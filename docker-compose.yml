@@ -35,7 +35,6 @@ services:
 
 networks:
   agent_swarm:
-    external: true
 
 # volumes:
 #   agent_swarm_open-webui:
