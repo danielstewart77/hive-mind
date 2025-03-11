@@ -1,0 +1,6 @@
+openai
+flask
+python-dotenv
+requests
+agent_tooling
+setuptools

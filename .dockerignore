@@ -1,0 +1,10 @@
+**/.git
+**/.vscode
+**/__pycache__
+**/node_modules
+*.pyc
+*.pyo
+*.pyd
+.venv/
+.vscode/
+__pycache__/

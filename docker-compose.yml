@@ -1,0 +1,42 @@
+services:
+  # open-webui:
+  #   container_name: open-webui
+  #   image: ghcr.io/open-webui/open-webui:cuda
+  #   restart: unless-stopped
+  #   ports:
+  #     - "8080:8080"
+  #   runtime: nvidia  # Ensures GPU access
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: all
+  #             capabilities: [gpu]
+  #   volumes:
+  #     - agent_swarm_open-webui:/app/backend/data
+  #   networks:
+  #     - agent_swarm
+
+  hive_mind:
+    container_name: hive_mind
+    build: .
+    working_dir: /usr/src/app
+    volumes:
+      - .:/usr/src/app
+    ports:
+      - "7977:7977"  # Expose the Flask app port
+    env_file:
+      - secrets.env
+    command: ["python", "main.py"]
+    restart: unless-stopped
+    networks:
+      - agent_swarm
+
+networks:
+  agent_swarm:
+    external: true
+
+# volumes:
+#   agent_swarm_open-webui:
+#     external: true
