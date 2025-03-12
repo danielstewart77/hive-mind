@@ -34,7 +34,7 @@ def chat():
         #add the instruction to the messages
         messages.append({
             "role": "system",
-            "content": decomposed_task.model_dump_json()
+            "content": decomposed_task
         })
 
         messages.append({

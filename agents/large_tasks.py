@@ -71,7 +71,8 @@ def decompose_task(message: str) -> TaskDecomposition:
     '''
     
     # call the Ollama API to decompose the task
-    return ollama_generate(message, model, instruction, TaskDecomposition)
+    tasks = ollama_generate(message, model, instruction, TaskDecomposition)
+    return tasks.model_dump_json()
 
 
 def answer_is_complete(messages: list) -> bool:
