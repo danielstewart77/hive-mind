@@ -1,12 +1,17 @@
 # Agent Tooling Demonstration
 
-This project demonstrates an implementation of the `agent_tooling` package by utilizing function calling capabilities with an LLM (Large Language Model) hosted via Ollama. The project showcases how an AI agent can break down complex tasks, interact with multiple tool functions, and determine when an answer is complete.
+This project demonstrates an implementation of the `agent_tooling` package by utilizing a model's tool calling capabilities.
 
 ## Features
+- **Implements @tool decorator**: Example implementation of tool registration.
+- **Tool Calling**: Demonstrates how an agent dynamically selects tools based on context.
+
+## Misc Features
+- **Open Web-UI Integration**: Integrates (pretty well...) with Open Web-UI requests.
 - **Task Decomposition**: Uses an LLM to break down complex user queries into structured steps.
-- **Function Calling**: Demonstrates how an agent dynamically selects tools based on context.
 - **Pydantic Integration**: Ensures structured output with JSON validation.
-- **Ollama API Integration**: Calls models like `deepseek-r1:14b` and `deepseek-coder-v2:16b` for various NLP tasks.
+- **OpenAI API Integration**: Calls models like `gpt-4o` for automatica tool selection.
+- **Ollama API Integration**: Calls models like `deepseek-r1:14b` and `deepseek-coder-v2:16b` for various tasks.
 - **Chat Threading**: Maintains a structured conversation history to determine tool execution flow.
 - **Answer Completion Evaluation**: Determines if the response fully answers the user's query.
 
@@ -99,14 +104,14 @@ HIVE_MIND/
 │── models/
 │   │── __pycache__/
 │   │── open_web_ui.py
-│── open_web-ui_system_prompts/
+│── open_web-ui_system_prompts/ # If you're using Open Web-UI, these will help you understand how it's sending requests.
 │   │── message_autocompletion.txt
 │   │── message_summery.txt
 │   │── message_tags.txt
 │── services/
 │   │── __pycache__/
 │   │── tool_calling.py
-│   │── utilities.py
+│   │── agent_tooling.py # Here's where `agent_tooling.get_registered_tools()` is used to provide `gpt-4o` with available tools
 │── venv/
 │   │── __init__.py
 │── .dockerignore
