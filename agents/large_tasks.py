@@ -24,7 +24,7 @@ class TaskDecomposition(BaseModel):
 
 
 def decompose_task(message: str) -> TaskDecomposition:
-    """Decompose a multi-step task into simple steps (using the Ollama API)."""
+    """Decompose a multi-step task into simple steps."""
     model = "deepseek-coder-v2:16b"
     # Schema for the expected JSON response
     schema = {
