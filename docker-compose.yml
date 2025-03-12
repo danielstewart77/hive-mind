@@ -22,13 +22,10 @@ services:
     container_name: hive_mind
     build: .
     working_dir: /usr/src/app
-    volumes:
-      - .:/usr/src/app
     ports:
-      - "7977:7977"  # Expose the Flask app port
+      - "7977:7977"
     env_file:
       - secrets.env
-    command: ["python", "main.py"]
     restart: unless-stopped
     networks:
       - agent_swarm
