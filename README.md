@@ -22,22 +22,23 @@ This project demonstrates an implementation of the `agent_tooling` package by ut
 ### Setup
 1. Clone this repository:
    ```bash
-   git clone https://github.com/your-repo/agent-tooling-demo.git
-   cd agent-tooling-demo
+   git clone https://github.com/danielstewart77/hive_mind.git
+   cd hive_mind
    ```
 2. Create virtual environment:
     ```
     python3 -m venv venv
     ```
 2. Install dependencies:
-    - activate your environment (linux)
+    - Activate your environment (linux)
     ```bash
     . venv/bin/activate
-    - activate your environment (windows)
+    ```
+    - Activate your environment (windows)
     ```bash
     . .\venv\Scripts\activate
     ```
-    - install requirements
+    - Install requirements
     ```bash
     pip install -r requirements.txt
     ```
@@ -69,21 +70,18 @@ python app.py
 ```
 
 ### Example Requests
-#### Decomposing a Task
-Send a request to decompose a complex task:
 ```json
-{
-  "messages": [{"role": "user", "content": "How do I start losing belly fat and gaining muscle safely?"}]
-}
+{"messages":[
+  {"role": "user", "content":"what is the curren bitoin price"}
+]}
 ```
 
-#### Answer Completion Check
-Check if an answer is fully addressed:
+#### Example Response
 ```json
 {
-  "messages": [
-    {"role": "user", "content": "Should I focus my diet efforts on eating lean protein?"}
-  ]
+    "response": [
+        "Agent CoinGecko 🦎: The current price of Bitcoin is $82779 USD."
+    ]
 }
 ```
 
