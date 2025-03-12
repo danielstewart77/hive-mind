@@ -66,7 +66,7 @@ This project demonstrates an implementation of the `agent_tooling` package by ut
    docker compose up -d --build
    ```
    - add the `pipe` configuration to Open Web-UI
-   [OpenWebUI Forwarder Pipe](https://github.com/danielstewart77/open_web-ui_pipe)
+   - [OpenWebUI Forwarder Pipe](https://github.com/danielstewart77/open_web-ui_pipe/blob/main/pipe.py)
  
 ## Usage
 
