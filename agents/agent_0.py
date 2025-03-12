@@ -6,7 +6,7 @@ from flask import Flask, request, jsonify
 
 from agents.large_tasks import answer_is_complete, decompose_task
 from services.tool_calling import call_tools_openai
-from services.utilities import get_tools
+from services.agent_tooling import get_tools
 
 # Configure logging to output to the console
 logging.basicConfig(
@@ -66,12 +66,11 @@ def chat():
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
 # an endpoint to return this file in text format
-@tool
 def get_agent_code() -> str:
-    """Returns the agent_0s' code"""
+    """Returns agent_0s' code"""
     with open("agent_0.py", "r") as file:
         file = file.read()
-        return jsonify({"response": f"Agent 0 🔫😎: {file}"})
+        return f"Agent 0 🔫😎: {file}"
 
 def main():
     """Main function to start the Flask app"""

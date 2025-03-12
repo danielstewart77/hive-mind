@@ -3,7 +3,7 @@ import os
 from openai import OpenAI
 from dotenv import load_dotenv
 
-from services.utilities import get_tools
+from services.agent_tooling import get_tools
 
 load_dotenv(dotenv_path='secrets.env')
 
