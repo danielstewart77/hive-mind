@@ -1,5 +1,5 @@
 import agents.agent_0
-import agents.coingeko
+import agents.coingecko
 import agents.openai
 
 def main():

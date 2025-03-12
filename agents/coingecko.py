@@ -36,12 +36,12 @@ def current_crypto_price(token: str) -> str:
             if price_response.status_code == 200:
                 price_data = price_response.json()
                 if coin_id in price_data and 'usd' in price_data[coin_id]:
-                    return f"The current price of {token} is ${price_data[coin_id]['usd']} USD."
+                    return f"Agent CoinGecko 🦎: The current price of {token} is ${price_data[coin_id]['usd']} USD."
                 else:
-                    return f"Price data for {token} is unavailable."
+                    return f"Agent CoinGecko 🦎: Price data for {token} is unavailable."
             else:
-                return f"Failed to retrieve price data for {token}."
+                return f"Agent CoinGecko 🦎: Failed to retrieve price data for {token}."
         else:
-            return f"{token} not found in the coin list."
+            return f"Agent CoinGecko 🦎: {token} not found in the coin list."
     else:
-        return "Failed to retrieve the list of cryptocurrencies from CoinGecko API."
+        return "Agent CoinGecko 🦎: Failed to retrieve the list of cryptocurrencies from CoinGecko API."
