@@ -2,5 +2,5 @@ openai
 flask
 python-dotenv
 requests
-agent_tooling
+agent_tooling==0.2.0
 setuptools

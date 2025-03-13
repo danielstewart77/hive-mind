@@ -2,7 +2,7 @@ import os
 import json
 from openai import OpenAI
 from dotenv import load_dotenv
-from agent_tooling import tool 
+from agent_tooling import tool
 from pydantic import BaseModel
 from models.open_web_ui import Autocompletion, Tags, Summary
 
