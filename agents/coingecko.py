@@ -3,14 +3,7 @@ from agent_tooling import tool
 
 @tool
 def current_crypto_price(token: str) -> str:
-    """A tool that handles requests for the current price of a cryptocurrency.
-
-    Args:
-        token: The name of the cryptocurrency.
-    
-    Returns:
-        The current price of the cryptocurrency in USD, or an error message if not found.
-    """
+    """Choose this tool when the user asks for the current price of a cryptocurrency."""
 
     # Define the API endpoint
     url = 'https://api.coingecko.com/api/v3/coins/list'

@@ -5,8 +5,8 @@ from agent_tooling import tool
 from flask import Flask, request, jsonify
 
 from agents.large_tasks import answer_is_complete, decompose_task
-from services.tool_calling import call_tools_openai
-from services.agent_tooling import get_tools
+from services.openai_tool_calling import call_tools_openai
+from services.ollama_tool_calling import call_tools_ollama
 
 # Configure logging to output to the console
 logging.basicConfig(
@@ -30,35 +30,33 @@ def chat():
         return jsonify({"error": "No messages found."}), 400
     
     try:
-        decomposed_task = decompose_task(chat_content)
-        #add the instruction to the messages
-        messages.append({
-            "role": "system",
-            "content": decomposed_task
-        })
+        # decomposed_task = decompose_task(chat_content)
+        # #add the instruction to the messages
+        # messages.append({
+        #     "role": "system",
+        #     "content": decomposed_task
+        # })
 
-        messages.append({
-            "role": "system",
-            "content": "EVERY step defined above IS ACCOMPLISHED before considering this task complete."
-        })
+        # messages.append({
+        #     "role": "system",
+        #     "content": "EVERY step defined above IS ACCOMPLISHED before considering this task complete."
+        # })
 
         complete = False
-        n = 1 # number of loops it takes to get a complete answer
 
         while not complete:
             # Get the response from the interpretation function
             result = call_tools_openai(messages=messages)
+            #result = call_tools_ollama(messages=messages)
 
             # check if the answer is complete
             complete = answer_is_complete(result)
             if complete:
                 break
-
-            n += 1
         
         # Return last n messages with answers
         return jsonify({
-            "response": [msg["content"].strip() for msg in messages[-n:]]  
+            "response": result
         })
 
     except Exception as e:

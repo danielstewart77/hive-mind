@@ -4,7 +4,7 @@ import agents.openai
 
 def main():
     """Main entry point for the application."""
-    print("Starting HIVE MIND system...")
+    print("Awakening the HIVE MIND...")
 
     # Start each agent explicitly
     agents.agent_0.main()
