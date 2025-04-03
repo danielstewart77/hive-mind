@@ -1,10 +1,10 @@
 import agents.agent_0
-import agents.coingecko
-import agents.openai
+
+from utilities import tool_discovery
 
 def main():
     """Main entry point for the application."""
-    print("Starting HIVE MIND system...")
+    print("Awakening the HIVE MIND...")
 
     # Start each agent explicitly
     agents.agent_0.main()

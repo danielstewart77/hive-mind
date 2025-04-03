@@ -1,5 +1,6 @@
 import os
 import json
+from typing import Generator
 from openai import OpenAI
 from dotenv import load_dotenv
 from agent_tooling import tool
@@ -9,41 +10,10 @@ from models.open_web_ui import Autocompletion, Tags, Summary
 load_dotenv(dotenv_path='secrets.env')
 client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 
-@tool
-def add_numbers(a: int, b: int) -> str:
-    """Adds two numbers together and returns the result as a standardized response."""
-    sum_val = a + b
-    result = f"The sum of {a} and {b} is {sum_val}."
-    return result
-
-@tool
-def message_autocomplete(message: str) -> dict:
-    """Suggests autocompletions for the given message."""
-    raw_response = api_structure_output(message=message, model=Autocompletion)
-    return raw_response
-
-@tool
-def create_title_and_emoji(message: str) -> dict:
-    """Creates a title for the chat thread with an emoji."""
-    raw_response = api_structure_output(message=message, model=Summary)
-    return raw_response
-
-@tool
-def create_tags(message: str) -> dict:
-    """Creates tags categorizing the main themes of the chat history."""
-    raw_response = api_structure_output(message=message, model=Tags)
-    return raw_response
-
-@tool
-def answer_question(message: str) -> str:
-    """Answers a given question when no other tools apply."""
-    raw_response = api(message)
-    return raw_response
-
-def api(message: str) -> str:
+def completions(message: str, model: str = "gpt-4o") -> str:
     """Call the OpenAI API and return the raw response."""
     completion = client.chat.completions.create(
-        model="gpt-4o",
+        model=model,
         messages=[
             {"role": "developer", "content": message}
         ]
@@ -51,14 +21,39 @@ def api(message: str) -> str:
     content = completion.choices[0].message.content
     return content
 
-def api_structure_output(message: str, model: BaseModel) -> str:
+def completions_structured(message: str, response_format: BaseModel, model: str = "gpt-4o-2024-08-06") -> BaseModel:
     """Call the OpenAI API and return the raw response."""
     completion = client.beta.chat.completions.parse(
-        model="gpt-4o-2024-08-06",
+        model=model,
         messages=[
             {"role": "developer", "content": message}
         ],
-        response_format=model
+        response_format=response_format
     )
-    content = completion.choices[0].message.content
+    content = completion.choices[0].message.parsed
+    # return the content as the model type
     return content
+
+@tool
+def completions_streaming(message: str, model: str = "gpt-4o") -> Generator[str, None, None]:
+    """Call the OpenAI API for streaming output."""
+    stream = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "developer", "content": message}
+        ],
+        stream=True
+    )
+
+    for chunk in stream:
+        if chunk.choices and chunk.choices[0].delta.content is not None:
+            yield chunk.choices[0].delta.content
+    
+#     @tool
+# def openai_embeddings(api_key: str, model: str, prompt: str):
+#     """Call the OpenAI API for embeddings."""
+#     response = openai.Embedding.create(
+#         input=prompt,
+#         model=model
+#     )
+#     return response.data
