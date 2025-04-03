@@ -1,22 +1,24 @@
 services:
-  # open-webui:
-  #   container_name: open-webui
-  #   image: ghcr.io/open-webui/open-webui:cuda
-  #   restart: unless-stopped
-  #   ports:
-  #     - "8080:8080"
-  #   runtime: nvidia  # Ensures GPU access
-  #   deploy:
-  #     resources:
-  #       reservations:
-  #         devices:
-  #           - driver: nvidia
-  #             count: all
-  #             capabilities: [gpu]
-  #   volumes:
-  #     - agent_swarm_open-webui:/app/backend/data
-  #   networks:
-  #     - agent_swarm
+  open-webui:
+    container_name: open-webui
+    image: ghcr.io/open-webui/open-webui:cuda
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    runtime: nvidia  # Ensures GPU access
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - /home/USER/Storage/Dev/OpenWebUIData/:/app/backend/data
+    networks:
+      - agent_swarm
+    env_file:
+      - /home/USER/Storage/Dev/OpenWebUIData/secrets.env 
 
   hive_mind:
     container_name: hive_mind
@@ -29,10 +31,8 @@ services:
     restart: unless-stopped
     networks:
       - agent_swarm
+    volumes:
+      - /home/USER/Storage/Dev/hive_mind/agents/:/usr/src/app/agents
 
 networks:
   agent_swarm:
-
-# volumes:
-#   agent_swarm_open-webui:
-#     external: true

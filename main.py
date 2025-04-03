@@ -1,6 +1,6 @@
 import agents.agent_0
-import agents.coingecko
-import agents.openai
+
+from utilities import tool_discovery
 
 def main():
     """Main entry point for the application."""
