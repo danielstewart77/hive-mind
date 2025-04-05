@@ -27,10 +27,6 @@ def update_agent_code(name: str, update_description: str) -> Generator[str, None
     from agents.agent_read import get_agent_by_name
     agent = get_agent_by_name(name=name)
     
-    
-    # Prepare the message based on matches found
-
-    
     code_string = agent.code
     
     # Prepare the update request
