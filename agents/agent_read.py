@@ -4,6 +4,8 @@ from agent_tooling import tool, get_agents, Agent
 from agents.openai import completions_streaming, completions_structured
 from pydantic import BaseModel
 
+from utilities.tool_discovery import discover_tools
+
 class AgentMatches(BaseModel):
     agents: list[Agent]
     class Config:
@@ -23,24 +25,32 @@ class AgentEncoder(json.JSONEncoder):
                 'code': obj.code
             }
         return super().default(obj)
+    
 
 @tool
-def list_agents() -> Generator[str, None, None]: 
+def get_agents_with_descriptions() -> Generator[str, None, None]:
     """
-    List all available agents in the system. This function retrieves the list of agents and formats them into a readable string.
-    
-    Returns:
-        str: A formatted string listing all available agents.
+    Describes to the user what the agents of the HIVE MIND can do. This function retrieves the list of agents and formats them into a readable string.
+    The function streams the agent information to the user.
+    Args:
+        None
+    Yields:
+        Generator[str, None, None]:  A formatted string listing all available agents with their descriptions.
     """
+
+    discover_tools()
 
     agents = get_agents()
 
-    agent_names = [agent.name for agent in agents]
 
+    # Retrieve the list of agents
+    agent_info = [{"name": agent.name, "description": agent.description} for agent in agents]
+
+    # Stream the agent information
     agent_descriptions = completions_streaming(
-            message=f'''Use these agent names: {json.dumps(agent_names)} 
-            to list the agents of the HIVE MIND'''
-        )
+        message=f'''Use these agent names and descriptions: {json.dumps(agent_info)} 
+        to describe the abilities of the HIVE MIND'''
+    )
 
     # stream the response
     for chunk in agent_descriptions:
@@ -111,6 +121,8 @@ def get_agent_code_by_name(name: str) -> Generator[str, None, None]:
     """
     # Retrieve the list of agents
     # list[Agent]
+    discover_tools()
+
     agents = get_agents()
 
     agent_names = [agent.name for agent in agents]
@@ -139,7 +151,8 @@ def get_agent_code_by_name(name: str) -> Generator[str, None, None]:
 
     # If exactly one agent is found, return its code
     stream = completions_streaming(
-        message=f"Return this code: {code} for the agent with the name: {name} along with nicely formatted markdown explaining the code."
+        message=f'''Return ALL of this code: {code} in a (python markdown box) for the agent with the name: {name} 
+        and at the bottom, an explanation of the code in nicely formatted markdown.'''
     )
 
     # stream the response
@@ -157,6 +170,8 @@ def get_agent_code_by_description(description: str) -> Generator[str, None, None
     Returns:
         Generator[str, None, None]: The code of the matched agent.
     """
+
+    discover_tools()
 
     agents = get_agents()
 
@@ -191,28 +206,4 @@ def get_agent_code_by_description(description: str) -> Generator[str, None, None
 
     # stream the response
     for chunk in stream:
-        yield chunk
-
-@tool
-def get_agents_with_descriptions() -> Generator[str, None, None]:
-    """
-    Describes to the user what the agents of the HIVE MIND can do. This function retrieves the list of agents and formats them into a readable string.
-    The function streams the agent information to the user.
-    Args:
-        None
-    Yields:
-        Generator[str, None, None]:  A formatted string listing all available agents with their descriptions.
-    """
-
-    # Retrieve the list of agents
-    agent_info = [{"name": agent.name, "description": agent.description} for agent in _agents]
-
-    # Stream the agent information
-    agent_descriptions = completions_streaming(
-        message=f'''Use these agent names and descriptions: {json.dumps(agent_info)} 
-        to describe the abilities of the HIVE MIND'''
-    )
-
-    # stream the response
-    for chunk in agent_descriptions:
         yield chunk
