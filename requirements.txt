@@ -8,3 +8,6 @@ bs4
 py2neo
 neo4j
 psutil
+llama-index-llms-langchain
+langgraph
+langgraph-sdk

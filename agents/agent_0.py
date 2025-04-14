@@ -60,16 +60,6 @@ def chat():
         app.logger.error(f"Error in chat endpoint: {str(e)}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
-@app.route("/agent_code", methods=["GET"])
-def get_agent_code():
-    """Returns agent_0s' code"""
-    try:
-        with open("agent_0.py", "r") as file:
-            file_content = file.read()
-            return f"Agent 0 🔫😎: {file_content}"
-    except Exception as e:
-        return jsonify({"error": f"Could not read agent code: {str(e)}"}), 500
-
 def main():
     """Main function to start the Flask app"""
     app.run(host="0.0.0.0", port=7977, debug=True)

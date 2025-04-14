@@ -25,6 +25,7 @@ def discover_tools(agents_folder='agents'):
     # Import all modules in the agents folder
     import_submodules(agents_folder)
     import_submodules('utilities')
+    import_submodules('workflows')
     
     # You can also scan specific folders for Python files and import them
     # For example:
