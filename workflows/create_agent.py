@@ -8,7 +8,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from pydantic import BaseModel, Field
 import uuid
 
-from agents.maker import create
+from agents.maker import generate_code
 from agent_tooling import tool
 
 from agents.openai import completions_structured
@@ -52,7 +52,7 @@ def generate_code(state: State) -> State:
     else:
         code_instructions = state["code_instructions"]
     
-    generated_code = create(
+    generated_code = generate_code(
         agent_requirements=code_instructions,
         llm_provider="openai")
     

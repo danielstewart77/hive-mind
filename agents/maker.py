@@ -7,7 +7,7 @@ from utilities.tool_discovery import discover_tools
 from models.maker import AgentCode, AgentName, RequirementUpdate
 
 #@tool
-def create(agent_requirements: str, llm_provider: str = "openai") -> Generator[str, None, None]: 
+def generate_code(agent_requirements: str, llm_provider: str = "openai") -> Generator[str, None, None]: 
     """Is called when the user specifically says they want to create a NEW agent.
     This function creates a new agent based on the provided requirements and language model provider.
     Args:
