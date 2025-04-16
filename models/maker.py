@@ -17,3 +17,10 @@ class RequirementUpdate(BaseModel):
 
     class Config:
         extra = "forbid"
+
+class RequiredLibrariesUpdate(BaseModel):
+    update: bool
+    libraries: list[str]
+
+    class Config:
+        extra = "forbid"

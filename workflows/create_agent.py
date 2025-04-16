@@ -8,7 +8,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from pydantic import BaseModel, Field
 import uuid
 
-from agents.maker import generate_code
+from agents.maker import create_local_repository, generate_code, generate_requirements, suggest_agent_name, update_requirements
 from agent_tooling import tool
 
 from agents.openai import completions_structured
@@ -21,18 +21,13 @@ class State(TypedDict):
     message: str
     step: str
     user_feedback: str
+    suggested_name: str
+    agent_name: str
 
 class UserFeedback(BaseModel):
     approve: bool = Field(..., description="""This value is derived from the user's feedback.""")
     user_feedback: str = Field(..., description="""The user's feedback on the code. This value MUST 
                                come VERBATIM from the user's message. DO NOT change this in ANY way. """)
-
-    class Config:
-        extra = "forbid"
-
-class RequiredLibrariesUpdate(BaseModel):
-    update: bool
-    libraries: list[str]
 
     class Config:
         extra = "forbid"
@@ -73,78 +68,82 @@ def get_user_feedback(state: State) -> State:
                 "question": question
             }
         )
-    else:
+    elif state["step"] == "libraries":
         question = f"Do you approve these additional libraries:\n ```\r{'\n'.join(state['required_libraries']['required_libraries'])}"
         feedback = interrupt(
             {
                 "question": question
             }
         )
+    elif state["step"] == "name":
+        question = f"Can we call your agent {state['suggested_name']}?"
+        feedback = interrupt(
+            {
+                "question": question
+            }
+        )
+
+    else:
+        raise ValueError("Invalid step for user feedback.")
 
     message = f"""Read the user's feedback and determine if the code is approved.
      If the code is not approved, extract EXACT WORDS VERBATIM from user's message for updated code requirements.
      feedback: {feedback}"""
 
-    code_feedback = completions_structured(message=message, response_format=UserFeedback)
+    user_feedback = completions_structured(message=message, response_format=UserFeedback)
     
     # Store the approval status and updated requirements in the state
     updated_state = state.copy()
-    updated_state["approve"] = code_feedback.approve
+    updated_state["approve"] = user_feedback.approve
+    if state["step"] == "name":
+        updated_state["agent_name"] = state["suggested_name"]
     
-    if not code_feedback.approve:
+    if not user_feedback.approve:
         # If not approved, update the requirements
-        updated_state["user_feedback"] = code_feedback.user_feedback
+        if state["step"] == "name":
+            updated_state["user_feedback"] += " " + user_feedback.user_feedback
+        updated_state["user_feedback"] = user_feedback.user_feedback
     
     # Return the updated state - the router will handle the branching
     return updated_state
 
 def generate_required_libraries(state: State) -> State:
     """Generate requirements based on the approved code"""
-    # read the requirements.txt file and check if the requirements are already there
-    file = os.path.join(os.path.dirname(os.path.dirname(__file__)), "requirements.txt")
-
-    with open(file, "r") as f:
-        requirements = f.readlines()
-        requirements = [r.strip() for r in requirements]
-
     agent_code = state["generated_code"]
 
-    libraries_update = completions_structured(
-            message=f'''Based on this code: {agent_code} \n Does the contents of the requirements.txt file:
-            \n {requirements} need to be updated? If so, list each missing requirement.''',
-            model="gpt-4o-2024-08-06",
-            response_format=RequiredLibrariesUpdate
-    )
+    libraries_update = generate_requirements(agent_code=agent_code)
 
     new_state = state.copy()
     new_state["step"] = "libraries"
-    new_state["required_libraries"] = libraries_update.model_dump()
+    new_state["required_libraries"] = libraries_update
+
+    return new_state
+
+def generate_agent_name(state: State) -> State:
+    """Generate a name for the agent"""
+    # Call the function to generate a name
+    generated_code = state["generated_code"]
+    user_feedback = state["user_feedback"]
+    suggested_name = suggest_agent_name(agent_code=generated_code, user_feedback=user_feedback)
+
+    # Update the state with the generated name
+    new_state = state.copy()
+    new_state["suggested_name"] = suggested_name
 
     return new_state
 
 def write_required_libraries(state: State) -> State:
     # update the requirements.txt file with the required libraries
-    file = os.path.join(os.path.dirname(os.path.dirname(__file__)), "requirements.txt")
-
-    requirements = state["required_libraries"]
-    with open(file, "a") as f:
-        for req in requirements:
-            f.write(f"\n{req}")
-            logging.info(f"Updated requirements.txt file: {file}")
-    
-    # run pip install -r requirements.txt
-    # if not in docker
-    if not os.path.exists("venv"):
-        # activate the virtual environment
-        if os.name == 'nt':
-            os.system("venv\\Scripts\\activate")
-        else:
-            os.system(". venv/bin/activate")
-    os.system("pip install -r requirements.txt")
+    required_libraries = state["required_libraries"]
+    if required_libraries:
+        # Call the function to update requirements
+        update_requirements(required_libraries=required_libraries)
 
 def write_code(state: State) -> State:
     """Save the final approved code"""
     # Define the folder path relative to the script location
+    generated_code = state["generated_code"]
+    create_local_repository(agent_code=generated_code, agent_name="temp_value")
 
     agent_name = "temp_value"
     folder = os.path.dirname(__file__)
@@ -176,6 +175,7 @@ def create_agent_workflow():
     graph.add_node("generate_code", generate_code)
     graph.add_node("get_user_feedback", get_user_feedback)
     graph.add_node("generate_required_libraries", generate_required_libraries)
+    graph.add_node("generate_agent_name", generate_agent_name)
     graph.add_node("write_required_libraries", write_required_libraries)
     graph.add_node("write_code", write_code)
     
@@ -197,6 +197,10 @@ def create_agent_workflow():
             return "write_required_libraries"
         elif approve is False and step == "libraries":
             return "generate_code"
+        elif approve is True and step == "name":
+            return "write_required_libraries"
+        elif approve is False and step == "name":
+            return "generate_agent_name"
         else:
             raise ValueError(f"Unhandled state: approve={approve}, step={step}")
 
