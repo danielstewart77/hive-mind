@@ -11,3 +11,5 @@ psutil
 llama-index-llms-langchain
 langgraph
 langgraph-sdk
+pyfiglet
+graphviz

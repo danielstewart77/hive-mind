@@ -27,8 +27,8 @@ class AgentEncoder(json.JSONEncoder):
         return super().default(obj)
     
 
-@tool
-def get_agents_with_descriptions() -> Generator[str, None, None]:
+#@tool
+def get_agents_with_descriptions(messages: list[dict[str, str]]) -> Generator[str, None, None]:
     """
     Describes to the user what the agents of the HIVE MIND can do. This function retrieves the list of agents and formats them into a readable string.
     The function streams the agent information to the user.
@@ -56,8 +56,8 @@ def get_agents_with_descriptions() -> Generator[str, None, None]:
     for chunk in agent_descriptions:
         yield chunk
 
-@tool
-def get_agent_by_name(name: str) -> Agent:
+#@tool
+def get_agent_by_name(name: str, messages: list[dict[str, str]] = None) -> Agent:
     """
     Get an agent by its name. This function searches for an agent with the specified name and returns it.
 
@@ -82,8 +82,8 @@ def get_agent_by_name(name: str) -> Agent:
     # If exactly one agent is found, return it
     return matches.agents[0]
 
-@tool
-def get_agent_by_description(description: str) -> Agent:
+#@tool
+def get_agent_by_description(description: str, messages: list[dict[str, str]] = None) -> Agent:
     """
     Get an agent by its description. This function searches for an agent with the specified description and returns it.
 
@@ -108,8 +108,8 @@ def get_agent_by_description(description: str) -> Agent:
     # If exactly one agent is found, return it
     return matches.agents[0]
 
-@tool
-def get_agent_code_by_name(name: str) -> Generator[str, None, None]: 
+#@tool
+def get_agent_code_by_name(name: str, messages: list[dict[str, str]] = None) -> Generator[str, None, None]: 
     """
     Get the code of an agent by its name. This function searches for an agent with the specified name and returns its code.
 
@@ -159,8 +159,8 @@ def get_agent_code_by_name(name: str) -> Generator[str, None, None]:
     for chunk in stream:
         yield chunk
 
-@tool       
-def get_agent_code_by_description(description: str) -> Generator[str, None, None]: 
+#@tool       
+def get_agent_code_by_description(description: str, messages: list[dict[str, str]] = None) -> Generator[str, None, None]: 
     """
     Get the code of an agent by its description. This function searches for an agent with the specified description and returns its code.
 
