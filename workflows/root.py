@@ -8,12 +8,17 @@ from langgraph.checkpoint.memory import MemorySaver
 from pydantic import BaseModel, Field
 import uuid
 
+from agent_tooling import OpenAITooling
+
 from agents.maker import create_local_repository, generate_agent_code, generate_requirements, extract_function_name, update_requirements
 from agent_tooling import tool
 
 from agents.openai import completions_structured
 from utilities.messages import get_last_user_message
 from workflows.models.feedback import UserFeedback
+
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+        
 
 # Define our state structure
 class State(TypedDict):
@@ -25,30 +30,7 @@ class State(TypedDict):
     user_feedback: str
     agent_name: str
 
-# Create nodes for our workflow
-def generate_code(state: State) -> State:
-    """Generate initial agent code based on requirements"""
 
-    current_step = state["step"]
-    if current_step == "libraries" or current_step == "code":
-        code_instructions = state["code_instructions"]
-        current_code = state["generated_code"]
-        # call llm to reword requirements with updated requirements
-        user_feedback = state["user_feedback"]
-
-        code_instructions = f"update the code: {current_code} \n to meet these updated insructions: {user_feedback}"
-    else:
-        code_instructions = state["code_instructions"]
-    
-    generated_code = generate_agent_code(
-        agent_requirements=code_instructions,
-        llm_provider="openai")
-    
-    new_state = state.copy()
-    new_state["generated_code"] = generated_code
-    new_state["step"] = "code"
-
-    return new_state
 
 def get_user_feedback(state: State) -> State:
     """Get human feedback on the generated code"""
@@ -97,69 +79,43 @@ def get_user_feedback(state: State) -> State:
     # Return the updated state - the router will handle the branching
     return updated_state
 
-def generate_required_libraries(state: State) -> State:
-    """Generate requirements based on the approved code"""
-    agent_code = state["generated_code"]
+def triage(state: State) -> State:
+    # we're here because there is no workflow_id, so this in a fresh request
+    # we need to find out which workflow this request should trigger
+    # we'll need to pass some (or all) of the workflows but not root
+    # be sure to remember that there may need to be a condition where the
+    # workflow terminates (or is complete) and should be removed so that a 
+    # subsequent message can begin a new workflow
+    openai = OpenAITooling(api_key=OPENAI_API_KEY)
 
-    libraries_update = generate_requirements(agent_code=agent_code)
+    messages = state["messages"]
 
-    new_state = state.copy()
-    new_state["step"] = "libraries"
-    new_state["required_libraries"] = libraries_update
+    # here we could pass the message history, or simple the last message
+    # lets create a list[dict[str,str]] with only the last message
+    last_message = get_last_user_message(messages=messages)
+    messages = [{"user": last_message}]
+    result = openai.call_tools(
+        messages=messages,
+        model="gpt-4.1-mini",
+        tags=["triage_workflow"])
+    
+    # tools tagged with 
 
-    return new_state
 
-def generate_agent_name(state: State) -> State:
-    """Generate a name for the agent"""
-    # Call the function to generate a name
-    generated_code = state["generated_code"]
-    name = extract_function_name(agent_code=generated_code)
 
-    # Update the state with the generated name
-    new_state = state.copy()
-    new_state["agent_name"] = name
-    new_state["step"] = "name"
-
-    return new_state
-
-def write_required_libraries(state: State) -> State:
-    # update the requirements.txt file with the required libraries
-    required_libraries = state["required_libraries"]
-    if required_libraries:
-        # Call the function to update requirements
-        update_requirements(required_libraries=required_libraries)
-
-def write_code(state: State) -> State:
-    """Save the final approved code"""
-    # Define the folder path relative to the script location
-    generated_code = state["generated_code"]
-    agent_name = state["agent_name"]
-    create_local_repository(agent_code=generated_code, agent_name=agent_name)
-
-    return {
-        "code_instructions": state["code_instructions"],
-        "generated_code": state["generated_code"],
-        "required_libraries": state["required_libraries"],
-        "message": "Agent has been successfully created!",
-        "step": "done"
-    }
 
 # Create the workflow graph
-def create_agent_workflow():
+def create_root_workflow():
     # Initialize the graph
     graph = StateGraph(State)
     
     # Add nodes
-    graph.add_node("generate_code", generate_code)
+    graph.add_node("interpret_request", triage)
     graph.add_node("get_user_feedback", get_user_feedback)
-    graph.add_node("generate_required_libraries", generate_required_libraries)
-    graph.add_node("generate_agent_name", generate_agent_name)
-    graph.add_node("write_required_libraries", write_required_libraries)
-    graph.add_node("write_code", write_code)
     
     # Add the edges
-    graph.add_edge(START, "generate_code")
-    graph.add_edge("generate_code", "get_user_feedback")
+    graph.add_edge(START, "interpret_request")
+    graph.add_edge("interpret_request", "get_user_feedback")
     graph.add_edge("generate_required_libraries", "get_user_feedback")
     
     # Define the conditional edge function
@@ -205,7 +161,7 @@ def create_agent_workflow():
 active_workflows = {}
 
 @tool(tags=["root_workflow"])
-def workflow_create_agent(
+def root_workflow(
     workflow_id: Optional[str] = None,
     messages: Optional[list[str]] = None,
 ) -> Generator[str, None, None]:
@@ -241,7 +197,7 @@ def workflow_create_agent(
             
         else:
             # Start a new workflow
-            workflow = create_agent_workflow()
+            workflow = create_root_workflow()
             
             # Generate a new workflow ID if we don't have one
             workflow_id = str(uuid.uuid4())

@@ -34,7 +34,7 @@ def chat():
         @stream_with_context
         def generate_response():
             tool_discovery.discover_tools()
-            result = openai.call_tools(messages=messages, model="gpt-4o-2024-05-13")
+            result = openai.call_tools(messages=messages, model="gpt-4.1", tags=["root_workflow"])
             
             if isinstance(result, Generator):
                 for partial in result:
