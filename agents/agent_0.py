@@ -34,6 +34,12 @@ def chat():
         @stream_with_context
         def generate_response():
             tool_discovery.discover_tools()
+            result = root_workflow(
+                openai=openai,
+                messages=messages,
+                model="gpt-4.1",
+                tags=["root_workflow"]
+            )
             result = openai.call_tools(messages=messages, model="gpt-4.1", tags=["root_workflow"])
             
             if isinstance(result, Generator):
