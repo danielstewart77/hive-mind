@@ -108,19 +108,19 @@ def get_user_feedback(state: State) -> State:
         )
 
     elif state["step"] == "update_code":
-        question = f"```python \r{state["generated_code"]}```\n\n##Do you approve this code:\n"
+        question = f"```python \r{state['generated_code']}```\n\n##Do you approve this code:\n"
         feedback = interrupt(
             {
                 "question": question
             }
         )
     elif state["step"] == "libraries" and state["required_libraries"] is not None:
-        question = f"Do you approve these additional libraries:\n ```\r{'\n'.join(state['required_libraries'])}"
-        feedback = interrupt(
-            {
-                "question": question
-            }
-        )
+        libs = '\n'.join(state['required_libraries'])
+        question = f"Do you approve these additional libraries:\n```\n{libs}\n```"
+        feedback = interrupt({
+            "question": question
+        })
+
     elif state["step"] == "libraries" and state["required_libraries"] is None:
         updated_state = state.copy()
         updated_state["approve"] = True

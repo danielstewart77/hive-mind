@@ -13,3 +13,4 @@ langgraph
 langgraph-sdk
 pyfiglet
 graphviz
+gradio
