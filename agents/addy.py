@@ -1,6 +1,6 @@
 from typing import Generator
 from agent_tooling import tool
-from agents.openai import completions_streaming
+from utilities.openai_tools import completions_streaming
 
 @tool
 def addy(a: str, b: str, c: str, messages: list[dict[str, str]] = None) -> Generator[str, None, None]:

@@ -1,6 +1,6 @@
 import json
 from typing import Generator, Optional
-from agents.openai import completions_structured
+from utilities.openai_tools import completions_structured
 from agent_tooling import tool
 from models.open_web_ui import Autocompletion, Summary, Tags
 

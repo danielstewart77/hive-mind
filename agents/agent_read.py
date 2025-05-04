@@ -1,7 +1,7 @@
 import json
 from typing import Generator
 from agent_tooling import tool, get_agents, Agent
-from agents.openai import completions_streaming, completions_structured
+from utilities.openai_tools import completions_streaming, completions_structured
 from pydantic import BaseModel
 
 from utilities.tool_discovery import discover_tools

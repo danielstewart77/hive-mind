@@ -13,7 +13,7 @@ from agent_tooling import OpenAITooling
 from agents.maker import create_local_repository, generate_agent_code, generate_requirements, extract_function_name, update_requirements
 from agent_tooling import tool
 
-from agents.openai import completions_structured
+from utilities.openai_tools import completions_structured
 from utilities.messages import get_last_user_message
 from workflows.models.feedback import UserFeedback
 
@@ -22,64 +22,57 @@ OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 
 # Define our state structure
 class State(TypedDict):
-    code_instructions: str
-    generated_code: str
-    required_libraries: str
-    message: str
-    step: str
     user_feedback: str
-    agent_name: str
-
     messages: Optional[list[dict[str, str]]] = Field(default_factory=list)
     results: Optional[dict[str, Any]] = Field(default_factory=dict)
 
 
-def get_user_feedback(state: State) -> State:
-    """Get human feedback on the generated code"""
-    # Interrupt the workflow to get human feedback
+# def get_user_feedback(state: State) -> State:
+#     """Get human feedback on the generated code"""
+#     # Interrupt the workflow to get human feedback
 
-    if state["step"] == "code":
-        question = f"```python \r{state['generated_code']}```\n\nDo you approve this code?"
-        feedback = interrupt(
-            {
-                "question": question
-            }
-        )
-    elif state["step"] == "libraries" and state["required_libraries"] is not None:
-        libs = '\n'.join(state['required_libraries'])
-        question = f"Do you approve these additional libraries:\n```\n{libs}\n```"
-        feedback = interrupt({
-            "question": question
-        })
+#     if state["step"] == "code":
+#         question = f"```python \r{state['generated_code']}```\n\nDo you approve this code?"
+#         feedback = interrupt(
+#             {
+#                 "question": question
+#             }
+#         )
+#     elif state["step"] == "libraries" and state["required_libraries"] is not None:
+#         libs = '\n'.join(state['required_libraries'])
+#         question = f"Do you approve these additional libraries:\n```\n{libs}\n```"
+#         feedback = interrupt({
+#             "question": question
+#         })
 
-    elif state["step"] == "libraries" and state["required_libraries"] is None:
-        updated_state = state.copy()
-        updated_state["approve"] = True
-        return updated_state
+#     elif state["step"] == "libraries" and state["required_libraries"] is None:
+#         updated_state = state.copy()
+#         updated_state["approve"] = True
+#         return updated_state
 
-    else:
-        raise ValueError(f"Invalid step for user feedback => state:{state['step']} feedback:{feedback}")
+#     else:
+#         raise ValueError(f"Invalid step for user feedback => state:{state['step']} feedback:{feedback}")
 
-    message = f"""Read the user's feedback and determine if the code is approved.
-     If the code is not approved, extract EXACT WORDS VERBATIM from user's message for updated code requirements.
-     feedback: {feedback}"""
+#     message = f"""Read the user's feedback and determine if the code is approved.
+#      If the code is not approved, extract EXACT WORDS VERBATIM from user's message for updated code requirements.
+#      feedback: {feedback}"""
 
-    user_feedback = completions_structured(message=message, response_format=UserFeedback)
+#     user_feedback = completions_structured(message=message, response_format=UserFeedback)
     
-    # Store the approval status and updated requirements in the state
-    updated_state = state.copy()
-    updated_state["approve"] = user_feedback.approve
-    if state["step"] == "name":
-        updated_state["agent_name"] = state["suggested_name"]
+#     # Store the approval status and updated requirements in the state
+#     updated_state = state.copy()
+#     updated_state["approve"] = user_feedback.approve
+#     if state["step"] == "name":
+#         updated_state["agent_name"] = state["suggested_name"]
     
-    if not user_feedback.approve:
-        # If not approved, update the requirements
-        if state["step"] == "name":
-            updated_state["user_feedback"] += " " + user_feedback.user_feedback
-        updated_state["user_feedback"] = user_feedback.user_feedback
+#     if not user_feedback.approve:
+#         # If not approved, update the requirements
+#         if state["step"] == "name":
+#             updated_state["user_feedback"] += " " + user_feedback.user_feedback
+#         updated_state["user_feedback"] = user_feedback.user_feedback
     
-    # Return the updated state - the router will handle the branching
-    return updated_state
+#     # Return the updated state - the router will handle the branching
+#     return updated_state
 
 def triage(state: State) -> State:
     # we're here because there is no workflow_id, so this in a fresh request
@@ -99,7 +92,7 @@ def triage(state: State) -> State:
     result = openai.call_tools(
         messages=messages,
         model="gpt-4.1-mini",
-        tags=["workflow"])
+        tags=["triage"])
     
     new_state = state.copy()
     new_state["result"] = result
@@ -122,39 +115,39 @@ def create_root_workflow():
     graph = StateGraph(State)
     
     # Add nodes
-    graph.add_node("interpret_request", triage)
-    graph.add_node("get_user_feedback", get_user_feedback)
+    graph.add_node("triage", triage)
+    #graph.add_node("get_user_feedback", get_user_feedback)
     
     # Add the edges
-    graph.add_edge(START, "interpret_request")
-    graph.add_edge("interpret_request", "get_user_feedback")
-    graph.add_edge("generate_required_libraries", "get_user_feedback")
+    graph.add_edge(START, "triage")
+    # graph.add_edge("interpret_request", "get_user_feedback")
+    # graph.add_edge("generate_required_libraries", "get_user_feedback")
     
-    # Define the conditional edge function
-    def conditional_transition(state):
-        approve = state.get("approve")
-        step = state.get("step")
+    # # Define the conditional edge function
+    # def conditional_transition(state):
+    #     approve = state.get("approve")
+    #     step = state.get("step")
 
-        if approve is True and step == "code":
-            return "generate_required_libraries"
-        elif approve is False and step == "code":
-            return "generate_code"
-        elif approve is True and step == "libraries" and state["required_libraries"] is not None:
-            return "write_required_libraries"
-        elif approve is True and step == "libraries" and state["required_libraries"] is None:
-            return "generate_agent_name"
-        elif approve is False and step == "libraries":
-            return "generate_code"
-        else:
-            raise ValueError(f"Unhandled state: approve={approve}, step={step}")
+    #     if approve is True and step == "code":
+    #         return "generate_required_libraries"
+    #     elif approve is False and step == "code":
+    #         return "generate_code"
+    #     elif approve is True and step == "libraries" and state["required_libraries"] is not None:
+    #         return "write_required_libraries"
+    #     elif approve is True and step == "libraries" and state["required_libraries"] is None:
+    #         return "generate_agent_name"
+    #     elif approve is False and step == "libraries":
+    #         return "generate_code"
+    #     else:
+    #         raise ValueError(f"Unhandled state: approve={approve}, step={step}")
 
-    # Add the conditional edges
-    graph.add_conditional_edges(
-        "get_user_feedback",
-        conditional_transition
-    )
+    # # Add the conditional edges
+    # graph.add_conditional_edges(
+    #     "get_user_feedback",
+    #     conditional_transition
+    # )
     
-    graph.add_edge("write_code", END)
+    graph.add_edge("triage", END)
     
     # Add a checkpointer when compiling
     checkpointer = MemorySaver()
@@ -163,7 +156,6 @@ def create_root_workflow():
 # Global storage for in-progress workflows
 active_workflows = {}
 
-@tool(tags=["root_workflow"])
 def root_workflow(
     workflow_id: Optional[str] = None,
     messages: Optional[list[str]] = None,

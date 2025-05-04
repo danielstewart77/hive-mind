@@ -3,7 +3,7 @@ import psutil
 import platform
 import socket
 from typing import Any, Dict, Generator
-from agents.openai import completions_streaming
+from utilities.openai_tools import completions_streaming
 
 @tool
 def get_system_info() -> Generator[str, None, None]: 

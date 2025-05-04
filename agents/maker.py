@@ -3,9 +3,9 @@ import os
 from typing import Generator
 
 from openai import completions
-from agents.openai import completions_streaming, completions_structured, completions
+from utilities.openai_tools import completions_streaming, completions_structured, completions
 from agent_tooling import tool
-from utilities.tool_discovery import discover_tools
+
 from models.maker import AgentCode, AgentName, RequirementUpdate, RequiredLibrariesUpdate
 
 #@tool

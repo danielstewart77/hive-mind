@@ -8,7 +8,7 @@ from agent_tooling import tool, Agent
 
 from agents.agent_editor import update_agent_code_workflow
 from agents.maker import create_local_repository, generate_requirements, update_requirements
-from agents.openai import completions_structured
+from utilities.openai_tools import completions_structured
 from utilities.messages import get_last_user_message
 from workflows.models.feedback import UserFeedback
 from agents.agent_read import get_agent_by_name, get_agent_by_description

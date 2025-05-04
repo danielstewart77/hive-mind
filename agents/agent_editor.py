@@ -1,6 +1,6 @@
 from typing import Generator
 from agent_tooling import tool, Agent
-from agents.openai import completions_streaming, completions_structured
+from utilities.openai_tools import completions_streaming, completions_structured
 from pydantic import BaseModel
 
 

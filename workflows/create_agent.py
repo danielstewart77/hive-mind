@@ -11,7 +11,7 @@ import uuid
 from agents.maker import create_local_repository, generate_agent_code, generate_requirements, extract_function_name, update_requirements
 from agent_tooling import tool
 
-from agents.openai import completions_structured
+from utilities.openai_tools import completions_structured
 from utilities.messages import get_last_user_message
 from workflows.models.feedback import UserFeedback
 
