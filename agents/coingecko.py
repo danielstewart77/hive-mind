@@ -2,7 +2,7 @@ import requests
 from agent_tooling import tool
 
 @tool
-def current_crypto_price(token: str) -> str:
+def current_crypto_price(token: str, messages) -> str:
     """Choose this tool when the user asks for the current price of a cryptocurrency."""
 
     # Define the API endpoint

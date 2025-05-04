@@ -2,7 +2,7 @@ import logging
 import os
 import sys
 from typing import Generator
-from agent_tooling import OpenAITooling
+from agent_tooling import OpenAITooling, discover_tools
 from flask import Flask, request, jsonify, Response, stream_with_context
 import json
 
@@ -33,7 +33,8 @@ def chat():
         # Define the generator function with the captured variables
         @stream_with_context
         def generate_response():
-            tool_discovery.discover_tools()
+            discover_tools(['agents', 'utilities'])
+            #tool_discovery.discover_tools()
             result = openai.call_tools(messages=messages)
             
             if isinstance(result, Generator):
