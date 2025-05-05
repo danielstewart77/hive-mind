@@ -9,7 +9,7 @@ from workflows.root import root_workflow
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 openai = OpenAITooling(api_key=OPENAI_API_KEY, model="gpt-4o")
 
-discover_tools()
+discover_tools(['agents', 'workflows', 'utilities'])
 
 # This will keep track of the entire chat history
 chat_history = []
@@ -26,21 +26,29 @@ def chat_interface(user_message: str) -> Generator[list[dict], None, None]:
     global chat_history
 
     user_msg = {"role": "user", "content": user_message}
-
-    # Append the user message to the chat history
     chat_history.append(user_msg)
 
-    assistant_response = root_workflow(
-        messages=chat_history
-    )
-    
-    full_response = ""
+    assistant_response = root_workflow(messages=chat_history)
 
-    for i, word in enumerate(assistant_response.split()):
-        full_response += word + " "
-        yield chat_history + [user_msg, {"role": "assistant", "content": full_response.strip()}]
+    # Case 1: Streaming generator
+    if isinstance(assistant_response, Generator):
+        full_response = ""
+        for partial in assistant_response:
+            chunk = (
+                partial.get("response")
+                if isinstance(partial, dict) and "response" in partial
+                else str(partial)
+            )
+            full_response += chunk
+            yield chat_history + [{"role": "assistant", "content": full_response.strip()}]
+        chat_history.append({"role": "assistant", "content": full_response.strip()})
 
-    chat_history.extend([user_msg, {"role": "assistant", "content": full_response.strip()}])
+    # Case 2: Regular string
+    else:
+        full_response = str(assistant_response)
+        chat_history.append({"role": "assistant", "content": full_response})
+        yield chat_history
+
 
 with gr.Blocks() as demo:
     gr.Markdown("### Chat with Agent")

@@ -87,12 +87,13 @@ def triage(state: State) -> State:
 
     # here we could pass the message history, or simple the last message
     # lets create a list[dict[str,str]] with only the last message
-    last_message = get_last_user_message(messages=messages)
-    messages = [{"user": last_message}]
+    # last_message = get_last_user_message(messages=messages)
+    # messages = [{"user": last_message}]
     result = openai.call_tools(
         messages=messages,
         model="gpt-4.1-mini",
-        tags=["triage"])
+        tags=["triage"],
+        stream=False)
     
     new_state = state.copy()
     new_state["result"] = result
@@ -201,12 +202,9 @@ def root_workflow(
             # Stream the workflow with the initial state
             stream = workflow.stream(
                 {
-                    "code_instructions": last_user_message,
-                    "generated_code": "",
-                    "required_libraries": "",
-                    "message": "",
-                    "step": "",
+                    "messages": messages,
                     "user_feedback": "",
+                    "results": {},
                 },
                 config={"configurable": {"thread_id": thread_id}}
             )
