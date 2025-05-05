@@ -51,7 +51,7 @@ def chat_interface(user_message: str) -> Generator[list[dict], None, None]:
 
 
 with gr.Blocks() as demo:
-    gr.Markdown("### Chat with Agent")
+    gr.Markdown("### Chat with the Hive Mind")
     chatbot = gr.Chatbot(label="Chat", type="messages")
     msg = gr.Textbox(label="Your message")
 

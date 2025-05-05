@@ -1,11 +1,8 @@
 from typing import Generator
-from agent_tooling import tool, Agent
+from agent_tooling import tool, Agent, discover_tools
 from utilities.openai_tools import completions_streaming, completions_structured
 from pydantic import BaseModel
-
-
 from models.maker import AgentCode
-from utilities.tool_discovery import discover_tools
 
 class AgentMatches(BaseModel):
     agents: list[Agent]

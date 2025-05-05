@@ -1,8 +1,6 @@
 import os
 from typing import Generator
-from agent_tooling import tool
-
-from utilities.tool_discovery import discover_tools
+from agent_tooling import tool, discover_tools
 
 @tool
 def delete_agent(agent_name: str) -> Generator[str, None, None]:

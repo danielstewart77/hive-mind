@@ -14,8 +14,9 @@ from agents.maker import create_local_repository, generate_agent_code, generate_
 from agent_tooling import tool
 
 from utilities.openai_tools import completions_structured
-from utilities.messages import get_last_user_message
+from utilities.messages import get_last_message, get_last_user_message
 from workflows.models.feedback import UserFeedback
+from agents.websearch_openai import web_search
 
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
         
@@ -24,7 +25,8 @@ OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 class State(TypedDict):
     user_feedback: str
     messages: Optional[list[dict[str, str]]] = Field(default_factory=list)
-    results: Optional[dict[str, Any]] = Field(default_factory=dict)
+    #results: Optional[dict[str, Any]] = Field(default_factory=dict)
+    result: Optional[str] = None
 
 
 # def get_user_feedback(state: State) -> State:
@@ -81,22 +83,30 @@ def triage(state: State) -> State:
     # be sure to remember that there may need to be a condition where the
     # workflow terminates (or is complete) and should be removed so that a 
     # subsequent message can begin a new workflow
-    openai = OpenAITooling(api_key=OPENAI_API_KEY)
 
-    messages = state["messages"]
+    try:
+        openai = OpenAITooling(api_key=OPENAI_API_KEY, fallback_tool=web_search)
 
-    # here we could pass the message history, or simple the last message
-    # lets create a list[dict[str,str]] with only the last message
-    # last_message = get_last_user_message(messages=messages)
-    # messages = [{"user": last_message}]
-    result = openai.call_tools(
-        messages=messages,
-        model="gpt-4.1-mini",
-        tags=["triage"],
-        stream=False)
+        messages = state["messages"]
+
+        # here we could pass the message history, or simple the last message
+        # lets create a list[dict[str,str]] with only the last message
+        # last_message = get_last_user_message(messages=messages)
+        # messages = [{"user": last_message}]
+    
+        result = openai.call_tools(
+            messages=messages,
+            model="gpt-4.1-mini",
+            tags=["triage"],
+            stream=False)
+        message = get_last_message(result)
+    except Exception as e:
+        logging.error(f"Error in triage: {str(e)}")
+        message = f"Error in triage: {str(e)}"
     
     new_state = state.copy()
-    new_state["result"] = result
+    
+    new_state["result"] = message
 
     # at this point we have selected a workflow
     # it's possible that the workflow is paused and i'm not sure if
@@ -204,7 +214,7 @@ def root_workflow(
                 {
                     "messages": messages,
                     "user_feedback": "",
-                    "results": {},
+                    "result": "",
                 },
                 config={"configurable": {"thread_id": thread_id}}
             )
@@ -246,13 +256,15 @@ def root_workflow(
         
         # If we didn't find an interrupt, the workflow completed
         if not found_interrupt:
-            result_message = "Awesomesocks, you're agent is completed!"
+            # Extract last state emitted by any node
+            last_node_state = next(reversed(final_state.values()), {})
+            result_message = last_node_state.get("result", "Workflow completed without user input.")
             
-            if final_state and isinstance(final_state, dict):
-                if "message" in final_state:
-                    result_message = final_state["message"]
-                elif isinstance(final_state.get("write_code"), dict) and "message" in final_state["write_code"]:
-                    result_message = final_state["write_code"]["message"]
+            # if final_state and isinstance(final_state, dict):
+            #     if "message" in final_state:
+            #         result_message = final_state["message"]
+            #     elif isinstance(final_state.get("write_code"), dict) and "message" in final_state["write_code"]:
+            #         result_message = final_state["write_code"]["message"]
             
             # Clean up the stored workflow
             if workflow_id in active_workflows:
