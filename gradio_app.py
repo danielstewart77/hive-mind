@@ -5,6 +5,9 @@ from typing import Generator
 from agent_tooling import OpenAITooling, discover_tools
 from workflows.root import root_workflow
 
+from shared.state import stream_cache
+
+
 # Initialize tooling
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 openai = OpenAITooling(api_key=OPENAI_API_KEY, model="gpt-4o")
@@ -24,30 +27,49 @@ chat_history = []
 
 def chat_interface(user_message: str) -> Generator[list[dict], None, None]:
     global chat_history
+    from shared.state import stream_cache
+
+    yield chat_history + [{"role": "assistant", "content": "Thinking..."}]
+
 
     user_msg = {"role": "user", "content": user_message}
     chat_history.append(user_msg)
 
-    assistant_response = root_workflow(messages=chat_history)
+    response_stream = root_workflow(messages=chat_history)
 
-    # Case 1: Streaming generator
-    if isinstance(assistant_response, Generator):
-        full_response = ""
-        for partial in assistant_response:
-            chunk = (
-                partial.get("response")
-                if isinstance(partial, dict) and "response" in partial
-                else str(partial)
-            )
-            full_response += chunk
+    full_response = ""
+    thread_id = None
+
+    for partial in response_stream:
+        if isinstance(partial, dict):
+            last_state = next(reversed(partial.values()), {})
+            thread_id = last_state.get("thread_id")
+            result = last_state.get("result", "")
+            full_response += result
             yield chat_history + [{"role": "assistant", "content": full_response.strip()}]
-        chat_history.append({"role": "assistant", "content": full_response.strip()})
+        else:
+            full_response += str(partial)
+            yield chat_history + [{"role": "assistant", "content": full_response.strip()}]
 
-    # Case 2: Regular string
-    else:
-        full_response = str(assistant_response)
-        chat_history.append({"role": "assistant", "content": full_response})
-        yield chat_history
+    print("📦 stream_cache keys:", list(stream_cache.keys()))
+
+    if thread_id and thread_id in stream_cache:
+        stream = stream_cache.pop(thread_id)
+        for item in stream:
+            try:
+                content = item.choices[0].delta.content
+            except Exception as e:
+                print("⚠️ Failed to extract content:", e)
+                continue
+
+            if content:
+                full_response += content
+                yield chat_history + [{"role": "assistant", "content": full_response.strip()}]
+
+
+    chat_history.append({"role": "assistant", "content": full_response.strip()})
+
+
 
 
 with gr.Blocks() as demo:

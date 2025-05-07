@@ -20,103 +20,48 @@ from agents.websearch_openai import web_search
 
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
         
+from shared.state import stream_cache
+
+
 
 # Define our state structure
 class State(TypedDict):
     user_feedback: str
     messages: Optional[list[dict[str, str]]] = Field(default_factory=list)
-    #results: Optional[dict[str, Any]] = Field(default_factory=dict)
     result: Optional[str] = None
-
-
-# def get_user_feedback(state: State) -> State:
-#     """Get human feedback on the generated code"""
-#     # Interrupt the workflow to get human feedback
-
-#     if state["step"] == "code":
-#         question = f"```python \r{state['generated_code']}```\n\nDo you approve this code?"
-#         feedback = interrupt(
-#             {
-#                 "question": question
-#             }
-#         )
-#     elif state["step"] == "libraries" and state["required_libraries"] is not None:
-#         libs = '\n'.join(state['required_libraries'])
-#         question = f"Do you approve these additional libraries:\n```\n{libs}\n```"
-#         feedback = interrupt({
-#             "question": question
-#         })
-
-#     elif state["step"] == "libraries" and state["required_libraries"] is None:
-#         updated_state = state.copy()
-#         updated_state["approve"] = True
-#         return updated_state
-
-#     else:
-#         raise ValueError(f"Invalid step for user feedback => state:{state['step']} feedback:{feedback}")
-
-#     message = f"""Read the user's feedback and determine if the code is approved.
-#      If the code is not approved, extract EXACT WORDS VERBATIM from user's message for updated code requirements.
-#      feedback: {feedback}"""
-
-#     user_feedback = completions_structured(message=message, response_format=UserFeedback)
-    
-#     # Store the approval status and updated requirements in the state
-#     updated_state = state.copy()
-#     updated_state["approve"] = user_feedback.approve
-#     if state["step"] == "name":
-#         updated_state["agent_name"] = state["suggested_name"]
-    
-#     if not user_feedback.approve:
-#         # If not approved, update the requirements
-#         if state["step"] == "name":
-#             updated_state["user_feedback"] += " " + user_feedback.user_feedback
-#         updated_state["user_feedback"] = user_feedback.user_feedback
-    
-#     # Return the updated state - the router will handle the branching
-#     return updated_state
+    stream: Optional[Generator] = None
+    thread_id: Optional[str] = None
 
 def triage(state: State) -> State:
-    # we're here because there is no workflow_id, so this in a fresh request
-    # we need to find out which workflow this request should trigger
-    # we'll need to pass some (or all) of the workflows but not root
-    # be sure to remember that there may need to be a condition where the
-    # workflow terminates (or is complete) and should be removed so that a 
-    # subsequent message can begin a new workflow
-
     try:
+        print("🧪 Entered triage node with state:", state)
         openai = OpenAITooling(api_key=OPENAI_API_KEY, fallback_tool=web_search)
-
         messages = state["messages"]
 
-        # here we could pass the message history, or simple the last message
-        # lets create a list[dict[str,str]] with only the last message
-        # last_message = get_last_user_message(messages=messages)
-        # messages = [{"user": last_message}]
-    
-        result = openai.call_tools(
+        result_stream = openai.call_tools(
             messages=messages,
             model="gpt-4.1-mini",
             tags=["triage"],
-            stream=False)
-        message = get_last_message(result)
+            stream=True
+        )
+
+        # Store it globally using thread ID or workflow ID
+        thread_id = state.get("thread_id")  # make sure thread_id is included in state
+        print("🧵 thread_id in triage:", thread_id)
+        if thread_id:
+            stream_cache[thread_id] = result_stream
+        else:
+            print("❌ No thread_id found in state. Stream will be lost.")
+
+        # new_state = state.copy()
+        # new_state["result"] = "[streaming started]"
+        # return new_state
+        return state
+
     except Exception as e:
-        logging.error(f"Error in triage: {str(e)}")
-        message = f"Error in triage: {str(e)}"
-    
-    new_state = state.copy()
-    
-    new_state["result"] = message
-
-    # at this point we have selected a workflow
-    # it's possible that the workflow is paused and i'm not sure if
-    # it would return a result of if it would only return when the 
-    # workflow is complete. for sure, if the workflow completes
-    # without any user input, it will return a result
-
-    return new_state
-    
-
+        new_state = state.copy()
+        new_state["result"] = f"Error in triage: {str(e)}"
+        return new_state
 
 
 
@@ -127,36 +72,9 @@ def create_root_workflow():
     
     # Add nodes
     graph.add_node("triage", triage)
-    #graph.add_node("get_user_feedback", get_user_feedback)
     
     # Add the edges
     graph.add_edge(START, "triage")
-    # graph.add_edge("interpret_request", "get_user_feedback")
-    # graph.add_edge("generate_required_libraries", "get_user_feedback")
-    
-    # # Define the conditional edge function
-    # def conditional_transition(state):
-    #     approve = state.get("approve")
-    #     step = state.get("step")
-
-    #     if approve is True and step == "code":
-    #         return "generate_required_libraries"
-    #     elif approve is False and step == "code":
-    #         return "generate_code"
-    #     elif approve is True and step == "libraries" and state["required_libraries"] is not None:
-    #         return "write_required_libraries"
-    #     elif approve is True and step == "libraries" and state["required_libraries"] is None:
-    #         return "generate_agent_name"
-    #     elif approve is False and step == "libraries":
-    #         return "generate_code"
-    #     else:
-    #         raise ValueError(f"Unhandled state: approve={approve}, step={step}")
-
-    # # Add the conditional edges
-    # graph.add_conditional_edges(
-    #     "get_user_feedback",
-    #     conditional_transition
-    # )
     
     graph.add_edge("triage", END)
     
@@ -171,106 +89,44 @@ def root_workflow(
     workflow_id: Optional[str] = None,
     messages: Optional[list[str]] = None,
 ) -> Generator[str, None, None]:
-    """
-    DO NOT assign a value to the workflow_id parameter, unless it is given in the message.
-
-    Parameters:
-    - workflow_id (str, optional): Only populate this field when the workflow_id is given in the messages.
-    - messages: Leave this field blank; it will be automatically populated with the user input.
-    """
     try:
-        # get the last user message
         last_user_message = get_last_user_message(messages)
         if not last_user_message:
             yield "No user message found. Please provide a message."
             return
 
-        # Define stream variable outside the if/else blocks
-        stream = None
-        
-        # If we have a workflow_id, we're resuming an existing workflow
         if workflow_id and workflow_id in active_workflows:
             workflow = active_workflows[workflow_id]["workflow"]
             thread_id = active_workflows[workflow_id]["thread_id"]
-            
-            # Use stream instead of invoke for consistency
-            stream = workflow.stream(
+
+            yield from workflow.stream(
                 Command(resume=last_user_message),
                 config={"configurable": {"thread_id": thread_id}}
             )
-            
         else:
-            # Start a new workflow
             workflow = create_root_workflow()
-            
-            # Generate a new workflow ID if we don't have one
             workflow_id = str(uuid.uuid4())
-                
-            # Configure a thread ID for this workflow
             thread_id = workflow_id
-            
-            # Stream the workflow with the initial state
+
             stream = workflow.stream(
                 {
                     "messages": messages,
                     "user_feedback": "",
                     "result": "",
+                    "thread_id": thread_id,  # ✅ include this!
                 },
                 config={"configurable": {"thread_id": thread_id}}
             )
-            
-            # Store the workflow and thread ID for later resumption
+
             active_workflows[workflow_id] = {
                 "workflow": workflow,
                 "thread_id": thread_id
             }
-        
-        # Process the stream
-        found_interrupt = False
-        final_state = None
-        
-        # Make sure stream exists before trying to iterate over it
-        if stream:
-            for chunk in stream:
-                
-                # Check if this chunk contains an interrupt
-                if isinstance(chunk, dict) and "__interrupt__" in chunk:
-                    found_interrupt = True
-                    interrupt_info = chunk["__interrupt__"][0]
-                    
-                    # Extract the interrupt value
-                    interrupt_value = interrupt_info.value if hasattr(interrupt_info, 'value') else interrupt_info
-                    
-                    # Extract the question and context
-                    question = "User input required"
-                    
-                    if isinstance(interrupt_value, dict):
-                        question = interrupt_value.get("question", question)
-                    
-                    # Format the response to indicate we need user input
-                    yield f" workflow_id: {workflow_id}\n\n{question}"
-                    break
-                
-                # Keep track of the final state
-                final_state = chunk
-        
-        # If we didn't find an interrupt, the workflow completed
-        if not found_interrupt:
-            # Extract last state emitted by any node
-            last_node_state = next(reversed(final_state.values()), {})
-            result_message = last_node_state.get("result", "Workflow completed without user input.")
-            
-            # if final_state and isinstance(final_state, dict):
-            #     if "message" in final_state:
-            #         result_message = final_state["message"]
-            #     elif isinstance(final_state.get("write_code"), dict) and "message" in final_state["write_code"]:
-            #         result_message = final_state["write_code"]["message"]
-            
-            # Clean up the stored workflow
-            if workflow_id in active_workflows:
-                del active_workflows[workflow_id]
-                
-            yield result_message
-            
+
+            yield from stream
+
     except Exception as e:
-        yield f"Error in create_agent: {str(e)}\nTraceback: {traceback.format_exc()}"
+        def error_stream():
+            yield f"Error in create_agent: {str(e)}\nTraceback: {traceback.format_exc()}"
+        yield from error_stream()
+
