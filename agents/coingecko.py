@@ -2,7 +2,6 @@ import requests
 from agent_tooling import tool
 import os
 
-
 @tool(tags=["triage"])
 def get_crypto_price(crypto_name):
     """Use this agent to get the current price of a cryptocurrency."""
@@ -26,6 +25,7 @@ def get_crypto_price(crypto_name):
             return f'CoinGecko 🦎: Sorry, I could not find the price for {crypto_name}.'
     else:
         return 'CoinGecko 🦎: Failed to retrieve data from the API.'
+
 
 
 

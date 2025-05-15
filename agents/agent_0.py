@@ -2,7 +2,7 @@ import logging
 import os
 import sys
 from typing import Generator
-from agent_tooling import OpenAITooling
+from agent_tooling import OpenAITooling, discover_tools
 from flask import Flask, request, jsonify, Response, stream_with_context
 import json
 
