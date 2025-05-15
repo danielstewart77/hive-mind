@@ -204,7 +204,7 @@ def create_agent_workflow():
 # Global storage for in-progress workflows
 active_workflows = {}
 
-@tool(tags=["triage"])
+@tool(tags=["agent"])
 def workflow_create_agent(
     workflow_id: Optional[str] = None,
     messages: Optional[list[str]] = None,

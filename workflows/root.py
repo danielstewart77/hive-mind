@@ -1,28 +1,34 @@
-import logging
+
 import os
 import traceback
-from typing import Dict, Any, Generator, Literal, TypedDict,Optional
+from typing import Generator, Optional, TypedDict
+
+#from gradio import List
+from dotenv import load_dotenv
 from langgraph.graph import StateGraph, END, START
-from langgraph.types import interrupt, Command
+from langgraph.types import Command
 from langgraph.checkpoint.memory import MemorySaver
-from pydantic import BaseModel, Field
+from pydantic import Field
 import uuid
-
-from agent_tooling import OpenAITooling
-
-from agents.maker import create_local_repository, generate_agent_code, generate_requirements, extract_function_name, update_requirements
-from agent_tooling import tool
-
+from utilities.messages import get_last_user_message
+from agent_tooling import OpenAITooling, OllamaTooling
 from utilities.openai_tools import completions_structured
-from utilities.messages import get_last_message, get_last_user_message
-from workflows.models.feedback import UserFeedback
-from agents.websearch_openai import web_search
+from pydantic import BaseModel
+
+load_dotenv()
 
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
-        
+
 from shared.state import stream_cache
 
+ollama_tooling_client = OllamaTooling(model="llama3.2:8b")
+agent_tooling_openai = OpenAITooling(api_key=OPENAI_API_KEY)
 
+class TriageRequestType(BaseModel):
+    agent: bool = Field(description="Whether the request is for an agent")
+
+    class Config:
+        extra = "forbid"
 
 # Define our state structure
 class State(TypedDict):
@@ -32,18 +38,67 @@ class State(TypedDict):
     stream: Optional[Generator] = None
     thread_id: Optional[str] = None
 
+def triage_temp(messages: Optional[list[dict[str, str]]] = None) -> Generator[str | dict, None, None]:
+    """call this function any time the user specifically mentions agents or tools"""
+    yield "🛠️  Triaging request...\n\n\n"
+
+    if not messages:
+        yield "No messages provided. Please provide a message."
+
+    message = get_last_user_message(messages)
+    if not message:
+        yield "No user message found. Please provide a message."
+        return
+
+    agent = completions_structured(
+        message=message,
+        response_format=TriageRequestType,
+        model="gpt-4.1",
+    ).agent
+
+    if agent:
+        yield from ollama_tooling_client.call_tools(
+                messages=messages,
+                model="qwen3:8b",
+                tool_choice="auto",
+                tags=["agent"]
+            )
+    else:
+        yield from ollama_tooling_client.call_tools(
+                messages=messages,
+                model="qwen3:8b",
+                tool_choice="auto",
+                tags=["triage"],
+                fallback_tool="web_search",
+            )
+
+
 def triage(state: State) -> State:
     try:
         print("🧪 Entered triage node with state:", state)
-        openai = OpenAITooling(api_key=OPENAI_API_KEY, fallback_tool=web_search)
+        
         messages = state["messages"]
 
-        result_stream = openai.call_tools(
+        # result_stream = agent_tooling_openai.call_tools(
+        #     messages=messages,
+        #     model="gpt-4.1",
+        #     tool_choice="auto",
+        #     tags=["agent", "triage", "ollama", "openai"],
+        #     fallback_tool="web_search",
+        # )
+
+        
+
+        result_stream = ollama_tooling_client.call_tools(
             messages=messages,
-            model="gpt-4.1-mini",
-            tags=["triage"],
-            stream=True
+            model="granite3.3:2b",
+            tool_choice="auto",
+            tags=["agent", "triage", "ollama", "openai"],
+            fallback_tool="web_search",
         )
+
+
+        #result_stream = triage_temp(messages)
 
         # Store it globally using thread ID or workflow ID
         thread_id = state.get("thread_id")  # make sure thread_id is included in state
@@ -53,9 +108,6 @@ def triage(state: State) -> State:
         else:
             print("❌ No thread_id found in state. Stream will be lost.")
 
-        # new_state = state.copy()
-        # new_state["result"] = "[streaming started]"
-        # return new_state
         return state
 
     except Exception as e:

@@ -56,6 +56,19 @@ def completions_streaming(message: str, model: str = "gpt-4.1") -> Generator[str
     for chunk in stream:
         if chunk.choices and chunk.choices[0].delta.content is not None:
             yield chunk.choices[0].delta.content
+
+# completions streaming with messages
+def completions_streaming_with_messages(messages: list[dict[str, str]], model: str = "gpt-4.1") -> Generator[str, None, None]:
+    """Call the OpenAI API for streaming output."""
+    stream = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        stream=True
+    )
+
+    for chunk in stream:
+        if chunk.choices and chunk.choices[0].delta.content is not None:
+            yield chunk.choices[0].delta.content
     
 #     @tool
 # def openai_embeddings(api_key: str, model: str, prompt: str):

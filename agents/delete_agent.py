@@ -2,7 +2,7 @@ import os
 from typing import Generator
 from agent_tooling import tool, discover_tools
 
-@tool
+@tool(tags=["agent"])
 def delete_agent(agent_name: str) -> Generator[str, None, None]:
     """
     This function deletes an unwanted agent by the provided name.
