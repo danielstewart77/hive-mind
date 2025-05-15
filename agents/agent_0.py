@@ -6,7 +6,7 @@ from agent_tooling import OpenAITooling
 from flask import Flask, request, jsonify, Response, stream_with_context
 import json
 
-from utilities import tool_discovery
+from workflows.root import root_workflow
 
 # Configure logging
 logging.basicConfig(
@@ -33,7 +33,6 @@ def chat():
         # Define the generator function with the captured variables
         @stream_with_context
         def generate_response():
-            tool_discovery.discover_tools()
             result = root_workflow(
                 openai=openai,
                 messages=messages,

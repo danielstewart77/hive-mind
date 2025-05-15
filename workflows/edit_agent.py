@@ -218,7 +218,7 @@ def create_agent_workflow():
 # Global storage for in-progress workflows
 active_workflows = {}
 
-#@tool
+@tool(tags=["agent"])
 def workflow_update_agent(
     workflow_id: Optional[str] = None,
     messages: Optional[list[str]] = None,

@@ -9,7 +9,7 @@ from openai import OpenAI
 VISUAL_CROSSING_API_KEY = os.getenv('VISUAL_CROSSING_API_KEY')
 BASE_URL = 'https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/'
 
-@tool
+@tool(tags=["triage"])
 def get_houston_weather_forecast(messages: list[dict[str, str]], location: str = 'Houston,TX') -> str:
     """
     Responds to a request for the weather forecast.
@@ -21,7 +21,7 @@ def get_houston_weather_forecast(messages: list[dict[str, str]], location: str =
     Returns:
         str: A formatted string containing the weather forecast details for the specified
     """
-
+    yield "Fetching weather forecast from Visual Crossing...\n\n\n"
     OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
     client = OpenAI(api_key=OPENAI_API_KEY)
 
