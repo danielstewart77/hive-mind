@@ -1,10 +1,8 @@
 import json
 from typing import Generator
-from agent_tooling import tool, get_agents, Agent
-from agents.openai import completions_streaming, completions_structured
+from agent_tooling import discover_tools, tool, get_agents, Agent
+from utilities.openai_tools import completions_streaming, completions_structured
 from pydantic import BaseModel
-
-from utilities.tool_discovery import discover_tools
 
 class AgentMatches(BaseModel):
     agents: list[Agent]
@@ -27,8 +25,8 @@ class AgentEncoder(json.JSONEncoder):
         return super().default(obj)
     
 
-@tool
-def get_agents_with_descriptions() -> Generator[str, None, None]:
+@tool(tags=["agent"])
+def get_agents_with_descriptions(messages: list[dict[str, str]]) -> Generator[str, None, None]:
     """
     Describes to the user what the agents of the HIVE MIND can do. This function retrieves the list of agents and formats them into a readable string.
     The function streams the agent information to the user.
@@ -48,16 +46,15 @@ def get_agents_with_descriptions() -> Generator[str, None, None]:
 
     # Stream the agent information
     agent_descriptions = completions_streaming(
-        message=f'''Use these agent names and descriptions: {json.dumps(agent_info)} 
-        to describe the abilities of the HIVE MIND'''
+        message=f'''For each agent of the HIVE MIND, list the agent's name, parameters, and give a brief description: {json.dumps(agent_info)}'''
     )
 
     # stream the response
     for chunk in agent_descriptions:
         yield chunk
 
-@tool
-def get_agent_by_name(name: str) -> Agent:
+#@tool
+def get_agent_by_name(name: str, messages: list[dict[str, str]] = None) -> Agent:
     """
     Get an agent by its name. This function searches for an agent with the specified name and returns it.
 
@@ -82,8 +79,8 @@ def get_agent_by_name(name: str) -> Agent:
     # If exactly one agent is found, return it
     return matches.agents[0]
 
-@tool
-def get_agent_by_description(description: str) -> Agent:
+#@tool
+def get_agent_by_description(description: str, messages: list[dict[str, str]] = None) -> Agent:
     """
     Get an agent by its description. This function searches for an agent with the specified description and returns it.
 
@@ -108,8 +105,8 @@ def get_agent_by_description(description: str) -> Agent:
     # If exactly one agent is found, return it
     return matches.agents[0]
 
-@tool
-def get_agent_code_by_name(name: str) -> Generator[str, None, None]: 
+@tool(tags=["agent"])
+def get_agent_code_by_name(name: str, messages: list[dict[str, str]] = None) -> Generator[str, None, None]:
     """
     Get the code of an agent by its name. This function searches for an agent with the specified name and returns its code.
 
@@ -134,7 +131,7 @@ def get_agent_code_by_name(name: str) -> Generator[str, None, None]:
 
     if not matches:
         stream = completions_streaming(
-            message=f"Tell the user that no  angents were found with the name: {name}. Nor were there any similar names."
+            message=f"Tell the user that no agents were found with the name: {name}. Nor were there any similar names."
         )
     if len(matches.agents) > 1:
         stream = completions_streaming(
@@ -142,7 +139,7 @@ def get_agent_code_by_name(name: str) -> Generator[str, None, None]:
         )
     if len(matches.agents) == 0:
         stream = completions_streaming(
-            message=f"Tell the user that no  angents were found with the name: {name}. Nor were there any similar names."
+            message=f"Tell the user that no agents were found with the name: {name}. Nor were there any similar names."
         )
 
     # select the agent from the list of agents by name
@@ -159,8 +156,8 @@ def get_agent_code_by_name(name: str) -> Generator[str, None, None]:
     for chunk in stream:
         yield chunk
 
-@tool       
-def get_agent_code_by_description(description: str) -> Generator[str, None, None]: 
+@tool(tags=["agent"])   
+def get_agent_code_by_description(description: str, messages: list[dict[str, str]] = None) -> Generator[str, None, None]: 
     """
     Get the code of an agent by its description. This function searches for an agent with the specified description and returns its code.
 

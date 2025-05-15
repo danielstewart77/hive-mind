@@ -10,7 +10,7 @@ from models.open_web_ui import Autocompletion, Tags, Summary
 load_dotenv(dotenv_path='secrets.env')
 client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 
-def completions(message: str, model: str = "gpt-4o") -> str:
+def completions(message: str, model: str = "gpt-4.1") -> str:
     """Call the OpenAI API and return the raw response."""
     completion = client.chat.completions.create(
         model=model,
@@ -21,7 +21,16 @@ def completions(message: str, model: str = "gpt-4o") -> str:
     content = completion.choices[0].message.content
     return content
 
-def completions_structured(message: str, response_format: BaseModel, model: str = "gpt-4o-2024-08-06") -> BaseModel:
+def completions_with_messages(messages: list[dict[str, str]], model: str = "gpt-4.1") -> str:
+    """Call the OpenAI API and return the raw response."""
+    completion = client.chat.completions.create(
+        model=model,
+        messages=messages
+    )
+    content = completion.choices[0].message.content
+    return content
+
+def completions_structured(message: str, response_format: BaseModel, model: str = "gpt-4.1") -> BaseModel:
     """Call the OpenAI API and return the raw response."""
     completion = client.beta.chat.completions.parse(
         model=model,
@@ -34,14 +43,26 @@ def completions_structured(message: str, response_format: BaseModel, model: str 
     # return the content as the model type
     return content
 
-@tool
-def completions_streaming(message: str, model: str = "gpt-4o") -> Generator[str, None, None]:
+def completions_streaming(message: str, model: str = "gpt-4.1") -> Generator[str, None, None]:
     """Call the OpenAI API for streaming output."""
     stream = client.chat.completions.create(
         model=model,
         messages=[
             {"role": "developer", "content": message}
         ],
+        stream=True
+    )
+
+    for chunk in stream:
+        if chunk.choices and chunk.choices[0].delta.content is not None:
+            yield chunk.choices[0].delta.content
+
+# completions streaming with messages
+def completions_streaming_with_messages(messages: list[dict[str, str]], model: str = "gpt-4.1") -> Generator[str, None, None]:
+    """Call the OpenAI API for streaming output."""
+    stream = client.chat.completions.create(
+        model=model,
+        messages=messages,
         stream=True
     )
 

@@ -6,7 +6,7 @@ from agent_tooling import OpenAITooling, discover_tools
 from flask import Flask, request, jsonify, Response, stream_with_context
 import json
 
-from utilities import tool_discovery
+from workflows.root import root_workflow
 
 # Configure logging
 logging.basicConfig(
@@ -33,9 +33,13 @@ def chat():
         # Define the generator function with the captured variables
         @stream_with_context
         def generate_response():
-            discover_tools(['agents', 'utilities'])
-            #tool_discovery.discover_tools()
-            result = openai.call_tools(messages=messages)
+            result = root_workflow(
+                openai=openai,
+                messages=messages,
+                model="gpt-4.1",
+                tags=["root_workflow"]
+            )
+            result = openai.call_tools(messages=messages, model="gpt-4.1", tags=["root_workflow"])
             
             if isinstance(result, Generator):
                 for partial in result:
@@ -60,16 +64,6 @@ def chat():
     except Exception as e:
         app.logger.error(f"Error in chat endpoint: {str(e)}")
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
-
-@app.route("/agent_code", methods=["GET"])
-def get_agent_code():
-    """Returns agent_0s' code"""
-    try:
-        with open("agent_0.py", "r") as file:
-            file_content = file.read()
-            return f"Agent 0 🔫😎: {file_content}"
-    except Exception as e:
-        return jsonify({"error": f"Could not read agent code: {str(e)}"}), 500
 
 def main():
     """Main function to start the Flask app"""

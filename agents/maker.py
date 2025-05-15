@@ -1,13 +1,15 @@
 import logging
 import os
 from typing import Generator
-from agents.openai import completions_streaming, completions_structured
-from agent_tooling import tool
-from utilities.tool_discovery import discover_tools
-from models.maker import AgentCode, AgentName, RequirementUpdate
 
-@tool
-def create_agent(agent_requirements: str, llm_provider: str = "openai") -> Generator[str, None, None]: 
+from openai import completions
+from utilities.openai_tools import completions_streaming, completions_structured, completions
+from agent_tooling import tool
+
+from models.maker import AgentCode, AgentName, RequirementUpdate, RequiredLibrariesUpdate
+
+#@tool
+def generate_agent_code(agent_requirements: str, llm_provider: str = "openai") -> str: 
     """Is called when the user specifically says they want to create a NEW agent.
     This function creates a new agent based on the provided requirements and language model provider.
     Args:
@@ -16,6 +18,9 @@ def create_agent(agent_requirements: str, llm_provider: str = "openai") -> Gener
     Returns:
         str: a message indicating the agent was created successfully
     """
+
+    if llm_provider == "openai":
+        llm_model = "gpt-4.1-mini"
 
     # *** create the project *** #
 
@@ -28,21 +33,17 @@ def create_agent(agent_requirements: str, llm_provider: str = "openai") -> Gener
 
     agent_code = completions_structured(message=instructions,
                                         response_format=AgentCode,
-                                        model="gpt-4o-2024-08-06",
+                                        model=llm_model,
     ).code
 
     instructions = f''' Update this code: {agent_code} by adding the following:
-        1) from the `agent_tooling` module include the `tool` function
+        1) import the library `from agent_tooling import tool`
         2) add the `@tool` decorator to the main/entry-point function
-        Example:
-        from agent_tooling import tool
-        @tool
-        def new_agent_name(message: str) -> Generator[str, None, None]:
-        # function code here'''
+        3) add an extra parameter to the function with the signature: messages: list[dict[str, str]] = None'''
     
     agent_code = completions_structured(message=instructions,
                                         response_format=AgentCode,
-                                        model="gpt-4o-2024-08-06",
+                                        model=llm_model,
     ).code
 
     instructions = f''' Update this code: {agent_code} by adding the following:
@@ -53,7 +54,7 @@ def create_agent(agent_requirements: str, llm_provider: str = "openai") -> Gener
     
     agent_code = completions_structured(message=instructions,
                                         response_format=AgentCode,
-                                        model="gpt-4o-2024-08-06",
+                                        model=llm_model,
     ).code
 
     instructions = f''' Update this code: {agent_code} by adding the following:
@@ -63,22 +64,22 @@ def create_agent(agent_requirements: str, llm_provider: str = "openai") -> Gener
         
     agent_code = completions_structured(message=instructions,
                                         response_format=AgentCode,
-                                        model="gpt-4o-2024-08-06",
+                                        model=llm_model,
     ).code
 
-    instructions = f''' If the this code is using secret keys, passwords, or tokens: {agent_code}:
-        use this pattern: 
-        from dotenv import load_dotenv
-        import os
-        load_dotenv(dotenv_path='secrets.env')
-        KEY_NAME = os.getenv("KEY_NAME")
-        USERNAME = os.getenv("USERNAME")
-        PASSWORD = os.getenv("PASSWORD")'''
+    # instructions = f''' If the this code is using secret keys, passwords, or tokens: {agent_code}:
+    #     use this pattern: 
+    #     from dotenv import load_dotenv
+    #     import os
+    #     load_dotenv(dotenv_path='secrets.env')
+    #     KEY_NAME = os.getenv("KEY_NAME")
+    #     USERNAME = os.getenv("USERNAME")
+    #     PASSWORD = os.getenv("PASSWORD")'''
 
-    agent_code = completions_structured(message=instructions,
-                                        response_format=AgentCode,
-                                        model="gpt-4o-2024-08-06",
-    ).code
+    # agent_code = completions_structured(message=instructions,
+    #                                     response_format=AgentCode,
+    #                                     model=llm_model,
+    # ).code
 
     instructions = f''' Update this code: {agent_code} by using the following pattern to return
     a streaming value:
@@ -89,83 +90,65 @@ def create_agent(agent_requirements: str, llm_provider: str = "openai") -> Gener
 
     Example:
     from typing import Generator
-    from agent_tooling import tool
     from agents.openai import completions_streaming
-        
-    @tool
-    def new_agent_name(message: str) -> Generator[str, None, None]: 
     
-        #do something and get some result
+    message = "Format this message nicely: The sum of num_a, num_b, and num_c is result."
         
-        stream = completions_streaming(''' + "message=f" + "Format this message nicely: {" + "message}" + ''')
+        stream = completions_streaming(message=message)
 
         # stream the response
         for chunk in stream:
             yield chunk
     '''
 
-    agent_code = completions_structured(message=instructions,
+    return completions_structured(message=instructions,
                                         response_format=AgentCode,
-                                        model="gpt-4o-2024-08-06",
+                                        model=llm_model,
     ).code
-    
-    agent_name = completions_structured(
-        message=f'''Based on this code: {agent_code} \n name the agent the same as the function name.
-        if there are multiple functions, name the agent the same as the  main/entry-point function name''',
-        response_format=AgentName,
-        model="gpt-4o-mini"
-    ).name
 
-    stream = completions_streaming(
-        message=f"Return this code: {agent_code} for the agent with the name: {agent_name} along with nicely formatted markdown explaining the code."
-    )
-
-    # stream the response
-    for chunk in stream:
-        yield chunk
-
-    # *** check the requirements and update if needed (may require pip and/or docker commands)*** #
-    # read the requirements.txt file and check if the requirements are already there
-    
+def generate_requirements(agent_code: str, llm_model: str = "gpt-4.1-nano") -> list[str] | None:
     file = os.path.join(os.path.dirname(os.path.dirname(__file__)), "requirements.txt")
 
     with open(file, "r") as f:
         requirements = f.readlines()
         requirements = [r.strip() for r in requirements]
 
-    requirementUpdate = completions_structured(
+    libraries_update = completions_structured(
             message=f'''Based on this code: {agent_code} \n Does the contents of the requirements.txt file:
             \n {requirements} need to be updated? If so, list each missing requirement.''',
-            model="gpt-4o-2024-08-06",
-            response_format=RequirementUpdate
+            model=llm_model,
+            response_format=RequiredLibrariesUpdate
     )
 
-    if requirementUpdate.update:
-        # update the requirements.txt file with the agent requirements
-        with open(file, "a") as f:
-            for req in requirementUpdate.requirements:
-                f.write(f"\n{req}")
-                logging.info(f"Updated requirements.txt file: {file}")
-        
-        # run pip install -r requirements.txt
-        # if not in docker
-        if not os.path.exists("venv"):
-            # activate the virtual environment
-            if os.name == 'nt':
-                os.system("venv\\Scripts\\activate")
-            else:
-                os.system(". venv/bin/activate")
-        os.system("pip install -r requirements.txt")
-
-    # *** create the project repo *** #
-    create_local_repository(agent_code=agent_code, agent_name=agent_name)
-
-    # update the secrets.env file with any necessary keys
-
-    # update the README.md file with the agent description
+    if libraries_update.update:
+        return libraries_update.libraries
+    else:
+        return None
     
-    # reload the system to get the new agent
-    discover_tools()
+def extract_function_name(agent_code: str, llm_model: str = "gpt-4.1-nano") -> str:
+    agent_name_suggestion = completions_structured(
+        message=f"""Return the name of the function decorated with `@tool` in this code: {agent_code}""",
+        model=llm_model,
+        response_format=AgentName).name
+    return agent_name_suggestion
+    
+def update_requirements(required_libraries: list[str]) -> None:
+    # update the requirements.txt file with the required libraries
+    file = os.path.join(os.path.dirname(os.path.dirname(__file__)), "requirements.txt")
+    with open(file, "a") as f:
+        for req in required_libraries:
+            f.write(f"\n{req}")
+            logging.info(f"Updated requirements.txt file: {file}")
+    
+    # run pip install -r requirements.txt
+    # if not in docker
+    if not os.path.exists("venv"):
+        # activate the virtual environment
+        if os.name == 'nt':
+            os.system("venv\\Scripts\\activate")
+        else:
+            os.system(". venv/bin/activate")
+    os.system("pip install -r requirements.txt")
 
 def create_local_repository(agent_code: str, agent_name: str) -> None:
     # Define the folder path relative to the script location

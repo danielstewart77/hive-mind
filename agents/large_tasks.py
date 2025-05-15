@@ -4,7 +4,7 @@ import requests
 import json
 from typing import List, Dict, Union, Any
 from pydantic import BaseModel
-from agent_tooling import tool
+#from agent_tooling import tool
 from dotenv import load_dotenv
 
 from agents.ollama import ollama_generate
@@ -129,9 +129,3 @@ def answer_is_complete(messages: list) -> bool:
     else:
         # Default to False if we can't parse
         return False
-
-@tool
-def largest_cryptocurrencies_by_market_cap(n: int) -> Dict[str, List[str]]:
-    '''Returns the names of the n largest cryptocurrencies by market capitalization.'''
-    return f"Agent Crypto Bro ₿😎💰: {['Bitcoin', 'Ethereum', 'XRP', 'Binance Coin', 'Solana', 'Cardano', 'Dogecoin', 'Tron', 'Avalanche', 'Shiba Inu'][:n]}"
-
