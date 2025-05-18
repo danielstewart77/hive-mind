@@ -1,10 +1,10 @@
 import os
 import re
+import httpx
 import requests
 import json
-from typing import List
-from pydantic import BaseModel
-#from agent_tooling import tool
+from typing import List, Dict, Type, TypeVar
+from pydantic import BaseModel, ValidationError
 
 from dotenv import load_dotenv
 load_dotenv(dotenv_path='secrets.env')
@@ -85,3 +85,37 @@ def ollama_generate(message: str, llm_model: str, instruction: str, data_model: 
             raise
     else:
         raise Exception(f"API request failed with status code {response.status_code}")
+    
+
+
+T = TypeVar("T", bound=BaseModel)
+
+def ollama_structured_chat(
+    messages: List[Dict[str, str]],
+    model: str,
+    response_format: Type[T]
+) -> T:
+    try:
+        response = httpx.post(
+            f"{OLLAMA_API_URL}/api/chat",
+            json={
+                "model": model,
+                "messages": messages,
+                "stream": False
+            },
+            timeout=30
+        )
+        response.raise_for_status()
+        content = response.json()["message"]["content"]
+
+        # Try to parse the model output as JSON and validate it
+        import json
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            raise ValueError("Response content is not valid JSON.")
+
+        return response_format.parse_obj(parsed)
+
+    except (httpx.HTTPError, ValidationError, ValueError) as e:
+        raise RuntimeError(f"Ollama structured call failed: {e}")
