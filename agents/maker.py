@@ -38,7 +38,7 @@ def generate_agent_code(agent_requirements: str, llm_provider: str = "openai") -
 
     instructions = f''' Update this code: {agent_code} by adding the following:
         1) import the library `from agent_tooling import tool`
-        2) add the `@tool` decorator to the main/entry-point function
+        2) add the `@tool(tags=["agent"])` decorator to the main/entry-point function
         3) add an extra parameter to the function with the signature: messages: list[dict[str, str]] = None'''
     
     agent_code = completions_structured(message=instructions,
