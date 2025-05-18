@@ -4,9 +4,7 @@ import gradio as gr
 from typing import Generator
 from agent_tooling import OpenAITooling, discover_tools
 from workflows.root import root_workflow
-
 from shared.state import stream_cache
-
 
 # Initialize tooling
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -17,24 +15,18 @@ discover_tools(['agents', 'workflows', 'utilities'])
 # This will keep track of the entire chat history
 chat_history = []
 
-chatbot = gr.Chatbot(label="Chat", type="messages")
-
-import gradio as gr
-from typing import Generator
-
-# Global chat history in OpenAI format
-chat_history = []
-
-def chat_interface(user_message: str) -> Generator[tuple[list[dict], str], None, None]:
+def chat_interface(user_message: str, tags_csv: str) -> Generator[tuple[list[dict], str], None, None]:
     global chat_history
     from shared.state import stream_cache
 
+    tags = [t.strip() for t in tags_csv.split(",") if t.strip()]
     yield chat_history + [{"role": "assistant", "content": "Thinking..."}], ""
 
     user_msg = {"role": "user", "content": user_message}
     chat_history.append(user_msg)
 
-    response_stream = root_workflow(messages=chat_history)
+    # Pass tags to the workflow (currently unused, but reserved for future functionality)
+    response_stream = root_workflow(messages=chat_history, tags=tags)
 
     full_response = ""
     thread_id = None
@@ -86,7 +78,6 @@ def chat_interface(user_message: str) -> Generator[tuple[list[dict], str], None,
 
     yield chat_history, ""
 
-
 with gr.Blocks(css="""
 #chat-container {
     display: flex;
@@ -109,10 +100,15 @@ with gr.Blocks(css="""
 """) as demo:
     with gr.Column(elem_id="chat-container"):
         gr.Markdown("### Chat with the Hive Mind")
-        chatbot = gr.Chatbot(label="I have spoken", type="messages", elem_id="chatbot")
+
+        with gr.Row():
+            chatbot = gr.Chatbot(label="I have spoken", type="messages", elem_id="chatbot", scale=9)
+            tags_input = gr.Textbox(label="Tool Tags", placeholder="e.g. workflows, utilities", scale=1)
+
+
         msg = gr.Textbox(label="You may grovel here:", elem_id="msg-box")
 
-        msg.submit(fn=chat_interface, inputs=msg, outputs=[chatbot, msg])
+        msg.submit(fn=chat_interface, inputs=[msg, tags_input], outputs=[chatbot, msg])
 
         clear_btn = gr.Button("🧹 Clear Chat")
 

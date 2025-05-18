@@ -37,6 +37,7 @@ class State(TypedDict):
     result: Optional[str] = None
     stream: Optional[Generator] = None
     thread_id: Optional[str] = None
+    tags: Optional[list[str]] = Field(default_factory=list)
 
 def triage_temp(messages: Optional[list[dict[str, str]]] = None) -> Generator[str | dict, None, None]:
     """call this function any time the user specifically mentions agents or tools"""
@@ -78,24 +79,25 @@ def triage(state: State) -> State:
         print("🧪 Entered triage node with state:", state)
         
         messages = state["messages"]
+        tags = state.get("tags", [])
 
-        # result_stream = agent_tooling_openai.call_tools(
-        #     messages=messages,
-        #     model="gpt-4.1",
-        #     tool_choice="auto",
-        #     tags=["agent", "triage", "ollama", "openai"],
-        #     fallback_tool="web_search",
-        # )
+        result_stream = agent_tooling_openai.call_tools(
+            messages=messages,
+            model="gpt-4.1",
+            tool_choice="auto",
+            tags=tags,
+            fallback_tool="web_search",
+        )
 
         
 
-        result_stream = ollama_tooling_client.call_tools(
-            messages=messages,
-            model="granite3.3:2b",
-            tool_choice="auto",
-            tags=["agent", "triage", "ollama", "openai"],
-            fallback_tool="web_search",
-        )
+        # result_stream = ollama_tooling_client.call_tools(
+        #     messages=messages,
+        #     model="granite3.3:2b",
+        #     tool_choice="auto",
+        #     tags=tags,
+        #     fallback_tool="web_search",
+        # )
 
 
         #result_stream = triage_temp(messages)
@@ -140,6 +142,7 @@ active_workflows = {}
 def root_workflow(
     workflow_id: Optional[str] = None,
     messages: Optional[list[str]] = None,
+    tags: Optional[list[str]] = None,
 ) -> Generator[str, None, None]:
     try:
         last_user_message = get_last_user_message(messages)
@@ -165,7 +168,8 @@ def root_workflow(
                     "messages": messages,
                     "user_feedback": "",
                     "result": "",
-                    "thread_id": thread_id,  # ✅ include this!
+                    "thread_id": thread_id,
+                    "tags": tags or [],
                 },
                 config={"configurable": {"thread_id": thread_id}}
             )
