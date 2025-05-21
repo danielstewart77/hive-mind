@@ -4,11 +4,15 @@ import gradio as gr
 from typing import Generator
 from agent_tooling import OpenAITooling, discover_tools
 from workflows.root import root_workflow
+global chat_history
 from shared.state import stream_cache
+import shared.state as global_state
+from langgraph.types import Command
+from utilities.messages import get_last_user_message
 
 # Initialize tooling
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-openai = OpenAITooling(api_key=OPENAI_API_KEY, model="gpt-4o")
+agent_tooling_openai = OpenAITooling(api_key=OPENAI_API_KEY, model="gpt-4o")
 
 discover_tools(['agents', 'workflows', 'utilities'])
 
@@ -16,8 +20,6 @@ discover_tools(['agents', 'workflows', 'utilities'])
 chat_history = []
 
 def chat_interface(user_message: str, tags_csv: str) -> Generator[tuple[list[dict], str], None, None]:
-    global chat_history
-    from shared.state import stream_cache
 
     tags = [t.strip() for t in tags_csv.split(",") if t.strip()]
     yield chat_history + [{"role": "assistant", "content": "Thinking..."}], ""
@@ -25,64 +27,67 @@ def chat_interface(user_message: str, tags_csv: str) -> Generator[tuple[list[dic
     user_msg = {"role": "user", "content": user_message}
     chat_history.append(user_msg)
 
-    # Pass tags to the workflow (currently unused, but reserved for future functionality)
-    response_stream = root_workflow(messages=chat_history, tags=tags)
+    if global_state.workflow_id and global_state.workflow_id in global_state.workflows:
+        workflow = global_state.workflows[global_state.workflow_id]["workflow"]
+        thread_id = global_state.workflows[global_state.workflow_id]["thread_id"]
+
+        last_user_message = get_last_user_message(chat_history)
+
+        response_stream = workflow.stream(
+            Command(resume=last_user_message),
+            config={"configurable": {"thread_id": thread_id}}
+        )
+
+        full_response = ""
+        thread_id = None
+        last_state = None
+
+        for partial in response_stream:
+            if isinstance(partial, dict):
+                last_state = next(reversed(partial.values()), {})
+                # thread_id = last_state.get("thread_id")
+                result = last_state.get("message", "")
+                full_response += result or ""
+
+            else:
+                full_response += str(partial)
+
+            yield chat_history + [{"role": "assistant", "content": full_response.strip()}], ""
+
+    else:
+
+        response_stream = agent_tooling_openai.call_tools(
+            messages=chat_history,
+            model="gpt-4.1",
+            tool_choice="auto",
+            tags=tags,
+            fallback_tool="web_search",
+        )
+
+    # result_stream = ollama_tooling_client.call_tools(
+    #     messages=messages,
+    #     model="granite3.3:2b",
+    #     tool_choice="auto",
+    #     tags=tags,
+    #     fallback_tool="web_search",
+    # )
 
     full_response = ""
-    thread_id = None
-    last_state = None
 
     for partial in response_stream:
-        if isinstance(partial, dict):
-            last_state = next(reversed(partial.values()), {})
-            thread_id = last_state.get("thread_id")
-            result = last_state.get("result", "")
-            full_response += result or ""
-        else:
-            full_response += str(partial)
+
+        full_response += str(partial)
 
         yield chat_history + [{"role": "assistant", "content": full_response.strip()}], ""
 
-    if thread_id and thread_id in stream_cache:
-        cached_stream = stream_cache.pop(thread_id)
-        for item in cached_stream:
-            try:
-                if hasattr(item, "choices") and item.choices[0].delta:
-                    content = item.choices[0].delta.content
-                elif isinstance(item, str):
-                    content = item
-                else:
-                    content = str(item)
-            except Exception as e:
-                print("⚠️ Error extracting content from stream:", e)
-                continue
-
-            if content:
-                full_response += content
-                yield chat_history + [{"role": "assistant", "content": full_response.strip()}], ""
-
     if full_response:
         chat_history.append({"role": "assistant", "content": full_response.strip()})
-    else:
-        message = None
-        if last_state and isinstance(last_state, dict):
-            messages = last_state.get("messages", [])
-            for msg in reversed(messages):
-                if "content" in msg:
-                    message = msg["content"]
-                    break
-        chat_history.append({
-            "role": "assistant",
-            "content": message.strip() if message else "[no response]"
-        })
-
-    yield chat_history, ""
 
 with gr.Blocks(css="""
 #chat-container {
     display: flex;
     flex-direction: column;
-    height: 90vh;
+    height: 90%;
     padding: 0;
     margin: 0;
 }
