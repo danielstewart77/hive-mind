@@ -14,6 +14,7 @@ from agent_tooling import tool
 from utilities.openai_tools import completions_structured
 from utilities.messages import get_last_user_message
 from workflows.models.feedback import UserFeedback
+import shared.state as global_state
 
 # Define our state structure
 class State(TypedDict):
@@ -129,12 +130,17 @@ def write_required_libraries(state: State) -> State:
         # Call the function to update requirements
         update_requirements(required_libraries=required_libraries)
 
+    return state
+
 def write_code(state: State) -> State:
     """Save the final approved code"""
     # Define the folder path relative to the script location
     generated_code = state["generated_code"]
     agent_name = state["agent_name"]
     create_local_repository(agent_code=generated_code, agent_name=agent_name)
+
+    del global_state.workflows[global_state.workflow_id]
+    global_state.workflow_id = None
 
     return {
         "code_instructions": state["code_instructions"],
@@ -186,7 +192,7 @@ def create_agent_workflow():
         conditional_transition
     )
     
-    graph.add_edge("generate_agent_name", "write_required_libraries")
+    graph.add_edge("generate_agent_name", "write_code")
     graph.add_edge("write_required_libraries", "write_code")
     graph.add_edge("write_code", END)
 
@@ -201,22 +207,14 @@ def create_agent_workflow():
     checkpointer = MemorySaver()
     return graph.compile(checkpointer=checkpointer)
 
-# Global storage for in-progress workflows
-active_workflows = {}
 
 @tool(tags=["agent"])
 def workflow_create_agent(
-    workflow_id: Optional[str] = None,
     messages: Optional[list[str]] = None,
 ) -> Generator[str, None, None]:
     """
-    1) Call this tool when the user wants to create a new agent.
-    2) ALWAYS Call this tool when the messages contains a workflow_id value.
-    3) DO NOT assign a value to the workflow_id parameter, unless it is given in the message.
-
-    Parameters:
-    - workflow_id (str, optional): Only populate this field when the workflow_id is given in the messages.
-    - messages: (Optional) Leave this field blank; it will be automatically populated with the user input.
+    Resume the agent creation workflow using the workflow_id set by the root.
+    Assumes that the workflow has already been initialized and is stored in shared.active_workflows.
     """
     try:
         # get the last user message
@@ -227,91 +225,66 @@ def workflow_create_agent(
 
         # Define stream variable outside the if/else blocks
         stream = None
+            
+        # Start a new workflow
+        workflow = create_agent_workflow()
         
-        # If we have a workflow_id, we're resuming an existing workflow
-        if workflow_id and workflow_id in active_workflows:
-            workflow = active_workflows[workflow_id]["workflow"]
-            thread_id = active_workflows[workflow_id]["thread_id"]
+        # Generate a new workflow ID if we don't have one
+        workflow_id = str(uuid.uuid4())
             
-            # Use stream instead of invoke for consistency
-            stream = workflow.stream(
-                Command(resume=last_user_message),
-                config={"configurable": {"thread_id": thread_id}}
-            )
-            
-        else:
-            # Start a new workflow
-            workflow = create_agent_workflow()
-            
-            # Generate a new workflow ID if we don't have one
-            workflow_id = str(uuid.uuid4())
-                
-            # Configure a thread ID for this workflow
-            thread_id = workflow_id
-            
-            # Stream the workflow with the initial state
-            stream = workflow.stream(
-                {
-                    "code_instructions": last_user_message,
-                    "generated_code": "",
-                    "required_libraries": "",
-                    "message": "",
-                    "step": "",
-                    "user_feedback": "",
-                },
-                config={"configurable": {"thread_id": thread_id}}
-            )
-            
-            # Store the workflow and thread ID for later resumption
-            active_workflows[workflow_id] = {
-                "workflow": workflow,
-                "thread_id": thread_id
-            }
+        # Configure a thread ID for this workflow
+        thread_id = workflow_id
+        
+        # Stream the workflow with the initial state
+        stream = workflow.stream(
+            {
+                "code_instructions": last_user_message,
+                "generated_code": "",
+                "required_libraries": "",
+                "message": "",
+                "step": "",
+                "user_feedback": "",
+            },
+            config={"configurable": {"thread_id": thread_id}}
+        )
+        
+        # Store the workflow and thread ID for later resumption
+        global_state.workflow_id = workflow_id
+        global_state.workflows[workflow_id] = {
+            "workflow": workflow,
+            "thread_id": thread_id
+        }
         
         # Process the stream
         found_interrupt = False
         final_state = None
-        
-        # Make sure stream exists before trying to iterate over it
-        if stream:
-            for chunk in stream:
-                
-                # Check if this chunk contains an interrupt
-                if isinstance(chunk, dict) and "__interrupt__" in chunk:
-                    found_interrupt = True
-                    interrupt_info = chunk["__interrupt__"][0]
-                    
-                    # Extract the interrupt value
-                    interrupt_value = interrupt_info.value if hasattr(interrupt_info, 'value') else interrupt_info
-                    
-                    # Extract the question and context
-                    question = "User input required"
-                    
-                    if isinstance(interrupt_value, dict):
-                        question = interrupt_value.get("question", question)
-                    
-                    # Format the response to indicate we need user input
-                    yield f" workflow_id: {workflow_id}\n\n{question}"
-                    break
-                
-                # Keep track of the final state
-                final_state = chunk
-        
-        # If we didn't find an interrupt, the workflow completed
+
+        for chunk in stream:
+            if isinstance(chunk, dict) and "__interrupt__" in chunk:
+                found_interrupt = True
+                interrupt_info = chunk["__interrupt__"][0]
+                interrupt_value = getattr(interrupt_info, "value", interrupt_info)
+
+                question = "User input required"
+                if isinstance(interrupt_value, dict):
+                    question = interrupt_value.get("question", question)
+
+                yield question
+                break
+
+            final_state = chunk
+
         if not found_interrupt:
-            result_message = "Awesomesocks, you're agent is completed!"
-            
-            if final_state and isinstance(final_state, dict):
-                if "message" in final_state:
-                    result_message = final_state["message"]
-                elif isinstance(final_state.get("write_code"), dict) and "message" in final_state["write_code"]:
-                    result_message = final_state["write_code"]["message"]
-            
-            # Clean up the stored workflow
-            if workflow_id in active_workflows:
-                del active_workflows[workflow_id]
-                
+            result_message = "✅ Awesomesocks, your agent is completed!"
+            if isinstance(final_state, dict) and "message" in final_state:
+                result_message = final_state["message"]
+
+            # ✅ Clean up
+            del global_state.workflows[global_state.workflow_id]
+            from shared import state as shared_state
+            shared_state.workflow_id = None
+
             yield result_message
-            
+
     except Exception as e:
-        yield f"Error in create_agent: {str(e)}\nTraceback: {traceback.format_exc()}"
+        yield f"❌ Error in workflow_create_agent: {str(e)}\nTraceback:\n{traceback.format_exc()}"
