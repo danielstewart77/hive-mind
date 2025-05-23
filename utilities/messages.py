@@ -69,3 +69,15 @@ def get_last_function_message(messages: list[dict[str, str]]) -> str:
             (m["content"] for m in reversed(messages) if m["role"] == "function"),
             ""
         )
+
+
+def mentions_tag(messages: list[dict[str, str]], tag: str, roles: list[str]) -> bool:
+    tag_lower = tag.lower()
+    return any(
+        tag_lower in m["content"].lower()
+        for m in reversed(messages)
+        if m["role"] in roles
+    )
+
+def mentions_editor(messages: list[dict[str, str]]) -> bool:
+    return mentions_tag(messages, "@editor", roles=["user", "function"])
