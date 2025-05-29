@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Edit File</title>
+</head>
+<body>
+    <h1>Editing: {{ file_name }}</h1>
+    <form id="saveForm">
+        <textarea id="code" style="width: 100%; height: 500px;">{{ file_content }}</textarea><br>
+        <button type="button" onclick="save()">Save</button>
+    </form>
+    <script>
+        async function save() {
+            const code = document.getElementById("code").value;
+            const response = await fetch("/save", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ code })
+            });
+            const result = await response.json();
+            alert(result.message || result.error);
+        }
+    </script>
+</body>
+</html>

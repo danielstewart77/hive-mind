@@ -43,7 +43,7 @@ def completions_structured(message: str, response_format: BaseModel, model: str 
     # return the content as the model type
     return content
 
-def completions_streaming(message: str, model: str = "gpt-4.1") -> Generator[str, None, None]:
+def completions_streaming(message: str, model: str = "gpt-4o") -> Generator[str, None, None]:
     """Call the OpenAI API for streaming output."""
     stream = client.chat.completions.create(
         model=model,

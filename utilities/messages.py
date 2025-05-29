@@ -70,7 +70,6 @@ def get_last_function_message(messages: list[dict[str, str]]) -> str:
             ""
         )
 
-
 def mentions_tag(messages: list[dict[str, str]], tag: str, roles: list[str]) -> bool:
     tag_lower = tag.lower()
     return any(

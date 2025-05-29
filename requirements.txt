@@ -2,7 +2,7 @@ openai
 flask
 python-dotenv
 requests
-agent_tooling==0.2.6
+agent_tooling
 setuptools
 bs4
 py2neo
@@ -13,5 +13,7 @@ langgraph
 langgraph-sdk
 pyfiglet
 graphviz
-gradio
+gradio[mcp]
 GitPython
+mcpo
+mcp[cli]
