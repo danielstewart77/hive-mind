@@ -5,6 +5,7 @@ from shared.state import editor_state
 import os
 import logging
 import uvicorn
+import json
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -16,7 +17,13 @@ templates = Jinja2Templates(directory="templates")
 
 @app.get("/edit", response_class=HTMLResponse)
 async def edit_page(request: Request):
-    file_path = editor_state.get("file_path")
+    try:
+        with open("/tmp/editor_state.json", "r") as f:
+            data = json.load(f)
+            file_path = data.get("file_path")
+    except FileNotFoundError:
+        return HTMLResponse("No file selected or file not found.", status_code=404)
+
     if not file_path or not os.path.exists(file_path):
         return HTMLResponse("No file selected or file not found.", status_code=404)
 
@@ -46,5 +53,5 @@ async def save_code(request: Request):
         return JSONResponse({"error": str(e)}, status_code=500)
     
 if __name__ == "__main__":
-    log.info("Starting FastAPI server on http://0.0.0.0:7779")
-    uvicorn.run("fastapi_server:app", host="0.0.0.0", port=7779, reload=True)
+    log.info("Starting FastAPI server on http://localhost:7779")
+    uvicorn.run("fastapi_server:app", host="localhost", port=7779, reload=True)
