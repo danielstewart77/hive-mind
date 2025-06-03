@@ -1,6 +1,7 @@
 import json
 from typing import Generator
 from agent_tooling import discover_tools, tool, get_agents, Agent
+from utilities.messages import get_last_user_message
 from utilities.openai_tools import completions_streaming, completions_structured
 from pydantic import BaseModel
 
@@ -44,20 +45,28 @@ def get_agents_with_descriptions(messages: list[dict[str, str]]) -> Generator[st
     # Retrieve the list of agents
     agent_info = [{"name": agent.name, "description": agent.description, "file_name": agent.file_name, "file_path": agent.file_path} for agent in agents]
 
-    # Stream the agent information
-    agent_descriptions = completions_streaming(
-        message=f'''
-        For each agent of the HIVE MIND, list all of the information:
-        1) agent's name, 
-        2) parameters, 
-        3) file name, 
-        4) file path, and 
-        5) give a brief description: {json.dumps(agent_info)}'''
-    )
+    if not messages:
+        yield json.dumps(agent_info, indent=2)
 
-    # stream the response
-    for chunk in agent_descriptions:
-        yield chunk
+    else:
+        message = get_last_user_message(messages)
+        if not message:
+            message = f'''
+            For each agent of the HIVE MIND, list all of the information:
+            1) agent's name, 
+            2) parameters, 
+            3) file name, 
+            4) file path, and 
+            5) give a brief description'''
+
+        #Stream the agent information
+        agent_descriptions = completions_streaming(
+            message=f'{message}: {json.dumps(agent_info)}'
+        )
+
+        # stream the response
+        for chunk in agent_descriptions:
+            yield chunk
 
 #@tool
 def get_agent_by_name(name: str, messages: list[dict[str, str]] = None) -> Agent:
