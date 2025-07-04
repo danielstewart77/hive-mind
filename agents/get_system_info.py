@@ -11,7 +11,7 @@ from utilities.openai_tools import completions_streaming
 from openai import OpenAI
 
 
-@tool(tags=["triage"])
+@tool(tags=["system"])
 def get_system_info(messages: list[dict[str, str]]) -> Generator[str, None, None]: 
     """
     Call this function if the user asks for system or server information, this function is called to gather and return the system's details.

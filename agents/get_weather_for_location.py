@@ -134,7 +134,7 @@ class WeatherAgent:
         else:
             return f"Weather for {self.location.title()} from {start_str} to {end_str}:\n" + "\n".join(days_weather)
 
-@tool(tags=["agent"])
+@tool(tags=["weather"])
 def get_weather_for_location(location: str = "missouri city, tx", time_span: str = "today", messages: Optional[List[Dict[str, str]]] = None) -> Generator[str, None, None]:
     """
     Retrieves weather information for a specified location and time span, streaming the response.

@@ -6,7 +6,7 @@ import keyword
 
 load_dotenv(dotenv_path='secrets.env')
 
-@tool
+@tool(tags=["news"])
 def add_article_to_neo4j_db(title: str, text: str, date: str):
     """
     Connects to a Neo4j database, creates an Article node with the 

@@ -9,7 +9,7 @@ from utilities.messages import get_last_user_message
 load_dotenv()
 client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 
-@tool(tags=["triage"])
+@tool(tags=["web"])
 def web_search(messages: list[dict[str, str]]) -> Generator[str, None, None]:
     """Use this agent to perform a web search and return the results. This is useful for finding information that is not in the knowledge base."""
     yield "Searchin' up the interwebs...\n\n\n"

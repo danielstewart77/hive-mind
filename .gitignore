@@ -68,7 +68,6 @@ cover/
 .python-version
 
 # VS Code
-.vscode/
 .history/
 
 # PyCharm

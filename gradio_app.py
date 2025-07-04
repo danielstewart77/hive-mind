@@ -1,21 +1,26 @@
 import os
 import gradio as gr
-from typing import Generator
-from agent_tooling import OpenAITooling, discover_tools, OllamaTooling
+from typing import Generator, List
+from agent_tooling import OpenAITooling, discover_tools, OllamaTooling, get_tags
+from pydantic import BaseModel
 global chat_history
 import shared.state as global_state
 from langgraph.types import Command
 from utilities.messages import get_last_function_message, get_last_user_message, mentions_editor
-from gradio.routes import mount_gradio_app
-import uvicorn
+from utilities.openai_tools import completions_structured
 
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
 
 # Initialize tooling
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 agent_tooling_openai = OpenAITooling(api_key=OPENAI_API_KEY, model="gpt-4o")
 ollama_tooling_client = OllamaTooling()
+
+class TriageSubject(BaseModel):
+    subject: str
+    class Config:
+        extra = "forbid"  
+
+
 
 discover_tools(['agents', 'workflows', 'utilities'])
 
@@ -63,26 +68,63 @@ def chat_interface(
 
     else:
         if model_source == "internal":
+            all_tags: List[str] = get_tags()
+            last_user_message = get_last_user_message(messages)
+
+            triage_subject = completions_structured(
+                message=f"""Which subject does the following request fall under: {last_user_message}
+                    --from the following tags: {', '.join(all_tags)}""",
+                response_format=TriageSubject
+            )
+
+            triage_subject = TriageSubject(**triage_subject.model_dump())
+
+
+            # add triage_subject.subject to list[str]
+            tag_list = []
+            tag_list.append(triage_subject.subject)
+
             response_stream = ollama_tooling_client.call_tools(
-            messages=messages,
-            model=internal_model,
-            tool_choice="auto",
-            tags=tags,
-            fallback_tool="web_search",
-        )
+                messages=messages,
+                model=internal_model,
+                tool_choice="auto",
+                tags=tag_list,
+                fallback_tool="web_search"
+            )
+
         else:
             if provider == "OpenAI":
+
+                all_tags: List[str] = get_tags()
+
+                last_user_message = get_last_user_message(messages)
+
+                triage_subject = completions_structured(
+                    message=f"""Which subject does the following request fall under: {last_user_message}
+                        --from the following tags: {', '.join(all_tags)}""",
+                    response_format=TriageSubject
+                )
+
+                triage_subject = TriageSubject(**triage_subject.model_dump())
+
+
+                # add triage_subject.subject to list[str]
+                tag_list = []
+                tag_list.append(triage_subject.subject)
+
+
                 response_stream = agent_tooling_openai.call_tools(
                     messages=messages,
                     model=openai_model,
                     tool_choice="auto",
-                    tags=tags,
+                    tags=tag_list,
                     fallback_tool="web_search",
                 )
             elif provider == "Anthropic":
                 raise Exception("Anthropic provider not implemented yet for tool calling.")
         
         full_response = ""
+        #response_stream = iter([])  # Ensure response_stream is always defined
         for partial in response_stream:
             full_response += str(partial)
             yield messages + [{"role": "assistant", "content": full_response.strip()}], "", gr.update(visible=False)

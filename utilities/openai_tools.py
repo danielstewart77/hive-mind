@@ -30,8 +30,15 @@ def completions_with_messages(messages: list[dict[str, str]], model: str = "gpt-
     content = completion.choices[0].message.content
     return content
 
-def completions_structured(message: str, response_format: BaseModel, model: str = "gpt-4.1") -> BaseModel:
-    """Call the OpenAI API and return the raw response."""
+from typing import Type
+from pydantic import BaseModel
+
+def completions_structured(
+    message: str,
+    response_format: type[BaseModel],  # Accepts any BaseModel subclass
+    model: str = "gpt-4.1"
+) -> BaseModel:
+    """Call the OpenAI API and return the parsed response as the given BaseModel subclass."""
     completion = client.beta.chat.completions.parse(
         model=model,
         messages=[
@@ -40,7 +47,8 @@ def completions_structured(message: str, response_format: BaseModel, model: str 
         response_format=response_format
     )
     content = completion.choices[0].message.parsed
-    # return the content as the model type
+    if content is None:
+        raise ValueError("OpenAI API did not return a valid parsed response.")
     return content
 
 def completions_streaming(message: str, model: str = "gpt-4o") -> Generator[str, None, None]:

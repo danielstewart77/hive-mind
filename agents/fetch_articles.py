@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 import os
 from neo4j import GraphDatabase
 
-@tool
+@tool(tags=["news"])
 def fetch_articles(criteria: str) -> str:
     """
     This function connects to a Neo4j database to retrieve articles based on specified

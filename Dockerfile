@@ -9,6 +9,9 @@ RUN apt update && apt install -y \
     python3 python3-pip python3-venv python3-dev gcc libpq-dev curl \
     && rm -rf /var/lib/apt/lists/*
 
+# Create global python alias
+RUN ln -s /usr/bin/python3 /usr/bin/python
+
 # Ensure Python is available
 RUN python3 --version
 

@@ -45,7 +45,7 @@ def find_critical_lines(lines: list[str]) -> list[str]:
     return critical_lines
 
 
-@tool(tags=["triage"])
+@tool(tags=["system"])
 def agent_logs(messages: list[dict[str, str]] = None, log_paths: list[str] = None) -> Generator[str, None, None]:
     """
     Call this function any time the user specifically mentions logs or log files.

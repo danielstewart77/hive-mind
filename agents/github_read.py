@@ -4,7 +4,7 @@ import requests
 from utilities.messages import get_last_user_message
 from utilities.openai_tools import completions_streaming
 
-@tool(tags=["triage"])
+@tool(tags=["code"])
 def github_read(repo: str, messages: list[dict[str, str]] = None) -> Generator[str, None, None]:
     """
     Call this tool any time the user mentions changes from a pull request in a GitHub repository.

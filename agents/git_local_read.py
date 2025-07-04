@@ -7,7 +7,7 @@ import git
 
 REPO_BASE_DIR = "/home/USER/Storage/Dev"
 
-@tool(tags=["triage"])
+@tool(tags=["code"])
 def git_local_read(repo_name: str, messages: list[dict[str, str]] = None, changes: List[str] = None) -> Generator[str, None, None]:
     """
     call this tool any time the user mentions wanting a commit message for changes in a local git repository.

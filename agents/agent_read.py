@@ -26,7 +26,7 @@ class AgentEncoder(json.JSONEncoder):
         return super().default(obj)
     
 
-@tool(tags=["agent", "editor"])
+@tool(tags=["agent"])
 def get_agents_with_descriptions(messages: list[dict[str, str]]) -> Generator[str, None, None]:
     """
     Describes to the user what the agents of the HIVE MIND can do. This function retrieves the list of agents and formats them into a readable string.

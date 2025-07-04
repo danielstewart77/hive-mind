@@ -1,13 +1,103 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Edit File</title>
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            font-family: Arial, sans-serif;
+            background: #f8f9fa;
+            color: #222;
+            height: 100%;
+        }
+        body {
+            display: flex;
+            flex-direction: column;
+            min-height: 100vh;
+            box-sizing: border-box;
+        }
+        h1 {
+            font-size: 1.2rem;
+            margin: 1rem 0 0.5rem 0;
+            text-align: center;
+            word-break: break-all;
+        }
+        form#saveForm {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            padding: 0.5rem;
+            box-sizing: border-box;
+            width: 100%;
+            max-width: 600px;
+            margin: 0 auto;
+            height: 100%;
+        }
+        .textarea-container {
+            flex: 1 1 auto;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+        }
+        textarea#code {
+            width: 100%;
+            flex: 1 1 auto;
+            min-height: 0;
+            resize: none;
+            font-size: 1rem;
+            padding: 0.75rem;
+            border: 1px solid #ccc;
+            border-radius: 8px;
+            margin-bottom: 1rem;
+            box-sizing: border-box;
+            background: #fff;
+        }
+        .button-container {
+            width: 100%;
+            display: flex;
+            flex-shrink: 0;
+        }
+        button[type="button"] {
+            width: 100%;
+            padding: 1rem;
+            font-size: 1.1rem;
+            background: #007bff;
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        button[type="button"]:active,
+        button[type="button"]:hover {
+            background: #0056b3;
+        }
+        @media (max-width: 600px) {
+            h1 {
+                font-size: 1rem;
+            }
+            textarea#code {
+                font-size: 0.95rem;
+            }
+            button[type="button"] {
+                font-size: 1rem;
+                padding: 0.85rem;
+            }
+        }
+    </style>
 </head>
 <body>
     <h1>Editing: {{ file_name }}</h1>
     <form id="saveForm">
-        <textarea id="code" style="width: 100%; height: 90%;">{{ file_content }}</textarea><br>
-        <button type="button" onclick="save()">Save</button>
+        <div class="textarea-container">
+            <textarea id="code">{{ file_content }}</textarea>
+        </div>
+        <div class="button-container">
+            <button type="button" onclick="save()">Save</button>
+        </div>
     </form>
     <script>
         async function save() {

@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse, JSONResponse
-from shared.state import editor_state
+from shared.state import get_editor_state
 import os
 import logging
 import uvicorn
@@ -40,6 +40,8 @@ async def edit_page(request: Request):
 async def save_code(request: Request):
     body = await request.json()
     code = body.get("code", "")
+
+    editor_state = get_editor_state()
     file_path = editor_state.get("file_path")
 
     if not file_path:
@@ -51,7 +53,10 @@ async def save_code(request: Request):
         return {"message": "Saved."}
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
     
 if __name__ == "__main__":
-    log.info("Starting FastAPI server on http://localhost:7779")
-    uvicorn.run("fastapi_server:app", host="localhost", port=7779, reload=True)
+    log.info("Starting FastAPI server on http://0.0.0.0:7779")
+    uvicorn.run("fastapi_server:app", host="0.0.0.0", port=7779, reload=True)
+
+
