@@ -1,26 +1,30 @@
 import os
 import gradio as gr
-from typing import Generator, List
+from typing import List
 from agent_tooling import OpenAITooling, discover_tools, OllamaTooling, get_tags
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 global chat_history
 import shared.state as global_state
 from langgraph.types import Command
 from utilities.messages import get_last_function_message, get_last_user_message, mentions_editor
 from utilities.openai_tools import completions_structured
+from utilities.ollama_tools import completions_structured as ollama_completions_structured
 
 
 # Initialize tooling
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 agent_tooling_openai = OpenAITooling(api_key=OPENAI_API_KEY, model="gpt-4o")
-ollama_tooling_client = OllamaTooling()
+ollama_tooling_client = OllamaTooling(model="granite3.3:8b")
 
 class TriageSubject(BaseModel):
-    subject: str
+    subject: list[str]
     class Config:
         extra = "forbid"  
 
-
+class RelevanceJudge(BaseModel):
+    relevance: bool = Field(..., description="Is this response relevant to the user's query?")
+    class Config:
+        extra = "forbid"
 
 discover_tools(['agents', 'workflows', 'utilities'])
 
@@ -35,12 +39,13 @@ def chat_interface(
     provider: str,
     openai_model: str,
     anthropic_model: str
-) -> Generator[tuple[list[dict], str, gr.HTML], None, None]:
+) -> tuple[list[dict], str, dict]:
     tags = [t.strip() for t in tags_csv.split(",") if t.strip()]
-    yield messages + [{"role": "assistant", "content": "Thinking..."}], "", gr.update(visible=False)
 
     user_msg = {"role": "user", "content": user_message}
     messages.append(user_msg)
+
+    full_response = ""
 
     if global_state.workflow_id and global_state.workflow_id in global_state.workflows:
         workflow = global_state.workflows[global_state.workflow_id]["workflow"]
@@ -53,7 +58,6 @@ def chat_interface(
             config={"configurable": {"thread_id": thread_id}}
         )
 
-        full_response = ""
         last_state = None
 
         for partial in response_stream:
@@ -64,33 +68,69 @@ def chat_interface(
             else:
                 full_response += str(partial)
 
-            yield messages + [{"role": "assistant", "content": full_response.strip()}], "", gr.update(visible=False)
-
     else:
+        response_stream = None
+        
         if model_source == "internal":
             all_tags: List[str] = get_tags()
             last_user_message = get_last_user_message(messages)
 
-            triage_subject = completions_structured(
-                message=f"""Which subject does the following request fall under: {last_user_message}
+            triage_subjects = completions_structured(
+                message=f"""List the most likely relevant subjects that this request falls under: {last_user_message}
                     --from the following tags: {', '.join(all_tags)}""",
                 response_format=TriageSubject
             )
 
-            triage_subject = TriageSubject(**triage_subject.model_dump())
-
+            triage_subjects = TriageSubject(**triage_subjects.model_dump())
 
             # add triage_subject.subject to list[str]
             tag_list = []
-            tag_list.append(triage_subject.subject)
+            tag_list.extend(triage_subjects.subject)
 
-            response_stream = ollama_tooling_client.call_tools(
-                messages=messages,
-                model=internal_model,
-                tool_choice="auto",
-                tags=tag_list,
-                fallback_tool="web_search"
-            )
+            # response_stream = ollama_tooling_client.call_tools(
+            #     messages=messages,
+            #     model=internal_model,
+            #     tool_choice="auto",
+            #     tags=tag_list,
+            #     fallback_tool="web_search"
+            # )
+
+            # just for fun let's call `call_tools` for each tag in tag_list
+            # then, lets ask the llm to answer based on total of all answers:
+            full_response = ""
+
+            for tag in tag_list:
+                responses = ollama_tooling_client.call_tools(
+                    messages=messages,
+                    model=internal_model,
+                    tool_choice="required",
+                    tags=[tag]
+                )
+                if isinstance(responses, list):
+                    # Find the last assistant or function message with content
+                    for message in reversed(responses):
+                        if message.get("role") in ["assistant", "function"] and message.get("content"):
+                            # check for relevance
+                            relevance_judge = ollama_completions_structured(
+                                message=f"""Does the following response address the user's query: {message.get("content", "")}""",
+                                response_format=RelevanceJudge,
+                                model="granite3.3:2b"
+                            )
+                            relevance_judge = RelevanceJudge(**relevance_judge.model_dump())
+                            if relevance_judge.relevance:
+                                full_response += " " + message.get("content", "")
+                            else:
+                                # remove message from responses
+                                responses.remove(message)
+                            break
+            
+
+            # next, let's do this again for each tag, but then ask the llm to
+            # look at each answer and determine if the answer is revelant. the
+            # answer will be added to the sum of answers only if deemed revelant.
+            # then, the revelant answers will be sent again to the llm for the
+            # final answer:
+            
 
         else:
             if provider == "OpenAI":
@@ -99,43 +139,45 @@ def chat_interface(
 
                 last_user_message = get_last_user_message(messages)
 
-                triage_subject = completions_structured(
+                triage_subjects = completions_structured(
                     message=f"""Which subject does the following request fall under: {last_user_message}
                         --from the following tags: {', '.join(all_tags)}""",
                     response_format=TriageSubject
                 )
 
-                triage_subject = TriageSubject(**triage_subject.model_dump())
-
+                triage_subjects = TriageSubject(**triage_subjects.model_dump())
 
                 # add triage_subject.subject to list[str]
                 tag_list = []
-                tag_list.append(triage_subject.subject)
-
+                tag_list.append(triage_subjects.subject)
 
                 response_stream = agent_tooling_openai.call_tools(
                     messages=messages,
                     model=openai_model,
-                    tool_choice="auto",
+                    tool_choice="required",
                     tags=tag_list,
                     fallback_tool="web_search",
                 )
             elif provider == "Anthropic":
                 raise Exception("Anthropic provider not implemented yet for tool calling.")
         
-        full_response = ""
-        #response_stream = iter([])  # Ensure response_stream is always defined
-        for partial in response_stream:
-            full_response += str(partial)
-            yield messages + [{"role": "assistant", "content": full_response.strip()}], "", gr.update(visible=False)
+            # Collect all response data (only from external, now) if not using workflow
+            if response_stream:
+                # response_stream should now be a list of messages from both OpenAI and Ollama tooling
+                if isinstance(response_stream, list):
+                    # Find the last assistant or function message with content
+                    for message in reversed(response_stream):
+                        if message.get("role") in ["assistant", "function"] and message.get("content"):
+                            full_response = message.get("content", "")
+                            break
 
     if full_response:
         messages.append({"role": "assistant", "content": full_response.strip()})
 
     if mentions_editor(messages):
-        yield messages, "", gr.update(value=get_last_function_message(messages).replace("@editor", "").strip(), visible=True)
+        return messages, "", gr.update(value=get_last_function_message(messages).replace("@editor", "").strip(), visible=True)
     else:
-        yield messages, "", gr.update(visible=False)
+        return messages, "", gr.update(visible=False)
 
 
 def toggle_sidebar(visible_state):
@@ -152,7 +194,7 @@ def clear_chat():
 def handle_model_source_selection(source):
     if source == "internal":
         return (
-            gr.update(choices=["granite3.3:2b", "qwen3:8b", "qwen3:14b", "llama3.2:3b"], value="granite3.3:2b", visible=True, interactive=True),
+            gr.update(choices=["granite3.3:8b", "qwen3:8b", "qwen3:14b", "llama3.2:3b"], value="granite3.3:8b", visible=True, interactive=True),
             gr.update(visible=False),
             gr.update(visible=False, interactive=False),
             gr.update(visible=False, interactive=False)
@@ -244,7 +286,7 @@ html, body, .gradio-container {
 
             # 2️⃣ Dropdown for internal models
             internal_models = gr.Dropdown(
-                choices=["granite3.3:2b", "qwen3:8b", "qwen3:14b", "llama3.2:3b"],
+                choices=["granite3.3:8b", "qwen3:8b", "qwen3:14b", "llama3.2:3b"],
                 label="models",
                 visible=True,
                 interactive=True
@@ -316,4 +358,4 @@ html, body, .gradio-container {
     toggle_btn.click(fn=toggle_sidebar, inputs=[sidebar_visible], outputs=[sidebar, sidebar_visible])
 
 if __name__ == "__main__":
-    demo.queue().launch(server_name="0.0.0.0", server_port=7977)
+    demo.launch(server_name="0.0.0.0", server_port=7977)

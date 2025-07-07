@@ -18,3 +18,4 @@ GitPython
 mcpo
 mcp[cli]
 uvicorn
+ollama
