@@ -5,8 +5,7 @@ import os
 
 @tool(tags=["money"])
 def get_crypto_price(crypto_name):
-    """Use this agent to get the current price of a cryptocurrency. Yields streaming output."""
-    yield f"CoinGecko 🦎: Looking up the price for {crypto_name}...\n"
+    """Use this agent to get the current price of a cryptocurrency."""
     url = 'https://api.coingecko.com/api/v3/simple/price'
     params = {
         'ids': crypto_name.lower(),
@@ -21,11 +20,11 @@ def get_crypto_price(crypto_name):
         data = response.json()
         if crypto_name.lower() in data:
             price = data[crypto_name.lower()]['usd']
-            yield f'CoinGecko 🦎: The price of {crypto_name.capitalize()} in USD is ${price}'
+            return f'CoinGecko 🦎: The price of {crypto_name.capitalize()} in USD is ${price}'
         else:
-            yield f'CoinGecko 🦎: Sorry, I could not find the price for {crypto_name}.'
+            return f'CoinGecko 🦎: Sorry, I could not find the price for {crypto_name}.'
     else:
-        yield 'CoinGecko 🦎: Failed to retrieve data from the API.'
+        return 'CoinGecko 🦎: Failed to retrieve data from the API.'
 
 
 

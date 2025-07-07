@@ -2,8 +2,7 @@ from typing import Optional, List, Dict, Generator
 from agent_tooling import tool
 import requests
 from datetime import datetime, timedelta
-from utilities.openai_tools import completions_streaming
-
+from utilities.openai_tools import completions
 class WeatherAgent:
     def __init__(self, location: str = "missouri city, tx", time_span: str = "today"):
         self.location = location
@@ -135,26 +134,29 @@ class WeatherAgent:
             return f"Weather for {self.location.title()} from {start_str} to {end_str}:\n" + "\n".join(days_weather)
 
 @tool(tags=["weather"])
-def get_weather_for_location(location: str = "missouri city, tx", time_span: str = "today", messages: Optional[List[Dict[str, str]]] = None) -> Generator[str, None, None]:
+def get_weather_for_location(location: Optional[str] = None, time_span: str = "today", messages: Optional[List[Dict[str, str]]] = None) -> str:
     """
     Retrieves weather information for a specified location and time span, streaming the response.
 
     Parameters:
-    - location (str): The place to get weather for, e.g., "missouri city, tx".
+    - location (str): The place to get weather for, e.g., "missouri city, tx". If None, defaults to "missouri city, tx".
     - time_span (str): The period to get weather for, default is "today". Options include "today", "tonight", "this week", and "this weekend".
     - messages (list): Optional parameter for message context, not used in the current implementation.
 
     Yields:
     - str: Chunks of a nicely formatted weather report.
     """
+    # Handle None or null location by using default
+    if location is None:
+        location = "missouri city, tx"
+    
     # Validate and convert arguments if necessary
-
     if not isinstance(location, str):
         try:
             location = str(location)
         except Exception:
-            yield "Invalid location parameter provided."
-            return
+            location = "missouri city, tx"  # Fallback to default
+            
 
     if not isinstance(time_span, str):
         try:
@@ -173,10 +175,7 @@ def get_weather_for_location(location: str = "missouri city, tx", time_span: str
 
     # Compose a message for LLM to format nicely
     message_to_format = f"Provide a friendly weather report for the following data:\n{result}"
-    stream = completions_streaming(message=message_to_format)
-
-    for chunk in stream:
-        yield chunk
+    return completions(message=message_to_format)
 
 # Example usage as generator:
 # for chunk in get_weather_for_location("new york, ny", "this weekend"):

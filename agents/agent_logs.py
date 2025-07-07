@@ -1,7 +1,7 @@
 import os
 import re
 import json
-from typing import Generator
+from typing import Optional
 from agent_tooling import tool
 from utilities.openai_tools import completions_streaming
 
@@ -46,7 +46,7 @@ def find_critical_lines(lines: list[str]) -> list[str]:
 
 
 @tool(tags=["system"])
-def agent_logs(messages: list[dict[str, str]] = None, log_paths: list[str] = None) -> Generator[str, None, None]:
+def agent_logs(messages: Optional[list[dict[str, str]]] = None, log_paths: Optional[list[str]] = None) -> str:
     """
     Call this function any time the user specifically mentions logs or log files.
     """
@@ -100,11 +100,13 @@ def agent_logs(messages: list[dict[str, str]] = None, log_paths: list[str] = Non
             f.write(f"{logfile}|{pos}\n")
 
     if not all_critical:
-        # Yield a message if no critical logs were found
+        # Return a message if no critical logs were found
         message = "No critical action items detected in the monitored logs."
-        for chunk in completions_streaming(message=message):
-            yield chunk
-        return
+        stream = completions_streaming(message=message)
+        full_response = ""
+        for chunk in stream:
+            full_response += chunk
+        return full_response
 
     # Compose a report
     report_lines = ["Critical action items detected:"]
@@ -115,6 +117,9 @@ def agent_logs(messages: list[dict[str, str]] = None, log_paths: list[str] = Non
 
     report_str = "\n".join(report_lines)
 
-    # Format and stream the report
-    for chunk in completions_streaming(message=f"Format this message nicely for the user:\n{report_str}"):
-        yield chunk
+    # Format and return the report
+    stream = completions_streaming(message=f"Format this message nicely for the user:\n{report_str}")
+    full_response = ""
+    for chunk in stream:
+        full_response += chunk
+    return full_response

@@ -5,14 +5,14 @@ from dotenv import load_dotenv
 import psutil
 import platform
 import socket
-from typing import Any, Dict, Generator
+from typing import Any, Dict
 from utilities.messages import get_last_user_message
 from utilities.openai_tools import completions_streaming
 from openai import OpenAI
 
 
 @tool(tags=["system"])
-def get_system_info(messages: list[dict[str, str]]) -> Generator[str, None, None]: 
+def get_system_info(messages: list[dict[str, str]]) -> str: 
     """
     Call this function if the user asks for system or server information, this function is called to gather and return the system's details.
     It collects CPU usage, memory usage, disk utilization, OS name, platform details, CPU architecture, 
@@ -56,15 +56,10 @@ def get_system_info(messages: list[dict[str, str]]) -> Generator[str, None, None
 
     message = get_last_user_message(messages)
 
-    stream = client.responses.create(
-        model="gpt-4.1",
-        input=f"{message}: {json.dumps(system_info)}",
-        stream=True
+    response = client.chat.completions.create(
+        model="gpt-4",
+        messages=[{"role": "user", "content": f"{message}: {json.dumps(system_info)}"}],
+        stream=False
     )
 
-    for event in stream:
-        # Check if the event has a 'delta' attribute
-        if hasattr(event, 'delta'):
-            delta = getattr(event, 'delta', '')
-            if delta:
-                yield delta
+    return response.choices[0].message.content or "No response generated"
