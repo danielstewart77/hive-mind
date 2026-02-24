@@ -1,30 +1,30 @@
-# mcp_server.py
-import os
+"""
+Hive Mind MCP Server.
+
+Exposes all @tool() decorated functions from agents/ as MCP resources.
+Claude Code SDK connects to this server via stdio to access external integrations.
+"""
 
 import logging
+
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger(__name__)
 
 from agent_tooling import discover_tools, get_tool_function, get_tool_schemas
-discover_tools(['agents', 'workflows', 'utilities'])
 from mcp.server.fastmcp import FastMCP
 
-# Initialize FastMCP
-mcp = FastMCP("agent-tool-server")
+# Discover tools from agents/ only (workflows/utilities removed)
+discover_tools(["agents"])
 
-# Register all tools with FastMCP
+mcp = FastMCP("hive-mind-tools")
+
 for schema in get_tool_schemas():
-    name = schema['name']
+    name = schema["name"]
     func = get_tool_function(name)
     if func:
-        log.info(f"[MCP REGISTER] {name}")
+        log.info(f"[MCP] {name}")
         mcp.tool()(func)
 
-# Run the server
 if __name__ == "__main__":
-    if os.environ.get("RUN_DIRECT") == "1":
-        log.info("Starting MCP server on 0.0.0.0:7777")
-        mcp.run()
-    else:
-        log.info("Starting MCP server in stdio mode (used by mcpo)")
-        mcp.run()  # uses stdin/stdout for mcpo
+    log.info("Starting MCP server (stdio mode)")
+    mcp.run()

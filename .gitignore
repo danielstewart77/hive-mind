@@ -122,6 +122,20 @@ ENV/
 env.bak/
 venv.bak/
 
+# Session database
+sessions.db
+data/
+
+# Project config (user-specific or contains sensitive IDs)
+config.yaml
+.mcp.json
+.mcp.container.json
+
+# Local tool state
+.claude/
+.obsidian/
+.log_agent_positions
+
 # Editor backups
 *~
 *.swp

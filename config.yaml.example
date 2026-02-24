@@ -1,0 +1,43 @@
+# Hive Mind Configuration
+# Copy to config.yaml and fill in real values.
+# Non-secret settings only - secrets stay in .env
+
+# Gateway server
+server_port: 8420
+idle_timeout_minutes: 30
+max_sessions: 10
+default_model: sonnet
+
+# Autopilot guard rails
+autopilot_guards:
+  max_budget_usd: 5.00
+  max_turns_without_input: 50
+  max_minutes_without_input: 30
+
+# Providers — env overrides applied per-subprocess, not globally
+providers:
+  anthropic: {}
+  ollama:
+    env:
+      ANTHROPIC_AUTH_TOKEN: "ollama"
+      ANTHROPIC_API_KEY: ""
+      ANTHROPIC_BASE_URL: "http://your-ollama-host:11434"
+    api_base: "http://your-ollama-host:11434"
+
+# Static model -> provider mappings (Ollama models auto-discovered)
+models:
+  sonnet: anthropic
+  opus: anthropic
+  haiku: anthropic
+
+# Ports
+mcp_port: 7777
+
+# Discord bot — user/channel allowlists (IDs from Discord Developer Portal)
+discord_allowed_users:
+  - 000000000000000000
+discord_allowed_channels: []  # Empty = all channels + DMs
+
+# Telegram bot — user allowlists (get your ID from @userinfobot)
+telegram_allowed_users:
+  - 0000000000

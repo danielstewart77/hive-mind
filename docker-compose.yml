@@ -1,69 +1,82 @@
 services:
-  open-webui:
-    container_name: open-webui
-    image: ghcr.io/open-webui/open-webui:cuda
+  server:
+    build: .
+    container_name: hive-mind-server
+    working_dir: /usr/src/app
+    volumes:
+      - .:/usr/src/app
+      - ~/.claude:/home/hivemind/.claude
+      - sessions-db:/usr/src/app/data
+    environment:
+      - SESSIONS_DB_PATH=/usr/src/app/data/sessions.db
     restart: unless-stopped
-    ports:
-      - "8080:8080"
-    runtime: nvidia
+    networks:
+      - hivemind
+    # Gateway server — other services connect to this
+    command: ["/opt/venv/bin/python3", "server.py"]
+
+  discord-bot:
+    build: .
+    container_name: hive-mind-discord
+    working_dir: /usr/src/app
+    volumes:
+      - .:/usr/src/app
+      - ~/.claude:/home/hivemind/.claude
+    env_file:
+      - .env
+    restart: unless-stopped
+    depends_on:
+      - server
+    networks:
+      - hivemind
+    environment:
+      - HIVE_MIND_SERVER_URL=http://server:8420
+    command: ["/opt/venv/bin/python3", "discord_bot.py"]
+
+  voice-server:
+    build: .
+    container_name: hive-mind-voice
+    working_dir: /usr/src/app
+    volumes:
+      - .:/usr/src/app
+    restart: unless-stopped
+    networks:
+      - hivemind
+    environment:
+      - WHISPER_MODEL=medium
+      - KOKORO_VOICE=af_heart
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              count: all
+              count: 1
               capabilities: [gpu]
+    command: ["/opt/venv/bin/python3", "voice_server.py"]
+
+  telegram-bot:
+    build: .
+    container_name: hive-mind-telegram
+    working_dir: /usr/src/app
     volumes:
-      - /home/USER/Storage/Dev/OpenWebUIData/:/app/backend/data
-    networks:
-      - agent_swarm
+      - .:/usr/src/app
+      - ~/.claude:/home/hivemind/.claude
     env_file:
-      - /home/USER/Storage/Dev/OpenWebUIData/secrets.env 
-
-  # gradio_server:
-  #   build: .
-  #   container_name: gradio_server
-  #   working_dir: /usr/src/app
-  #   command: ./venv/bin/python gradio_app.py
-  #   ports:
-  #     - "7977:7977"
-  #   volumes:
-  #     - /home/USER/Storage/Dev/hive_mind:/usr/src/app/hive_mind
-  #   env_file:
-  #     - .env
-  #   networks:
-  #     - agent_swarm
-  #   restart: unless-stopped
-
-  # fastapi_server:
-  #   build: .
-  #   container_name: fastapi_server
-  #   working_dir: /usr/src/app
-  #   command: ./venv/bin/uvicorn fastapi_server:app --host 0.0.0.0 --port 7779 --reload
-  #   ports:
-  #     - "7779:7779"
-  #   volumes:
-  #     - /home/USER/Storage/Dev/hive_mind:/usr/src/app/hive_mind
-  #   env_file:
-  #     - .env
-  #   networks:
-  #     - agent_swarm
-  #   restart: unless-stopped
-
-  # mcp_server:
-  #   build: .
-  #   container_name: mcp_server
-  #   working_dir: /usr/src/app
-  #   command: ./venv/bin/mcpo --port 7777 -- ./venv/bin/python mcp_server.py
-  #   ports:
-  #     - "7777:7777"
-  #   volumes:
-  #     - /home/USER/Storage/Dev/hive_mind:/usr/src/app/hive_mind
-  #   env_file:
-  #     - .env
-  #   networks:
-  #     - agent_swarm
-  #   restart: unless-stopped
+      - .env
+    restart: unless-stopped
+    depends_on:
+      - server
+      - voice-server
+    networks:
+      - hivemind
+    environment:
+      - HIVE_MIND_SERVER_URL=http://server:8420
+      - VOICE_SERVER_URL=http://voice-server:8422
+    command: ["/opt/venv/bin/python3", "telegram_bot.py"]
 
 networks:
-  agent_swarm:
+  hivemind:
+    driver: bridge
+
+volumes:
+  sessions-db:

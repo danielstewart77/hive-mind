@@ -1,53 +1,55 @@
-from agent_tooling import tool
-from dotenv import load_dotenv
+import json
 import os
+from agent_tooling import tool
 from neo4j import GraphDatabase
+
+try:
+    import keyring
+except ImportError:
+    keyring = None
+
+_SERVICE_NAME = "hive-mind"
+
+
+def _get_credential(key: str) -> str | None:
+    """Get a credential from keyring, falling back to environment."""
+    if keyring:
+        val = keyring.get_password(_SERVICE_NAME, key)
+        if val:
+            return val
+    return os.getenv(key)
+
 
 @tool(tags=["news"])
 def fetch_articles(criteria: str) -> str:
+    """Retrieve articles from Neo4j database matching the given criteria.
+
+    Args:
+        criteria: The criteria value to match against Article nodes.
+
+    Returns:
+        JSON string with list of articles (title + content) or error message.
     """
-    This function connects to a Neo4j database to retrieve articles based on specified
-    criteria. It uses environment variables to securely store database credentials.
-    The function formats the retrieved articles for easy reading and returns
-    a success message if the operation completes successfully.
-    """
-    # Load environment variables
-    load_dotenv(dotenv_path='secrets.env')
-    NEO4J_URI = os.getenv('NEO4J_URI')
-    USERNAME = os.getenv('USERNAME')
-    PASSWORD = os.getenv('PASSWORD')
+    uri = _get_credential("NEO4J_URI")
+    username = _get_credential("NEO4J_USERNAME") or os.getenv("USERNAME")
+    password = _get_credential("NEO4J_PASSWORD") or os.getenv("PASSWORD")
 
-    # Verify and convert criteria to a usable format (string in this case)
-    if not isinstance(criteria, str):
-        raise ValueError("Criteria should be a string.")
+    if not uri:
+        return json.dumps({"error": "NEO4J_URI not configured in environment."})
 
-    # Initialize the Neo4j driver
-    driver = GraphDatabase.driver(NEO4J_URI, auth=(USERNAME, PASSWORD))
-
+    driver = GraphDatabase.driver(uri, auth=(username, password))
     try:
         with driver.session() as session:
-            # Define a Cypher query to retrieve articles based on criteria
-            query = """
-            MATCH (a:Article)
-            WHERE a.criteria = $criteria
-            RETURN a.title, a.content
-            """
-
-            # Execute the query
-            result = session.run(query, criteria=criteria)
-
-            # Format the articles for easy reading
-            articles = []
-            for record in result:
-                articles.append(f"Title: {record['a.title']}, Content: {record['a.content']}")
-
-            # Print or log formatted articles (for illustrative purposes)
-            for article in articles:
-                print(article)
-
+            result = session.run(
+                "MATCH (a:Article) WHERE a.criteria = $criteria RETURN a.title, a.content",
+                criteria=criteria,
+            )
+            articles = [
+                {"title": record["a.title"], "content": record["a.content"]}
+                for record in result
+            ]
+        return json.dumps({"articles": articles, "count": len(articles)})
     except Exception as e:
-        return f"An error occurred: {str(e)}"
+        return json.dumps({"error": str(e)})
     finally:
         driver.close()
-
-    return "Articles retrieved and formatted successfully."
