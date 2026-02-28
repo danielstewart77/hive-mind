@@ -7,14 +7,13 @@ All Claude Code interaction flows through the gateway — no SDK dependency.
 """
 
 import asyncio
-import glob
 import io
 import json
 import logging
 import os
 import re
 import sys
-from datetime import datetime
+import time
 
 import aiohttp
 from telegram import Update
@@ -27,6 +26,7 @@ from telegram.ext import (
 )
 
 from config import config
+from gateway_client import GatewayClient, get_lock, get_skills, time_ago
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,49 +41,24 @@ TELEGRAM_MSG_LIMIT = 4096
 SERVER_URL = os.environ.get("HIVE_MIND_SERVER_URL", f"http://localhost:{config.server_port}")
 VOICE_SERVER_URL = os.environ.get("VOICE_SERVER_URL", "http://localhost:8422")
 
-# Global HTTP session (created at startup)
+# Surface-specific system prompt appended when spawning Telegram sessions.
+# Telegram renders plain text only; voice output is spoken aloud.
+# Instruct Claude to respond conversationally — no code blocks, no markdown,
+# no technical formatting. Describe code concepts in plain English instead.
+TELEGRAM_SURFACE_PROMPT = (
+    "You are responding via Telegram. Your responses will be spoken aloud as voice or read as plain text. "
+    "CRITICAL: Do not use any special characters for formatting. No asterisks, no pound signs, no backticks, "
+    "no hyphens as bullet points, no underscores for emphasis, no angle brackets, no pipes. "
+    "Do not write code of any kind — no code blocks, no inline code, no command snippets. "
+    "Do not use numbered or bulleted lists. "
+    "Write in plain flowing sentences, like natural speech. "
+    "If asked about code or technical topics, describe what it does in plain English "
+    "the way you would explain it to someone out loud — no syntax, no examples, just the concept."
+)
+
+# Global HTTP session and gateway client (created at startup)
 http: aiohttp.ClientSession | None = None
-
-# Per-chat processing locks
-_locks: dict[int, asyncio.Lock] = {}
-
-# ---------------------------------------------------------------------------
-# Skills helpers
-# ---------------------------------------------------------------------------
-_SKILLS_DIR = os.path.expanduser("~/.claude/skills")
-
-
-def _get_skills() -> list[dict]:
-    """Read all user-invocable skills from SKILL.md files."""
-    skills = []
-    for path in sorted(glob.glob(os.path.join(_SKILLS_DIR, "*/SKILL.md"))):
-        try:
-            with open(path) as f:
-                content = f.read()
-            m = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
-            if not m:
-                continue
-            fm: dict[str, str] = {}
-            for line in m.group(1).split("\n"):
-                if ":" in line:
-                    k, _, v = line.partition(":")
-                    fm[k.strip()] = v.strip().strip('"').strip("'")
-            invocable = fm.get("user-invocable", fm.get("user_invocable", "")).lower()
-            if invocable == "true" and (name := fm.get("name", "")):
-                skills.append({
-                    "name": name,
-                    "description": fm.get("description", "")[:100],
-                    "argument_hint": fm.get("argument-hint", ""),
-                })
-        except Exception:
-            pass
-    return skills
-
-
-def _get_lock(chat_id: int) -> asyncio.Lock:
-    if chat_id not in _locks:
-        _locks[chat_id] = asyncio.Lock()
-    return _locks[chat_id]
+gateway: GatewayClient | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -92,74 +67,6 @@ def _get_lock(chat_id: int) -> asyncio.Lock:
 def _is_allowed_user(user_id: int) -> bool:
     """Fail-closed: empty allowlist = no access."""
     return user_id in config.telegram_allowed_users
-
-
-# ---------------------------------------------------------------------------
-# Gateway client helpers
-# ---------------------------------------------------------------------------
-async def _ensure_session(user_id: int, chat_id: int) -> str:
-    """Get active session for this chat, or create one."""
-    async with http.get(
-        f"{SERVER_URL}/sessions",
-        params={"client_type": "telegram", "client_ref": str(chat_id)},
-    ) as resp:
-        data = await resp.json()
-        for s in data:
-            if s.get("is_active"):
-                return s["id"]
-
-    async with http.post(
-        f"{SERVER_URL}/sessions",
-        json={
-            "owner_type": "telegram",
-            "owner_ref": str(user_id),
-            "client_ref": str(chat_id),
-        },
-    ) as resp:
-        return (await resp.json())["id"]
-
-
-async def _query(prompt: str, user_id: int, chat_id: int) -> str:
-    """Send message to gateway, stream SSE response, return text."""
-    session_id = await _ensure_session(user_id, chat_id)
-    result_text = ""
-    assistant_texts: list[str] = []
-
-    async with http.post(
-        f"{SERVER_URL}/sessions/{session_id}/message",
-        json={"content": prompt},
-    ) as resp:
-        async for line in resp.content:
-            line = line.decode().strip()
-            if not line or not line.startswith("data: "):
-                continue
-            try:
-                event = json.loads(line.removeprefix("data: "))
-            except json.JSONDecodeError:
-                continue
-            etype = event.get("type")
-            if etype == "assistant":
-                for block in event.get("message", {}).get("content", []):
-                    if block.get("type") == "text":
-                        assistant_texts.append(block["text"])
-            elif etype == "result":
-                result_text = event.get("result", "")
-
-    return "\n\n".join(assistant_texts) or result_text or "(No response)"
-
-
-async def _server_command(cmd: str, user_id: int, chat_id: int) -> dict:
-    """Send a server command and return the JSON response."""
-    async with http.post(
-        f"{SERVER_URL}/command",
-        json={
-            "content": cmd,
-            "owner_type": "telegram",
-            "owner_ref": str(user_id),
-            "client_ref": str(chat_id),
-        },
-    ) as resp:
-        return await resp.json()
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +91,29 @@ async def _tts(text: str) -> bytes:
 
 
 # ---------------------------------------------------------------------------
+# Markdown stripping (Telegram renders plain text only)
+# ---------------------------------------------------------------------------
+def _strip_markdown(text: str) -> str:
+    """Remove markdown syntax, leaving plain readable text."""
+    # Fenced code blocks — preserve content, drop fences
+    text = re.sub(r"```[^\n]*\n(.*?)```", r"\1", text, flags=re.DOTALL)
+    # Inline code
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    # Headers
+    text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+    # Bold / italic (*** ** * ___ __ _)
+    text = re.sub(r"\*{1,3}([^*\n]+)\*{1,3}", r"\1", text)
+    text = re.sub(r"_{1,3}([^_\n]+)_{1,3}", r"\1", text)
+    # Links: [label](url) → label
+    text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
+    # Horizontal rules
+    text = re.sub(r"^[-*_]{3,}\s*$", "", text, flags=re.MULTILINE)
+    # Table separator rows (---|---|---)
+    text = re.sub(r"^\|?[\s\-:|]+\|[\s\-:|]*\|?\s*$", "", text, flags=re.MULTILINE)
+    return text.strip()
+
+
+# ---------------------------------------------------------------------------
 # Message chunking (Telegram's 4096-char limit)
 # ---------------------------------------------------------------------------
 def _chunk_message(text: str) -> list[str]:
@@ -198,19 +128,48 @@ def _chunk_message(text: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Streaming helper
+# ---------------------------------------------------------------------------
+async def _stream_to_message(
+    sent,
+    user_id: int,
+    chat_id: int,
+    prompt: str,
+    edit_interval: float = 2.0,
+) -> list[str]:
+    """Stream a gateway response, progressively editing sent as chunks arrive.
+
+    Returns the final list of message chunks (after markdown stripping).
+    Telegram-specific: strips markdown before each edit and final send.
+    """
+    accumulated = ""
+    last_edit = 0.0
+
+    async for text_chunk in gateway.query_stream(user_id, chat_id, prompt):
+        accumulated += ("\n\n" if accumulated else "") + text_chunk
+        now = time.monotonic()
+        if now - last_edit >= edit_interval:
+            preview = _chunk_message(_strip_markdown(accumulated))[0]
+            try:
+                await sent.edit_text(preview)
+            except Exception:
+                pass  # MessageNotModified or rate limit — skip this update
+            last_edit = now
+
+    if not accumulated:
+        accumulated = "(No response)"
+
+    final_chunks = _chunk_message(_strip_markdown(accumulated))
+    try:
+        await sent.edit_text(final_chunks[0])
+    except Exception:
+        pass
+    return final_chunks
+
+
+# ---------------------------------------------------------------------------
 # Server command formatters
 # ---------------------------------------------------------------------------
-def _time_ago(ts: float) -> str:
-    delta = datetime.now().timestamp() - ts
-    if delta < 60:
-        return "just now"
-    if delta < 3600:
-        return f"{int(delta / 60)} min ago"
-    if delta < 86400:
-        return f"{int(delta / 3600)}h ago"
-    return f"{int(delta / 86400)}d ago"
-
-
 def _format_sessions(sessions: list[dict]) -> str:
     if not sessions:
         return "No sessions found."
@@ -223,7 +182,7 @@ def _format_sessions(sessions: list[dict]) -> str:
         short_id = s["id"][:8]
         summary = s.get("summary", "Untitled")
         last = s.get("last_active", 0)
-        ago = _time_ago(last) if last else "?"
+        ago = time_ago(last) if last else "?"
         lines.append(
             f"{i}. {status_icon}{autopilot} {short_id} \u2014 \"{summary}\" [{s.get('model', '?')}] ({ago})"
         )
@@ -248,7 +207,7 @@ SERVER_COMMANDS = {"/clear", "/model", "/autopilot", "/kill", "/status", "/sessi
 async def _handle_server_command(content: str, user_id: int, chat_id: int) -> str:
     parts = content.split()
     cmd = parts[0]
-    result = await _server_command(content, user_id, chat_id)
+    result = await gateway.server_command(user_id, chat_id, content)
 
     if "error" in result:
         return f"Error: {result['error']}"
@@ -368,7 +327,7 @@ async def cmd_kill(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_skills(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _auth_check(update):
         return
-    skills = _get_skills()
+    skills = get_skills()
     if not skills:
         await update.message.reply_text("No skills found.")
         return
@@ -390,13 +349,12 @@ async def cmd_skill(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prompt = f"/{name} {args}" if args else f"/{name}"
 
     chat_id = update.effective_chat.id
-    lock = _get_lock(chat_id)
+    lock = get_lock(chat_id)
     async with lock:
-        response = await _query(prompt, update.effective_user.id, chat_id)
-        chunks = _chunk_message(response)
-        await update.message.reply_text(chunks[0])
-        for chunk in chunks[1:]:
-            await update.effective_chat.send_message(chunk)
+        sent = await update.message.reply_text("\u2026")
+        final_chunks = await _stream_to_message(sent, update.effective_user.id, chat_id, prompt)
+        for extra in final_chunks[1:]:
+            await update.effective_chat.send_message(extra)
 
 
 # ---------------------------------------------------------------------------
@@ -420,7 +378,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     chat_id = update.effective_chat.id
-    lock = _get_lock(chat_id)
+    lock = get_lock(chat_id)
 
     if lock.locked():
         await update.message.reply_text("Still processing your previous message, please wait.")
@@ -428,14 +386,64 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     async with lock:
         try:
-            response = await _query(content, update.effective_user.id, chat_id)
-            chunks = _chunk_message(response)
-            await update.message.reply_text(chunks[0])
-            for chunk in chunks[1:]:
-                await update.effective_chat.send_message(chunk)
+            sent = await update.message.reply_text("\u2026")
+            final_chunks = await _stream_to_message(sent, update.effective_user.id, chat_id, content)
+            for extra in final_chunks[1:]:
+                await update.effective_chat.send_message(extra)
         except Exception:
             log.exception("Error processing message in chat %s", chat_id)
             await update.message.reply_text("Something went wrong. Try again or use /clear.")
+
+
+# ---------------------------------------------------------------------------
+# Voice message handler
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# HITL approve/deny handlers
+# ---------------------------------------------------------------------------
+async def cmd_hitl_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed_user(update.effective_user.id):
+        return
+    await _handle_hitl_response(update, approved=True)
+
+
+async def cmd_hitl_deny(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed_user(update.effective_user.id):
+        return
+    await _handle_hitl_response(update, approved=False)
+
+
+async def _handle_hitl_response(update: Update, approved: bool):
+    """Extract token from /approve_<token> or /deny_<token> and POST to gateway."""
+    text = (update.message.text or "").strip()
+    # Extract token: everything after /approve_ or /deny_
+    parts = text.split("_", 1)
+    if len(parts) < 2 or not parts[1]:
+        await update.message.reply_text("Invalid approval token.")
+        return
+
+    token = parts[1]
+    hitl_secret = config.hitl_internal_token
+
+    if not hitl_secret:
+        await update.message.reply_text("HITL not configured on server.")
+        return
+
+    try:
+        async with http.post(
+            f"{SERVER_URL}/hitl/respond",
+            json={"token": token, "approved": approved},
+            headers={"X-HITL-Internal": hitl_secret},
+        ) as resp:
+            data = await resp.json()
+            if resp.status == 200:
+                verdict = "Approved" if approved else "Denied"
+                await update.message.reply_text(f"{verdict}.")
+            else:
+                await update.message.reply_text(f"Failed: {data.get('error', 'unknown error')}")
+    except Exception:
+        log.exception("HITL respond failed")
+        await update.message.reply_text("Failed to send response to server.")
 
 
 # ---------------------------------------------------------------------------
@@ -446,7 +454,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     chat_id = update.effective_chat.id
-    lock = _get_lock(chat_id)
+    lock = get_lock(chat_id)
 
     if lock.locked():
         await update.message.reply_text("Still processing your previous message, please wait.")
@@ -459,24 +467,43 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ogg_bytes = bytes(await voice_file.download_as_bytearray())
 
             # STT via voice-server
-            text = await _stt(ogg_bytes)
-            log.info("STT: %r", text[:80])
+            try:
+                text = await _stt(ogg_bytes)
+            except Exception as e:
+                log.exception("STT failed in chat %s", chat_id)
+                await update.message.reply_text("Couldn't transcribe your audio.")
+                return
 
+            log.info("STT: %r", text[:80])
             if not text.strip():
                 await update.message.reply_text("Couldn't transcribe audio.")
                 return
 
-            # Query gateway
-            response = await _query(text, update.effective_user.id, chat_id)
+            # Query gateway (full response needed for TTS — no streaming display here)
+            try:
+                response = _strip_markdown(await gateway.query(update.effective_user.id, chat_id, text))
+            except Exception as e:
+                log.exception("Gateway query failed in chat %s", chat_id)
+                await update.message.reply_text("Something went wrong getting a response.")
+                return
 
             # TTS via voice-server
-            ogg_response = await _tts(response)
+            try:
+                ogg_response = await _tts(response)
+            except Exception as e:
+                log.exception("TTS failed in chat %s", chat_id)
+                await update.message.reply_text("Got a response but couldn't synthesize audio.")
+                return
 
-            # Reply with voice note
-            await update.message.reply_voice(voice=io.BytesIO(ogg_response))
+            # Reply with voice note; fall back to text if voice delivery fails
+            try:
+                await update.message.reply_voice(voice=io.BytesIO(ogg_response))
+            except Exception:
+                log.exception("reply_voice failed for chat %s, falling back to text", chat_id)
+                await update.message.reply_text(response)
 
         except Exception:
-            log.exception("Error processing voice in chat %s", chat_id)
+            log.exception("Unexpected error in voice handler for chat %s", chat_id)
             await update.message.reply_text("Something went wrong with voice processing.")
 
 
@@ -499,8 +526,9 @@ def _get_bot_token() -> str:
 
 
 async def _on_startup(app) -> None:
-    global http
+    global http, gateway
     http = aiohttp.ClientSession()
+    gateway = GatewayClient(http, SERVER_URL, "telegram", surface_prompt=TELEGRAM_SURFACE_PROMPT)
     log.info(
         "Hive Mind Telegram bot started (gateway=%s, voice=%s)",
         SERVER_URL,
@@ -520,6 +548,7 @@ if __name__ == "__main__":
     app = (
         ApplicationBuilder()
         .token(token)
+        .concurrent_updates(True)
         .post_init(_on_startup)
         .post_shutdown(_on_shutdown)
         .build()
@@ -535,6 +564,8 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("kill", cmd_kill))
     app.add_handler(CommandHandler("skills", cmd_skills))
     app.add_handler(CommandHandler("skill", cmd_skill))
+    app.add_handler(MessageHandler(filters.Regex(r"^/approve_\w+$"), cmd_hitl_approve))
+    app.add_handler(MessageHandler(filters.Regex(r"^/deny_\w+$"), cmd_hitl_deny))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 

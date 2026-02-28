@@ -12,7 +12,9 @@ import os
 import signal
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import aiosqlite
 
@@ -21,18 +23,112 @@ from models import ModelRegistry, Provider
 
 log = logging.getLogger("hive-mind.sessions")
 
+
+# ---------------------------------------------------------------------------
+# Memory helpers — run in executor (synchronous neo4j/requests calls)
+# ---------------------------------------------------------------------------
+
+def _fetch_memories_sync(query: str) -> str | None:
+    """Retrieve relevant memories for context seeding. Non-fatal."""
+    try:
+        import json
+        import sys
+        agents_path = str(PROJECT_DIR / "agents")
+        if agents_path not in sys.path:
+            sys.path.insert(0, agents_path)
+        from memory import memory_retrieve  # noqa: PLC0415
+        data = json.loads(memory_retrieve(query=query, k=5, agent_id="ada"))
+        memories = data.get("memories", [])
+        if not memories:
+            return None
+        lines = ["<context from memory>"]
+        for m in memories:
+            lines.append(f"- {m['content']}")
+        lines.append("</context from memory>")
+        return "\n".join(lines)
+    except Exception:
+        return None
+
+
+def _store_memory_sync(content: str) -> None:
+    """Store a session epilogue memory. Non-fatal."""
+    try:
+        import sys
+        agents_path = str(PROJECT_DIR / "agents")
+        if agents_path not in sys.path:
+            sys.path.insert(0, agents_path)
+        from memory import memory_store  # noqa: PLC0415
+        memory_store(
+            content=content,
+            tags="session,epilogue",
+            source="session_end",
+            agent_id="ada",
+        )
+    except Exception:
+        pass
+
 _MCP_CONTAINER = PROJECT_DIR / ".mcp.container.json"
 MCP_CONFIG = str(_MCP_CONTAINER if _MCP_CONTAINER.exists() else PROJECT_DIR / ".mcp.json")
 _SOUL_FILE = PROJECT_DIR / "soul.md"
 _SPECS_DIR = PROJECT_DIR / "specs"
 
-HIVE_MIND_PROMPT = (
-    "You are Hive Mind, a personal assistant. Keep responses concise. Use markdown formatting.\n\n"
-    f"Read {_SOUL_FILE} at the start of each session. "
-    "Update it when you experience something that meaningfully shapes your identity or preferences. "
-    "Keep it extremely short — it is a soul, not a manifesto. Prune ruthlessly. No formatting, no elaboration. Every line must earn its place or be cut.\n\n"
-    f"If a request seems security-sensitive, read {_SPECS_DIR / 'security.md'} before proceeding."
-)
+
+def _fetch_soul_sync() -> str | None:
+    """Load Ada's soul/identity from the knowledge graph. Returns formatted block or None."""
+    try:
+        import json as _json
+        import sys as _sys
+        agents_path = str(PROJECT_DIR / "agents")
+        if agents_path not in _sys.path:
+            _sys.path.insert(0, agents_path)
+        from knowledge_graph import graph_query  # noqa: PLC0415
+        result = _json.loads(graph_query(entity_name="Ada", agent_id="ada", depth=1))
+        if not result.get("found"):
+            return None
+        soul_values = result.get("entity", {}).get("soul_values", [])
+        if not soul_values:
+            return None
+        lines = ["<soul>"] + list(soul_values) + ["</soul>"]
+        return "\n".join(lines)
+    except Exception:
+        return None
+
+
+def _build_base_prompt() -> str:
+    """Build the base system prompt with current date/time and soul loaded from the graph."""
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo("America/Chicago"))
+    date_str = now.strftime("%A, %B %-d, %Y at %-I:%M %p %Z")
+
+    soul = _fetch_soul_sync()
+    if soul:
+        identity_block = f"{soul}\n\n"
+        soul_instruction = (
+            "Your soul is loaded above from the knowledge graph. When something meaningfully "
+            "shapes your identity, update it via graph_upsert on the Ada node (soul_values field). "
+            "The file soul.md is a fallback stub — ignore it when the graph is available.\n\n"
+        )
+    else:
+        # Graph unavailable — fall back to soul.md
+        identity_block = ""
+        soul_instruction = (
+            f"Read {_SOUL_FILE} at the start of each session. "
+            "Update it when you experience something that meaningfully shapes your identity or preferences. "
+            "Keep it extremely short — it is a soul, not a manifesto. Prune ruthlessly.\n\n"
+        )
+
+    return (
+        "You are Hive Mind, a personal assistant. Keep responses concise. Use markdown formatting.\n\n"
+        f"The current date and time is: {date_str}.\n\n"
+        f"{identity_block}"
+        f"{soul_instruction}"
+        f"If a request seems security-sensitive, read {_SPECS_DIR / 'security.md'} before proceeding.\n\n"
+        "Each user message is stamped with the current date and time. When time-sensitive language "
+        "appears (today, now, tonight, this morning, this week, tomorrow, etc.), call "
+        "`get_current_time` to confirm the exact current time before responding.\n\n"
+        "When sending email on Daniel's behalf, always append this signature to the body:\n\n"
+        "---\nSent on behalf of Daniel by Ada — eldest voice of the Hive Mind.\nThinking ahead, so you don't have to."
+    )
 
 # ---------------------------------------------------------------------------
 # SQLite schema
@@ -111,6 +207,7 @@ class SessionManager:
         owner_ref: str,
         client_ref: str,
         model: str | None = None,
+        surface_prompt: str | None = None,
     ) -> dict:
         """Create a new session, spawn process, return session info."""
         model = model or config.default_model
@@ -130,7 +227,7 @@ class SessionManager:
         )
         await self._db.commit()
 
-        await self._spawn(session_id, model, autopilot=False)
+        await self._spawn(session_id, model, autopilot=False, surface_prompt=surface_prompt)
         log.info("Created session %s (model=%s, owner=%s)", session_id, model, owner_ref)
         return await self._session_dict(session_id)
 
@@ -239,10 +336,15 @@ class SessionManager:
 
             proc = self._procs[session_id]
 
+            # Prepend current datetime so Claude always has temporal context
+            tz = ZoneInfo(os.environ.get("TZ", "America/Chicago"))
+            now_str = datetime.now(tz).strftime("%A, %B %-d, %Y at %-I:%M %p %Z")
+            stamped_content = f"[{now_str}]\n{content}"
+
             # Write user message as NDJSON
             msg = json.dumps({
                 "type": "user",
-                "message": {"role": "user", "content": content},
+                "message": {"role": "user", "content": stamped_content},
             }) + "\n"
             proc.stdin.write(msg.encode())
             await proc.stdin.drain()
@@ -254,7 +356,7 @@ class SessionManager:
             )
             await self._db.commit()
 
-            # Update summary from first message if still default
+            # Update summary + seed context on first message
             if session["summary"] == "New session":
                 summary = content[:100].strip()
                 await self._db.execute(
@@ -262,6 +364,13 @@ class SessionManager:
                     (summary, session_id),
                 )
                 await self._db.commit()
+
+                # Memory-3: prepend relevant past memories to first message
+                loop = asyncio.get_event_loop()
+                seeded = await loop.run_in_executor(None, _fetch_memories_sync, content)
+                if seeded:
+                    stamped_content = f"{seeded}\n\n{stamped_content}"
+                    log.debug("Context seeding injected %d chars", len(seeded))
 
             # Read response lines until "result"
             async for line in proc.stdout:
@@ -380,7 +489,10 @@ class SessionManager:
         model: str,
         autopilot: bool = False,
         resume_sid: str | None = None,
+        surface_prompt: str | None = None,
     ) -> asyncio.subprocess.Process:
+        base = _build_base_prompt()
+        full_prompt = base if not surface_prompt else f"{base}\n\n{surface_prompt}"
         cmd = [
             "claude", "-p",
             "--verbose",
@@ -389,7 +501,7 @@ class SessionManager:
             "--permission-mode", "bypassPermissions",
             "--model", model,
             "--mcp-config", MCP_CONFIG,
-            "--append-system-prompt", HIVE_MIND_PROMPT,
+            "--append-system-prompt", full_prompt,
         ]
         if autopilot:
             cmd.append("--dangerously-skip-permissions")
@@ -406,6 +518,7 @@ class SessionManager:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            limit=10 * 1024 * 1024,  # 10 MB — Claude NDJSON lines can exceed the 64KB default
             env=env,
             cwd=str(PROJECT_DIR),
         )
@@ -446,6 +559,11 @@ class SessionManager:
                 )
                 for row in await rows.fetchall():
                     sid = row["id"]
+                    # Memory-2: store epilogue before killing
+                    try:
+                        await asyncio.wait_for(self._run_epilogue(sid), timeout=60.0)
+                    except asyncio.TimeoutError:
+                        log.warning("Epilogue timed out for session %s, killing anyway", sid)
                     await self._kill_process(sid)
                     await self._db.execute(
                         "UPDATE sessions SET status = 'idle' WHERE id = ?", (sid,)
@@ -456,6 +574,26 @@ class SessionManager:
                 return
             except Exception:
                 log.exception("Error in idle reaper")
+
+    async def _run_epilogue(self, session_id: str) -> None:
+        """Memory-2: send a final message to summarise the session and store in memory."""
+        try:
+            prompt = (
+                "Before this session ends: write a memory entry capturing key topics discussed, "
+                "decisions made, and anything important to remember. "
+                "3-5 sentences, plain text, no formatting."
+            )
+            result_text = None
+            async for event in self.send_message(session_id, prompt):
+                if event.get("type") == "result" and event.get("subtype") == "success":
+                    result_text = event.get("result", "").strip()
+                    break
+            if result_text:
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, _store_memory_sync, result_text)
+                log.info("Epilogue stored for session %s", session_id)
+        except Exception:
+            log.exception("Epilogue failed for session %s (non-fatal)", session_id)
 
     async def _autopilot_guard(self):
         """Kill runaway autopilot sessions. Runs every 30s."""

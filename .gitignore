@@ -136,6 +136,18 @@ config.yaml
 .obsidian/
 .log_agent_positions
 
+# Generated output artifacts
+*-report.md
+reports/
+
+# Personal notes
+jobs/
+
+# Future voice reference audio (binary, large)
+voice_ref/
+
 # Editor backups
 *~
 *.swp
+backups/sessions.db.bak.20260228
+backups/reminders.db.bak.20260228

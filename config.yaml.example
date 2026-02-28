@@ -41,3 +41,24 @@ discord_allowed_channels: []  # Empty = all channels + DMs
 # Telegram bot — user allowlists (get your ID from @userinfobot)
 telegram_allowed_users:
   - 0000000000
+telegram_owner_chat_id: 0000000000  # DM chat ID for HITL approval notifications
+
+# Scheduled tasks (cron in 5-field format: min hour day month weekday)
+# voice: true  → TTS delivery via Telegram voice note (uses voice surface prompt)
+# voice: false → Text delivery via Telegram message (uses dev surface prompt — allows code)
+scheduled_tasks:
+  - cron: "0 7 * * *"
+    timezone: "America/Chicago"
+    voice: true
+    prompt: >-
+      Give me a voice overview of my day. Check my calendar for today's events.
+      Summarize everything in a friendly conversational way.
+
+  # Weekly autonomous self-improvement run
+  - cron: "0 3 * * 0"
+    timezone: "America/Chicago"
+    voice: false
+    prompt: >-
+      This is your weekly self-improvement session. Read /usr/src/app/goals.md,
+      execute the next concrete step for the highest-priority incomplete goal,
+      update goals.md with progress, and respond with a plain-text summary.

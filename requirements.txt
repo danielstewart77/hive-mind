@@ -18,12 +18,17 @@ aiohttp
 # External integrations
 neo4j
 py2neo
+dateparser
 
 # Discord bot
-discord.py
+discord.py[voice]
+PyNaCl
 
 # Telegram bot
 python-telegram-bot[job-queue]>=21.0
+
+# Scheduler
+apscheduler>=3.10
 
 # Voice server (STT + TTS)
 faster-whisper>=1.0.0

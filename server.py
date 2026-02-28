@@ -5,15 +5,19 @@ Thin HTTP/WebSocket layer over the session manager.
 All Claude CLI interaction flows through here.
 """
 
+import asyncio
 import json
 import logging
+import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse
+import aiohttp
+from fastapi import FastAPI, Header, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from config import config
+from hitl import hitl_store, TOKEN_TTL
 from models import ModelRegistry, Provider
 from sessions import SessionManager
 
@@ -44,12 +48,25 @@ model_registry = _build_registry()
 session_mgr = SessionManager(model_registry)
 
 
+_hitl_cleanup_task: asyncio.Task | None = None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _hitl_cleanup_task
     await session_mgr.start()
+    _hitl_cleanup_task = asyncio.create_task(_hitl_cleanup_loop())
     log.info("Gateway started on port %d", config.server_port)
     yield
+    _hitl_cleanup_task.cancel()
     await session_mgr.shutdown()
+
+
+async def _hitl_cleanup_loop():
+    """Periodically purge expired HITL tokens."""
+    while True:
+        await asyncio.sleep(30)
+        hitl_store.cleanup_expired()
 
 
 app = FastAPI(title="Hive Mind Gateway", version="1.0.0", lifespan=lifespan)
@@ -63,6 +80,7 @@ class CreateSessionRequest(BaseModel):
     owner_ref: str
     client_ref: str
     model: str | None = None
+    surface_prompt: str | None = None
 
 
 class MessageRequest(BaseModel):
@@ -88,6 +106,7 @@ async def create_session(body: CreateSessionRequest):
         owner_ref=body.owner_ref,
         client_ref=body.client_ref,
         model=body.model,
+        surface_prompt=body.surface_prompt,
     )
     return session
 
@@ -285,6 +304,98 @@ async def _handle_command(cmd: str, parts: list[str], body: CommandRequest):
         return await session_mgr.kill_session(target)
 
     return {"error": f"Unknown command: {cmd}"}
+
+
+# ---------------------------------------------------------------------------
+# HITL (Human-in-the-Loop) approval endpoints
+# ---------------------------------------------------------------------------
+def _get_telegram_token() -> str | None:
+    """Get Telegram bot token from env or keyring."""
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if token:
+        return token
+    try:
+        import keyring
+        token = keyring.get_password("hive-mind", "TELEGRAM_BOT_TOKEN")
+    except Exception:
+        pass
+    return token
+
+
+async def _send_telegram_approval_request(token: str, summary: str):
+    """Send HITL approval DM to the owner via Telegram Bot API."""
+    bot_token = _get_telegram_token()
+    chat_id = config.telegram_owner_chat_id
+
+    if not bot_token or not chat_id:
+        log.error("HITL: cannot send Telegram DM — missing bot token or owner chat ID")
+        return
+
+    # Truncate and escape summary for Telegram
+    safe_summary = summary[:200].replace("<", "&lt;").replace(">", "&gt;")
+    text = (
+        f"Approval required:\n\n"
+        f"{safe_summary}\n\n"
+        f"✅ /approve_{token}\n\n"
+        f"─────────────────\n\n"
+        f"❌ /deny_{token}"
+    )
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            await session.post(
+                f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                json={"chat_id": chat_id, "text": text},
+            )
+    except Exception:
+        log.exception("HITL: failed to send Telegram DM")
+
+
+class HITLRequest(BaseModel):
+    action: str
+    summary: str
+
+
+class HITLResponse(BaseModel):
+    token: str
+    approved: bool
+
+
+@app.post("/hitl/request")
+async def hitl_request(body: HITLRequest):
+    """Create an HITL approval request. Blocks until approved, denied, or timeout."""
+    token, entry = hitl_store.create(body.action, body.summary)
+
+    # Fire-and-forget: send Telegram DM to owner
+    asyncio.create_task(_send_telegram_approval_request(token, body.summary))
+
+    # Block until resolved or timeout
+    try:
+        await asyncio.wait_for(entry.event.wait(), timeout=TOKEN_TTL)
+    except asyncio.TimeoutError:
+        hitl_store.cleanup_expired()
+
+    approved = entry.approved is True
+    return {"approved": approved}
+
+
+@app.post("/hitl/respond")
+async def hitl_respond(
+    body: HITLResponse,
+    x_hitl_internal: str = Header(None),
+):
+    """Resolve an HITL approval request. Called by the Telegram bot."""
+    if not config.hitl_internal_token:
+        return JSONResponse({"error": "HITL not configured"}, status_code=500)
+
+    if x_hitl_internal != config.hitl_internal_token:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    ok = hitl_store.resolve(body.token, body.approved)
+    if not ok:
+        return JSONResponse({"error": "invalid or expired token"}, status_code=404)
+
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------

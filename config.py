@@ -5,6 +5,8 @@ Reads NON-SECRET settings from config.yaml and SECRETS from .env.
 NEVER put config in .env - that file is for secrets ONLY.
 """
 
+import os
+
 import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,6 +30,15 @@ class AutopilotGuards:
     max_budget_usd: float = 5.00
     max_turns_without_input: int = 50
     max_minutes_without_input: int = 30
+
+
+@dataclass
+class ScheduledTask:
+    cron: str
+    prompt: str
+    voice: bool = True
+    notify: bool = True  # False = run for side effects only, no Telegram delivery
+    timezone: str = "America/Chicago"
 
 
 @dataclass
@@ -56,6 +67,13 @@ class HiveMindConfig:
 
     # Telegram bot
     telegram_allowed_users: list[int] = field(default_factory=list)
+    telegram_owner_chat_id: int = 0  # DM chat ID for HITL approval notifications
+
+    # HITL (Human-in-the-Loop)
+    hitl_internal_token: str = ""  # shared secret between gateway and bot
+
+    # Scheduled tasks
+    scheduled_tasks: list[ScheduledTask] = field(default_factory=list)
 
     @classmethod
     def from_yaml(cls) -> "HiveMindConfig":
@@ -79,6 +97,18 @@ class HiveMindConfig:
             discord_allowed_users=_yaml_config.get("discord_allowed_users", []),
             discord_allowed_channels=_yaml_config.get("discord_allowed_channels", []),
             telegram_allowed_users=_yaml_config.get("telegram_allowed_users", []),
+            telegram_owner_chat_id=_yaml_config.get("telegram_owner_chat_id", 0),
+            hitl_internal_token=os.environ.get("HITL_INTERNAL_TOKEN", ""),
+            scheduled_tasks=[
+                ScheduledTask(
+                    cron=t["cron"],
+                    prompt=t["prompt"],
+                    voice=t.get("voice", True),
+                    notify=t.get("notify", True),
+                    timezone=t.get("timezone", "America/Chicago"),
+                )
+                for t in _yaml_config.get("scheduled_tasks", [])
+            ],
         )
 
 

@@ -4,11 +4,15 @@ services:
     container_name: hive-mind-server
     working_dir: /usr/src/app
     volumes:
-      - .:/usr/src/app
-      - ~/.claude:/home/hivemind/.claude
+      - ${HOST_PROJECT_DIR:-.}:/usr/src/app
+      - ${HOST_CLAUDE_DIR:-~/.claude}:/home/hivemind/.claude
       - sessions-db:/usr/src/app/data
+    env_file:
+      - .env
     environment:
       - SESSIONS_DB_PATH=/usr/src/app/data/sessions.db
+    ports:
+      - "8420:8420"
     restart: unless-stopped
     networks:
       - hivemind
@@ -20,31 +24,31 @@ services:
     container_name: hive-mind-discord
     working_dir: /usr/src/app
     volumes:
-      - .:/usr/src/app
-      - ~/.claude:/home/hivemind/.claude
+      - ${HOST_PROJECT_DIR:-.}:/usr/src/app
+      - ${HOST_CLAUDE_DIR:-~/.claude}:/home/hivemind/.claude
     env_file:
       - .env
     restart: unless-stopped
     depends_on:
       - server
+      - voice-server
     networks:
       - hivemind
     environment:
       - HIVE_MIND_SERVER_URL=http://server:8420
+      - VOICE_SERVER_URL=http://voice-server:8422
     command: ["/opt/venv/bin/python3", "discord_bot.py"]
 
   voice-server:
     build: .
     container_name: hive-mind-voice
     working_dir: /usr/src/app
-    volumes:
-      - .:/usr/src/app
-    restart: unless-stopped
+    restart: always
     networks:
       - hivemind
     environment:
       - WHISPER_MODEL=medium
-      - KOKORO_VOICE=af_heart
+      - KOKORO_VOICE=bf_alice
     deploy:
       resources:
         reservations:
@@ -59,8 +63,8 @@ services:
     container_name: hive-mind-telegram
     working_dir: /usr/src/app
     volumes:
-      - .:/usr/src/app
-      - ~/.claude:/home/hivemind/.claude
+      - ${HOST_PROJECT_DIR:-.}:/usr/src/app
+      - ${HOST_CLAUDE_DIR:-~/.claude}:/home/hivemind/.claude
     env_file:
       - .env
     restart: unless-stopped
@@ -74,9 +78,82 @@ services:
       - VOICE_SERVER_URL=http://voice-server:8422
     command: ["/opt/venv/bin/python3", "telegram_bot.py"]
 
+  scheduler:
+    build: .
+    container_name: hive-mind-scheduler
+    working_dir: /usr/src/app
+    volumes:
+      - ${HOST_CLAUDE_DIR:-~/.claude}:/home/hivemind/.claude
+    env_file:
+      - .env
+    restart: unless-stopped
+    depends_on:
+      - server
+      - voice-server
+    networks:
+      - hivemind
+    environment:
+      - HIVE_MIND_SERVER_URL=http://server:8420
+      - VOICE_SERVER_URL=http://voice-server:8422
+    command: ["/opt/venv/bin/python3", "scheduler.py"]
+
+  neo4j:
+    image: neo4j:5.26-community
+    container_name: hive-mind-neo4j
+    restart: unless-stopped
+    networks:
+      - hivemind
+    environment:
+      - NEO4J_AUTH=${NEO4J_AUTH:-neo4j/hivemind-memory}
+      - NEO4J_PLUGINS=["apoc"]
+      - NEO4J_dbms_security_procedures_unrestricted=apoc.*
+    volumes:
+      - neo4j-data:/data
+    # No ports exposed — internal network only
+
+  planka-db:
+    image: postgres:14-alpine
+    container_name: hive-mind-planka-db
+    restart: unless-stopped
+    networks:
+      - hivemind
+    environment:
+      - POSTGRES_DB=planka
+      - POSTGRES_USER=planka
+      - POSTGRES_PASSWORD=${PLANKA_DB_PASSWORD:-planka}
+    volumes:
+      - planka-db:/var/lib/postgresql/data
+
+  planka:
+    image: ghcr.io/plankanban/planka:latest
+    container_name: hive-mind-planka
+    restart: unless-stopped
+    depends_on:
+      - planka-db
+    networks:
+      - hivemind
+    environment:
+      - BASE_URL=${PLANKA_BASE_URL:-http://localhost:3000}
+      - DATABASE_URL=postgresql://planka:${PLANKA_DB_PASSWORD:-planka}@planka-db/planka
+      - SECRET_KEY_BASE=${PLANKA_SECRET_KEY_BASE}
+      - DEFAULT_ADMIN_EMAIL=${PLANKA_ADMIN_EMAIL:-admin@hivemind.local}
+      - DEFAULT_ADMIN_PASSWORD=${PLANKA_ADMIN_PASSWORD:-changeme}
+      - DEFAULT_ADMIN_NAME=${PLANKA_ADMIN_NAME:-Admin}
+      - DEFAULT_ADMIN_USERNAME=${PLANKA_ADMIN_USERNAME:-admin}
+    ports:
+      - "3000:1337"
+    volumes:
+      - planka-data:/app/public/user-avatars
+      - planka-data:/app/public/project-background-images
+      - planka-data:/app/private/attachments
+
 networks:
   hivemind:
-    driver: bridge
+    external: true
+    name: hivemind
 
 volumes:
   sessions-db:
+  neo4j-data:
+  planka-db:
+  planka-data:
