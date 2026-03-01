@@ -17,15 +17,31 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from config import config
-from hitl import hitl_store, TOKEN_TTL
-from models import ModelRegistry, Provider
-from sessions import SessionManager
+from core.hitl import hitl_store, TOKEN_TTL
+from core.models import ModelRegistry, Provider
+from core.sessions import SessionManager
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 log = logging.getLogger("hive-mind.server")
+
+# ---------------------------------------------------------------------------
+# Keyring → env bridge: expose keyring secrets as env vars so non-Python
+# consumers (e.g. Claude Code reading .mcp.container.json) can resolve them.
+# ---------------------------------------------------------------------------
+_KEYRING_ENV_KEYS = ["MCP_AUTH_TOKEN", "HITL_INTERNAL_TOKEN"]
+
+try:
+    import keyring as _kr
+    for _k in _KEYRING_ENV_KEYS:
+        if _k not in os.environ:
+            _v = _kr.get_password("hive-mind", _k)
+            if _v:
+                os.environ[_k] = _v
+except Exception:
+    pass  # keyring unavailable — fall through to env_file / .env
 
 # ---------------------------------------------------------------------------
 # Bootstrap model registry from config
@@ -310,16 +326,15 @@ async def _handle_command(cmd: str, parts: list[str], body: CommandRequest):
 # HITL (Human-in-the-Loop) approval endpoints
 # ---------------------------------------------------------------------------
 def _get_telegram_token() -> str | None:
-    """Get Telegram bot token from env or keyring."""
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    if token:
-        return token
+    """Get Telegram bot token — keyring first, env fallback."""
     try:
         import keyring
         token = keyring.get_password("hive-mind", "TELEGRAM_BOT_TOKEN")
+        if token:
+            return token
     except Exception:
         pass
-    return token
+    return os.getenv("TELEGRAM_BOT_TOKEN")
 
 
 async def _send_telegram_approval_request(token: str, summary: str):

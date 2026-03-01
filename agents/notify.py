@@ -1,8 +1,8 @@
 """
-Hive Mind — Fallback notification tool.
+Hive Mind — Notification tools.
 
 Sends owner notifications via multiple channels with automatic fallback.
-Use when normal channels (Telegram bot / Discord) may be unavailable.
+Includes voice message delivery via TTS + Telegram sendVoice.
 
 Channel order: telegram_direct → email (if configured) → alert_file
 """
@@ -14,14 +14,16 @@ from pathlib import Path
 
 import httpx
 from agent_tooling import tool
+from agents.secret_manager import get_credential
+from config import config
 
 _ALERT_FILE = Path("/usr/src/app/data/alerts.log")
 
 
 def _telegram_direct(message: str) -> tuple[bool, str]:
     """Send via Telegram Bot API directly (bypasses gateway)."""
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_OWNER_CHAT_ID")
+    token = get_credential("TELEGRAM_BOT_TOKEN")
+    chat_id = get_credential("TELEGRAM_OWNER_CHAT_ID")
 
     if not token or not chat_id:
         return False, "TELEGRAM_BOT_TOKEN or TELEGRAM_OWNER_CHAT_ID not set"
@@ -41,10 +43,10 @@ def _telegram_direct(message: str) -> tuple[bool, str]:
 
 def _smtp_email(message: str) -> tuple[bool, str]:
     """Send via SMTP if credentials are configured."""
-    smtp_host = os.getenv("SMTP_HOST")
-    smtp_user = os.getenv("SMTP_USER")
-    smtp_pass = os.getenv("SMTP_PASSWORD")
-    smtp_to = os.getenv("SMTP_TO") or smtp_user
+    smtp_host = get_credential("SMTP_HOST")
+    smtp_user = get_credential("SMTP_USER")
+    smtp_pass = get_credential("SMTP_PASSWORD")
+    smtp_to = get_credential("SMTP_TO") or smtp_user
 
     if not all([smtp_host, smtp_user, smtp_pass]):
         return False, "SMTP not configured (SMTP_HOST/SMTP_USER/SMTP_PASSWORD)"
@@ -53,7 +55,7 @@ def _smtp_email(message: str) -> tuple[bool, str]:
         import smtplib
         from email.mime.text import MIMEText
 
-        smtp_port = int(os.getenv("SMTP_PORT", "587"))
+        smtp_port = int(get_credential("SMTP_PORT") or "587")
         msg = MIMEText(message)
         msg["Subject"] = "Hive Mind Alert"
         msg["From"] = smtp_user
@@ -121,3 +123,44 @@ def notify_owner(message: str, channels: str = "telegram,email,file") -> str:
         "delivered": delivered,
         "channels": results,
     })
+
+
+@tool(tags=["system"])
+def send_voice_message(message: str) -> str:
+    """Send a voice message to Daniel via Telegram.
+
+    Converts text to speech via the voice server, then sends the audio
+    as a Telegram voice message. Use this for reminders or any notification
+    that should be spoken aloud.
+
+    Args:
+        message: The text to speak and send as a voice message.
+
+    Returns:
+        JSON with delivery status.
+    """
+    token = get_credential("TELEGRAM_BOT_TOKEN")
+    chat_id = config.telegram_owner_chat_id
+    voice_url = os.getenv("VOICE_SERVER_URL", "http://voice-server:8422")
+
+    if not token or not chat_id:
+        return json.dumps({"success": False, "error": "Missing bot token or chat ID"})
+
+    try:
+        tts_resp = httpx.post(
+            f"{voice_url}/tts", json={"text": message}, timeout=30,
+        )
+        if tts_resp.status_code != 200:
+            return json.dumps({"success": False, "error": f"TTS failed: {tts_resp.status_code}"})
+
+        resp = httpx.post(
+            f"https://api.telegram.org/bot{token}/sendVoice",
+            data={"chat_id": str(chat_id)},
+            files={"voice": ("message.ogg", tts_resp.content, "audio/ogg")},
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            return json.dumps({"success": True, "detail": "Voice message sent"})
+        return json.dumps({"success": False, "error": f"Telegram API: {resp.status_code}"})
+    except Exception as e:
+        return json.dumps({"success": False, "error": f"{type(e).__name__}: {e}"})

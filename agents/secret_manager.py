@@ -1,22 +1,45 @@
 """Manage secrets via the system keyring.
 
-Secrets are stored encrypted at rest in the Linux system keyring
-(GNOME Keyring / KDE Wallet) using the 'hive-mind' service namespace.
-Falls back to environment variables for secrets injected at launch.
+Secrets are stored in the system keyring using the 'hive-mind' service
+namespace.  Falls back to environment variables when keyring is unavailable
+(e.g. inside a Docker container without D-Bus).
 """
 
 import json
+import logging
 import os
 
 import keyring
 from agent_tooling import tool
 
+log = logging.getLogger(__name__)
+
 SERVICE_NAME = "hive-mind"
 _REGISTRY_KEY = "_KEY_REGISTRY"
 
-# Key naming allowlist: must end with _KEY, _SECRET, _TOKEN, _API,
-# or start with HIVEMIND_
-_ALLOWED_SUFFIXES = ("_KEY", "_SECRET", "_TOKEN", "_API")
+
+def _keyring_get(key: str) -> str | None:
+    """Safe wrapper around keyring.get_password — returns None on failure."""
+    try:
+        return keyring.get_password(SERVICE_NAME, key)
+    except Exception:
+        return None
+
+
+def _keyring_set(key: str, value: str) -> bool:
+    """Safe wrapper around keyring.set_password — returns success bool."""
+    try:
+        keyring.set_password(SERVICE_NAME, key, value)
+        return True
+    except Exception as exc:
+        log.warning("keyring.set_password failed for '%s': %s", key, exc)
+        return False
+
+# Key naming allowlist: must end with an allowed suffix or start with HIVEMIND_
+_ALLOWED_SUFFIXES = (
+    "_KEY", "_SECRET", "_TOKEN", "_API",
+    "_AUTH", "_URI", "_URL", "_EMAIL", "_PASSWORD", "_ID",
+)
 _ALLOWED_PREFIX = "HIVEMIND_"
 
 
@@ -29,7 +52,7 @@ def _is_valid_key_name(key: str) -> bool:
 
 def _get_registry() -> list[str]:
     """Load the list of stored key names from the keyring."""
-    raw = keyring.get_password(SERVICE_NAME, _REGISTRY_KEY)
+    raw = _keyring_get(_REGISTRY_KEY)
     if raw:
         try:
             return json.loads(raw)
@@ -40,9 +63,7 @@ def _get_registry() -> list[str]:
 
 def _save_registry(keys: list[str]) -> None:
     """Persist the list of stored key names to the keyring."""
-    keyring.set_password(
-        SERVICE_NAME, _REGISTRY_KEY, json.dumps(sorted(set(keys)))
-    )
+    _keyring_set(_REGISTRY_KEY, json.dumps(sorted(set(keys))))
 
 
 def get_credential(key: str) -> str | None:
@@ -50,7 +71,7 @@ def get_credential(key: str) -> str | None:
 
     For use by other agents that need credentials (e.g. Neo4j tools).
     """
-    return keyring.get_password(SERVICE_NAME, key) or os.getenv(key)
+    return _keyring_get(key) or os.getenv(key)
 
 
 @tool(tags=["system"])
@@ -71,11 +92,12 @@ def set_secret(key: str, value: str) -> str:
     if not _is_valid_key_name(key):
         return (
             f"Error: key '{key}' is not allowed. "
-            "Key names must end with _KEY, _SECRET, _TOKEN, or _API, "
-            "or start with HIVEMIND_."
+            f"Key names must end with one of {_ALLOWED_SUFFIXES}, "
+            f"or start with {_ALLOWED_PREFIX}."
         )
 
-    keyring.set_password(SERVICE_NAME, key, value)
+    if not _keyring_set(key, value):
+        return f"Error: failed to store '{key}' — no keyring backend available."
 
     # Update registry
     registry = _get_registry()
@@ -102,11 +124,11 @@ def get_secret(key: str) -> str:
     key = key.strip().upper()
 
     # Check keyring first, then fall back to environment
-    if keyring.get_password(SERVICE_NAME, key):
-        return f"'{key}' is configured."
+    if _keyring_get(key):
+        return f"'{key}' is configured (keyring)."
 
     if os.getenv(key):
-        return f"'{key}' is configured (via environment)."
+        return f"'{key}' is configured (environment)."
 
     return f"'{key}' is NOT configured."
 

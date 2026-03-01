@@ -16,14 +16,15 @@ import os
 
 import requests
 from agent_tooling import tool
+from agents.secret_manager import get_credential
 
-PLANKA_URL = os.environ.get("PLANKA_URL", "http://planka:1337")
+PLANKA_URL = get_credential("PLANKA_URL") or "http://planka:1337"
 
 
 def _get_token() -> str:
     """Authenticate with Planka and return a bearer token."""
-    email = os.environ.get("PLANKA_EMAIL", "")
-    password = os.environ.get("PLANKA_PASSWORD", "")
+    email = get_credential("PLANKA_EMAIL") or ""
+    password = get_credential("PLANKA_PASSWORD") or ""
     if not email or not password:
         raise RuntimeError(
             "PLANKA_EMAIL and PLANKA_PASSWORD must be configured. "

@@ -5,6 +5,7 @@ requests
 agent_tooling
 setuptools
 keyring
+keyrings.alt
 
 # MCP
 mcp[cli]

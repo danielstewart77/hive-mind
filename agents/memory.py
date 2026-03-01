@@ -20,6 +20,7 @@ from typing import Optional
 
 import requests
 from agent_tooling import tool
+from agents.secret_manager import get_credential
 from neo4j import GraphDatabase
 
 logger = logging.getLogger(__name__)
@@ -28,11 +29,11 @@ logger = logging.getLogger(__name__)
 _driver = None
 _index_created = False
 
-NEO4J_URI = os.getenv("NEO4J_URI", "bolt://neo4j:7687")
-NEO4J_AUTH_ENV = os.getenv("NEO4J_AUTH", "neo4j/hivemind-memory")
+NEO4J_URI = get_credential("NEO4J_URI") or "bolt://neo4j:7687"
+NEO4J_AUTH_ENV = get_credential("NEO4J_AUTH") or "neo4j/hivemind-memory"
 _NEO4J_USER, _, _NEO4J_PASS = NEO4J_AUTH_ENV.partition("/")
 
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://203.0.113.10:11434")
+OLLAMA_BASE_URL = get_credential("OLLAMA_BASE_URL") or "http://203.0.113.10:11434"
 EMBEDDING_MODEL = "qwen3-embedding:8b"
 EMBEDDING_DIM = 4096
 VECTOR_INDEX = "memory_embedding"

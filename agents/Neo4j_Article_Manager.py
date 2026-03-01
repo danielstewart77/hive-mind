@@ -1,23 +1,8 @@
 from agent_tooling import tool
 from py2neo import Graph, Node, Relationship
-import os
 import keyword
 
-try:
-    import keyring
-except ImportError:
-    keyring = None
-
-_SERVICE_NAME = "hive-mind"
-
-
-def _get_credential(key: str) -> str | None:
-    """Get a credential from keyring, falling back to environment."""
-    if keyring:
-        val = keyring.get_password(_SERVICE_NAME, key)
-        if val:
-            return val
-    return os.getenv(key)
+from agents.secret_manager import get_credential
 
 
 @tool(tags=["news"])
@@ -27,9 +12,9 @@ def add_article_to_neo4j_db(title: str, text: str, date: str):
     provided title, text, and date. It extracts keywords from the title as topics, relates them to the article,
     and handles entities for further relational context.
     """
-    neo4j_url = _get_credential("NEO4J_URL")
-    neo4j_username = _get_credential("NEO4J_USERNAME")
-    neo4j_password = _get_credential("NEO4J_PASSWORD")
+    neo4j_url = get_credential("NEO4J_URL")
+    neo4j_username = get_credential("NEO4J_USERNAME")
+    neo4j_password = get_credential("NEO4J_PASSWORD")
 
     # Establish connection to the Neo4j database
     graph = Graph(neo4j_url, auth=(neo4j_username, neo4j_password))

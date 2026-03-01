@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 import aiosqlite
 
 from config import PROJECT_DIR, config
-from models import ModelRegistry, Provider
+from core.models import ModelRegistry, Provider
 
 log = logging.getLogger("hive-mind.sessions")
 
@@ -127,7 +127,7 @@ def _build_base_prompt() -> str:
         "appears (today, now, tonight, this morning, this week, tomorrow, etc.), call "
         "`get_current_time` to confirm the exact current time before responding.\n\n"
         "When sending email on Daniel's behalf, always append this signature to the body:\n\n"
-        "---\nSent on behalf of Daniel by Ada — eldest voice of the Hive Mind.\nThinking ahead, so you don't have to."
+        "---\nSent on behalf of Daniel by Ada — eldest voice of the Hive Mind."
     )
 
 # ---------------------------------------------------------------------------

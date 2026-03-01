@@ -20,7 +20,7 @@ import discord
 from discord import app_commands
 
 from config import config
-from gateway_client import GatewayClient, get_lock, get_skills, time_ago
+from core.gateway_client import GatewayClient, get_lock, get_skills, time_ago
 
 logging.basicConfig(
     level=logging.INFO,
@@ -593,21 +593,17 @@ async def on_message(message: discord.Message):
 # Entry point
 # ---------------------------------------------------------------------------
 def _get_bot_token() -> str:
-    """Load Discord bot token from keyring with .env fallback."""
-    token = os.getenv("DISCORD_BOT_TOKEN")
-    if token:
-        return token
+    """Load Discord bot token — keyring first, env fallback."""
     try:
         import keyring
         token = keyring.get_password("hive-mind", "DISCORD_BOT_TOKEN")
+        if token:
+            return token
     except Exception:
         pass
+    token = os.getenv("DISCORD_BOT_TOKEN")
     if not token:
-        log.error(
-            "DISCORD_BOT_TOKEN not found. Set it via:\n"
-            "  - .env file: DISCORD_BOT_TOKEN=your-token\n"
-            '  - keyring: python -c "import keyring; keyring.set_password(\'hive-mind\', \'DISCORD_BOT_TOKEN\', \'your-token\')"'
-        )
+        log.error("DISCORD_BOT_TOKEN not found in keyring or environment.")
         sys.exit(1)
     return token
 

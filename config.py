@@ -1,8 +1,8 @@
 """
 Hive Mind — Centralized configuration.
 
-Reads NON-SECRET settings from config.yaml and SECRETS from .env.
-NEVER put config in .env - that file is for secrets ONLY.
+Reads NON-SECRET settings from config.yaml.
+Secrets: keyring first (via 'hive-mind' service), env fallback.
 """
 
 import os
@@ -14,6 +14,21 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+def _get_secret(key: str, default: str = "") -> str:
+    """Get a secret — keyring first, env fallback.
+
+    Inline to avoid circular import with agents/secret_manager.py.
+    """
+    try:
+        import keyring
+        val = keyring.get_password("hive-mind", key)
+        if val:
+            return val
+    except Exception:
+        pass
+    return os.environ.get(key, default)
 
 PROJECT_DIR = Path(__file__).parent.resolve()
 
@@ -98,7 +113,7 @@ class HiveMindConfig:
             discord_allowed_channels=_yaml_config.get("discord_allowed_channels", []),
             telegram_allowed_users=_yaml_config.get("telegram_allowed_users", []),
             telegram_owner_chat_id=_yaml_config.get("telegram_owner_chat_id", 0),
-            hitl_internal_token=os.environ.get("HITL_INTERNAL_TOKEN", ""),
+            hitl_internal_token=_get_secret("HITL_INTERNAL_TOKEN"),
             scheduled_tasks=[
                 ScheduledTask(
                     cron=t["cron"],

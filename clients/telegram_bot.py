@@ -26,7 +26,7 @@ from telegram.ext import (
 )
 
 from config import config
-from gateway_client import GatewayClient, get_lock, get_skills, time_ago
+from core.gateway_client import GatewayClient, get_lock, get_skills, time_ago
 
 logging.basicConfig(
     level=logging.INFO,
@@ -511,16 +511,17 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Entry point
 # ---------------------------------------------------------------------------
 def _get_bot_token() -> str:
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    if token:
-        return token
+    """Load Telegram bot token — keyring first, env fallback."""
     try:
         import keyring
         token = keyring.get_password("hive-mind", "TELEGRAM_BOT_TOKEN")
+        if token:
+            return token
     except Exception:
         pass
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
-        log.error("TELEGRAM_BOT_TOKEN not found. Set it in .env: TELEGRAM_BOT_TOKEN=your-token")
+        log.error("TELEGRAM_BOT_TOKEN not found in keyring or environment.")
         sys.exit(1)
     return token
 

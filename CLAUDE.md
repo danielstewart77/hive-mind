@@ -22,7 +22,7 @@ This file provides guidance to Claude Code when working with this repository.
                  └──────┬──────┘
                         │
               ┌─────────▼─────────┐
-              │  Session Manager  │  ← sessions.py
+              │  Session Manager  │  ← core/sessions.py
               │  (process pool +  │
               │   SQLite DB)      │
               └─────────┬─────────┘
@@ -54,16 +54,6 @@ Per-subprocess env isolation — no global env mutation.
 ## Quick Start
 
 ```bash
-source venv/bin/activate
-pip install -r requirements.txt
-# Start the gateway server
-python server.py
-# In another terminal, start the Discord bot
-python discord_bot.py
-```
-
-### Docker (MCP server only)
-```bash
 docker compose up -d --build
 ```
 
@@ -72,29 +62,45 @@ docker compose up -d --build
 ```
 hive_mind/
 ├── server.py                      # FastAPI gateway (HTTP + WebSocket endpoints)
-├── sessions.py                    # Session manager (process pool + SQLite)
-├── models.py                      # Model registry (static aliases + Ollama auto-discovery)
+├── mcp_server.py                  # MCP server exposing agent tools (stdio)
 ├── config.py                      # Centralized config (loads config.yaml)
 ├── config.yaml                    # Non-secret settings (providers, models, server)
-├── discord_bot.py                 # Discord bot (thin HTTP client to gateway)
-├── mcp_server.py                  # MCP server exposing agent tools (stdio)
-├── .mcp.json                      # Wires MCP tools into Claude Code
-├── agents/                        # MCP tools (@tool decorated)
-│   ├── coingecko.py              # Crypto prices (CoinGecko API)
-│   ├── get_weather_for_location.py # Weather (Open-Meteo, no key needed)
-│   ├── fetch_articles.py         # Neo4j article reader
-│   ├── Neo4j_Article_Manager.py  # Neo4j article writer
-│   ├── agent_logs.py             # System log scanner
-│   ├── tool_creator.py           # Runtime tool creation + pip install
-│   ├── secret_manager.py         # .env secret management
+├── .mcp.json                      # Wires MCP tools into Claude Code (host paths)
+├── .mcp.container.json            # MCP config for container context
+│
+├── core/                          # Internal libraries (not entry points)
+│   ├── sessions.py               # Session manager (process pool + SQLite)
+│   ├── models.py                 # Model registry (static aliases + Ollama)
+│   ├── gateway_client.py         # Shared HTTP client for bots
+│   └── hitl.py                   # Human-in-the-loop approval
+│
+├── clients/                       # Thin client entry points
+│   ├── discord_bot.py            # Discord bot
+│   ├── telegram_bot.py           # Telegram bot
+│   └── scheduler.py              # Cron daemon
+│
+├── voice/                         # Voice infrastructure
+│   └── voice_server.py           # STT/TTS FastAPI server
+│
+├── agents/                        # MCP tools (@tool decorated, auto-discovered)
+│   ├── secret_manager.py         # Keyring secret management
+│   ├── knowledge_graph.py        # Neo4j knowledge graph
+│   ├── planka.py                 # Planka Kanban board
+│   ├── notify.py                 # Telegram/email notifications
+│   ├── coingecko.py              # Crypto prices
+│   ├── tool_creator.py           # Runtime tool creation
 │   └── [dynamically created tools]
-├── shared/
-│   └── state.py                  # Reserved for future stateful tools
-├── documents/                    # Plans, reviews, specs
-├── requirements.txt
+│
+├── documents/                     # Plans, specs, reviews
+├── jobs/                          # Data files (resumes, specs)
+├── data/                          # SQLite databases (Docker volume)
+├── backups/                       # Manual backups
+│
+├── soul.md                        # Ada's identity (fallback stub)
+├── CLAUDE.md                      # This file
 ├── Dockerfile
 ├── docker-compose.yml
-└── CLAUDE.md
+└── requirements.txt
 ```
 
 ## Configuration
@@ -121,11 +127,9 @@ models:
   haiku: anthropic
 ```
 
-Secrets in `.env`:
-
-```ini
-DISCORD_BOT_TOKEN=...
-```
+Secrets are stored in the system keyring (`keyrings.alt.file.PlaintextKeyring`).
+Use `get_credential()` from `agents/secret_manager.py` to read them.
+A minimal `.env` remains for docker-compose interpolation (Neo4j, Planka only).
 
 ## Gateway API
 

@@ -16,7 +16,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from config import config
-from gateway_client import GatewayClient
+from core.gateway_client import GatewayClient
 
 logging.basicConfig(
     level=logging.INFO,

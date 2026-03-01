@@ -16,10 +16,11 @@ import os
 import re
 
 from agent_tooling import tool
+from agents.secret_manager import get_credential
 from neo4j import GraphDatabase
 
-NEO4J_URI = os.getenv("NEO4J_URI", "bolt://neo4j:7687")
-NEO4J_AUTH_ENV = os.getenv("NEO4J_AUTH", "neo4j/hivemind-memory")
+NEO4J_URI = get_credential("NEO4J_URI") or "bolt://neo4j:7687"
+NEO4J_AUTH_ENV = get_credential("NEO4J_AUTH") or "neo4j/hivemind-memory"
 _NEO4J_USER, _, _NEO4J_PASS = NEO4J_AUTH_ENV.partition("/")
 
 _driver = None

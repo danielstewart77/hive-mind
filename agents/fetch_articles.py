@@ -1,23 +1,7 @@
 import json
-import os
 from agent_tooling import tool
+from agents.secret_manager import get_credential
 from neo4j import GraphDatabase
-
-try:
-    import keyring
-except ImportError:
-    keyring = None
-
-_SERVICE_NAME = "hive-mind"
-
-
-def _get_credential(key: str) -> str | None:
-    """Get a credential from keyring, falling back to environment."""
-    if keyring:
-        val = keyring.get_password(_SERVICE_NAME, key)
-        if val:
-            return val
-    return os.getenv(key)
 
 
 @tool(tags=["news"])
@@ -30,9 +14,9 @@ def fetch_articles(criteria: str) -> str:
     Returns:
         JSON string with list of articles (title + content) or error message.
     """
-    uri = _get_credential("NEO4J_URI")
-    username = _get_credential("NEO4J_USERNAME") or os.getenv("USERNAME")
-    password = _get_credential("NEO4J_PASSWORD") or os.getenv("PASSWORD")
+    uri = get_credential("NEO4J_URI")
+    username = get_credential("NEO4J_USERNAME")
+    password = get_credential("NEO4J_PASSWORD")
 
     if not uri:
         return json.dumps({"error": "NEO4J_URI not configured in environment."})

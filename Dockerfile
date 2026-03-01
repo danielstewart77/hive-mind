@@ -6,7 +6,7 @@ WORKDIR /usr/src/app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip python3-venv python3-dev gcc libpq-dev curl \
     nodejs npm \
-    ffmpeg \
+    ffmpeg git \
     && rm -rf /var/lib/apt/lists/*
 
 RUN ln -sf /usr/bin/python3 /usr/bin/python

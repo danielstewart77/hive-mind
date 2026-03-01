@@ -1,6 +1,6 @@
-import os
 import requests
 from agent_tooling import tool
+from agents.secret_manager import get_credential
 
 
 @tool(tags=["money"])
@@ -16,7 +16,7 @@ def get_crypto_price(crypto_name: str) -> str:
     url = "https://api.coingecko.com/api/v3/simple/price"
     params = {"ids": crypto_name.lower(), "vs_currencies": "usd"}
     headers = {}
-    api_key = os.getenv("COINGECKO_API_KEY")
+    api_key = get_credential("COINGECKO_API_KEY")
     if api_key:
         headers["x-cg-pro-api-key"] = api_key
 

@@ -2,14 +2,15 @@ import json
 import os
 import requests
 from agent_tooling import tool
+from agents.secret_manager import get_credential
 
 _X_API_BASE = "https://api.twitter.com/2"
 
 
 def _headers() -> dict:
-    token = os.getenv("X_BEARER_TOKEN")
+    token = get_credential("X_BEARER_TOKEN")
     if not token:
-        raise ValueError("X_BEARER_TOKEN environment variable not set. Add it via set_secret.")
+        raise ValueError("X_BEARER_TOKEN not found in keyring or environment. Add it via set_secret.")
     return {"Authorization": f"Bearer {token}"}
 
 
