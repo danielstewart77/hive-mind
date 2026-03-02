@@ -44,7 +44,7 @@ Each client is a thin HTTP wrapper around the gateway. The gateway spawns Claude
 
 ### Self-Improvement
 
-When a user requests something no existing tool handles, Claude Code generates the tool code, writes it to `agents/` via the `create_tool` MCP tool, and the new tool is immediately available. If an API key is needed, it asks the user and stores it in the keyring.
+When a user requests something no existing tool handles, Claude Code generates the tool code and submits it via the `create_tool` MCP tool. The code is staged in `agents/staging/`, validated against a security blocklist (Ring 1 — AST validation), and if it passes, promoted to `agents/` and registered. The new tool runs in an isolated subprocess with a stripped environment (Ring 2 — process isolation), so dynamically created tools cannot access secrets or parent process memory unless explicitly granted. If an API key is needed, Claude asks the user and stores it in the keyring.
 
 ## Quick Start
 
@@ -137,7 +137,8 @@ hive_mind/
 │   ├── sessions.py               # Session manager (process pool + SQLite)
 │   ├── models.py                 # Model registry (static aliases + Ollama)
 │   ├── gateway_client.py         # Shared HTTP client for bots
-│   └── hitl.py                   # Human-in-the-loop approval
+│   ├── hitl.py                   # Human-in-the-loop approval
+│   └── tool_runner.py            # Subprocess isolation for dynamic tools (Ring 2)
 │
 ├── clients/                       # Thin client entry points
 │   ├── discord_bot.py            # Discord bot
@@ -153,7 +154,8 @@ hive_mind/
 │   ├── planka.py                 # Kanban board integration
 │   ├── notify.py                 # Telegram/email/voice notifications
 │   ├── reminders.py              # One-time reminder system
-│   ├── tool_creator.py           # Runtime tool creation
+│   ├── tool_creator.py           # Runtime tool creation (Ring 1 AST validation)
+│   ├── staging/                  # Staging area for new tools before validation
 │   └── ...
 │
 ├── specs/                         # Security specifications
@@ -161,8 +163,8 @@ hive_mind/
 │
 ├── documents/                     # Reference docs
 │   ├── DEVELOPMENT.md            # Developer guide
+│   ├── DIAGNOSTIC.md             # Outage post-mortem (2026-03-02)
 │   ├── SEC_REVIEW.md             # Security audit findings
-│   ├── SECURITY_MITIGATION.md    # Concentric ring hardening plan
 │   └── VOICE_IDENTITY.md         # Ada's voice character spec
 │
 ├── soul.md                        # Ada's identity (fallback stub)
@@ -184,15 +186,15 @@ The primary threat is **prompt injection** — an attacker influencing Claude's 
 
 The security architecture uses layered containment so that each ring limits what a successful exploit at the previous layer can achieve.
 
-**Ring 0 — Mount Restriction.** The `~/.claude` directory is bind-mounted into containers. Without restriction, a prompt injection could write a malicious skill file that persists across container restarts and executes with host-level permissions. Mitigation: mount only the credentials file, read-only. *(Status: designed, deployment pending.)*
+**Ring 0 — Secret Isolation (Keyring Migration).** All 10 application secrets are stored in the system keyring (`keyrings.alt.file.PlaintextKeyring`), not in environment variables or `.env` files. No Python service uses `env_file: .env`. The gateway server and scheduler include keyring-to-env bridges that inject only the specific keys each subprocess needs at startup. A minimal `.env` remains only for docker-compose interpolation consumed by third-party containers (Neo4j, Planka). *(Status: implemented.)*
 
-**Ring 1 — AST Validation.** Before any runtime-created tool is loaded, its source code is parsed with Python's `ast` module and checked against a blocklist of dangerous patterns (`eval`, `exec`, `socket`, `shell=True`). This is a first-line filter, not a sandbox. *(Status: designed, implementation pending.)*
+**Ring 1 — AST Validation.** Before any runtime-created tool is loaded, its source code is parsed with Python's `ast` module and checked against a blocklist of dangerous patterns. Blocked: `eval`, `exec`, `compile`, `__import__`, `breakpoint`, `os.system`, `subprocess shell=True`, and imports of `pty`, `ctypes`, `socket`, `multiprocessing`, `code`, `codeop`. Code is staged in `agents/staging/` first, validated, then promoted to `agents/`. Violations are rejected with full audit logging. *(Status: implemented.)*
 
-**Ring 2 — Process Isolation.** MCP tool invocations run in child subprocesses with a stripped environment rather than in the MCP server process. Prevents a malicious tool from reading API keys or tokens from the parent process memory. *(Status: designed.)*
+**Ring 2 — Process Isolation.** Dynamically created MCP tools run in child subprocesses with a stripped environment (`core/tool_runner.py`). The subprocess receives only 5 base env vars (PATH, PYTHONPATH, HOME, VIRTUAL_ENV, LANG) plus any explicitly declared via the `allowed_env` parameter on `create_tool`. A 30-second timeout kills runaway tools. First-party tools (hand-written, committed to the repo) continue to run in-process. *(Status: implemented.)*
 
-**Ring 3 — Container Hardening.** Docker Compose configuration additions that require no code changes: `no-new-privileges`, `cap_drop: ALL`, `read_only: true` with tmpfs for scratch space. Blocks local privilege escalation and filesystem modification. *(Status: designed, deployment pending.)*
+**Ring 3 — Container Hardening.** All Python services in `docker-compose.yml` run with `no-new-privileges`, `cap_drop: ALL`, `read_only: true`, and `tmpfs: /tmp`. Compatibility exceptions: the server container adds `tmpfs: /home/hivemind` so Claude Code can write its `.claude.json` config (the `.claude` bind mount layers on top, preserving keyring access); the voice-server uses a `whisper-cache` named volume at `/home/hivemind/.cache` for Whisper model downloads, and omits `cap_drop` to preserve NVIDIA GPU runtime access. *(Status: implemented.)*
 
-**Ring 4 — Named Volumes.** Replace the host bind mount (`.:/usr/src/app`) with named Docker volumes in production, eliminating the direct path from container writes to host filesystem. A development override file re-enables the bind mount for local work. *(Status: designed.)*
+**Ring 4 — Named Volumes.** The default `docker-compose.yml` includes host bind mounts for development. A separate `docker-compose.production.yml` (gitignored) removes them — use `docker compose -f docker-compose.yml -f docker-compose.production.yml up` for production, where code is baked into the image and the `.claude` bind mount remains for keyring access. *(Status: implemented.)*
 
 **Ring 5 — User Namespace Remapping.** Maps container UID 0 to an unprivileged host UID via Docker's `userns-remap`. If an attacker escapes the container via a kernel exploit, they arrive on the host as an unprivileged user. *(Status: designed.)*
 
@@ -209,7 +211,11 @@ Tool requests action → Gateway generates one-time token (in-memory only)
 
 The tool subprocess never sees the confirmation token. It cannot forge approval because the token is generated after the request, held in gateway memory only, and the approval signal must arrive via an external channel.
 
-Actions requiring HITL confirmation: sending email, deleting email, modifying calendar events, posting to social media, executing shell commands beyond tool scope.
+Tokens have a per-request TTL (default 180s, clamped to 30s–10min). Long-running operations like Docker builds use a 600s TTL. The Telegram bot's HTTP session uses an unlimited timeout so it never drops the SSE stream while waiting for HITL approval + operation completion.
+
+The session manager updates `last_active` on every event yielded during response processing, preventing the idle reaper from killing sessions during long-running operations (HITL waits, Docker builds, multi-tool chains).
+
+Actions requiring HITL confirmation: sending email, deleting email, modifying calendar events, posting to social media, Docker Compose operations, executing shell commands beyond tool scope.
 
 ### Secret Management
 
@@ -233,8 +239,7 @@ The project maintains an active security review cycle:
 
 1. **Security spec** (`specs/security.md`) defines hard limits (never exfiltrate secrets, never execute destructive commands without confirmation) and elevated-risk procedures
 2. **Security audit** (`documents/SEC_REVIEW.md`) tracks specific findings with severity ratings, remediation status, and verification steps
-3. **Mitigation plans** (`documents/SECURITY_MITIGATION.md`) detail the concentric ring architecture with implementation priority, effort estimates, and attack scenario walkthroughs
-4. **Planka board** tracks all security findings and mitigation rings as prioritized stories
+3. **Planka board** tracks all security findings and mitigation rings as prioritized stories
 
 New capabilities are evaluated against the threat model before deployment. The security posture is reviewed after any significant architectural change.
 

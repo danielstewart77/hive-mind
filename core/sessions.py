@@ -312,7 +312,7 @@ class SessionManager:
     # ------------------------------------------------------------------
     # Messaging
     # ------------------------------------------------------------------
-    async def send_message(self, session_id: str, content: str):
+    async def send_message(self, session_id: str, content: str, images: list[dict] | None = None):
         """Send a message and yield NDJSON response events."""
         lock = self._locks.setdefault(session_id, asyncio.Lock())
         async with lock:
@@ -341,10 +341,25 @@ class SessionManager:
             now_str = datetime.now(tz).strftime("%A, %B %-d, %Y at %-I:%M %p %Z")
             stamped_content = f"[{now_str}]\n{content}"
 
+            # Build message content — multimodal array when images present
+            if images:
+                message_content = [{"type": "text", "text": stamped_content}]
+                for img in images:
+                    message_content.append({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": img["media_type"],
+                            "data": img["data"],
+                        },
+                    })
+            else:
+                message_content = stamped_content
+
             # Write user message as NDJSON
             msg = json.dumps({
                 "type": "user",
-                "message": {"role": "user", "content": stamped_content},
+                "message": {"role": "user", "content": message_content},
             }) + "\n"
             proc.stdin.write(msg.encode())
             await proc.stdin.drain()
@@ -371,6 +386,9 @@ class SessionManager:
                 if seeded:
                     stamped_content = f"{seeded}\n\n{stamped_content}"
                     log.debug("Context seeding injected %d chars", len(seeded))
+                    # Update multimodal content if images were attached
+                    if images and isinstance(message_content, list):
+                        message_content[0]["text"] = stamped_content
 
             # Read response lines until "result"
             async for line in proc.stdout:
@@ -384,14 +402,21 @@ class SessionManager:
 
                 yield event
 
+                # Keep session alive while Claude is actively producing output
+                now = time.time()
+                await self._db.execute(
+                    "UPDATE sessions SET last_active = ? WHERE id = ?",
+                    (now, session_id),
+                )
+
                 if event.get("type") == "result":
                     claude_sid = event.get("session_id")
                     if claude_sid:
                         await self._db.execute(
-                            "UPDATE sessions SET claude_sid = ?, last_active = ? WHERE id = ?",
-                            (claude_sid, time.time(), session_id),
+                            "UPDATE sessions SET claude_sid = ? WHERE id = ?",
+                            (claude_sid, session_id),
                         )
-                        await self._db.commit()
+                    await self._db.commit()
                     break
 
     # ------------------------------------------------------------------

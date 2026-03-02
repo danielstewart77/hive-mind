@@ -16,6 +16,14 @@ services:
     restart: unless-stopped
     networks:
       - hivemind
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /home/hivemind:uid=1000,gid=1000
     # Gateway server — other services connect to this
     command: ["/opt/venv/bin/python3", "server.py"]
 
@@ -32,6 +40,13 @@ services:
       - voice-server
     networks:
       - hivemind
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
     environment:
       - HIVE_MIND_SERVER_URL=http://server:8420
       - VOICE_SERVER_URL=http://voice-server:8422
@@ -46,6 +61,14 @@ services:
     restart: always
     networks:
       - hivemind
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - ${HOST_PROJECT_DIR:-.}:/usr/src/app
+      - whisper-cache:/home/hivemind/.cache
     environment:
       - WHISPER_MODEL=medium
       - KOKORO_VOICE=bf_alice
@@ -71,6 +94,13 @@ services:
       - voice-server
     networks:
       - hivemind
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
     environment:
       - HIVE_MIND_SERVER_URL=http://server:8420
       - VOICE_SERVER_URL=http://voice-server:8422
@@ -90,6 +120,13 @@ services:
       - voice-server
     networks:
       - hivemind
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
     environment:
       - HIVE_MIND_SERVER_URL=http://server:8420
       - VOICE_SERVER_URL=http://voice-server:8422
@@ -157,3 +194,4 @@ volumes:
   neo4j-data:
   planka-db:
   planka-data:
+  whisper-cache:

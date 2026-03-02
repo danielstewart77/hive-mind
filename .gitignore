@@ -130,6 +130,8 @@ data/
 config.yaml
 .mcp.json
 .mcp.container.json
+docker-compose.override.yml
+docker-compose.production.yml
 
 # Local tool state
 .claude/

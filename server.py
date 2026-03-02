@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from config import config
-from core.hitl import hitl_store, TOKEN_TTL
+from core.hitl import hitl_store, DEFAULT_TTL
 from core.models import ModelRegistry, Provider
 from core.sessions import SessionManager
 
@@ -99,8 +99,14 @@ class CreateSessionRequest(BaseModel):
     surface_prompt: str | None = None
 
 
+class ImageAttachment(BaseModel):
+    data: str        # base64-encoded image bytes
+    media_type: str  # e.g. "image/jpeg", "image/png"
+
+
 class MessageRequest(BaseModel):
     content: str
+    images: list[ImageAttachment] = []
 
 
 class ModelSwitchRequest(BaseModel):
@@ -160,8 +166,10 @@ async def delete_session(session_id: str):
 # ---------------------------------------------------------------------------
 @app.post("/sessions/{session_id}/message")
 async def send_message(session_id: str, body: MessageRequest):
+    images = [{"media_type": img.media_type, "data": img.data} for img in body.images] if body.images else None
+
     async def event_stream():
-        async for event in session_mgr.send_message(session_id, body.content):
+        async for event in session_mgr.send_message(session_id, body.content, images=images):
             yield f"data: {json.dumps(event)}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
@@ -204,7 +212,8 @@ async def ws_stream(ws: WebSocket, session_id: str):
     try:
         while True:
             data = await ws.receive_json()
-            async for event in session_mgr.send_message(session_id, data["content"]):
+            images = data.get("images")
+            async for event in session_mgr.send_message(session_id, data["content"], images=images):
                 await ws.send_json(event)
     except WebSocketDisconnect:
         pass
@@ -369,6 +378,7 @@ async def _send_telegram_approval_request(token: str, summary: str):
 class HITLRequest(BaseModel):
     action: str
     summary: str
+    ttl: int = DEFAULT_TTL
 
 
 class HITLResponse(BaseModel):
@@ -379,14 +389,15 @@ class HITLResponse(BaseModel):
 @app.post("/hitl/request")
 async def hitl_request(body: HITLRequest):
     """Create an HITL approval request. Blocks until approved, denied, or timeout."""
-    token, entry = hitl_store.create(body.action, body.summary)
+    ttl = max(30, min(body.ttl, 600))  # clamp: 30s–10min
+    token, entry = hitl_store.create(body.action, body.summary, ttl=ttl)
 
     # Fire-and-forget: send Telegram DM to owner
     asyncio.create_task(_send_telegram_approval_request(token, body.summary))
 
     # Block until resolved or timeout
     try:
-        await asyncio.wait_for(entry.event.wait(), timeout=TOKEN_TTL)
+        await asyncio.wait_for(entry.event.wait(), timeout=ttl)
     except asyncio.TimeoutError:
         hitl_store.cleanup_expired()
 

@@ -13,16 +13,17 @@ import time
 
 log = logging.getLogger("hive-mind.hitl")
 
-TOKEN_TTL = 180  # seconds before a pending request expires
+DEFAULT_TTL = 180  # seconds before a pending request expires
 
 
 class PendingConfirmation:
-    __slots__ = ("action", "summary", "expires_at", "event", "approved")
+    __slots__ = ("action", "summary", "ttl", "expires_at", "event", "approved")
 
-    def __init__(self, action: str, summary: str):
+    def __init__(self, action: str, summary: str, ttl: int = DEFAULT_TTL):
         self.action = action
         self.summary = summary
-        self.expires_at = time.time() + TOKEN_TTL
+        self.ttl = ttl
+        self.expires_at = time.time() + ttl
         self.event = asyncio.Event()
         self.approved: bool | None = None
 
@@ -31,12 +32,12 @@ class HITLStore:
     def __init__(self):
         self._pending: dict[str, PendingConfirmation] = {}
 
-    def create(self, action: str, summary: str) -> tuple[str, PendingConfirmation]:
+    def create(self, action: str, summary: str, ttl: int = DEFAULT_TTL) -> tuple[str, PendingConfirmation]:
         """Create a new pending confirmation and return (token, entry)."""
         token = secrets.token_hex(6)  # 12 chars — fits Telegram command limit
-        entry = PendingConfirmation(action, summary)
+        entry = PendingConfirmation(action, summary, ttl=ttl)
         self._pending[token] = entry
-        log.info("HITL created: token=%s action=%s summary=%r", token, action, summary[:100])
+        log.info("HITL created: token=%s action=%s ttl=%ds summary=%r", token, action, ttl, summary[:100])
         return token, entry
 
     def resolve(self, token: str, approved: bool) -> bool:

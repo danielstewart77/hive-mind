@@ -136,16 +136,22 @@ async def _stream_to_message(
     chat_id: int,
     prompt: str,
     edit_interval: float = 2.0,
+    images: list[dict] | None = None,
+    voice: bool = False,
+    chat=None,
 ) -> list[str]:
     """Stream a gateway response, progressively editing sent as chunks arrive.
 
     Returns the final list of message chunks (after markdown stripping).
     Telegram-specific: strips markdown before each edit and final send.
+
+    When voice=True, the full response is converted to a single voice message
+    after streaming completes, so text arrives progressively and voice follows.
     """
     accumulated = ""
     last_edit = 0.0
 
-    async for text_chunk in gateway.query_stream(user_id, chat_id, prompt):
+    async for text_chunk in gateway.query_stream(user_id, chat_id, prompt, images=images):
         accumulated += ("\n\n" if accumulated else "") + text_chunk
         now = time.monotonic()
         if now - last_edit >= edit_interval:
@@ -164,6 +170,17 @@ async def _stream_to_message(
         await sent.edit_text(final_chunks[0])
     except Exception:
         pass
+
+    # Send one voice message with the complete response
+    if voice and chat:
+        full_text = _strip_markdown(accumulated).strip()
+        if full_text:
+            try:
+                ogg = await _tts(full_text)
+                await chat.send_voice(voice=io.BytesIO(ogg))
+            except Exception:
+                log.warning("Final voice TTS/send failed", exc_info=True)
+
     return final_chunks
 
 
@@ -396,8 +413,56 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------------------------
-# Voice message handler
+# Photo message handler
 # ---------------------------------------------------------------------------
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_allowed_user(update.effective_user.id):
+        return
+
+    # In group chats, only respond to @mentions in the caption
+    if update.effective_chat.type != "private":
+        bot_username = context.bot.username
+        caption = update.message.caption or ""
+        if f"@{bot_username}" not in caption:
+            return
+        caption = caption.replace(f"@{context.bot.username}", "").strip()
+    else:
+        caption = update.message.caption or ""
+
+    content = caption if caption else "Please analyze this image."
+
+    chat_id = update.effective_chat.id
+    lock = get_lock(chat_id)
+
+    if lock.locked():
+        await update.message.reply_text("Still processing your previous message, please wait.")
+        return
+
+    async with lock:
+        try:
+            import base64
+
+            # Download highest resolution photo
+            photo = update.message.photo[-1]
+            file = await photo.get_file()
+            photo_bytes = bytes(await file.download_as_bytearray())
+            b64_data = base64.b64encode(photo_bytes).decode("ascii")
+
+            images = [{"media_type": "image/jpeg", "data": b64_data}]
+
+            sent = await update.message.reply_text("\u2026")
+            final_chunks = await _stream_to_message(
+                sent, update.effective_user.id, chat_id, content, images=images,
+            )
+            for extra in final_chunks[1:]:
+                await update.effective_chat.send_message(extra)
+        except Exception:
+            log.exception("Error processing photo in chat %s", chat_id)
+            await update.message.reply_text(
+                "Something went wrong processing your image. Try again or use /clear."
+            )
+
+
 # ---------------------------------------------------------------------------
 # HITL approve/deny handlers
 # ---------------------------------------------------------------------------
@@ -437,8 +502,12 @@ async def _handle_hitl_response(update: Update, approved: bool):
         ) as resp:
             data = await resp.json()
             if resp.status == 200:
-                verdict = "Approved" if approved else "Denied"
-                await update.message.reply_text(f"{verdict}.")
+                if approved:
+                    await update.message.reply_text(
+                        "Approved. Operation in progress, please wait\u2026"
+                    )
+                else:
+                    await update.message.reply_text("Denied.")
             else:
                 await update.message.reply_text(f"Failed: {data.get('error', 'unknown error')}")
     except Exception:
@@ -469,7 +538,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # STT via voice-server
             try:
                 text = await _stt(ogg_bytes)
-            except Exception as e:
+            except Exception:
                 log.exception("STT failed in chat %s", chat_id)
                 await update.message.reply_text("Couldn't transcribe your audio.")
                 return
@@ -479,28 +548,14 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("Couldn't transcribe audio.")
                 return
 
-            # Query gateway (full response needed for TTS — no streaming display here)
-            try:
-                response = _strip_markdown(await gateway.query(update.effective_user.id, chat_id, text))
-            except Exception as e:
-                log.exception("Gateway query failed in chat %s", chat_id)
-                await update.message.reply_text("Something went wrong getting a response.")
-                return
-
-            # TTS via voice-server
-            try:
-                ogg_response = await _tts(response)
-            except Exception as e:
-                log.exception("TTS failed in chat %s", chat_id)
-                await update.message.reply_text("Got a response but couldn't synthesize audio.")
-                return
-
-            # Reply with voice note; fall back to text if voice delivery fails
-            try:
-                await update.message.reply_voice(voice=io.BytesIO(ogg_response))
-            except Exception:
-                log.exception("reply_voice failed for chat %s, falling back to text", chat_id)
-                await update.message.reply_text(response)
+            # Stream response: text updates live, voice chunks sent progressively
+            sent = await update.message.reply_text("\u2026")
+            final_chunks = await _stream_to_message(
+                sent, update.effective_user.id, chat_id, text,
+                voice=True, chat=update.effective_chat,
+            )
+            for extra in final_chunks[1:]:
+                await update.effective_chat.send_message(extra)
 
         except Exception:
             log.exception("Unexpected error in voice handler for chat %s", chat_id)
@@ -528,7 +583,7 @@ def _get_bot_token() -> str:
 
 async def _on_startup(app) -> None:
     global http, gateway
-    http = aiohttp.ClientSession()
+    http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=0, sock_read=0))
     gateway = GatewayClient(http, SERVER_URL, "telegram", surface_prompt=TELEGRAM_SURFACE_PROMPT)
     log.info(
         "Hive Mind Telegram bot started (gateway=%s, voice=%s)",
@@ -567,6 +622,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("skill", cmd_skill))
     app.add_handler(MessageHandler(filters.Regex(r"^/approve_\w+$"), cmd_hitl_approve))
     app.add_handler(MessageHandler(filters.Regex(r"^/deny_\w+$"), cmd_hitl_deny))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 

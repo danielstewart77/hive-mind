@@ -18,6 +18,22 @@ from apscheduler.triggers.cron import CronTrigger
 from config import config
 from core.gateway_client import GatewayClient
 
+# ---------------------------------------------------------------------------
+# Keyring → env bridge: the scheduler needs TELEGRAM_BOT_TOKEN in os.environ
+# for direct Telegram API calls (voice/text delivery).
+# ---------------------------------------------------------------------------
+_KEYRING_ENV_KEYS = ["TELEGRAM_BOT_TOKEN"]
+
+try:
+    import keyring as _kr
+    for _k in _KEYRING_ENV_KEYS:
+        if _k not in os.environ:
+            _v = _kr.get_password("hive-mind", _k)
+            if _v:
+                os.environ[_k] = _v
+except Exception:
+    pass
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",

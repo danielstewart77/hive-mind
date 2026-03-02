@@ -123,7 +123,8 @@ class GatewayClient:
             return await resp.json()
 
     async def query_stream(
-        self, user_id: int, client_ref: int | str, prompt: str
+        self, user_id: int, client_ref: int | str, prompt: str,
+        images: list[dict] | None = None,
     ) -> AsyncGenerator[str, None]:
         """Yield assistant text chunks from the gateway SSE response as they arrive.
 
@@ -139,9 +140,12 @@ class GatewayClient:
         # SSE streams can be very long-lived (HITL approval waits, docker
         # builds, etc.), so override the default aiohttp timeouts.
         sse_timeout = aiohttp.ClientTimeout(total=0, sock_read=0)
+        payload = {"content": prompt}
+        if images:
+            payload["images"] = images
         async with self.http.post(
             f"{self.server_url}/sessions/{session_id}/message",
-            json={"content": prompt},
+            json=payload,
             timeout=sse_timeout,
         ) as resp:
             buf = ""
@@ -168,9 +172,10 @@ class GatewayClient:
         if not yielded_any and result_fallback:
             yield result_fallback
 
-    async def query(self, user_id: int, client_ref: int | str, prompt: str) -> str:
+    async def query(self, user_id: int, client_ref: int | str, prompt: str,
+                    images: list[dict] | None = None) -> str:
         """Send a query and return the complete response text (non-streaming)."""
         texts: list[str] = []
-        async for text in self.query_stream(user_id, client_ref, prompt):
+        async for text in self.query_stream(user_id, client_ref, prompt, images=images):
             texts.append(text)
         return "\n\n".join(texts) or "(No response)"

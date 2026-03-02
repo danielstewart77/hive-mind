@@ -3,6 +3,7 @@ python-dotenv
 pyyaml
 requests
 agent_tooling
+openai
 setuptools
 keyring
 keyrings.alt

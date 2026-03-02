@@ -7,17 +7,22 @@
 git clone <repo>
 cd hive_mind
 cp config.yaml.example config.yaml   # fill in your IDs
-cp .env.example .env                  # fill in your secrets
+
+# Secrets go in the system keyring, not .env (see Secret Management below)
+# A minimal .env is only needed for docker-compose interpolation (Neo4j, Planka)
 
 # Run locally (outside Docker)
 python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-python server.py                       # gateway on :8420
-python scheduler.py                    # scheduled tasks
-python voice_server.py                 # voice on :8422
+python server.py                                  # gateway on :8420
+python -m clients.scheduler                       # scheduled tasks
+python -m voice.voice_server                      # voice on :8422
 
 # Run via Docker (from project root — important, see note below)
 docker compose up -d --build
+
+# Production (no host bind mounts):
+docker compose -f docker-compose.yml -f docker-compose.production.yml up -d --build
 ```
 
 **Docker rebuild note:** Always run `docker compose` from the project root
@@ -175,7 +180,7 @@ See `specs/security.md` for the full security policy and `documents/SEC_REVIEW.m
 for the current open findings.
 
 **Key rules:**
-- Secrets go in `.env` (gitignored) or system keyring — never in source code
+- Secrets go in the system keyring (service name `hive-mind`) — never in source code or `.env`
 - `config.yaml` is gitignored — it contains user IDs (Telegram, Discord)
 - Agent tools use `get_credential()` helper: keyring first, env var fallback
 - All `subprocess.run` calls must use list arguments (`shell=False`)
@@ -201,17 +206,32 @@ Alert file location: `/usr/src/app/data/alerts.log`
 
 ---
 
+## Secret Management
+
+All application secrets are stored in the **system keyring** (`keyrings.alt.file.PlaintextKeyring`),
+not in environment variables or `.env` files. Use `get_credential(key)` from
+`agents/secret_manager.py` to read them (keyring first, env fallback).
+
+The keyring data lives at `/home/hivemind/.claude/data/python_keyring/keyring_pass.cfg`,
+shared across containers via the `.claude` bind mount.
+
+A minimal `.env` remains only for docker-compose interpolation consumed by third-party
+containers (Neo4j, Planka) that cannot read from a keyring.
+
 ## Environment Variables Reference
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `DISCORD_BOT_TOKEN` | For Discord | Discord bot token |
-| `TELEGRAM_BOT_TOKEN` | For Telegram | Telegram bot token |
-| `ANTHROPIC_API_KEY` | Yes | Claude API key (auto-set by Claude Code) |
-| `NEO4J_URI` | For graph tools | Neo4j connection URI |
-| `NEO4J_USERNAME` | For graph tools | Neo4j username |
-| `NEO4J_PASSWORD` | For graph tools | Neo4j password |
-| `VOICE_SERVER_URL` | For voice | Default: `http://voice-server:8422` |
-| `HIVE_MIND_SERVER_URL` | For bots | Default: `http://server:8420` |
-| `KOKORO_VOICE` | Optional | TTS voice preset. Default: `bf_alice` |
-| `WHISPER_MODEL` | Optional | STT model size. Default: `medium` |
+These are set via `docker-compose.yml` `environment:` blocks, not `.env`:
+
+| Variable | Set on | Description |
+|----------|--------|-------------|
+| `HIVE_MIND_SERVER_URL` | Bot containers | Gateway URL. Default: `http://server:8420` |
+| `VOICE_SERVER_URL` | Bot containers | Voice server URL. Default: `http://voice-server:8422` |
+| `PYTHON_KEYRING_BACKEND` | All Python services | `keyrings.alt.file.PlaintextKeyring` |
+| `XDG_DATA_HOME` | All Python services | `/home/hivemind/.claude/data` |
+| `SESSIONS_DB_PATH` | Server | SQLite path. Default: `/usr/src/app/data/sessions.db` |
+| `WHISPER_MODEL` | Voice server | STT model size. Default: `medium` |
+| `KOKORO_VOICE` | Voice server | TTS voice preset. Default: `bf_alice` |
+
+Secrets in keyring (service name `hive-mind`): `DISCORD_BOT_TOKEN`, `TELEGRAM_BOT_TOKEN`,
+`NEO4J_AUTH`, `NEO4J_URI`, `HITL_INTERNAL_TOKEN`, `MCP_AUTH_TOKEN`, `X_BEARER_TOKEN`,
+`PLANKA_EMAIL`, `PLANKA_PASSWORD`, `PLANKA_URL`.
