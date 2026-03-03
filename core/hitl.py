@@ -40,14 +40,35 @@ class HITLStore:
         log.info("HITL created: token=%s action=%s ttl=%ds summary=%r", token, action, ttl, summary[:100])
         return token, entry
 
+    def status(self, token: str) -> dict:
+        """Check the status of a pending confirmation (non-blocking).
+
+        Returns dict with 'state': 'pending' | 'approved' | 'denied' | 'expired' | 'unknown'.
+        """
+        entry = self._pending.get(token)
+        if entry is None:
+            return {"state": "unknown"}
+        if time.time() > entry.expires_at:
+            return {"state": "expired"}
+        if entry.approved is True:
+            return {"state": "approved"}
+        if entry.approved is False:
+            return {"state": "denied"}
+        return {"state": "pending"}
+
     def resolve(self, token: str, approved: bool) -> bool:
-        """Resolve a pending confirmation. Returns False if token is invalid/expired."""
-        entry = self._pending.pop(token, None)
+        """Resolve a pending confirmation. Returns False if token is invalid/expired.
+
+        The entry stays in _pending so status() can still read the result.
+        cleanup_expired() handles removal.
+        """
+        entry = self._pending.get(token)
         if entry is None:
             log.warning("HITL resolve: unknown token %s", token)
             return False
         if time.time() > entry.expires_at:
             log.warning("HITL resolve: expired token %s", token)
+            self._pending.pop(token, None)
             return False
         entry.approved = approved
         entry.event.set()
@@ -55,14 +76,18 @@ class HITLStore:
         return True
 
     def cleanup_expired(self):
-        """Wake any waiters on expired tokens and purge them."""
+        """Wake any waiters on expired tokens and purge stale entries.
+
+        Resolved entries are kept until their TTL expires so polling
+        clients can still read the result via status().
+        """
         now = time.time()
         expired = [t for t, e in self._pending.items() if now > e.expires_at]
         for token in expired:
             entry = self._pending.pop(token)
-            entry.approved = None
-            entry.event.set()  # unblock the waiter
-            log.info("HITL expired: token=%s action=%s", token, entry.action)
+            if entry.approved is None:
+                entry.event.set()  # unblock the waiter
+                log.info("HITL expired: token=%s action=%s", token, entry.action)
 
 
 hitl_store = HITLStore()

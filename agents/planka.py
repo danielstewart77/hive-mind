@@ -20,6 +20,11 @@ from agents.secret_manager import get_credential
 
 PLANKA_URL = get_credential("PLANKA_URL") or "http://planka:1337"
 
+# Development board label IDs
+LABEL_ADA = "1720207192893686912"
+LABEL_DANIEL = "1720605269303493825"
+LABEL_LOW_PRIORITY = "1720174481533568072"
+
 
 def _get_token() -> str:
     """Authenticate with Planka and return a bearer token."""
@@ -87,6 +92,8 @@ def planka_get_board(board_id: str) -> str:
             "board": data["item"],
             "lists": included.get("lists", []),
             "cards": included.get("cards", []),
+            "labels": included.get("labels", []),
+            "cardLabels": included.get("cardLabels", []),
         })
     except Exception as e:
         return f"Error: {e}"
@@ -115,6 +122,7 @@ def planka_get_card(card_id: str) -> str:
         return json.dumps({
             "card": data["item"],
             "labels": included.get("labels", []),
+            "cardLabels": included.get("cardLabels", []),
             "tasks": included.get("tasks", []),
             "attachments": included.get("attachments", []),
         })

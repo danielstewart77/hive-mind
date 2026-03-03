@@ -153,3 +153,6 @@ voice_ref/
 *.swp
 backups/sessions.db.bak.20260228
 backups/reminders.db.bak.20260228
+
+# Internal documentation
+documents/

@@ -15,9 +15,30 @@ import json
 import os
 import re
 
+import requests
 from agent_tooling import tool
 from agents.secret_manager import get_credential
 from neo4j import GraphDatabase
+
+GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://localhost:8420")
+HITL_TTL = 180
+
+
+def _hitl_gate(summary: str) -> bool:
+    """Request HITL approval showing the exact graph operation to be written.
+
+    Returns True if approved, False if denied or timed out.
+    """
+    try:
+        resp = requests.post(
+            f"{GATEWAY_URL}/hitl/request",
+            json={"action": "graph_upsert", "summary": summary, "ttl": HITL_TTL},
+            timeout=HITL_TTL + 5,
+        )
+        resp.raise_for_status()
+        return resp.json().get("approved", False)
+    except Exception:
+        return False
 
 NEO4J_URI = get_credential("NEO4J_URI") or "bolt://neo4j:7687"
 NEO4J_AUTH_ENV = get_credential("NEO4J_AUTH") or "neo4j/hivemind-memory"
@@ -54,8 +75,7 @@ def _validate_relation(relation: str) -> str:
     return relation
 
 
-@tool(tags=["memory"])
-def graph_upsert(
+def graph_upsert_direct(
     entity_type: str,
     name: str,
     properties: str = "{}",
@@ -64,27 +84,13 @@ def graph_upsert(
     target_type: str = "",
     agent_id: str = "ada",
 ) -> str:
-    """Add or update a knowledge graph node, optionally linking it to another node.
-
-    Args:
-        entity_type: Node label — one of Person, Project, System, Concept, Preference.
-        name: Unique name for this entity (e.g. "Daniel", "Hive Mind").
-        properties: JSON string of extra properties to set (e.g. '{"role": "owner"}').
-        relation: Relationship type to create (e.g. MANAGES, WORKS_ON). Leave empty for node-only.
-        target_name: Name of the target node to link to. Required if relation is set.
-        target_type: Entity type of the target node (defaults to entity_type if omitted).
-        agent_id: Which agent's graph this belongs to (default "ada").
-
-    Returns:
-        JSON confirmation with node id and relationship created (if any).
-    """
+    """Write to the knowledge graph without HITL. Called by the epilogue after batch approval."""
     try:
         label = _validate_label(entity_type)
         props = json.loads(properties) if properties.strip() != "{}" else {}
 
         driver = _get_driver()
         with driver.session() as session:
-            # Upsert the node
             result = session.run(
                 f"""
                 MERGE (n:{label} {{name: $name, agent_id: $agent_id}})
@@ -122,6 +128,59 @@ def graph_upsert(
             "relation_created": rel_created,
             "relation": f"-[:{relation}]->({target_name})" if rel_created else None,
         })
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+@tool(tags=["memory"])
+def graph_upsert(
+    entity_type: str,
+    name: str,
+    properties: str = "{}",
+    relation: str = "",
+    target_name: str = "",
+    target_type: str = "",
+    agent_id: str = "ada",
+) -> str:
+    """Add or update a knowledge graph node, optionally linking it to another node.
+
+    Args:
+        entity_type: Node label — one of Person, Project, System, Concept, Preference.
+        name: Unique name for this entity (e.g. "Daniel", "Hive Mind").
+        properties: JSON string of extra properties to set (e.g. '{"role": "owner"}').
+        relation: Relationship type to create (e.g. MANAGES, WORKS_ON). Leave empty for node-only.
+        target_name: Name of the target node to link to. Required if relation is set.
+        target_type: Entity type of the target node (defaults to entity_type if omitted).
+        agent_id: Which agent's graph this belongs to (default "ada").
+
+    Returns:
+        JSON confirmation with node id and relationship created (if any).
+    """
+    try:
+        label = _validate_label(entity_type)
+        props = json.loads(properties) if properties.strip() != "{}" else {}
+
+        # Build HITL summary showing the exact graph operation
+        props_str = f" {json.dumps(props)}" if props else ""
+        node_repr = f"({label}:{name}{props_str})"
+        if relation and target_name:
+            tgt = target_type or entity_type
+            hitl_summary = f"{node_repr} --[{relation}]--> ({tgt}:{target_name})"
+        else:
+            hitl_summary = node_repr
+
+        if not _hitl_gate(hitl_summary):
+            return json.dumps({"upserted": False, "reason": "denied by HITL"})
+
+        return graph_upsert_direct(
+            entity_type=entity_type,
+            name=name,
+            properties=properties,
+            relation=relation,
+            target_name=target_name,
+            target_type=target_type,
+            agent_id=agent_id,
+        )
     except Exception as e:
         return json.dumps({"error": str(e)})
 

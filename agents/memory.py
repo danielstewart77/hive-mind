@@ -25,6 +25,27 @@ from neo4j import GraphDatabase
 
 logger = logging.getLogger(__name__)
 
+GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://localhost:8420")
+HITL_TTL = 180
+
+
+def _hitl_gate(content: str) -> bool:
+    """Request HITL approval showing the exact content to be stored.
+
+    Returns True if approved, False if denied or timed out.
+    """
+    try:
+        resp = requests.post(
+            f"{GATEWAY_URL}/hitl/request",
+            json={"action": "memory_store", "summary": content, "ttl": HITL_TTL},
+            timeout=HITL_TTL + 5,
+        )
+        resp.raise_for_status()
+        return resp.json().get("approved", False)
+    except Exception:
+        logger.exception("HITL gate failed — denying memory write by default")
+        return False
+
 # --- Lazy singletons ---
 _driver = None
 _index_created = False
@@ -73,24 +94,13 @@ def _embed(text: str) -> list[float]:
     return resp.json()["embeddings"][0]
 
 
-@tool(tags=["memory"])
-def memory_store(
+def memory_store_direct(
     content: str,
     tags: str = "",
     source: str = "user",
     agent_id: str = "ada",
 ) -> str:
-    """Store a memory as a semantic embedding in Neo4j.
-
-    Args:
-        content: The text to remember (experience, observation, fact, etc.)
-        tags: Comma-separated tags for categorisation (e.g. "session,preference")
-        source: Origin of the memory — "user", "tool", "session", "self"
-        agent_id: Which agent this memory belongs to (default "ada")
-
-    Returns:
-        JSON with the stored memory ID and confirmation.
-    """
+    """Write to vector memory without HITL. Called by the epilogue after batch approval."""
     try:
         embedding = _embed(content)
         driver = _get_driver()
@@ -118,6 +128,34 @@ def memory_store(
             record = result.single()
             memory_id = record["id"] if record else "unknown"
         return json.dumps({"stored": True, "id": memory_id, "agent_id": agent_id})
+    except Exception as e:
+        logger.exception("memory_store_direct failed")
+        return json.dumps({"error": str(e)})
+
+
+@tool(tags=["memory"])
+def memory_store(
+    content: str,
+    tags: str = "",
+    source: str = "user",
+    agent_id: str = "ada",
+) -> str:
+    """Store a memory as a semantic embedding in Neo4j.
+
+    Args:
+        content: The text to remember (experience, observation, fact, etc.)
+        tags: Comma-separated tags for categorisation (e.g. "session,preference")
+        source: Origin of the memory — "user", "tool", "session", "self"
+        agent_id: Which agent this memory belongs to (default "ada")
+
+    Returns:
+        JSON with the stored memory ID and confirmation.
+    """
+    try:
+        if not _hitl_gate(content):
+            return json.dumps({"stored": False, "reason": "denied by HITL"})
+
+        return memory_store_direct(content, tags=tags, source=source, agent_id=agent_id)
     except Exception as e:
         logger.exception("memory_store failed")
         return json.dumps({"error": str(e)})

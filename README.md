@@ -158,11 +158,11 @@ hive_mind/
 │   ├── staging/                  # Staging area for new tools before validation
 │   └── ...
 │
-├── specs/                         # Security specifications
-│   └── security.md               # Hard limits and elevated-risk policy
+├── specs/                         # Project specifications
+│   ├── security.md               # Hard limits and elevated-risk policy
+│   └── DEVELOPMENT.md            # Developer guide and conventions
 │
 ├── documents/                     # Reference docs
-│   ├── DEVELOPMENT.md            # Developer guide
 │   ├── DIAGNOSTIC.md             # Outage post-mortem (2026-03-02)
 │   ├── SEC_REVIEW.md             # Security audit findings
 │   └── VOICE_IDENTITY.md         # Ada's voice character spec

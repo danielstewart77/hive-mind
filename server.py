@@ -204,6 +204,20 @@ async def list_models():
 
 
 # ---------------------------------------------------------------------------
+# Epilogue sweep endpoint
+# ---------------------------------------------------------------------------
+@app.post("/epilogue/sweep")
+async def epilogue_sweep(x_hitl_internal: str = Header(None)):
+    """Trigger epilogue processing for all unprocessed dead sessions."""
+    if not config.hitl_internal_token:
+        return JSONResponse({"error": "HITL not configured"}, status_code=500)
+    if x_hitl_internal != config.hitl_internal_token:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    results = await session_mgr.sweep_epilogues()
+    return results
+
+
+# ---------------------------------------------------------------------------
 # WebSocket endpoint
 # ---------------------------------------------------------------------------
 @app.websocket("/sessions/{session_id}/stream")
@@ -222,7 +236,7 @@ async def ws_stream(ws: WebSocket, session_id: str):
 # ---------------------------------------------------------------------------
 # Slash command routing (used by clients)
 # ---------------------------------------------------------------------------
-SERVER_COMMANDS = {"/clear", "/model", "/autopilot", "/kill", "/status", "/sessions", "/switch", "/new"}
+SERVER_COMMANDS = {"/clear", "/model", "/autopilot", "/kill", "/status", "/sessions", "/switch", "/new", "/remember"}
 
 
 class CommandRequest(BaseModel):
@@ -266,15 +280,10 @@ async def _handle_command(cmd: str, parts: list[str], body: CommandRequest):
     if cmd == "/sessions":
         return await session_mgr.list_sessions(owner_ref=body.owner_ref)
 
-    if cmd == "/new":
-        return await session_mgr.create_session(
-            owner_type=body.owner_type,
-            owner_ref=body.owner_ref,
-            client_ref=body.client_ref,
-        )
-
-    if cmd == "/clear":
-        # Get active session, kill it, create new one
+    if cmd in ("/new", "/clear"):
+        # Kill active session (if any) then create a new one.
+        # Epilogue fires in the background via _trigger_epilogue_for_dead_sessions
+        # inside create_session — HITL will arrive in the new session context.
         active = await session_mgr.get_active_session(body.owner_type, body.client_ref)
         if active:
             await session_mgr.kill_session(active["id"])
@@ -328,6 +337,12 @@ async def _handle_command(cmd: str, parts: list[str], body: CommandRequest):
                 return {"error": f"Invalid session number: {target}"}
         return await session_mgr.kill_session(target)
 
+    if cmd == "/remember":
+        active = await session_mgr.get_active_session(body.owner_type, body.client_ref)
+        if not active:
+            return {"error": "No active session. Use /new first."}
+        return await session_mgr.force_epilogue(active["id"])
+
     return {"error": f"Unknown command: {cmd}"}
 
 
@@ -355,8 +370,8 @@ async def _send_telegram_approval_request(token: str, summary: str):
         log.error("HITL: cannot send Telegram DM — missing bot token or owner chat ID")
         return
 
-    # Truncate and escape summary for Telegram
-    safe_summary = summary[:200].replace("<", "&lt;").replace(">", "&gt;")
+    # Escape for Telegram HTML; truncate to stay within 4096-char message limit
+    safe_summary = summary[:4000].replace("<", "&lt;").replace(">", "&gt;")
     text = (
         f"Approval required:\n\n"
         f"{safe_summary}\n\n"
@@ -379,6 +394,7 @@ class HITLRequest(BaseModel):
     action: str
     summary: str
     ttl: int = DEFAULT_TTL
+    wait: bool = True  # False = return token immediately (non-blocking)
 
 
 class HITLResponse(BaseModel):
@@ -388,12 +404,19 @@ class HITLResponse(BaseModel):
 
 @app.post("/hitl/request")
 async def hitl_request(body: HITLRequest):
-    """Create an HITL approval request. Blocks until approved, denied, or timeout."""
+    """Create an HITL approval request.
+
+    With wait=True (default): blocks until approved, denied, or timeout.
+    With wait=False: returns the token immediately for polling via GET /hitl/status/{token}.
+    """
     ttl = max(30, min(body.ttl, 600))  # clamp: 30s–10min
     token, entry = hitl_store.create(body.action, body.summary, ttl=ttl)
 
     # Fire-and-forget: send Telegram DM to owner
     asyncio.create_task(_send_telegram_approval_request(token, body.summary))
+
+    if not body.wait:
+        return {"token": token, "state": "pending"}
 
     # Block until resolved or timeout
     try:
@@ -403,6 +426,12 @@ async def hitl_request(body: HITLRequest):
 
     approved = entry.approved is True
     return {"approved": approved}
+
+
+@app.get("/hitl/status/{token}")
+async def hitl_status(token: str):
+    """Poll the status of an HITL request. Returns state: pending|approved|denied|expired|unknown."""
+    return hitl_store.status(token)
 
 
 @app.post("/hitl/respond")

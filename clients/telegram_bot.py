@@ -218,7 +218,7 @@ def _format_status(data: dict) -> str:
 # ---------------------------------------------------------------------------
 # Server command dispatcher
 # ---------------------------------------------------------------------------
-SERVER_COMMANDS = {"/clear", "/model", "/autopilot", "/kill", "/status", "/sessions", "/switch", "/new"}
+SERVER_COMMANDS = {"/clear", "/model", "/autopilot", "/kill", "/status", "/sessions", "/switch", "/new", "/remember"}
 
 
 async def _handle_server_command(content: str, user_id: int, chat_id: int) -> str:
@@ -286,6 +286,13 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _auth_check(update):
         return
     msg = await _handle_server_command("/new", update.effective_user.id, update.effective_chat.id)
+    await update.message.reply_text(msg)
+
+
+async def cmd_remember(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _auth_check(update):
+        return
+    msg = await _handle_server_command("/remember", update.effective_user.id, update.effective_chat.id)
     await update.message.reply_text(msg)
 
 
@@ -618,6 +625,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("autopilot", cmd_autopilot))
     app.add_handler(CommandHandler("switch", cmd_switch))
     app.add_handler(CommandHandler("kill", cmd_kill))
+    app.add_handler(CommandHandler("remember", cmd_remember))
     app.add_handler(CommandHandler("skills", cmd_skills))
     app.add_handler(CommandHandler("skill", cmd_skill))
     app.add_handler(MessageHandler(filters.Regex(r"^/approve_\w+$"), cmd_hitl_approve))
