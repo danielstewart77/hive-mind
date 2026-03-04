@@ -1,8 +1,9 @@
 """Planning Genius skill wrapper as MCP tool."""
 
 import subprocess
-import sys
 from agent_tooling import tool
+
+from core.path_validation import validate_documents_path
 
 
 @tool(tags=["code"])
@@ -18,6 +19,11 @@ def planning_genius(documents_path: str) -> str:
     Returns:
         Success message with plan location or error details.
     """
+    try:
+        documents_path = validate_documents_path(documents_path)
+    except ValueError as e:
+        return f"Path validation failed: {e}"
+
     result = subprocess.run(
         ["claude", "run", "planning-genius", documents_path],
         capture_output=True,
