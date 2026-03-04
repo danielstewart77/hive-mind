@@ -6,7 +6,6 @@ Supports text messages and voice notes (STT/TTS via voice-server).
 All Claude Code interaction flows through the gateway — no SDK dependency.
 """
 
-import asyncio
 import io
 import json
 import logging
@@ -114,6 +113,32 @@ def _strip_markdown(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# JSON detection / sanitization helpers
+# ---------------------------------------------------------------------------
+def _looks_like_json(text: str) -> bool:
+    """Return True if text looks like a raw JSON object or array."""
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if not (stripped.startswith("{") or stripped.startswith("[")):
+        return False
+    try:
+        parsed = json.loads(stripped)
+        # Only consider dicts and lists as "JSON payloads" — not bare
+        # strings, numbers, booleans, or null.
+        return isinstance(parsed, (dict, list))
+    except (json.JSONDecodeError, ValueError):
+        return False
+
+
+def _sanitize_response(text: str) -> str:
+    """Replace raw JSON payloads with a human-readable confirmation."""
+    if _looks_like_json(text):
+        return "Done."
+    return text
+
+
+# ---------------------------------------------------------------------------
 # Message chunking (Telegram's 4096-char limit)
 # ---------------------------------------------------------------------------
 def _chunk_message(text: str) -> list[str]:
@@ -165,7 +190,7 @@ async def _stream_to_message(
     if not accumulated:
         accumulated = "(No response)"
 
-    final_chunks = _chunk_message(_strip_markdown(accumulated))
+    final_chunks = [_sanitize_response(c) for c in _chunk_message(_strip_markdown(accumulated))]
     try:
         await sent.edit_text(final_chunks[0])
     except Exception:
@@ -259,7 +284,7 @@ async def _handle_server_command(content: str, user_id: int, chat_id: int) -> st
     if cmd == "/kill":
         return f"Killed \"{result.get('summary', '?')}\" (status: {result.get('status')})"
 
-    return json.dumps(result, indent=2)
+    return "Done."
 
 
 # ---------------------------------------------------------------------------
@@ -570,6 +595,48 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------------------------
+# Catch-all for unregistered slash commands
+# ---------------------------------------------------------------------------
+async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Route unregistered slash commands as prompts to the gateway.
+
+    Any /command that is not handled by a registered CommandHandler falls
+    through to this catch-all.  The full command text (including the /)
+    is sent as a regular prompt so Claude can process it as a skill.
+    """
+    if not _is_allowed_user(update.effective_user.id):
+        await update.message.reply_text("Not authorized.")
+        return
+
+    content = update.message.text or ""
+
+    # Strip @botname suffix in group chats (e.g. /remember@botname → /remember)
+    if context.bot.username:
+        content = content.replace(f"@{context.bot.username}", "")
+    content = content.strip()
+
+    if not content:
+        return
+
+    chat_id = update.effective_chat.id
+    lock = get_lock(chat_id)
+
+    if lock.locked():
+        await update.message.reply_text("Still processing your previous message, please wait.")
+        return
+
+    async with lock:
+        try:
+            sent = await update.message.reply_text("\u2026")
+            final_chunks = await _stream_to_message(sent, update.effective_user.id, chat_id, content)
+            for extra in final_chunks[1:]:
+                await update.effective_chat.send_message(extra)
+        except Exception:
+            log.exception("Error processing unknown command in chat %s", chat_id)
+            await update.message.reply_text("Something went wrong. Try again or use /clear.")
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 def _get_bot_token() -> str:
@@ -633,5 +700,7 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    # Catch-all: any /command not matched above is routed as a prompt
+    app.add_handler(MessageHandler(filters.COMMAND, handle_unknown_command))
 
     app.run_polling()

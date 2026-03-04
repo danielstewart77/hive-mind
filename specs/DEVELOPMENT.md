@@ -113,6 +113,72 @@ asyncio.run(run_task(0))  # task index from config.yaml
 
 ---
 
+## Dependency Scanning (pip-audit)
+
+The project uses `pip-audit` to scan Python dependencies for known vulnerabilities.
+A pre-commit hook automatically runs the scan when `requirements.txt` or
+`requirements-dev.txt` are modified.
+
+### Setup
+
+Install dev dependencies (one-time):
+```bash
+pip install -r requirements-dev.txt
+```
+
+Install the pre-commit hook:
+```bash
+bash scripts/install-hooks.sh
+```
+
+### Manual Scanning
+
+```bash
+# Scan currently installed packages
+python core/dep_scan.py
+
+# Scan a specific requirements file
+pip-audit -r requirements.txt --format=json
+
+# Scan with verbose output
+pip-audit -r requirements.txt
+```
+
+### Interpreting Results
+
+pip-audit reports known vulnerabilities from the Python Packaging Advisory Database
+(PyPI) and the OSV database. Each finding includes:
+- **Package name and version** currently installed
+- **Vulnerability ID** (PYSEC-*, GHSA-*, CVE-*)
+- **Description** of the vulnerability
+- **Fix versions** (if available)
+
+### Remediation Process
+
+1. **Review the finding** -- read the vulnerability description and assess impact
+2. **Check fix availability** -- if fix versions are listed, upgrade:
+   ```bash
+   pip install package-name==<fix-version>
+   ```
+3. **Update requirements.txt** -- pin the fixed version
+4. **Re-run the scan** to confirm the fix:
+   ```bash
+   python core/dep_scan.py
+   ```
+5. **If no fix exists** -- evaluate whether the vulnerability applies to this
+   project's usage of the package. Document the decision and add a comment
+   in requirements.txt if the risk is accepted.
+
+### Bypassing the Hook (Emergency)
+
+If you must commit despite a vulnerability (e.g., no fix available yet):
+```bash
+git commit --no-verify -m "reason for bypass"
+```
+Document the bypass reason in the commit message.
+
+---
+
 ## Rollback Strategy
 
 ### Code rollback

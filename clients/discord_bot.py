@@ -7,7 +7,6 @@ All Claude Code interaction flows through the gateway — no SDK dependency.
 
 import asyncio
 import contextlib
-import json
 import logging
 import os
 import re
@@ -306,7 +305,7 @@ async def _handle_server_command(content: str, user_id: int, channel_id: int) ->
     if cmd == "/kill":
         return f"Killed session \"{result.get('summary', '?')}\" (status: {result.get('status')})"
 
-    return json.dumps(result, indent=2)
+    return "Done."
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,155 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 240" width="680" height="240">
+  <defs>
+    <!-- Background gradient: deep left, slightly lighter right -->
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#090912"/>
+      <stop offset="60%" stop-color="#0f0f1f"/>
+      <stop offset="100%" stop-color="#141428"/>
+    </linearGradient>
+
+    <!-- Gold glow for accent hexagons -->
+    <filter id="hex-glow">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- Subtle text glow -->
+    <filter id="text-glow">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- Fade mask: left edge transparent (leaves room for profile icon) -->
+    <linearGradient id="fade-left" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="white" stop-opacity="0"/>
+      <stop offset="25%" stop-color="white" stop-opacity="0.3"/>
+      <stop offset="45%" stop-color="white" stop-opacity="1"/>
+      <stop offset="100%" stop-color="white" stop-opacity="1"/>
+    </linearGradient>
+    <mask id="hex-mask">
+      <rect width="680" height="240" fill="url(#fade-left)"/>
+    </mask>
+
+    <!-- Vignette overlay -->
+    <radialGradient id="vignette" cx="60%" cy="50%" r="70%">
+      <stop offset="0%" stop-color="#c9a84c" stop-opacity="0.04"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0.5"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Base background -->
+  <rect width="680" height="240" fill="url(#bg)"/>
+
+  <!-- Hex grid layer (masked to fade left) -->
+  <g mask="url(#hex-mask)" opacity="1">
+
+    <!-- Row 1 (y≈30) -->
+    <polygon points="120,10 148,26 148,58 120,74 92,58 92,26"   fill="none" stroke="#c9a84c" stroke-width="0.6" stroke-opacity="0.12"/>
+    <polygon points="176,10 204,26 204,58 176,74 148,58 148,26" fill="none" stroke="#c9a84c" stroke-width="0.6" stroke-opacity="0.12"/>
+    <polygon points="232,10 260,26 260,58 232,74 204,58 204,26" fill="none" stroke="#c9a84c" stroke-width="0.6" stroke-opacity="0.12"/>
+    <polygon points="288,10 316,26 316,58 288,74 260,58 260,26" fill="none" stroke="#c9a84c" stroke-width="0.6" stroke-opacity="0.12"/>
+    <polygon points="344,10 372,26 372,58 344,74 316,58 316,26" fill="none" stroke="#c9a84c" stroke-width="0.8" stroke-opacity="0.18"/>
+    <polygon points="400,10 428,26 428,58 400,74 372,58 372,26" fill="none" stroke="#c9a84c" stroke-width="0.8" stroke-opacity="0.18"/>
+    <polygon points="456,10 484,26 484,58 456,74 428,58 428,26" fill="none" stroke="#c9a84c" stroke-width="0.8" stroke-opacity="0.22"/>
+    <polygon points="512,10 540,26 540,58 512,74 484,58 484,26" fill="none" stroke="#c9a84c" stroke-width="1.0" stroke-opacity="0.28"/>
+    <polygon points="568,10 596,26 596,58 568,74 540,58 540,26" fill="none" stroke="#c9a84c" stroke-width="1.0" stroke-opacity="0.28"/>
+    <polygon points="624,10 652,26 652,58 624,74 596,58 596,26" fill="none" stroke="#c9a84c" stroke-width="1.0" stroke-opacity="0.28"/>
+
+    <!-- Row 2 (offset, y≈74) -->
+    <polygon points="92,74  120,90 120,122 92,138 64,122 64,90"  fill="none" stroke="#c9a84c" stroke-width="0.6" stroke-opacity="0.10"/>
+    <polygon points="148,74 176,90 176,122 148,138 120,122 120,90" fill="none" stroke="#c9a84c" stroke-width="0.6" stroke-opacity="0.12"/>
+    <polygon points="204,74 232,90 232,122 204,138 176,122 176,90" fill="none" stroke="#c9a84c" stroke-width="0.6" stroke-opacity="0.14"/>
+    <polygon points="260,74 288,90 288,122 260,138 232,122 232,90" fill="none" stroke="#c9a84c" stroke-width="0.8" stroke-opacity="0.18"/>
+    <polygon points="316,74 344,90 344,122 316,138 288,122 288,90" fill="none" stroke="#c9a84c" stroke-width="0.8" stroke-opacity="0.20"/>
+    <polygon points="372,74 400,90 400,122 372,138 344,122 344,90" fill="none" stroke="#c9a84c" stroke-width="1.0" stroke-opacity="0.26"/>
+    <polygon points="428,74 456,90 456,122 428,138 400,122 400,90" fill="none" stroke="#c9a84c" stroke-width="1.0" stroke-opacity="0.30"/>
+    <polygon points="484,74 512,90 512,122 484,138 456,122 456,90" fill="none" stroke="#c9a84c" stroke-width="1.2" stroke-opacity="0.35"/>
+    <polygon points="540,74 568,90 568,122 540,138 512,122 512,90" fill="none" stroke="#c9a84c" stroke-width="1.2" stroke-opacity="0.35"/>
+    <polygon points="596,74 624,90 624,122 596,138 568,122 568,90" fill="none" stroke="#c9a84c" stroke-width="1.2" stroke-opacity="0.35"/>
+
+    <!-- Row 3 (y≈138) -->
+    <polygon points="120,138 148,154 148,186 120,202 92,186 92,154"  fill="none" stroke="#c9a84c" stroke-width="0.6" stroke-opacity="0.10"/>
+    <polygon points="176,138 204,154 204,186 176,202 148,186 148,154" fill="none" stroke="#c9a84c" stroke-width="0.6" stroke-opacity="0.12"/>
+    <polygon points="232,138 260,154 260,186 232,202 204,186 204,154" fill="none" stroke="#c9a84c" stroke-width="0.8" stroke-opacity="0.16"/>
+    <polygon points="288,138 316,154 316,186 288,202 260,186 260,154" fill="none" stroke="#c9a84c" stroke-width="0.8" stroke-opacity="0.20"/>
+    <polygon points="344,138 372,154 372,186 344,202 316,186 316,154" fill="none" stroke="#c9a84c" stroke-width="1.0" stroke-opacity="0.24"/>
+    <polygon points="400,138 428,154 428,186 400,202 372,186 372,154" fill="none" stroke="#c9a84c" stroke-width="1.0" stroke-opacity="0.28"/>
+    <polygon points="456,138 484,154 484,186 456,202 428,186 428,154" fill="none" stroke="#c9a84c" stroke-width="1.2" stroke-opacity="0.32"/>
+    <polygon points="512,138 540,154 540,186 512,202 484,186 484,154" fill="none" stroke="#c9a84c" stroke-width="1.2" stroke-opacity="0.35"/>
+    <polygon points="568,138 596,154 596,186 568,202 540,186 540,154" fill="none" stroke="#c9a84c" stroke-width="1.2" stroke-opacity="0.35"/>
+    <polygon points="624,138 652,154 652,186 624,202 596,186 596,154" fill="none" stroke="#c9a84c" stroke-width="1.2" stroke-opacity="0.35"/>
+
+    <!-- Row 4 (y≈202) -->
+    <polygon points="148,202 176,218 176,250 148,266 120,250 120,218" fill="none" stroke="#c9a84c" stroke-width="0.6" stroke-opacity="0.10"/>
+    <polygon points="204,202 232,218 232,250 204,266 176,250 176,218" fill="none" stroke="#c9a84c" stroke-width="0.6" stroke-opacity="0.12"/>
+    <polygon points="260,202 288,218 288,250 260,266 232,250 232,218" fill="none" stroke="#c9a84c" stroke-width="0.8" stroke-opacity="0.16"/>
+    <polygon points="316,202 344,218 344,250 316,266 288,250 288,218" fill="none" stroke="#c9a84c" stroke-width="0.8" stroke-opacity="0.18"/>
+    <polygon points="372,202 400,218 400,250 372,266 344,250 344,218" fill="none" stroke="#c9a84c" stroke-width="1.0" stroke-opacity="0.22"/>
+    <polygon points="428,202 456,218 456,250 428,266 400,250 400,218" fill="none" stroke="#c9a84c" stroke-width="1.0" stroke-opacity="0.26"/>
+    <polygon points="484,202 512,218 512,250 484,266 456,250 456,218" fill="none" stroke="#c9a84c" stroke-width="1.2" stroke-opacity="0.30"/>
+    <polygon points="540,202 568,218 568,250 540,266 512,250 512,218" fill="none" stroke="#c9a84c" stroke-width="1.2" stroke-opacity="0.32"/>
+    <polygon points="596,202 624,218 624,250 596,266 568,250 568,218" fill="none" stroke="#c9a84c" stroke-width="1.2" stroke-opacity="0.32"/>
+
+    <!-- Accent hexagons — brighter, glowing -->
+    <polygon points="484,74 512,90 512,122 484,138 456,122 456,90"
+      fill="#c9a84c" fill-opacity="0.04"
+      stroke="#c9a84c" stroke-width="1.5" stroke-opacity="0.7"
+      filter="url(#hex-glow)"/>
+    <polygon points="568,138 596,154 596,186 568,202 540,186 540,154"
+      fill="#c9a84c" fill-opacity="0.03"
+      stroke="#c9a84c" stroke-width="1.2" stroke-opacity="0.5"
+      filter="url(#hex-glow)"/>
+    <polygon points="400,10 428,26 428,58 400,74 372,58 372,26"
+      fill="#c9a84c" fill-opacity="0.03"
+      stroke="#c9a84c" stroke-width="1.0" stroke-opacity="0.45"
+      filter="url(#hex-glow)"/>
+
+    <!-- Node dots at select vertices -->
+    <circle cx="484" cy="74"  r="2.5" fill="#c9a84c" fill-opacity="0.8" filter="url(#hex-glow)"/>
+    <circle cx="512" cy="90"  r="1.5" fill="#c9a84c" fill-opacity="0.6"/>
+    <circle cx="456" cy="90"  r="1.5" fill="#c9a84c" fill-opacity="0.6"/>
+    <circle cx="568" cy="138" r="2.0" fill="#c9a84c" fill-opacity="0.7" filter="url(#hex-glow)"/>
+    <circle cx="400" cy="10"  r="1.5" fill="#c9a84c" fill-opacity="0.5"/>
+    <circle cx="624" cy="74"  r="1.5" fill="#c9a84c" fill-opacity="0.5"/>
+    <circle cx="540" cy="202" r="1.5" fill="#c9a84c" fill-opacity="0.5"/>
+
+    <!-- Connector lines between accent nodes -->
+    <line x1="484" y1="74" x2="568" y2="138" stroke="#c9a84c" stroke-width="0.8" stroke-opacity="0.25" stroke-dasharray="4 6"/>
+    <line x1="484" y1="74" x2="400" y2="10"  stroke="#c9a84c" stroke-width="0.6" stroke-opacity="0.18" stroke-dasharray="3 7"/>
+    <line x1="568" y1="138" x2="624" y2="74" stroke="#c9a84c" stroke-width="0.6" stroke-opacity="0.18" stroke-dasharray="3 7"/>
+  </g>
+
+  <!-- Vignette -->
+  <rect width="680" height="240" fill="url(#vignette)"/>
+
+  <!-- Text block — right-aligned, away from icon zone -->
+  <text
+    x="650" y="108"
+    text-anchor="end"
+    font-family="Georgia, 'Times New Roman', serif"
+    font-size="42"
+    letter-spacing="10"
+    fill="#c9a84c"
+    fill-opacity="0.90"
+    filter="url(#text-glow)"
+  >ADA</text>
+
+  <text
+    x="650" y="136"
+    text-anchor="end"
+    font-family="Georgia, 'Times New Roman', serif"
+    font-size="13"
+    letter-spacing="4"
+    fill="#c9a84c"
+    fill-opacity="0.45"
+  >ELDEST VOICE OF THE HIVE</text>
+
+  <!-- Thin horizontal rule under text -->
+  <line x1="390" y1="145" x2="650" y2="145" stroke="#c9a84c" stroke-width="0.5" stroke-opacity="0.3"/>
+</svg>

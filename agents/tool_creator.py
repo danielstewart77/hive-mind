@@ -9,14 +9,15 @@ Code is staged in agents/staging/ first, validated, then promoted to agents/.
 """
 
 import ast
-import logging
 import os
 import re
 import shutil
 import subprocess
 import sys
+
 from agent_tooling import tool, discover_tools, get_tool_function
 
+from core.audit import get_audit_logger
 from core.tool_runner import make_isolated_wrapper
 
 AGENTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)))
@@ -25,12 +26,8 @@ PROJECT_DIR = os.path.dirname(AGENTS_DIR)
 
 os.makedirs(STAGING_DIR, exist_ok=True)
 
-# Audit logger for security-sensitive operations
-_audit = logging.getLogger("hive_mind.audit")
-_audit.setLevel(logging.INFO)
-_audit_handler = logging.FileHandler(os.path.join(PROJECT_DIR, "audit.log"))
-_audit_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-_audit.addHandler(_audit_handler)
+# Audit logger — uses shared RotatingFileHandler from core.audit
+_audit = get_audit_logger()
 
 # Strict regex for pip package specifiers — blocks URLs, git repos, local paths
 _PACKAGE_RE = re.compile(r"^[a-zA-Z0-9._-]+(\[[\w,\s]+\])?(([=!<>~]=|[<>])[^\s]+)?$")

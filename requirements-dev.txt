@@ -1,0 +1,5 @@
+# Dev-only dependencies -- not installed in production containers
+pip-audit>=2.7.0
+pytest>=7.0
+mypy>=1.0
+ruff>=0.1.0
