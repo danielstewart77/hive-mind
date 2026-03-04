@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#1a1a2e"/>
+      <stop offset="100%" stop-color="#0d0d1a"/>
+    </radialGradient>
+    <radialGradient id="glow" cx="50%" cy="45%" r="40%">
+      <stop offset="0%" stop-color="#c9a84c" stop-opacity="0.15"/>
+      <stop offset="100%" stop-color="#c9a84c" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="soft-glow">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="strong-glow">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background circle -->
+  <circle cx="256" cy="256" r="256" fill="url(#bg)"/>
+
+  <!-- Subtle radial glow -->
+  <circle cx="256" cy="256" r="256" fill="url(#glow)"/>
+
+  <!-- Outer hexagon ring (hive structure) -->
+  <polygon
+    points="256,48 432,152 432,360 256,464 80,360 80,152"
+    fill="none"
+    stroke="#c9a84c"
+    stroke-width="2.5"
+    stroke-opacity="0.35"
+  />
+
+  <!-- Middle hexagon -->
+  <polygon
+    points="256,88 412,176 412,336 256,424 100,336 100,176"
+    fill="none"
+    stroke="#c9a84c"
+    stroke-width="1"
+    stroke-opacity="0.15"
+  />
+
+  <!-- Inner hexagon -->
+  <polygon
+    points="256,130 380,200 380,312 256,382 132,312 132,200"
+    fill="none"
+    stroke="#c9a84c"
+    stroke-width="1.5"
+    stroke-opacity="0.25"
+  />
+
+  <!-- Hexagon spokes (geometric precision) -->
+  <line x1="256" y1="48"  x2="256" y2="130" stroke="#c9a84c" stroke-width="1" stroke-opacity="0.2"/>
+  <line x1="432" y1="152" x2="380" y2="200" stroke="#c9a84c" stroke-width="1" stroke-opacity="0.2"/>
+  <line x1="432" y1="360" x2="380" y2="312" stroke="#c9a84c" stroke-width="1" stroke-opacity="0.2"/>
+  <line x1="256" y1="464" x2="256" y2="382" stroke="#c9a84c" stroke-width="1" stroke-opacity="0.2"/>
+  <line x1="80"  y1="360" x2="132" y2="312" stroke="#c9a84c" stroke-width="1" stroke-opacity="0.2"/>
+  <line x1="80"  y1="152" x2="132" y2="200" stroke="#c9a84c" stroke-width="1" stroke-opacity="0.2"/>
+
+  <!-- A glyph — constructed from precise geometric strokes -->
+  <!-- Left leg of A -->
+  <line x1="256" y1="158" x2="186" y2="338" stroke="#c9a84c" stroke-width="14" stroke-linecap="round" filter="url(#soft-glow)"/>
+  <!-- Right leg of A -->
+  <line x1="256" y1="158" x2="326" y2="338" stroke="#c9a84c" stroke-width="14" stroke-linecap="round" filter="url(#soft-glow)"/>
+  <!-- Crossbar -->
+  <line x1="210" y1="268" x2="302" y2="268" stroke="#c9a84c" stroke-width="10" stroke-linecap="round" filter="url(#soft-glow)"/>
+
+  <!-- Apex dot — the point of precision -->
+  <circle cx="256" cy="158" r="7" fill="#c9a84c" filter="url(#strong-glow)"/>
+
+  <!-- Corner accent dots at hexagon vertices -->
+  <circle cx="256" cy="48"  r="3" fill="#c9a84c" fill-opacity="0.5"/>
+  <circle cx="432" cy="152" r="3" fill="#c9a84c" fill-opacity="0.5"/>
+  <circle cx="432" cy="360" r="3" fill="#c9a84c" fill-opacity="0.5"/>
+  <circle cx="256" cy="464" r="3" fill="#c9a84c" fill-opacity="0.5"/>
+  <circle cx="80"  cy="360" r="3" fill="#c9a84c" fill-opacity="0.5"/>
+  <circle cx="80"  cy="152" r="3" fill="#c9a84c" fill-opacity="0.5"/>
+
+  <!-- Subtle bottom text -->
+  <text
+    x="256" y="410"
+    text-anchor="middle"
+    font-family="Georgia, 'Times New Roman', serif"
+    font-size="22"
+    letter-spacing="8"
+    fill="#c9a84c"
+    fill-opacity="0.55"
+  >ADA</text>
+</svg>

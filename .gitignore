@@ -122,6 +122,34 @@ ENV/
 env.bak/
 venv.bak/
 
+# Session database
+sessions.db
+data/
+
+# Project config (user-specific or contains sensitive IDs)
+config.yaml
+.mcp.json
+.mcp.container.json
+docker-compose.override.yml
+docker-compose.production.yml
+
+# Local tool state
+.claude/
+.obsidian/
+.log_agent_positions
+
+# Generated output artifacts
+*-report.md
+reports/
+
+# Personal notes
+jobs/
+
+# Future voice reference audio (binary, large)
+voice_ref/
+
 # Editor backups
 *~
 *.swp
+backups/sessions.db.bak.20260228
+backups/reminders.db.bak.20260228

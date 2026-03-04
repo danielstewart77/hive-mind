@@ -1,40 +1,41 @@
-# Use full Ubuntu image for package compatibility
-FROM ubuntu:latest
+FROM ubuntu:24.04
 
-# Set working directory
 WORKDIR /usr/src/app
 
-# Install Python and system dependencies
-RUN apt update && apt install -y \
+# System deps + Node.js (for Claude Code CLI)
+RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip python3-venv python3-dev gcc libpq-dev curl \
+    nodejs npm \
+    ffmpeg git \
     && rm -rf /var/lib/apt/lists/*
 
-# Create global python alias
-RUN ln -s /usr/bin/python3 /usr/bin/python
+RUN ln -sf /usr/bin/python3 /usr/bin/python
 
-# Ensure Python is available
-RUN python3 --version
+# Claude Code CLI
+RUN npm install -g @anthropic-ai/claude-code
 
-# Create and activate a virtual environment
-RUN python3 -m venv venv
+# Non-root user — UID 1000 matches typical host user for bind-mount perms
+# Ubuntu 24.04 ships with uid 1000 as 'ubuntu', so rename it
+RUN usermod -l hivemind -d /home/hivemind -m ubuntu \
+    && groupmod -n hivemind ubuntu \
+    && mkdir -p /home/hivemind/.claude /home/hivemind/.cache \
+    && chown -R hivemind:hivemind /home/hivemind
 
-# Upgrade pip inside the virtual environment
-RUN venv/bin/pip install --upgrade pip
-
-# Copy only the requirements file first (to cache dependencies)
+# Python venv + deps — installed to /opt/venv so bind mounts don't clobber it
+RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --upgrade pip
 COPY requirements.txt .
+RUN /opt/venv/bin/pip install --no-cache-dir --force-reinstall agent_tooling
+RUN /opt/venv/bin/pip install --no-cache-dir --force-reinstall -r requirements.txt
 
-# Manually install agent_tooling first (to avoid issues)
-RUN venv/bin/pip install --no-cache-dir --force-reinstall agent_tooling
+# Pre-download spaCy model (Kokoro/misaki needs it; can't pip-install at runtime as non-root)
+RUN /opt/venv/bin/python -m spacy download en_core_web_sm
 
-# Install all other dependencies
-RUN venv/bin/pip install --no-cache-dir --force-reinstall -r requirements.txt
-
-# Copy the rest of the application after dependencies are installed
+# App code (overridden by bind mount in dev, baked in for production)
 COPY . .
+RUN mkdir -p /usr/src/app/data \
+    && chown -R hivemind:hivemind /usr/src/app
 
-# Expose the application port
-EXPOSE 7977
+USER hivemind
 
-# Run the application with the virtual environment's Python
-CMD ["venv/bin/python3", "main.py"]
+EXPOSE 8420
+CMD ["/opt/venv/bin/python3", "server.py"]
