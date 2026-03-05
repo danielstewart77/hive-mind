@@ -234,6 +234,21 @@ async def memory_orphan_sweep(x_hitl_internal: str = Header(None)):
 
 
 # ---------------------------------------------------------------------------
+# Technical-Config Pruning Sweep
+# ---------------------------------------------------------------------------
+@app.post("/memory/techconfig-sweep")
+async def memory_techconfig_sweep(x_hitl_internal: str = Header(None)):
+    """Trigger technical-config pruning sweep to verify stored facts against codebase."""
+    if not config.hitl_internal_token:
+        return JSONResponse({"error": "HITL not configured"}, status_code=500)
+    if x_hitl_internal != config.hitl_internal_token:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from core.techconfig_pruning import sweep_techconfig_entries
+    results = await asyncio.to_thread(sweep_techconfig_entries)
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Epilogue sweep endpoint
 # ---------------------------------------------------------------------------
 @app.post("/epilogue/sweep")

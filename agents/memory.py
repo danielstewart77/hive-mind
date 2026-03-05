@@ -114,6 +114,7 @@ def memory_store_direct(
     as_of: str | None = None,
     expires_at: str | None = None,
     recurring: bool | None = None,
+    codebase_ref: str | None = None,
 ) -> str:
     """Write to vector memory without HITL. Called by the epilogue after batch approval."""
     try:
@@ -153,7 +154,8 @@ def memory_store_direct(
                     as_of: $as_of,
                     expires_at: $expires_at,
                     superseded: $superseded,
-                    recurring: $recurring
+                    recurring: $recurring,
+                    codebase_ref: $codebase_ref
                 })
                 RETURN elementId(m) AS id
                 """,
@@ -169,6 +171,7 @@ def memory_store_direct(
                 expires_at=meta.get("expires_at"),
                 superseded=meta.get("superseded", False),
                 recurring=meta.get("recurring"),
+                codebase_ref=codebase_ref,
             )
             record = result.single()
             memory_id = record["id"] if record else "unknown"
@@ -194,6 +197,7 @@ def memory_store(
     as_of: str | None = None,
     expires_at: str | None = None,
     recurring: bool | None = None,
+    codebase_ref: str | None = None,
 ) -> str:
     """Store a memory as a semantic embedding in Neo4j.
 
@@ -206,6 +210,9 @@ def memory_store(
         as_of: ISO datetime for when the fact was established (defaults to now)
         expires_at: ISO datetime for when a timed-event expires (required for timed-event)
         recurring: Explicit recurring flag for timed-events (overrides heuristic detection)
+        codebase_ref: Optional file path or symbol reference in the codebase this entry
+            is about (e.g. "core/sessions.py", "SessionManager.send_message"). Used by
+            the technical-config pruning pass to verify accuracy.
 
     Returns:
         JSON with the stored memory ID and confirmation.
@@ -223,6 +230,7 @@ def memory_store(
             as_of=as_of,
             expires_at=expires_at,
             recurring=recurring,
+            codebase_ref=codebase_ref,
         )
     except Exception as e:
         logger.exception("memory_store failed")
@@ -270,6 +278,7 @@ def memory_retrieve(
                            m.as_of AS as_of,
                            m.expires_at AS expires_at,
                            m.superseded AS superseded,
+                           m.codebase_ref AS codebase_ref,
                            score
                     ORDER BY score DESC
                     """,
@@ -295,6 +304,7 @@ def memory_retrieve(
                            m.as_of AS as_of,
                            m.expires_at AS expires_at,
                            m.superseded AS superseded,
+                           m.codebase_ref AS codebase_ref,
                            score
                     ORDER BY score DESC
                     """,
@@ -316,6 +326,7 @@ def memory_retrieve(
                     "as_of": record["as_of"],
                     "expires_at": record["expires_at"],
                     "superseded": record["superseded"],
+                    "codebase_ref": record["codebase_ref"],
                 }
                 for record in result
             ]

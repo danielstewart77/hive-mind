@@ -185,6 +185,26 @@ async def _orphan_sweep() -> None:
         log.exception("Orphan sweep failed")
 
 
+async def _techconfig_sweep() -> None:
+    """Call the gateway's techconfig sweep endpoint to verify technical-config entries."""
+    log.info("Running technical-config pruning sweep")
+    try:
+        timeout = aiohttp.ClientTimeout(total=300)
+        headers = {"X-HITL-Internal": config.hitl_internal_token or ""}
+        async with aiohttp.ClientSession(timeout=timeout) as http:
+            async with http.post(f"{SERVER_URL}/memory/techconfig-sweep", headers=headers) as resp:
+                data = await resp.json()
+                log.info(
+                    "Techconfig sweep: verified=%d, pruned=%d, flagged=%d, errors=%d",
+                    data.get("verified", 0),
+                    data.get("pruned", 0),
+                    data.get("flagged", 0),
+                    data.get("errors", 0),
+                )
+    except Exception:
+        log.exception("Technical-config pruning sweep failed")
+
+
 async def _epilogue_sweep() -> None:
     """Call the gateway's epilogue sweep endpoint to process unprocessed dead sessions."""
     log.info("Running epilogue sweep")
@@ -242,8 +262,13 @@ async def main() -> None:
     scheduler.add_job(_orphan_sweep, orphan_trigger, id="orphan-sweep")
     log.info("Scheduled orphan sweep @ 45 3 * * *")
 
+    # Add techconfig pruning sweep job (weekly, Sunday at 4:00 AM CT)
+    techconfig_trigger = CronTrigger(hour="4", minute="0", day_of_week="sun", timezone="America/Chicago")
+    scheduler.add_job(_techconfig_sweep, techconfig_trigger, id="techconfig-sweep")
+    log.info("Scheduled technical-config pruning sweep @ 0 4 * * 0")
+
     scheduler.start()
-    log.info("Scheduler running — %d job(s) active + epilogue sweep + memory expiry sweep + orphan sweep", len(config.scheduled_tasks))
+    log.info("Scheduler running — %d job(s) active + epilogue sweep + memory expiry sweep + orphan sweep + techconfig sweep", len(config.scheduled_tasks))
 
     await asyncio.Event().wait()  # run forever
 
