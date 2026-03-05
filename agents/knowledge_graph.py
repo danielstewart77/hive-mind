@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import time
 
 import requests
 from agent_tooling import tool
@@ -137,6 +138,9 @@ def graph_upsert_direct(
         # Merge metadata into props for the SET clause
         props.update(meta)
 
+        # Add created_at timestamp for orphan sweep tracking
+        props["created_at"] = time.time()
+
         driver = _get_driver()
         with driver.session() as session:
             _ensure_metadata_indexes(session)
@@ -222,8 +226,25 @@ def graph_upsert(
         JSON confirmation with node id and relationship created (if any).
     """
     try:
+        from core.kg_guards import check_disambiguation, check_orphan_guard, send_disambiguation_message
+
         label = _validate_label(entity_type)
         props = json.loads(properties) if properties.strip() != "{}" else {}
+
+        # Orphan guard: reject writes without edges
+        allowed, orphan_msg = check_orphan_guard(relation, target_name)
+        if not allowed:
+            return json.dumps({"upserted": False, "reason": orphan_msg})
+
+        # Disambiguation: check for similar/duplicate nodes
+        disambig = check_disambiguation(name, entity_type, agent_id)
+        if disambig.action == "disambiguate":
+            send_disambiguation_message(name, disambig.existing_nodes)
+            return json.dumps({
+                "upserted": False,
+                "reason": "disambiguation_required",
+                "similar_nodes": disambig.existing_nodes,
+            })
 
         # Build HITL summary showing the exact graph operation
         props_str = f" {json.dumps(props)}" if props else ""

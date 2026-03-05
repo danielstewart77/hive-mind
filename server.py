@@ -219,6 +219,21 @@ async def memory_expiry_sweep(x_hitl_internal: str = Header(None)):
 
 
 # ---------------------------------------------------------------------------
+# Orphan Sweep
+# ---------------------------------------------------------------------------
+@app.post("/memory/orphan-sweep")
+async def memory_orphan_sweep(x_hitl_internal: str = Header(None)):
+    """Trigger orphan node sweep for stale orphan graph nodes."""
+    if not config.hitl_internal_token:
+        return JSONResponse({"error": "HITL not configured"}, status_code=500)
+    if x_hitl_internal != config.hitl_internal_token:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from core.orphan_sweep import sweep_orphan_nodes
+    results = await asyncio.to_thread(sweep_orphan_nodes)
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Epilogue sweep endpoint
 # ---------------------------------------------------------------------------
 @app.post("/epilogue/sweep")

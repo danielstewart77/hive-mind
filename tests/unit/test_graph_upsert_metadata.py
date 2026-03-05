@@ -189,17 +189,26 @@ class TestGraphUpsertWithHITL:
     def test_graph_upsert_with_hitl_passes_data_class_through(self) -> None:
         mock_driver = _make_mock_driver()
         import agents.knowledge_graph as kg_mod
+        from core.kg_guards import DisambiguationResult
+
+        proceed_result = DisambiguationResult(
+            action="proceed", existing_nodes=[], message="No match."
+        )
 
         with (
             patch.object(kg_mod, "_hitl_gate", return_value=True),
             patch.object(kg_mod, "_get_driver", return_value=mock_driver),
             patch.object(kg_mod, "_kg_index_created", True),
+            patch("core.kg_guards.check_disambiguation", return_value=proceed_result),
         ):
             result_str = kg_mod.graph_upsert(
                 entity_type="Person",
                 name="Daniel",
                 data_class="person",
                 source="user",
+                relation="KNOWS_ABOUT",
+                target_name="Hive Mind",
+                target_type="Project",
             )
             result = json.loads(result_str)
             assert result["upserted"] is True

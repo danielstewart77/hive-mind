@@ -166,6 +166,25 @@ async def _memory_expiry_sweep() -> None:
         log.exception("Memory expiry sweep failed")
 
 
+async def _orphan_sweep() -> None:
+    """Call the gateway's orphan sweep endpoint to find stale orphan graph nodes."""
+    log.info("Running orphan sweep")
+    try:
+        timeout = aiohttp.ClientTimeout(total=120)
+        headers = {"X-HITL-Internal": config.hitl_internal_token or ""}
+        async with aiohttp.ClientSession(timeout=timeout) as http:
+            async with http.post(f"{SERVER_URL}/memory/orphan-sweep", headers=headers) as resp:
+                data = await resp.json()
+                log.info(
+                    "Orphan sweep: orphans_found=%d, notified=%s, errors=%d",
+                    data.get("orphans_found", 0),
+                    data.get("notified", False),
+                    data.get("errors", 0),
+                )
+    except Exception:
+        log.exception("Orphan sweep failed")
+
+
 async def _epilogue_sweep() -> None:
     """Call the gateway's epilogue sweep endpoint to process unprocessed dead sessions."""
     log.info("Running epilogue sweep")
@@ -218,8 +237,13 @@ async def main() -> None:
     scheduler.add_job(_memory_expiry_sweep, memory_expiry_trigger, id="memory-expiry-sweep")
     log.info("Scheduled memory expiry sweep @ 30 3 * * *")
 
+    # Add orphan sweep job (nightly at 3:45 AM CT)
+    orphan_trigger = CronTrigger(hour="3", minute="45", timezone="America/Chicago")
+    scheduler.add_job(_orphan_sweep, orphan_trigger, id="orphan-sweep")
+    log.info("Scheduled orphan sweep @ 45 3 * * *")
+
     scheduler.start()
-    log.info("Scheduler running — %d job(s) active + epilogue sweep + memory expiry sweep", len(config.scheduled_tasks))
+    log.info("Scheduler running — %d job(s) active + epilogue sweep + memory expiry sweep + orphan sweep", len(config.scheduled_tasks))
 
     await asyncio.Event().wait()  # run forever
 
