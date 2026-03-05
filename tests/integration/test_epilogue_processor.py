@@ -38,7 +38,7 @@ def _make_mock_db(claude_sid: str, epilogue_status=None):
         cursor = AsyncMock()
         if "SELECT" in query:
             cursor.fetchone = AsyncMock(
-                return_value={"epilogue_status": epilogue_status, "claude_sid": claude_sid}
+                return_value={"epilogue_status": epilogue_status, "claude_sid": claude_sid, "summary": "", "last_active": 0.0}
             )
         return cursor
 

@@ -341,6 +341,16 @@ _ENTITY_TYPE_MAP = {
     "place": "Concept",
 }
 
+# Map epilogue entity types to data classes for classification
+_ENTITY_DATA_CLASS_MAP = {
+    "person": "person",
+    "project": "technical-config",
+    "preference": "preference",
+    "system": "technical-config",
+    "concept": "session-log",
+    "place": "session-log",
+}
+
 
 async def write_to_memory(digest: dict) -> None:
     """Write digest data directly to knowledge graph and vector memory.
@@ -358,7 +368,8 @@ async def write_to_memory(digest: dict) -> None:
                 memory_store_direct,
                 content=topic,
                 tags="session,epilogue",
-                source="session_epilogue",
+                source="session",
+                data_class="session-log",
             )
             log.info("Stored memory: %.80s", topic)
         except Exception as e:
@@ -374,7 +385,9 @@ async def write_to_memory(digest: dict) -> None:
     # Write entities to knowledge graph
     for ent in entities:
         name = ent.get("name", "").strip()
-        entity_type = _ENTITY_TYPE_MAP.get(ent.get("type", "").lower(), "Concept")
+        raw_type = ent.get("type", "").lower()
+        entity_type = _ENTITY_TYPE_MAP.get(raw_type, "Concept")
+        data_class = _ENTITY_DATA_CLASS_MAP.get(raw_type, "session-log")
         context = ent.get("context", "")
         if not name:
             continue
@@ -385,6 +398,8 @@ async def write_to_memory(digest: dict) -> None:
                 entity_type=entity_type,
                 name=name,
                 properties=props,
+                source="session",
+                data_class=data_class,
             )
             log.info("Upserted graph node: %s (%s)", name, entity_type)
         except Exception as e:
@@ -397,6 +412,12 @@ async def write_to_memory(digest: dict) -> None:
         to_name = rel.get("to", "").strip()
         if not (from_name and edge and to_name):
             continue
+        # Infer data_class from the source entity
+        from_raw_type = next(
+            (e.get("type", "").lower() for e in entities if e.get("name") == from_name),
+            "",
+        )
+        rel_data_class = _ENTITY_DATA_CLASS_MAP.get(from_raw_type, "session-log")
         try:
             await asyncio.to_thread(
                 graph_upsert_direct,
@@ -405,6 +426,8 @@ async def write_to_memory(digest: dict) -> None:
                 relation=edge,
                 target_name=to_name,
                 target_type=entity_type_map.get(to_name, "Concept"),
+                source="session",
+                data_class=rel_data_class,
             )
             log.info("Created relationship: %s -[%s]-> %s", from_name, edge, to_name)
         except Exception as e:

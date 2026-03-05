@@ -80,11 +80,9 @@ class TestValidateDataClass:
         with pytest.raises(ValueError, match="unknown-class"):
             validate_data_class("unknown-class")
 
-    def test_validate_data_class_none_warns(self, caplog: pytest.LogCaptureFixture) -> None:
-        with caplog.at_level(logging.WARNING):
-            result = validate_data_class(None)
-        assert result is None
-        assert any("deprecat" in msg.lower() for msg in caplog.messages)
+    def test_validate_data_class_none_raises_value_error(self) -> None:
+        with pytest.raises(ValueError, match="required"):
+            validate_data_class(None)
 
     def test_validate_data_class_empty_string_raises(self) -> None:
         with pytest.raises(ValueError):
@@ -130,14 +128,9 @@ class TestBuildMetadata:
         assert meta["data_class"] == "timed-event"
         assert meta["tier"] == "reviewable"
 
-    def test_build_metadata_without_data_class_returns_minimal(self) -> None:
-        meta = build_metadata(data_class=None, source="user")
-        assert meta["source"] == "user"
-        assert "as_of" in meta
-        # When data_class is None, tier and data_class should not be in metadata
-        # or should be None
-        assert meta.get("data_class") is None
-        assert meta.get("tier") is None
+    def test_build_metadata_without_data_class_raises_value_error(self) -> None:
+        with pytest.raises(ValueError, match="required"):
+            build_metadata(data_class=None, source="user")
 
     def test_build_metadata_as_of_defaults_to_now(self) -> None:
         before = datetime.now(timezone.utc).isoformat()

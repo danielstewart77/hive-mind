@@ -82,25 +82,14 @@ class TestMemoryStoreDirectMetadata:
             assert result["stored"] is False
             assert "unknown-class" in result.get("prompt", "").lower() or "unknown-class" in result.get("error", "").lower()
 
-    def test_memory_store_direct_without_data_class_logs_deprecation(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        mock_driver = _make_mock_driver()
+    def test_memory_store_direct_without_data_class_raises_type_error(self) -> None:
         import agents.memory as mem_mod
 
-        with (
-            patch.object(mem_mod, "_get_driver", return_value=mock_driver),
-            patch.object(mem_mod, "_embed", return_value=[0.1] * 4096),
-            patch.object(mem_mod, "_index_created", True),
-            caplog.at_level(logging.WARNING),
-        ):
-            result_str = mem_mod.memory_store_direct(
+        with pytest.raises(TypeError):
+            mem_mod.memory_store_direct(
                 content="something without class",
                 source="user",
             )
-            result = json.loads(result_str)
-            assert result["stored"] is True  # Backward compat
-            assert any("deprecat" in msg.lower() for msg in caplog.messages)
 
     def test_memory_store_direct_timed_event_without_expires_returns_error(self) -> None:
         mock_driver = _make_mock_driver()

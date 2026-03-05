@@ -17,7 +17,7 @@ class TestProcessSkipsAlreadyProcessed:
         mock_db = AsyncMock()
         mock_cursor = AsyncMock()
         mock_cursor.fetchone = AsyncMock(
-            return_value={"epilogue_status": "completed", "claude_sid": "abc"}
+            return_value={"epilogue_status": "completed", "claude_sid": "abc", "summary": "", "last_active": 0.0}
         )
         mock_db.execute = AsyncMock(return_value=mock_cursor)
 
@@ -50,7 +50,7 @@ class TestProcessMarksLowSignalAsSkipped:
             cursor = AsyncMock()
             if "SELECT" in query:
                 cursor.fetchone = AsyncMock(
-                    return_value={"epilogue_status": None, "claude_sid": "claude-sid-123"}
+                    return_value={"epilogue_status": None, "claude_sid": "claude-sid-123", "summary": "", "last_active": 0.0}
                 )
             return cursor
 
@@ -92,7 +92,7 @@ class TestProcessStatusTransitions:
             cursor = AsyncMock()
             if "SELECT" in query:
                 cursor.fetchone = AsyncMock(
-                    return_value={"epilogue_status": None, "claude_sid": "claude-sid-456"}
+                    return_value={"epilogue_status": None, "claude_sid": "claude-sid-456", "summary": "", "last_active": 0.0}
                 )
             elif "UPDATE" in query and "epilogue_status" in query and params:
                 # Track status updates
@@ -145,7 +145,7 @@ class TestProcessStatusTransitions:
             cursor = AsyncMock()
             if "SELECT" in query:
                 cursor.fetchone = AsyncMock(
-                    return_value={"epilogue_status": None, "claude_sid": "claude-sid-789"}
+                    return_value={"epilogue_status": None, "claude_sid": "claude-sid-789", "summary": "", "last_active": 0.0}
                 )
             return cursor
 
@@ -192,7 +192,7 @@ class TestProcessStatusTransitions:
             cursor = AsyncMock()
             if "SELECT" in query:
                 cursor.fetchone = AsyncMock(
-                    return_value={"epilogue_status": None, "claude_sid": "claude-sid-101"}
+                    return_value={"epilogue_status": None, "claude_sid": "claude-sid-101", "summary": "", "last_active": 0.0}
                 )
             return cursor
 

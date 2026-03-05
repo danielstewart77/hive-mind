@@ -105,11 +105,12 @@ def _embed(text: str) -> list[float]:
 
 
 def memory_store_direct(
+    *,
     content: str,
+    data_class: str,
     tags: str = "",
     source: str = "user",
     agent_id: str = "ada",
-    data_class: str | None = None,
     as_of: str | None = None,
     expires_at: str | None = None,
 ) -> str:
@@ -176,11 +177,12 @@ def memory_store_direct(
 
 @tool(tags=["memory"])
 def memory_store(
+    *,
     content: str,
+    data_class: str,
     tags: str = "",
     source: str = "user",
     agent_id: str = "ada",
-    data_class: str | None = None,
     as_of: str | None = None,
     expires_at: str | None = None,
 ) -> str:
@@ -188,10 +190,10 @@ def memory_store(
 
     Args:
         content: The text to remember (experience, observation, fact, etc.)
+        data_class: Memory data class (e.g. "person", "preference", "technical-config"). Required.
         tags: Comma-separated tags for categorisation (e.g. "session,preference")
-        source: Origin of the memory — "user", "tool", "session", "self"
+        source: Origin of the memory -- "user", "tool", "session", "self"
         agent_id: Which agent this memory belongs to (default "ada")
-        data_class: Memory data class (e.g. "person", "preference", "technical-config")
         as_of: ISO datetime for when the fact was established (defaults to now)
         expires_at: ISO datetime for when a timed-event expires (required for timed-event)
 
@@ -203,7 +205,7 @@ def memory_store(
             return json.dumps({"stored": False, "reason": "denied by HITL"})
 
         return memory_store_direct(
-            content,
+            content=content,
             tags=tags,
             source=source,
             agent_id=agent_id,

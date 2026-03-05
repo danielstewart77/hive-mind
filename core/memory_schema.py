@@ -51,27 +51,49 @@ DATA_CLASS_REGISTRY: dict[str, DataClassDef] = {
 VALID_SOURCES = {"user", "tool", "session", "self"}
 VALID_TIERS = {"reviewable", "durable"}
 
+def register_new_class(
+    class_name: str,
+    tier: str = "reviewable",
+    tags: list[str] | None = None,
+) -> DataClassDef:
+    """Register a new data class at runtime.
 
-def validate_data_class(data_class: str | None) -> DataClassDef | None:
+    Used during backfill when Daniel classifies entries into a new class
+    that doesn't exist in the registry yet.
+
+    Args:
+        class_name: Name for the new class (e.g. "shopping-list").
+        tier: "reviewable" or "durable" (default: "reviewable").
+        tags: Optional tag list; defaults to [tier, class_name].
+
+    Returns:
+        The newly created DataClassDef.
+    """
+    if tags is None:
+        tags = [tier, class_name]
+    new_def = DataClassDef(name=class_name, tier=tier, tags=tags)
+    DATA_CLASS_REGISTRY[class_name] = new_def
+    logger.info("Registered new data class: %s (tier=%s)", class_name, tier)
+    return new_def
+
+
+def validate_data_class(data_class: str | None) -> DataClassDef:
     """Validate a data class name against the registry.
 
     Args:
-        data_class: The data class name to validate, or None for backward compat.
+        data_class: The data class name to validate. Required -- cannot be None.
 
     Returns:
-        The DataClassDef for known classes, or None when data_class is None.
+        The DataClassDef for the given class name.
 
     Raises:
-        ValueError: When data_class is a non-None string not in the registry.
+        ValueError: When data_class is None or not in the registry.
     """
     if data_class is None:
-        logger.warning(
-            "data_class not provided -- this is deprecated and will become "
-            "required in a future release. Pass a valid data_class from the "
-            "registry: %s",
-            sorted(DATA_CLASS_REGISTRY.keys()),
+        raise ValueError(
+            "data_class is required. Pass a valid data_class from the "
+            f"registry: {sorted(DATA_CLASS_REGISTRY.keys())}"
         )
-        return None
 
     if data_class not in DATA_CLASS_REGISTRY:
         raise ValueError(
@@ -113,7 +135,7 @@ def build_metadata(
     Validates data_class and source, then assembles the metadata fields.
 
     Args:
-        data_class: The data class name, or None for backward compat.
+        data_class: The data class name. Required -- cannot be None.
         source: Origin of the entry ("user", "tool", "session", "self").
         as_of: ISO datetime string; defaults to now if not provided.
         expires_at: ISO datetime string; required for timed-event class.
@@ -123,7 +145,7 @@ def build_metadata(
         superseded, and optionally expires_at.
 
     Raises:
-        ValueError: On invalid data_class, source, or missing expires_at
+        ValueError: On invalid/missing data_class, source, or missing expires_at
             for timed-event.
     """
     validate_source(source)
@@ -133,26 +155,19 @@ def build_metadata(
         as_of = datetime.now(timezone.utc).isoformat()
 
     meta: dict = {
+        "data_class": cls_def.name,
+        "tier": cls_def.tier,
         "as_of": as_of,
         "source": source,
         "superseded": False,
     }
 
-    if cls_def is not None:
-        meta["data_class"] = cls_def.name
-        meta["tier"] = cls_def.tier
-
-        if cls_def.requires_expires and not expires_at:
-            raise ValueError(
-                f"data_class {data_class!r} requires expires_at to be set "
-                f"(an ISO datetime for when the event occurs)."
-            )
-        if expires_at:
-            meta["expires_at"] = expires_at
-    else:
-        meta["data_class"] = None
-        meta["tier"] = None
-        if expires_at:
-            meta["expires_at"] = expires_at
+    if cls_def.requires_expires and not expires_at:
+        raise ValueError(
+            f"data_class {data_class!r} requires expires_at to be set "
+            f"(an ISO datetime for when the event occurs)."
+        )
+    if expires_at:
+        meta["expires_at"] = expires_at
 
     return meta

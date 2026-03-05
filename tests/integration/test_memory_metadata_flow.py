@@ -1,4 +1,4 @@
-"""Integration tests for memory metadata flow — store and retrieve with metadata."""
+"""Integration tests for memory metadata flow -- store and retrieve with metadata."""
 
 import json
 import sys
@@ -94,38 +94,46 @@ class TestStoreRetrieveMetadataFlow:
             assert memory["tier"] == "durable"
 
 
-class TestEpilogueWriteWithoutDataClass:
-    """Tests that epilogue write_to_memory still works during transition period."""
+class TestEpilogueWriteRequiresDataClass:
+    """Tests that epilogue write_to_memory now passes data_class for all writes."""
 
-    def test_epilogue_write_to_memory_without_data_class_still_works(self) -> None:
-        """Verify that write_to_memory (which calls memory_store_direct and
-        graph_upsert_direct without data_class) still succeeds."""
+    def test_epilogue_write_to_memory_passes_data_class(self) -> None:
+        """Verify that write_to_memory passes data_class for all operations."""
+        import asyncio
         import agents.memory as mem_mod
         import agents.knowledge_graph as kg_mod
 
-        mock_driver = _make_mock_driver()
+        mem_calls: list[dict] = []
+        kg_calls: list[dict] = []
+
+        def capture_mem(**kwargs):
+            mem_calls.append(kwargs)
+            return json.dumps({"stored": True, "id": "test", "data_class": kwargs.get("data_class")})
+
+        def capture_kg(**kwargs):
+            kg_calls.append(kwargs)
+            return json.dumps({"upserted": True, "id": "test"})
+
+        digest = {
+            "topics": ["Session covered dark mode preferences."],
+            "entities": [
+                {"name": "Daniel", "type": "person", "context": "Owner of Hive Mind"},
+            ],
+            "relationships": [],
+        }
 
         with (
-            patch.object(mem_mod, "_get_driver", return_value=mock_driver),
-            patch.object(mem_mod, "_embed", return_value=[0.1] * 4096),
-            patch.object(mem_mod, "_index_created", True),
-            patch.object(kg_mod, "_get_driver", return_value=mock_driver),
-            patch.object(kg_mod, "_kg_index_created", True),
+            patch("agents.memory.memory_store_direct", side_effect=capture_mem),
+            patch("agents.knowledge_graph.graph_upsert_direct", side_effect=capture_kg),
         ):
-            # Simulate epilogue calling memory_store_direct without data_class
-            result_str = mem_mod.memory_store_direct(
-                content="Session 48ec54d4 was about dark mode preferences.",
-                tags="session,epilogue",
-                source="session",
-            )
-            result = json.loads(result_str)
-            assert result["stored"] is True
+            from core.epilogue import write_to_memory
+            asyncio.run(write_to_memory(digest))
 
-            # Simulate epilogue calling graph_upsert_direct without data_class
-            result_str = kg_mod.graph_upsert_direct(
-                entity_type="Person",
-                name="Daniel",
-                properties='{"context": "prefers dark mode"}',
-            )
-            result = json.loads(result_str)
-            assert result["upserted"] is True
+        # Memory store should have data_class="session-log"
+        assert len(mem_calls) == 1
+        assert mem_calls[0]["data_class"] == "session-log"
+        assert mem_calls[0]["source"] == "session"
+
+        # Graph upsert should have data_class="person"
+        assert len(kg_calls) == 1
+        assert kg_calls[0]["data_class"] == "person"

@@ -81,24 +81,14 @@ class TestGraphUpsertDirectMetadata:
             assert "error" in result
             assert "unknown-class" in result["error"].lower()
 
-    def test_graph_upsert_direct_without_data_class_logs_deprecation(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        mock_driver = _make_mock_driver()
+    def test_graph_upsert_direct_without_data_class_raises_type_error(self) -> None:
         import agents.knowledge_graph as kg_mod
 
-        with (
-            patch.object(kg_mod, "_get_driver", return_value=mock_driver),
-            patch.object(kg_mod, "_kg_index_created", True),
-            caplog.at_level(logging.WARNING),
-        ):
-            result_str = kg_mod.graph_upsert_direct(
+        with pytest.raises(TypeError):
+            kg_mod.graph_upsert_direct(
                 entity_type="Person",
                 name="Daniel",
             )
-            result = json.loads(result_str)
-            assert result["upserted"] is True  # Backward compat
-            assert any("deprecat" in msg.lower() for msg in caplog.messages)
 
     def test_graph_upsert_direct_metadata_on_relationship_target(self) -> None:
         mock_driver = _make_mock_driver()

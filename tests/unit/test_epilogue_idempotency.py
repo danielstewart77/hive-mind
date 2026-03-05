@@ -18,7 +18,7 @@ class TestIdempotency:
         mock_db = AsyncMock()
         mock_cursor = AsyncMock()
         mock_cursor.fetchone = AsyncMock(
-            return_value={"epilogue_status": "completed", "claude_sid": "abc"}
+            return_value={"epilogue_status": "completed", "claude_sid": "abc", "summary": "", "last_active": 0.0}
         )
         mock_db.execute = AsyncMock(return_value=mock_cursor)
 
@@ -35,7 +35,7 @@ class TestIdempotency:
         mock_db = AsyncMock()
         mock_cursor = AsyncMock()
         mock_cursor.fetchone = AsyncMock(
-            return_value={"epilogue_status": "skipped", "claude_sid": "abc"}
+            return_value={"epilogue_status": "skipped", "claude_sid": "abc", "summary": "", "last_active": 0.0}
         )
         mock_db.execute = AsyncMock(return_value=mock_cursor)
 
@@ -70,7 +70,7 @@ class TestIdempotency:
             cursor = AsyncMock()
             if "SELECT" in query:
                 cursor.fetchone = AsyncMock(
-                    return_value={"epilogue_status": "pending", "claude_sid": "claude-pending"}
+                    return_value={"epilogue_status": "pending", "claude_sid": "claude-pending", "summary": "", "last_active": 0.0}
                 )
             return cursor
 
@@ -119,7 +119,7 @@ class TestIdempotency:
             cursor = AsyncMock()
             if "SELECT" in query:
                 cursor.fetchone = AsyncMock(
-                    return_value={"epilogue_status": "digest_sent", "claude_sid": "claude-digest-sent"}
+                    return_value={"epilogue_status": "digest_sent", "claude_sid": "claude-digest-sent", "summary": "", "last_active": 0.0}
                 )
             return cursor
 

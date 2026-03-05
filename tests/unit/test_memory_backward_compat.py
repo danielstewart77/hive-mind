@@ -1,4 +1,4 @@
-"""Unit tests for backward compatibility — calling without data_class still works."""
+"""Unit tests for data_class requirement -- calling without data_class raises TypeError."""
 
 import json
 import logging
@@ -32,10 +32,20 @@ def _make_mock_driver() -> MagicMock:
     return mock_driver
 
 
-class TestMemoryStoreBackwardCompat:
-    """Tests that memory_store_direct works without data_class (backward compat)."""
+class TestMemoryStoreRequiresDataClass:
+    """Tests that memory_store_direct requires data_class (no longer backward compat)."""
 
-    def test_memory_store_direct_no_data_class_still_stores(self) -> None:
+    def test_memory_store_direct_no_data_class_raises_type_error(self) -> None:
+        import agents.memory as mem_mod
+
+        with pytest.raises(TypeError):
+            mem_mod.memory_store_direct(
+                content="A memory entry without data_class",
+                tags="test",
+                source="user",
+            )
+
+    def test_memory_store_direct_with_data_class_stores_successfully(self) -> None:
         mock_driver = _make_mock_driver()
         import agents.memory as mem_mod
 
@@ -45,36 +55,28 @@ class TestMemoryStoreBackwardCompat:
             patch.object(mem_mod, "_index_created", True),
         ):
             result_str = mem_mod.memory_store_direct(
-                content="A backward-compatible memory entry",
+                content="A memory entry with data_class",
                 tags="test",
                 source="user",
+                data_class="session-log",
             )
             result = json.loads(result_str)
             assert result["stored"] is True
 
-    def test_memory_store_direct_no_data_class_logs_deprecation_warning(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        mock_driver = _make_mock_driver()
-        import agents.memory as mem_mod
 
-        with (
-            patch.object(mem_mod, "_get_driver", return_value=mock_driver),
-            patch.object(mem_mod, "_embed", return_value=[0.1] * 4096),
-            patch.object(mem_mod, "_index_created", True),
-            caplog.at_level(logging.WARNING),
-        ):
-            mem_mod.memory_store_direct(
-                content="No data_class provided",
-                source="user",
+class TestGraphUpsertRequiresDataClass:
+    """Tests that graph_upsert_direct requires data_class (no longer backward compat)."""
+
+    def test_graph_upsert_direct_no_data_class_raises_type_error(self) -> None:
+        import agents.knowledge_graph as kg_mod
+
+        with pytest.raises(TypeError):
+            kg_mod.graph_upsert_direct(
+                entity_type="Person",
+                name="Daniel",
             )
-            assert any("deprecat" in msg.lower() for msg in caplog.messages)
 
-
-class TestGraphUpsertBackwardCompat:
-    """Tests that graph_upsert_direct works without data_class (backward compat)."""
-
-    def test_graph_upsert_direct_no_data_class_still_upserts(self) -> None:
+    def test_graph_upsert_direct_with_data_class_upserts_successfully(self) -> None:
         mock_driver = _make_mock_driver()
         import agents.knowledge_graph as kg_mod
 
@@ -85,26 +87,10 @@ class TestGraphUpsertBackwardCompat:
             result_str = kg_mod.graph_upsert_direct(
                 entity_type="Person",
                 name="Daniel",
+                data_class="person",
             )
             result = json.loads(result_str)
             assert result["upserted"] is True
-
-    def test_graph_upsert_direct_no_data_class_logs_deprecation_warning(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        mock_driver = _make_mock_driver()
-        import agents.knowledge_graph as kg_mod
-
-        with (
-            patch.object(kg_mod, "_get_driver", return_value=mock_driver),
-            patch.object(kg_mod, "_kg_index_created", True),
-            caplog.at_level(logging.WARNING),
-        ):
-            kg_mod.graph_upsert_direct(
-                entity_type="Person",
-                name="Daniel",
-            )
-            assert any("deprecat" in msg.lower() for msg in caplog.messages)
 
 
 class TestMemoryRetrieveBackwardCompat:
@@ -165,5 +151,5 @@ class TestMemoryRetrieveBackwardCompat:
             # First entry has metadata
             assert memories[0]["data_class"] == "person"
             assert memories[0]["tier"] == "durable"
-            # Second entry has None metadata (backward compat)
+            # Second entry has None metadata (legacy data in DB)
             assert memories[1]["data_class"] is None

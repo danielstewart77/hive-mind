@@ -26,7 +26,7 @@ class TestRequestDigestApproval:
 
         with patch("core.epilogue.aiohttp.ClientSession", return_value=mock_session):
             result = await request_digest_approval(
-                "http://localhost:8420", "This is a test digest"
+                "http://localhost:8420", {"topics": ["This is a test digest"], "entities": [], "relationships": []}
             )
 
         mock_session.post.assert_called_once()
@@ -53,7 +53,7 @@ class TestRequestDigestApproval:
 
         with patch("core.epilogue.aiohttp.ClientSession", return_value=mock_session):
             result = await request_digest_approval(
-                "http://localhost:8420", "Test digest"
+                "http://localhost:8420", {"topics": ["Test digest"], "entities": [], "relationships": []}
             )
         assert result is True
 
@@ -72,7 +72,7 @@ class TestRequestDigestApproval:
 
         with patch("core.epilogue.aiohttp.ClientSession", return_value=mock_session):
             result = await request_digest_approval(
-                "http://localhost:8420", "Test digest"
+                "http://localhost:8420", {"topics": ["Test digest"], "entities": [], "relationships": []}
             )
         assert result is False
 
@@ -86,6 +86,6 @@ class TestRequestDigestApproval:
 
         with patch("core.epilogue.aiohttp.ClientSession", return_value=mock_session):
             result = await request_digest_approval(
-                "http://localhost:8420", "Test digest"
+                "http://localhost:8420", {"topics": ["Test digest"], "entities": [], "relationships": []}
             )
         assert result is False

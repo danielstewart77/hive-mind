@@ -104,14 +104,15 @@ def _ensure_metadata_indexes(session) -> None:  # type: ignore[no-untyped-def]
 
 
 def graph_upsert_direct(
+    *,
     entity_type: str,
     name: str,
+    data_class: str,
     properties: str = "{}",
     relation: str = "",
     target_name: str = "",
     target_type: str = "",
     agent_id: str = "ada",
-    data_class: str | None = None,
     as_of: str | None = None,
     source: str = "user",
 ) -> str:
@@ -191,14 +192,15 @@ def graph_upsert_direct(
 
 @tool(tags=["memory"])
 def graph_upsert(
+    *,
     entity_type: str,
     name: str,
+    data_class: str,
     properties: str = "{}",
     relation: str = "",
     target_name: str = "",
     target_type: str = "",
     agent_id: str = "ada",
-    data_class: str | None = None,
     as_of: str | None = None,
     source: str = "user",
 ) -> str:

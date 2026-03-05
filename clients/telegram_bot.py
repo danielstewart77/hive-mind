@@ -496,6 +496,34 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------------------------
+# Backfill /classify_* handler
+# ---------------------------------------------------------------------------
+def _apply_classification_sync(element_id: str, data_class: str) -> str:
+    """Thin wrapper so the Telegram handler can call apply_classification."""
+    from agents.memory_backfill import apply_classification
+    return apply_classification(element_id, data_class)
+
+
+async def cmd_classify(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /classify_<id> <class> commands from backfill review messages."""
+    if not _is_allowed_user(update.effective_user.id):
+        await update.message.reply_text("Not authorized.")
+        return
+
+    from core.backfill_review import parse_classify_command
+
+    text = (update.message.text or "").strip()
+    parsed = parse_classify_command(text)
+    if parsed is None:
+        await update.message.reply_text("Invalid command. Usage: /classify_<id> <class>")
+        return
+
+    element_id, data_class = parsed
+    result = _apply_classification_sync(element_id, data_class)
+    await update.message.reply_text(result)
+
+
+# ---------------------------------------------------------------------------
 # HITL approve/deny handlers
 # ---------------------------------------------------------------------------
 async def cmd_hitl_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -697,6 +725,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("skill", cmd_skill))
     app.add_handler(MessageHandler(filters.Regex(r"^/approve_\w+$"), cmd_hitl_approve))
     app.add_handler(MessageHandler(filters.Regex(r"^/deny_\w+$"), cmd_hitl_deny))
+    app.add_handler(MessageHandler(filters.Regex(r"^/classify_"), cmd_classify))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
