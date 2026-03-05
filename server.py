@@ -204,6 +204,21 @@ async def list_models():
 
 
 # ---------------------------------------------------------------------------
+# Memory Expiry
+# ---------------------------------------------------------------------------
+@app.post("/memory/expiry-sweep")
+async def memory_expiry_sweep(x_hitl_internal: str = Header(None)):
+    """Trigger memory expiry sweep for expired timed-event entries."""
+    if not config.hitl_internal_token:
+        return JSONResponse({"error": "HITL not configured"}, status_code=500)
+    if x_hitl_internal != config.hitl_internal_token:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from core.memory_expiry import sweep_expired_events
+    results = await asyncio.to_thread(sweep_expired_events)
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Epilogue sweep endpoint
 # ---------------------------------------------------------------------------
 @app.post("/epilogue/sweep")

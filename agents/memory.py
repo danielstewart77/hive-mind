@@ -83,7 +83,7 @@ def _ensure_index(session):
         """
     )
     # Create property indexes for metadata fields on Memory nodes
-    for field in ("tier", "data_class", "expires_at", "source"):
+    for field in ("tier", "data_class", "expires_at", "source", "recurring"):
         try:
             session.run(
                 f"CREATE INDEX idx_memory_{field} IF NOT EXISTS "
@@ -113,6 +113,7 @@ def memory_store_direct(
     agent_id: str = "ada",
     as_of: str | None = None,
     expires_at: str | None = None,
+    recurring: bool | None = None,
 ) -> str:
     """Write to vector memory without HITL. Called by the epilogue after batch approval."""
     try:
@@ -124,7 +125,12 @@ def memory_store_direct(
 
         try:
             meta = build_metadata(
-                data_class=data_class, source=source, as_of=as_of, expires_at=expires_at
+                data_class=data_class,
+                source=source,
+                as_of=as_of,
+                expires_at=expires_at,
+                recurring=recurring,
+                content=content,
             )
         except ValueError as e:
             return json.dumps({"stored": False, "error": str(e), "prompt": str(e)})
@@ -146,7 +152,8 @@ def memory_store_direct(
                     tier: $tier,
                     as_of: $as_of,
                     expires_at: $expires_at,
-                    superseded: $superseded
+                    superseded: $superseded,
+                    recurring: $recurring
                 })
                 RETURN elementId(m) AS id
                 """,
@@ -161,6 +168,7 @@ def memory_store_direct(
                 as_of=meta.get("as_of"),
                 expires_at=meta.get("expires_at"),
                 superseded=meta.get("superseded", False),
+                recurring=meta.get("recurring"),
             )
             record = result.single()
             memory_id = record["id"] if record else "unknown"
@@ -185,6 +193,7 @@ def memory_store(
     agent_id: str = "ada",
     as_of: str | None = None,
     expires_at: str | None = None,
+    recurring: bool | None = None,
 ) -> str:
     """Store a memory as a semantic embedding in Neo4j.
 
@@ -196,6 +205,7 @@ def memory_store(
         agent_id: Which agent this memory belongs to (default "ada")
         as_of: ISO datetime for when the fact was established (defaults to now)
         expires_at: ISO datetime for when a timed-event expires (required for timed-event)
+        recurring: Explicit recurring flag for timed-events (overrides heuristic detection)
 
     Returns:
         JSON with the stored memory ID and confirmation.
@@ -212,6 +222,7 @@ def memory_store(
             data_class=data_class,
             as_of=as_of,
             expires_at=expires_at,
+            recurring=recurring,
         )
     except Exception as e:
         logger.exception("memory_store failed")
