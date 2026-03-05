@@ -15,4 +15,14 @@ cp "$SCRIPTS_DIR/pre-commit-pip-audit.sh" "$TARGET"
 chmod +x "$TARGET"
 echo "Installed pre-commit hook (pip-audit)"
 
+# Install pre-push hook
+TARGET="$HOOKS_DIR/pre-push"
+if [ -f "$TARGET" ] && [ ! -L "$TARGET" ]; then
+    echo "Backing up existing pre-push hook to pre-push.bak"
+    cp "$TARGET" "$TARGET.bak"
+fi
+cp "$SCRIPTS_DIR/pre-push.sh" "$TARGET"
+chmod +x "$TARGET"
+echo "Installed pre-push hook (HITL gate)"
+
 echo "Done. Hooks installed."
