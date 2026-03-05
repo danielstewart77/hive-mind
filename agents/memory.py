@@ -21,6 +21,7 @@ from typing import Optional
 import requests
 from agent_tooling import tool
 from agents.secret_manager import get_credential
+from core.memory_schema import build_metadata, validate_source
 from neo4j import GraphDatabase
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,15 @@ def _ensure_index(session):
         }}
         """
     )
+    # Create property indexes for metadata fields on Memory nodes
+    for field in ("tier", "data_class", "expires_at", "source"):
+        try:
+            session.run(
+                f"CREATE INDEX idx_memory_{field} IF NOT EXISTS "
+                f"FOR (m:Memory) ON (m.{field})"
+            )
+        except Exception:
+            logger.debug("Index idx_memory_%s may already exist", field)
     _index_created = True
 
 
@@ -99,9 +109,25 @@ def memory_store_direct(
     tags: str = "",
     source: str = "user",
     agent_id: str = "ada",
+    data_class: str | None = None,
+    as_of: str | None = None,
+    expires_at: str | None = None,
 ) -> str:
     """Write to vector memory without HITL. Called by the epilogue after batch approval."""
     try:
+        # Validate data_class and source, build metadata
+        try:
+            validate_source(source)
+        except ValueError as e:
+            return json.dumps({"stored": False, "error": str(e)})
+
+        try:
+            meta = build_metadata(
+                data_class=data_class, source=source, as_of=as_of, expires_at=expires_at
+            )
+        except ValueError as e:
+            return json.dumps({"stored": False, "error": str(e), "prompt": str(e)})
+
         embedding = _embed(content)
         driver = _get_driver()
         with driver.session() as session:
@@ -114,20 +140,35 @@ def memory_store_direct(
                     source: $source,
                     agent_id: $agent_id,
                     created_at: $created_at,
-                    embedding: $embedding
+                    embedding: $embedding,
+                    data_class: $data_class,
+                    tier: $tier,
+                    as_of: $as_of,
+                    expires_at: $expires_at,
+                    superseded: $superseded
                 })
                 RETURN elementId(m) AS id
                 """,
                 content=content,
                 tags=tags,
-                source=source,
+                source=meta.get("source", source),
                 agent_id=agent_id,
                 created_at=int(time.time()),
                 embedding=embedding,
+                data_class=meta.get("data_class"),
+                tier=meta.get("tier"),
+                as_of=meta.get("as_of"),
+                expires_at=meta.get("expires_at"),
+                superseded=meta.get("superseded", False),
             )
             record = result.single()
             memory_id = record["id"] if record else "unknown"
-        return json.dumps({"stored": True, "id": memory_id, "agent_id": agent_id})
+        return json.dumps({
+            "stored": True,
+            "id": memory_id,
+            "agent_id": agent_id,
+            "data_class": meta.get("data_class"),
+        })
     except Exception as e:
         logger.exception("memory_store_direct failed")
         return json.dumps({"error": str(e)})
@@ -139,6 +180,9 @@ def memory_store(
     tags: str = "",
     source: str = "user",
     agent_id: str = "ada",
+    data_class: str | None = None,
+    as_of: str | None = None,
+    expires_at: str | None = None,
 ) -> str:
     """Store a memory as a semantic embedding in Neo4j.
 
@@ -147,6 +191,9 @@ def memory_store(
         tags: Comma-separated tags for categorisation (e.g. "session,preference")
         source: Origin of the memory — "user", "tool", "session", "self"
         agent_id: Which agent this memory belongs to (default "ada")
+        data_class: Memory data class (e.g. "person", "preference", "technical-config")
+        as_of: ISO datetime for when the fact was established (defaults to now)
+        expires_at: ISO datetime for when a timed-event expires (required for timed-event)
 
     Returns:
         JSON with the stored memory ID and confirmation.
@@ -155,7 +202,15 @@ def memory_store(
         if not _hitl_gate(content):
             return json.dumps({"stored": False, "reason": "denied by HITL"})
 
-        return memory_store_direct(content, tags=tags, source=source, agent_id=agent_id)
+        return memory_store_direct(
+            content,
+            tags=tags,
+            source=source,
+            agent_id=agent_id,
+            data_class=data_class,
+            as_of=as_of,
+            expires_at=expires_at,
+        )
     except Exception as e:
         logger.exception("memory_store failed")
         return json.dumps({"error": str(e)})
@@ -197,6 +252,11 @@ def memory_retrieve(
                            m.source AS source,
                            m.agent_id AS agent_id,
                            m.created_at AS created_at,
+                           m.data_class AS data_class,
+                           m.tier AS tier,
+                           m.as_of AS as_of,
+                           m.expires_at AS expires_at,
+                           m.superseded AS superseded,
                            score
                     ORDER BY score DESC
                     """,
@@ -217,6 +277,11 @@ def memory_retrieve(
                            m.source AS source,
                            m.agent_id AS agent_id,
                            m.created_at AS created_at,
+                           m.data_class AS data_class,
+                           m.tier AS tier,
+                           m.as_of AS as_of,
+                           m.expires_at AS expires_at,
+                           m.superseded AS superseded,
                            score
                     ORDER BY score DESC
                     """,
@@ -233,6 +298,11 @@ def memory_retrieve(
                     "agent_id": record["agent_id"],
                     "created_at": record["created_at"],
                     "score": round(record["score"], 4),
+                    "data_class": record["data_class"],
+                    "tier": record["tier"],
+                    "as_of": record["as_of"],
+                    "expires_at": record["expires_at"],
+                    "superseded": record["superseded"],
                 }
                 for record in result
             ]

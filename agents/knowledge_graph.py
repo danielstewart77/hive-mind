@@ -12,13 +12,17 @@ Required env vars (shared with memory.py):
 """
 
 import json
+import logging
 import os
 import re
 
 import requests
 from agent_tooling import tool
 from agents.secret_manager import get_credential
+from core.memory_schema import build_metadata, validate_source
 from neo4j import GraphDatabase
+
+logger = logging.getLogger(__name__)
 
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://localhost:8420")
 HITL_TTL = 180
@@ -45,6 +49,7 @@ NEO4J_AUTH_ENV = get_credential("NEO4J_AUTH") or "neo4j/hivemind-memory"
 _NEO4J_USER, _, _NEO4J_PASS = NEO4J_AUTH_ENV.partition("/")
 
 _driver = None
+_kg_index_created = False
 
 _VALID_ENTITY_TYPES = {"Person", "Project", "System", "Concept", "Preference"}
 _VALID_RELATIONS = {"KNOWS_ABOUT", "WORKS_ON", "PREFERS", "RELATED_TO", "MANAGES"}
@@ -75,6 +80,29 @@ def _validate_relation(relation: str) -> str:
     return relation
 
 
+def _ensure_metadata_indexes(session) -> None:  # type: ignore[no-untyped-def]
+    """Create property indexes for metadata fields on entity nodes.
+
+    Uses a global guard to run only once per process, same pattern as
+    agents/memory.py _ensure_index.
+    """
+    global _kg_index_created
+    if _kg_index_created:
+        return
+
+    for label in _VALID_ENTITY_TYPES:
+        for field in ("tier", "data_class", "source"):
+            try:
+                session.run(  # type: ignore[union-attr]
+                    f"CREATE INDEX idx_{label.lower()}_{field} IF NOT EXISTS "
+                    f"FOR (n:{label}) ON (n.{field})"
+                )
+            except Exception:
+                logger.debug("Index idx_%s_%s may already exist", label.lower(), field)
+
+    _kg_index_created = True
+
+
 def graph_upsert_direct(
     entity_type: str,
     name: str,
@@ -83,14 +111,34 @@ def graph_upsert_direct(
     target_name: str = "",
     target_type: str = "",
     agent_id: str = "ada",
+    data_class: str | None = None,
+    as_of: str | None = None,
+    source: str = "user",
 ) -> str:
     """Write to the knowledge graph without HITL. Called by the epilogue after batch approval."""
     try:
+        # Validate data_class and source, build metadata
+        try:
+            validate_source(source)
+        except ValueError as e:
+            return json.dumps({"error": str(e)})
+
+        try:
+            meta = build_metadata(
+                data_class=data_class, source=source, as_of=as_of
+            )
+        except ValueError as e:
+            return json.dumps({"error": str(e)})
+
         label = _validate_label(entity_type)
         props = json.loads(properties) if properties.strip() != "{}" else {}
 
+        # Merge metadata into props for the SET clause
+        props.update(meta)
+
         driver = _get_driver()
         with driver.session() as session:
+            _ensure_metadata_indexes(session)
             result = session.run(
                 f"""
                 MERGE (n:{label} {{name: $name, agent_id: $agent_id}})
@@ -110,13 +158,21 @@ def graph_upsert_direct(
                 session.run(
                     f"""
                     MERGE (t:{tgt_label} {{name: $target_name, agent_id: $agent_id}})
+                    SET t += $meta_props
                     WITH t
                     MATCH (n:{label} {{name: $name, agent_id: $agent_id}})
-                    MERGE (n)-[:{rel_type}]->(t)
+                    MERGE (n)-[r:{rel_type}]->(t)
+                    SET r.as_of = $meta_as_of, r.source = $meta_source,
+                        r.data_class = $meta_data_class, r.tier = $meta_tier
                     """,
                     target_name=target_name,
                     agent_id=agent_id,
                     name=name,
+                    meta_props=meta,
+                    meta_as_of=meta.get("as_of"),
+                    meta_source=meta.get("source", source),
+                    meta_data_class=meta.get("data_class"),
+                    meta_tier=meta.get("tier"),
                 )
                 rel_created = True
 
@@ -127,6 +183,7 @@ def graph_upsert_direct(
             "name": name,
             "relation_created": rel_created,
             "relation": f"-[:{relation}]->({target_name})" if rel_created else None,
+            "data_class": meta.get("data_class"),
         })
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -141,6 +198,9 @@ def graph_upsert(
     target_name: str = "",
     target_type: str = "",
     agent_id: str = "ada",
+    data_class: str | None = None,
+    as_of: str | None = None,
+    source: str = "user",
 ) -> str:
     """Add or update a knowledge graph node, optionally linking it to another node.
 
@@ -152,6 +212,9 @@ def graph_upsert(
         target_name: Name of the target node to link to. Required if relation is set.
         target_type: Entity type of the target node (defaults to entity_type if omitted).
         agent_id: Which agent's graph this belongs to (default "ada").
+        data_class: Data class for this entry (e.g. "person", "preference", "technical-config").
+        as_of: ISO datetime for when the fact was established (defaults to now).
+        source: Origin of the entry — "user", "tool", "session", or "self".
 
     Returns:
         JSON confirmation with node id and relationship created (if any).
@@ -180,6 +243,9 @@ def graph_upsert(
             target_name=target_name,
             target_type=target_type,
             agent_id=agent_id,
+            data_class=data_class,
+            as_of=as_of,
+            source=source,
         )
     except Exception as e:
         return json.dumps({"error": str(e)})
