@@ -77,6 +77,7 @@ class TestStoreRetrieveMetadataFlow:
             "expires_at": None,
             "superseded": False,
             "codebase_ref": None,
+            "archived": None,
         }[key]
         retrieve_result_mock = MagicMock()
         retrieve_result_mock.__iter__ = MagicMock(return_value=iter([record_mock]))

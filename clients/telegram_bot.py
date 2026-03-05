@@ -524,6 +524,64 @@ async def cmd_classify(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------------------------
+# Monthly review response handlers (/keep_*, /archive_*, /discard_*)
+# ---------------------------------------------------------------------------
+async def _handle_review_response(update: Update, action: str) -> None:
+    """Extract element ID from /keep_<id>, /archive_<id>, or /discard_<id> and POST to gateway."""
+    if not _is_allowed_user(update.effective_user.id):
+        await update.message.reply_text("Not authorized.")
+        return
+
+    text = (update.message.text or "").strip()
+    # Extract ID: everything after /keep_, /archive_, or /discard_
+    prefix = f"/{action}_"
+    if not text.startswith(prefix):
+        await update.message.reply_text(f"Invalid command format. Usage: {prefix}<id>")
+        return
+
+    element_id = text[len(prefix):]
+    if not element_id:
+        await update.message.reply_text(f"Invalid command format. Usage: {prefix}<id>")
+        return
+
+    hitl_secret = config.hitl_internal_token
+    if not hitl_secret:
+        await update.message.reply_text("HITL not configured on server.")
+        return
+
+    try:
+        async with http.post(
+            f"{SERVER_URL}/memory/review-respond",
+            json={"element_id": element_id, "action": action},
+            headers={"X-HITL-Internal": hitl_secret},
+        ) as resp:
+            data = await resp.json()
+            if resp.status == 200 and data.get("ok"):
+                await update.message.reply_text(f"Done: {action} applied.")
+            else:
+                error_msg = data.get("error", "unknown error")
+                await update.message.reply_text(f"Failed: {error_msg}")
+    except Exception:
+        log.exception("Review respond failed for %s", action)
+        await update.message.reply_text("Failed to send response to server.")
+
+
+async def cmd_review_keep(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /keep_<id> commands from monthly review messages."""
+    await _handle_review_response(update, "keep")
+
+
+async def cmd_review_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /archive_<id> commands from monthly review messages."""
+    await _handle_review_response(update, "archive")
+
+
+async def cmd_review_discard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /discard_<id> commands from monthly review messages."""
+    await _handle_review_response(update, "discard")
+
+
+# ---------------------------------------------------------------------------
 # HITL approve/deny handlers
 # ---------------------------------------------------------------------------
 async def cmd_hitl_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -726,6 +784,9 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.Regex(r"^/approve_\w+$"), cmd_hitl_approve))
     app.add_handler(MessageHandler(filters.Regex(r"^/deny_\w+$"), cmd_hitl_deny))
     app.add_handler(MessageHandler(filters.Regex(r"^/classify_"), cmd_classify))
+    app.add_handler(MessageHandler(filters.Regex(r"^/keep_[^\s]+$"), cmd_review_keep))
+    app.add_handler(MessageHandler(filters.Regex(r"^/archive_[^\s]+$"), cmd_review_archive))
+    app.add_handler(MessageHandler(filters.Regex(r"^/discard_[^\s]+$"), cmd_review_discard))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))

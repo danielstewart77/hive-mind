@@ -1,7 +1,6 @@
 """Unit tests for data_class requirement -- calling without data_class raises TypeError."""
 
 import json
-import logging
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -117,6 +116,7 @@ class TestMemoryRetrieveBackwardCompat:
             "expires_at": None,
             "superseded": False,
             "codebase_ref": None,
+            "archived": None,
         }[key]
 
         record_without_meta = MagicMock()
@@ -133,6 +133,7 @@ class TestMemoryRetrieveBackwardCompat:
             "expires_at": None,
             "superseded": None,
             "codebase_ref": None,
+            "archived": None,
         }[key]
 
         mock_result = MagicMock()

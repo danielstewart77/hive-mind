@@ -41,6 +41,7 @@ class TestMemoryRetrieveMetadata:
             expires_at=None,
             superseded=False,
             codebase_ref=None,
+            archived=None,
         )
         mock_result = MagicMock()
         mock_result.__iter__ = MagicMock(return_value=iter([record]))
@@ -74,6 +75,7 @@ class TestMemoryRetrieveMetadata:
             expires_at=None,
             superseded=False,
             codebase_ref=None,
+            archived=None,
         )
         mock_result = MagicMock()
         mock_result.__iter__ = MagicMock(return_value=iter([record]))
@@ -106,6 +108,7 @@ class TestMemoryRetrieveMetadata:
             expires_at=None,
             superseded=False,
             codebase_ref=None,
+            archived=None,
         )
         mock_result = MagicMock()
         mock_result.__iter__ = MagicMock(return_value=iter([record]))
@@ -141,6 +144,7 @@ class TestMemoryRetrieveMetadata:
             expires_at=None,
             superseded=None,
             codebase_ref=None,
+            archived=None,
         )
         mock_result = MagicMock()
         mock_result.__iter__ = MagicMock(return_value=iter([record]))

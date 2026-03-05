@@ -243,6 +243,7 @@ def memory_retrieve(
     k: int = 10,
     agent_id: str = "ada",
     tag_filter: Optional[str] = None,
+    include_archived: bool = False,
 ) -> str:
     """Retrieve the most semantically relevant memories for a query.
 
@@ -251,12 +252,17 @@ def memory_retrieve(
         k: Number of results to return (default 10, max 50).
         agent_id: Which agent's memories to search (default "ada").
         tag_filter: Optional tag to filter results (e.g. "session").
+        include_archived: If True, include archived entries. Default False.
 
     Returns:
         JSON array of memories sorted by relevance (highest first), each with
         content, tags, source, agent_id, created_at, and similarity score.
     """
     k = min(k, 50)
+    archived_filter = (
+        "" if include_archived
+        else " AND (m.archived IS NULL OR m.archived = false)"
+    )
     try:
         embedding = _embed(query)
         driver = _get_driver()
@@ -264,10 +270,10 @@ def memory_retrieve(
             _ensure_index(session)
             if tag_filter:
                 result = session.run(
-                    """
+                    f"""
                     CALL db.index.vector.queryNodes($index, $k, $embedding)
                     YIELD node AS m, score
-                    WHERE m.agent_id = $agent_id AND m.tags CONTAINS $tag_filter
+                    WHERE m.agent_id = $agent_id AND m.tags CONTAINS $tag_filter{archived_filter}
                     RETURN m.content AS content,
                            m.tags AS tags,
                            m.source AS source,
@@ -279,6 +285,7 @@ def memory_retrieve(
                            m.expires_at AS expires_at,
                            m.superseded AS superseded,
                            m.codebase_ref AS codebase_ref,
+                           m.archived AS archived,
                            score
                     ORDER BY score DESC
                     """,
@@ -290,10 +297,10 @@ def memory_retrieve(
                 )
             else:
                 result = session.run(
-                    """
+                    f"""
                     CALL db.index.vector.queryNodes($index, $k, $embedding)
                     YIELD node AS m, score
-                    WHERE m.agent_id = $agent_id
+                    WHERE m.agent_id = $agent_id{archived_filter}
                     RETURN m.content AS content,
                            m.tags AS tags,
                            m.source AS source,
@@ -305,6 +312,7 @@ def memory_retrieve(
                            m.expires_at AS expires_at,
                            m.superseded AS superseded,
                            m.codebase_ref AS codebase_ref,
+                           m.archived AS archived,
                            score
                     ORDER BY score DESC
                     """,
@@ -327,6 +335,7 @@ def memory_retrieve(
                     "expires_at": record["expires_at"],
                     "superseded": record["superseded"],
                     "codebase_ref": record["codebase_ref"],
+                    "archived": record["archived"],
                 }
                 for record in result
             ]

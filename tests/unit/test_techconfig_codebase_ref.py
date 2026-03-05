@@ -127,6 +127,7 @@ class TestCodebaseRefInMemoryStore:
             "expires_at": None,
             "superseded": False,
             "codebase_ref": "server.py",
+            "archived": None,
         }
         mock_result = MagicMock()
         mock_result.__iter__ = MagicMock(return_value=iter([mock_record]))

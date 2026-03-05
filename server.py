@@ -263,6 +263,57 @@ async def epilogue_sweep(x_hitl_internal: str = Header(None)):
 
 
 # ---------------------------------------------------------------------------
+# Monthly Review Sweep
+# ---------------------------------------------------------------------------
+@app.post("/memory/monthly-review")
+async def memory_monthly_review(x_hitl_internal: str = Header(None)):
+    """Trigger monthly review sweep for world-event, intention, session-log entries."""
+    if not config.hitl_internal_token:
+        return JSONResponse({"error": "HITL not configured"}, status_code=500)
+    if x_hitl_internal != config.hitl_internal_token:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from core.monthly_review import sweep_monthly_review
+    results = await asyncio.to_thread(sweep_monthly_review)
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Monthly Review Response
+# ---------------------------------------------------------------------------
+class ReviewRespondRequest(BaseModel):
+    element_id: str
+    action: str
+
+
+@app.post("/memory/review-respond")
+async def memory_review_respond(
+    body: ReviewRespondRequest,
+    x_hitl_internal: str = Header(None),
+):
+    """Handle keep/archive/discard response for a monthly review entry."""
+    if not config.hitl_internal_token:
+        return JSONResponse({"error": "HITL not configured"}, status_code=500)
+    if x_hitl_internal != config.hitl_internal_token:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    action = body.action.lower()
+    if action == "keep":
+        from core.monthly_review import handle_keep
+        return await asyncio.to_thread(handle_keep, body.element_id)
+    elif action == "archive":
+        from core.monthly_review import handle_archive
+        return await asyncio.to_thread(handle_archive, body.element_id)
+    elif action == "discard":
+        from core.monthly_review import handle_discard
+        return await asyncio.to_thread(handle_discard, body.element_id)
+    else:
+        return JSONResponse(
+            {"error": f"Invalid action: {body.action}. Must be keep, archive, or discard."},
+            status_code=400,
+        )
+
+
+# ---------------------------------------------------------------------------
 # WebSocket endpoint
 # ---------------------------------------------------------------------------
 @app.websocket("/sessions/{session_id}/stream")
