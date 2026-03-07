@@ -166,44 +166,6 @@ async def _memory_expiry_sweep() -> None:
         log.exception("Memory expiry sweep failed")
 
 
-async def _orphan_sweep() -> None:
-    """Call the gateway's orphan sweep endpoint to find stale orphan graph nodes."""
-    log.info("Running orphan sweep")
-    try:
-        timeout = aiohttp.ClientTimeout(total=120)
-        headers = {"X-HITL-Internal": config.hitl_internal_token or ""}
-        async with aiohttp.ClientSession(timeout=timeout) as http:
-            async with http.post(f"{SERVER_URL}/memory/orphan-sweep", headers=headers) as resp:
-                data = await resp.json()
-                log.info(
-                    "Orphan sweep: orphans_found=%d, notified=%s, errors=%d",
-                    data.get("orphans_found", 0),
-                    data.get("notified", False),
-                    data.get("errors", 0),
-                )
-    except Exception:
-        log.exception("Orphan sweep failed")
-
-
-async def _techconfig_sweep() -> None:
-    """Call the gateway's techconfig sweep endpoint to verify technical-config entries."""
-    log.info("Running technical-config pruning sweep")
-    try:
-        timeout = aiohttp.ClientTimeout(total=300)
-        headers = {"X-HITL-Internal": config.hitl_internal_token or ""}
-        async with aiohttp.ClientSession(timeout=timeout) as http:
-            async with http.post(f"{SERVER_URL}/memory/techconfig-sweep", headers=headers) as resp:
-                data = await resp.json()
-                log.info(
-                    "Techconfig sweep: verified=%d, pruned=%d, flagged=%d, errors=%d",
-                    data.get("verified", 0),
-                    data.get("pruned", 0),
-                    data.get("flagged", 0),
-                    data.get("errors", 0),
-                )
-    except Exception:
-        log.exception("Technical-config pruning sweep failed")
-
 
 async def _epilogue_sweep() -> None:
     """Call the gateway's epilogue sweep endpoint to process unprocessed dead sessions."""
@@ -223,24 +185,6 @@ async def _epilogue_sweep() -> None:
     except Exception:
         log.exception("Epilogue sweep failed")
 
-
-async def _monthly_review_sweep() -> None:
-    """Call the gateway's monthly review endpoint to surface entries for Daniel's review."""
-    log.info("Running monthly review sweep")
-    try:
-        timeout = aiohttp.ClientTimeout(total=120)
-        headers = {"X-HITL-Internal": config.hitl_internal_token or ""}
-        async with aiohttp.ClientSession(timeout=timeout) as http:
-            async with http.post(f"{SERVER_URL}/memory/monthly-review", headers=headers) as resp:
-                data = await resp.json()
-                log.info(
-                    "Monthly review sweep: entries_found=%d, messages_sent=%d, errors=%d",
-                    data.get("entries_found", 0),
-                    data.get("messages_sent", 0),
-                    data.get("errors", 0),
-                )
-    except Exception:
-        log.exception("Monthly review sweep failed")
 
 
 async def main() -> None:
@@ -276,23 +220,8 @@ async def main() -> None:
     scheduler.add_job(_memory_expiry_sweep, memory_expiry_trigger, id="memory-expiry-sweep")
     log.info("Scheduled memory expiry sweep @ 30 3 * * *")
 
-    # Add orphan sweep job (nightly at 3:45 AM CT)
-    orphan_trigger = CronTrigger(hour="3", minute="45", timezone="America/Chicago")
-    scheduler.add_job(_orphan_sweep, orphan_trigger, id="orphan-sweep")
-    log.info("Scheduled orphan sweep @ 45 3 * * *")
-
-    # Add techconfig pruning sweep job (weekly, Sunday at 4:00 AM CT)
-    techconfig_trigger = CronTrigger(hour="4", minute="0", day_of_week="sun", timezone="America/Chicago")
-    scheduler.add_job(_techconfig_sweep, techconfig_trigger, id="techconfig-sweep")
-    log.info("Scheduled technical-config pruning sweep @ 0 4 * * 0")
-
-    # Add monthly review sweep job (1st of every month at 9:00 AM CT)
-    monthly_review_trigger = CronTrigger(hour="9", minute="0", day="1", timezone="America/Chicago")
-    scheduler.add_job(_monthly_review_sweep, monthly_review_trigger, id="monthly-review-sweep")
-    log.info("Scheduled monthly review sweep @ 0 9 1 * *")
-
     scheduler.start()
-    log.info("Scheduler running — %d job(s) active + epilogue sweep + memory expiry sweep + orphan sweep + techconfig sweep + monthly review sweep", len(config.scheduled_tasks))
+    log.info("Scheduler running — %d job(s) active + epilogue sweep + memory expiry sweep", len(config.scheduled_tasks))
 
     await asyncio.Event().wait()  # run forever
 
