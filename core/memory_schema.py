@@ -31,9 +31,6 @@ DATA_CLASS_REGISTRY: dict[str, DataClassDef] = {
     "technical-config": DataClassDef(
         "technical-config", "reviewable", ["reviewable", "technical"], False
     ),
-    "session-log": DataClassDef(
-        "session-log", "reviewable", ["reviewable", "session"], False
-    ),
     "timed-event": DataClassDef(
         "timed-event", "reviewable", ["reviewable", "event"], True
     ),
@@ -46,6 +43,18 @@ DATA_CLASS_REGISTRY: dict[str, DataClassDef] = {
     ),
     "intention": DataClassDef(
         "intention", "reviewable", ["reviewable", "intention"], False
+    ),
+    "ada-identity": DataClassDef(
+        "ada-identity", "durable", ["durable", "identity"], False
+    ),
+    "future-project": DataClassDef(
+        "future-project", "reviewable", ["reviewable", "project"], False
+    ),
+    "ephemeral": DataClassDef(
+        "ephemeral", "reviewable", ["reviewable", "ephemeral"], False
+    ),
+    "news-digest": DataClassDef(
+        "news-digest", "reviewable", ["reviewable", "news"], False
     ),
 }
 
