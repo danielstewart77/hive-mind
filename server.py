@@ -31,7 +31,7 @@ log = logging.getLogger("hive-mind.server")
 # Keyring → env bridge: expose keyring secrets as env vars so non-Python
 # consumers (e.g. Claude Code reading .mcp.container.json) can resolve them.
 # ---------------------------------------------------------------------------
-_KEYRING_ENV_KEYS = ["MCP_AUTH_TOKEN", "HITL_INTERNAL_TOKEN"]
+_KEYRING_ENV_KEYS = ["MCP_AUTH_TOKEN", "HITL_INTERNAL_TOKEN", "GITHUB_TOKEN"]
 
 try:
     import keyring as _kr
