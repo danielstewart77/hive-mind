@@ -56,7 +56,7 @@ class TestGetTranscriptPath:
 
     @pytest.mark.asyncio
     async def test_get_transcript_path_returns_correct_path(self, tmp_path):
-        from core.sessions import SessionManager, TRANSCRIPT_DIR
+        from core.sessions import SessionManager
         from core.models import ModelRegistry
 
         registry = MagicMock(spec=ModelRegistry)
@@ -69,7 +69,7 @@ class TestGetTranscriptPath:
         mgr._db.execute = AsyncMock(return_value=mock_cursor)
 
         # Create a temporary transcript file so the file existence check passes
-        with patch("core.sessions.TRANSCRIPT_DIR", tmp_path):
+        with patch("core.sessions._TRANSCRIPT_DIR", tmp_path):
             transcript_file = tmp_path / "abc123.jsonl"
             transcript_file.write_text('{"type":"user"}\n')
 
@@ -109,6 +109,6 @@ class TestGetTranscriptPath:
         mgr._db.execute = AsyncMock(return_value=mock_cursor)
 
         # Patch TRANSCRIPT_DIR to tmp_path where no file exists
-        with patch("core.sessions.TRANSCRIPT_DIR", tmp_path):
+        with patch("core.sessions._TRANSCRIPT_DIR", tmp_path):
             result = await mgr.get_transcript_path("test-session-id")
             assert result is None

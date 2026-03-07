@@ -57,7 +57,7 @@ class TestMemoryStoreRequiresDataClass:
                 content="A memory entry with data_class",
                 tags="test",
                 source="user",
-                data_class="session-log",
+                data_class="technical-config",
             )
             result = json.loads(result_str)
             assert result["stored"] is True

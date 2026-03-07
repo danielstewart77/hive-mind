@@ -19,18 +19,21 @@ from core.memory_schema import (
 class TestDataClassRegistry:
     """Tests for the DATA_CLASS_REGISTRY constant."""
 
-    def test_registry_contains_all_seven_classes(self) -> None:
+    def test_registry_contains_all_classes(self) -> None:
         expected = {
             "technical-config",
-            "session-log",
             "timed-event",
             "person",
             "world-event",
             "preference",
             "intention",
+            "ada-identity",
+            "future-project",
+            "ephemeral",
+            "news-digest",
         }
         assert set(DATA_CLASS_REGISTRY.keys()) == expected
-        assert len(DATA_CLASS_REGISTRY) == 7
+        assert len(DATA_CLASS_REGISTRY) == 10
 
     def test_registry_technical_config_is_reviewable(self) -> None:
         dc = DATA_CLASS_REGISTRY["technical-config"]

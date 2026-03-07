@@ -20,7 +20,7 @@ import aiohttp
 import aiosqlite
 
 from config import PROJECT_DIR, config
-from core.epilogue import TRANSCRIPT_DIR
+_TRANSCRIPT_DIR = Path.home() / ".claude" / "projects" / "-usr-src-app"
 from core.gateway_client import GatewayClient
 from core.models import ModelRegistry, Provider
 
@@ -691,7 +691,7 @@ class SessionManager:
         result = await row.fetchone()
         if not result or not result["claude_sid"]:
             return None
-        path = TRANSCRIPT_DIR / f"{result['claude_sid']}.jsonl"
+        path = _TRANSCRIPT_DIR / f"{result['claude_sid']}.jsonl"
         if path.exists():
             return path
         return None

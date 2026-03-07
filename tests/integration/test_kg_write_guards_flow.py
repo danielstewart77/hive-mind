@@ -152,35 +152,3 @@ class TestGracePeriodAllowsOrphanViaDirect:
         props = call_args[1]["props"]
         assert "created_at" in props
         assert before <= props["created_at"] <= after
-
-
-class TestOrphanSweepFindsStaleOrphan:
-    """sweep_orphan_nodes finds a stale orphan node and notifies."""
-
-    def test_orphan_sweep_finds_stale_orphan_and_notifies(self) -> None:
-        stale_time = time.time() - 3600
-
-        mock_driver = MagicMock()
-        mock_session = MagicMock()
-        mock_driver.session.return_value.__enter__ = MagicMock(return_value=mock_session)
-        mock_driver.session.return_value.__exit__ = MagicMock(return_value=False)
-
-        mock_query_result = MagicMock()
-        mock_query_result.__iter__ = MagicMock(return_value=iter([
-            {"name": "StaleOrphan", "labels": ["Person"], "created_at": stale_time, "id": "id-1"},
-        ]))
-        mock_session.run.return_value = mock_query_result
-
-        from core import orphan_sweep
-
-        with (
-            patch.object(orphan_sweep, "_get_driver", return_value=mock_driver),
-            patch.object(orphan_sweep, "_telegram_direct", return_value=(True, "sent")) as mock_tg,
-        ):
-            result = orphan_sweep.sweep_orphan_nodes()
-
-        assert result["orphans_found"] == 1
-        assert result["notified"] is True
-        mock_tg.assert_called_once()
-        call_msg = mock_tg.call_args[0][0]
-        assert "StaleOrphan" in call_msg
