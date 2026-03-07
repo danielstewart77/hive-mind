@@ -1,4 +1,4 @@
-"""Integration tests for memory metadata flow — store and retrieve with metadata."""
+"""Integration tests for memory metadata flow -- store and retrieve with metadata."""
 
 import json
 import sys
@@ -76,6 +76,8 @@ class TestStoreRetrieveMetadataFlow:
             "as_of": "2026-01-01T00:00:00Z",
             "expires_at": None,
             "superseded": False,
+            "codebase_ref": None,
+            "archived": None,
         }[key]
         retrieve_result_mock = MagicMock()
         retrieve_result_mock.__iter__ = MagicMock(return_value=iter([record_mock]))
@@ -94,38 +96,3 @@ class TestStoreRetrieveMetadataFlow:
             assert memory["tier"] == "durable"
 
 
-class TestEpilogueWriteWithoutDataClass:
-    """Tests that epilogue write_to_memory still works during transition period."""
-
-    def test_epilogue_write_to_memory_without_data_class_still_works(self) -> None:
-        """Verify that write_to_memory (which calls memory_store_direct and
-        graph_upsert_direct without data_class) still succeeds."""
-        import agents.memory as mem_mod
-        import agents.knowledge_graph as kg_mod
-
-        mock_driver = _make_mock_driver()
-
-        with (
-            patch.object(mem_mod, "_get_driver", return_value=mock_driver),
-            patch.object(mem_mod, "_embed", return_value=[0.1] * 4096),
-            patch.object(mem_mod, "_index_created", True),
-            patch.object(kg_mod, "_get_driver", return_value=mock_driver),
-            patch.object(kg_mod, "_kg_index_created", True),
-        ):
-            # Simulate epilogue calling memory_store_direct without data_class
-            result_str = mem_mod.memory_store_direct(
-                content="Session 48ec54d4 was about dark mode preferences.",
-                tags="session,epilogue",
-                source="session",
-            )
-            result = json.loads(result_str)
-            assert result["stored"] is True
-
-            # Simulate epilogue calling graph_upsert_direct without data_class
-            result_str = kg_mod.graph_upsert_direct(
-                entity_type="Person",
-                name="Daniel",
-                properties='{"context": "prefers dark mode"}',
-            )
-            result = json.loads(result_str)
-            assert result["upserted"] is True

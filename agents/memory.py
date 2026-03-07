@@ -83,7 +83,7 @@ def _ensure_index(session):
         """
     )
     # Create property indexes for metadata fields on Memory nodes
-    for field in ("tier", "data_class", "expires_at", "source"):
+    for field in ("tier", "data_class", "expires_at", "source", "recurring"):
         try:
             session.run(
                 f"CREATE INDEX idx_memory_{field} IF NOT EXISTS "
@@ -105,13 +105,16 @@ def _embed(text: str) -> list[float]:
 
 
 def memory_store_direct(
+    *,
     content: str,
+    data_class: str,
     tags: str = "",
     source: str = "user",
     agent_id: str = "ada",
-    data_class: str | None = None,
     as_of: str | None = None,
     expires_at: str | None = None,
+    recurring: bool | None = None,
+    codebase_ref: str | None = None,
 ) -> str:
     """Write to vector memory without HITL. Called by the epilogue after batch approval."""
     try:
@@ -123,7 +126,12 @@ def memory_store_direct(
 
         try:
             meta = build_metadata(
-                data_class=data_class, source=source, as_of=as_of, expires_at=expires_at
+                data_class=data_class,
+                source=source,
+                as_of=as_of,
+                expires_at=expires_at,
+                recurring=recurring,
+                content=content,
             )
         except ValueError as e:
             return json.dumps({"stored": False, "error": str(e), "prompt": str(e)})
@@ -145,7 +153,9 @@ def memory_store_direct(
                     tier: $tier,
                     as_of: $as_of,
                     expires_at: $expires_at,
-                    superseded: $superseded
+                    superseded: $superseded,
+                    recurring: $recurring,
+                    codebase_ref: $codebase_ref
                 })
                 RETURN elementId(m) AS id
                 """,
@@ -160,6 +170,8 @@ def memory_store_direct(
                 as_of=meta.get("as_of"),
                 expires_at=meta.get("expires_at"),
                 superseded=meta.get("superseded", False),
+                recurring=meta.get("recurring"),
+                codebase_ref=codebase_ref,
             )
             record = result.single()
             memory_id = record["id"] if record else "unknown"
@@ -176,43 +188,209 @@ def memory_store_direct(
 
 @tool(tags=["memory"])
 def memory_store(
+    *,
     content: str,
+    data_class: str,
     tags: str = "",
     source: str = "user",
     agent_id: str = "ada",
-    data_class: str | None = None,
     as_of: str | None = None,
     expires_at: str | None = None,
+    recurring: bool | None = None,
+    codebase_ref: str | None = None,
 ) -> str:
     """Store a memory as a semantic embedding in Neo4j.
 
     Args:
         content: The text to remember (experience, observation, fact, etc.)
+        data_class: Memory data class (e.g. "person", "preference", "technical-config"). Required.
         tags: Comma-separated tags for categorisation (e.g. "session,preference")
-        source: Origin of the memory — "user", "tool", "session", "self"
+        source: Origin of the memory -- "user", "tool", "session", "self"
         agent_id: Which agent this memory belongs to (default "ada")
-        data_class: Memory data class (e.g. "person", "preference", "technical-config")
         as_of: ISO datetime for when the fact was established (defaults to now)
         expires_at: ISO datetime for when a timed-event expires (required for timed-event)
+        recurring: Explicit recurring flag for timed-events (overrides heuristic detection)
+        codebase_ref: Optional file path or symbol reference in the codebase this entry
+            is about (e.g. "core/sessions.py", "SessionManager.send_message"). Used by
+            the technical-config pruning pass to verify accuracy.
 
     Returns:
         JSON with the stored memory ID and confirmation.
     """
     try:
-        if not _hitl_gate(content):
-            return json.dumps({"stored": False, "reason": "denied by HITL"})
-
         return memory_store_direct(
-            content,
+            content=content,
             tags=tags,
             source=source,
             agent_id=agent_id,
             data_class=data_class,
             as_of=as_of,
             expires_at=expires_at,
+            recurring=recurring,
+            codebase_ref=codebase_ref,
         )
     except Exception as e:
         logger.exception("memory_store failed")
+        return json.dumps({"error": str(e)})
+
+
+@tool(tags=["memory"])
+def memory_list(
+    offset: int = 0,
+    limit: int = 25,
+    agent_id: str = "ada",
+) -> str:
+    """List all Memory nodes sequentially by creation time for review and cleanup.
+
+    Args:
+        offset: Number of entries to skip (for pagination).
+        limit: Number of entries to return (default 25, max 100).
+        agent_id: Which agent's memories to list (default "ada").
+
+    Returns:
+        JSON with entries (id, content, tags, source, data_class, created_at),
+        offset, limit, and total count.
+    """
+    limit = min(limit, 100)
+    try:
+        driver = _get_driver()
+        with driver.session() as session:
+            _ensure_index(session)
+            total_result = session.run(
+                "MATCH (m:Memory) WHERE m.agent_id = $agent_id RETURN count(m) AS total",
+                agent_id=agent_id,
+            )
+            total = total_result.single()["total"]
+            result = session.run(
+                """
+                MATCH (m:Memory)
+                WHERE m.agent_id = $agent_id
+                RETURN elementId(m) AS id,
+                       m.content AS content,
+                       m.tags AS tags,
+                       m.source AS source,
+                       m.data_class AS data_class,
+                       m.created_at AS created_at
+                ORDER BY m.created_at ASC
+                SKIP $offset
+                LIMIT $limit
+                """,
+                agent_id=agent_id,
+                offset=offset,
+                limit=limit,
+            )
+            entries = [
+                {
+                    "id": record["id"],
+                    "content": record["content"],
+                    "tags": record["tags"],
+                    "source": record["source"],
+                    "data_class": record["data_class"],
+                    "created_at": record["created_at"],
+                }
+                for record in result
+            ]
+        return json.dumps({"entries": entries, "offset": offset, "limit": limit, "total": total})
+    except Exception as e:
+        logger.exception("memory_list failed")
+        return json.dumps({"error": str(e)})
+
+
+@tool(tags=["memory"])
+def memory_delete(memory_id: str) -> str:
+    """Delete a Memory node from Neo4j by its element ID.
+
+    Args:
+        memory_id: The elementId of the memory to delete (from memory_list).
+
+    Returns:
+        JSON confirming deletion or error.
+    """
+    try:
+        driver = _get_driver()
+        with driver.session() as session:
+            result = session.run(
+                """
+                MATCH (m:Memory)
+                WHERE elementId(m) = $memory_id
+                WITH m, m.content AS content
+                DETACH DELETE m
+                RETURN content
+                """,
+                memory_id=memory_id,
+            )
+            record = result.single()
+            if record:
+                return json.dumps({"deleted": True, "id": memory_id, "content": record["content"]})
+            return json.dumps({"deleted": False, "reason": "not found", "id": memory_id})
+    except Exception as e:
+        logger.exception("memory_delete failed")
+        return json.dumps({"error": str(e)})
+
+
+@tool(tags=["memory"])
+def memory_update(
+    memory_id: str,
+    data_class: str = "",
+    tags: str = "",
+) -> str:
+    """Update metadata on an existing Memory node.
+
+    Allows setting or correcting data_class and tags on entries
+    created before the classification pipeline existed. No HITL —
+    administrative cleanup only.
+
+    Args:
+        memory_id: The elementId of the memory to update (from memory_list).
+        data_class: New data class to assign (e.g., "technical-config", "person").
+                    Must be a valid registered class. Leave empty to leave unchanged.
+        tags: Comma-separated tags to replace existing tags.
+              Leave empty to leave unchanged.
+
+    Returns:
+        JSON with updated memory details or error.
+    """
+    from core.memory_schema import DATA_CLASS_REGISTRY, validate_data_class
+
+    try:
+        updates: dict = {}
+        if data_class:
+            try:
+                validate_data_class(data_class)
+            except ValueError as e:
+                return json.dumps({"updated": False, "error": str(e)})
+            updates["data_class"] = data_class
+            updates["tier"] = DATA_CLASS_REGISTRY[data_class].tier
+        if tags:
+            updates["tags"] = tags
+
+        if not updates:
+            return json.dumps({"updated": False, "error": "no fields provided to update"})
+
+        driver = _get_driver()
+        with driver.session() as session:
+            result = session.run(
+                """
+                MATCH (m:Memory)
+                WHERE elementId(m) = $memory_id
+                SET m += $updates
+                RETURN elementId(m) AS id, m.data_class AS data_class,
+                       left(m.content, 80) AS preview
+                """,
+                memory_id=memory_id,
+                updates=updates,
+            )
+            record = result.single()
+            if not record:
+                return json.dumps({"updated": False, "error": "not found", "id": memory_id})
+            return json.dumps({
+                "updated": True,
+                "id": record["id"],
+                "data_class": record["data_class"],
+                "preview": record["preview"],
+            })
+    except Exception as e:
+        logger.exception("memory_update failed")
         return json.dumps({"error": str(e)})
 
 
@@ -257,6 +435,7 @@ def memory_retrieve(
                            m.as_of AS as_of,
                            m.expires_at AS expires_at,
                            m.superseded AS superseded,
+                           m.codebase_ref AS codebase_ref,
                            score
                     ORDER BY score DESC
                     """,
@@ -282,6 +461,7 @@ def memory_retrieve(
                            m.as_of AS as_of,
                            m.expires_at AS expires_at,
                            m.superseded AS superseded,
+                           m.codebase_ref AS codebase_ref,
                            score
                     ORDER BY score DESC
                     """,
@@ -303,6 +483,7 @@ def memory_retrieve(
                     "as_of": record["as_of"],
                     "expires_at": record["expires_at"],
                     "superseded": record["superseded"],
+                    "codebase_ref": record["codebase_ref"],
                 }
                 for record in result
             ]

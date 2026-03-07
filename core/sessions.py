@@ -20,7 +20,7 @@ import aiohttp
 import aiosqlite
 
 from config import PROJECT_DIR, config
-from core.epilogue import DIGEST_SYSTEM_PROMPT, TRANSCRIPT_DIR, process_session_epilogue
+_TRANSCRIPT_DIR = Path.home() / ".claude" / "projects" / "-usr-src-app"
 from core.gateway_client import GatewayClient
 from core.models import ModelRegistry, Provider
 
@@ -154,8 +154,6 @@ class SessionManager:
         self._locks: dict[str, asyncio.Lock] = {}
         self._reaper_task: asyncio.Task | None = None
         self._guard_task: asyncio.Task | None = None
-        self._epilogue_http: aiohttp.ClientSession | None = None
-        self._epilogue_gateway_client: GatewayClient | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -184,17 +182,6 @@ class SessionManager:
         await self._db.commit()
         self._reaper_task = asyncio.create_task(self._idle_reaper())
         self._guard_task = asyncio.create_task(self._autopilot_guard())
-        # Dedicated HTTP client + GatewayClient for epilogue processing.
-        # Uses owner_type="epilogue" to keep these sessions separate from user sessions.
-        # DIGEST_SYSTEM_PROMPT is passed as surface_prompt so the Claude session
-        # receives JSON output format instructions.
-        self._epilogue_http = aiohttp.ClientSession()
-        self._epilogue_gateway_client = GatewayClient(
-            http=self._epilogue_http,
-            server_url=f"http://localhost:{config.server_port}",
-            owner_type="epilogue",
-            surface_prompt=DIGEST_SYSTEM_PROMPT,
-        )
         log.info("Session manager started (db=%s)", db_path)
 
     async def shutdown(self):
@@ -205,8 +192,6 @@ class SessionManager:
             self._guard_task.cancel()
         for sid in list(self._procs):
             await self._kill_process(sid)
-        if self._epilogue_http:
-            await self._epilogue_http.close()
         if self._db:
             await self._db.close()
         log.info("Session manager shut down")
@@ -232,7 +217,6 @@ class SessionManager:
                VALUES (?, ?, ?, ?, ?, ?, 'running')""",
             (session_id, owner_type, owner_ref, model, now, now),
         )
-        # Activate on this client surface
         await self._db.execute(
             """INSERT OR REPLACE INTO active_sessions (client_type, client_ref, session_id)
                VALUES (?, ?, ?)""",
@@ -242,13 +226,6 @@ class SessionManager:
 
         await self._spawn(session_id, model, autopilot=False, surface_prompt=surface_prompt)
         log.info("Created session %s (model=%s, owner=%s)", session_id, model, owner_ref)
-
-        # Fire-and-forget: process epilogues for dead predecessor sessions
-        asyncio.create_task(
-            self._trigger_epilogue_for_dead_sessions(owner_ref),
-            name=f"epilogue-trigger-{owner_ref}",
-        )
-
         return await self._session_dict(session_id)
 
     async def get_session(self, session_id: str) -> dict | None:
@@ -657,100 +634,6 @@ class SessionManager:
             except Exception:
                 log.exception("Error in idle reaper")
 
-    async def _trigger_epilogue_for_dead_sessions(self, owner_ref: str) -> None:
-        """Find dead predecessor sessions and process their epilogues.
-
-        Queries for sessions belonging to the same owner that are dead
-        (closed, idle, killed_guard) and have no epilogue_status yet.
-        """
-        if owner_ref == "0":
-            return  # Never process epilogues for internal epilogue sessions
-        try:
-            rows = await self._db.execute(
-                """SELECT id FROM sessions
-                   WHERE owner_ref = ?
-                   AND status IN ('closed', 'idle', 'killed_guard')
-                   AND epilogue_status IS NULL""",
-                (owner_ref,),
-            )
-            dead_sessions = await rows.fetchall()
-            if not dead_sessions:
-                return
-
-            log.info("Found %d dead sessions for epilogue processing", len(dead_sessions))
-
-            server_url = f"http://localhost:{config.server_port}"
-            for session_row in dead_sessions:
-                sid = session_row["id"]
-                try:
-                    status = await process_session_epilogue(
-                        sid, self._db, server_url, self._epilogue_gateway_client, 0
-                    )
-                    log.info("Epilogue for session %s: %s", sid, status)
-                except Exception:
-                    log.exception("Epilogue failed for session %s (non-fatal)", sid)
-        except Exception:
-            log.exception("Error in epilogue trigger for owner %s", owner_ref)
-
-    async def sweep_epilogues(self) -> dict:
-        """Process epilogues for all unprocessed dead sessions.
-
-        Called by the /epilogue/sweep endpoint (Trigger B).
-        Returns summary: {"processed": N, "skipped": M, "errors": K}
-        """
-        rows = await self._db.execute(
-            """SELECT id FROM sessions
-               WHERE status IN ('closed', 'idle', 'killed_guard')
-               AND epilogue_status IS NULL
-               AND owner_ref != '0'"""
-        )
-        dead_sessions = await rows.fetchall()
-
-        processed = 0
-        skipped = 0
-        errors = 0
-        server_url = f"http://localhost:{config.server_port}"
-
-        for session_row in dead_sessions:
-            sid = session_row["id"]
-            try:
-                status = await process_session_epilogue(
-                    sid, self._db, server_url, self._epilogue_gateway_client, 0
-                )
-                if status == "completed":
-                    processed += 1
-                elif status == "skipped":
-                    skipped += 1
-                else:
-                    errors += 1
-            except Exception:
-                log.exception("Epilogue sweep failed for session %s", sid)
-                errors += 1
-
-        return {"processed": processed, "skipped": skipped, "errors": errors}
-
-    async def force_epilogue(self, session_id: str) -> dict:
-        """Force epilogue processing on a session, regardless of current status.
-
-        Used by the /remember command. Resets epilogue_status to NULL before processing.
-        """
-        # Reset epilogue_status to allow reprocessing
-        await self._db.execute(
-            "UPDATE sessions SET epilogue_status = NULL WHERE id = ?",
-            (session_id,),
-        )
-        await self._db.commit()
-
-        server_url = f"http://localhost:{config.server_port}"
-        try:
-            status = await process_session_epilogue(
-                session_id, self._db, server_url, self._epilogue_gateway_client, 0, force=True
-            )
-            return {"status": status, "session_id": session_id}
-        except Exception as e:
-            log.exception("Force epilogue failed for session %s", session_id)
-            return {"error": str(e), "session_id": session_id}
-
     async def _autopilot_guard(self):
         """Kill runaway autopilot sessions. Runs every 30s."""
         while True:
@@ -808,7 +691,7 @@ class SessionManager:
         result = await row.fetchone()
         if not result or not result["claude_sid"]:
             return None
-        path = TRANSCRIPT_DIR / f"{result['claude_sid']}.jsonl"
+        path = _TRANSCRIPT_DIR / f"{result['claude_sid']}.jsonl"
         if path.exists():
             return path
         return None

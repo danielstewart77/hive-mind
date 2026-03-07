@@ -81,24 +81,14 @@ class TestGraphUpsertDirectMetadata:
             assert "error" in result
             assert "unknown-class" in result["error"].lower()
 
-    def test_graph_upsert_direct_without_data_class_logs_deprecation(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        mock_driver = _make_mock_driver()
+    def test_graph_upsert_direct_without_data_class_raises_type_error(self) -> None:
         import agents.knowledge_graph as kg_mod
 
-        with (
-            patch.object(kg_mod, "_get_driver", return_value=mock_driver),
-            patch.object(kg_mod, "_kg_index_created", True),
-            caplog.at_level(logging.WARNING),
-        ):
-            result_str = kg_mod.graph_upsert_direct(
+        with pytest.raises(TypeError):
+            kg_mod.graph_upsert_direct(
                 entity_type="Person",
                 name="Daniel",
             )
-            result = json.loads(result_str)
-            assert result["upserted"] is True  # Backward compat
-            assert any("deprecat" in msg.lower() for msg in caplog.messages)
 
     def test_graph_upsert_direct_metadata_on_relationship_target(self) -> None:
         mock_driver = _make_mock_driver()
@@ -199,17 +189,26 @@ class TestGraphUpsertWithHITL:
     def test_graph_upsert_with_hitl_passes_data_class_through(self) -> None:
         mock_driver = _make_mock_driver()
         import agents.knowledge_graph as kg_mod
+        from core.kg_guards import DisambiguationResult
+
+        proceed_result = DisambiguationResult(
+            action="proceed", existing_nodes=[], message="No match."
+        )
 
         with (
             patch.object(kg_mod, "_hitl_gate", return_value=True),
             patch.object(kg_mod, "_get_driver", return_value=mock_driver),
             patch.object(kg_mod, "_kg_index_created", True),
+            patch("core.kg_guards.check_disambiguation", return_value=proceed_result),
         ):
             result_str = kg_mod.graph_upsert(
                 entity_type="Person",
                 name="Daniel",
                 data_class="person",
                 source="user",
+                relation="KNOWS_ABOUT",
+                target_name="Hive Mind",
+                target_type="Project",
             )
             result = json.loads(result_str)
             assert result["upserted"] is True

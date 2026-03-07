@@ -204,16 +204,17 @@ async def list_models():
 
 
 # ---------------------------------------------------------------------------
-# Epilogue sweep endpoint
+# Memory Expiry
 # ---------------------------------------------------------------------------
-@app.post("/epilogue/sweep")
-async def epilogue_sweep(x_hitl_internal: str = Header(None)):
-    """Trigger epilogue processing for all unprocessed dead sessions."""
+@app.post("/memory/expiry-sweep")
+async def memory_expiry_sweep(x_hitl_internal: str = Header(None)):
+    """Trigger memory expiry sweep for expired timed-event entries."""
     if not config.hitl_internal_token:
         return JSONResponse({"error": "HITL not configured"}, status_code=500)
     if x_hitl_internal != config.hitl_internal_token:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
-    results = await session_mgr.sweep_epilogues()
+    from core.memory_expiry import sweep_expired_events
+    results = await asyncio.to_thread(sweep_expired_events)
     return results
 
 
@@ -281,9 +282,8 @@ async def _handle_command(cmd: str, parts: list[str], body: CommandRequest):
         return await session_mgr.list_sessions(owner_ref=body.owner_ref)
 
     if cmd in ("/new", "/clear"):
-        # Kill active session (if any) then create a new one.
-        # Epilogue fires in the background via _trigger_epilogue_for_dead_sessions
-        # inside create_session — HITL will arrive in the new session context.
+        # Kill active session (if any), run memory pipeline on it, then create a new one.
+        # _run_memory_for_owner blocks inside create_session until the pipeline finishes.
         active = await session_mgr.get_active_session(body.owner_type, body.client_ref)
         if active:
             await session_mgr.kill_session(active["id"])
@@ -338,10 +338,12 @@ async def _handle_command(cmd: str, parts: list[str], body: CommandRequest):
         return await session_mgr.kill_session(target)
 
     if cmd == "/remember":
-        active = await session_mgr.get_active_session(body.owner_type, body.client_ref)
-        if not active:
-            return {"error": "No active session. Use /new first."}
-        return await session_mgr.force_epilogue(active["id"])
+        return {
+            "response": (
+                "The memory pipeline runs automatically when you start a new session with /new. "
+                "To save something specific right now, say 'remember this' in the conversation."
+            )
+        }
 
     return {"error": f"Unknown command: {cmd}"}
 
