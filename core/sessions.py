@@ -20,7 +20,7 @@ import aiohttp
 import aiosqlite
 
 from config import PROJECT_DIR, config
-from core.epilogue import MEMORY_MANAGER_PROMPT, TRANSCRIPT_DIR, format_transcript, read_transcript
+from core.epilogue import TRANSCRIPT_DIR
 from core.gateway_client import GatewayClient
 from core.models import ModelRegistry, Provider
 
@@ -154,8 +154,6 @@ class SessionManager:
         self._locks: dict[str, asyncio.Lock] = {}
         self._reaper_task: asyncio.Task | None = None
         self._guard_task: asyncio.Task | None = None
-        self._epilogue_http: aiohttp.ClientSession | None = None
-        self._epilogue_gateway_client: GatewayClient | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -184,17 +182,6 @@ class SessionManager:
         await self._db.commit()
         self._reaper_task = asyncio.create_task(self._idle_reaper())
         self._guard_task = asyncio.create_task(self._autopilot_guard())
-        # Dedicated HTTP client + GatewayClient for epilogue processing.
-        # Uses owner_type="epilogue" to keep these sessions separate from user sessions.
-        # MEMORY_MANAGER_PROMPT is passed as surface_prompt so the Claude session
-        # knows to run the memory-manager pipeline on the transcript it receives.
-        self._epilogue_http = aiohttp.ClientSession()
-        self._epilogue_gateway_client = GatewayClient(
-            http=self._epilogue_http,
-            server_url=f"http://localhost:{config.server_port}",
-            owner_type="epilogue",
-            surface_prompt=MEMORY_MANAGER_PROMPT,
-        )
         log.info("Session manager started (db=%s)", db_path)
 
     async def shutdown(self):
@@ -205,8 +192,6 @@ class SessionManager:
             self._guard_task.cancel()
         for sid in list(self._procs):
             await self._kill_process(sid)
-        if self._epilogue_http:
-            await self._epilogue_http.close()
         if self._db:
             await self._db.close()
         log.info("Session manager shut down")
@@ -222,13 +207,7 @@ class SessionManager:
         model: str | None = None,
         surface_prompt: str | None = None,
     ) -> dict:
-        """Create a new session, spawn process, return session info.
-
-        Runs the memory pipeline for any unprocessed dead sessions belonging to
-        the same owner before spawning the new subprocess. Blocks until done.
-        """
-        await self._run_memory_for_owner(owner_ref)
-
+        """Create a new session, spawn process, return session info."""
         model = model or config.default_model
         session_id = str(uuid.uuid4())
         now = time.time()
@@ -654,93 +633,6 @@ class SessionManager:
                 return
             except Exception:
                 log.exception("Error in idle reaper")
-
-    async def _run_memory_for_owner(self, owner_ref: str) -> None:
-        """Run the memory pipeline for all unprocessed dead sessions belonging to owner_ref.
-
-        Called at the start of create_session to process old sessions before spawning
-        a new one. Skips internal epilogue sessions (owner_ref == "0"). Non-fatal —
-        errors are logged but do not prevent the new session from starting.
-        """
-        if owner_ref == "0":
-            return
-        try:
-            rows = await self._db.execute(
-                """SELECT id, claude_sid FROM sessions
-                   WHERE owner_ref = ?
-                   AND status IN ('closed', 'idle', 'killed_guard')
-                   AND epilogue_status IS NULL""",
-                (owner_ref,),
-            )
-            dead_sessions = await rows.fetchall()
-            if not dead_sessions:
-                return
-
-            log.info(
-                "Running memory pipeline for %d dead session(s), owner=%s",
-                len(dead_sessions), owner_ref,
-            )
-
-            for session_row in dead_sessions:
-                sid = session_row["id"]
-                claude_sid = session_row["claude_sid"]
-
-                await self._db.execute(
-                    "UPDATE sessions SET epilogue_status = 'pending' WHERE id = ?",
-                    (sid,),
-                )
-                await self._db.commit()
-
-                if not claude_sid:
-                    await self._db.execute(
-                        "UPDATE sessions SET epilogue_status = 'skipped' WHERE id = ?",
-                        (sid,),
-                    )
-                    await self._db.commit()
-                    continue
-
-                transcript_path = TRANSCRIPT_DIR / f"{claude_sid}.jsonl"
-                turns = read_transcript(transcript_path)
-
-                if not turns:
-                    log.info("No transcript for session %s — skipping", sid)
-                    await self._db.execute(
-                        "UPDATE sessions SET epilogue_status = 'skipped' WHERE id = ?",
-                        (sid,),
-                    )
-                    await self._db.commit()
-                    transcript_path.unlink(missing_ok=True)
-                    continue
-
-                transcript_text = format_transcript(turns)
-                prompt = (
-                    "Process this session transcript through the memory pipeline "
-                    "(automated trigger):\n\n"
-                    "---BEGIN TRANSCRIPT---\n"
-                    f"{transcript_text}\n"
-                    "---END TRANSCRIPT---"
-                )
-
-                try:
-                    await self._epilogue_gateway_client.query(
-                        0, f"epilogue-{sid[:8]}", prompt
-                    )
-                    transcript_path.unlink(missing_ok=True)
-                    await self._db.execute(
-                        "UPDATE sessions SET epilogue_status = 'completed' WHERE id = ?",
-                        (sid,),
-                    )
-                    await self._db.commit()
-                    log.info("Memory pipeline completed for session %s", sid)
-                except Exception as e:
-                    log.error("Memory pipeline failed for session %s: %s", sid, e)
-                    await self._db.execute(
-                        "UPDATE sessions SET epilogue_status = 'skipped' WHERE id = ?",
-                        (sid,),
-                    )
-                    await self._db.commit()
-        except Exception:
-            log.exception("Error in _run_memory_for_owner for owner %s", owner_ref)
 
     async def _autopilot_guard(self):
         """Kill runaway autopilot sessions. Runs every 30s."""

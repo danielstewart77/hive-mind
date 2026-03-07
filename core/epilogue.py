@@ -1,8 +1,7 @@
 """
 Hive Mind — Session epilogue utilities.
 
-Provides transcript reading and the system prompt for the automated
-memory pipeline. Orchestration lives in SessionManager._run_memory_for_owner.
+Provides transcript reading utilities used by the /save-session skill.
 """
 
 import json
@@ -14,20 +13,6 @@ log = logging.getLogger("hive-mind.epilogue")
 
 TRANSCRIPT_DIR = Path.home() / ".claude" / "projects" / "-usr-src-app"
 MAX_TRANSCRIPT_CHARS = 50000
-
-MEMORY_MANAGER_PROMPT = (
-    "You are processing a completed session transcript for memory storage.\n\n"
-    "When you receive a transcript, invoke the memory-manager pipeline with "
-    "trigger type 'automated'. Follow these steps exactly:\n"
-    "1. Create a temp directory: /tmp/memory-{use current timestamp}/\n"
-    "2. Run parse-memory agent — pass: trigger=automated, the full transcript, temp path\n"
-    "3. On PASS: run classify-memory agent — pass: temp path\n"
-    "4. On PASS: run route-memory agent — pass: temp path\n"
-    "5. On PASS (not ALL_DISCARDED): run save-memory agent — pass: temp path\n"
-    "6. Delete the temp directory\n\n"
-    "Proceed autonomously. When classify-memory needs a new data class, it will "
-    "prompt Daniel via Telegram — that is expected and correct."
-)
 
 
 @dataclass

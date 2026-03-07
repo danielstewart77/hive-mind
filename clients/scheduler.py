@@ -167,25 +167,6 @@ async def _memory_expiry_sweep() -> None:
 
 
 
-async def _epilogue_sweep() -> None:
-    """Call the gateway's epilogue sweep endpoint to process unprocessed dead sessions."""
-    log.info("Running epilogue sweep")
-    try:
-        timeout = aiohttp.ClientTimeout(total=120)
-        headers = {"X-HITL-Internal": config.hitl_internal_token or ""}
-        async with aiohttp.ClientSession(timeout=timeout) as http:
-            async with http.post(f"{SERVER_URL}/epilogue/sweep", headers=headers) as resp:
-                data = await resp.json()
-                log.info(
-                    "Epilogue sweep results: processed=%d, skipped=%d, errors=%d",
-                    data.get("processed", 0),
-                    data.get("skipped", 0),
-                    data.get("errors", 0),
-                )
-    except Exception:
-        log.exception("Epilogue sweep failed")
-
-
 
 async def main() -> None:
     if not config.scheduled_tasks:
@@ -210,18 +191,13 @@ async def main() -> None:
         scheduler.add_job(run_task, trigger, args=[i], id=f"task-{i}")
         log.info("Scheduled task %d @ %s (%s): %s", i, task.cron, task.timezone, task.prompt[:60])
 
-    # Add epilogue sweep job (every 30 minutes)
-    epilogue_trigger = CronTrigger(minute="*/30", timezone="America/Chicago")
-    scheduler.add_job(_epilogue_sweep, epilogue_trigger, id="epilogue-sweep")
-    log.info("Scheduled epilogue sweep @ */30 * * * *")
-
     # Add memory expiry sweep job (nightly at 3:30 AM CT)
     memory_expiry_trigger = CronTrigger(hour="3", minute="30", timezone="America/Chicago")
     scheduler.add_job(_memory_expiry_sweep, memory_expiry_trigger, id="memory-expiry-sweep")
     log.info("Scheduled memory expiry sweep @ 30 3 * * *")
 
     scheduler.start()
-    log.info("Scheduler running — %d job(s) active + epilogue sweep + memory expiry sweep", len(config.scheduled_tasks))
+    log.info("Scheduler running — %d job(s) active + memory expiry sweep", len(config.scheduled_tasks))
 
     await asyncio.Event().wait()  # run forever
 
