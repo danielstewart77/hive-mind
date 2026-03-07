@@ -149,6 +149,9 @@ jobs/
 # Future voice reference audio (binary, large)
 voice_ref/
 
+# Internal documentation (local only — not for GitHub)
+documents/
+
 # Editor backups
 *~
 *.swp
