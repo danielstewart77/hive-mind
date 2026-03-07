@@ -35,8 +35,8 @@ DATA_CLASS_REGISTRY: dict[str, DataClassDef] = {
         "timed-event", "reviewable", ["reviewable", "event"], True
     ),
     "person": DataClassDef("person", "durable", ["durable", "person"], False),
-    "world-event": DataClassDef(
-        "world-event", "reviewable", ["reviewable", "world-event"], False
+    "news-event": DataClassDef(
+        "news-event", "reviewable", ["reviewable", "news-event"], False
     ),
     "preference": DataClassDef(
         "preference", "durable", ["durable", "preference"], False

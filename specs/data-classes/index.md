@@ -20,7 +20,7 @@ add an entry here automatically. The first entry was added manually.
 | `ephemeral` | `ephemeral.md` | — | Point-in-time data with no lasting relevance — weather, live prices, status snapshots — always discarded |
 | `news-digest` | `news-digest.md` | — | Raw news content from newsletters or feed runs (TLDR, X AI Lurker, InfoSec roundups) — always discarded unless Daniel engaged with it, in which case reclassify the engaged chunk |
 | `preference` | `preference.md` | vector | A stable preference, habit, or behavioral tendency belonging to Daniel or Ada |
-| `world-event` | `world-event.md` | vector | A significant external event with lasting relevance to Daniel or his community |
+| `news-event` | `news-event.md` | — | External news or world incidents — always discarded |
 | `intention` | `intention.md` | vector | A stated near-term plan from Daniel not yet acted on — lighter than future-project |
 | `timed-event` | `timed-event.md` | vector | A future scheduled event with a specific datetime; requires expires_at |
 

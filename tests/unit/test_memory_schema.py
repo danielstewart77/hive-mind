@@ -24,7 +24,7 @@ class TestDataClassRegistry:
             "technical-config",
             "timed-event",
             "person",
-            "world-event",
+            "news-event",
             "preference",
             "intention",
             "ada-identity",
