@@ -1,8 +1,9 @@
 """
 Hive Mind — Voice Server.
 
-Provides STT (faster-whisper) and TTS (Kokoro) over HTTP.
-Both models load at startup and stay resident.
+Provides STT (faster-whisper) and TTS over HTTP.
+TTS engine priority: F5-TTS (voice cloning) → Kokoro (fallback).
+All models load at startup and stay resident.
 Auto-detects CUDA; falls back to CPU gracefully.
 """
 
@@ -55,9 +56,14 @@ app = FastAPI(title="Hive Mind Voice Server")
 _DEVICE = "cuda" if _GPU_OK and torch.cuda.is_available() else "cpu"
 _WHISPER_MODEL = os.getenv("WHISPER_MODEL", "medium")
 _KOKORO_VOICE = os.getenv("KOKORO_VOICE", "bf_alice")
+_F5_REF_AUDIO = os.getenv("F5_REF_AUDIO", "/usr/src/app/voice_ref/hive_mind_voice.wav")
+_F5_REF_TEXT = os.getenv("F5_REF_TEXT", "/usr/src/app/voice_ref/hive_mind_voice.txt")
+_USE_F5TTS = os.getenv("USE_F5TTS", "1").lower() in ("1", "true", "yes")
 
 _whisper = None
 _kokoro: dict = {}  # lang_code -> KPipeline
+_f5tts = None
+_f5_ref_text: str = ""
 
 
 def _pipeline_for(voice: str):
@@ -69,11 +75,11 @@ def _pipeline_for(voice: str):
 
 
 # ---------------------------------------------------------------------------
-# Startup — load both models once
+# Startup — load all models once
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
 async def startup():
-    global _whisper, _kokoro
+    global _whisper, _kokoro, _f5tts, _f5_ref_text
 
     log.info("Voice server starting on device: %s", _DEVICE)
 
@@ -87,7 +93,25 @@ async def startup():
     _kokoro["a"] = KPipeline(lang_code="a", device=_DEVICE)
     _kokoro["b"] = KPipeline(lang_code="b", device=_DEVICE)
 
-    log.info("Voice server ready.")
+    if _USE_F5TTS and os.path.exists(_F5_REF_AUDIO):
+        try:
+            from f5_tts.api import F5TTS
+            log.info("Loading F5-TTS (voice cloning)...")
+            _f5tts = F5TTS(device=_DEVICE)
+            # Load reference transcript
+            ref_text_path = _F5_REF_TEXT
+            if os.path.exists(ref_text_path):
+                with open(ref_text_path) as f:
+                    _f5_ref_text = f.read().strip()
+            log.info("F5-TTS ready. Reference: %s (%d chars)", _F5_REF_AUDIO, len(_f5_ref_text))
+        except Exception as e:
+            log.warning("F5-TTS failed to load (%s) — falling back to Kokoro only", e)
+            _f5tts = None
+    else:
+        if _USE_F5TTS:
+            log.warning("F5_REF_AUDIO not found at %s — F5-TTS disabled", _F5_REF_AUDIO)
+
+    log.info("Voice server ready. TTS engine: %s", "F5-TTS + Kokoro fallback" if _f5tts else "Kokoro")
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +152,6 @@ async def stt(file: UploadFile):
 
     audio_bytes = await file.read()
 
-    # Convert OGG → WAV if needed
     fname = file.filename or ""
     ctype = file.content_type or ""
     if "ogg" in ctype or fname.endswith(".ogg") or fname.endswith(".oga"):
@@ -155,31 +178,49 @@ async def stt(file: UploadFile):
 # ---------------------------------------------------------------------------
 class TTSRequest(BaseModel):
     text: str
-    voice: str = _KOKORO_VOICE
+    voice: str = "f5"   # "f5" = F5-TTS (default), anything else = Kokoro voice name
     speed: float = 1.0
 
 
 @app.post("/tts")
 async def tts(req: TTSRequest):
     """Synthesise text to OGG/Opus audio."""
-    if _kokoro is None:
-        raise HTTPException(status_code=503, detail="TTS model not ready")
 
-    pipeline = _pipeline_for(req.voice)
+    # F5-TTS path
+    if req.voice == "f5" and _f5tts is not None:
+        try:
+            wav_array, sr, _ = _f5tts.infer(
+                ref_file=_F5_REF_AUDIO,
+                ref_text=_f5_ref_text,
+                gen_text=req.text,
+            )
+            wav_buf = io.BytesIO()
+            sf.write(wav_buf, wav_array, sr, format="WAV")
+            ogg_bytes = _wav_to_ogg(wav_buf.getvalue())
+            log.info("TTS (F5): %d chars → %d bytes OGG", len(req.text), len(ogg_bytes))
+            return Response(content=ogg_bytes, media_type="audio/ogg")
+        except Exception as e:
+            log.warning("F5-TTS inference failed (%s) — falling back to Kokoro", e)
+
+    # Kokoro fallback
+    if not _kokoro:
+        raise HTTPException(status_code=503, detail="TTS not ready")
+
+    kokoro_voice = _KOKORO_VOICE if req.voice == "f5" else req.voice
+    pipeline = _pipeline_for(kokoro_voice)
     samples = []
-    for _, _, audio in pipeline(req.text, voice=req.voice, speed=req.speed):
+    for _, _, audio in pipeline(req.text, voice=kokoro_voice, speed=req.speed):
         samples.append(audio)
 
     if not samples:
         raise HTTPException(status_code=500, detail="TTS produced no audio")
 
     audio_array = np.concatenate(samples)
-
     wav_buf = io.BytesIO()
     sf.write(wav_buf, audio_array, 24000, format="WAV")
     ogg_bytes = _wav_to_ogg(wav_buf.getvalue())
 
-    log.info("TTS: %d chars → %d bytes OGG", len(req.text), len(ogg_bytes))
+    log.info("TTS (Kokoro/%s): %d chars → %d bytes OGG", kokoro_voice, len(req.text), len(ogg_bytes))
     return Response(content=ogg_bytes, media_type="audio/ogg")
 
 
@@ -190,8 +231,10 @@ async def tts(req: TTSRequest):
 async def health():
     return {
         "stt": "ready" if _whisper else "loading",
-        "tts": "ready" if _kokoro else "loading",
+        "tts": "ready" if (_f5tts or _kokoro) else "loading",
+        "tts_engine": "f5+kokoro" if _f5tts else "kokoro",
         "tts_voices": list(_kokoro.keys()),
+        "f5_ref_audio": _F5_REF_AUDIO if _f5tts else None,
         "device": _DEVICE,
         "whisper_model": _WHISPER_MODEL,
         "kokoro_voice": _KOKORO_VOICE,
