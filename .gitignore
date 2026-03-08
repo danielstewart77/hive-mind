@@ -161,3 +161,6 @@ documents/
 backups/sessions.db.bak.20260228
 backups/reminders.db.bak.20260228
 
+
+# Story files (working docs, not for GitHub)
+stories/
