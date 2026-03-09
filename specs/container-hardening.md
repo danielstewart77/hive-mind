@@ -35,6 +35,3 @@ docker compose -f docker-compose.yml -f docker-compose.production.yml up -d --bu
 
 The `.claude` bind mount stays in both environments for keyring access.
 
-## Ring 5: User Namespace Remapping (Designed, Not Implemented)
-
-Maps container UID 0 to an unprivileged host UID via Docker's `userns-remap`. If an attacker escapes the container, they arrive on the host as an unprivileged user.

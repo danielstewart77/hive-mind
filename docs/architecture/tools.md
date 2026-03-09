@@ -5,7 +5,7 @@ Hive Mind exposes tools across two MCP servers. Both are available to Ada in eve
 - **`hive-mind-tools`** — internal, stdio, spawned by Claude CLI (`mcp_server.py`)
 - **`hive-mind-mcp`** — external, SSE, separate Docker service (`hive_mind_mcp/`)
 
-HITL = requires human approval via Telegram before executing. See [hitl.md](hitl.md).
+HITL = requires human approval via Telegram before executing. See [hitl-approval.md](../../specs/hitl-approval.md).
 
 ---
 
@@ -148,6 +148,3 @@ See [external-mcp.md](external-mcp.md) for the full pattern.
 
 ---
 
-## Planned / Future
-
-**Spark to Bloom MCP** — a dedicated MCP server inside the `spark_to_bloom` project for managing Daniel's personal website (`sparktobloom.com`). Would provide tools for creating/editing articles and pages, updating the homepage grid, and publishing via git push → Woodpecker CI. See `documents/spark-to-bloom-mcp-proposal.md` for the full spec.

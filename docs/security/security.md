@@ -52,7 +52,7 @@ The external MCP server (`hive_mind_mcp`) is protected by a bearer token. The to
 ## Security Review Process
 
 1. **Security spec** (`specs/security.md`) — hard limits and elevated-risk procedures (authoritative source)
-2. **Security audit** (`documents/SEC_REVIEW.md`) — specific findings with severity ratings and remediation status
+2. **Security audit** (`docs/SEC_REVIEW.md`) — specific findings with severity ratings and remediation status
 3. **Planka board** — tracks all security findings and mitigation rings as prioritized stories
 
-See also: [HITL (Human-in-the-Loop)](hitl.md) for how write operations are confirmed before execution.
+See also: [HITL (Human-in-the-Loop)](../specs/hitl-approval.md) for how write operations are confirmed before execution.

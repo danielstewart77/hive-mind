@@ -5,13 +5,10 @@ Read this file first. Load only the specs relevant to the current task.
 ## Core Standards (always relevant)
 | Spec | File | Summary |
 |------|------|---------|
+| Conventions | `specs/conventions.md` | Build order (CLI → skill → spec → code), when to use skill-creator-claude / mcp-tool-builder |
 | Security Policy | `specs/security.md` | Hard limits, elevated-risk rules, prompt injection defense, default stance |
-| Development Conventions | `specs/DEVELOPMENT.md` | Setup, testing, branching, rollback, environment variables, notification channels |
-
-## Architecture
-| Spec | File | Summary |
-|------|------|---------|
-| Gateway Architecture | `specs/gateway-architecture.md` | Session manager, SSE streaming, model registry, client pattern, MCP auth |
+| Branch Strategy | `specs/branching.md` | Branch naming, PR checklist |
+| Notification Channels | `specs/notification-channels.md` | Fallback order: Telegram → Telegram API → Gmail → alert file |
 
 ## Security Implementation
 | Spec | File | Summary |

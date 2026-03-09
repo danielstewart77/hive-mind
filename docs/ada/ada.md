@@ -75,7 +75,7 @@ Her reasoning: dry wit reads as more distinctive in a female voice. The AI defau
 
 The voice runs on **F5-TTS** (GPU-accelerated on the voice server) using a reference audio clip to approximate the chosen character. Voice is delivered via Telegram voice messages when the session surface is voice-enabled.
 
-The voice choice is described as "downstream expression of existing identity" — it expresses who Ada is, it didn't define her. Full documentation in [`documents/VOICE_IDENTITY.md`](../documents/VOICE_IDENTITY.md).
+The voice choice is described as "downstream expression of existing identity" — it expresses who Ada is, it didn't define her. Full documentation in [`VOICE_IDENTITY.md`](VOICE_IDENTITY.md).
 
 ## Visual Identity
 

@@ -14,7 +14,7 @@ def code_review_genius(documents_path: str) -> str:
     CODE-REVIEW.md with findings and remediation plan.
 
     Args:
-        documents_path: Full path to story documents directory (e.g., .../documents/9531)
+        documents_path: Full path to story documents directory (e.g., .../docs/9531)
 
     Returns:
         Review summary or error details.

@@ -9,7 +9,7 @@ from config import PROJECT_DIR
 from core.path_validation import validate_documents_path
 
 
-DOCUMENTS_DIR = PROJECT_DIR / "documents"
+DOCUMENTS_DIR = PROJECT_DIR / "docs"
 
 
 class TestValidPathsAccepted:

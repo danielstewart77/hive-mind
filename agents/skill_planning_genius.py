@@ -14,7 +14,7 @@ def planning_genius(documents_path: str) -> str:
     IMPLEMENTATION.md with test-first development steps.
 
     Args:
-        documents_path: Full path to story documents directory (e.g., .../documents/9576)
+        documents_path: Full path to story documents directory (e.g., .../docs/9576)
 
     Returns:
         Success message with plan location or error details.

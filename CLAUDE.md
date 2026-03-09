@@ -91,7 +91,7 @@ hive_mind/
 │   ├── tool_creator.py           # Runtime tool creation
 │   └── [dynamically created tools]
 │
-├── documents/                     # Plans, specs, reviews
+├── docs/                          # Human-readable documentation and background
 ├── jobs/                          # Data files (resumes, specs)
 ├── data/                          # SQLite databases (Docker volume)
 ├── backups/                       # Manual backups

@@ -11,11 +11,15 @@ Hive Mind uses two MCP servers:
 
 The internal server (`mcp_server.py`) runs as a subprocess of Claude CLI inside the main container. It has direct access to the Python runtime, the keyring, and the filesystem.
 
-The external server (`hive_mind_mcp`) is a standalone FastAPI service. It exists because some tools need capabilities that are awkward to co-locate with the main container:
+The external server (`hive_mind_mcp`) is a standalone FastAPI service. The split is a **security boundary**, not a convenience choice.
 
-- **OAuth credentials** (Gmail, Calendar) — use file-based token storage at `hive_mind_mcp/credentials/`
-- **Docker socket access** — mounting `/var/run/docker.sock` into the gateway container would be a significant security expansion; the MCP container is purpose-built for it
-- **Separation of concerns** — tools that manage infrastructure (compose ops) are isolated from the AI runtime they're managing
+Write and destructive operations (send email, modify calendar, Docker Compose ops) are deliberately isolated in the external server so that every such action must pass through a HITL gate before it executes. The internal server cannot perform these operations — not because it's awkward, but because the architecture enforces it. An AI agent running inside the main container cannot approve its own write operations; approval happens out-of-band via Telegram, and the token is held only in gateway memory.
+
+This also has practical consequences:
+
+- **OAuth credentials** (Gmail, Calendar) — stored in `hive_mind_mcp/credentials/`, not in the main container
+- **Docker socket access** — scoped to the MCP container only; the gateway container never touches the socket
+- **Blast radius containment** — a compromised or misbehaving AI session cannot write email, modify calendar, or restart services without explicit human approval
 
 ## Architecture
 
@@ -92,4 +96,4 @@ The credentials volume is mounted read-only inside `hive_mind_mcp`. The `hive_mi
 
 The `tools/approval.py` module in `hive_mind_mcp` implements non-blocking HITL polling. It sends a POST to the gateway's `/hitl/request`, then polls `/hitl/status/{token}` every 5 seconds. This keeps the MCP SSE connection alive during long waits (a single long-blocking request would time out the SSE client).
 
-See [HITL documentation](hitl.md) for the full approval flow.
+See [HITL documentation](../../specs/hitl-approval.md) for the full approval flow.

@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 from config import PROJECT_DIR
 
-DOCUMENTS_DIR = PROJECT_DIR / "documents"
+DOCUMENTS_DIR = PROJECT_DIR / "docs"
 VALID_PATH = str(DOCUMENTS_DIR / "integration-test-12345")
 
 

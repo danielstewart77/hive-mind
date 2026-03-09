@@ -1,7 +1,7 @@
 """Path validation for skill agent document paths.
 
 Prevents CWE-22 path traversal by ensuring all documents_path values
-resolve to a subdirectory within the project's documents/ directory.
+resolve to a subdirectory within the project's docs/ directory.
 Uses os.path.realpath() to canonicalize paths and resolve symlinks.
 """
 
@@ -9,7 +9,7 @@ import os
 
 from config import PROJECT_DIR
 
-DOCUMENTS_DIR = PROJECT_DIR / "documents"
+DOCUMENTS_DIR = PROJECT_DIR / "docs"
 
 
 def validate_documents_path(documents_path: str) -> str:
@@ -17,7 +17,7 @@ def validate_documents_path(documents_path: str) -> str:
 
     Returns the resolved (canonicalized) path string if valid.
     Raises ValueError if the path is empty, contains null bytes,
-    or resolves to a location outside the allowed documents/ directory.
+    or resolves to a location outside the allowed docs/ directory.
 
     Args:
         documents_path: The raw path string to validate.
@@ -39,7 +39,7 @@ def validate_documents_path(documents_path: str) -> str:
 
     if not resolved.startswith(required_prefix):
         raise ValueError(
-            "documents_path is outside the allowed documents/ directory"
+            "documents_path is outside the allowed docs/ directory"
         )
 
     return resolved

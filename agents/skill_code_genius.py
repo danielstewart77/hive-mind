@@ -14,7 +14,7 @@ def code_genius(documents_path: str) -> str:
     and self-corrects with up to 5 retries per build type.
 
     Args:
-        documents_path: Full path to story documents directory (e.g., .../documents/9576)
+        documents_path: Full path to story documents directory (e.g., .../docs/9576)
 
     Returns:
         Build status and completion message.
