@@ -152,8 +152,6 @@ voice_ref/*.mp3
 voice_ref/*.ogg
 voice_ref/*.mkv
 
-# Internal documentation (local only — not for GitHub)
-documents/
 
 # Editor backups
 *~
