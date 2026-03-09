@@ -38,8 +38,8 @@ This file provides guidance to Claude Code when working with this repository.
 ### Self-Improvement
 
 When a user requests something no existing tool handles, Claude Code:
-1. Generates the tool code
-2. Calls `create_tool` MCP tool to write it to `agents/` and register it
+1. Generates the tool code by chaining avaliable terminal tools
+2. For requests that are frequent or could benifit from more structure, call `create_tool` MCP tool to write it to `agents/` and register it
 3. If an API key is needed, asks the user and calls `set_secret` to store it
 4. The new tool is immediately available for use
 
@@ -170,3 +170,4 @@ The tool is auto-discovered by the MCP server. Return raw data (JSON strings pre
 4. **Less code is better** — if Claude Code already does it, don't wrap it
 5. **Gateway is the single source of truth** — all clients go through server.py
 6. **Per-process isolation** — env vars set per subprocess, never globally
+7. **Always echo directory paths exactly** — whenever a directory path is mentioned (by either party), spell it out character-for-character as you understand it (e.g. `hive_mind_mcp`, not "hive mind mcp") so Daniel can catch hyphen/underscore/casing errors before any action is taken.

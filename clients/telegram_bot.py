@@ -96,8 +96,13 @@ def _strip_markdown(text: str) -> str:
     """Remove markdown syntax, leaving plain readable text."""
     # Fenced code blocks — preserve content, drop fences
     text = re.sub(r"```[^\n]*\n(.*?)```", r"\1", text, flags=re.DOTALL)
-    # Inline code
-    text = re.sub(r"`([^`]+)`", r"\1", text)
+    # Save inline code content as placeholders before bold/italic processing,
+    # so underscores inside code spans aren't consumed by the italic regex.
+    saved: list[str] = []
+    def _save(m: re.Match) -> str:
+        saved.append(m.group(1))
+        return f"\x00CODE{len(saved) - 1}\x00"
+    text = re.sub(r"`([^`]+)`", _save, text)
     # Headers
     text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
     # Bold / italic (*** ** * ___ __ _)
@@ -109,6 +114,9 @@ def _strip_markdown(text: str) -> str:
     text = re.sub(r"^[-*_]{3,}\s*$", "", text, flags=re.MULTILINE)
     # Table separator rows (---|---|---)
     text = re.sub(r"^\|?[\s\-:|]+\|[\s\-:|]*\|?\s*$", "", text, flags=re.MULTILINE)
+    # Restore code span content
+    for i, content in enumerate(saved):
+        text = text.replace(f"\x00CODE{i}\x00", content)
     return text.strip()
 
 

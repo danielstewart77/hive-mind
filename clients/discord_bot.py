@@ -60,17 +60,6 @@ def _is_allowed_channel(channel_id: int) -> bool:
 # ---------------------------------------------------------------------------
 # Voice / TTS helpers
 # ---------------------------------------------------------------------------
-def _strip_markdown(text: str) -> str:
-    """Remove markdown syntax for clean TTS input."""
-    text = re.sub(r"```[^\n]*\n(.*?)```", r"\1", text, flags=re.DOTALL)
-    text = re.sub(r"`([^`]+)`", r"\1", text)
-    text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
-    text = re.sub(r"\*{1,3}([^*\n]+)\*{1,3}", r"\1", text)
-    text = re.sub(r"_{1,3}([^_\n]+)_{1,3}", r"\1", text)
-    text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
-    text = re.sub(r"^[-*_]{3,}\s*$", "", text, flags=re.MULTILINE)
-    return text.strip()
-
 
 async def _tts(text: str) -> bytes:
     """POST text to voice-server /tts, return OGG audio bytes."""
@@ -102,7 +91,7 @@ async def _play_tts_for_member(member: discord.Member | discord.User, text: str)
         return
 
     try:
-        ogg_bytes = await _tts(_strip_markdown(text))
+        ogg_bytes = await _tts(text)
     except Exception:
         log.exception("TTS synthesis failed")
         return

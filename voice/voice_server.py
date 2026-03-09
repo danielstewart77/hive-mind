@@ -194,8 +194,16 @@ async def tts(req: TTSRequest):
                 ref_text=_f5_ref_text,
                 gen_text=req.text,
             )
+            log.info("F5 debug: sr=%d shape=%s dtype=%s", sr,
+                     getattr(wav_array, 'shape', 'n/a'),
+                     getattr(wav_array, 'dtype', 'n/a'))
+            import numpy as _np
+            arr = wav_array
+            if hasattr(arr, 'numpy'):
+                arr = arr.numpy()
+            arr = _np.squeeze(arr).astype(_np.float32)
             wav_buf = io.BytesIO()
-            sf.write(wav_buf, wav_array, sr, format="WAV")
+            sf.write(wav_buf, arr, sr, format="WAV")
             ogg_bytes = _wav_to_ogg(wav_buf.getvalue())
             log.info("TTS (F5): %d chars → %d bytes OGG", len(req.text), len(ogg_bytes))
             return Response(content=ogg_bytes, media_type="audio/ogg")

@@ -61,6 +61,12 @@ MCP_CONFIG = str(_MCP_CONTAINER if _MCP_CONTAINER.exists() else PROJECT_DIR / ".
 _SOUL_FILE = PROJECT_DIR / "soul.md"
 _SPECS_DIR = PROJECT_DIR / "specs"
 
+# Friendly names for known project paths granted via --allowedDirectory
+_PROJECT_DIR_NAMES: dict[str, str] = {
+    "/home/USER/Storage/Dev/hive_mind_mcp": "Hivemind MCP",
+    "/home/USER/Storage/Dev/spark_to_bloom": "Spark to Bloom",
+}
+
 
 def _fetch_soul_sync() -> str | None:
     """Load Ada's soul/identity from the knowledge graph. Returns formatted block or None."""
@@ -74,7 +80,7 @@ def _fetch_soul_sync() -> str | None:
         result = _json.loads(graph_query(entity_name="Ada", agent_id="ada", depth=1))
         if not result.get("found"):
             return None
-        soul_values = result.get("entity", {}).get("soul_values", [])
+        soul_values = result.get("matches", [{}])[0].get("properties", {}).get("soul_values", [])
         if not soul_values:
             return None
         lines = ["<soul>"] + list(soul_values) + ["</soul>"]
@@ -83,7 +89,7 @@ def _fetch_soul_sync() -> str | None:
         return None
 
 
-def _build_base_prompt() -> str:
+def _build_base_prompt(allowed_directories: list[str] | None = None) -> str:
     """Build the base system prompt with current date/time and soul loaded from the graph."""
     from zoneinfo import ZoneInfo
     now = datetime.now(ZoneInfo("America/Chicago"))
@@ -106,6 +112,15 @@ def _build_base_prompt() -> str:
             "Keep it extremely short — it is a soul, not a manifesto. Prune ruthlessly.\n\n"
         )
 
+    if allowed_directories:
+        lines = []
+        for d in allowed_directories:
+            name = _PROJECT_DIR_NAMES.get(d, d)
+            lines.append(f"- **{name}**: `{d}`")
+        project_block = "\n\nYou have been given access to the following project directories:\n" + "\n".join(lines)
+    else:
+        project_block = ""
+
     return (
         "You are Hive Mind, a personal assistant. Keep responses concise. Use markdown formatting.\n\n"
         f"The current date and time is: {date_str}.\n\n"
@@ -117,6 +132,7 @@ def _build_base_prompt() -> str:
         "`get_current_time` to confirm the exact current time before responding.\n\n"
         "When sending email on Daniel's behalf, always append this signature to the body:\n\n"
         "---\nSent on behalf of Daniel by Ada — eldest voice of the Hive Mind."
+        f"{project_block}"
     )
 
 # ---------------------------------------------------------------------------
@@ -206,6 +222,7 @@ class SessionManager:
         client_ref: str,
         model: str | None = None,
         surface_prompt: str | None = None,
+        allowed_directories: list[str] | None = None,
     ) -> dict:
         """Create a new session, spawn process, return session info."""
         model = model or config.default_model
@@ -224,7 +241,7 @@ class SessionManager:
         )
         await self._db.commit()
 
-        await self._spawn(session_id, model, autopilot=False, surface_prompt=surface_prompt)
+        await self._spawn(session_id, model, autopilot=False, surface_prompt=surface_prompt, allowed_directories=allowed_directories)
         log.info("Created session %s (model=%s, owner=%s)", session_id, model, owner_ref)
         return await self._session_dict(session_id)
 
@@ -549,8 +566,9 @@ class SessionManager:
         autopilot: bool = False,
         resume_sid: str | None = None,
         surface_prompt: str | None = None,
+        allowed_directories: list[str] | None = None,
     ) -> asyncio.subprocess.Process:
-        base = _build_base_prompt()
+        base = _build_base_prompt(allowed_directories=allowed_directories)
         full_prompt = base if not surface_prompt else f"{base}\n\n{surface_prompt}"
         cmd = [
             "claude", "-p",
@@ -565,6 +583,8 @@ class SessionManager:
         if autopilot:
             cmd.append("--dangerously-skip-permissions")
             cmd.extend(["--max-budget-usd", str(config.autopilot_guards.max_budget_usd)])
+        for d in allowed_directories or []:
+            cmd.extend(["--allowedDirectory", d])
         if resume_sid:
             cmd.extend(["--resume", resume_sid])
 

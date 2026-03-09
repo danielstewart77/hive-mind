@@ -331,17 +331,18 @@ def memory_delete(memory_id: str) -> str:
 @tool(tags=["memory"])
 def memory_update(
     memory_id: str,
+    content: str = "",
     data_class: str = "",
     tags: str = "",
 ) -> str:
-    """Update metadata on an existing Memory node.
+    """Update an existing Memory node.
 
-    Allows setting or correcting data_class and tags on entries
-    created before the classification pipeline existed. No HITL —
-    administrative cleanup only.
+    Allows updating content (re-embeds automatically), data_class, and tags.
+    Any combination of fields can be provided; omitted fields are unchanged.
 
     Args:
         memory_id: The elementId of the memory to update (from memory_list).
+        content: New content to store. Re-embeds automatically. Leave empty to leave unchanged.
         data_class: New data class to assign (e.g., "technical-config", "person").
                     Must be a valid registered class. Leave empty to leave unchanged.
         tags: Comma-separated tags to replace existing tags.
@@ -354,6 +355,9 @@ def memory_update(
 
     try:
         updates: dict = {}
+        if content:
+            updates["content"] = content
+            updates["embedding"] = _embed(content)
         if data_class:
             try:
                 validate_data_class(data_class)

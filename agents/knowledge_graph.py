@@ -280,15 +280,18 @@ def graph_query(
     agent_id: str = "ada",
     depth: int = 1,
 ) -> str:
-    """Retrieve a knowledge graph node and its connected relationships.
+    """Retrieve knowledge graph node(s) and their connected relationships.
+
+    Searches by full name (exact), first_name, last_name, or aliases.
+    Returns all matching nodes — if multiple match, disambiguate before acting.
 
     Args:
-        entity_name: Name of the entity to look up (e.g. "Daniel").
+        entity_name: Name or name fragment to search (e.g. "Wil", "Vark", "Wil Vark", "Coach").
         agent_id: Which agent's graph to search (default "ada").
         depth: How many hops to traverse (default 1, max 3).
 
     Returns:
-        JSON with the node's properties and all connected nodes/relationships.
+        JSON with matching nodes, their properties, and connected relationships.
     """
     depth = min(max(depth, 1), 3)
     try:
@@ -296,13 +299,18 @@ def graph_query(
         with driver.session() as session:
             result = session.run(
                 f"""
-                MATCH (n {{name: $name, agent_id: $agent_id}})
+                MATCH (n {{agent_id: $agent_id}})
+                WHERE n.name = $query
+                   OR n.first_name = $query
+                   OR n.last_name = $query
+                   OR $query IN coalesce(n.aliases, [])
+                WITH n
                 OPTIONAL MATCH (n)-[r*1..{depth}]-(m)
                 RETURN n,
                        [rel IN r | {{type: type(rel), direction: 'out'}}] AS rels,
                        m
                 """,
-                name=entity_name,
+                query=entity_name,
                 agent_id=agent_id,
             )
             rows = result.data()
@@ -310,20 +318,87 @@ def graph_query(
         if not rows:
             return json.dumps({"found": False, "entity": entity_name})
 
-        node_props = dict(rows[0]["n"])
-        connections = []
+        nodes: dict[str, dict] = {}
         for row in rows:
+            node = dict(row["n"])
+            key = node.get("name", str(node))
+            if key not in nodes:
+                nodes[key] = {"properties": node, "connections": []}
             if row["m"]:
-                connections.append({
+                nodes[key]["connections"].append({
                     "node": dict(row["m"]),
                     "via": row["rels"],
                 })
 
+        matches = list(nodes.values())
         return json.dumps({
             "found": True,
-            "entity": node_props,
-            "connections": connections,
-            "connection_count": len(connections),
+            "count": len(matches),
+            "matches": matches,
+        })
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+@tool(tags=["memory"])
+def search_person(
+    first_name: str = "",
+    last_name: str = "",
+    title: str = "",
+    relationship: str = "",
+    agent_id: str = "ada",
+) -> str:
+    """Search for Person nodes by any known name fragment or relationship to Daniel.
+
+    All parameters are optional but at least one must be provided.
+    Matching is case-insensitive substring (CONTAINS) — pass whatever you know.
+    Multiple params are combined with AND (all must match).
+
+    Args:
+        first_name: Given name fragment (e.g. "Wil", "manny").
+        last_name: Surname fragment (e.g. "Vark", "stew").
+        title: Title or honorific fragment (e.g. "Coach", "Dr").
+        relationship: How this person relates to Daniel (e.g. "wife", "doctor", "child").
+        agent_id: Which agent's graph to search (default "ada").
+
+    Returns:
+        JSON with matching Person nodes and their properties.
+    """
+    if not any([first_name, last_name, title, relationship]):
+        return json.dumps({"error": "At least one search parameter must be provided."})
+    try:
+        driver = _get_driver()
+        with driver.session() as session:
+            result = session.run(
+                """
+                MATCH (n:Person {agent_id: $agent_id})
+                WHERE ($first_name = '' OR toLower(coalesce(n.first_name, '')) CONTAINS toLower($first_name))
+                  AND ($last_name = '' OR toLower(coalesce(n.last_name, '')) CONTAINS toLower($last_name))
+                  AND ($title = '' OR toLower(coalesce(n.title, '')) CONTAINS toLower($title))
+                  AND ($relationship = '' OR ANY(r IN coalesce(n.relationship, []) WHERE toLower(r) CONTAINS toLower($relationship)))
+                RETURN n
+                """,
+                first_name=first_name,
+                last_name=last_name,
+                title=title,
+                relationship=relationship,
+                agent_id=agent_id,
+            )
+            rows = result.data()
+
+        if not rows:
+            return json.dumps({"found": False, "query": {
+                "first_name": first_name,
+                "last_name": last_name,
+                "title": title,
+                "relationship": relationship,
+            }})
+
+        matches = [dict(row["n"]) for row in rows]
+        return json.dumps({
+            "found": True,
+            "count": len(matches),
+            "matches": matches,
         })
     except Exception as e:
         return json.dumps({"error": str(e)})

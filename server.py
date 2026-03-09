@@ -9,11 +9,15 @@ import asyncio
 import json
 import logging
 import os
+import secrets as _secrets
+import time
 from contextlib import asynccontextmanager
+from pathlib import Path
+from urllib.parse import urlencode
 
 import aiohttp
 from fastapi import FastAPI, Header, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel
 
 from config import config
@@ -97,6 +101,7 @@ class CreateSessionRequest(BaseModel):
     client_ref: str
     model: str | None = None
     surface_prompt: str | None = None
+    allowed_directories: list[str] | None = None
 
 
 class ImageAttachment(BaseModel):
@@ -129,6 +134,7 @@ async def create_session(body: CreateSessionRequest):
         client_ref=body.client_ref,
         model=body.model,
         surface_prompt=body.surface_prompt,
+        allowed_directories=body.allowed_directories,
     )
     return session
 
@@ -287,10 +293,12 @@ async def _handle_command(cmd: str, parts: list[str], body: CommandRequest):
         active = await session_mgr.get_active_session(body.owner_type, body.client_ref)
         if active:
             await session_mgr.kill_session(active["id"])
+        allowed_directories = parts[1:] if len(parts) > 1 else None
         return await session_mgr.create_session(
             owner_type=body.owner_type,
             owner_ref=body.owner_ref,
             client_ref=body.client_ref,
+            allowed_directories=allowed_directories,
         )
 
     if cmd == "/model":
@@ -346,6 +354,103 @@ async def _handle_command(cmd: str, parts: list[str], body: CommandRequest):
         }
 
     return {"error": f"Unknown command: {cmd}"}
+
+
+# ---------------------------------------------------------------------------
+# LinkedIn OAuth
+# ---------------------------------------------------------------------------
+_LINKEDIN_AUTH_URL = "https://www.linkedin.com/oauth/v2/authorization"
+_LINKEDIN_TOKEN_URL = "https://www.linkedin.com/oauth/v2/accessToken"
+_LINKEDIN_USERINFO_URL = "https://api.linkedin.com/v2/userinfo"
+_LINKEDIN_REDIRECT_URI = "https://sparktobloom.com/linkedin/callback"
+_LINKEDIN_SCOPES = "openid profile email w_member_social"
+_LINKEDIN_TOKEN_PATH = Path("/home/USER/Storage/Dev/hive_mind_mcp/credentials/linkedin_token.json")
+
+_linkedin_oauth_states: set[str] = set()
+
+
+def _get_linkedin_creds() -> tuple[str | None, str | None]:
+    try:
+        import keyring as _kr
+        cid = _kr.get_password("hive-mind", "LINKEDIN_CLIENT_ID")
+        csec = _kr.get_password("hive-mind", "LINKEDIN_CLIENT_SECRET")
+        return cid, csec
+    except Exception:
+        return os.getenv("LINKEDIN_CLIENT_ID"), os.getenv("LINKEDIN_CLIENT_SECRET")
+
+
+@app.get("/linkedin/auth")
+async def linkedin_auth():
+    """Redirect browser to LinkedIn OAuth authorization page."""
+    client_id, _ = _get_linkedin_creds()
+    if not client_id:
+        return JSONResponse({"error": "LINKEDIN_CLIENT_ID not configured"}, status_code=500)
+    state = _secrets.token_urlsafe(16)
+    _linkedin_oauth_states.add(state)
+    params = urlencode({
+        "response_type": "code",
+        "client_id": client_id,
+        "redirect_uri": _LINKEDIN_REDIRECT_URI,
+        "scope": _LINKEDIN_SCOPES,
+        "state": state,
+    })
+    return RedirectResponse(f"{_LINKEDIN_AUTH_URL}?{params}")
+
+
+@app.get("/linkedin/callback")
+async def linkedin_callback(code: str | None = None, state: str | None = None, error: str | None = None):
+    """Handle LinkedIn OAuth callback — exchange code for tokens and store them."""
+    if error:
+        return JSONResponse({"error": f"LinkedIn auth error: {error}"}, status_code=400)
+    if state not in _linkedin_oauth_states:
+        return JSONResponse({"error": "Invalid or expired OAuth state"}, status_code=400)
+    _linkedin_oauth_states.discard(state)
+
+    client_id, client_secret = _get_linkedin_creds()
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            _LINKEDIN_TOKEN_URL,
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "redirect_uri": _LINKEDIN_REDIRECT_URI,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        ) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                return JSONResponse({"error": f"Token exchange failed: {text}"}, status_code=400)
+            token_data = await resp.json()
+
+    access_token = token_data["access_token"]
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            _LINKEDIN_USERINFO_URL,
+            headers={"Authorization": f"Bearer {access_token}"},
+        ) as resp:
+            userinfo = await resp.json()
+
+    now = int(time.time())
+    token_file = {
+        "access_token": access_token,
+        "refresh_token": token_data.get("refresh_token"),
+        "expires_at": now + token_data.get("expires_in", 5184000),
+        "refresh_token_expires_at": now + token_data.get("refresh_token_expires_in", 31536000),
+        "user_id": userinfo.get("sub"),
+        "name": userinfo.get("name"),
+        "client_id": client_id,
+        "client_secret": client_secret,
+    }
+
+    _LINKEDIN_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _LINKEDIN_TOKEN_PATH.write_text(json.dumps(token_file, indent=2))
+    log.info("LinkedIn tokens stored for user: %s", token_file.get("name"))
+
+    return {"ok": True, "message": f"LinkedIn authorized for {token_file['name']}. You can close this tab."}
 
 
 # ---------------------------------------------------------------------------
