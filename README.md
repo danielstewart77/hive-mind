@@ -1,4 +1,8 @@
+<img src="assets/ada_banner.svg" alt="Ada — Eldest Voice of the Hive Mind" width="100%"/>
+
 # Hive Mind
+
+<img src="assets/ada_icon.svg" alt="Ada icon" width="80" align="right"/>
 
 A self-improving personal assistant powered by Claude Code. The system wraps the Claude CLI's bidirectional streaming mode behind a centralized gateway, giving every client — Discord, Telegram, scheduled tasks — full Claude Code capabilities through one API.
 
