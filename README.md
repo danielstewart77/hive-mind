@@ -24,12 +24,14 @@ graph TD
     TG[Telegram] --> GW
     SC[Scheduler] --> GW
 
-    GW["FastAPI Gateway<br/>server.py :8420"]
-    GW --> SM["Session Manager<br/>core/sessions.py<br/>process pool + SQLite"]
-    SM -->|"stdin/stdout (NDJSON)"| CL["claude -p --stream-json<br/>one process per session"]
+    GW[FastAPI Gateway]
+    GW --> SM[Session Manager]
+    SM -->|stdin/stdout NDJSON| CL[claude --stream-json]
 
-    CL <-->|stdio| INT["hive-mind-tools<br/>internal MCP<br/>(full access)"]
-    CL <-->|"SSE + bearer token"| EXT["hive-mind-mcp :9421<br/>external MCP<br/>(writes + HITL gate)"]
+    CL -->|stdio| INT[hive-mind-tools - internal MCP]
+    INT -->|results| CL
+    CL -->|SSE + bearer token| EXT[hive-mind-mcp - external MCP + HITL]
+    EXT -->|results| CL
 ```
 
 Each client is a thin HTTP wrapper. The gateway spawns Claude CLI subprocesses — one per session — with full MCP tool access. Claude Code does the heavy lifting; clients just relay messages and render responses.
