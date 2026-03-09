@@ -20,18 +20,17 @@ A self-improving personal assistant powered by Claude Code. The system wraps the
 
 ```mermaid
 graph TD
-    DC[Discord] --> GW
-    TG[Telegram] --> GW
-    SC[Scheduler] --> GW
+    DC["Discord"] --> GW["FastAPI Gateway"]
+    TG["Telegram"] --> GW
+    SC["Scheduler"] --> GW
 
-    GW[FastAPI Gateway]
-    GW --> SM[Session Manager]
-    SM -->|stdin/stdout NDJSON| CL[claude --stream-json]
+    GW --> SM["Session Manager"]
+    SM -->|"stdin/stdout"| CL["claude subprocess"]
 
-    CL -->|stdio| INT[hive-mind-tools - internal MCP]
-    INT -->|results| CL
-    CL -->|SSE + bearer token| EXT[hive-mind-mcp - external MCP + HITL]
-    EXT -->|results| CL
+    CL -->|"stdio"| INT["hive-mind-tools (internal MCP)"]
+    INT -->|"results"| CL
+    CL -->|"SSE"| EXT["hive-mind-mcp (external MCP, HITL gated)"]
+    EXT -->|"results"| CL
 ```
 
 Each client is a thin HTTP wrapper. The gateway spawns Claude CLI subprocesses — one per session — with full MCP tool access. Claude Code does the heavy lifting; clients just relay messages and render responses.
