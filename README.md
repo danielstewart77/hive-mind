@@ -20,14 +20,14 @@ A self-improving personal assistant powered by Claude Code. The system wraps the
 
 ```mermaid
 flowchart TD
-    DC[Discord] --> GW[Gateway]
+    DC[Discord] --> GW[FastAPI Gateway]
     TG[Telegram] --> GW
     SC[Scheduler] --> GW
     GW --> SM[Session Manager]
-    SM -->|stdin/stdout| CL[claude subprocess]
-    CL -->|stdio| INT[hive-mind-tools]
+    SM -->|stdin/stdout| CL[claude --stream-json]
+    CL -->|stdio| INT[hive-mind-tools - internal MCP]
     INT -->|results| CL
-    CL -->|SSE| EXT[hive-mind-mcp]
+    CL -->|SSE| EXT[hive-mind-mcp - external MCP + HITL]
     EXT -->|results| CL
 ```
 
