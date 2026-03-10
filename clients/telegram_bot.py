@@ -18,6 +18,7 @@ import aiohttp
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -532,35 +533,31 @@ async def cmd_classify(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------------------------
-# HITL approve/deny handlers
+# HITL inline keyboard callback handler
 # ---------------------------------------------------------------------------
-async def cmd_hitl_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed_user(update.effective_user.id):
-        return
-    await _handle_hitl_response(update, approved=True)
+async def handle_hitl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle inline keyboard button taps for HITL approve/deny."""
+    query = update.callback_query
 
-
-async def cmd_hitl_deny(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed_user(update.effective_user.id):
-        return
-    await _handle_hitl_response(update, approved=False)
-
-
-async def _handle_hitl_response(update: Update, approved: bool):
-    """Extract token from /approve_<token> or /deny_<token> and POST to gateway."""
-    text = (update.message.text or "").strip()
-    # Extract token: everything after /approve_ or /deny_
-    parts = text.split("_", 1)
-    if len(parts) < 2 or not parts[1]:
-        await update.message.reply_text("Invalid approval token.")
+    # Auth check
+    if not _is_allowed_user(query.from_user.id):
+        await query.answer("Not authorized.")
         return
 
-    token = parts[1]
+    # Parse callback_data: "hitl_approve_<token>" or "hitl_deny_<token>"
+    data = query.data or ""
+    if data.startswith("hitl_approve_"):
+        action = "approve"
+        token = data[len("hitl_approve_"):]
+    elif data.startswith("hitl_deny_"):
+        action = "deny"
+        token = data[len("hitl_deny_"):]
+    else:
+        await query.answer("Unknown action.")
+        return
+
+    approved = action == "approve"
     hitl_secret = config.hitl_internal_token
-
-    if not hitl_secret:
-        await update.message.reply_text("HITL not configured on server.")
-        return
 
     try:
         async with http.post(
@@ -568,19 +565,27 @@ async def _handle_hitl_response(update: Update, approved: bool):
             json={"token": token, "approved": approved},
             headers={"X-HITL-Internal": hitl_secret},
         ) as resp:
-            data = await resp.json()
             if resp.status == 200:
+                # Success: update message with status
+                original_text = query.message.text or ""
+                # Replace the header with the status
+                body = original_text.split("\n\n", 1)[-1] if "\n\n" in original_text else original_text
                 if approved:
-                    await update.message.reply_text(
-                        "Approved. Operation in progress, please wait\u2026"
-                    )
+                    new_text = f"\u2705 Approved\n\n{body}"
                 else:
-                    await update.message.reply_text("Denied.")
+                    new_text = f"\u274c Denied\n\n{body}"
+                await query.edit_message_text(new_text)
+                await query.edit_message_reply_markup(reply_markup=None)
             else:
-                await update.message.reply_text(f"Failed: {data.get('error', 'unknown error')}")
+                # 404 = expired or already resolved (double-tap)
+                original_text = query.message.text or ""
+                body = original_text.split("\n\n", 1)[-1] if "\n\n" in original_text else original_text
+                await query.edit_message_text(f"\u23f0 Expired\n\n{body}")
+                await query.edit_message_reply_markup(reply_markup=None)
     except Exception:
-        log.exception("HITL respond failed")
-        await update.message.reply_text("Failed to send response to server.")
+        log.exception("HITL callback handler failed")
+
+    await query.answer()
 
 
 # ---------------------------------------------------------------------------
@@ -731,8 +736,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("remember", cmd_remember))
     app.add_handler(CommandHandler("skills", cmd_skills))
     app.add_handler(CommandHandler("skill", cmd_skill))
-    app.add_handler(MessageHandler(filters.Regex(r"^/approve_\w+$"), cmd_hitl_approve))
-    app.add_handler(MessageHandler(filters.Regex(r"^/deny_\w+$"), cmd_hitl_deny))
+    app.add_handler(CallbackQueryHandler(handle_hitl_callback, pattern=r"^hitl_(approve|deny)_"))
     app.add_handler(MessageHandler(filters.Regex(r"^/classify_"), cmd_classify))
 
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))

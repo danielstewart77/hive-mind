@@ -69,6 +69,8 @@ session_mgr = SessionManager(model_registry)
 
 
 _hitl_cleanup_task: asyncio.Task | None = None
+# Track Telegram messages for HITL tokens: token -> (chat_id, message_id, original_text)
+_hitl_messages: dict[str, tuple[int, int, str]] = {}
 
 
 @asynccontextmanager
@@ -83,10 +85,12 @@ async def lifespan(app: FastAPI):
 
 
 async def _hitl_cleanup_loop():
-    """Periodically purge expired HITL tokens."""
+    """Periodically purge expired HITL tokens and update Telegram messages."""
     while True:
         await asyncio.sleep(30)
-        hitl_store.cleanup_expired()
+        expired_tokens = hitl_store.cleanup_expired()
+        for token in expired_tokens:
+            await _edit_hitl_message(token, "Expired")
 
 
 app = FastAPI(title="Hive Mind Gateway", version="1.0.0", lifespan=lifespan)
@@ -469,7 +473,7 @@ def _get_telegram_token() -> str | None:
 
 
 async def _send_telegram_approval_request(token: str, summary: str):
-    """Send HITL approval DM to the owner via Telegram Bot API."""
+    """Send HITL approval DM to the owner via Telegram Bot API with inline keyboard."""
     bot_token = _get_telegram_token()
     chat_id = config.telegram_owner_chat_id
 
@@ -477,24 +481,66 @@ async def _send_telegram_approval_request(token: str, summary: str):
         log.error("HITL: cannot send Telegram DM — missing bot token or owner chat ID")
         return
 
-    # Escape for Telegram HTML; truncate to stay within 4096-char message limit
     safe_summary = summary[:4000].replace("<", "&lt;").replace(">", "&gt;")
-    text = (
-        f"Approval required:\n\n"
-        f"{safe_summary}\n\n"
-        f"✅ /approve_{token}\n\n"
-        f"─────────────────\n\n"
-        f"❌ /deny_{token}"
-    )
+    text = f"\U0001f514 Approval Required\n\n{safe_summary}"
+
+    reply_markup = {
+        "inline_keyboard": [
+            [{"text": "\u2705 Approve", "callback_data": f"hitl_approve_{token}"}],
+            [{"text": "\u274c Reject", "callback_data": f"hitl_deny_{token}"}],
+        ]
+    }
 
     try:
         async with aiohttp.ClientSession() as session:
-            await session.post(
+            async with session.post(
                 f"https://api.telegram.org/bot{bot_token}/sendMessage",
-                json={"chat_id": chat_id, "text": text},
-            )
+                json={"chat_id": chat_id, "text": text, "reply_markup": reply_markup},
+            ) as resp:
+                data = await resp.json()
+                message_id = data.get("result", {}).get("message_id")
+                if message_id:
+                    _hitl_messages[token] = (chat_id, message_id, text)
     except Exception:
         log.exception("HITL: failed to send Telegram DM")
+
+
+async def _edit_hitl_message(token: str, status: str):
+    """Edit a tracked HITL Telegram message to show a status and remove buttons.
+
+    Args:
+        token: The HITL token identifying the message.
+        status: Status label to prepend (e.g. "Approved", "Denied", "Expired").
+    """
+    msg_info = _hitl_messages.pop(token, None)
+    if msg_info is None:
+        return
+
+    chat_id, message_id, original_text = msg_info
+    bot_token = _get_telegram_token()
+    if not bot_token:
+        return
+
+    # Build status-prefixed text
+    status_icons = {"Approved": "\u2705", "Denied": "\u274c", "Expired": "\u23f0"}
+    icon = status_icons.get(status, "")
+    # Replace the original header with the status
+    new_text = f"{icon} {status}\n\n" + original_text.split("\n\n", 1)[-1]
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Update the message text and remove inline keyboard in a single call
+            await session.post(
+                f"https://api.telegram.org/bot{bot_token}/editMessageText",
+                json={
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "text": new_text,
+                    "reply_markup": {"inline_keyboard": []},
+                },
+            )
+    except Exception:
+        log.exception("HITL: failed to edit Telegram message for token %s", token)
 
 
 class HITLRequest(BaseModel):

@@ -75,19 +75,24 @@ class HITLStore:
         log.info("HITL resolved: token=%s approved=%s action=%s", token, approved, entry.action)
         return True
 
-    def cleanup_expired(self):
+    def cleanup_expired(self) -> list[str]:
         """Wake any waiters on expired tokens and purge stale entries.
 
         Resolved entries are kept until their TTL expires so polling
         clients can still read the result via status().
+
+        Returns the list of tokens that were pending (unresolved) at expiry time.
         """
         now = time.time()
         expired = [t for t, e in self._pending.items() if now > e.expires_at]
+        pending_expired: list[str] = []
         for token in expired:
             entry = self._pending.pop(token)
             if entry.approved is None:
                 entry.event.set()  # unblock the waiter
+                pending_expired.append(token)
                 log.info("HITL expired: token=%s action=%s", token, entry.action)
+        return pending_expired
 
 
 hitl_store = HITLStore()

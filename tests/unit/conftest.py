@@ -41,6 +41,7 @@ def _mock_third_party_modules(monkeypatch):
 
     telegram_ext_mock = _create_mock_module("telegram.ext")
     telegram_ext_mock.ApplicationBuilder = MagicMock()
+    telegram_ext_mock.CallbackQueryHandler = MagicMock()
     telegram_ext_mock.CommandHandler = MagicMock()
     telegram_ext_mock.ContextTypes = MagicMock()
     telegram_ext_mock.MessageHandler = MagicMock()
