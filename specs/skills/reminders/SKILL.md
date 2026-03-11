@@ -12,25 +12,25 @@ Manage one-time reminders backed by SQLite with natural language time parsing.
 
 ### Set a reminder
 ```bash
-python /usr/src/app/tools/stateless/reminders/reminders.py set \
+/usr/src/app/tools/stateless/reminders/venv/bin/python /usr/src/app/tools/stateless/reminders/reminders.py set \
   --message "<reminder text>" \
   --when "<time expression>"
 ```
 
 ### List pending reminders
 ```bash
-python /usr/src/app/tools/stateless/reminders/reminders.py list
+/usr/src/app/tools/stateless/reminders/venv/bin/python /usr/src/app/tools/stateless/reminders/reminders.py list
 ```
 
 ### Delete a reminder
 ```bash
-python /usr/src/app/tools/stateless/reminders/reminders.py delete \
+/usr/src/app/tools/stateless/reminders/venv/bin/python /usr/src/app/tools/stateless/reminders/reminders.py delete \
   --reminder-id <id>
 ```
 
 ### Get and fire due reminders
 ```bash
-python /usr/src/app/tools/stateless/reminders/reminders.py due
+/usr/src/app/tools/stateless/reminders/venv/bin/python /usr/src/app/tools/stateless/reminders/reminders.py due
 ```
 
 ## Arguments

@@ -13,7 +13,7 @@ Get the current date and time with day of week.
 Run the current-time tool via Bash:
 
 ```bash
-python /usr/src/app/tools/stateless/current_time/current_time.py \
+/usr/src/app/tools/stateless/current_time/venv/bin/python /usr/src/app/tools/stateless/current_time/current_time.py \
   --timezone "<IANA timezone>"
 ```
 

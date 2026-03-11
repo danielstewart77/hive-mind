@@ -13,10 +13,6 @@ def _mock_neo4j_and_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
     if "neo4j" not in sys.modules:
         neo4j_mock = MagicMock()
         monkeypatch.setitem(sys.modules, "neo4j", neo4j_mock)
-    if "agent_tooling" not in sys.modules:
-        at_mock = MagicMock()
-        at_mock.tool = MagicMock(return_value=lambda f: f)
-        monkeypatch.setitem(sys.modules, "agent_tooling", at_mock)
 
 
 def _make_mock_driver() -> MagicMock:
@@ -35,7 +31,7 @@ class TestMemoryStoreRequiresDataClass:
     """Tests that memory_store_direct requires data_class (no longer backward compat)."""
 
     def test_memory_store_direct_no_data_class_raises_type_error(self) -> None:
-        import agents.memory as mem_mod
+        import tools.stateful.memory as mem_mod
 
         with pytest.raises(TypeError):
             mem_mod.memory_store_direct(
@@ -46,7 +42,7 @@ class TestMemoryStoreRequiresDataClass:
 
     def test_memory_store_direct_with_data_class_stores_successfully(self) -> None:
         mock_driver = _make_mock_driver()
-        import agents.memory as mem_mod
+        import tools.stateful.memory as mem_mod
 
         with (
             patch.object(mem_mod, "_get_driver", return_value=mock_driver),
@@ -67,7 +63,7 @@ class TestGraphUpsertRequiresDataClass:
     """Tests that graph_upsert_direct requires data_class (no longer backward compat)."""
 
     def test_graph_upsert_direct_no_data_class_raises_type_error(self) -> None:
-        import agents.knowledge_graph as kg_mod
+        import tools.stateful.knowledge_graph as kg_mod
 
         with pytest.raises(TypeError):
             kg_mod.graph_upsert_direct(
@@ -77,7 +73,7 @@ class TestGraphUpsertRequiresDataClass:
 
     def test_graph_upsert_direct_with_data_class_upserts_successfully(self) -> None:
         mock_driver = _make_mock_driver()
-        import agents.knowledge_graph as kg_mod
+        import tools.stateful.knowledge_graph as kg_mod
 
         with (
             patch.object(kg_mod, "_get_driver", return_value=mock_driver),
@@ -96,7 +92,7 @@ class TestMemoryRetrieveBackwardCompat:
     """Tests that memory_retrieve handles entries with and without metadata."""
 
     def test_memory_retrieve_returns_entries_with_and_without_metadata(self) -> None:
-        import agents.memory as mem_mod
+        import tools.stateful.memory as mem_mod
 
         mock_driver = _make_mock_driver()
         mock_session = mock_driver.session.return_value.__enter__.return_value

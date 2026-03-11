@@ -12,14 +12,14 @@ Send notifications via multiple channels with automatic fallback.
 
 ### Send notification
 ```bash
-python /usr/src/app/tools/stateless/notify/notify.py send \
+/usr/src/app/tools/stateless/notify/venv/bin/python /usr/src/app/tools/stateless/notify/notify.py send \
   --message "<message>" \
   --channels "telegram,email,file"
 ```
 
 ### Send voice message
 ```bash
-python /usr/src/app/tools/stateless/notify/notify.py voice \
+/usr/src/app/tools/stateless/notify/venv/bin/python /usr/src/app/tools/stateless/notify/notify.py voice \
   --message "<text to speak>"
 ```
 

@@ -24,7 +24,7 @@ class TestMemoryRetrieveMetadata:
     """Tests for metadata fields in memory_retrieve results."""
 
     def test_memory_retrieve_includes_data_class_in_results(self) -> None:
-        import agents.memory as mem_mod
+        import tools.stateful.memory as mem_mod
 
         mock_driver = _make_mock_driver()
         mock_session = mock_driver.session.return_value.__enter__.return_value
@@ -58,7 +58,7 @@ class TestMemoryRetrieveMetadata:
             assert result["memories"][0]["data_class"] == "person"
 
     def test_memory_retrieve_includes_tier_in_results(self) -> None:
-        import agents.memory as mem_mod
+        import tools.stateful.memory as mem_mod
 
         mock_driver = _make_mock_driver()
         mock_session = mock_driver.session.return_value.__enter__.return_value
@@ -91,7 +91,7 @@ class TestMemoryRetrieveMetadata:
             assert result["memories"][0]["tier"] == "durable"
 
     def test_memory_retrieve_includes_as_of_in_results(self) -> None:
-        import agents.memory as mem_mod
+        import tools.stateful.memory as mem_mod
 
         mock_driver = _make_mock_driver()
         mock_session = mock_driver.session.return_value.__enter__.return_value
@@ -125,7 +125,7 @@ class TestMemoryRetrieveMetadata:
 
     def test_memory_retrieve_handles_entries_without_metadata(self) -> None:
         """Pre-migration entries should return None for metadata fields."""
-        import agents.memory as mem_mod
+        import tools.stateful.memory as mem_mod
 
         mock_driver = _make_mock_driver()
         mock_session = mock_driver.session.return_value.__enter__.return_value

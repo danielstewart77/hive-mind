@@ -12,20 +12,20 @@ Store, check, and list secrets in the system keyring. Values are never revealed 
 
 ### Store a secret
 ```bash
-python /usr/src/app/tools/stateless/secrets/secrets.py set \
+/usr/src/app/tools/stateless/secrets/venv/bin/python /usr/src/app/tools/stateless/secrets/secrets.py set \
   --key "<KEY_NAME>" \
   --value "<secret_value>"
 ```
 
 ### Check if a secret exists
 ```bash
-python /usr/src/app/tools/stateless/secrets/secrets.py get \
+/usr/src/app/tools/stateless/secrets/venv/bin/python /usr/src/app/tools/stateless/secrets/secrets.py get \
   --key "<KEY_NAME>"
 ```
 
 ### List all stored secret keys
 ```bash
-python /usr/src/app/tools/stateless/secrets/secrets.py list
+/usr/src/app/tools/stateless/secrets/venv/bin/python /usr/src/app/tools/stateless/secrets/secrets.py list
 ```
 
 ## Arguments

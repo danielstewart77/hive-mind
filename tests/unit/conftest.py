@@ -78,3 +78,19 @@ def _mock_third_party_modules(monkeypatch):
     keyring_mock = _create_mock_module("keyring")
     keyring_mock.get_password = MagicMock(return_value=None)
     monkeypatch.setitem(sys.modules, "keyring", keyring_mock)
+
+    # --- Third-party deps for tools/stateful/ ---
+    if "requests" not in sys.modules:
+        requests_mock = _create_mock_module("requests")
+        requests_mock.post = MagicMock()
+        requests_mock.get = MagicMock()
+        monkeypatch.setitem(sys.modules, "requests", requests_mock)
+
+    if "neo4j" not in sys.modules:
+        neo4j_mock = _create_mock_module("neo4j")
+        neo4j_mock.GraphDatabase = MagicMock()
+        monkeypatch.setitem(sys.modules, "neo4j", neo4j_mock)
+
+    if "py2neo" not in sys.modules:
+        py2neo_mock = _create_mock_module("py2neo")
+        monkeypatch.setitem(sys.modules, "py2neo", py2neo_mock)

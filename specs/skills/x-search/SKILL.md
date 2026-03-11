@@ -12,14 +12,14 @@ Search X (Twitter) for popular recent tweets or get thread replies.
 
 ### Search tweets
 ```bash
-python /usr/src/app/tools/stateless/x_api/x_api.py search \
+/usr/src/app/tools/stateless/x_api/venv/bin/python /usr/src/app/tools/stateless/x_api/x_api.py search \
   --query "<search query>" \
   --max-results 20
 ```
 
 ### Get thread replies
 ```bash
-python /usr/src/app/tools/stateless/x_api/x_api.py replies \
+/usr/src/app/tools/stateless/x_api/venv/bin/python /usr/src/app/tools/stateless/x_api/x_api.py replies \
   --conversation-id "<tweet_id>" \
   --max-results 20
 ```

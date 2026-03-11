@@ -13,10 +13,6 @@ def _mock_neo4j_and_deps(monkeypatch: pytest.MonkeyPatch) -> None:
     if "neo4j" not in sys.modules:
         neo4j_mock = MagicMock()
         monkeypatch.setitem(sys.modules, "neo4j", neo4j_mock)
-    if "agent_tooling" not in sys.modules:
-        at_mock = MagicMock()
-        at_mock.tool = MagicMock(return_value=lambda f: f)
-        monkeypatch.setitem(sys.modules, "agent_tooling", at_mock)
 
 
 class TestValidateDataClassRequired:
@@ -37,14 +33,14 @@ class TestMemoryStoreRequired:
     """Tests that memory_store and memory_store_direct require data_class."""
 
     def test_memory_store_without_data_class_raises(self) -> None:
-        import agents.memory as mem_mod
+        import tools.stateful.memory as mem_mod
         # memory_store requires data_class as a required argument now
         # Calling without it should raise TypeError
         with pytest.raises(TypeError):
             mem_mod.memory_store(content="test")
 
     def test_memory_store_direct_without_data_class_raises(self) -> None:
-        import agents.memory as mem_mod
+        import tools.stateful.memory as mem_mod
         with pytest.raises(TypeError):
             mem_mod.memory_store_direct(content="test")
 
@@ -53,11 +49,11 @@ class TestGraphUpsertRequired:
     """Tests that graph_upsert and graph_upsert_direct require data_class."""
 
     def test_graph_upsert_without_data_class_raises(self) -> None:
-        import agents.knowledge_graph as kg_mod
+        import tools.stateful.knowledge_graph as kg_mod
         with pytest.raises(TypeError):
             kg_mod.graph_upsert(entity_type="Person", name="X")
 
     def test_graph_upsert_direct_without_data_class_raises(self) -> None:
-        import agents.knowledge_graph as kg_mod
+        import tools.stateful.knowledge_graph as kg_mod
         with pytest.raises(TypeError):
             kg_mod.graph_upsert_direct(entity_type="Person", name="X")

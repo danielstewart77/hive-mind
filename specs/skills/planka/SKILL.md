@@ -11,7 +11,7 @@ Interact with the Planka Kanban board.
 ## Usage
 
 ```bash
-python /usr/src/app/tools/stateless/planka/planka.py <command> [args]
+/usr/src/app/tools/stateless/planka/venv/bin/python /usr/src/app/tools/stateless/planka/planka.py <command> [args]
 ```
 
 ## Commands

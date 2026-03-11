@@ -11,7 +11,7 @@ Get current USD price of a cryptocurrency via CoinGecko API.
 ## Usage
 
 ```bash
-python /usr/src/app/tools/stateless/crypto/crypto.py \
+/usr/src/app/tools/stateless/crypto/venv/bin/python /usr/src/app/tools/stateless/crypto/crypto.py \
   --coin "<coin_id>"
 ```
 

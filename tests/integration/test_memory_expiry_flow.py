@@ -18,10 +18,6 @@ def _mock_deps(monkeypatch: pytest.MonkeyPatch) -> None:
     if "neo4j" not in sys.modules:
         neo4j_mock = MagicMock()
         monkeypatch.setitem(sys.modules, "neo4j", neo4j_mock)
-    if "agent_tooling" not in sys.modules:
-        at_mock = MagicMock()
-        at_mock.tool = MagicMock(return_value=lambda f: f)
-        monkeypatch.setitem(sys.modules, "agent_tooling", at_mock)
 
 
 def _make_mock_driver() -> MagicMock:
@@ -128,7 +124,7 @@ class TestMemoryStoreExpiresAtValidation:
 
     def test_memory_store_rejects_unresolved_expires_at(self) -> None:
         mock_driver = _make_mock_driver()
-        import agents.memory as mem_mod
+        import tools.stateful.memory as mem_mod
 
         with (
             patch.object(mem_mod, "_get_driver", return_value=mock_driver),
@@ -151,7 +147,7 @@ class TestMemoryStoreRecurringFromContent:
 
     def test_memory_store_sets_recurring_from_content(self) -> None:
         mock_driver = _make_mock_driver()
-        import agents.memory as mem_mod
+        import tools.stateful.memory as mem_mod
 
         with (
             patch.object(mem_mod, "_get_driver", return_value=mock_driver),

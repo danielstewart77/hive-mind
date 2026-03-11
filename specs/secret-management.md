@@ -10,7 +10,7 @@ Secrets follow a strict priority order:
 
 ## Reading Secrets
 
-Use `get_credential(key)` from `agents/secret_manager.py`. It checks keyring first, env fallback, returns `None` if neither has the key. Never read secrets any other way.
+Use `get_credential(key)` from `core/secrets.py`. It checks keyring first, env fallback, returns `None` if neither has the key. Never read secrets any other way.
 
 ## Keyring Configuration
 

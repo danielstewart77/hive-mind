@@ -13,10 +13,6 @@ def _mock_neo4j_and_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
     if "neo4j" not in sys.modules:
         neo4j_mock = MagicMock()
         monkeypatch.setitem(sys.modules, "neo4j", neo4j_mock)
-    if "agent_tooling" not in sys.modules:
-        at_mock = MagicMock()
-        at_mock.tool = MagicMock(return_value=lambda f: f)
-        monkeypatch.setitem(sys.modules, "agent_tooling", at_mock)
 
 
 def _make_mock_driver() -> MagicMock:
@@ -35,7 +31,7 @@ class TestStoreRetrieveMetadataFlow:
     """Tests for the full store-then-retrieve flow with metadata."""
 
     def test_store_then_retrieve_preserves_metadata(self) -> None:
-        import agents.memory as mem_mod
+        import tools.stateful.memory as mem_mod
 
         mock_driver = _make_mock_driver()
         mock_session = mock_driver.session.return_value.__enter__.return_value

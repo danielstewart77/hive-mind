@@ -18,10 +18,6 @@ def _mock_deps(monkeypatch: pytest.MonkeyPatch) -> None:
     if "neo4j" not in sys.modules:
         neo4j_mock = MagicMock()
         monkeypatch.setitem(sys.modules, "neo4j", neo4j_mock)
-    if "agent_tooling" not in sys.modules:
-        at_mock = MagicMock()
-        at_mock.tool = MagicMock(return_value=lambda f: f)
-        monkeypatch.setitem(sys.modules, "agent_tooling", at_mock)
 
     # Mock apscheduler modules
     apscheduler_mock = MagicMock()

@@ -20,10 +20,6 @@ def _mock_neo4j_and_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
     if "neo4j" not in sys.modules:
         neo4j_mock = MagicMock()
         monkeypatch.setitem(sys.modules, "neo4j", neo4j_mock)
-    if "agent_tooling" not in sys.modules:
-        at_mock = MagicMock()
-        at_mock.tool = MagicMock(return_value=lambda f: f)
-        monkeypatch.setitem(sys.modules, "agent_tooling", at_mock)
 
 
 def _make_mock_driver() -> MagicMock:
@@ -47,7 +43,7 @@ class TestGraphUpsertGuards:
     def test_graph_upsert_calls_disambiguation_before_write(self) -> None:
         """check_disambiguation should be called before _hitl_gate."""
         mock_driver = _make_mock_driver()
-        import agents.knowledge_graph as kg_mod
+        import tools.stateful.knowledge_graph as kg_mod
 
         proceed_result = DisambiguationResult(
             action="proceed", existing_nodes=[], message="No match."
@@ -75,7 +71,7 @@ class TestGraphUpsertGuards:
     def test_graph_upsert_exact_match_proceeds_to_merge(self) -> None:
         """When disambiguation returns 'merge', write should proceed (MERGE Cypher handles it)."""
         mock_driver = _make_mock_driver()
-        import agents.knowledge_graph as kg_mod
+        import tools.stateful.knowledge_graph as kg_mod
 
         merge_result = DisambiguationResult(
             action="merge",
@@ -104,7 +100,7 @@ class TestGraphUpsertGuards:
 
     def test_graph_upsert_similar_name_sends_disambiguation_and_rejects(self) -> None:
         """When disambiguation returns 'disambiguate', write should be rejected."""
-        import agents.knowledge_graph as kg_mod
+        import tools.stateful.knowledge_graph as kg_mod
 
         disambig_result = DisambiguationResult(
             action="disambiguate",
@@ -134,7 +130,7 @@ class TestGraphUpsertGuards:
     def test_graph_upsert_no_match_proceeds_normally(self) -> None:
         """When no similar node found, write should proceed normally."""
         mock_driver = _make_mock_driver()
-        import agents.knowledge_graph as kg_mod
+        import tools.stateful.knowledge_graph as kg_mod
 
         proceed_result = DisambiguationResult(
             action="proceed", existing_nodes=[], message="No match."
@@ -161,7 +157,7 @@ class TestGraphUpsertGuards:
 
     def test_graph_upsert_orphan_guard_rejects_no_edges(self) -> None:
         """Write should be rejected when no relation/target provided."""
-        import agents.knowledge_graph as kg_mod
+        import tools.stateful.knowledge_graph as kg_mod
 
         result_str = kg_mod.graph_upsert(
             entity_type="Person",
@@ -179,7 +175,7 @@ class TestGraphUpsertGuards:
     def test_graph_upsert_orphan_guard_allows_with_edges(self) -> None:
         """Write should proceed when relation and target_name provided."""
         mock_driver = _make_mock_driver()
-        import agents.knowledge_graph as kg_mod
+        import tools.stateful.knowledge_graph as kg_mod
 
         proceed_result = DisambiguationResult(
             action="proceed", existing_nodes=[], message="No match."
@@ -206,7 +202,7 @@ class TestGraphUpsertGuards:
 
     def test_graph_upsert_disambiguation_result_in_response(self) -> None:
         """Returned JSON should include disambiguation info when rejected."""
-        import agents.knowledge_graph as kg_mod
+        import tools.stateful.knowledge_graph as kg_mod
 
         disambig_result = DisambiguationResult(
             action="disambiguate",
@@ -235,7 +231,7 @@ class TestGraphUpsertGuards:
 
     def test_graph_upsert_orphan_rejection_returns_json_error(self) -> None:
         """Returned JSON should contain the orphan error message."""
-        import agents.knowledge_graph as kg_mod
+        import tools.stateful.knowledge_graph as kg_mod
 
         result_str = kg_mod.graph_upsert(
             entity_type="Person",
@@ -258,7 +254,7 @@ class TestGraphUpsertDirectGuards:
     def test_graph_upsert_direct_with_relation_proceeds(self) -> None:
         """Write should succeed when relation and target are provided."""
         mock_driver = _make_mock_driver()
-        import agents.knowledge_graph as kg_mod
+        import tools.stateful.knowledge_graph as kg_mod
 
         with (
             patch.object(kg_mod, "_get_driver", return_value=mock_driver),
@@ -281,7 +277,7 @@ class TestGraphUpsertDirectGuards:
     def test_graph_upsert_direct_without_relation_uses_grace_period(self) -> None:
         """graph_upsert_direct should pass through without relation (grace period for epilogue)."""
         mock_driver = _make_mock_driver()
-        import agents.knowledge_graph as kg_mod
+        import tools.stateful.knowledge_graph as kg_mod
 
         with (
             patch.object(kg_mod, "_get_driver", return_value=mock_driver),
@@ -300,7 +296,7 @@ class TestGraphUpsertDirectGuards:
     def test_graph_upsert_direct_adds_created_at_to_node(self) -> None:
         """A created_at epoch timestamp should be added to node properties."""
         mock_driver = _make_mock_driver()
-        import agents.knowledge_graph as kg_mod
+        import tools.stateful.knowledge_graph as kg_mod
 
         before = time.time()
 

@@ -40,6 +40,7 @@ RUN /opt/venv/bin/playwright install --with-deps chromium
 
 # App code (overridden by bind mount in dev, baked in for production)
 COPY . .
+
 RUN mkdir -p /usr/src/app/data \
     && chown -R hivemind:hivemind /usr/src/app
 

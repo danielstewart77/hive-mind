@@ -12,10 +12,6 @@ def _mock_neo4j_and_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
     if "neo4j" not in sys.modules:
         neo4j_mock = MagicMock()
         monkeypatch.setitem(sys.modules, "neo4j", neo4j_mock)
-    if "agent_tooling" not in sys.modules:
-        at_mock = MagicMock()
-        at_mock.tool = MagicMock(return_value=lambda f: f)
-        monkeypatch.setitem(sys.modules, "agent_tooling", at_mock)
 
 
 def _make_mock_driver() -> MagicMock:
@@ -34,7 +30,7 @@ class TestMemoryEnsureIndex:
     """Tests for _ensure_index in agents/memory.py."""
 
     def test_ensure_index_creates_vector_index(self) -> None:
-        import agents.memory as mem_mod
+        import tools.stateful.memory as mem_mod
 
         # Reset the global guard
         with patch.object(mem_mod, "_index_created", False):
@@ -49,7 +45,7 @@ class TestMemoryEnsureIndex:
             assert "VECTOR INDEX" in first_query.upper() or "vector" in first_query.lower()
 
     def test_ensure_index_creates_tier_index(self) -> None:
-        import agents.memory as mem_mod
+        import tools.stateful.memory as mem_mod
 
         with patch.object(mem_mod, "_index_created", False):
             mock_session = MagicMock()
@@ -60,7 +56,7 @@ class TestMemoryEnsureIndex:
             assert len(tier_queries) >= 1
 
     def test_ensure_index_creates_data_class_index(self) -> None:
-        import agents.memory as mem_mod
+        import tools.stateful.memory as mem_mod
 
         with patch.object(mem_mod, "_index_created", False):
             mock_session = MagicMock()
@@ -71,7 +67,7 @@ class TestMemoryEnsureIndex:
             assert len(dc_queries) >= 1
 
     def test_ensure_index_creates_expires_at_index(self) -> None:
-        import agents.memory as mem_mod
+        import tools.stateful.memory as mem_mod
 
         with patch.object(mem_mod, "_index_created", False):
             mock_session = MagicMock()
@@ -82,7 +78,7 @@ class TestMemoryEnsureIndex:
             assert len(exp_queries) >= 1
 
     def test_ensure_index_creates_source_index(self) -> None:
-        import agents.memory as mem_mod
+        import tools.stateful.memory as mem_mod
 
         with patch.object(mem_mod, "_index_created", False):
             mock_session = MagicMock()
@@ -93,7 +89,7 @@ class TestMemoryEnsureIndex:
             assert len(src_queries) >= 1
 
     def test_ensure_index_idempotent(self) -> None:
-        import agents.memory as mem_mod
+        import tools.stateful.memory as mem_mod
 
         with patch.object(mem_mod, "_index_created", False):
             mock_session = MagicMock()
@@ -109,7 +105,7 @@ class TestKnowledgeGraphEnsureMetadataIndexes:
     """Tests for _ensure_metadata_indexes in agents/knowledge_graph.py."""
 
     def test_ensure_metadata_indexes_creates_indexes(self) -> None:
-        import agents.knowledge_graph as kg_mod
+        import tools.stateful.knowledge_graph as kg_mod
 
         with patch.object(kg_mod, "_kg_index_created", False):
             mock_session = MagicMock()
@@ -121,7 +117,7 @@ class TestKnowledgeGraphEnsureMetadataIndexes:
             assert len(calls) >= 15
 
     def test_ensure_metadata_indexes_idempotent(self) -> None:
-        import agents.knowledge_graph as kg_mod
+        import tools.stateful.knowledge_graph as kg_mod
 
         with patch.object(kg_mod, "_kg_index_created", False):
             mock_session = MagicMock()

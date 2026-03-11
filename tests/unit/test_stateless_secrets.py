@@ -1,105 +1,98 @@
-"""Unit tests for the stateless secrets tool."""
+"""Unit tests for the stateless secrets tool.
+
+Tests the secrets module functions directly with mocked keyring backend.
+"""
 
 import json
-import subprocess
+import argparse
 import sys
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-SCRIPT_PATH = "/usr/src/app/tools/stateless/secrets/secrets.py"
+
+@pytest.fixture()
+def _secrets_mod(monkeypatch):
+    """Import secrets module with a mocked keyring backend."""
+    # Create a simple in-memory keyring mock
+    store = {}
+    keyring_mock = MagicMock()
+    keyring_mock.get_password = MagicMock(side_effect=lambda svc, key: store.get(key))
+    keyring_mock.set_password = MagicMock(
+        side_effect=lambda svc, key, val: store.__setitem__(key, val)
+    )
+    monkeypatch.setitem(sys.modules, "keyring", keyring_mock)
+
+    # Clear any cached import
+    for mod_name in list(sys.modules.keys()):
+        if "tools.stateless.secrets" in mod_name:
+            del sys.modules[mod_name]
+
+    import tools.stateless.secrets.secrets as mod
+    return mod
 
 
 class TestStatelessSecrets:
-    def test_set_secret_stores_value(self):
+    def test_set_secret_stores_value(self, _secrets_mod, capsys):
         """Asserts set subcommand stores a secret and returns confirmation."""
-        result = subprocess.run(
-            [sys.executable, SCRIPT_PATH, "set",
-             "--key", "TEST_API_KEY",
-             "--value", "test-value-123"],
-            capture_output=True, text=True, timeout=10,
-        )
-        data = json.loads(result.stdout)
+        args = argparse.Namespace(key="TEST_API_KEY", value="test-value-123")
+        rc = _secrets_mod.cmd_set(args)
+        out = capsys.readouterr().out
+        data = json.loads(out)
         assert data.get("stored") is True
         assert data["key"] == "TEST_API_KEY"
-        assert result.returncode == 0
+        assert rc == 0
 
-    def test_get_secret_confirms_existence(self):
-        """Asserts get subcommand confirms a stored secret exists without revealing value."""
-        # First store a secret
-        subprocess.run(
-            [sys.executable, SCRIPT_PATH, "set",
-             "--key", "TEST_CHECK_KEY",
-             "--value", "hidden-value"],
-            capture_output=True, text=True, timeout=10,
-        )
-        # Then check it
-        result = subprocess.run(
-            [sys.executable, SCRIPT_PATH, "get",
-             "--key", "TEST_CHECK_KEY"],
-            capture_output=True, text=True, timeout=10,
-        )
-        data = json.loads(result.stdout)
+    def test_get_secret_confirms_existence(self, _secrets_mod, capsys):
+        """Asserts get subcommand confirms a stored secret exists."""
+        # Store first
+        _secrets_mod.cmd_set(argparse.Namespace(key="TEST_CHECK_KEY", value="hidden-value"))
+        capsys.readouterr()  # discard set output
+
+        rc = _secrets_mod.cmd_get(argparse.Namespace(key="TEST_CHECK_KEY"))
+        out = capsys.readouterr().out
+        data = json.loads(out)
         assert data.get("configured") is True
-        assert "hidden-value" not in result.stdout
-        assert result.returncode == 0
+        assert "hidden-value" not in out
+        assert rc == 0
 
-    def test_get_secret_reports_missing(self):
+    def test_get_secret_reports_missing(self, _secrets_mod, capsys):
         """Asserts get subcommand reports when secret is not found."""
-        result = subprocess.run(
-            [sys.executable, SCRIPT_PATH, "get",
-             "--key", "NONEXISTENT_ZZZZZ_KEY"],
-            capture_output=True, text=True, timeout=10,
-        )
-        data = json.loads(result.stdout)
+        rc = _secrets_mod.cmd_get(argparse.Namespace(key="NONEXISTENT_ZZZZZ_KEY"))
+        out = capsys.readouterr().out
+        data = json.loads(out)
         assert data.get("configured") is False
-        assert result.returncode == 0
+        assert rc == 0
 
-    def test_list_secrets_returns_keys(self):
+    def test_list_secrets_returns_keys(self, _secrets_mod, capsys):
         """Asserts list subcommand returns stored key names."""
-        # Store a secret first
-        subprocess.run(
-            [sys.executable, SCRIPT_PATH, "set",
-             "--key", "LIST_TEST_KEY",
-             "--value", "list-value"],
-            capture_output=True, text=True, timeout=10,
-        )
-        result = subprocess.run(
-            [sys.executable, SCRIPT_PATH, "list"],
-            capture_output=True, text=True, timeout=10,
-        )
-        data = json.loads(result.stdout)
+        _secrets_mod.cmd_set(argparse.Namespace(key="LIST_TEST_KEY", value="list-value"))
+        capsys.readouterr()
+
+        rc = _secrets_mod.cmd_list(argparse.Namespace())
+        out = capsys.readouterr().out
+        data = json.loads(out)
         assert "keys" in data
         assert isinstance(data["keys"], list)
-        assert result.returncode == 0
+        assert rc == 0
 
-    def test_set_rejects_invalid_key_name(self):
+    def test_set_rejects_invalid_key_name(self, _secrets_mod, capsys):
         """Asserts set rejects keys that don't match allowed naming patterns."""
-        result = subprocess.run(
-            [sys.executable, SCRIPT_PATH, "set",
-             "--key", "badname",
-             "--value", "test-value"],
-            capture_output=True, text=True, timeout=10,
-        )
-        data = json.loads(result.stdout)
+        rc = _secrets_mod.cmd_set(argparse.Namespace(key="badname", value="test-value"))
+        out = capsys.readouterr().out
+        data = json.loads(out)
         assert "error" in data
-        assert result.returncode == 1
+        assert rc == 1
 
-    def test_set_rejects_empty_key(self):
+    def test_set_rejects_empty_key(self, _secrets_mod, capsys):
         """Asserts set rejects empty key names."""
-        result = subprocess.run(
-            [sys.executable, SCRIPT_PATH, "set",
-             "--key", "  ",
-             "--value", "test-value"],
-            capture_output=True, text=True, timeout=10,
-        )
-        data = json.loads(result.stdout)
+        rc = _secrets_mod.cmd_set(argparse.Namespace(key="  ", value="test-value"))
+        out = capsys.readouterr().out
+        data = json.loads(out)
         assert "error" in data
-        assert result.returncode == 1
+        assert rc == 1
 
-    def test_exit_codes(self):
-        """Asserts exit 0 on successful operations."""
-        result = subprocess.run(
-            [sys.executable, SCRIPT_PATH, "list"],
-            capture_output=True, text=True, timeout=10,
-        )
-        assert result.returncode == 0
+    def test_exit_codes(self, _secrets_mod, capsys):
+        """Asserts list returns exit 0."""
+        rc = _secrets_mod.cmd_list(argparse.Namespace())
+        assert rc == 0

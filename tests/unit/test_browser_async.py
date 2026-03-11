@@ -60,7 +60,7 @@ def reset_browser_sessions():
 class TestBrowserNavigate:
     @pytest.mark.asyncio
     async def test_browser_navigate_returns_json_with_title_and_url(self, mock_playwright):
-        """Asserts navigate returns JSON with title, url, accessibility_tree keys."""
+        """Asserts navigate returns JSON with title, url, content keys."""
         from tools.stateful.browser import browser_navigate, _sessions
 
         page = mock_playwright["page"]
@@ -77,7 +77,7 @@ class TestBrowserNavigate:
         data = json.loads(result)
         assert "title" in data
         assert "url" in data
-        assert "accessibility_tree" in data
+        assert "content" in data
         assert data["title"] == "Test Page"
 
     @pytest.mark.asyncio
@@ -203,7 +203,7 @@ class TestBrowserContent:
 
     @pytest.mark.asyncio
     async def test_browser_content_accessibility_mode(self, mock_playwright):
-        """Asserts accessibility mode returns snapshot tree."""
+        """Asserts accessibility mode returns body text content."""
         from tools.stateful.browser import browser_content, _sessions
 
         page = mock_playwright["page"]
@@ -218,9 +218,8 @@ class TestBrowserContent:
         result = await browser_content(mode="accessibility")
         data = json.loads(result)
         assert "content" in data
-        # Accessibility tree should be JSON string
-        tree = json.loads(data["content"])
-        assert tree["role"] == "document"
+        assert isinstance(data["content"], str)
+        assert data["content"] == "Hello World"
 
     @pytest.mark.asyncio
     async def test_browser_content_truncates_long_content(self, mock_playwright):

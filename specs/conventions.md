@@ -39,15 +39,15 @@ Skills live in `.claude/skills/<skill-name>/SKILL.md`.
 
 ## When Writing an MCP Tool
 
-Use the `mcp-tool-builder` skill. It handles the full lifecycle: dependencies, secrets, code generation, registration, smoke testing.
+Use the `tool-creator` skill. It handles the full lifecycle: dependencies, secrets, code generation, registration, smoke testing.
 
 ```
-/mcp-tool-builder <description>
+/tool-creator <description>
 ```
 
 MCP tool rules (enforced by the builder skill):
 - Return raw data (JSON strings preferred) — never format for display
-- Read secrets via `get_credential(key)` from `agents/secret_manager.py`
+- Read secrets via `get_credential(key)` from `tools/secret_manager.py`
 - No module-level side effects (no DB connections at import time)
 - Catch specific exceptions; return `{"error": "brief description"}` on failure
 - All `subprocess.run` calls must use list arguments (`shell=False`)

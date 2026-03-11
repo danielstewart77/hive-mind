@@ -1,8 +1,6 @@
 """Integration tests for browser tool registration in the MCP server."""
 
 import ast
-import sys
-from unittest.mock import MagicMock, patch
 
 
 class TestBrowserFastMCPRegistration:
@@ -23,8 +21,8 @@ class TestBrowserFastMCPRegistration:
         registered_names = {f.__name__ for f in BROWSER_TOOLS}
         assert expected_tools == registered_names
 
-    def test_mcp_server_still_loads_agent_tooling_tools(self):
-        """Asserts the mcp_server.py source still imports agent_tooling during transition."""
+    def test_mcp_server_no_agent_tooling(self):
+        """Asserts mcp_server.py no longer imports agent_tooling after migration."""
         with open("/usr/src/app/mcp_server.py") as f:
             source = f.read()
 
@@ -37,12 +35,7 @@ class TestBrowserFastMCPRegistration:
                 for alias in node.names:
                     imports.append(alias.name)
 
-        # During transition (Step 2), agent_tooling should still be imported
-        # This test will be updated in Step 13 when we cut over
         has_agent_tooling = any("agent_tooling" in imp for imp in imports)
         has_browser_import = any("tools.stateful.browser" in imp for imp in imports)
 
-        # During transition, both should be present: agent_tooling for existing
-        # tools and browser import for the new direct registration.
-        # NOTE: In Step 13, change to: assert not has_agent_tooling and has_browser_import
-        assert has_agent_tooling and has_browser_import
+        assert not has_agent_tooling and has_browser_import

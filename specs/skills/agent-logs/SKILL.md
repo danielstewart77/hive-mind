@@ -11,7 +11,7 @@ Scan system log files for critical entries (errors, failures, panics, etc.). Tra
 ## Usage
 
 ```bash
-python /usr/src/app/tools/stateless/agent_logs/agent_logs.py \
+/usr/src/app/tools/stateless/agent_logs/venv/bin/python /usr/src/app/tools/stateless/agent_logs/agent_logs.py \
   --log-paths "<comma-separated paths>"
 ```
 

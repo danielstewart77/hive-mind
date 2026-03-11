@@ -11,7 +11,7 @@ The system uses layered notification with automatic fallback. Always prefer the 
 | 3 | **Gmail** (via MCP email tool) | Telegram unreachable |
 | 4 | **Alert file** (`/usr/src/app/data/alerts.log`) | Last resort — always works, no network required |
 
-The `notify_owner` tool in `agents/notify.py` implements channels 1–4 automatically.
+The `notify_owner` tool in `tools/stateless/notify/notify.py` implements channels 1–4 automatically.
 
 ## When to Call notify_owner
 

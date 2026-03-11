@@ -38,9 +38,9 @@ This file provides guidance to Claude Code when working with this repository.
 ### Self-Improvement
 
 When a user requests something no existing tool handles, Claude Code:
-1. Generates the tool code by chaining avaliable terminal tools
-2. For requests that are frequent or could benifit from more structure, call `create_tool` MCP tool to write it to `agents/` and register it
-3. If an API key is needed, asks the user and calls `set_secret` to store it
+1. Generates the tool code by chaining available terminal tools
+2. For requests that are frequent or could benefit from more structure, use the `/tool-creator` skill to create a new tool
+3. If an API key is needed, asks the user and uses the `/secrets` skill to store it
 4. The new tool is immediately available for use
 
 ### Backend Flexibility
@@ -62,7 +62,7 @@ docker compose up -d --build
 ```
 hive_mind/
 ├── server.py                      # FastAPI gateway (HTTP + WebSocket endpoints)
-├── mcp_server.py                  # MCP server exposing agent tools (stdio)
+├── mcp_server.py                  # MCP server (FastMCP, direct registration)
 ├── config.py                      # Centralized config (loads config.yaml)
 ├── config.yaml                    # Non-secret settings (providers, models, server)
 ├── .mcp.json                      # Wires MCP tools into Claude Code (host paths)
@@ -70,9 +70,27 @@ hive_mind/
 │
 ├── core/                          # Internal libraries (not entry points)
 │   ├── sessions.py               # Session manager (process pool + SQLite)
+│   ├── secrets.py                # Shared get_credential() utility
 │   ├── models.py                 # Model registry (static aliases + Ollama)
 │   ├── gateway_client.py         # Shared HTTP client for bots
 │   └── hitl.py                   # Human-in-the-loop approval
+│
+├── tools/
+│   ├── stateful/                  # MCP tools (registered in mcp_server.py)
+│   │   ├── browser.py            # Async Playwright browser automation
+│   │   ├── knowledge_graph.py    # Neo4j knowledge graph
+│   │   └── memory.py             # Neo4j vector memory store
+│   │
+│   └── stateless/                 # Standalone scripts (invoked via skills)
+│       ├── crypto/crypto.py      # CoinGecko crypto prices
+│       ├── weather/weather.py    # Open-Meteo weather
+│       ├── notify/notify.py      # Telegram/email notifications
+│       ├── planka/planka.py      # Planka Kanban board
+│       ├── reminders/reminders.py # One-time reminders (SQLite)
+│       ├── secrets/secrets.py    # Keyring secret management
+│       ├── x_api/x_api.py       # X/Twitter search
+│       ├── agent_logs/agent_logs.py # Log file scanner
+│       └── current_time/current_time.py # Timezone-aware clock
 │
 ├── clients/                       # Thin client entry points
 │   ├── discord_bot.py            # Discord bot
@@ -82,19 +100,9 @@ hive_mind/
 ├── voice/                         # Voice infrastructure
 │   └── voice_server.py           # STT/TTS FastAPI server
 │
-├── agents/                        # MCP tools (@tool decorated, auto-discovered)
-│   ├── secret_manager.py         # Keyring secret management
-│   ├── knowledge_graph.py        # Neo4j knowledge graph
-│   ├── planka.py                 # Planka Kanban board
-│   ├── notify.py                 # Telegram/email notifications
-│   ├── coingecko.py              # Crypto prices
-│   ├── tool_creator.py           # Runtime tool creation
-│   └── [dynamically created tools]
-│
 ├── docs/                          # Human-readable documentation and background
 ├── jobs/                          # Data files (resumes, specs)
 ├── data/                          # SQLite databases (Docker volume)
-├── backups/                       # Manual backups
 │
 ├── soul.md                        # Ada's identity (fallback stub)
 ├── CLAUDE.md                      # This file
@@ -128,7 +136,7 @@ models:
 ```
 
 Secrets are stored in the system keyring (`keyrings.alt.file.PlaintextKeyring`).
-Use `get_credential()` from `agents/secret_manager.py` to read them.
+Use `get_credential()` from `core/secrets.py` to read them.
 A minimal `.env` remains for docker-compose interpolation (Neo4j, Planka only).
 
 ## Gateway API
@@ -147,20 +155,18 @@ A minimal `.env` remains for docker-compose interpolation (Neo4j, Planka only).
 | `GET` | `/models` | List available models |
 | `POST` | `/command` | Route slash commands |
 
-## Adding New MCP Tools
+## Adding New Tools
 
-Create a Python file in `agents/` with the `@tool()` decorator:
+Use the `/tool-creator` skill, which reads `specs/tool-migration.md` to determine the right pattern:
 
-```python
-from agent_tooling import tool
+**Stateful tools** (need persistent connections — Neo4j, Playwright, etc.):
+- Add functions to `tools/stateful/` and register in `mcp_server.py`
+- Available as MCP tools immediately after container restart
 
-@tool(tags=["example"])
-def my_tool(param: str) -> str:
-    """Clear description of what this tool does."""
-    return result
-```
-
-The tool is auto-discovered by the MCP server. Return raw data (JSON strings preferred) — Claude Code handles formatting for the user.
+**Stateless tools** (standalone scripts — API calls, file ops, etc.):
+- Create a script in `tools/stateless/<name>/<name>.py` with argparse + JSON stdout
+- Create a Claude skill in `.claude/skills/<name>/SKILL.md` to invoke it
+- Editable without any container restart
 
 ## Key Design Principles
 

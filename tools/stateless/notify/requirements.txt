@@ -1,1 +1,3 @@
 httpx
+keyring
+keyrings.alt

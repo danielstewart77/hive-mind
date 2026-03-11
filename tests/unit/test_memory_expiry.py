@@ -13,10 +13,6 @@ def _mock_neo4j_and_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
     if "neo4j" not in sys.modules:
         neo4j_mock = MagicMock()
         monkeypatch.setitem(sys.modules, "neo4j", neo4j_mock)
-    if "agent_tooling" not in sys.modules:
-        at_mock = MagicMock()
-        at_mock.tool = MagicMock(return_value=lambda f: f)
-        monkeypatch.setitem(sys.modules, "agent_tooling", at_mock)
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +230,7 @@ class TestMemoryStoreDirectRecurring:
 
     def test_memory_store_direct_timed_event_with_recurring_stores_property(self) -> None:
         mock_driver = _make_mock_driver()
-        import agents.memory as mem_mod
+        import tools.stateful.memory as mem_mod
 
         with (
             patch.object(mem_mod, "_get_driver", return_value=mock_driver),
@@ -256,7 +252,7 @@ class TestMemoryStoreDirectRecurring:
 
     def test_memory_store_direct_timed_event_explicit_recurring_false(self) -> None:
         mock_driver = _make_mock_driver()
-        import agents.memory as mem_mod
+        import tools.stateful.memory as mem_mod
 
         with (
             patch.object(mem_mod, "_get_driver", return_value=mock_driver),
@@ -279,7 +275,7 @@ class TestMemoryStoreDirectRecurring:
 
     def test_memory_store_direct_timed_event_without_expires_returns_error(self) -> None:
         mock_driver = _make_mock_driver()
-        import agents.memory as mem_mod
+        import tools.stateful.memory as mem_mod
 
         with (
             patch.object(mem_mod, "_get_driver", return_value=mock_driver),
@@ -296,7 +292,7 @@ class TestMemoryStoreDirectRecurring:
 
     def test_memory_store_direct_timed_event_invalid_expires_returns_error(self) -> None:
         mock_driver = _make_mock_driver()
-        import agents.memory as mem_mod
+        import tools.stateful.memory as mem_mod
 
         with (
             patch.object(mem_mod, "_get_driver", return_value=mock_driver),
@@ -314,7 +310,7 @@ class TestMemoryStoreDirectRecurring:
 
     def test_memory_store_direct_non_timed_event_no_recurring_property(self) -> None:
         mock_driver = _make_mock_driver()
-        import agents.memory as mem_mod
+        import tools.stateful.memory as mem_mod
 
         with (
             patch.object(mem_mod, "_get_driver", return_value=mock_driver),
@@ -336,7 +332,7 @@ class TestMemoryStoreDirectRecurring:
 
     def test_memory_store_timed_event_hitl_approved_stores_recurring(self) -> None:
         mock_driver = _make_mock_driver()
-        import agents.memory as mem_mod
+        import tools.stateful.memory as mem_mod
 
         with (
             patch.object(mem_mod, "_hitl_gate", return_value=True),

@@ -11,7 +11,7 @@ Get current or forecasted weather for any location.
 ## Usage
 
 ```bash
-python /usr/src/app/tools/stateless/weather/weather.py \
+/usr/src/app/tools/stateless/weather/venv/bin/python /usr/src/app/tools/stateless/weather/weather.py \
   --location "<city, state>" \
   --time-span "<today|tonight|this week|this weekend>"
 ```

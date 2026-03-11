@@ -16,10 +16,6 @@ def _mock_neo4j_and_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
         neo4j_mock = MagicMock()
         monkeypatch.setitem(sys.modules, "neo4j", neo4j_mock)
     # Mock agent_tooling if not available
-    if "agent_tooling" not in sys.modules:
-        at_mock = MagicMock()
-        at_mock.tool = MagicMock(return_value=lambda f: f)
-        monkeypatch.setitem(sys.modules, "agent_tooling", at_mock)
 
 
 def _make_mock_driver() -> MagicMock:
@@ -39,7 +35,7 @@ class TestMemoryStoreDirectMetadata:
 
     def test_memory_store_direct_with_data_class_includes_metadata(self) -> None:
         mock_driver = _make_mock_driver()
-        import agents.memory as mem_mod
+        import tools.stateful.memory as mem_mod
 
         with (
             patch.object(mem_mod, "_get_driver", return_value=mock_driver),
@@ -67,7 +63,7 @@ class TestMemoryStoreDirectMetadata:
 
     def test_memory_store_direct_unknown_class_returns_prompt(self) -> None:
         mock_driver = _make_mock_driver()
-        import agents.memory as mem_mod
+        import tools.stateful.memory as mem_mod
 
         with (
             patch.object(mem_mod, "_get_driver", return_value=mock_driver),
@@ -83,7 +79,7 @@ class TestMemoryStoreDirectMetadata:
             assert "unknown-class" in result.get("prompt", "").lower() or "unknown-class" in result.get("error", "").lower()
 
     def test_memory_store_direct_without_data_class_raises_type_error(self) -> None:
-        import agents.memory as mem_mod
+        import tools.stateful.memory as mem_mod
 
         with pytest.raises(TypeError):
             mem_mod.memory_store_direct(
@@ -93,7 +89,7 @@ class TestMemoryStoreDirectMetadata:
 
     def test_memory_store_direct_timed_event_without_expires_returns_error(self) -> None:
         mock_driver = _make_mock_driver()
-        import agents.memory as mem_mod
+        import tools.stateful.memory as mem_mod
 
         with (
             patch.object(mem_mod, "_get_driver", return_value=mock_driver),
@@ -110,7 +106,7 @@ class TestMemoryStoreDirectMetadata:
 
     def test_memory_store_direct_timed_event_with_expires_includes_field(self) -> None:
         mock_driver = _make_mock_driver()
-        import agents.memory as mem_mod
+        import tools.stateful.memory as mem_mod
 
         with (
             patch.object(mem_mod, "_get_driver", return_value=mock_driver),
@@ -133,7 +129,7 @@ class TestMemoryStoreDirectMetadata:
 
     def test_memory_store_direct_invalid_source_returns_error(self) -> None:
         mock_driver = _make_mock_driver()
-        import agents.memory as mem_mod
+        import tools.stateful.memory as mem_mod
 
         with (
             patch.object(mem_mod, "_get_driver", return_value=mock_driver),
@@ -150,7 +146,7 @@ class TestMemoryStoreDirectMetadata:
 
     def test_memory_store_return_includes_data_class_in_response(self) -> None:
         mock_driver = _make_mock_driver()
-        import agents.memory as mem_mod
+        import tools.stateful.memory as mem_mod
 
         with (
             patch.object(mem_mod, "_get_driver", return_value=mock_driver),
@@ -172,7 +168,7 @@ class TestMemoryStoreWithHITL:
 
     def test_memory_store_with_hitl_passes_data_class_through(self) -> None:
         mock_driver = _make_mock_driver()
-        import agents.memory as mem_mod
+        import tools.stateful.memory as mem_mod
 
         with (
             patch.object(mem_mod, "_hitl_gate", return_value=True),

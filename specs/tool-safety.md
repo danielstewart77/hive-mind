@@ -10,9 +10,9 @@ Before any runtime-created tool is loaded, its source code is parsed with Python
 - Imports of: `pty`, `ctypes`, `socket`, `multiprocessing`, `code`, `codeop`
 
 ### Staging Flow
-1. Code is written to `agents/staging/` first
+1. Code is written to `tools/stateful/staging/` first
 2. AST validation runs against the blocklist
-3. If clean, promoted to `agents/`
+3. If clean, promoted to `tools/stateful/`
 4. If violations found, rejected with audit logging
 
 ### First-Party vs Dynamic Tools
@@ -36,7 +36,7 @@ The child process receives only 5 base env vars:
 
 ## Rules for New Tools
 
-- All `@tool()` decorated functions in `agents/` are auto-discovered by the MCP server
+- All `@tool()` decorated functions in `tools/stateful/` are auto-discovered by the MCP server
 - Return raw data (JSON strings preferred) — never format for display
 - Read credentials via `get_credential(key)` — never hardcode
 - No module-level side effects (no DB connections at import time)

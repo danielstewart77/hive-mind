@@ -14,10 +14,6 @@ def _mock_neo4j_and_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
     if "neo4j" not in sys.modules:
         neo4j_mock = MagicMock()
         monkeypatch.setitem(sys.modules, "neo4j", neo4j_mock)
-    if "agent_tooling" not in sys.modules:
-        at_mock = MagicMock()
-        at_mock.tool = MagicMock(return_value=lambda f: f)
-        monkeypatch.setitem(sys.modules, "agent_tooling", at_mock)
 
 
 def _make_mock_driver() -> MagicMock:
@@ -37,7 +33,7 @@ class TestGraphUpsertDirectMetadata:
 
     def test_graph_upsert_direct_with_data_class_sets_metadata_on_node(self) -> None:
         mock_driver = _make_mock_driver()
-        import agents.knowledge_graph as kg_mod
+        import tools.stateful.knowledge_graph as kg_mod
 
         with (
             patch.object(kg_mod, "_get_driver", return_value=mock_driver),
@@ -66,7 +62,7 @@ class TestGraphUpsertDirectMetadata:
 
     def test_graph_upsert_direct_unknown_class_returns_prompt(self) -> None:
         mock_driver = _make_mock_driver()
-        import agents.knowledge_graph as kg_mod
+        import tools.stateful.knowledge_graph as kg_mod
 
         with (
             patch.object(kg_mod, "_get_driver", return_value=mock_driver),
@@ -82,7 +78,7 @@ class TestGraphUpsertDirectMetadata:
             assert "unknown-class" in result["error"].lower()
 
     def test_graph_upsert_direct_without_data_class_raises_type_error(self) -> None:
-        import agents.knowledge_graph as kg_mod
+        import tools.stateful.knowledge_graph as kg_mod
 
         with pytest.raises(TypeError):
             kg_mod.graph_upsert_direct(
@@ -92,7 +88,7 @@ class TestGraphUpsertDirectMetadata:
 
     def test_graph_upsert_direct_metadata_on_relationship_target(self) -> None:
         mock_driver = _make_mock_driver()
-        import agents.knowledge_graph as kg_mod
+        import tools.stateful.knowledge_graph as kg_mod
 
         with (
             patch.object(kg_mod, "_get_driver", return_value=mock_driver),
@@ -122,7 +118,7 @@ class TestGraphUpsertDirectMetadata:
     def test_graph_upsert_direct_relationship_includes_tier(self) -> None:
         """AC-4: tier must be set on every edge, not just nodes."""
         mock_driver = _make_mock_driver()
-        import agents.knowledge_graph as kg_mod
+        import tools.stateful.knowledge_graph as kg_mod
 
         with (
             patch.object(kg_mod, "_get_driver", return_value=mock_driver),
@@ -149,7 +145,7 @@ class TestGraphUpsertDirectMetadata:
 
     def test_graph_upsert_direct_invalid_source_returns_error(self) -> None:
         mock_driver = _make_mock_driver()
-        import agents.knowledge_graph as kg_mod
+        import tools.stateful.knowledge_graph as kg_mod
 
         with (
             patch.object(kg_mod, "_get_driver", return_value=mock_driver),
@@ -166,7 +162,7 @@ class TestGraphUpsertDirectMetadata:
 
     def test_graph_upsert_return_includes_data_class(self) -> None:
         mock_driver = _make_mock_driver()
-        import agents.knowledge_graph as kg_mod
+        import tools.stateful.knowledge_graph as kg_mod
 
         with (
             patch.object(kg_mod, "_get_driver", return_value=mock_driver),
@@ -188,7 +184,7 @@ class TestGraphUpsertWithHITL:
 
     def test_graph_upsert_with_hitl_passes_data_class_through(self) -> None:
         mock_driver = _make_mock_driver()
-        import agents.knowledge_graph as kg_mod
+        import tools.stateful.knowledge_graph as kg_mod
         from core.kg_guards import DisambiguationResult
 
         proceed_result = DisambiguationResult(

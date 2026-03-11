@@ -17,10 +17,6 @@ def _mock_neo4j_and_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
     if "neo4j" not in sys.modules:
         neo4j_mock = MagicMock()
         monkeypatch.setitem(sys.modules, "neo4j", neo4j_mock)
-    if "agent_tooling" not in sys.modules:
-        at_mock = MagicMock()
-        at_mock.tool = MagicMock(return_value=lambda f: f)
-        monkeypatch.setitem(sys.modules, "agent_tooling", at_mock)
 
 
 def _make_mock_driver() -> MagicMock:
@@ -73,7 +69,7 @@ class TestDisambiguationBlocksWriteFlow:
         ]
         disambig_session.run.return_value = disambig_result
 
-        import agents.knowledge_graph as kg_mod
+        import tools.stateful.knowledge_graph as kg_mod
         from core import kg_guards
 
         with (
@@ -105,7 +101,7 @@ class TestOrphanGuardBlocksGraphUpsert:
 
     def test_orphan_guard_blocks_graph_upsert_without_edges(self) -> None:
         """Write should be rejected with correct error message when no edges."""
-        import agents.knowledge_graph as kg_mod
+        import tools.stateful.knowledge_graph as kg_mod
 
         result_str = kg_mod.graph_upsert(
             entity_type="Person",
@@ -126,7 +122,7 @@ class TestGracePeriodAllowsOrphanViaDirect:
 
     def test_grace_period_allows_temporary_orphan_via_direct(self) -> None:
         mock_driver = _make_mock_driver()
-        import agents.knowledge_graph as kg_mod
+        import tools.stateful.knowledge_graph as kg_mod
 
         before = time.time()
 
