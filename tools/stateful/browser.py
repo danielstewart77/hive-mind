@@ -124,15 +124,14 @@ async def browser_navigate(url: str, session_key: str = "default") -> str:
         await _cleanup_idle()
         page = await _get_or_create_session(session_key)
         await page.goto(url, wait_until="networkidle", timeout=30000)
-        tree = await page.accessibility.snapshot()
-        tree_str = json.dumps(tree, indent=2)
-        if len(tree_str) > 8000:
-            tree_str = tree_str[:8000] + "\n... [truncated]"
+        body_text = await page.inner_text("body")
+        if len(body_text) > 8000:
+            body_text = body_text[:8000] + "\n... [truncated]"
 
         result: dict = {
             "title": await page.title(),
             "url": page.url,
-            "accessibility_tree": tree_str,
+            "content": body_text,
         }
 
         if await _detect_captcha(page):
@@ -222,8 +221,7 @@ async def browser_content(
         if mode == "text":
             content = await page.inner_text("body")
         else:
-            tree = await page.accessibility.snapshot()
-            content = json.dumps(tree, indent=2)
+            content = await page.inner_text("body")
         if len(content) > 12000:
             content = content[:12000] + "\n... [truncated]"
 

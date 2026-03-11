@@ -11,6 +11,12 @@ keyrings.alt
 # MCP
 mcp[cli]
 
+# Browser automation
+playwright
+
+# Dev tooling
+pip-audit
+
 # Gateway server
 fastapi
 uvicorn[standard]
@@ -24,7 +30,7 @@ dateparser
 
 # Discord bot
 discord.py[voice]
-PyNaCl
+PyNaCl>=1.6.2
 
 # Telegram bot
 python-telegram-bot[job-queue]>=21.0
