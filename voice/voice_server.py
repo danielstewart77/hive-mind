@@ -129,13 +129,13 @@ def _ogg_to_wav(ogg_bytes: bytes) -> bytes:
     return result.stdout
 
 
-def _wav_to_ogg(wav_bytes: bytes) -> bytes:
-    """Convert WAV → OGG/Opus (Telegram voice note format)."""
-    result = subprocess.run(
-        ["ffmpeg", "-i", "pipe:0", "-c:a", "libopus", "-b:a", "64k", "-f", "ogg", "pipe:1"],
-        input=wav_bytes,
-        capture_output=True,
-    )
+def _wav_to_ogg(wav_bytes: bytes, speed: float = 1.0) -> bytes:
+    """Convert WAV → OGG/Opus (Telegram voice note format). Applies atempo if speed != 1.0."""
+    cmd = ["ffmpeg", "-i", "pipe:0"]
+    if speed != 1.0:
+        cmd += ["-af", f"atempo={speed:.3f}"]
+    cmd += ["-c:a", "libopus", "-b:a", "64k", "-f", "ogg", "pipe:1"]
+    result = subprocess.run(cmd, input=wav_bytes, capture_output=True)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg WAV→OGG: {result.stderr.decode()}")
     return result.stdout
@@ -179,7 +179,7 @@ async def stt(file: UploadFile):
 class TTSRequest(BaseModel):
     text: str
     voice: str = "f5"   # "f5" = F5-TTS (default), anything else = Kokoro voice name
-    speed: float = 1.0
+    speed: float = 0.9
 
 
 @app.post("/tts")
@@ -204,7 +204,7 @@ async def tts(req: TTSRequest):
             arr = _np.squeeze(arr).astype(_np.float32)
             wav_buf = io.BytesIO()
             sf.write(wav_buf, arr, sr, format="WAV")
-            ogg_bytes = _wav_to_ogg(wav_buf.getvalue())
+            ogg_bytes = _wav_to_ogg(wav_buf.getvalue(), speed=req.speed)
             log.info("TTS (F5): %d chars → %d bytes OGG", len(req.text), len(ogg_bytes))
             return Response(content=ogg_bytes, media_type="audio/ogg")
         except Exception as e:
