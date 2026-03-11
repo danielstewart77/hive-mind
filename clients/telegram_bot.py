@@ -598,30 +598,31 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_id = update.effective_chat.id
     lock = get_lock(chat_id)
+    queue = get_queue(chat_id)
+
+    # STT happens outside the lock so we have text to queue if busy
+    try:
+        voice_file = await update.message.voice.get_file()
+        ogg_bytes = bytes(await voice_file.download_as_bytearray())
+        text = await _stt(ogg_bytes)
+    except Exception:
+        log.exception("STT failed in chat %s", chat_id)
+        await update.message.reply_text("Couldn't transcribe your audio.")
+        return
+
+    log.info("STT: %r", text[:80])
+    if not text.strip():
+        await update.message.reply_text("Couldn't transcribe audio.")
+        return
 
     if lock.locked():
-        await update.message.reply_text("Still processing your previous message — yours is queued and will follow.")
+        pos = queue.qsize() + 1
+        await queue.put(text)
+        await update.message.reply_text(f"Still processing — yours is queued (#{pos}).")
+        return
 
     async with lock:
         try:
-            # Download OGG/Opus from Telegram
-            voice_file = await update.message.voice.get_file()
-            ogg_bytes = bytes(await voice_file.download_as_bytearray())
-
-            # STT via voice-server
-            try:
-                text = await _stt(ogg_bytes)
-            except Exception:
-                log.exception("STT failed in chat %s", chat_id)
-                await update.message.reply_text("Couldn't transcribe your audio.")
-                return
-
-            log.info("STT: %r", text[:80])
-            if not text.strip():
-                await update.message.reply_text("Couldn't transcribe audio.")
-                return
-
-            # Stream response: text updates live, voice chunks sent progressively
             sent = await update.message.reply_text("\u2026")
             final_chunks = await _stream_to_message(
                 sent, update.effective_user.id, chat_id, text,
@@ -629,10 +630,24 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             for extra in final_chunks[1:]:
                 await update.effective_chat.send_message(extra)
-
         except Exception:
             log.exception("Unexpected error in voice handler for chat %s", chat_id)
             await update.message.reply_text("Something went wrong with voice processing.")
+
+        # Drain queue in a loop — new messages may arrive during batch processing
+        while not queue.empty():
+            queued: list[str] = []
+            while not queue.empty():
+                queued.append(queue.get_nowait())
+            batch = _format_queue_batch(queued)
+            try:
+                sent2 = await update.effective_chat.send_message("\u2026")
+                final_chunks2 = await _stream_to_message(sent2, update.effective_user.id, chat_id, batch)
+                for extra in final_chunks2[1:]:
+                    await update.effective_chat.send_message(extra)
+            except Exception:
+                log.exception("Error processing queued batch in chat %s", chat_id)
+                await update.effective_chat.send_message("Something went wrong processing your queued messages.")
 
 
 # ---------------------------------------------------------------------------
