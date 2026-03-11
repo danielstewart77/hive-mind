@@ -16,14 +16,14 @@ logger = logging.getLogger(__name__)
 
 def _get_driver():
     """Lazy import to avoid circular dependency and allow mocking."""
-    from agents.memory import _get_driver as _mem_get_driver
+    from tools.stateful.memory import _get_driver as _mem_get_driver
     return _mem_get_driver()
 
 
 def _telegram_direct(message: str) -> tuple[bool, str]:
-    """Lazy import of the Telegram direct send function."""
-    from agents.notify import _telegram_direct as _notify_telegram
-    return _notify_telegram(message)
+    """Delegate to shared Telegram utility in core/."""
+    from core.notify_utils import telegram_direct
+    return telegram_direct(message)
 
 
 def sweep_expired_events() -> dict:

@@ -29,8 +29,7 @@ RUN usermod -l hivemind -d /home/hivemind -m ubuntu \
 # Python venv + deps — installed to /opt/venv so bind mounts don't clobber it
 RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --upgrade pip
 COPY requirements.txt .
-RUN /opt/venv/bin/pip install --no-cache-dir --force-reinstall agent_tooling
-RUN /opt/venv/bin/pip install --no-cache-dir --force-reinstall -r requirements.txt
+RUN /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
 
 # Pre-download spaCy model (Kokoro/misaki needs it; can't pip-install at runtime as non-root)
 RUN /opt/venv/bin/python -m spacy download en_core_web_sm

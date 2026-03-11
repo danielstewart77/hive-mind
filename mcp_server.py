@@ -1,49 +1,37 @@
 """
 Hive Mind MCP Server.
 
-Exposes tools via FastMCP. Browser tools are registered directly from
-tools/stateful/browser.py (async Playwright). Other tools still use
-agent_tooling discovery during the migration transition.
+Exposes tools via FastMCP with direct registration from tools/stateful/.
+No agent_tooling dependency — all tools are imported and registered explicitly.
+
+Tool categories:
+  - Browser tools (async Playwright) from tools/stateful/browser.py
+  - Knowledge graph tools (Neo4j) from tools/stateful/knowledge_graph.py
+  - Memory tools (Neo4j + embeddings) from tools/stateful/memory.py
 
 Claude Code SDK connects to this server via stdio to access external integrations.
 """
 
 import logging
 
-from agent_tooling import discover_tools, get_tool_function, get_tool_schemas
 from mcp.server.fastmcp import FastMCP
 
 from core.audit import audit_wrap, get_audit_logger
 from tools.stateful.browser import BROWSER_TOOLS
+from tools.stateful.knowledge_graph import KG_TOOLS
+from tools.stateful.memory import MEMORY_TOOLS
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger(__name__)
 
-# Discover tools from agents/ (excluding browser tools which are now direct)
-discover_tools(["agents"])
-
 mcp = FastMCP("hive-mind-tools")
 audit_logger = get_audit_logger()
 
-# Browser tool names to exclude from agent_tooling registration
-_BROWSER_TOOL_NAMES = {f.__name__ for f in BROWSER_TOOLS}
-
-# Register browser tools directly (async Playwright, no @tool decorator)
-for func in BROWSER_TOOLS:
-    log.info("[MCP] %s (direct)", func.__name__)
+# Register all stateful tools directly
+for func in BROWSER_TOOLS + KG_TOOLS + MEMORY_TOOLS:
+    log.info("[MCP] %s", func.__name__)
     wrapped = audit_wrap(func, audit_logger)
     mcp.tool()(wrapped)
-
-# Register remaining agent_tooling tools (excludes browser to avoid duplicates)
-for schema in get_tool_schemas():
-    name = schema["name"]
-    if name in _BROWSER_TOOL_NAMES:
-        continue  # Already registered directly above
-    func = get_tool_function(name)
-    if func:
-        log.info("[MCP] %s", name)
-        func = audit_wrap(func, audit_logger)
-        mcp.tool()(func)
 
 if __name__ == "__main__":
     log.info("Starting MCP server (stdio mode)")

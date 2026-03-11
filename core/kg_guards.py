@@ -26,16 +26,16 @@ class DisambiguationResult:
 
 def _get_driver():
     """Lazy import to avoid circular dependency and allow mocking."""
-    from agents.knowledge_graph import _get_driver as _kg_get_driver
+    from tools.stateful.knowledge_graph import _get_driver as _kg_get_driver
 
     return _kg_get_driver()
 
 
 def _telegram_direct(message: str) -> tuple[bool, str]:
-    """Lazy import of the Telegram direct send function."""
-    from agents.notify import _telegram_direct as _notify_telegram
+    """Delegate to shared Telegram utility in core/."""
+    from core.notify_utils import telegram_direct
 
-    return _notify_telegram(message)
+    return telegram_direct(message)
 
 
 def check_disambiguation(
