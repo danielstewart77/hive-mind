@@ -25,6 +25,18 @@ Interact with the Planka Kanban board.
 - `assign-label --card-id <id> --label-id <id>` -- Assign label
 - `create-card --list-id <id> --name "..." [--description "..."] [--card-type story]` -- Create card
 
+## Known IDs (Hive Mind board)
+
+| Name | Type | ID |
+|------|------|----|
+| Hive Mind | Project | `1720152515468592132` |
+| Development | Board | `1720152515644752902` |
+| Backlog | List | `1720152629494940682` |
+| In Progress | List | `1720153348214096907` |
+| Done | List | `1720153348432200716` |
+
+Use these directly in commands — no need to look them up first.
+
 ## Output
 
 JSON with operation results.

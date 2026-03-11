@@ -17,6 +17,7 @@ import aiohttp
 
 _SKILLS_DIR = os.path.expanduser("~/.claude/skills")
 _locks: dict[int, asyncio.Lock] = {}
+_chat_queues: dict[int, asyncio.Queue] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +55,12 @@ def get_lock(chat_id: int) -> asyncio.Lock:
     if chat_id not in _locks:
         _locks[chat_id] = asyncio.Lock()
     return _locks[chat_id]
+
+
+def get_queue(chat_id: int) -> asyncio.Queue:
+    if chat_id not in _chat_queues:
+        _chat_queues[chat_id] = asyncio.Queue()
+    return _chat_queues[chat_id]
 
 
 def time_ago(ts: float) -> str:

@@ -26,7 +26,7 @@ from telegram.ext import (
 )
 
 from config import config
-from core.gateway_client import GatewayClient, get_lock, get_skills, time_ago
+from core.gateway_client import GatewayClient, get_lock, get_queue, get_skills, time_ago
 
 logging.basicConfig(
     level=logging.INFO,
@@ -221,6 +221,17 @@ async def _stream_to_message(
 # ---------------------------------------------------------------------------
 # Server command formatters
 # ---------------------------------------------------------------------------
+def _format_queue_batch(messages: list[str]) -> str:
+    """Combine queued messages into one prompt so Claude replies once."""
+    if len(messages) == 1:
+        return messages[0]
+    items = "\n".join(f"{i + 1}. {m}" for i, m in enumerate(messages))
+    return (
+        "While you were processing my previous message, I sent several more. "
+        "Please address all of them in one reply:\n\n" + items
+    )
+
+
 def _format_sessions(sessions: list[dict]) -> str:
     if not sessions:
         return "No sessions found."
@@ -437,9 +448,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_id = update.effective_chat.id
     lock = get_lock(chat_id)
+    queue = get_queue(chat_id)
 
     if lock.locked():
-        await update.message.reply_text("Still processing your previous message, please wait.")
+        pos = queue.qsize() + 1
+        await queue.put(content)
+        await update.message.reply_text(f"Still processing — yours is queued (#{pos}).")
         return
 
     async with lock:
@@ -451,6 +465,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             log.exception("Error processing message in chat %s", chat_id)
             await update.message.reply_text("Something went wrong. Try again or use /clear.")
+
+        # Drain any messages that queued up while we were busy
+        queued: list[str] = []
+        while not queue.empty():
+            queued.append(queue.get_nowait())
+        if queued:
+            batch = _format_queue_batch(queued)
+            try:
+                sent2 = await update.effective_chat.send_message("\u2026")
+                final_chunks2 = await _stream_to_message(sent2, update.effective_user.id, chat_id, batch)
+                for extra in final_chunks2[1:]:
+                    await update.effective_chat.send_message(extra)
+            except Exception:
+                log.exception("Error processing queued batch in chat %s", chat_id)
+                await update.effective_chat.send_message("Something went wrong processing your queued messages.")
 
 
 # ---------------------------------------------------------------------------
@@ -476,8 +505,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lock = get_lock(chat_id)
 
     if lock.locked():
-        await update.message.reply_text("Still processing your previous message, please wait.")
-        return
+        await update.message.reply_text("Still processing your previous message — yours is queued and will follow.")
 
     async with lock:
         try:
@@ -572,8 +600,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lock = get_lock(chat_id)
 
     if lock.locked():
-        await update.message.reply_text("Still processing your previous message, please wait.")
-        return
+        await update.message.reply_text("Still processing your previous message — yours is queued and will follow.")
 
     async with lock:
         try:
@@ -634,9 +661,12 @@ async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_T
 
     chat_id = update.effective_chat.id
     lock = get_lock(chat_id)
+    queue = get_queue(chat_id)
 
     if lock.locked():
-        await update.message.reply_text("Still processing your previous message, please wait.")
+        pos = queue.qsize() + 1
+        await queue.put(content)
+        await update.message.reply_text(f"Still processing — yours is queued (#{pos}).")
         return
 
     async with lock:
@@ -648,6 +678,21 @@ async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_T
         except Exception:
             log.exception("Error processing unknown command in chat %s", chat_id)
             await update.message.reply_text("Something went wrong. Try again or use /clear.")
+
+        # Drain any messages that queued up while we were busy
+        queued: list[str] = []
+        while not queue.empty():
+            queued.append(queue.get_nowait())
+        if queued:
+            batch = _format_queue_batch(queued)
+            try:
+                sent2 = await update.effective_chat.send_message("\u2026")
+                final_chunks2 = await _stream_to_message(sent2, update.effective_user.id, chat_id, batch)
+                for extra in final_chunks2[1:]:
+                    await update.effective_chat.send_message(extra)
+            except Exception:
+                log.exception("Error processing queued batch in chat %s", chat_id)
+                await update.effective_chat.send_message("Something went wrong processing your queued messages.")
 
 
 # ---------------------------------------------------------------------------
