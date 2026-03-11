@@ -121,22 +121,65 @@ def audit_wrap(func: Callable[..., Any], logger: logging.Logger) -> Callable[...
     - Records wall-clock duration in milliseconds
     - Logs success or error status
     - Re-raises any exception unchanged
+
+    Async functions receive an async wrapper so that
+    ``inspect.iscoroutinefunction`` remains True and FastMCP can ``await`` them.
     """
 
     sig = inspect.signature(func)
 
+    def _log_call(
+        all_args: dict[str, Any],
+        start: float,
+        status: str,
+        error_msg: str | None,
+    ) -> None:
+        duration_ms = round((time.monotonic() - start) * 1000, 2)
+        audit_data = {
+            "event": "tool_call",
+            "tool": func.__name__,
+            "args": redact_args(all_args),
+            "status": status,
+            "duration_ms": duration_ms,
+            "error": error_msg,
+        }
+        logger.info(
+            "tool_call: %s", func.__name__, extra={"audit_data": audit_data}
+        )
+
+    if inspect.iscoroutinefunction(func):
+
+        @functools.wraps(func)
+        async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+            bound = sig.bind(*args, **kwargs)
+            bound.apply_defaults()
+            all_args = dict(bound.arguments)
+
+            start = time.monotonic()
+            status = "success"
+            error_msg: str | None = None
+
+            try:
+                result = await func(*args, **kwargs)
+                return result
+            except Exception as exc:
+                status = "error"
+                error_msg = str(exc)
+                raise
+            finally:
+                _log_call(all_args, start, status, error_msg)
+
+        return async_wrapper
+
     @functools.wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        # Bind positional + keyword args into a single dict
         bound = sig.bind(*args, **kwargs)
         bound.apply_defaults()
         all_args = dict(bound.arguments)
 
-        redacted = redact_args(all_args)
         start = time.monotonic()
         status = "success"
         error_msg: str | None = None
-        result = None
 
         try:
             result = func(*args, **kwargs)
@@ -146,17 +189,6 @@ def audit_wrap(func: Callable[..., Any], logger: logging.Logger) -> Callable[...
             error_msg = str(exc)
             raise
         finally:
-            duration_ms = round((time.monotonic() - start) * 1000, 2)
-            audit_data = {
-                "event": "tool_call",
-                "tool": func.__name__,
-                "args": redacted,
-                "status": status,
-                "duration_ms": duration_ms,
-                "error": error_msg,
-            }
-            logger.info(
-                "tool_call: %s", func.__name__, extra={"audit_data": audit_data}
-            )
+            _log_call(all_args, start, status, error_msg)
 
     return wrapper

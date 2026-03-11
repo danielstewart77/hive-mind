@@ -70,8 +70,11 @@ def get_credential(key: str) -> str | None:
     """Get a secret from keyring, falling back to environment variables.
 
     For use by other agents that need credentials (e.g. Neo4j tools).
+    Delegates to core.secrets.get_credential for the actual implementation.
     """
-    return _keyring_get(key) or os.getenv(key)
+    from core.secrets import get_credential as _core_get_credential
+
+    return _core_get_credential(key)
 
 
 @tool(tags=["system"])
