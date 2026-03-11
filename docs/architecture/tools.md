@@ -29,62 +29,25 @@ HITL = requires human approval via Telegram before executing. See [hitl-approval
 | `graph_query` | No | Query the graph by entity name (fuzzy match) |
 | `search_person` | No | Search persons by first name, last name, title, or relationship |
 
-### Planka (Kanban)
+---
 
-| Tool | HITL | Description |
+## Stateless Tools (via Skills)
+
+The following capabilities are no longer MCP tools. They are standalone scripts in `tools/stateless/`, each with its own venv, invoked via Claude skills.
+
+| Capability | Skill | Script |
 |---|---|---|
-| `planka_list_projects` | No | List all Planka projects |
-| `planka_get_board` | No | Get board with all lists and cards |
-| `planka_get_card` | No | Get card details by ID |
-| `planka_create_card` | No | Create a new card in a list |
-| `planka_move_card` | No | Move a card to a different list |
-| `planka_update_card` | No | Update card name or description |
-| `planka_add_comment` | No | Add a comment to a card |
-| `planka_assign_label` | No | Assign a label to a card |
+| Weather | `/weather` | `tools/stateless/weather/weather.py` |
+| Crypto prices | `/crypto-price` | `tools/stateless/crypto/crypto.py` |
+| Current time | `/current-time` | `tools/stateless/current_time/current_time.py` |
+| X/Twitter search | `/x-search` | `tools/stateless/x_api/x_api.py` |
+| Notifications | `/notify` | `tools/stateless/notify/notify.py` |
+| Reminders | `/reminders` | `tools/stateless/reminders/reminders.py` |
+| Secrets | `/secrets` | `tools/stateless/secrets/secrets.py` |
+| Planka Kanban | `/planka` | `tools/stateless/planka/planka.py` |
+| Agent logs | `/agent-logs` | `tools/stateless/agent_logs/agent_logs.py` |
 
-### Notifications & Reminders
-
-| Tool | HITL | Description |
-|---|---|---|
-| `notify_owner` | No | Send notification via Telegram, email, and/or file |
-| `send_voice_message` | No | Send a TTS voice message via Telegram |
-| `set_reminder` | No | Set a one-time reminder (fires via scheduler) |
-| `list_reminders` | No | List all pending reminders |
-| `delete_reminder` | No | Delete a reminder by ID |
-| `get_due_reminders` | No | Get reminders that are currently due |
-
-### Secrets
-
-| Tool | HITL | Description |
-|---|---|---|
-| `set_secret` | No | Store a secret in the system keyring |
-| `get_secret` | No | Retrieve a secret from the keyring |
-| `list_secrets` | No | List all stored secret key names (not values) |
-
-### Self-Improvement
-
-| Tool | HITL | Description |
-|---|---|---|
-| `create_tool` | No | Write, AST-validate, and register a new MCP tool in `agents/` |
-| `install_dependency` | No | Install a Python package into the venv |
-
-### Social & Market Data
-
-| Tool | HITL | Description |
-|---|---|---|
-| `search_x_threads` | No | Search X (Twitter) threads by keyword |
-| `get_x_thread_replies` | No | Get replies and engagement for an X thread |
-| `get_crypto_price` | No | Get current price for a cryptocurrency |
-
-### Utilities
-
-| Tool | HITL | Description |
-|---|---|---|
-| `get_current_time` | No | Current time in a given timezone (default: America/Chicago) |
-| `get_weather_for_location` | No | Weather forecast for a location and time span |
-| `agent_logs` | No | Read recent logs from hive_mind container services |
-| `code_genius` | No | Invoke the code-genius coding skill from a documents path |
-| `planning_genius` | No | Invoke the planning-genius skill from a documents path |
+See `specs/tool-migration.md` for the migration rationale and pattern details.
 
 ---
 
@@ -138,13 +101,18 @@ HITL = requires human approval via Telegram before executing. See [hitl-approval
 
 ## Adding New Tools
 
-**Internal tool** (no external auth, no Docker socket needed):
-→ Create `agents/my_tool.py` with `@tool()` decorator. Auto-discovered immediately, no restart needed.
+Use the `/tool-creator` skill. It reads `specs/tool-migration.md` to determine the right pattern:
+
+**Stateless tool** (API call, file op, no persistent connection):
+→ Creates `tools/stateless/<name>/` with script, `requirements.txt`, venv, and a Claude skill. Editable without restart.
+
+**Stateful tool** (needs Neo4j, Playwright, or other persistent connection):
+→ Adds a function to `tools/stateful/` and registers it in `mcp_server.py`. Requires `hive_mind` container restart.
 
 **External tool** (OAuth, file credentials, Docker access):
-→ Create `hive_mind_mcp/tools/my_tool.py`, import and register in `hive_mind_mcp/server.py`, restart the `hive-mind-mcp` container.
+→ Create in `hive_mind_mcp/`, register in `hive_mind_mcp/server.py`, restart `hive-mind-mcp` container.
 
-See [external-mcp.md](external-mcp.md) for the full pattern.
+See [external-mcp.md](external-mcp.md) for the external pattern.
 
 ---
 

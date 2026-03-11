@@ -102,28 +102,45 @@ All Claude skills, version-controlled. Bootstrap: `cp -rn specs/skills/. ~/.clau
 | [1pm](specs/skills/1pm/SKILL.md) | Afternoon briefing |
 | [3am](specs/skills/3am/SKILL.md) | Nightly autonomous session |
 | [7am](specs/skills/7am/SKILL.md) | Morning briefing |
+| [agent-logs](specs/skills/agent-logs/SKILL.md) | Scan system log files for critical entries |
 | [check-reminders](specs/skills/check-reminders/SKILL.md) | Check due reminders |
 | [code-genius](specs/skills/code-genius/SKILL.md) | Angular/Dotnet TDD implementation |
 | [code-review-genius](specs/skills/code-review-genius/SKILL.md) | Structured code review against story requirements |
+| [commit](specs/skills/commit/SKILL.md) | Stage, commit, push, and open a PR |
+| [convert-to-pdf](specs/skills/convert-to-pdf/SKILL.md) | Convert documents to PDF |
 | [create-agents-claude](specs/skills/create-agents-claude/SKILL.md) | Guide for creating Claude subagents |
 | [create-data-class](specs/skills/create-data-class/SKILL.md) | Create a new memory data class spec |
+| [create-story](specs/skills/create-story/SKILL.md) | Create a Planka story card |
+| [crypto-price](specs/skills/crypto-price/SKILL.md) | Get cryptocurrency prices |
+| [current-time](specs/skills/current-time/SKILL.md) | Get current date and time for any timezone |
 | [knowledge-graph-save](specs/skills/knowledge-graph-save/SKILL.md) | Write a memory chunk to the knowledge graph |
 | [master-code-review](specs/skills/master-code-review/SKILL.md) | Security-aware code review orchestrator |
-| [mcp-tool-builder](specs/skills/mcp-tool-builder/SKILL.md) | Build and register a new MCP tool |
 | [memory-manager](specs/skills/memory-manager/SKILL.md) | Full memory storage lifecycle orchestrator |
 | [mermaid-diagram-creator](specs/skills/mermaid-diagram-creator/SKILL.md) | Create and validate Mermaid diagrams |
+| [notify](specs/skills/notify/SKILL.md) | Send notifications via Telegram, email, or file |
 | [notify-action](specs/skills/notify-action/SKILL.md) | Handle a memory chunk with notify action |
 | [orchestrator](specs/skills/orchestrator/SKILL.md) | SDLC pipeline orchestrator |
+| [pdf-formatter](specs/skills/pdf-formatter/SKILL.md) | Reformat or fix PDF formatting issues |
 | [pin-memory-action](specs/skills/pin-memory-action/SKILL.md) | Write a memory chunk to MEMORY.md |
+| [planka](specs/skills/planka/SKILL.md) | Manage Planka Kanban board cards |
 | [planning-genius](specs/skills/planning-genius/SKILL.md) | TDD implementation plan from story description |
+| [post-to-linkedin](specs/skills/post-to-linkedin/SKILL.md) | Post to Daniel's LinkedIn |
 | [python-code-genius](specs/skills/python-code-genius/SKILL.md) | Python/FastAPI TDD implementation |
+| [remember](specs/skills/remember/SKILL.md) | Save a specific piece of information to memory |
+| [reminders](specs/skills/reminders/SKILL.md) | Set, list, delete, and check one-time reminders |
+| [save-session](specs/skills/save-session/SKILL.md) | Save memories from the current session |
+| [secrets](specs/skills/secrets/SKILL.md) | Manage secrets via the system keyring |
 | [semantic-memory-save](specs/skills/semantic-memory-save/SKILL.md) | Write a memory chunk to the vector store |
 | [sitrep](specs/skills/sitrep/SKILL.md) | System situation report |
 | [skill-creator-claude](specs/skills/skill-creator-claude/SKILL.md) | Guide for creating Claude skills correctly |
 | [story-close](specs/skills/story-close/SKILL.md) | Close a completed story after PR merge |
 | [story-start](specs/skills/story-start/SKILL.md) | Kick off a development story from Planka |
 | [sync-discord-slash-commands](specs/skills/sync-discord-slash-commands/SKILL.md) | Sync skills to Discord slash commands |
+| [tool-creator](specs/skills/tool-creator/SKILL.md) | Create a new Hive Mind tool (stateless or stateful) |
+| [update-documentation](specs/skills/update-documentation/SKILL.md) | Update README and linked docs to match the codebase |
+| [weather](specs/skills/weather/SKILL.md) | Get weather for a location |
 | [x-ai-lurker](specs/skills/x-ai-lurker/SKILL.md) | Fetch top AI threads from X |
+| [x-search](specs/skills/x-search/SKILL.md) | Search X (Twitter) for tweets and thread replies |
 
 ## License
 

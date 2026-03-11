@@ -38,6 +38,8 @@ The session manager updates `last_active` on every event yielded during response
 
 The Telegram bot's HTTP session uses an unlimited timeout (`aiohttp.ClientTimeout(total=0, sock_read=0)`) so it never drops the SSE stream while waiting for HITL approval + operation completion.
 
+Approval requests are sent as Telegram messages with **inline keyboard buttons** (Approve / Deny). Tapping a button calls back to the gateway's `/hitl/respond` endpoint. The original message updates in-place to show the outcome (Approved / Denied / Expired). Double-taps on an already-resolved request are silently ignored.
+
 ## Actions Requiring HITL
 
 - Sending, deleting, or modifying email
@@ -50,4 +52,5 @@ The Telegram bot's HTTP session uses an unlimited timeout (`aiohttp.ClientTimeou
 
 - `core/hitl.py` — in-memory token store with asyncio.Event-based waiting
 - `server.py` — `/hitl/request`, `/hitl/status/{token}`, `/hitl/respond` endpoints
-- Telegram bot handles `/approve_{token}` and `/deny_{token}` commands
+- `clients/telegram_bot.py` — inline keyboard callback handler (`button_callback`), expired-request cleanup loop
+- `specs/hitl-telegram-inline-buttons.md` — full design spec for the inline keyboard implementation
