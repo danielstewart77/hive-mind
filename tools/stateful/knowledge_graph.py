@@ -284,17 +284,17 @@ def graph_query(
             result = session.run(
                 f"""
                 MATCH (n {{agent_id: $agent_id}})
-                WHERE n.name = $query
-                   OR n.first_name = $query
-                   OR n.last_name = $query
-                   OR $query IN coalesce(n.aliases, [])
+                WHERE n.name = $search_name
+                   OR n.first_name = $search_name
+                   OR n.last_name = $search_name
+                   OR $search_name IN coalesce(n.aliases, [])
                 WITH n
                 OPTIONAL MATCH (n)-[r*1..{depth}]-(m)
                 RETURN n,
                        [rel IN r | {{type: type(rel), direction: 'out'}}] AS rels,
                        m
                 """,
-                query=entity_name,
+                search_name=entity_name,
                 agent_id=agent_id,
             )
             rows = result.data()
