@@ -466,8 +466,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log.exception("Error processing message in chat %s", chat_id)
             await update.message.reply_text("Something went wrong. Try again or use /clear.")
 
-        # Brief collection window — lets in-flight voice STTs finish and queue up
-        await asyncio.sleep(3)
 
         # Drain queue in a loop — new messages may arrive during batch processing
         while not queue.empty():
@@ -637,8 +635,6 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log.exception("Unexpected error in voice handler for chat %s", chat_id)
             await update.message.reply_text("Something went wrong with voice processing.")
 
-        # Brief collection window — lets in-flight voice STTs finish and queue up
-        await asyncio.sleep(3)
 
         # Drain queue in a loop — new messages may arrive during batch processing
         while not queue.empty():
@@ -700,8 +696,6 @@ async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_T
             log.exception("Error processing unknown command in chat %s", chat_id)
             await update.message.reply_text("Something went wrong. Try again or use /clear.")
 
-        # Brief collection window — lets in-flight voice STTs finish and queue up
-        await asyncio.sleep(3)
 
         # Drain queue in a loop — new messages may arrive during batch processing
         while not queue.empty():
