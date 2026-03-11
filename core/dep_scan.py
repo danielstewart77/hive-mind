@@ -108,7 +108,13 @@ def run_pip_audit(
     Returns:
         A ScanResult with parsed vulnerability data.
     """
+    # CVEs suppressed because the fix is incompatible with a pinned dependency.
+    # discord.py[voice] requires PyNaCl<1.6, but CVE fix needs >=1.6.2.
+    IGNORED_VULNS = ["CVE-2025-69277"]
+
     cmd = [sys.executable, "-m", "pip_audit", "--format=json", "--output=-"]
+    for vuln_id in IGNORED_VULNS:
+        cmd.extend(["--ignore-vuln", vuln_id])
     if requirements_file is not None:
         cmd.extend(["-r", requirements_file])
 

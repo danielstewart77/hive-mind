@@ -30,7 +30,6 @@ dateparser
 
 # Discord bot
 discord.py[voice]>=2.0
-PyNaCl>=1.6.2
 
 # Telegram bot
 python-telegram-bot[job-queue]>=21.0
