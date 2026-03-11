@@ -466,11 +466,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log.exception("Error processing message in chat %s", chat_id)
             await update.message.reply_text("Something went wrong. Try again or use /clear.")
 
-        # Drain any messages that queued up while we were busy
-        queued: list[str] = []
+        # Drain queue in a loop — new messages may arrive during batch processing
         while not queue.empty():
-            queued.append(queue.get_nowait())
-        if queued:
+            queued: list[str] = []
+            while not queue.empty():
+                queued.append(queue.get_nowait())
             batch = _format_queue_batch(queued)
             try:
                 sent2 = await update.effective_chat.send_message("\u2026")
@@ -679,11 +679,11 @@ async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_T
             log.exception("Error processing unknown command in chat %s", chat_id)
             await update.message.reply_text("Something went wrong. Try again or use /clear.")
 
-        # Drain any messages that queued up while we were busy
-        queued: list[str] = []
+        # Drain queue in a loop — new messages may arrive during batch processing
         while not queue.empty():
-            queued.append(queue.get_nowait())
-        if queued:
+            queued: list[str] = []
+            while not queue.empty():
+                queued.append(queue.get_nowait())
             batch = _format_queue_batch(queued)
             try:
                 sent2 = await update.effective_chat.send_message("\u2026")
