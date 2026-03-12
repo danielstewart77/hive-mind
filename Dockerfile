@@ -31,9 +31,6 @@ RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --upgrade pip
 COPY requirements.txt .
 RUN /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
 
-# Pre-download spaCy model (Kokoro/misaki needs it; can't pip-install at runtime as non-root)
-RUN /opt/venv/bin/python -m spacy download en_core_web_sm
-
 # Playwright browsers (installed as root before USER switch, shared path)
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
 RUN /opt/venv/bin/playwright install --with-deps chromium

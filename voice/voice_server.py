@@ -2,11 +2,14 @@
 Hive Mind — Voice Server.
 
 Provides STT (faster-whisper) and TTS over HTTP.
-TTS engine priority: F5-TTS (voice cloning) → Kokoro (fallback).
+TTS backend is switchable via TTS_BACKEND env var:
+  - "fish"  → Fish Speech (separate container, HTTP client)
+  - "bark"  → Bark (local, neural, fallback)
 All models load at startup and stay resident.
 Auto-detects CUDA; falls back to CPU gracefully.
 """
 
+import base64
 import io
 import logging
 import os
@@ -55,23 +58,17 @@ app = FastAPI(title="Hive Mind Voice Server")
 
 _DEVICE = "cuda" if _GPU_OK and torch.cuda.is_available() else "cpu"
 _WHISPER_MODEL = os.getenv("WHISPER_MODEL", "medium")
-_KOKORO_VOICE = os.getenv("KOKORO_VOICE", "bf_alice")
-_F5_REF_AUDIO = os.getenv("F5_REF_AUDIO", "/usr/src/app/voice_ref/hive_mind_voice.wav")
-_F5_REF_TEXT = os.getenv("F5_REF_TEXT", "/usr/src/app/voice_ref/hive_mind_voice.txt")
-_USE_F5TTS = os.getenv("USE_F5TTS", "1").lower() in ("1", "true", "yes")
+_TTS_BACKEND = os.getenv("TTS_BACKEND", "fish")       # "fish" or "bark"
+_BARK_SPEAKER = os.getenv("BARK_SPEAKER", "v2/en_speaker_9")
+_FISH_URL = os.getenv("FISH_SPEECH_URL", "http://fish-speech:8080")
+_FISH_REF_AUDIO = os.getenv("FISH_REF_AUDIO", "/usr/src/app/voice_ref/hive_mind_voice.wav")
+_FISH_REF_TEXT = os.getenv("FISH_REF_TEXT", "/usr/src/app/voice_ref/hive_mind_voice.txt")
 
 _whisper = None
-_kokoro: dict = {}  # lang_code -> KPipeline
-_f5tts = None
-_f5_ref_text: str = ""
-
-
-def _pipeline_for(voice: str):
-    """Return the KPipeline for the given voice name (routes by prefix)."""
-    lang = "b" if voice.startswith("b") else "a"
-    if lang not in _kokoro:
-        raise HTTPException(status_code=503, detail=f"Kokoro pipeline '{lang}' not ready")
-    return _kokoro[lang]
+_bark_loaded = False
+_bark_sample_rate = 24000
+_fish_ref_audio_b64: str | None = None
+_fish_ref_text: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -79,39 +76,45 @@ def _pipeline_for(voice: str):
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
 async def startup():
-    global _whisper, _kokoro, _f5tts, _f5_ref_text
+    global _whisper, _bark_loaded, _bark_sample_rate, _fish_ref_audio_b64, _fish_ref_text
 
-    log.info("Voice server starting on device: %s", _DEVICE)
+    log.info("Voice server starting on device: %s | TTS backend: %s", _DEVICE, _TTS_BACKEND)
 
     from faster_whisper import WhisperModel
     compute_type = "float16" if _DEVICE == "cuda" else "int8"
     log.info("Loading faster-whisper %s (%s)...", _WHISPER_MODEL, compute_type)
     _whisper = WhisperModel(_WHISPER_MODEL, device=_DEVICE, compute_type=compute_type)
 
-    from kokoro import KPipeline
-    log.info("Loading Kokoro v1.0 (American + British)...")
-    _kokoro["a"] = KPipeline(lang_code="a", device=_DEVICE)
-    _kokoro["b"] = KPipeline(lang_code="b", device=_DEVICE)
+    if _TTS_BACKEND == "fish":
+        if os.path.exists(_FISH_REF_AUDIO):
+            with open(_FISH_REF_AUDIO, "rb") as f:
+                _fish_ref_audio_b64 = base64.b64encode(f.read()).decode()
+            log.info("Fish Speech: loaded reference audio from %s", _FISH_REF_AUDIO)
+        else:
+            log.warning("Fish Speech: reference audio not found at %s", _FISH_REF_AUDIO)
 
-    if _USE_F5TTS and os.path.exists(_F5_REF_AUDIO):
-        try:
-            from f5_tts.api import F5TTS
-            log.info("Loading F5-TTS (voice cloning)...")
-            _f5tts = F5TTS(device=_DEVICE)
-            # Load reference transcript
-            ref_text_path = _F5_REF_TEXT
-            if os.path.exists(ref_text_path):
-                with open(ref_text_path) as f:
-                    _f5_ref_text = f.read().strip()
-            log.info("F5-TTS ready. Reference: %s (%d chars)", _F5_REF_AUDIO, len(_f5_ref_text))
-        except Exception as e:
-            log.warning("F5-TTS failed to load (%s) — falling back to Kokoro only", e)
-            _f5tts = None
+        if os.path.exists(_FISH_REF_TEXT):
+            with open(_FISH_REF_TEXT, "r") as f:
+                _fish_ref_text = f.read().strip()
+            log.info("Fish Speech: loaded reference text (%d chars)", len(_fish_ref_text))
+        else:
+            log.warning("Fish Speech: reference text not found at %s", _FISH_REF_TEXT)
+
+        log.info("Voice server ready. TTS: Fish Speech at %s", _FISH_URL)
+
     else:
-        if _USE_F5TTS:
-            log.warning("F5_REF_AUDIO not found at %s — F5-TTS disabled", _F5_REF_AUDIO)
+        if _DEVICE == "cuda":
+            os.environ["SUNO_USE_SMALL_MODELS"] = "0"
+            os.environ["SUNO_OFFLOAD_CPU"] = "0"
+        else:
+            os.environ["SUNO_USE_SMALL_MODELS"] = "1"
 
-    log.info("Voice server ready. TTS engine: %s", "F5-TTS + Kokoro fallback" if _f5tts else "Kokoro")
+        from bark import preload_models, SAMPLE_RATE
+        log.info("Loading Bark models (speaker: %s)...", _BARK_SPEAKER)
+        preload_models()
+        _bark_sample_rate = SAMPLE_RATE
+        _bark_loaded = True
+        log.info("Voice server ready. TTS: Bark at %dHz", _bark_sample_rate)
 
 
 # ---------------------------------------------------------------------------
@@ -178,58 +181,87 @@ async def stt(file: UploadFile):
 # ---------------------------------------------------------------------------
 class TTSRequest(BaseModel):
     text: str
-    voice: str = "f5"   # "f5" = F5-TTS (default), anything else = Kokoro voice name
+    voice: str = "default"
     speed: float = 0.9
 
 
 @app.post("/tts")
 async def tts(req: TTSRequest):
     """Synthesise text to OGG/Opus audio."""
+    if _TTS_BACKEND == "fish":
+        import aiohttp
+        payload: dict = {"text": req.text, "format": "wav", "streaming": False}
+        if _fish_ref_audio_b64 and _fish_ref_text:
+            payload["references"] = [{"audio": _fish_ref_audio_b64, "text": _fish_ref_text}]
 
-    # F5-TTS path
-    if req.voice == "f5" and _f5tts is not None:
-        try:
-            wav_array, sr, _ = _f5tts.infer(
-                ref_file=_F5_REF_AUDIO,
-                ref_text=_f5_ref_text,
-                gen_text=req.text,
-            )
-            log.info("F5 debug: sr=%d shape=%s dtype=%s", sr,
-                     getattr(wav_array, 'shape', 'n/a'),
-                     getattr(wav_array, 'dtype', 'n/a'))
-            import numpy as _np
-            arr = wav_array
-            if hasattr(arr, 'numpy'):
-                arr = arr.numpy()
-            arr = _np.squeeze(arr).astype(_np.float32)
-            wav_buf = io.BytesIO()
-            sf.write(wav_buf, arr, sr, format="WAV")
-            ogg_bytes = _wav_to_ogg(wav_buf.getvalue(), speed=req.speed)
-            log.info("TTS (F5): %d chars → %d bytes OGG", len(req.text), len(ogg_bytes))
-            return Response(content=ogg_bytes, media_type="audio/ogg")
-        except Exception as e:
-            log.warning("F5-TTS inference failed (%s) — falling back to Kokoro", e)
+        async with aiohttp.ClientSession() as session:
+            async with session.post(f"{_FISH_URL}/v1/tts", json=payload, timeout=aiohttp.ClientTimeout(total=300)) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    raise HTTPException(status_code=502, detail=f"Fish Speech error {resp.status}: {body}")
+                wav_bytes = await resp.read()
 
-    # Kokoro fallback
-    if not _kokoro:
-        raise HTTPException(status_code=503, detail="TTS not ready")
+        ogg_bytes = _wav_to_ogg(wav_bytes, speed=req.speed)
+        log.info("TTS (Fish Speech): %d chars → %d bytes OGG", len(req.text), len(ogg_bytes))
+        return Response(content=ogg_bytes, media_type="audio/ogg")
 
-    kokoro_voice = _KOKORO_VOICE if req.voice == "f5" else req.voice
-    pipeline = _pipeline_for(kokoro_voice)
-    samples = []
-    for _, _, audio in pipeline(req.text, voice=kokoro_voice, speed=req.speed):
-        samples.append(audio)
+    else:
+        if not _bark_loaded:
+            raise HTTPException(status_code=503, detail="TTS not ready")
 
-    if not samples:
-        raise HTTPException(status_code=500, detail="TTS produced no audio")
+        from bark import generate_audio
+        audio_array = generate_audio(req.text, history_prompt=_BARK_SPEAKER)
 
-    audio_array = np.concatenate(samples)
-    wav_buf = io.BytesIO()
-    sf.write(wav_buf, audio_array, 24000, format="WAV")
-    ogg_bytes = _wav_to_ogg(wav_buf.getvalue())
+        wav_buf = io.BytesIO()
+        sf.write(wav_buf, audio_array, _bark_sample_rate, format="WAV")
+        ogg_bytes = _wav_to_ogg(wav_buf.getvalue(), speed=req.speed)
 
-    log.info("TTS (Kokoro/%s): %d chars → %d bytes OGG", kokoro_voice, len(req.text), len(ogg_bytes))
-    return Response(content=ogg_bytes, media_type="audio/ogg")
+        log.info("TTS (Bark/%s): %d chars → %d bytes OGG", _BARK_SPEAKER, len(req.text), len(ogg_bytes))
+        return Response(content=ogg_bytes, media_type="audio/ogg")
+
+
+# ---------------------------------------------------------------------------
+# Backend switch endpoint (live, no restart needed)
+# ---------------------------------------------------------------------------
+class BackendRequest(BaseModel):
+    backend: str          # "fish" or "bark"
+    ref_audio_path: str | None = None   # override Fish ref audio path
+    ref_text_path: str | None = None    # override Fish ref text path
+
+
+@app.post("/backend")
+async def set_backend(req: BackendRequest):
+    """Switch TTS backend at runtime without restarting."""
+    global _TTS_BACKEND, _fish_ref_audio_b64, _fish_ref_text, _bark_loaded, _bark_sample_rate
+
+    if req.backend not in ("fish", "bark"):
+        raise HTTPException(status_code=400, detail="backend must be 'fish' or 'bark'")
+
+    if req.backend == "fish":
+        audio_path = req.ref_audio_path or _FISH_REF_AUDIO
+        text_path = req.ref_text_path or _FISH_REF_TEXT
+        if os.path.exists(audio_path):
+            with open(audio_path, "rb") as f:
+                _fish_ref_audio_b64 = base64.b64encode(f.read()).decode()
+        if os.path.exists(text_path):
+            with open(text_path, "r") as f:
+                _fish_ref_text = f.read().strip()
+
+    elif req.backend == "bark" and not _bark_loaded:
+        if _DEVICE == "cuda":
+            os.environ["SUNO_USE_SMALL_MODELS"] = "0"
+            os.environ["SUNO_OFFLOAD_CPU"] = "0"
+        else:
+            os.environ["SUNO_USE_SMALL_MODELS"] = "1"
+        from bark import preload_models, SAMPLE_RATE
+        log.info("Loading Bark models on backend switch...")
+        preload_models()
+        _bark_sample_rate = SAMPLE_RATE
+        _bark_loaded = True
+
+    _TTS_BACKEND = req.backend
+    log.info("TTS backend switched to: %s", _TTS_BACKEND)
+    return {"backend": _TTS_BACKEND, "status": "ok"}
 
 
 # ---------------------------------------------------------------------------
@@ -239,13 +271,12 @@ async def tts(req: TTSRequest):
 async def health():
     return {
         "stt": "ready" if _whisper else "loading",
-        "tts": "ready" if (_f5tts or _kokoro) else "loading",
-        "tts_engine": "f5+kokoro" if _f5tts else "kokoro",
-        "tts_voices": list(_kokoro.keys()),
-        "f5_ref_audio": _F5_REF_AUDIO if _f5tts else None,
+        "tts": "ready" if (_TTS_BACKEND == "fish" or _bark_loaded) else "loading",
+        "tts_engine": _TTS_BACKEND,
+        "fish_url": _FISH_URL if _TTS_BACKEND == "fish" else None,
+        "bark_speaker": _BARK_SPEAKER if _TTS_BACKEND == "bark" else None,
         "device": _DEVICE,
         "whisper_model": _WHISPER_MODEL,
-        "kokoro_voice": _KOKORO_VOICE,
     }
 
 

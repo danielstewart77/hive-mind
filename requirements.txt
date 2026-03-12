@@ -38,9 +38,7 @@ apscheduler>=3.10
 
 # Voice server (STT + TTS)
 faster-whisper>=1.0.0
-kokoro>=0.9.0
-f5-tts>=1.0.0
-torchcodec
-torch
+suno-bark
+torch<2.6.0
 soundfile
 numpy
