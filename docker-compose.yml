@@ -57,29 +57,11 @@ services:
       - XDG_DATA_HOME=/home/hivemind/.claude/data
     command: ["/opt/venv/bin/python3", "-m", "clients.discord_bot"]
 
-  fish-speech:
-    image: fishaudio/fish-speech:server-cuda
-    container_name: hive-mind-fish-speech
-    restart: unless-stopped
-    networks:
-      - hivemind
-    volumes:
-      - fish-speech-checkpoints:/app/checkpoints
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-
   voice-server:
     build: .
     container_name: hive-mind-voice
     working_dir: /usr/src/app
     restart: always
-    depends_on:
-      - fish-speech
     networks:
       - hivemind
     security_opt:
@@ -93,10 +75,8 @@ services:
     environment:
       - WHISPER_MODEL=medium
       - BARK_SPEAKER=v2/en_speaker_9
-      - TTS_BACKEND=fish
-      - FISH_SPEECH_URL=http://fish-speech:8080
+      - TTS_BACKEND=chatterbox
       - FISH_REF_AUDIO=/usr/src/app/voice_ref/hive_mind_voice.wav
-      - FISH_REF_TEXT=/usr/src/app/voice_ref/hive_mind_voice.txt
     deploy:
       resources:
         reservations:
@@ -220,4 +200,3 @@ volumes:
   planka-db:
   planka-data:
   whisper-cache:
-  fish-speech-checkpoints:

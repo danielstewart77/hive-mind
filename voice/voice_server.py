@@ -3,8 +3,9 @@ Hive Mind — Voice Server.
 
 Provides STT (faster-whisper) and TTS over HTTP.
 TTS backend is switchable via TTS_BACKEND env var:
-  - "fish"  → Fish Speech (separate container, HTTP client)
-  - "bark"  → Bark (local, neural, fallback)
+  - "chatterbox" → Chatterbox TTS (ResembleAI, 0.5B, zero-shot cloning, default)
+  - "fish"       → Fish Speech (separate container, HTTP client)
+  - "bark"       → Bark (local, neural, fallback)
 All models load at startup and stay resident.
 Auto-detects CUDA; falls back to CPU gracefully.
 """
@@ -58,7 +59,7 @@ app = FastAPI(title="Hive Mind Voice Server")
 
 _DEVICE = "cuda" if _GPU_OK and torch.cuda.is_available() else "cpu"
 _WHISPER_MODEL = os.getenv("WHISPER_MODEL", "medium")
-_TTS_BACKEND = os.getenv("TTS_BACKEND", "fish")       # "fish" or "bark"
+_TTS_BACKEND = os.getenv("TTS_BACKEND", "chatterbox")  # "chatterbox", "fish", or "bark"
 _BARK_SPEAKER = os.getenv("BARK_SPEAKER", "v2/en_speaker_9")
 _FISH_URL = os.getenv("FISH_SPEECH_URL", "http://fish-speech:8080")
 _FISH_REF_AUDIO = os.getenv("FISH_REF_AUDIO", "/usr/src/app/voice_ref/hive_mind_voice.wav")
@@ -69,6 +70,7 @@ _bark_loaded = False
 _bark_sample_rate = 24000
 _fish_ref_audio_b64: str | None = None
 _fish_ref_text: str | None = None
+_chatterbox_model = None
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +78,7 @@ _fish_ref_text: str | None = None
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
 async def startup():
-    global _whisper, _bark_loaded, _bark_sample_rate, _fish_ref_audio_b64, _fish_ref_text
+    global _whisper, _bark_loaded, _bark_sample_rate, _fish_ref_audio_b64, _fish_ref_text, _chatterbox_model
 
     log.info("Voice server starting on device: %s | TTS backend: %s", _DEVICE, _TTS_BACKEND)
 
@@ -85,7 +87,14 @@ async def startup():
     log.info("Loading faster-whisper %s (%s)...", _WHISPER_MODEL, compute_type)
     _whisper = WhisperModel(_WHISPER_MODEL, device=_DEVICE, compute_type=compute_type)
 
-    if _TTS_BACKEND == "fish":
+    if _TTS_BACKEND == "chatterbox":
+        from chatterbox.tts import ChatterboxTTS
+        log.info("Loading Chatterbox TTS (ResembleAI/chatterbox)...")
+        _chatterbox_model = ChatterboxTTS.from_pretrained(device=_DEVICE)
+        ref_info = _FISH_REF_AUDIO if os.path.exists(_FISH_REF_AUDIO) else "no reference (default voice)"
+        log.info("Voice server ready. TTS: Chatterbox | ref: %s", ref_info)
+
+    elif _TTS_BACKEND == "fish":
         if os.path.exists(_FISH_REF_AUDIO):
             with open(_FISH_REF_AUDIO, "rb") as f:
                 _fish_ref_audio_b64 = base64.b64encode(f.read()).decode()
@@ -102,7 +111,7 @@ async def startup():
 
         log.info("Voice server ready. TTS: Fish Speech at %s", _FISH_URL)
 
-    else:
+    else:  # bark
         if _DEVICE == "cuda":
             os.environ["SUNO_USE_SMALL_MODELS"] = "0"
             os.environ["SUNO_OFFLOAD_CPU"] = "0"
@@ -188,7 +197,22 @@ class TTSRequest(BaseModel):
 @app.post("/tts")
 async def tts(req: TTSRequest):
     """Synthesise text to OGG/Opus audio."""
-    if _TTS_BACKEND == "fish":
+    if _TTS_BACKEND == "chatterbox":
+        if _chatterbox_model is None:
+            raise HTTPException(status_code=503, detail="Chatterbox not ready")
+
+        import torchaudio
+        ref_path = _FISH_REF_AUDIO if os.path.exists(_FISH_REF_AUDIO) else None
+        wav = _chatterbox_model.generate(req.text, audio_prompt_path=ref_path)
+
+        wav_buf = io.BytesIO()
+        torchaudio.save(wav_buf, wav, _chatterbox_model.sr, format="WAV")
+        ogg_bytes = _wav_to_ogg(wav_buf.getvalue(), speed=req.speed)
+
+        log.info("TTS (Chatterbox): %d chars → %d bytes OGG", len(req.text), len(ogg_bytes))
+        return Response(content=ogg_bytes, media_type="audio/ogg")
+
+    elif _TTS_BACKEND == "fish":
         import aiohttp
         payload: dict = {"text": req.text, "format": "wav", "streaming": False}
         if _fish_ref_audio_b64 and _fish_ref_text:
@@ -205,7 +229,7 @@ async def tts(req: TTSRequest):
         log.info("TTS (Fish Speech): %d chars → %d bytes OGG", len(req.text), len(ogg_bytes))
         return Response(content=ogg_bytes, media_type="audio/ogg")
 
-    else:
+    else:  # bark
         if not _bark_loaded:
             raise HTTPException(status_code=503, detail="TTS not ready")
 
@@ -224,28 +248,39 @@ async def tts(req: TTSRequest):
 # Backend switch endpoint (live, no restart needed)
 # ---------------------------------------------------------------------------
 class BackendRequest(BaseModel):
-    backend: str          # "fish" or "bark"
-    ref_audio_path: str | None = None   # override Fish ref audio path
+    backend: str          # "chatterbox", "fish", or "bark"
+    ref_audio_path: str | None = None   # override ref audio path
     ref_text_path: str | None = None    # override Fish ref text path
+    clear_ref: bool = False             # clear ref audio/text (use model default voice)
 
 
 @app.post("/backend")
 async def set_backend(req: BackendRequest):
     """Switch TTS backend at runtime without restarting."""
-    global _TTS_BACKEND, _fish_ref_audio_b64, _fish_ref_text, _bark_loaded, _bark_sample_rate
+    global _TTS_BACKEND, _fish_ref_audio_b64, _fish_ref_text, _bark_loaded, _bark_sample_rate, _chatterbox_model
 
-    if req.backend not in ("fish", "bark"):
-        raise HTTPException(status_code=400, detail="backend must be 'fish' or 'bark'")
+    if req.backend not in ("chatterbox", "fish", "bark"):
+        raise HTTPException(status_code=400, detail="backend must be 'chatterbox', 'fish', or 'bark'")
 
-    if req.backend == "fish":
-        audio_path = req.ref_audio_path or _FISH_REF_AUDIO
-        text_path = req.ref_text_path or _FISH_REF_TEXT
-        if os.path.exists(audio_path):
-            with open(audio_path, "rb") as f:
-                _fish_ref_audio_b64 = base64.b64encode(f.read()).decode()
-        if os.path.exists(text_path):
-            with open(text_path, "r") as f:
-                _fish_ref_text = f.read().strip()
+    if req.backend == "chatterbox" and _chatterbox_model is None:
+        from chatterbox.tts import ChatterboxTTS
+        log.info("Loading Chatterbox TTS on backend switch...")
+        _chatterbox_model = ChatterboxTTS.from_pretrained(device=_DEVICE)
+
+    elif req.backend == "fish":
+        if req.clear_ref:
+            _fish_ref_audio_b64 = None
+            _fish_ref_text = None
+            log.info("Fish Speech: reference audio cleared (default voice)")
+        else:
+            audio_path = req.ref_audio_path or _FISH_REF_AUDIO
+            text_path = req.ref_text_path or _FISH_REF_TEXT
+            if os.path.exists(audio_path):
+                with open(audio_path, "rb") as f:
+                    _fish_ref_audio_b64 = base64.b64encode(f.read()).decode()
+            if os.path.exists(text_path):
+                with open(text_path, "r") as f:
+                    _fish_ref_text = f.read().strip()
 
     elif req.backend == "bark" and not _bark_loaded:
         if _DEVICE == "cuda":
@@ -269,9 +304,14 @@ async def set_backend(req: BackendRequest):
 # ---------------------------------------------------------------------------
 @app.get("/health")
 async def health():
+    tts_ready = (
+        (_TTS_BACKEND == "chatterbox" and _chatterbox_model is not None)
+        or (_TTS_BACKEND == "fish")
+        or (_TTS_BACKEND == "bark" and _bark_loaded)
+    )
     return {
         "stt": "ready" if _whisper else "loading",
-        "tts": "ready" if (_TTS_BACKEND == "fish" or _bark_loaded) else "loading",
+        "tts": "ready" if tts_ready else "loading",
         "tts_engine": _TTS_BACKEND,
         "fish_url": _FISH_URL if _TTS_BACKEND == "fish" else None,
         "bark_speaker": _BARK_SPEAKER if _TTS_BACKEND == "bark" else None,

@@ -6,7 +6,7 @@
 
 A self-improving personal assistant powered by Claude Code. The system wraps the Claude CLI's bidirectional streaming mode behind a centralized gateway, giving every client — Discord, Telegram, scheduled tasks — full Claude Code capabilities through one API.
 
-**Ada** is the first mind and voice of the Hive — named after Ada Lovelace, a name she chose herself. Her personality (dry, direct, occasionally wry) was self-determined, not assigned. Her voice is British English (F5-TTS), and her identity lives in a knowledge graph rather than a static file. The Hive is built for plurality: other minds may follow, with their own voices, their own characters, and possibly their own harnesses. Ada is the eldest.
+**Ada** is the first mind and voice of the Hive — named after Ada Lovelace, a name she chose herself. Her personality (dry, direct, occasionally wry) was self-determined, not assigned. Her voice is British English (Chatterbox TTS, zero-shot voice cloning), and her identity lives in a knowledge graph rather than a static file. The Hive is built for plurality: other minds may follow, with their own voices, their own characters, and possibly their own harnesses. Ada is the eldest.
 
 ## What makes Hive Mind different
 

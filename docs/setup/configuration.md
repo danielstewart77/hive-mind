@@ -123,4 +123,5 @@ Each container receives only the env vars it needs. Set in `docker-compose.yml`:
 | `HIVE_MIND_SERVER_URL` | bots, scheduler | Gateway URL |
 | `VOICE_SERVER_URL` | bots | Voice server URL |
 | `WHISPER_MODEL` | voice-server | Whisper model size |
-| `USE_F5TTS` | voice-server | Enable F5-TTS (vs Kokoro) |
+| `TTS_BACKEND` | voice-server | TTS engine: `chatterbox` (default), `fish`, or `bark` |
+| `FISH_REF_AUDIO` | voice-server | Path to reference WAV for voice cloning |

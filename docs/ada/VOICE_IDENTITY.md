@@ -12,57 +12,52 @@ Warmth: present but not performed. Sounds like it means what it says.
 
 ---
 
-## Current Implementation — Kokoro v1.0
+## Current Implementation — Chatterbox TTS
 
-**Engine:** Kokoro v1.0 (`kokoro` Python package)
+**Engine:** Chatterbox TTS (ResembleAI, 0.5B, MIT licence)
 **Server:** `voice_server.py` on port 8422
-**Config var:** `KOKORO_VOICE` in docker-compose / environment
+**Config var:** `TTS_BACKEND=chatterbox` in docker-compose environment
 
-The server currently uses `lang_code="a"` (American English), which limits available voices to
-American Female (`af_*`) and American Male (`am_*`) presets.
+Voice identity is achieved through **zero-shot voice cloning** — Chatterbox conditions every
+utterance on a 10-second reference clip rather than selecting from a preset voice list.
 
-### Best current option
+**Reference audio:** `voice_ref/hive_mind_voice.wav`
+10-second clip of Joanna Lumley speaking. Chosen because it naturally embodies the dry,
+measured British female register Ada aims for.
 
-| Voice | Description | Fit |
-|-------|-------------|-----|
-| `af_bella` | American Female — authoritative, clear | **Best current match** |
-| `af_heart` | American Female — warm, natural | Current default; slightly too warm |
-| `af_sarah` | American Female — professional, even | Acceptable fallback |
-| `am_adam` | American Male — neutral | Not preferred |
+**Reference transcript:** `voice_ref/hive_mind_voice.txt`
+"I've loved it since I was a child ffff for the reasons that, what, I don't think my parents
+read me poetry, but I had a kind of a feeling I liked the sound of the pattern it made."
 
-**Recommendation:** Switch default to `af_bella`.
+### Performance
 
-### Near-term improvement (no GPU needed)
+- ~2–3GB VRAM (vs 22GB for Fish Speech S2-Pro)
+- EOS detection at ~60–210 steps (fast)
+- Generation speed: ~63 tokens/sec on RTX A6000
 
-Kokoro supports British English voices by changing `lang_code="b"`. These carry the dry,
-wry quality more naturally and would be a better fit for the persona.
+### Updating the voice
 
-| Voice | Description | Fit |
-|-------|-------------|-----|
-| `bf_alice` | British Female — clear, measured | Strong candidate |
-| `bf_emma` | British Female — warm British | Good fallback |
-| `bm_daniel` | British Male — authoritative | If ever reconsidering male |
-
-To enable: update `voice_server.py` to support `lang_code="b"` (or dynamic per-voice routing),
-and set `KOKORO_VOICE=bf_alice`.
+To change the reference voice, replace `voice_ref/hive_mind_voice.wav` with a new 10-second
+clean mono WAV, then reload via:
+```bash
+curl -X POST http://voice-server:8422/backend \
+  -H 'Content-Type: application/json' \
+  -d '{"backend": "chatterbox"}'
+```
 
 ---
 
-## Future Upgrade — F5-TTS (pending A6000 GPU)
+## Fallback — Bark
 
-**Engine:** F5-TTS (zero-shot voice cloning)
-**Reference file:** `voice_ref/hive_mind_voice.wav` (10-second reference clip needed)
-**Planned port:** 8421 (`tts_server.py` — separate from current voice server)
-**Kokoro** remains as a fast fallback.
+**Engine:** Bark (suno-ai, neural)
+**Activated by:** `POST /backend {"backend": "bark"}`
 
-With F5-TTS, voice identity becomes a recorded reference clip rather than a preset selection,
-enabling a fully custom voice that matches this persona exactly.
-
-See `documents/TELEGRAM_VOICE_BUILD.md` for implementation details.
+Bark uses a preset voice (`v2/en_speaker_6`) and does not support voice cloning.
+Lower quality than Chatterbox but fully local and does not depend on a reference clip.
 
 ---
 
 ## Speed
 
 Default speed (`1.0`) is fine. Slightly faster (`1.05–1.1`) could suit the direct cadence
-without sounding rushed — worth testing when switching voices.
+without sounding rushed — worth testing if latency allows.

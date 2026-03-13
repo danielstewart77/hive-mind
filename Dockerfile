@@ -27,9 +27,10 @@ RUN usermod -l hivemind -d /home/hivemind -m ubuntu \
     && chown -R hivemind:hivemind /home/hivemind
 
 # Python venv + deps — installed to /opt/venv so bind mounts don't clobber it
-RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --upgrade pip
+RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --upgrade pip "setuptools<81" wheel
 COPY requirements.txt .
-RUN /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
+RUN /opt/venv/bin/pip install --no-cache-dir -r requirements.txt \
+    && /opt/venv/bin/pip install --no-cache-dir --no-deps chatterbox-tts
 
 # Playwright browsers (installed as root before USER switch, shared path)
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
