@@ -42,15 +42,4 @@ soundfile
 numpy
 torch==2.6.0
 torchaudio==2.6.0
-# Chatterbox TTS deps (installed --no-deps in Dockerfile due to numpy<1.26 pin incompatible with Python 3.12)
-librosa==0.11.0
-s3tokenizer
-transformers==4.46.3
-diffusers==0.29.0
-resemble-perth==1.0.1
-conformer==0.3.2
-safetensors==0.5.3
-spacy-pkuseg
-pykakasi==2.3.0
-pyloudnorm
-omegaconf
+TTS>=0.22.0

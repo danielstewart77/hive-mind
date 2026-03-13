@@ -74,9 +74,8 @@ services:
       - whisper-cache:/home/hivemind/.cache
     environment:
       - WHISPER_MODEL=medium
-      - BARK_SPEAKER=v2/en_speaker_9
-      - TTS_BACKEND=chatterbox
-      - FISH_REF_AUDIO=/usr/src/app/voice_ref/hive_mind_voice.wav
+      - XTTS_REF_AUDIO=/usr/src/app/voice_ref/hive_mind_voice.wav
+      - XTTS_LANGUAGE=en
     deploy:
       resources:
         reservations:

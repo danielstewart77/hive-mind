@@ -1,23 +1,19 @@
 """
-Hive Mind — Voice Server.
+Hive Mind -- Voice Server.
 
-Provides STT (faster-whisper) and TTS over HTTP.
-TTS backend is switchable via TTS_BACKEND env var:
-  - "chatterbox" → Chatterbox TTS (ResembleAI, 0.5B, zero-shot cloning, default)
-  - "fish"       → Fish Speech (separate container, HTTP client)
-  - "bark"       → Bark (local, neural, fallback)
-All models load at startup and stay resident.
+Provides STT (faster-whisper) and TTS (XTTS v2, Coqui) over HTTP.
+XTTS v2 supports zero-shot voice cloning from a reference WAV clip.
+Falls back to a stock speaker if no reference audio is available.
 Auto-detects CUDA; falls back to CPU gracefully.
 """
 
-import base64
 import io
 import logging
 import os
 import subprocess
 import tempfile
 
-# Check GPU compatibility BEFORE importing torch — once torch initializes
+# Check GPU compatibility BEFORE importing torch -- once torch initializes
 # CUDA, it's too late to hide the device from downstream libraries.
 def _check_gpu_early() -> bool:
     """Return True if CUDA GPU is usable (compute capability >= 7.0).
@@ -35,7 +31,7 @@ def _check_gpu_early() -> bool:
         libcuda.cuDeviceGetAttribute(ctypes.byref(minor), 76, dev)  # CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR
         if major.value < 7:
             logging.getLogger("hive-mind.voice").warning(
-                "GPU compute capability %d.%d < 7.0 — disabling CUDA",
+                "GPU compute capability %d.%d < 7.0 -- disabling CUDA",
                 major.value, minor.value,
             )
             os.environ["CUDA_VISIBLE_DEVICES"] = ""
@@ -46,12 +42,12 @@ def _check_gpu_early() -> bool:
 
 _GPU_OK = _check_gpu_early()
 
-import numpy as np
-import soundfile as sf
-import torch
-from fastapi import FastAPI, HTTPException, UploadFile
-from fastapi.responses import Response
-from pydantic import BaseModel
+import numpy as np  # noqa: E402
+import soundfile as sf  # noqa: E402
+import torch  # noqa: E402
+from fastapi import FastAPI, HTTPException, UploadFile  # noqa: E402
+from fastapi.responses import Response  # noqa: E402
+from pydantic import BaseModel  # noqa: E402
 
 log = logging.getLogger("hive-mind.voice")
 
@@ -59,97 +55,83 @@ app = FastAPI(title="Hive Mind Voice Server")
 
 _DEVICE = "cuda" if _GPU_OK and torch.cuda.is_available() else "cpu"
 _WHISPER_MODEL = os.getenv("WHISPER_MODEL", "medium")
-_TTS_BACKEND = os.getenv("TTS_BACKEND", "chatterbox")  # "chatterbox", "fish", or "bark"
-_BARK_SPEAKER = os.getenv("BARK_SPEAKER", "v2/en_speaker_9")
-_FISH_URL = os.getenv("FISH_SPEECH_URL", "http://fish-speech:8080")
-_FISH_REF_AUDIO = os.getenv("FISH_REF_AUDIO", "/usr/src/app/voice_ref/hive_mind_voice.wav")
-_FISH_REF_TEXT = os.getenv("FISH_REF_TEXT", "/usr/src/app/voice_ref/hive_mind_voice.txt")
+_XTTS_REF_AUDIO = os.getenv("XTTS_REF_AUDIO", "/usr/src/app/voice_ref/hive_mind_voice.wav")
+_XTTS_LANGUAGE = os.getenv("XTTS_LANGUAGE", "en")
 
 _whisper = None
-_bark_loaded = False
-_bark_sample_rate = 24000
-_fish_ref_audio_b64: str | None = None
-_fish_ref_text: str | None = None
-_chatterbox_model = None
+_xtts_model = None
+_use_voice_cloning = False
 
 
 # ---------------------------------------------------------------------------
-# Startup — load all models once
+# Startup -- load all models once
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
 async def startup():
-    global _whisper, _bark_loaded, _bark_sample_rate, _fish_ref_audio_b64, _fish_ref_text, _chatterbox_model
+    global _whisper, _xtts_model, _use_voice_cloning
 
-    log.info("Voice server starting on device: %s | TTS backend: %s", _DEVICE, _TTS_BACKEND)
+    log.info("Voice server starting on device: %s | TTS engine: xtts_v2", _DEVICE)
 
     from faster_whisper import WhisperModel
     compute_type = "float16" if _DEVICE == "cuda" else "int8"
     log.info("Loading faster-whisper %s (%s)...", _WHISPER_MODEL, compute_type)
     _whisper = WhisperModel(_WHISPER_MODEL, device=_DEVICE, compute_type=compute_type)
 
-    if _TTS_BACKEND == "chatterbox":
-        from chatterbox.tts import ChatterboxTTS
-        log.info("Loading Chatterbox TTS (ResembleAI/chatterbox)...")
-        _chatterbox_model = ChatterboxTTS.from_pretrained(device=_DEVICE)
-        ref_info = _FISH_REF_AUDIO if os.path.exists(_FISH_REF_AUDIO) else "no reference (default voice)"
-        log.info("Voice server ready. TTS: Chatterbox | ref: %s", ref_info)
+    from TTS.api import TTS as CoquiTTS
+    log.info("Loading XTTS v2 model...")
+    _xtts_model = CoquiTTS(model_name="tts_models/multilingual/multi-dataset/xtts_v2").to(_DEVICE)
 
-    elif _TTS_BACKEND == "fish":
-        if os.path.exists(_FISH_REF_AUDIO):
-            with open(_FISH_REF_AUDIO, "rb") as f:
-                _fish_ref_audio_b64 = base64.b64encode(f.read()).decode()
-            log.info("Fish Speech: loaded reference audio from %s", _FISH_REF_AUDIO)
-        else:
-            log.warning("Fish Speech: reference audio not found at %s", _FISH_REF_AUDIO)
+    _use_voice_cloning = os.path.exists(_XTTS_REF_AUDIO)
+    ref_info = _XTTS_REF_AUDIO if _use_voice_cloning else "no reference (stock voice: Claribel Dervla)"
+    log.info("Voice server ready. TTS: XTTS v2 | voice cloning: %s | ref: %s", _use_voice_cloning, ref_info)
 
-        if os.path.exists(_FISH_REF_TEXT):
-            with open(_FISH_REF_TEXT, "r") as f:
-                _fish_ref_text = f.read().strip()
-            log.info("Fish Speech: loaded reference text (%d chars)", len(_fish_ref_text))
-        else:
-            log.warning("Fish Speech: reference text not found at %s", _FISH_REF_TEXT)
 
-        log.info("Voice server ready. TTS: Fish Speech at %s", _FISH_URL)
-
-    else:  # bark
-        if _DEVICE == "cuda":
-            os.environ["SUNO_USE_SMALL_MODELS"] = "0"
-            os.environ["SUNO_OFFLOAD_CPU"] = "0"
-        else:
-            os.environ["SUNO_USE_SMALL_MODELS"] = "1"
-
-        from bark import preload_models, SAMPLE_RATE
-        log.info("Loading Bark models (speaker: %s)...", _BARK_SPEAKER)
-        preload_models()
-        _bark_sample_rate = SAMPLE_RATE
-        _bark_loaded = True
-        log.info("Voice server ready. TTS: Bark at %dHz", _bark_sample_rate)
+# ---------------------------------------------------------------------------
+# TTS synthesis helper
+# ---------------------------------------------------------------------------
+def _synthesize(text: str) -> np.ndarray:
+    """Synthesize text to a numpy audio array using XTTS v2."""
+    if _xtts_model is None:
+        raise RuntimeError("TTS model not loaded")
+    if _use_voice_cloning:
+        audio = _xtts_model.tts_with_vc(
+            text=text,
+            speaker_wav=_XTTS_REF_AUDIO,
+            language=_XTTS_LANGUAGE,
+        )
+    else:
+        audio = _xtts_model.tts(
+            text=text,
+            speaker="Claribel Dervla",
+            language=_XTTS_LANGUAGE,
+        )
+    return np.array(audio, dtype=np.float32)
 
 
 # ---------------------------------------------------------------------------
 # Audio conversion helpers
 # ---------------------------------------------------------------------------
 def _ogg_to_wav(ogg_bytes: bytes) -> bytes:
-    """Convert OGG/Opus → 16kHz mono WAV (Whisper expects this)."""
+    """Convert OGG/Opus -> 16kHz mono WAV (Whisper expects this)."""
     result = subprocess.run(
         ["ffmpeg", "-i", "pipe:0", "-f", "wav", "-ar", "16000", "-ac", "1", "pipe:1"],
         input=ogg_bytes,
         capture_output=True,
     )
     if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg OGG→WAV: {result.stderr.decode()}")
+        raise RuntimeError(f"ffmpeg OGG->WAV: {result.stderr.decode()}")
     return result.stdout
 
 
 def _wav_to_ogg(wav_bytes: bytes, speed: float = 1.0) -> bytes:
-    """Convert WAV → OGG/Opus (Telegram voice note format). Applies atempo if speed != 1.0."""
+    """Convert WAV -> OGG/Opus (Telegram voice note format). Applies atempo if speed != 1.0."""
     cmd = ["ffmpeg", "-i", "pipe:0"]
     if speed != 1.0:
         cmd += ["-af", f"atempo={speed:.3f}"]
     cmd += ["-c:a", "libopus", "-b:a", "64k", "-f", "ogg", "pipe:1"]
     result = subprocess.run(cmd, input=wav_bytes, capture_output=True)
     if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg WAV→OGG: {result.stderr.decode()}")
+        raise RuntimeError(f"ffmpeg WAV->OGG: {result.stderr.decode()}")
     return result.stdout
 
 
@@ -197,106 +179,17 @@ class TTSRequest(BaseModel):
 @app.post("/tts")
 async def tts(req: TTSRequest):
     """Synthesise text to OGG/Opus audio."""
-    if _TTS_BACKEND == "chatterbox":
-        if _chatterbox_model is None:
-            raise HTTPException(status_code=503, detail="Chatterbox not ready")
+    if _xtts_model is None:
+        raise HTTPException(status_code=503, detail="TTS not ready")
 
-        import torchaudio
-        ref_path = _FISH_REF_AUDIO if os.path.exists(_FISH_REF_AUDIO) else None
-        wav = _chatterbox_model.generate(req.text, audio_prompt_path=ref_path)
+    audio_array = _synthesize(req.text)
 
-        wav_buf = io.BytesIO()
-        torchaudio.save(wav_buf, wav, _chatterbox_model.sr, format="WAV")
-        ogg_bytes = _wav_to_ogg(wav_buf.getvalue(), speed=req.speed)
+    wav_buf = io.BytesIO()
+    sf.write(wav_buf, audio_array, 24000, format="WAV")
+    ogg_bytes = _wav_to_ogg(wav_buf.getvalue(), speed=req.speed)
 
-        log.info("TTS (Chatterbox): %d chars → %d bytes OGG", len(req.text), len(ogg_bytes))
-        return Response(content=ogg_bytes, media_type="audio/ogg")
-
-    elif _TTS_BACKEND == "fish":
-        import aiohttp
-        payload: dict = {"text": req.text, "format": "wav", "streaming": False}
-        if _fish_ref_audio_b64 and _fish_ref_text:
-            payload["references"] = [{"audio": _fish_ref_audio_b64, "text": _fish_ref_text}]
-
-        async with aiohttp.ClientSession() as session:
-            async with session.post(f"{_FISH_URL}/v1/tts", json=payload, timeout=aiohttp.ClientTimeout(total=300)) as resp:
-                if resp.status != 200:
-                    body = await resp.text()
-                    raise HTTPException(status_code=502, detail=f"Fish Speech error {resp.status}: {body}")
-                wav_bytes = await resp.read()
-
-        ogg_bytes = _wav_to_ogg(wav_bytes, speed=req.speed)
-        log.info("TTS (Fish Speech): %d chars → %d bytes OGG", len(req.text), len(ogg_bytes))
-        return Response(content=ogg_bytes, media_type="audio/ogg")
-
-    else:  # bark
-        if not _bark_loaded:
-            raise HTTPException(status_code=503, detail="TTS not ready")
-
-        from bark import generate_audio
-        audio_array = generate_audio(req.text, history_prompt=_BARK_SPEAKER)
-
-        wav_buf = io.BytesIO()
-        sf.write(wav_buf, audio_array, _bark_sample_rate, format="WAV")
-        ogg_bytes = _wav_to_ogg(wav_buf.getvalue(), speed=req.speed)
-
-        log.info("TTS (Bark/%s): %d chars → %d bytes OGG", _BARK_SPEAKER, len(req.text), len(ogg_bytes))
-        return Response(content=ogg_bytes, media_type="audio/ogg")
-
-
-# ---------------------------------------------------------------------------
-# Backend switch endpoint (live, no restart needed)
-# ---------------------------------------------------------------------------
-class BackendRequest(BaseModel):
-    backend: str          # "chatterbox", "fish", or "bark"
-    ref_audio_path: str | None = None   # override ref audio path
-    ref_text_path: str | None = None    # override Fish ref text path
-    clear_ref: bool = False             # clear ref audio/text (use model default voice)
-
-
-@app.post("/backend")
-async def set_backend(req: BackendRequest):
-    """Switch TTS backend at runtime without restarting."""
-    global _TTS_BACKEND, _fish_ref_audio_b64, _fish_ref_text, _bark_loaded, _bark_sample_rate, _chatterbox_model
-
-    if req.backend not in ("chatterbox", "fish", "bark"):
-        raise HTTPException(status_code=400, detail="backend must be 'chatterbox', 'fish', or 'bark'")
-
-    if req.backend == "chatterbox" and _chatterbox_model is None:
-        from chatterbox.tts import ChatterboxTTS
-        log.info("Loading Chatterbox TTS on backend switch...")
-        _chatterbox_model = ChatterboxTTS.from_pretrained(device=_DEVICE)
-
-    elif req.backend == "fish":
-        if req.clear_ref:
-            _fish_ref_audio_b64 = None
-            _fish_ref_text = None
-            log.info("Fish Speech: reference audio cleared (default voice)")
-        else:
-            audio_path = req.ref_audio_path or _FISH_REF_AUDIO
-            text_path = req.ref_text_path or _FISH_REF_TEXT
-            if os.path.exists(audio_path):
-                with open(audio_path, "rb") as f:
-                    _fish_ref_audio_b64 = base64.b64encode(f.read()).decode()
-            if os.path.exists(text_path):
-                with open(text_path, "r") as f:
-                    _fish_ref_text = f.read().strip()
-
-    elif req.backend == "bark" and not _bark_loaded:
-        if _DEVICE == "cuda":
-            os.environ["SUNO_USE_SMALL_MODELS"] = "0"
-            os.environ["SUNO_OFFLOAD_CPU"] = "0"
-        else:
-            os.environ["SUNO_USE_SMALL_MODELS"] = "1"
-        from bark import preload_models, SAMPLE_RATE
-        log.info("Loading Bark models on backend switch...")
-        preload_models()
-        _bark_sample_rate = SAMPLE_RATE
-        _bark_loaded = True
-
-    _TTS_BACKEND = req.backend
-    log.info("TTS backend switched to: %s", _TTS_BACKEND)
-    return {"backend": _TTS_BACKEND, "status": "ok"}
+    log.info("TTS (XTTS v2): %d chars -> %d bytes OGG", len(req.text), len(ogg_bytes))
+    return Response(content=ogg_bytes, media_type="audio/ogg")
 
 
 # ---------------------------------------------------------------------------
@@ -304,17 +197,12 @@ async def set_backend(req: BackendRequest):
 # ---------------------------------------------------------------------------
 @app.get("/health")
 async def health():
-    tts_ready = (
-        (_TTS_BACKEND == "chatterbox" and _chatterbox_model is not None)
-        or (_TTS_BACKEND == "fish")
-        or (_TTS_BACKEND == "bark" and _bark_loaded)
-    )
     return {
         "stt": "ready" if _whisper else "loading",
-        "tts": "ready" if tts_ready else "loading",
-        "tts_engine": _TTS_BACKEND,
-        "fish_url": _FISH_URL if _TTS_BACKEND == "fish" else None,
-        "bark_speaker": _BARK_SPEAKER if _TTS_BACKEND == "bark" else None,
+        "tts": "ready" if _xtts_model else "loading",
+        "tts_engine": "xtts_v2",
+        "ref_audio": _XTTS_REF_AUDIO,
+        "voice_cloning": _use_voice_cloning,
         "device": _DEVICE,
         "whisper_model": _WHISPER_MODEL,
     }
