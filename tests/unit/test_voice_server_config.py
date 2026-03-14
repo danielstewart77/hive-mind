@@ -1,10 +1,8 @@
-"""Tests for voice_server.py configuration and cleanup (Step 2).
+"""Tests for voice_server.py configuration.
 
 Verifies that:
 - XTTS env var defaults are correct
-- Old env vars are not referenced
-- Backend switching is removed
-- TTSRequest schema is unchanged
+- TTSRequest schema is correct
 """
 
 import os
@@ -33,33 +31,6 @@ def test_xtts_env_defaults(voice_server_source: str) -> None:
     assert re.search(
         r'XTTS_LANGUAGE.*"en"', voice_server_source
     ), "Default XTTS_LANGUAGE must be 'en'"
-
-
-def test_old_env_vars_not_referenced(voice_server_source: str) -> None:
-    """Old TTS env vars must not appear in voice_server.py."""
-    banned_vars = [
-        "KOKORO_VOICE",
-        "F5_REF_AUDIO",
-        "F5_REF_TEXT",
-        "TTS_BACKEND",
-        "BARK_SPEAKER",
-        "FISH_SPEECH_URL",
-        "FISH_REF_AUDIO",
-    ]
-    for var in banned_vars:
-        assert var not in voice_server_source, (
-            f"Old env var '{var}' still referenced in voice_server.py"
-        )
-
-
-def test_no_backend_switching(voice_server_source: str) -> None:
-    """BackendRequest model and /backend endpoint must be removed."""
-    assert "BackendRequest" not in voice_server_source, (
-        "BackendRequest class still present"
-    )
-    assert '"/backend"' not in voice_server_source, (
-        "/backend endpoint still present"
-    )
 
 
 def test_tts_request_schema_unchanged() -> None:

@@ -133,13 +133,19 @@ class TestHandleUnknownCommand:
         context = _make_context()
 
         mock_lock = _make_lock(is_locked=True)
+        mock_queue = MagicMock()
+        mock_queue.qsize.return_value = 0
+        mock_queue.put = AsyncMock()
 
         with (
             patch("clients.telegram_bot._is_allowed_user", return_value=True),
             patch("clients.telegram_bot.get_lock", return_value=mock_lock),
+            patch("clients.telegram_bot.get_queue", return_value=mock_queue),
         ):
             await handle_unknown_command(update, context)
 
-        update.message.reply_text.assert_called_once_with(
-            "Still processing your previous message, please wait."
-        )
+        reply_text_calls = update.message.reply_text.call_args_list
+        assert len(reply_text_calls) == 1
+        msg = reply_text_calls[0][0][0]
+        assert "Still processing" in msg
+        assert "queued" in msg
