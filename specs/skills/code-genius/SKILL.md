@@ -264,25 +264,7 @@ INIT → STEP 1 → STEP 2 (per task) → STEP 3 ──pass──→ STEP 4 ─�
 
 ## TDD Discipline
 
-These rules are **non-negotiable**. Every implementation pass must follow them.
-
-### Test-First Rule
-
-All new or changed behavior must be defined by tests written **before** the production code. The cycle is always: Red (write failing test) → Green (write code to pass) → Refactor.
-
-### What Makes a Good Test
-
-See `specs/testing.md` for the full guidelines. Summary:
-
-| Principle               | Do                                                                              | Don't                                                                       |
-| ----------------------- | ------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| **Observable behavior** | Assert return values, raised exceptions, mock call args, stdout/file output     | Assert internal state, private attributes, or how a result was computed     |
-| **Requirement-mapped**  | Each test traces to an acceptance criterion or task                             | Generic `test_init` tests with no behavioral assertion                      |
-| **Failure coverage**    | Test what happens on invalid input, missing data, and error conditions          | Only test the happy path                                                    |
-| **Meaningful coverage** | Cover critical branches, boundary conditions, and decisions                     | Chase line-count metrics with trivial assertions                            |
-| **Regression tests**    | Every bug fix includes a test that fails without the fix                        | Fix bugs without proving they won't recur                                   |
-
-**Delete tests for removed features** — tests that assert a removed library or feature is absent always pass and add zero value.
+See `specs/testing.md` for the full guidelines — what makes a test worth keeping, what must be deleted, and the Red → Green → Refactor cycle.
 
 ---
 
