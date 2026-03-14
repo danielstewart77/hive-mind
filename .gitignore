@@ -145,6 +145,7 @@ reports/
 
 # Personal notes
 jobs/
+linkedin/
 
 # Voice reference audio (binary, large) — keep local only
 voice_ref/*.wav
