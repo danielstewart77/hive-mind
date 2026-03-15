@@ -58,7 +58,9 @@ services:
     command: ["/opt/venv/bin/python3", "-m", "clients.discord_bot"]
 
   voice-server:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.voice
     container_name: hive-mind-voice
     working_dir: /usr/src/app
     restart: always
@@ -74,8 +76,7 @@ services:
       - whisper-cache:/home/hivemind/.cache
     environment:
       - WHISPER_MODEL=medium
-      - XTTS_REF_AUDIO=/usr/src/app/voice_ref/hive_mind_voice.wav
-      - XTTS_LANGUAGE=en
+      - VOICE_REF_DIR=/usr/src/app/voice_ref
     deploy:
       resources:
         reservations:

@@ -1,0 +1,36 @@
+FROM python:3.11-slim
+
+WORKDIR /usr/src/app
+
+# System deps -- ffmpeg for audio conversion, gcc for native extensions
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc libpq-dev ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Match host UID 1000 so bind-mount file permissions work
+RUN useradd -m -u 1000 -s /bin/bash hivemind \
+    && mkdir -p /home/hivemind/.cache /home/hivemind/.local/share \
+    && chown -R hivemind:hivemind /home/hivemind
+
+# Python venv -- installed to /opt/venv so bind mounts don't clobber it
+RUN python3 -m venv /opt/venv \
+    && /opt/venv/bin/pip install --upgrade pip "setuptools<81" wheel
+
+COPY requirements.voice.txt .
+RUN /opt/venv/bin/pip install --no-cache-dir -r requirements.voice.txt
+RUN /opt/venv/bin/pip install --no-cache-dir --no-deps chatterbox-tts
+
+# Build-time validation -- if any voice dep is broken the BUILD fails, not the container.
+# Add new critical imports here whenever new voice deps are introduced.
+RUN /opt/venv/bin/python -c "\
+from chatterbox.tts import ChatterboxTTS; \
+from faster_whisper import WhisperModel; \
+import multipart; \
+print('Voice deps OK')"
+
+RUN chown -R hivemind:hivemind /usr/src/app
+
+USER hivemind
+
+EXPOSE 8422
+CMD ["/opt/venv/bin/python3", "-m", "voice.voice_server"]

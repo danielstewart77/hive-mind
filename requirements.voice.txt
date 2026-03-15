@@ -1,0 +1,30 @@
+# Voice server dependencies -- Python 3.11 required
+# This file is used ONLY by Dockerfile.voice / the voice-server service.
+# chatterbox-tts itself is installed --no-deps in the Dockerfile.
+
+# STT
+faster-whisper>=1.0.0
+
+# Chatterbox TTS deps (installed separately because chatterbox-tts pins numpy<1.26)
+numpy
+torch==2.6.0
+torchaudio==2.6.0
+librosa==0.11.0
+s3tokenizer
+transformers==4.46.3
+diffusers==0.29.0
+resemble-perth==1.0.1
+conformer==0.3.2
+safetensors==0.5.3
+spacy-pkuseg
+pykakasi==2.3.0
+pyloudnorm
+omegaconf
+
+# Audio
+soundfile
+
+# HTTP server
+fastapi
+uvicorn[standard]
+python-multipart

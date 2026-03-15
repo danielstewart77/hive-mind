@@ -1,9 +1,10 @@
 """
 Hive Mind -- Voice Server.
 
-Provides STT (faster-whisper) and TTS (XTTS v2, Coqui) over HTTP.
-XTTS v2 supports zero-shot voice cloning from a reference WAV clip.
-Falls back to a stock speaker if no reference audio is available.
+Provides STT (faster-whisper) and TTS (Chatterbox) over HTTP.
+Chatterbox supports zero-shot voice cloning from a reference WAV clip.
+Voice selection via voice_id parameter (maps to voice_ref/{voice_id}.wav).
+Falls back to default.wav if the requested voice file does not exist.
 Auto-detects CUDA; falls back to CPU gracefully.
 """
 
@@ -42,9 +43,8 @@ def _check_gpu_early() -> bool:
 
 _GPU_OK = _check_gpu_early()
 
-import numpy as np  # noqa: E402
-import soundfile as sf  # noqa: E402
 import torch  # noqa: E402
+import torchaudio  # noqa: E402
 from fastapi import FastAPI, HTTPException, UploadFile  # noqa: E402
 from fastapi.responses import Response  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
@@ -55,12 +55,29 @@ app = FastAPI(title="Hive Mind Voice Server")
 
 _DEVICE = "cuda" if _GPU_OK and torch.cuda.is_available() else "cpu"
 _WHISPER_MODEL = os.getenv("WHISPER_MODEL", "medium")
-_XTTS_REF_AUDIO = os.getenv("XTTS_REF_AUDIO", "/usr/src/app/voice_ref/hive_mind_voice.wav")
-_XTTS_LANGUAGE = os.getenv("XTTS_LANGUAGE", "en")
+_VOICE_REF_DIR = os.getenv("VOICE_REF_DIR", "/usr/src/app/voice_ref")
 
 _whisper = None
-_xtts_model = None
-_use_voice_cloning = False
+_chatterbox_model = None
+
+
+# ---------------------------------------------------------------------------
+# Voice reference resolution
+# ---------------------------------------------------------------------------
+def _resolve_voice_ref(voice_id: str, voice_ref_dir: str | None = None) -> str | None:
+    """Resolve a voice_id to the corresponding WAV file path.
+
+    Returns the path to voice_ref/{voice_id}.wav if it exists,
+    falls back to voice_ref/default.wav, or returns None if neither exists.
+    """
+    ref_dir = voice_ref_dir or _VOICE_REF_DIR
+    path = os.path.join(ref_dir, f"{voice_id}.wav")
+    if os.path.exists(path):
+        return path
+    fallback = os.path.join(ref_dir, "default.wav")
+    if os.path.exists(fallback):
+        return fallback
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -68,44 +85,41 @@ _use_voice_cloning = False
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
 async def startup():
-    global _whisper, _xtts_model, _use_voice_cloning
+    global _whisper, _chatterbox_model
 
-    log.info("Voice server starting on device: %s | TTS engine: xtts_v2", _DEVICE)
+    log.info("Voice server starting on device: %s | TTS engine: chatterbox", _DEVICE)
 
     from faster_whisper import WhisperModel
     compute_type = "float16" if _DEVICE == "cuda" else "int8"
     log.info("Loading faster-whisper %s (%s)...", _WHISPER_MODEL, compute_type)
     _whisper = WhisperModel(_WHISPER_MODEL, device=_DEVICE, compute_type=compute_type)
 
-    from TTS.api import TTS as CoquiTTS
-    log.info("Loading XTTS v2 model...")
-    _xtts_model = CoquiTTS(model_name="tts_models/multilingual/multi-dataset/xtts_v2").to(_DEVICE)
+    from chatterbox.tts import ChatterboxTTS
+    log.info("Loading Chatterbox TTS...")
+    _chatterbox_model = ChatterboxTTS.from_pretrained(device=_DEVICE)
 
-    _use_voice_cloning = os.path.exists(_XTTS_REF_AUDIO)
-    ref_info = _XTTS_REF_AUDIO if _use_voice_cloning else "no reference (stock voice: Claribel Dervla)"
-    log.info("Voice server ready. TTS: XTTS v2 | voice cloning: %s | ref: %s", _use_voice_cloning, ref_info)
+    log.info(
+        "Voice server ready. TTS: Chatterbox | ref dir: %s",
+        _VOICE_REF_DIR,
+    )
 
 
 # ---------------------------------------------------------------------------
 # TTS synthesis helper
 # ---------------------------------------------------------------------------
-def _synthesize(text: str) -> np.ndarray:
-    """Synthesize text to a numpy audio array using XTTS v2."""
-    if _xtts_model is None:
+def _synthesize(text: str, ref_path: str | None = None):
+    """Synthesize text to a WAV tensor using Chatterbox.
+
+    Args:
+        text: The text to synthesize.
+        ref_path: Optional path to a reference WAV for voice cloning.
+
+    Returns:
+        A torch tensor containing the audio waveform.
+    """
+    if _chatterbox_model is None:
         raise RuntimeError("TTS model not loaded")
-    if _use_voice_cloning:
-        audio = _xtts_model.tts_with_vc(
-            text=text,
-            speaker_wav=_XTTS_REF_AUDIO,
-            language=_XTTS_LANGUAGE,
-        )
-    else:
-        audio = _xtts_model.tts(
-            text=text,
-            speaker="Claribel Dervla",
-            language=_XTTS_LANGUAGE,
-        )
-    return np.array(audio, dtype=np.float32)
+    return _chatterbox_model.generate(text, audio_prompt_path=ref_path)
 
 
 # ---------------------------------------------------------------------------
@@ -172,23 +186,24 @@ async def stt(file: UploadFile):
 # ---------------------------------------------------------------------------
 class TTSRequest(BaseModel):
     text: str
-    voice: str = "default"
+    voice_id: str = "default"
     speed: float = 0.9
 
 
 @app.post("/tts")
 async def tts(req: TTSRequest):
     """Synthesise text to OGG/Opus audio."""
-    if _xtts_model is None:
+    if _chatterbox_model is None:
         raise HTTPException(status_code=503, detail="TTS not ready")
 
-    audio_array = _synthesize(req.text)
+    ref_path = _resolve_voice_ref(req.voice_id)
+    wav = _synthesize(req.text, ref_path)
 
     wav_buf = io.BytesIO()
-    sf.write(wav_buf, audio_array, 24000, format="WAV")
+    torchaudio.save(wav_buf, wav, _chatterbox_model.sr, format="WAV")
     ogg_bytes = _wav_to_ogg(wav_buf.getvalue(), speed=req.speed)
 
-    log.info("TTS (XTTS v2): %d chars -> %d bytes OGG", len(req.text), len(ogg_bytes))
+    log.info("TTS (Chatterbox): %d chars -> %d bytes OGG", len(req.text), len(ogg_bytes))
     return Response(content=ogg_bytes, media_type="audio/ogg")
 
 
@@ -199,10 +214,9 @@ async def tts(req: TTSRequest):
 async def health():
     return {
         "stt": "ready" if _whisper else "loading",
-        "tts": "ready" if _xtts_model else "loading",
-        "tts_engine": "xtts_v2",
-        "ref_audio": _XTTS_REF_AUDIO,
-        "voice_cloning": _use_voice_cloning,
+        "tts": "ready" if _chatterbox_model else "loading",
+        "tts_engine": "chatterbox",
+        "voice_ref_dir": _VOICE_REF_DIR,
         "device": _DEVICE,
         "whisper_model": _WHISPER_MODEL,
     }

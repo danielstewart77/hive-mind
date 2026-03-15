@@ -36,10 +36,3 @@ python-telegram-bot[job-queue]>=21.0
 # Scheduler
 apscheduler>=3.10
 
-# Voice server (STT + TTS)
-faster-whisper>=1.0.0
-soundfile
-numpy
-torch==2.6.0
-torchaudio==2.6.0
-TTS>=0.22.0

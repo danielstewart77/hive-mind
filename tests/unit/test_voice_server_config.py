@@ -1,12 +1,12 @@
 """Tests for voice_server.py configuration.
 
 Verifies that:
-- XTTS env var defaults are correct
-- TTSRequest schema is correct
+- VOICE_REF_DIR env var has the correct default
+- TTSRequest schema has the expected fields (voice_id, text, speed)
 """
 
+import ast
 import os
-import re
 
 import pytest
 
@@ -21,40 +21,46 @@ def voice_server_source() -> str:
         return f.read()
 
 
-def test_xtts_env_defaults(voice_server_source: str) -> None:
-    """Default XTTS_REF_AUDIO and XTTS_LANGUAGE must be set correctly."""
-    assert "/usr/src/app/voice_ref/hive_mind_voice.wav" in voice_server_source, (
-        "Default XTTS_REF_AUDIO path not found"
+def test_voice_ref_dir_env_default(voice_server_source: str) -> None:
+    """voice_server.py must read VOICE_REF_DIR env var with default /usr/src/app/voice_ref."""
+    assert "VOICE_REF_DIR" in voice_server_source, "VOICE_REF_DIR env var not found"
+    assert "/usr/src/app/voice_ref" in voice_server_source, (
+        "Default VOICE_REF_DIR path not found"
     )
-    assert 'XTTS_LANGUAGE' in voice_server_source, "XTTS_LANGUAGE env var not found"
-    # Check the default language value is 'en'
-    assert re.search(
-        r'XTTS_LANGUAGE.*"en"', voice_server_source
-    ), "Default XTTS_LANGUAGE must be 'en'"
 
 
-def test_tts_request_schema_unchanged() -> None:
-    """TTSRequest must have text (str), voice (str, default 'default'), speed (float, default 0.9)."""
-    # We need to import TTSRequest without triggering the full module startup.
-    # Read the source and exec just the model definition.
-    import ast
+def test_tts_request_has_voice_id() -> None:
+    """TTSRequest must have a voice_id field (str type)."""
     with open(VOICE_SERVER_PATH) as f:
         source = f.read()
 
     tree = ast.parse(source)
-    # Find the TTSRequest class
-    found = False
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef) and node.name == "TTSRequest":
-            found = True
-            # Check it has the expected fields by name
+            field_names = []
+            for item in node.body:
+                if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
+                    field_names.append(item.target.id)
+            assert "voice_id" in field_names, "TTSRequest missing 'voice_id' field"
+            return
+
+    pytest.fail("TTSRequest class not found in voice_server.py")
+
+
+def test_tts_request_has_text_and_speed() -> None:
+    """TTSRequest must have text and speed fields."""
+    with open(VOICE_SERVER_PATH) as f:
+        source = f.read()
+
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "TTSRequest":
             field_names = []
             for item in node.body:
                 if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
                     field_names.append(item.target.id)
             assert "text" in field_names, "TTSRequest missing 'text' field"
-            assert "voice" in field_names, "TTSRequest missing 'voice' field"
             assert "speed" in field_names, "TTSRequest missing 'speed' field"
-            break
+            return
 
-    assert found, "TTSRequest class not found in voice_server.py"
+    pytest.fail("TTSRequest class not found in voice_server.py")

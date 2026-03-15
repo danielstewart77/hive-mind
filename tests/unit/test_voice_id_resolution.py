@@ -1,9 +1,9 @@
-"""Tests for Chatterbox TTS synthesis logic.
+"""Tests for voice ID resolution logic.
 
 Verifies that:
-- _synthesize calls model.generate with correct args when model is loaded
-- _synthesize raises RuntimeError when model is not loaded
-- _synthesize works with and without a reference audio path
+- _resolve_voice_ref returns the correct WAV path when the file exists
+- _resolve_voice_ref falls back to default.wav when the requested voice doesn't exist
+- _resolve_voice_ref("default") maps to default.wav
 """
 
 import sys
@@ -26,28 +26,20 @@ _NEED_PYDANTIC_MOCK = not _can_import("pydantic")
 @pytest.fixture(autouse=True)
 def _mock_voice_server_deps(monkeypatch):
     """Mock heavy deps so voice_server can be imported without GPU libs."""
-    # Mock numpy
     np_mock = MagicMock()
     np_mock.float32 = "float32"
     np_mock.ndarray = type("ndarray", (), {})
     np_mock.array = MagicMock(side_effect=lambda x, dtype=None: x)
     monkeypatch.setitem(sys.modules, "numpy", np_mock)
 
-    # Mock torch
     torch_mock = MagicMock()
     torch_mock.cuda.is_available.return_value = False
     monkeypatch.setitem(sys.modules, "torch", torch_mock)
 
-    # Mock torchaudio
     monkeypatch.setitem(sys.modules, "torchaudio", MagicMock())
-
-    # Mock faster_whisper
     monkeypatch.setitem(sys.modules, "faster_whisper", MagicMock())
-
-    # Mock soundfile
     monkeypatch.setitem(sys.modules, "soundfile", MagicMock())
 
-    # Mock chatterbox.tts
     chatterbox_mod = MagicMock()
     monkeypatch.setitem(sys.modules, "chatterbox", chatterbox_mod)
     monkeypatch.setitem(sys.modules, "chatterbox.tts", chatterbox_mod.tts)
@@ -63,12 +55,10 @@ def _mock_voice_server_deps(monkeypatch):
         monkeypatch.setitem(sys.modules, "fastapi", fastapi_mock)
         monkeypatch.setitem(sys.modules, "fastapi.responses", MagicMock())
 
-    # Remove cached voice_server module to force reimport with mocks
     for mod_name in list(sys.modules.keys()):
         if "voice_server" in mod_name or "voice.voice_server" in mod_name:
             del sys.modules[mod_name]
 
-    # Patch _check_gpu_early before import
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
 
 
@@ -82,41 +72,44 @@ def _import_voice_server():
         return vs
 
 
-def test_synthesize_calls_chatterbox_generate() -> None:
-    """When model is loaded and ref audio path is given, _synthesize calls model.generate."""
+def test_resolve_voice_id_existing_file(tmp_path) -> None:
+    """_resolve_voice_ref returns the path when the requested voice file exists."""
     vs = _import_voice_server()
 
-    mock_model = MagicMock()
-    mock_model.generate.return_value = MagicMock()  # tensor
-    vs._chatterbox_model = mock_model
+    # Create a fake voice file
+    ada_wav = tmp_path / "ada.wav"
+    ada_wav.write_bytes(b"RIFF" + b"\x00" * 100)
 
-    ref_path = "/usr/src/app/voice_ref/ada.wav"
-    vs._synthesize("Hello Daniel", ref_path)
-
-    mock_model.generate.assert_called_once_with(
-        "Hello Daniel", audio_prompt_path=ref_path
-    )
+    result = vs._resolve_voice_ref("ada", str(tmp_path))
+    assert result == str(ada_wav)
 
 
-def test_synthesize_raises_when_model_not_loaded() -> None:
-    """_synthesize must raise RuntimeError when TTS model is not loaded."""
-    vs = _import_voice_server()
-    vs._chatterbox_model = None
-
-    with pytest.raises(RuntimeError, match="TTS model not loaded"):
-        vs._synthesize("test text")
-
-
-def test_synthesize_without_ref_path() -> None:
-    """When ref_path is None, model.generate is called with audio_prompt_path=None."""
+def test_resolve_voice_id_fallback_to_default(tmp_path) -> None:
+    """_resolve_voice_ref falls back to default.wav when the requested voice doesn't exist."""
     vs = _import_voice_server()
 
-    mock_model = MagicMock()
-    mock_model.generate.return_value = MagicMock()
-    vs._chatterbox_model = mock_model
+    # Only create default.wav, not the requested voice
+    default_wav = tmp_path / "default.wav"
+    default_wav.write_bytes(b"RIFF" + b"\x00" * 100)
 
-    vs._synthesize("Hello world", None)
+    result = vs._resolve_voice_ref("nonexistent", str(tmp_path))
+    assert result == str(default_wav)
 
-    mock_model.generate.assert_called_once_with(
-        "Hello world", audio_prompt_path=None
-    )
+
+def test_resolve_voice_id_default_maps_to_default_wav(tmp_path) -> None:
+    """_resolve_voice_ref("default") returns default.wav."""
+    vs = _import_voice_server()
+
+    default_wav = tmp_path / "default.wav"
+    default_wav.write_bytes(b"RIFF" + b"\x00" * 100)
+
+    result = vs._resolve_voice_ref("default", str(tmp_path))
+    assert result == str(default_wav)
+
+
+def test_resolve_voice_id_returns_none_when_nothing_exists(tmp_path) -> None:
+    """_resolve_voice_ref returns None when neither the voice nor default exists."""
+    vs = _import_voice_server()
+
+    result = vs._resolve_voice_ref("nonexistent", str(tmp_path))
+    assert result is None

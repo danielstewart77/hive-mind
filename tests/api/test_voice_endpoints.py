@@ -1,22 +1,33 @@
-"""API tests for voice server endpoints (Step 2).
+"""API tests for voice server endpoints.
 
 Verifies:
-- /health returns xtts_v2 engine info
+- /health returns chatterbox engine info when model is loaded
 - /health reports loading when model not ready
-- /tts returns OGG audio
+- /tts returns OGG audio when model is ready
+- /tts accepts voice_id parameter
 - /tts returns 503 when not ready
 - /stt endpoint unchanged
 
-All heavy deps (torch, numpy, soundfile, TTS, faster_whisper) are mocked
+All heavy deps (torch, numpy, soundfile, chatterbox, faster_whisper) are mocked
 so these tests can run in the CI environment without GPU libraries.
 """
 
 import io
 import sys
-import types
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+
+def _can_import(name: str) -> bool:
+    try:
+        __import__(name)
+        return True
+    except ImportError:
+        return False
+
+
+_NEED_PYDANTIC_MOCK = not _can_import("pydantic")
 
 
 @pytest.fixture(autouse=True)
@@ -46,12 +57,21 @@ def _mock_voice_deps(monkeypatch):
     sf_mock = MagicMock()
     monkeypatch.setitem(sys.modules, "soundfile", sf_mock)
 
-    # Mock TTS.api
-    tts_mod = types.ModuleType("TTS")
-    tts_api_mod = types.ModuleType("TTS.api")
-    tts_api_mod.TTS = MagicMock()
-    monkeypatch.setitem(sys.modules, "TTS", tts_mod)
-    monkeypatch.setitem(sys.modules, "TTS.api", tts_api_mod)
+    # Mock chatterbox.tts
+    chatterbox_mod = MagicMock()
+    monkeypatch.setitem(sys.modules, "chatterbox", chatterbox_mod)
+    monkeypatch.setitem(sys.modules, "chatterbox.tts", chatterbox_mod.tts)
+
+    # Mock pydantic/fastapi if pydantic_core native lib can't load (CI/read-only fs)
+    if _NEED_PYDANTIC_MOCK:
+        pydantic_mock = MagicMock()
+        pydantic_mock.BaseModel = type("BaseModel", (), {})
+        monkeypatch.setitem(sys.modules, "pydantic", pydantic_mock)
+        monkeypatch.setitem(sys.modules, "pydantic_core", MagicMock())
+
+        fastapi_mock = MagicMock()
+        monkeypatch.setitem(sys.modules, "fastapi", fastapi_mock)
+        monkeypatch.setitem(sys.modules, "fastapi.responses", MagicMock())
 
     # Remove cached voice_server module to force reimport with mocks
     for mod_name in list(sys.modules.keys()):
@@ -82,24 +102,30 @@ def client(voice_app):
     return TestClient(voice_app, raise_server_exceptions=False)
 
 
-def test_health_returns_xtts_engine(client) -> None:
-    """GET /health must return tts_engine=xtts_v2 when model is loaded."""
+# Skip all API tests if pydantic can't load (no real FastAPI app available)
+pytestmark = pytest.mark.skipif(
+    _NEED_PYDANTIC_MOCK,
+    reason="pydantic_core native lib unavailable (read-only fs); FastAPI app cannot be created",
+)
+
+
+def test_health_returns_chatterbox_engine(client) -> None:
+    """GET /health must return tts_engine=chatterbox when model is loaded."""
     import voice.voice_server as vs
-    vs._xtts_model = MagicMock()  # Simulate loaded model
-    vs._use_voice_cloning = True
+    vs._chatterbox_model = MagicMock()
     vs._whisper = MagicMock()
 
     resp = client.get("/health")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["tts_engine"] == "xtts_v2"
+    assert data["tts_engine"] == "chatterbox"
     assert data["tts"] == "ready"
 
 
 def test_health_reports_loading_when_not_ready(client) -> None:
     """GET /health must report tts=loading when model is None."""
     import voice.voice_server as vs
-    vs._xtts_model = None
+    vs._chatterbox_model = None
     vs._whisper = None
 
     resp = client.get("/health")
@@ -112,37 +138,60 @@ def test_tts_endpoint_returns_ogg(client, monkeypatch) -> None:
     """POST /tts must return audio/ogg response when model is ready."""
     import voice.voice_server as vs
 
-    # Mock the XTTS model
+    # Mock the Chatterbox model
     mock_model = MagicMock()
-    mock_model.tts.return_value = [0.0] * 16000  # simulated audio samples
-    vs._xtts_model = mock_model
-    vs._use_voice_cloning = False
+    mock_model.generate.return_value = MagicMock()  # tensor
+    mock_model.sr = 24000
+    vs._chatterbox_model = mock_model
+
+    # Mock torchaudio.save to write fake WAV bytes
+    torchaudio_mock = sys.modules["torchaudio"]
+
+    def mock_torchaudio_save(buf, wav, sr, format=None):
+        buf.write(b"RIFF" + b"\x00" * 100)
+
+    torchaudio_mock.save = mock_torchaudio_save
 
     # Mock _wav_to_ogg to return fake OGG bytes
     fake_ogg = b"OggS" + b"\x00" * 100
     monkeypatch.setattr(vs, "_wav_to_ogg", lambda wav_bytes, speed=1.0: fake_ogg)
 
-    # Mock soundfile.write to produce valid WAV
-    def mock_sf_write(file, data, samplerate, format=None):
-        """Write minimal data to the buffer."""
-        if hasattr(file, 'write'):
-            file.write(b"RIFF" + b"\x00" * 100)
-
-    monkeypatch.setattr(vs.sf, "write", mock_sf_write)
-
-    # Mock np.array to return something
-    np_mock = sys.modules["numpy"]
-    np_mock.array.return_value = [0.0] * 16000
+    # Mock _resolve_voice_ref to return a path
+    monkeypatch.setattr(vs, "_resolve_voice_ref", lambda vid, vdir=None: "/fake/ref.wav")
 
     resp = client.post("/tts", json={"text": "Hello Daniel"})
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "audio/ogg"
 
 
-def test_tts_endpoint_503_when_not_ready(client) -> None:
-    """POST /tts must return 503 when XTTS model is not loaded."""
+def test_tts_endpoint_accepts_voice_id(client, monkeypatch) -> None:
+    """POST /tts with voice_id parameter must return 200."""
     import voice.voice_server as vs
-    vs._xtts_model = None
+
+    mock_model = MagicMock()
+    mock_model.generate.return_value = MagicMock()
+    mock_model.sr = 24000
+    vs._chatterbox_model = mock_model
+
+    torchaudio_mock = sys.modules["torchaudio"]
+
+    def mock_torchaudio_save(buf, wav, sr, format=None):
+        buf.write(b"RIFF" + b"\x00" * 100)
+
+    torchaudio_mock.save = mock_torchaudio_save
+
+    fake_ogg = b"OggS" + b"\x00" * 100
+    monkeypatch.setattr(vs, "_wav_to_ogg", lambda wav_bytes, speed=1.0: fake_ogg)
+    monkeypatch.setattr(vs, "_resolve_voice_ref", lambda vid, vdir=None: "/fake/ada.wav")
+
+    resp = client.post("/tts", json={"text": "Hello", "voice_id": "ada"})
+    assert resp.status_code == 200
+
+
+def test_tts_endpoint_503_when_not_ready(client) -> None:
+    """POST /tts must return 503 when Chatterbox model is not loaded."""
+    import voice.voice_server as vs
+    vs._chatterbox_model = None
 
     resp = client.post("/tts", json={"text": "Hello"})
     assert resp.status_code == 503
