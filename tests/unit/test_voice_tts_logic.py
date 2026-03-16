@@ -4,6 +4,7 @@ Verifies that:
 - _synthesize calls model.generate with correct args when model is loaded
 - _synthesize raises RuntimeError when model is not loaded
 - _synthesize works with and without a reference audio path
+- tts() endpoint handler calls _synthesize_chunked (not _synthesize directly)
 """
 
 import sys
@@ -119,4 +120,42 @@ def test_synthesize_without_ref_path() -> None:
 
     mock_model.generate.assert_called_once_with(
         "Hello world", audio_prompt_path=None
+    )
+
+
+def test_tts_endpoint_handler_calls_synthesize_chunked() -> None:
+    """The tts() endpoint handler must call _synthesize_chunked, not _synthesize directly.
+
+    Since pydantic may not be available (CI/read-only fs), we verify by
+    reading the source file and checking the tts() function body.
+    """
+    import pathlib
+
+    source_path = pathlib.Path(__file__).resolve().parents[2] / "voice" / "voice_server.py"
+    source = source_path.read_text()
+
+    # Extract the tts endpoint function body (from 'async def tts' to next function/section)
+    lines = source.splitlines()
+    in_tts = False
+    tts_body: list[str] = []
+    for line in lines:
+        if "async def tts(" in line:
+            in_tts = True
+            continue
+        if in_tts:
+            # End of function: non-indented line that's not empty/comment
+            if line and not line.startswith(" ") and not line.startswith("\t"):
+                break
+            tts_body.append(line)
+
+    tts_source = "\n".join(tts_body)
+
+    # It must call _synthesize_chunked
+    assert "_synthesize_chunked(" in tts_source, (
+        "tts() endpoint should call _synthesize_chunked"
+    )
+    # It must NOT call bare _synthesize (only _synthesize_chunked)
+    stripped = tts_source.replace("_synthesize_chunked", "")
+    assert "_synthesize(" not in stripped, (
+        "tts() endpoint should not call _synthesize directly"
     )

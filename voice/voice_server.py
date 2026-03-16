@@ -11,6 +11,7 @@ Auto-detects CUDA; falls back to CPU gracefully.
 import io
 import logging
 import os
+import re
 import subprocess
 import tempfile
 
@@ -105,6 +106,66 @@ async def startup():
 
 
 # ---------------------------------------------------------------------------
+# Sentence splitting for chunked TTS
+# ---------------------------------------------------------------------------
+_ABBREVIATIONS = frozenset({
+    "Mr", "Mrs", "Ms", "Dr", "St", "Jr", "Sr", "vs", "etc",
+    "Prof", "Gen", "Sgt", "Col", "Lt", "Capt", "Rev", "Vol",
+    "Dept", "Est", "Inc", "Ltd", "Corp", "Co", "approx",
+    "e.g", "i.e",
+})
+
+# Split after sentence-ending punctuation (including ellipsis) followed by
+# whitespace.  The captured group keeps the punctuation attached to the
+# preceding chunk during rejoin.
+_SENTENCE_SPLIT_RE = re.compile(
+    r"((?:\.{3}|[.!?]))"  # group 1: terminal punctuation (ellipsis or single)
+    r"\s+",                # followed by whitespace (consumed, not kept)
+)
+
+
+def _split_sentences(text: str) -> list[str]:
+    """Split text into sentences at boundary punctuation.
+
+    Splits on sentence-ending punctuation (.!?) followed by whitespace, while
+    preserving common abbreviations (Dr., Mr., etc.).  Returns ``[text]`` as a
+    single-element list if no splits are found or if input is empty/whitespace.
+    """
+    if not text or not text.strip():
+        return [text]
+
+    # re.split with a capture group returns [before, sep, after, sep, ...]
+    parts = _SENTENCE_SPLIT_RE.split(text)
+
+    # Rejoin: attach each captured punctuation to the preceding text fragment
+    chunks: list[str] = []
+    i = 0
+    while i < len(parts):
+        segment = parts[i]
+        # If next element is a captured punctuation group, attach it
+        if i + 1 < len(parts) and re.fullmatch(r"(?:\.{3}|[.!?])", parts[i + 1]):
+            segment += parts[i + 1]
+            i += 2
+        else:
+            i += 1
+        if segment:
+            chunks.append(segment)
+
+    # Rejoin chunks that were split on abbreviation periods
+    merged: list[str] = []
+    for chunk in chunks:
+        # Check if previous chunk ends with an abbreviation period
+        if merged and merged[-1].endswith("."):
+            last_word = merged[-1].rstrip(".").rsplit(None, 1)[-1] if merged[-1].rstrip(".") else ""
+            if last_word in _ABBREVIATIONS:
+                merged[-1] = merged[-1] + " " + chunk
+                continue
+        merged.append(chunk)
+
+    return merged if merged else [text]
+
+
+# ---------------------------------------------------------------------------
 # TTS synthesis helper
 # ---------------------------------------------------------------------------
 def _synthesize(text: str, ref_path: str | None = None):
@@ -120,6 +181,44 @@ def _synthesize(text: str, ref_path: str | None = None):
     if _chatterbox_model is None:
         raise RuntimeError("TTS model not loaded")
     return _chatterbox_model.generate(text, audio_prompt_path=ref_path)
+
+
+# ---------------------------------------------------------------------------
+# Chunked TTS synthesis
+# ---------------------------------------------------------------------------
+def _synthesize_chunked(text: str, ref_path: str | None = None):
+    """Synthesize text in sentence-sized chunks and concatenate the results.
+
+    Splits *text* into sentences, synthesizes each independently via
+    :func:`_synthesize`, and concatenates the resulting tensors along the time
+    axis (``dim=-1``).  If only one sentence is detected, it delegates directly
+    to :func:`_synthesize` without concatenation overhead.
+
+    Falls back to a single-call ``_synthesize(text, ref_path)`` if any step in
+    the chunked pipeline fails.
+    """
+    # Let RuntimeError from model-not-loaded propagate immediately
+    if _chatterbox_model is None:
+        raise RuntimeError("TTS model not loaded")
+
+    chunks = _split_sentences(text)
+
+    if len(chunks) == 1:
+        return _synthesize(text, ref_path)
+
+    try:
+        tensors = []
+        for chunk in chunks:
+            tensors.append(_synthesize(chunk, ref_path))
+        log.info("TTS chunked: %d sentences", len(chunks))
+        return torch.cat(tensors, dim=-1)
+    except Exception:
+        log.warning(
+            "Chunked synthesis failed for %d chunks; falling back to single call",
+            len(chunks),
+            exc_info=True,
+        )
+        return _synthesize(text, ref_path)
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +296,7 @@ async def tts(req: TTSRequest):
         raise HTTPException(status_code=503, detail="TTS not ready")
 
     ref_path = _resolve_voice_ref(req.voice_id)
-    wav = _synthesize(req.text, ref_path)
+    wav = _synthesize_chunked(req.text, ref_path)
 
     wav_buf = io.BytesIO()
     torchaudio.save(wav_buf, wav, _chatterbox_model.sr, format="WAV")

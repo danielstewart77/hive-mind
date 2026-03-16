@@ -6,6 +6,8 @@ Verifies:
 - /tts returns OGG audio when model is ready
 - /tts accepts voice_id parameter
 - /tts returns 503 when not ready
+- /tts uses chunked synthesis for multi-sentence text
+- /tts handles long (200+ word) text and returns audio/ogg
 - /stt endpoint unchanged
 
 All heavy deps (torch, numpy, soundfile, chatterbox, faster_whisper) are mocked
@@ -221,3 +223,71 @@ def test_stt_endpoint_unchanged(client, monkeypatch) -> None:
     assert resp.status_code == 200
     data = resp.json()
     assert "text" in data
+
+
+def test_tts_endpoint_uses_chunked_synthesis(client, monkeypatch) -> None:
+    """POST /tts with multi-sentence text calls _synthesize_chunked and returns 200."""
+    import voice.voice_server as vs
+
+    mock_model = MagicMock()
+    mock_model.sr = 24000
+    vs._chatterbox_model = mock_model
+
+    # Track whether _synthesize_chunked is called
+    chunked_called = []
+
+    def fake_synthesize_chunked(text, ref_path=None):
+        chunked_called.append(text)
+        return MagicMock()
+
+    monkeypatch.setattr(vs, "_synthesize_chunked", fake_synthesize_chunked)
+
+    torchaudio_mock = sys.modules["torchaudio"]
+
+    def mock_torchaudio_save(buf, wav, sr, format=None):
+        buf.write(b"RIFF" + b"\x00" * 100)
+
+    torchaudio_mock.save = mock_torchaudio_save
+
+    fake_ogg = b"OggS" + b"\x00" * 100
+    monkeypatch.setattr(vs, "_wav_to_ogg", lambda wav_bytes, speed=1.0: fake_ogg)
+    monkeypatch.setattr(vs, "_resolve_voice_ref", lambda vid, vdir=None: "/fake/ref.wav")
+
+    resp = client.post("/tts", json={"text": "First sentence. Second sentence."})
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "audio/ogg"
+    assert len(chunked_called) == 1
+    assert chunked_called[0] == "First sentence. Second sentence."
+
+
+def test_tts_endpoint_long_text_returns_ogg(client, monkeypatch) -> None:
+    """POST /tts with 200+ word text returns 200 and audio/ogg through chunked path."""
+    import voice.voice_server as vs
+
+    mock_model = MagicMock()
+    mock_model.generate.return_value = MagicMock()
+    mock_model.sr = 24000
+    vs._chatterbox_model = mock_model
+
+    torchaudio_mock = sys.modules["torchaudio"]
+
+    def mock_torchaudio_save(buf, wav, sr, format=None):
+        buf.write(b"RIFF" + b"\x00" * 100)
+
+    torchaudio_mock.save = mock_torchaudio_save
+
+    torch_mod = sys.modules["torch"]
+    torch_mod.cat.return_value = MagicMock()
+
+    fake_ogg = b"OggS" + b"\x00" * 100
+    monkeypatch.setattr(vs, "_wav_to_ogg", lambda wav_bytes, speed=1.0: fake_ogg)
+    monkeypatch.setattr(vs, "_resolve_voice_ref", lambda vid, vdir=None: "/fake/ref.wav")
+
+    # Generate a 200+ word text with multiple sentences
+    long_text = " ".join(
+        f"This is sentence number {i} with some extra words to increase the word count."
+        for i in range(25)
+    )
+    resp = client.post("/tts", json={"text": long_text})
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "audio/ogg"
