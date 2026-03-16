@@ -106,6 +106,36 @@ async def startup():
 
 
 # ---------------------------------------------------------------------------
+# Markdown stripping for TTS
+# ---------------------------------------------------------------------------
+def _strip_markdown(text: str) -> str:
+    """Remove markdown formatting so TTS reads clean prose, not syntax."""
+    # Fenced code blocks — drop entirely (reading code aloud is useless)
+    text = re.sub(r"```[\s\S]*?```", "", text)
+    # Inline code
+    text = re.sub(r"`[^`]+`", "", text)
+    # Markdown links — keep display text
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    # Headers
+    text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+    # Bold / italic (**, *, __, _)
+    text = re.sub(r"\*{1,3}([^*\n]+)\*{1,3}", r"\1", text)
+    text = re.sub(r"_{1,3}([^_\n]+)_{1,3}", r"\1", text)
+    # Bullet list markers
+    text = re.sub(r"^\s*[-*+]\s+", "", text, flags=re.MULTILINE)
+    # Numbered list markers
+    text = re.sub(r"^\s*\d+\.\s+", "", text, flags=re.MULTILINE)
+    # Em-dash / en-dash → comma pause
+    text = text.replace("—", ", ").replace("–", ", ")
+    # Bare URLs
+    text = re.sub(r"https?://\S+", "", text)
+    # Collapse whitespace
+    text = re.sub(r"\n+", " ", text)
+    text = re.sub(r"\s{2,}", " ", text)
+    return text.strip()
+
+
+# ---------------------------------------------------------------------------
 # Sentence splitting for chunked TTS
 # ---------------------------------------------------------------------------
 _ABBREVIATIONS = frozenset({
@@ -254,6 +284,7 @@ def _wav_to_ogg(wav_bytes: bytes, speed: float = 1.0) -> bytes:
 @app.post("/stt")
 async def stt(file: UploadFile):
     """Transcribe uploaded audio (OGG or WAV) to text."""
+    global _whisper
     if _whisper is None:
         raise HTTPException(status_code=503, detail="STT model not ready")
 
@@ -271,8 +302,17 @@ async def stt(file: UploadFile):
         tmp_path = f.name
 
     try:
-        segments, _ = _whisper.transcribe(tmp_path, language="en")
-        text = " ".join(s.text for s in segments).strip()
+        try:
+            segments, _ = _whisper.transcribe(tmp_path, language="en")
+            text = " ".join(s.text for s in segments).strip()
+        except RuntimeError as exc:
+            if "CUDA" not in str(exc):
+                raise
+            log.warning("CUDA error in STT — reinitialising whisper on CPU: %s", exc)
+            from faster_whisper import WhisperModel
+            _whisper = WhisperModel(_WHISPER_MODEL, device="cpu", compute_type="int8")
+            segments, _ = _whisper.transcribe(tmp_path, language="en")
+            text = " ".join(s.text for s in segments).strip()
     finally:
         os.unlink(tmp_path)
 
@@ -296,7 +336,7 @@ async def tts(req: TTSRequest):
         raise HTTPException(status_code=503, detail="TTS not ready")
 
     ref_path = _resolve_voice_ref(req.voice_id)
-    wav = _synthesize_chunked(req.text, ref_path)
+    wav = _synthesize_chunked(_strip_markdown(req.text), ref_path)
 
     wav_buf = io.BytesIO()
     torchaudio.save(wav_buf, wav, _chatterbox_model.sr, format="WAV")
