@@ -147,7 +147,7 @@ def cmd_voice(args: argparse.Namespace) -> int:
             return 1
 
         tts_resp = httpx.post(
-            f"{voice_url}/tts", json={"text": args.message}, timeout=30,
+            f"{voice_url}/tts", json={"text": args.message}, timeout=120,
         )
         if tts_resp.status_code != 200:
             print(json.dumps({"success": False, "error": f"TTS failed: {tts_resp.status_code}"}))
