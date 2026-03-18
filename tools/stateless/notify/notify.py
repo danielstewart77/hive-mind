@@ -134,39 +134,41 @@ def cmd_voice(args: argparse.Namespace) -> int:
         print(json.dumps({"success": True, "detail": "Voice message sent (test)"}))
         return 0
 
+    from core.secrets import get_credential
+    import httpx
+
+    token = get_credential("TELEGRAM_BOT_TOKEN")
+    chat_id = get_credential("TELEGRAM_OWNER_CHAT_ID")
+    voice_url = os.getenv("VOICE_SERVER_URL", "http://voice-server:8422")
+
+    if not token or not chat_id:
+        print(json.dumps({"success": False, "error": "Missing bot token or chat ID"}))
+        return 1
+
+    # Fork: parent returns immediately so the caller is unblocked.
+    # Child detaches and handles TTS synthesis + voice delivery with no timeout pressure.
+    pid = os.fork()
+    if pid != 0:
+        print(json.dumps({"success": True, "detail": "Voice synthesis queued"}))
+        return 0
+
+    # Child process
+    os.setsid()
     try:
-        from core.secrets import get_credential
-        import httpx
-
-        token = get_credential("TELEGRAM_BOT_TOKEN")
-        chat_id = get_credential("TELEGRAM_OWNER_CHAT_ID")
-        voice_url = os.getenv("VOICE_SERVER_URL", "http://voice-server:8422")
-
-        if not token or not chat_id:
-            print(json.dumps({"success": False, "error": "Missing bot token or chat ID"}))
-            return 1
-
         tts_resp = httpx.post(
-            f"{voice_url}/tts", json={"text": args.message}, timeout=120,
+            f"{voice_url}/tts", json={"text": args.message}, timeout=None,
         )
-        if tts_resp.status_code != 200:
-            print(json.dumps({"success": False, "error": f"TTS failed: {tts_resp.status_code}"}))
-            return 1
-
-        resp = httpx.post(
-            f"https://api.telegram.org/bot{token}/sendVoice",
-            data={"chat_id": str(chat_id)},
-            files={"voice": ("message.ogg", tts_resp.content, "audio/ogg")},
-            timeout=15,
-        )
-        if resp.status_code == 200:
-            print(json.dumps({"success": True, "detail": "Voice message sent"}))
-            return 0
-        print(json.dumps({"success": False, "error": f"Telegram API: {resp.status_code}"}))
-        return 1
-    except Exception as e:
-        print(json.dumps({"success": False, "error": f"{type(e).__name__}: {e}"}))
-        return 1
+        if tts_resp.status_code == 200:
+            httpx.post(
+                f"https://api.telegram.org/bot{token}/sendVoice",
+                data={"chat_id": str(chat_id)},
+                files={"voice": ("message.ogg", tts_resp.content, "audio/ogg")},
+                timeout=15,
+            )
+    except Exception:
+        pass
+    finally:
+        os._exit(0)
 
 
 def main() -> int:
