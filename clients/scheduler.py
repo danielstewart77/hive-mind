@@ -82,6 +82,17 @@ async def _tts(http: aiohttp.ClientSession, text: str) -> bytes:
         return await resp.read()
 
 
+async def _try_send_voice(bot_token: str, chat_id: int, text: str, task_index: int) -> None:
+    """Fire-and-forget: synthesise TTS and send voice note. Logs but never raises."""
+    try:
+        async with aiohttp.ClientSession() as http:
+            audio = await _tts(http, text)
+        await _send_voice(bot_token, chat_id, audio)
+        log.info("Voice delivery complete for task %d", task_index)
+    except Exception:
+        log.exception("Voice delivery failed for task %d (text already sent)", task_index)
+
+
 async def _send_voice(bot_token: str, chat_id: int, audio: bytes) -> None:
     form = aiohttp.FormData()
     form.add_field("voice", audio, filename="response.ogg", content_type="audio/ogg")
@@ -135,16 +146,10 @@ async def run_task(task_index: int) -> None:
         log.info("Task %d complete (notify=false, no delivery)", task_index)
         return
 
-    if task.voice:
-        try:
-            async with aiohttp.ClientSession() as http:
-                audio = await _tts(http, response)
-            await _send_voice(bot_token, chat_id, audio)
-            return
-        except Exception:
-            log.exception("Voice delivery failed for task %d, falling back to text", task_index)
-
+    # Always send text immediately, then fire TTS as a non-blocking background task.
     await _send_text(bot_token, chat_id, response)
+    if task.voice:
+        asyncio.create_task(_try_send_voice(bot_token, chat_id, response, task_index))
 
 
 async def _memory_expiry_sweep() -> None:
