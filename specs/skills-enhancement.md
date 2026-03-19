@@ -31,24 +31,28 @@ Skills can bundle scripts that generate interactive HTML — charts, graphs, vis
 
 ### `user-invocable` Fixes (Quick Wins)
 
-These skills are internal procedures — users should never invoke them directly:
+Internal pipeline steps — called by other skills, never directly by the user:
 
-| Skill | Current | Should Be |
-|-------|---------|-----------|
-| `agent-logs` | unknown | `user-invocable: false` |
-| `check-reminders` | unknown | `user-invocable: false` |
-| `crypto-price` | unknown | `user-invocable: false` |
-| `current-time` | unknown | `user-invocable: false` |
-| `knowledge-graph-save` | unknown | `user-invocable: false` |
-| `notify-action` | unknown | `user-invocable: false` |
-| `notify` | false | correct |
-| `pin-memory-action` | unknown | `user-invocable: false` |
-| `planka` | unknown | `user-invocable: false` |
-| `reminders` | unknown | `user-invocable: false` |
-| `secrets` | unknown | `user-invocable: false` |
-| `semantic-memory-save` | unknown | `user-invocable: false` |
-| `weather` | unknown | `user-invocable: false` |
-| `x-search` | unknown | `user-invocable: false` |
+| Skill | Should Be |
+|-------|-----------|
+| `check-reminders` | `user-invocable: false` |
+| `knowledge-graph-save` | `user-invocable: false` |
+| `notify-action` | `user-invocable: false` |
+| `pin-memory-action` | `user-invocable: false` |
+| `planka` | `user-invocable: false` |
+| `secrets` | `user-invocable: false` |
+| `semantic-memory-save` | `user-invocable: false` |
+
+User-facing utility skills — should remain `user-invocable: true`:
+
+| Skill | Reason |
+|-------|--------|
+| `agent-logs` | User asks for log scans directly |
+| `crypto-price` | User asks for prices directly |
+| `current-time` | User asks for time directly |
+| `reminders` | User sets/lists/deletes reminders directly |
+| `weather` | User asks for weather directly |
+| `x-search` | User searches X directly |
 
 ---
 
