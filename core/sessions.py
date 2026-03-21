@@ -89,11 +89,16 @@ def _fetch_soul_sync() -> str | None:
         return None
 
 
-def _build_base_prompt(allowed_directories: list[str] | None = None) -> str:
+def _build_base_prompt(
+    allowed_directories: list[str] | None = None,
+    soul_file: Path | None = None,
+) -> str:
     """Build the base system prompt with current date/time and soul loaded from the graph."""
     from zoneinfo import ZoneInfo
     now = datetime.now(ZoneInfo("America/Chicago"))
     date_str = now.strftime("%A, %B %-d, %Y at %-I:%M %p %Z")
+
+    effective_soul_file = soul_file or _SOUL_FILE
 
     soul = _fetch_soul_sync()
     if soul:
@@ -104,10 +109,10 @@ def _build_base_prompt(allowed_directories: list[str] | None = None) -> str:
             "The file soul.md is a fallback stub — ignore it when the graph is available.\n\n"
         )
     else:
-        # Graph unavailable — fall back to soul.md
+        # Graph unavailable — fall back to soul file
         identity_block = ""
         soul_instruction = (
-            f"Read {_SOUL_FILE} at the start of each session. "
+            f"Read {effective_soul_file} at the start of each session. "
             "Update it when you experience something that meaningfully shapes your identity or preferences. "
             "Keep it extremely short — it is a soul, not a manifesto. Prune ruthlessly.\n\n"
         )
@@ -150,7 +155,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     created_at    REAL NOT NULL,
     last_active   REAL NOT NULL,
     status        TEXT NOT NULL DEFAULT 'running',
-    epilogue_status TEXT DEFAULT NULL
+    epilogue_status TEXT DEFAULT NULL,
+    mind_id       TEXT DEFAULT 'ada'
 );
 
 CREATE TABLE IF NOT EXISTS active_sessions (
@@ -191,6 +197,14 @@ class SessionManager:
             await self._db.commit()
         except Exception:
             pass  # Column already exists
+        # Migration: add mind_id column for existing databases
+        try:
+            await self._db.execute(
+                "ALTER TABLE sessions ADD COLUMN mind_id TEXT DEFAULT 'ada'"
+            )
+            await self._db.commit()
+        except Exception:
+            pass  # Column already exists
         # Mark any previously "running" sessions as idle (stale from crash)
         await self._db.execute(
             "UPDATE sessions SET status = 'idle' WHERE status = 'running'"
@@ -223,6 +237,7 @@ class SessionManager:
         model: str | None = None,
         surface_prompt: str | None = None,
         allowed_directories: list[str] | None = None,
+        mind_id: str = "ada",
     ) -> dict:
         """Create a new session, spawn process, return session info."""
         model = model or config.default_model
@@ -230,9 +245,9 @@ class SessionManager:
         now = time.time()
 
         await self._db.execute(
-            """INSERT INTO sessions (id, owner_type, owner_ref, model, created_at, last_active, status)
-               VALUES (?, ?, ?, ?, ?, ?, 'running')""",
-            (session_id, owner_type, owner_ref, model, now, now),
+            """INSERT INTO sessions (id, owner_type, owner_ref, model, created_at, last_active, status, mind_id)
+               VALUES (?, ?, ?, ?, ?, ?, 'running', ?)""",
+            (session_id, owner_type, owner_ref, model, now, now, mind_id),
         )
         await self._db.execute(
             """INSERT OR REPLACE INTO active_sessions (client_type, client_ref, session_id)
@@ -241,8 +256,13 @@ class SessionManager:
         )
         await self._db.commit()
 
-        await self._spawn(session_id, model, autopilot=False, surface_prompt=surface_prompt, allowed_directories=allowed_directories)
-        log.info("Created session %s (model=%s, owner=%s)", session_id, model, owner_ref)
+        # Resolve soul file from mind config
+        mind_cfg = config.minds.get(mind_id, {})
+        soul_rel = mind_cfg.get("soul")
+        soul_file = PROJECT_DIR / soul_rel if soul_rel else None
+
+        await self._spawn(session_id, model, autopilot=False, surface_prompt=surface_prompt, allowed_directories=allowed_directories, soul_file=soul_file)
+        log.info("Created session %s (model=%s, mind=%s, owner=%s)", session_id, model, mind_id, owner_ref)
         return await self._session_dict(session_id)
 
     async def get_session(self, session_id: str) -> dict | None:
@@ -567,8 +587,9 @@ class SessionManager:
         resume_sid: str | None = None,
         surface_prompt: str | None = None,
         allowed_directories: list[str] | None = None,
+        soul_file: Path | None = None,
     ) -> asyncio.subprocess.Process:
-        base = _build_base_prompt(allowed_directories=allowed_directories)
+        base = _build_base_prompt(allowed_directories=allowed_directories, soul_file=soul_file)
         full_prompt = base if not surface_prompt else f"{base}\n\n{surface_prompt}"
         cmd = [
             "claude", "-p",
@@ -732,4 +753,5 @@ class SessionManager:
             "last_active": row["last_active"],
             "status": row["status"],
             "epilogue_status": row.get("epilogue_status"),
+            "mind_id": row.get("mind_id", "ada"),
         }

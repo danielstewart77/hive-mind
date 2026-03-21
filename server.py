@@ -106,6 +106,7 @@ class CreateSessionRequest(BaseModel):
     model: str | None = None
     surface_prompt: str | None = None
     allowed_directories: list[str] | None = None
+    mind_id: str = "ada"
 
 
 class ImageAttachment(BaseModel):
@@ -139,6 +140,7 @@ async def create_session(body: CreateSessionRequest):
         model=body.model,
         surface_prompt=body.surface_prompt,
         allowed_directories=body.allowed_directories,
+        mind_id=body.mind_id,
     )
     return session
 
