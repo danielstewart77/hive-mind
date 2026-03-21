@@ -15,6 +15,10 @@ playwright
 
 # Dev tooling
 pip-audit
+pytest
+pytest-asyncio
+mypy
+ruff
 
 # Gateway server
 fastapi

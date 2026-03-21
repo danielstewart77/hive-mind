@@ -13,6 +13,7 @@ services:
     environment:
       - SESSIONS_DB_PATH=/usr/src/app/data/sessions.db
       - PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring
+      - PYTHONNOUSERSITE=1
       - XDG_DATA_HOME=/home/hivemind/.claude/data
     ports:
       - "8420:8420"
@@ -54,6 +55,7 @@ services:
       - HIVE_MIND_SERVER_URL=http://server:8420
       - VOICE_SERVER_URL=http://voice-server:8422
       - PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring
+      - PYTHONNOUSERSITE=1
       - XDG_DATA_HOME=/home/hivemind/.claude/data
     command: ["/opt/venv/bin/python3", "-m", "clients.discord_bot"]
 
@@ -110,6 +112,7 @@ services:
       - HIVE_MIND_SERVER_URL=http://server:8420
       - VOICE_SERVER_URL=http://voice-server:8422
       - PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring
+      - PYTHONNOUSERSITE=1
       - XDG_DATA_HOME=/home/hivemind/.claude/data
     command: ["/opt/venv/bin/python3", "-m", "clients.telegram_bot"]
 
@@ -136,6 +139,7 @@ services:
       - HIVE_MIND_SERVER_URL=http://server:8420
       - VOICE_SERVER_URL=http://voice-server:8422
       - PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring
+      - PYTHONNOUSERSITE=1
       - XDG_DATA_HOME=/home/hivemind/.claude/data
     command: ["/opt/venv/bin/python3", "-m", "clients.scheduler"]
 

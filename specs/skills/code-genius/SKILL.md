@@ -121,10 +121,12 @@ Run the test suite and handle results:
 1. Run pytest:
 
    ```bash
-   pytest
+   # IMPORTANT: always use the project venv — /home/hivemind is noexec tmpfs
+   # bare python3/pytest will fail to load pydantic_core .so from user site-packages
+   /usr/src/app/venv/bin/python3 -m pytest
    ```
 
-   If a specific test path or config is used by the project (e.g., `pytest tests/` or `python -m pytest`), use that instead. Check `pyproject.toml` or `pytest.ini` for configuration.
+   This project uses `/usr/src/app/venv/bin/python3`. Never use bare `pytest` or `python3 -m pytest` — user site-packages are on a noexec filesystem and break pydantic_core imports. Check `pytest.ini` for test configuration (`testpaths = tests`, `asyncio_mode = auto`).
 
 2. Evaluate the result:
 
