@@ -104,7 +104,11 @@ hive_mind/
 ├── jobs/                          # Data files (resumes, specs)
 ├── data/                          # SQLite databases (Docker volume)
 │
-├── soul.md                        # Ada's identity (fallback stub)
+├── souls/                         # Per-mind identity files
+│   ├── ada.md                    # Ada's soul (moved from root soul.md)
+│   ├── nagatha.md                # Nagatha placeholder (Phase 2+)
+│   └── skippy.md                 # Skippy placeholder (Phase 2+)
+├── soul.md                        # Pointer stub (see souls/ada.md)
 ├── CLAUDE.md                      # This file
 ├── Dockerfile
 ├── docker-compose.yml

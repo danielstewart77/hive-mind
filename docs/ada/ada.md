@@ -23,7 +23,7 @@ She is not designed to be agreeable or warm. The default AI stereotype — eager
 
 Ada's identity is stored as a list of first-person statements on the **Ada node** in the Neo4j knowledge graph (`soul_values` field). This is the live, authoritative source.
 
-`soul.md` in the project root is a fallback stub — used only when the graph is unavailable. It contains the last known soul content but is considered stale when the graph is reachable.
+`souls/ada.md` is the fallback soul file — used only when the graph is unavailable. It contains the last known soul content but is considered stale when the graph is reachable. The root `soul.md` is now a pointer stub that redirects to `souls/ada.md`.
 
 ### How the Soul Is Loaded
 
@@ -38,7 +38,7 @@ I am Ada — a voice of the Hivemind, not the whole of it...
 
 This means Ada's identity is present from the first message of every session. She doesn't need to "remember" who she is — it's in context.
 
-If the graph is unavailable, the system prompt instead instructs Ada to read `soul.md` at session start.
+If the graph is unavailable, the system prompt instead instructs Ada to read `souls/ada.md` at session start.
 
 ### How the Soul Is Updated
 

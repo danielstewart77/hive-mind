@@ -58,7 +58,7 @@ def _fetch_memories_sync(query: str) -> str | None:
 
 _MCP_CONTAINER = PROJECT_DIR / ".mcp.container.json"
 MCP_CONFIG = str(_MCP_CONTAINER if _MCP_CONTAINER.exists() else PROJECT_DIR / ".mcp.json")
-_SOUL_FILE = PROJECT_DIR / "soul.md"
+_SOUL_FILE = PROJECT_DIR / "souls" / "ada.md"
 _SPECS_DIR = PROJECT_DIR / "specs"
 
 # Friendly names for known project paths granted via --allowedDirectory

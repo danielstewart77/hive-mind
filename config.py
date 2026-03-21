@@ -73,6 +73,9 @@ class HiveMindConfig:
     # Static model -> provider mappings
     models: dict[str, str] = field(default_factory=dict)
 
+    # Named minds — each with its own backend, model, soul, and database
+    minds: dict = field(default_factory=dict)
+
     # MCP server
     mcp_port: int = 7777
 
@@ -108,6 +111,7 @@ class HiveMindConfig:
             autopilot_guards=guards,
             providers=_yaml_config.get("providers", {}),
             models=_yaml_config.get("models", {}),
+            minds=_yaml_config.get("minds", {}),
             mcp_port=_yaml_config.get("mcp_port", 7777),
             discord_allowed_users=_yaml_config.get("discord_allowed_users", []),
             discord_allowed_channels=_yaml_config.get("discord_allowed_channels", []),
