@@ -1,6 +1,5 @@
 """Unit tests for core.memory_schema — data class registry and validation."""
 
-import logging
 from datetime import datetime, timezone
 
 import pytest

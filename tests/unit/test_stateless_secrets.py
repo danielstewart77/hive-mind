@@ -6,7 +6,7 @@ Tests the secrets module functions directly with mocked keyring backend.
 import json
 import argparse
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 

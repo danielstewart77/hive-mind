@@ -128,6 +128,14 @@ class ActivateRequest(BaseModel):
     client_ref: str
 
 
+class CreateGroupSessionRequest(BaseModel):
+    moderator_mind_id: str = "ada"
+
+
+class GroupSessionMessageRequest(BaseModel):
+    content: str
+
+
 # ---------------------------------------------------------------------------
 # Session endpoints
 # ---------------------------------------------------------------------------
@@ -205,6 +213,55 @@ async def switch_model(session_id: str, body: ModelSwitchRequest):
 @app.post("/sessions/{session_id}/autopilot")
 async def toggle_autopilot(session_id: str):
     return await session_mgr.toggle_autopilot(session_id)
+
+
+# ---------------------------------------------------------------------------
+# Group session endpoints
+# ---------------------------------------------------------------------------
+@app.post("/group-sessions")
+async def create_group_session(body: CreateGroupSessionRequest):
+    result = await session_mgr.create_group_session(body.moderator_mind_id)
+    return result
+
+
+@app.get("/group-sessions/{group_session_id}")
+async def get_group_session(group_session_id: str):
+    result = await session_mgr.get_group_session(group_session_id)
+    if not result:
+        return JSONResponse({"error": "Group session not found"}, status_code=404)
+    # Include transcript
+    transcript = await session_mgr.get_group_transcript(group_session_id)
+    result["transcript"] = transcript
+    return result
+
+
+@app.post("/group-sessions/{group_session_id}/message")
+async def send_group_message(group_session_id: str, body: GroupSessionMessageRequest):
+    """Send a message to the moderator's session in the group."""
+    group = await session_mgr.get_group_session(group_session_id)
+    if not group:
+        return JSONResponse({"error": "Group session not found"}, status_code=404)
+
+    moderator_mind_id = group["moderator_mind_id"]
+
+    # Find or create the moderator's child session via public API
+    child_session_id = await session_mgr.get_or_create_group_child_session(
+        group_session_id, moderator_mind_id
+    )
+
+    async def event_stream():
+        async for event in session_mgr.send_message(child_session_id, body.content):
+            yield f"data: {json.dumps(event)}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.delete("/group-sessions/{group_session_id}")
+async def delete_group_session(group_session_id: str):
+    try:
+        return await session_mgr.delete_group_session(group_session_id)
+    except ValueError:
+        return JSONResponse({"error": "Group session not found"}, status_code=404)
 
 
 # ---------------------------------------------------------------------------

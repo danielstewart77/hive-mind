@@ -3,7 +3,6 @@
 from io import StringIO
 from unittest.mock import patch
 
-import pytest
 
 from core.dep_scan import ScanResult, VulnerabilityRecord, main
 

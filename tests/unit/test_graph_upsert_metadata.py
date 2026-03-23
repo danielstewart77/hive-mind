@@ -1,7 +1,6 @@
 """Unit tests for metadata enforcement in graph_upsert and graph_upsert_direct."""
 
 import json
-import logging
 import sys
 from unittest.mock import MagicMock, patch
 

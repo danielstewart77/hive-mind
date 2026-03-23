@@ -18,6 +18,8 @@ from mcp.server.fastmcp import FastMCP
 
 from core.audit import audit_wrap, get_audit_logger
 from tools.stateful.browser import BROWSER_TOOLS
+from tools.stateful.group_chat import GROUP_CHAT_TOOLS
+from tools.stateful.inter_mind import INTER_MIND_TOOLS
 from tools.stateful.knowledge_graph import KG_TOOLS
 from tools.stateful.memory import MEMORY_TOOLS
 
@@ -28,7 +30,7 @@ mcp = FastMCP("hive-mind-tools")
 audit_logger = get_audit_logger()
 
 # Register all stateful tools directly
-for func in BROWSER_TOOLS + KG_TOOLS + MEMORY_TOOLS:
+for func in BROWSER_TOOLS + GROUP_CHAT_TOOLS + INTER_MIND_TOOLS + KG_TOOLS + MEMORY_TOOLS:
     log.info("[MCP] %s", func.__name__)
     wrapped = audit_wrap(func, audit_logger)
     mcp.tool()(wrapped)

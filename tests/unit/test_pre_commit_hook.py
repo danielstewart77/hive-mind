@@ -1,10 +1,8 @@
 """Unit tests for scripts/pre-commit-pip-audit.sh — pre-commit hook script."""
 
-import os
 import stat
 from pathlib import Path
 
-import pytest
 
 SCRIPTS_DIR = Path("/usr/src/app/scripts")
 HOOK_SCRIPT = SCRIPTS_DIR / "pre-commit-pip-audit.sh"

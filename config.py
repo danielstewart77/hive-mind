@@ -76,6 +76,9 @@ class HiveMindConfig:
     # Named minds — each with its own backend, model, soul, and database
     minds: dict = field(default_factory=dict)
 
+    # Group chat configuration
+    group_chat: dict = field(default_factory=dict)
+
     # MCP server
     mcp_port: int = 7777
 
@@ -112,6 +115,7 @@ class HiveMindConfig:
             providers=_yaml_config.get("providers", {}),
             models=_yaml_config.get("models", {}),
             minds=_yaml_config.get("minds", {}),
+            group_chat=_yaml_config.get("group_chat", {}),
             mcp_port=_yaml_config.get("mcp_port", 7777),
             discord_allowed_users=_yaml_config.get("discord_allowed_users", []),
             discord_allowed_channels=_yaml_config.get("discord_allowed_channels", []),

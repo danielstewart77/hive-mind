@@ -5,7 +5,6 @@ import subprocess
 import sys
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from core.dep_scan import (
     ScanResult,

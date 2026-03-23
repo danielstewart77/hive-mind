@@ -1,7 +1,6 @@
 """Unit tests for metadata enforcement in memory_store and memory_store_direct."""
 
 import json
-import logging
 import sys
 from unittest.mock import MagicMock, patch
 

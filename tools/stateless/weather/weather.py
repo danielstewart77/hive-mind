@@ -61,7 +61,6 @@ def _date_range(time_span: str) -> tuple[str, str]:
 
 def _mock_forecast(location: str, time_span: str) -> dict:
     """Return mock forecast data for testing."""
-    today = datetime.now(timezone.utc).date()
     start_str, end_str = _date_range(time_span)
     start = datetime.strptime(start_str, "%Y-%m-%d").date()
     end = datetime.strptime(end_str, "%Y-%m-%d").date()

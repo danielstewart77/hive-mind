@@ -1,13 +1,12 @@
 """Unit tests for async support in audit_wrap (core/audit.py)."""
 
-import asyncio
 import inspect
 import logging
 from unittest.mock import MagicMock
 
 import pytest
 
-from core.audit import audit_wrap, get_audit_logger
+from core.audit import audit_wrap
 
 
 class TestAuditWrapAsync:

@@ -1,9 +1,7 @@
 """Unit tests for core.secrets shared credential utility."""
 
-import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-import pytest
 
 
 class TestGetCredential:

@@ -1,9 +1,7 @@
 """Unit tests for making data_class a required parameter."""
 
-import json
-import logging
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 

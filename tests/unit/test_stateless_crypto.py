@@ -4,7 +4,6 @@ import json
 import subprocess
 import sys
 
-import pytest
 
 SCRIPT_PATH = "/usr/src/app/tools/stateless/crypto/crypto.py"
 

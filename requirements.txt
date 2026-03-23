@@ -3,6 +3,7 @@ python-dotenv
 pyyaml
 requests
 openai
+anthropic
 setuptools<81
 keyring
 keyrings.alt

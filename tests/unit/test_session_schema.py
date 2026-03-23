@@ -1,6 +1,5 @@
 """Tests for session schema changes: epilogue_status column and transcript path resolution."""
 
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -21,7 +20,7 @@ class TestSessionDictIncludesEpilogueStatus:
 
     @pytest.mark.asyncio
     async def test_session_dict_includes_epilogue_status(self):
-        from core.sessions import SessionManager, _SCHEMA
+        from core.sessions import SessionManager
         from core.models import ModelRegistry
 
         registry = MagicMock(spec=ModelRegistry)

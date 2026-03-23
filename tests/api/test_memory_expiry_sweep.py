@@ -1,9 +1,7 @@
 """API tests for the /memory/expiry-sweep endpoint."""
 
-from unittest.mock import AsyncMock, patch, MagicMock
-import asyncio
+from unittest.mock import AsyncMock, patch
 
-import pytest
 from fastapi.testclient import TestClient
 
 _AUTH_HEADER = {"X-HITL-Internal": "test-token"}
@@ -13,7 +11,7 @@ class TestMemoryExpirySweepEndpoint:
     """Tests for POST /memory/expiry-sweep."""
 
     def test_expiry_sweep_endpoint_returns_200(self) -> None:
-        with patch("server.session_mgr") as mock_mgr, \
+        with patch("server.session_mgr"), \
              patch("server.config") as mock_cfg, \
              patch("core.memory_expiry.sweep_expired_events", return_value={"deleted": 1, "prompted": 0, "errors": 0}):
             mock_cfg.hitl_internal_token = "test-token"
@@ -24,7 +22,7 @@ class TestMemoryExpirySweepEndpoint:
             assert response.status_code == 200
 
     def test_expiry_sweep_rejects_missing_token(self) -> None:
-        with patch("server.session_mgr") as mock_mgr, \
+        with patch("server.session_mgr"), \
              patch("server.config") as mock_cfg:
             mock_cfg.hitl_internal_token = "test-token"
             from server import app
@@ -34,7 +32,7 @@ class TestMemoryExpirySweepEndpoint:
             assert response.status_code == 401
 
     def test_expiry_sweep_rejects_wrong_token(self) -> None:
-        with patch("server.session_mgr") as mock_mgr, \
+        with patch("server.session_mgr"), \
              patch("server.config") as mock_cfg:
             mock_cfg.hitl_internal_token = "test-token"
             from server import app
@@ -47,7 +45,7 @@ class TestMemoryExpirySweepEndpoint:
             assert response.status_code == 401
 
     def test_expiry_sweep_returns_counts(self) -> None:
-        with patch("server.session_mgr") as mock_mgr, \
+        with patch("server.session_mgr"), \
              patch("server.config") as mock_cfg, \
              patch("core.memory_expiry.sweep_expired_events", return_value={"deleted": 3, "prompted": 1, "errors": 0}):
             mock_cfg.hitl_internal_token = "test-token"
@@ -65,7 +63,7 @@ class TestMemoryExpirySweepEndpoint:
 
     def test_expiry_sweep_uses_to_thread(self) -> None:
         """Assert that the endpoint runs sweep_expired_events via asyncio.to_thread to avoid blocking."""
-        with patch("server.session_mgr") as mock_mgr, \
+        with patch("server.session_mgr"), \
              patch("server.config") as mock_cfg, \
              patch("core.memory_expiry.sweep_expired_events", return_value={"deleted": 0, "prompted": 0, "errors": 0}) as mock_sweep, \
              patch("server.asyncio") as mock_asyncio:

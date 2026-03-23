@@ -6,7 +6,6 @@ import subprocess
 import sys
 import tempfile
 
-import pytest
 
 SCRIPT_PATH = "/usr/src/app/tools/stateless/agent_logs/agent_logs.py"
 

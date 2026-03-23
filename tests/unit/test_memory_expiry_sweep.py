@@ -3,7 +3,7 @@
 import logging
 import sys
 from datetime import datetime, timezone, timedelta
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 

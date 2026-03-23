@@ -4,7 +4,6 @@ from typing import Generator
 import ollama
 from dotenv import load_dotenv
 from pydantic import BaseModel
-from typing import Type
 
 load_dotenv(dotenv_path='secrets.env')
 

@@ -1,10 +1,8 @@
 """Unit tests for scripts/install-hooks.sh — hook installation script."""
 
-import os
 import stat
 from pathlib import Path
 
-import pytest
 
 SCRIPTS_DIR = Path("/usr/src/app/scripts")
 INSTALL_SCRIPT = SCRIPTS_DIR / "install-hooks.sh"

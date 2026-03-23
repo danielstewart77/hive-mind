@@ -1,9 +1,7 @@
 """Unit tests for requirements-dev.txt — dev-only dependency file."""
 
-import os
 from pathlib import Path
 
-import pytest
 
 PROJECT_ROOT = Path("/usr/src/app")
 
@@ -49,7 +47,7 @@ class TestDevRequirements:
                 packages.add(pkg.lower())
             return packages
 
-        prod_packages = extract_packages(prod_content)
+        extract_packages(prod_content)
         dev_packages = extract_packages(dev_content)
 
         # Core production packages that should NOT appear in dev requirements

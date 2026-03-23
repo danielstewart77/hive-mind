@@ -6,7 +6,6 @@ import sys
 import tempfile
 import os
 
-import pytest
 
 SCRIPT_PATH = "/usr/src/app/tools/stateless/notify/notify.py"
 

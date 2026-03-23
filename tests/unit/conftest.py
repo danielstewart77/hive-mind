@@ -94,3 +94,9 @@ def _mock_third_party_modules(monkeypatch):
     if "py2neo" not in sys.modules:
         py2neo_mock = _create_mock_module("py2neo")
         monkeypatch.setitem(sys.modules, "py2neo", py2neo_mock)
+
+    # --- Anthropic SDK mock (for minds/nagatha/) ---
+    if "anthropic" not in sys.modules:
+        anthropic_mock = _create_mock_module("anthropic")
+        anthropic_mock.AsyncAnthropic = MagicMock()
+        monkeypatch.setitem(sys.modules, "anthropic", anthropic_mock)

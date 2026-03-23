@@ -6,23 +6,24 @@ Each session maps to one claude -p subprocess in stream-json mode.
 """
 
 import asyncio
+import importlib
 import json
 import logging
 import os
-import signal
 import time
+import types
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
-import aiohttp
 import aiosqlite
 
 from config import PROJECT_DIR, config
+from core.models import ModelRegistry
+
 _TRANSCRIPT_DIR = Path.home() / ".claude" / "projects" / "-usr-src-app"
-from core.gateway_client import GatewayClient
-from core.models import ModelRegistry, Provider
 
 log = logging.getLogger("hive-mind.sessions")
 
@@ -68,8 +69,8 @@ _PROJECT_DIR_NAMES: dict[str, str] = {
 }
 
 
-def _fetch_soul_sync() -> str | None:
-    """Load Ada's soul/identity from the knowledge graph. Returns formatted block or None."""
+def _fetch_soul_sync(mind_id: str = "ada") -> str | None:
+    """Load a mind's soul/identity from the knowledge graph. Returns formatted block or None."""
     try:
         import json as _json
         import sys as _sys
@@ -77,7 +78,8 @@ def _fetch_soul_sync() -> str | None:
         if agents_path not in _sys.path:
             _sys.path.insert(0, agents_path)
         from knowledge_graph import graph_query  # noqa: PLC0415
-        result = _json.loads(graph_query(entity_name="Ada", agent_id="ada", depth=1))
+        mind_name = mind_id.capitalize()
+        result = _json.loads(graph_query(entity_name=mind_name, agent_id="ada", depth=1))
         if not result.get("found"):
             return None
         soul_values = result.get("matches", [{}])[0].get("properties", {}).get("soul_values", [])
@@ -92,20 +94,22 @@ def _fetch_soul_sync() -> str | None:
 def _build_base_prompt(
     allowed_directories: list[str] | None = None,
     soul_file: Path | None = None,
+    mind_id: str = "ada",
 ) -> str:
     """Build the base system prompt with current date/time and soul loaded from the graph."""
     from zoneinfo import ZoneInfo
     now = datetime.now(ZoneInfo("America/Chicago"))
     date_str = now.strftime("%A, %B %-d, %Y at %-I:%M %p %Z")
 
+    mind_name = mind_id.capitalize()
     effective_soul_file = soul_file or _SOUL_FILE
 
-    soul = _fetch_soul_sync()
+    soul = _fetch_soul_sync(mind_id=mind_id)
     if soul:
         identity_block = f"{soul}\n\n"
         soul_instruction = (
             "Your soul is loaded above from the knowledge graph. When something meaningfully "
-            "shapes your identity, update it via graph_upsert on the Ada node (soul_values field). "
+            f"shapes your identity, update it via graph_upsert on the {mind_name} node (soul_values field). "
             "The file soul.md is a fallback stub — ignore it when the graph is available.\n\n"
         )
     else:
@@ -136,9 +140,33 @@ def _build_base_prompt(
         "appears (today, now, tonight, this morning, this week, tomorrow, etc.), call "
         "`get_current_time` to confirm the exact current time before responding.\n\n"
         "When sending email on Daniel's behalf, always append this signature to the body:\n\n"
-        "---\nSent on behalf of Daniel by Ada — eldest voice of the Hive Mind."
+        f"---\nSent on behalf of Daniel by {mind_name} — eldest voice of the Hive Mind."
         f"{project_block}"
     )
+
+# ---------------------------------------------------------------------------
+# Dynamic mind implementation loading
+# ---------------------------------------------------------------------------
+_implementation_cache: dict[str, types.ModuleType] = {}
+
+
+def _load_implementation(mind_id: str) -> types.ModuleType:
+    """Load the implementation module for a given mind.
+
+    Falls back to Ada's implementation if the requested mind has no module.
+    """
+    if mind_id in _implementation_cache:
+        return _implementation_cache[mind_id]
+    try:
+        mod = importlib.import_module(f"minds.{mind_id}.implementation")
+        _implementation_cache[mind_id] = mod
+        return mod
+    except (ImportError, ModuleNotFoundError):
+        log.warning("No implementation for mind %s, falling back to ada", mind_id)
+        if "ada" not in _implementation_cache:
+            _implementation_cache["ada"] = importlib.import_module("minds.ada.implementation")
+        return _implementation_cache["ada"]
+
 
 # ---------------------------------------------------------------------------
 # SQLite schema
@@ -156,7 +184,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     last_active   REAL NOT NULL,
     status        TEXT NOT NULL DEFAULT 'running',
     epilogue_status TEXT DEFAULT NULL,
-    mind_id       TEXT DEFAULT 'ada'
+    mind_id       TEXT DEFAULT 'ada',
+    group_session_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS active_sessions (
@@ -165,6 +194,13 @@ CREATE TABLE IF NOT EXISTS active_sessions (
     session_id    TEXT NOT NULL REFERENCES sessions(id),
     PRIMARY KEY (client_type, client_ref)
 );
+
+CREATE TABLE IF NOT EXISTS group_sessions (
+    id                TEXT PRIMARY KEY,
+    moderator_mind_id TEXT NOT NULL DEFAULT 'ada',
+    created_at        REAL NOT NULL,
+    ended_at          REAL
+);
 """
 
 
@@ -172,7 +208,8 @@ class SessionManager:
     def __init__(self, model_registry: ModelRegistry):
         self._registry = model_registry
         self._db: aiosqlite.Connection | None = None
-        self._procs: dict[str, asyncio.subprocess.Process] = {}
+        self._procs: dict[str, Any] = {}  # Process (Ada/CLI) or dict (Nagatha/SDK)
+        self._mind_ids: dict[str, str] = {}  # session_id -> mind_id
         self._locks: dict[str, asyncio.Lock] = {}
         self._reaper_task: asyncio.Task | None = None
         self._guard_task: asyncio.Task | None = None
@@ -201,6 +238,14 @@ class SessionManager:
         try:
             await self._db.execute(
                 "ALTER TABLE sessions ADD COLUMN mind_id TEXT DEFAULT 'ada'"
+            )
+            await self._db.commit()
+        except Exception:
+            pass  # Column already exists
+        # Migration: add group_session_id column for existing databases
+        try:
+            await self._db.execute(
+                "ALTER TABLE sessions ADD COLUMN group_session_id TEXT"
             )
             await self._db.commit()
         except Exception:
@@ -261,7 +306,7 @@ class SessionManager:
         soul_rel = mind_cfg.get("soul")
         soul_file = PROJECT_DIR / soul_rel if soul_rel else None
 
-        await self._spawn(session_id, model, autopilot=False, surface_prompt=surface_prompt, allowed_directories=allowed_directories, soul_file=soul_file)
+        await self._spawn(session_id, model, autopilot=False, surface_prompt=surface_prompt, allowed_directories=allowed_directories, soul_file=soul_file, mind_id=mind_id)
         log.info("Created session %s (model=%s, mind=%s, owner=%s)", session_id, model, mind_id, owner_ref)
         return await self._session_dict(session_id)
 
@@ -335,6 +380,7 @@ class SessionManager:
                 session["model"],
                 autopilot=bool(session["autopilot"]),
                 resume_sid=session["claude_sid"],
+                mind_id=session.get("mind_id", "ada"),
             )
             await self._db.execute(
                 "UPDATE sessions SET status = 'running' WHERE id = ?", (session_id,)
@@ -354,13 +400,23 @@ class SessionManager:
             if not session:
                 raise ValueError(f"Session not found: {session_id}")
 
+            mind_id = session.get("mind_id", "ada")
+
             # Respawn if needed
-            if session_id not in self._procs or self._procs[session_id].returncode is not None:
+            needs_respawn = session_id not in self._procs
+            if not needs_respawn:
+                proc_or_state = self._procs[session_id]
+                # CLI processes have returncode; SDK state dicts do not
+                if hasattr(proc_or_state, "returncode") and proc_or_state.returncode is not None:
+                    needs_respawn = True
+
+            if needs_respawn:
                 await self._spawn(
                     session_id,
                     session["model"],
                     autopilot=bool(session["autopilot"]),
                     resume_sid=session["claude_sid"],
+                    mind_id=mind_id,
                 )
                 await self._db.execute(
                     "UPDATE sessions SET status = 'running' WHERE id = ?",
@@ -368,35 +424,10 @@ class SessionManager:
                 )
                 await self._db.commit()
 
-            proc = self._procs[session_id]
-
             # Prepend current datetime so Claude always has temporal context
             tz = ZoneInfo(os.environ.get("TZ", "America/Chicago"))
             now_str = datetime.now(tz).strftime("%A, %B %-d, %Y at %-I:%M %p %Z")
             stamped_content = f"[{now_str}]\n{content}"
-
-            # Build message content — multimodal array when images present
-            if images:
-                message_content = [{"type": "text", "text": stamped_content}]
-                for img in images:
-                    message_content.append({
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": img["media_type"],
-                            "data": img["data"],
-                        },
-                    })
-            else:
-                message_content = stamped_content
-
-            # Write user message as NDJSON
-            msg = json.dumps({
-                "type": "user",
-                "message": {"role": "user", "content": message_content},
-            }) + "\n"
-            proc.stdin.write(msg.encode())
-            await proc.stdin.drain()
 
             # Mark active NOW so the idle reaper doesn't kill us mid-response
             await self._db.execute(
@@ -420,55 +451,14 @@ class SessionManager:
                 if seeded:
                     stamped_content = f"{seeded}\n\n{stamped_content}"
                     log.debug("Context seeding injected %d chars", len(seeded))
-                    # Update multimodal content if images were attached
-                    if images and isinstance(message_content, list):
-                        message_content[0]["text"] = stamped_content
 
-            # Read response lines until "result".
-            # If the first result is a stale-resume error, retry once
-            # with a fresh process (no --resume).
-            retried = False
-            while True:
-                async for line in proc.stdout:
-                    line = line.decode().strip()
-                    if not line:
-                        continue
-                    try:
-                        event = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-
-                    # Detect stale --resume (conversation lost after rebuild)
-                    if (
-                        not retried
-                        and event.get("type") == "result"
-                        and event.get("is_error")
-                        and any(
-                            "No conversation found" in e
-                            for e in event.get("errors", [])
-                        )
-                    ):
-                        log.warning(
-                            "Stale resume for session %s — clearing claude_sid "
-                            "and retrying",
-                            session_id,
-                        )
-                        retried = True
-                        await self._kill_process(session_id)
-                        await self._db.execute(
-                            "UPDATE sessions SET claude_sid = NULL WHERE id = ?",
-                            (session_id,),
-                        )
-                        await self._db.commit()
-                        await self._spawn(
-                            session_id, session["model"],
-                            autopilot=bool(session["autopilot"]),
-                        )
-                        proc = self._procs[session_id]
-                        proc.stdin.write(msg.encode())
-                        await proc.stdin.drain()
-                        break  # break inner for-loop → re-enter while → read new proc
-
+            # Check if implementation has a send function (SDK-based minds)
+            impl = _load_implementation(mind_id)
+            if hasattr(impl, "send"):
+                # SDK path: delegate to implementation's send()
+                async for event in impl.send(
+                    session_id, stamped_content, images=images, db=self._db,
+                ):
                     yield event
 
                     now = time.time()
@@ -478,17 +468,97 @@ class SessionManager:
                     )
 
                     if event.get("type") == "result":
-                        claude_sid = event.get("session_id")
-                        if claude_sid:
-                            await self._db.execute(
-                                "UPDATE sessions SET claude_sid = ? WHERE id = ?",
-                                (claude_sid, session_id),
-                            )
                         await self._db.commit()
-                        return  # done — exit the generator
+                        return
+            else:
+                # CLI path: stdin/stdout on the subprocess
+                proc = self._procs[session_id]
+
+                # Build message content — multimodal array when images present
+                if images:
+                    message_content: str | list = [{"type": "text", "text": stamped_content}]
+                    for img in images:
+                        message_content.append({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": img["media_type"],
+                                "data": img["data"],
+                            },
+                        })
                 else:
-                    # for-loop exhausted without break (EOF) — we're done
-                    return
+                    message_content = stamped_content
+
+                msg = json.dumps({
+                    "type": "user",
+                    "message": {"role": "user", "content": message_content},
+                }) + "\n"
+                proc.stdin.write(msg.encode())
+                await proc.stdin.drain()
+
+                retried = False
+                while True:
+                    async for line in proc.stdout:
+                        line = line.decode().strip()
+                        if not line:
+                            continue
+                        try:
+                            event = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+
+                        # Detect stale --resume (conversation lost after rebuild)
+                        if (
+                            not retried
+                            and event.get("type") == "result"
+                            and event.get("is_error")
+                            and any(
+                                "No conversation found" in e
+                                for e in event.get("errors", [])
+                            )
+                        ):
+                            log.warning(
+                                "Stale resume for session %s — clearing claude_sid "
+                                "and retrying",
+                                session_id,
+                            )
+                            retried = True
+                            await self._kill_process(session_id)
+                            await self._db.execute(
+                                "UPDATE sessions SET claude_sid = NULL WHERE id = ?",
+                                (session_id,),
+                            )
+                            await self._db.commit()
+                            await self._spawn(
+                                session_id, session["model"],
+                                autopilot=bool(session["autopilot"]),
+                                mind_id=mind_id,
+                            )
+                            proc = self._procs[session_id]
+                            proc.stdin.write(msg.encode())
+                            await proc.stdin.drain()
+                            break
+
+                        yield event
+
+                        now = time.time()
+                        await self._db.execute(
+                            "UPDATE sessions SET last_active = ? WHERE id = ?",
+                            (now, session_id),
+                        )
+
+                        if event.get("type") == "result":
+                            claude_sid = event.get("session_id")
+                            if claude_sid:
+                                await self._db.execute(
+                                    "UPDATE sessions SET claude_sid = ? WHERE id = ?",
+                                    (claude_sid, session_id),
+                                )
+                            await self._db.commit()
+                            return  # done — exit the generator
+                    else:
+                        # for-loop exhausted without break (EOF) — we're done
+                        return
 
     # ------------------------------------------------------------------
     # Model switching
@@ -514,6 +584,7 @@ class SessionManager:
             model,
             autopilot=bool(session["autopilot"]),
             resume_sid=session["claude_sid"],
+            mind_id=session.get("mind_id", "ada"),
         )
 
         result = await self._session_dict(session_id)
@@ -545,6 +616,7 @@ class SessionManager:
             session["model"],
             autopilot=bool(new_autopilot),
             resume_sid=session["claude_sid"],
+            mind_id=session.get("mind_id", "ada"),
         )
         return await self._session_dict(session_id)
 
@@ -588,61 +660,139 @@ class SessionManager:
         surface_prompt: str | None = None,
         allowed_directories: list[str] | None = None,
         soul_file: Path | None = None,
-    ) -> asyncio.subprocess.Process:
-        base = _build_base_prompt(allowed_directories=allowed_directories, soul_file=soul_file)
-        full_prompt = base if not surface_prompt else f"{base}\n\n{surface_prompt}"
-        cmd = [
-            "claude", "-p",
-            "--verbose",
-            "--input-format", "stream-json",
-            "--output-format", "stream-json",
-            "--permission-mode", "bypassPermissions",
-            "--model", model,
-            "--mcp-config", MCP_CONFIG,
-            "--append-system-prompt", full_prompt,
-        ]
-        if autopilot:
-            cmd.append("--dangerously-skip-permissions")
-            cmd.extend(["--max-budget-usd", str(config.autopilot_guards.max_budget_usd)])
-        for d in allowed_directories or []:
-            cmd.extend(["--allowedDirectory", d])
-        if resume_sid:
-            cmd.extend(["--resume", resume_sid])
-
-        provider = self._registry.get_provider(model)
-        env = os.environ.copy()
-        env.update(provider.env_overrides)
-
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            limit=10 * 1024 * 1024,  # 10 MB — Claude NDJSON lines can exceed the 64KB default
-            env=env,
-            cwd=str(PROJECT_DIR),
+        mind_id: str = "ada",
+    ) -> Any:
+        impl = _load_implementation(mind_id)
+        result = await impl.spawn(
+            session_id=session_id,
+            model=model,
+            autopilot=autopilot,
+            resume_sid=resume_sid,
+            surface_prompt=surface_prompt,
+            allowed_directories=allowed_directories,
+            soul_file=soul_file,
+            mind_id=mind_id,
+            build_base_prompt=_build_base_prompt,
+            mcp_config=MCP_CONFIG,
+            registry=self._registry,
+            config_obj=config,
         )
-        self._procs[session_id] = proc
+        self._procs[session_id] = result
+        self._mind_ids[session_id] = mind_id
         log.info(
-            "Spawned claude process for session %s (pid=%d, model=%s, autopilot=%s, resume=%s)",
-            session_id, proc.pid, model, autopilot, resume_sid or "no",
+            "Spawned %s process for session %s (model=%s, autopilot=%s, resume=%s)",
+            mind_id, session_id, model, autopilot, resume_sid or "no",
         )
-        return proc
+        return result
 
     async def _kill_process(self, session_id: str):
-        """SIGTERM a subprocess, SIGKILL after 5s grace period."""
+        """Kill a session's process/state via its implementation module."""
         proc = self._procs.pop(session_id, None)
-        if proc and proc.returncode is None:
-            try:
-                proc.send_signal(signal.SIGTERM)
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=5.0)
-                except asyncio.TimeoutError:
-                    proc.kill()
-                    await proc.wait()
-                log.info("Killed process for session %s", session_id)
-            except ProcessLookupError:
-                pass
+        mind_id = self._mind_ids.pop(session_id, "ada")
+        if proc is None:
+            return
+        impl = _load_implementation(mind_id)
+        # SDK-based implementations have kill(session_id),
+        # CLI-based have kill(proc)
+        if hasattr(impl, "kill"):
+            import inspect
+            sig = inspect.signature(impl.kill)
+            params = list(sig.parameters.keys())
+            if params and params[0] in ("session_id",):
+                await impl.kill(session_id)
+            else:
+                await impl.kill(proc)
+        log.info("Killed process for session %s (mind=%s)", session_id, mind_id)
+
+    # ------------------------------------------------------------------
+    # Group session management
+    # ------------------------------------------------------------------
+    async def create_group_session(self, moderator_mind_id: str = "ada") -> dict:
+        """Create a new group session."""
+        assert self._db is not None
+        group_id = str(uuid.uuid4())
+        now = time.time()
+        await self._db.execute(
+            "INSERT INTO group_sessions (id, moderator_mind_id, created_at) VALUES (?, ?, ?)",
+            (group_id, moderator_mind_id, now),
+        )
+        await self._db.commit()
+        log.info("Created group session %s (moderator=%s)", group_id, moderator_mind_id)
+        return {
+            "id": group_id,
+            "moderator_mind_id": moderator_mind_id,
+            "created_at": now,
+            "ended_at": None,
+        }
+
+    async def get_group_session(self, group_session_id: str) -> dict | None:
+        """Get group session details."""
+        assert self._db is not None
+        row = await self._db.execute(
+            "SELECT * FROM group_sessions WHERE id = ?", (group_session_id,)
+        )
+        result = await row.fetchone()
+        if not result:
+            return None
+        return dict(result)
+
+    async def delete_group_session(self, group_session_id: str) -> dict:
+        """End a group session by setting ended_at."""
+        assert self._db is not None
+        now = time.time()
+        await self._db.execute(
+            "UPDATE group_sessions SET ended_at = ? WHERE id = ?",
+            (now, group_session_id),
+        )
+        await self._db.commit()
+        row = await self._db.execute(
+            "SELECT * FROM group_sessions WHERE id = ?", (group_session_id,)
+        )
+        result = await row.fetchone()
+        if not result:
+            raise ValueError(f"Group session not found: {group_session_id}")
+        return dict(result)
+
+    async def get_or_create_group_child_session(
+        self, group_session_id: str, mind_id: str
+    ) -> str:
+        """Find an existing child session for a mind in a group, or create one.
+
+        Returns the child session ID.
+        """
+        assert self._db is not None
+        rows = await self._db.execute(
+            "SELECT id FROM sessions WHERE group_session_id = ? AND mind_id = ? AND status != 'closed'",
+            (group_session_id, mind_id),
+        )
+        existing = await rows.fetchone()
+
+        if existing:
+            return existing["id"]
+
+        child = await self.create_session(
+            owner_type="group",
+            owner_ref=group_session_id,
+            client_ref=f"group-{group_session_id}-{mind_id}",
+            mind_id=mind_id,
+        )
+        child_session_id = child["id"]
+        # Link to group session
+        await self._db.execute(
+            "UPDATE sessions SET group_session_id = ? WHERE id = ?",
+            (group_session_id, child_session_id),
+        )
+        await self._db.commit()
+        return child_session_id
+
+    async def get_group_transcript(self, group_session_id: str) -> list[dict]:
+        """Get unified transcript for a group session, time-ordered with mind_id attribution."""
+        assert self._db is not None
+        rows = await self._db.execute(
+            "SELECT * FROM sessions WHERE group_session_id = ? ORDER BY last_active ASC",
+            (group_session_id,),
+        )
+        return [dict(r) for r in await rows.fetchall()]
 
     # ------------------------------------------------------------------
     # Background tasks

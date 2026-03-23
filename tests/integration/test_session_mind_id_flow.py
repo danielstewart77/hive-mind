@@ -5,8 +5,6 @@ and migration of existing databases without mind_id column.
 """
 
 import os
-import tempfile
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiosqlite
@@ -141,7 +139,7 @@ class TestSessionMindIdFlow:
     async def test_migration_adds_mind_id_to_existing_db(self, tmp_db_path):
         """Calling start() on a DB without the mind_id column should add it via migration."""
         from core.sessions import SessionManager
-        from core.models import ModelRegistry, Provider
+        from core.models import ModelRegistry
 
         # Create a DB with the old schema (no mind_id column)
         old_schema = """
