@@ -47,6 +47,9 @@ DATA_CLASS_REGISTRY: dict[str, DataClassDef] = {
     "ada-identity": DataClassDef(
         "ada-identity", "durable", ["durable", "identity"], False
     ),
+    "nagatha-identity": DataClassDef(
+        "nagatha-identity", "durable", ["durable", "identity"], False
+    ),
     "future-project": DataClassDef(
         "future-project", "reviewable", ["reviewable", "project"], False
     ),
