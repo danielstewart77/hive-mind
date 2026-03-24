@@ -251,6 +251,7 @@ async def send_group_message(group_session_id: str, body: GroupSessionMessageReq
 
     async def event_stream():
         async for event in session_mgr.send_message(child_session_id, body.content):
+            event.setdefault("mind_id", moderator_mind_id)
             yield f"data: {json.dumps(event)}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")

@@ -145,9 +145,8 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         if not responses:
             await update.message.reply_text("(no response from the hive)")
             return
-        for mind_id, text in responses:
-            label = mind_id.capitalize()
-            await update.message.reply_text(f"**{label}:** {text}")
+        for _mind_id, text in responses:
+            await update.message.reply_text(text)
     except Exception as exc:
         log.exception("Error sending group message")
         await update.message.reply_text(f"Error: {exc}")
