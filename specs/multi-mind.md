@@ -37,7 +37,7 @@ Session Manager (sessions.py)  ← reads mind_id, looks up config
         ↓
   ┌──────────────────────────────────┐
   │  Ada         Nagatha     Skippy  │
-  │  CLI Claude  SDK Claude  Ollama  │
+  │  CLI Claude  Codex       Ollama  │
   │  own soul    own soul    own soul│
   │  own db      own db      own db  │
   └──────────────────────────────────┘
@@ -64,7 +64,7 @@ graph TD
     subgraph Pods ["🧠 Isolated Mind Pods"]
         direction LR
         ADA["Ada\n· own soul.md\n· own SQLite\n· own MCP config\n· CLI Claude"]
-        NAG["Nagatha\n· own soul.md\n· own SQLite\n· own MCP config\n· SDK Claude"]
+        NAG["Nagatha\n· own soul.md\n· own SQLite\n· own MCP config\n· Codex harness [codex]"]
         SKIP["Skippy\n· own soul.md\n· own SQLite\n· own MCP config\n· Ollama"]
     end
 
@@ -94,8 +94,8 @@ minds:
     db: data/ada.db
     mcp_config: .mcp.ada.json
   nagatha:
-    backend: sdk_claude
-    model: sonnet
+    backend: codex_cli
+    model: codex
     soul: souls/nagatha.md
     db: data/nagatha.db
     mcp_config: .mcp.nagatha.json
@@ -108,6 +108,9 @@ minds:
 ```
 
 Each mind is just a parameter set. No new classes. No new modules.
+
+[codex] Nagatha remains `mind_id="nagatha"`. We are replacing the backend implementation behind that
+mind, not renaming the mind itself.
 
 ---
 
@@ -130,7 +133,12 @@ mcp_cfg   = mind_cfg["mcp_config"]
 backend   = mind_cfg["backend"]
 ```
 
-Then spawns the subprocess with those values — same spawn logic as today, just parameterised.
+Then dispatches using those values. CLI-backed minds still spawn a subprocess. SDK-backed minds keep
+per-session client state and stream results through the same event bus.
+
+[codex] For Nagatha, the implementation should continue to live at `minds/nagatha/implementation.py`
+and preserve the existing `spawn(...)`, `send(...)`, and `kill(...)` contract used by
+`core/sessions.py`.
 
 ---
 
@@ -142,6 +150,43 @@ Each mind gets:
 - `.mcp.<name>.json` — its own MCP tool permissions (optional: restrict what each mind can see)
 
 Ada's soul is already written. The others are stubs until named and defined.
+
+### Phase 3.5 — Replace Nagatha's harness: sdk_claude → codex_cli
+
+Nagatha's backend is replaced with a Codex CLI subprocess — the same pattern Ada uses with
+`cli_claude`. No API key required; auth via OpenAI Pro account (same mechanism as Claude CLI).
+
+**Config** (`minds/nagatha/config.yaml`):
+```yaml
+backend: codex_cli
+model: codex
+```
+
+**Invocation**:
+```
+codex exec --json --dangerously-bypass-approvals-and-sandbox -
+```
+Prompt piped via stdin. JSONL events streamed to stdout.
+
+**`minds/nagatha/implementation.py`** — same three-function contract as Ada:
+
+| Function | Behaviour |
+|---|---|
+| `spawn(...)` | Start `codex exec --json ...` subprocess. Same lifecycle as Ada. |
+| `send(...)` | Write stamped message to stdin. Read JSONL from stdout. Map to `assistant`/`result` events. |
+| `kill(...)` | Terminate subprocess. Identical to Ada. |
+
+**JSONL event mapping**:
+
+| Codex event | Internal event |
+|---|---|
+| item type `message` (agent output) | `assistant` |
+| `turn.completed` | `result` |
+| `turn.failed` | error |
+
+**What does NOT change**: Nagatha's soul node, session history, MCP tool access, `mind_id`.
+
+**Remove**: all `sdk_claude` implementation code from `minds/nagatha/implementation.py`.
 
 ---
 
@@ -164,6 +209,7 @@ The orchestrator (a skill, not a daemon) handles delegation: it sends a message 
 3. MCP tool permissions are per-mind. A mind only has access to the tools its config grants.
 4. `mind_id` is set at session creation and never changes mid-session.
 5. The Session Manager is backend-agnostic — it dispatches, it does not reason about identity.
+6. [codex] Changing Nagatha's harness must not change her identity, soul file, or stored session history.
 
 ---
 
@@ -209,6 +255,12 @@ This separation means:
 - MCP tool implementations — shared tools work for any mind
 - The `Event → Specification → Tools` architecture pattern
 - Deployment — all minds run in the same container unless explicitly split out later
+
+[codex] OpenAI docs note: Codex-capable models are currently exposed through the API/SDK, and
+OpenAI recommends the Responses API for streaming semantics. Sources:
+
+- https://platform.openai.com/docs/guides/streaming-responses
+- https://developers.openai.com/api/docs/models/gpt-5.2-codex
 
 ---
 
