@@ -210,6 +210,7 @@ class SessionManager:
         self._db: aiosqlite.Connection | None = None
         self._procs: dict[str, Any] = {}  # Process (Ada/CLI) or dict (Nagatha/SDK)
         self._mind_ids: dict[str, str] = {}  # session_id -> mind_id
+        self._cli_clean: dict[str, bool] = {}  # True = last CLI read completed
         self._locks: dict[str, asyncio.Lock] = {}
         self._reaper_task: asyncio.Task | None = None
         self._guard_task: asyncio.Task | None = None
@@ -474,6 +475,16 @@ class SessionManager:
                 # CLI path: stdin/stdout on the subprocess
                 proc = self._procs[session_id]
 
+                # Drain stale stdout before writing.  Two scenarios:
+                # (a) Post-result hook events (Stop hook / self-reflect) —
+                #     already buffered, drained in <100ms.
+                # (b) Previous stream interrupted (client disconnect) —
+                #     CLI may still be producing output, need longer wait.
+                if not self._cli_clean.get(session_id, True):
+                    await self._drain_stale_stdout(session_id, proc, timeout=30.0)
+                else:
+                    await self._drain_stale_stdout(session_id, proc, timeout=0.1)
+
                 # Build message content — multimodal array when images present
                 if images:
                     message_content: str | list = [{"type": "text", "text": stamped_content}]
@@ -496,69 +507,87 @@ class SessionManager:
                 proc.stdin.write(msg.encode())
                 await proc.stdin.drain()
 
-                retried = False
-                while True:
-                    async for line in proc.stdout:
-                        line = line.decode().strip()
-                        if not line:
-                            continue
-                        try:
-                            event = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
+                cli_completed = False
+                try:
+                    retried = False
+                    while True:
+                        async for line in proc.stdout:
+                            line = line.decode().strip()
+                            if not line:
+                                continue
+                            try:
+                                event = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
 
-                        # Detect stale --resume (conversation lost after rebuild)
-                        if (
-                            not retried
-                            and event.get("type") == "result"
-                            and event.get("is_error")
-                            and any(
-                                "No conversation found" in e
-                                for e in event.get("errors", [])
-                            )
-                        ):
-                            log.warning(
-                                "Stale resume for session %s — clearing claude_sid "
-                                "and retrying",
-                                session_id,
-                            )
-                            retried = True
-                            await self._kill_process(session_id)
-                            await self._db.execute(
-                                "UPDATE sessions SET claude_sid = NULL WHERE id = ?",
-                                (session_id,),
-                            )
-                            await self._db.commit()
-                            await self._spawn(
-                                session_id, session["model"],
-                                autopilot=bool(session["autopilot"]),
-                                mind_id=mind_id,
-                            )
-                            proc = self._procs[session_id]
-                            proc.stdin.write(msg.encode())
-                            await proc.stdin.drain()
-                            break
-
-                        yield event
-
-                        now = time.time()
-                        await self._db.execute(
-                            "UPDATE sessions SET last_active = ? WHERE id = ?",
-                            (now, session_id),
-                        )
-
-                        if event.get("type") == "result":
-                            claude_sid = event.get("session_id")
-                            if claude_sid:
-                                await self._db.execute(
-                                    "UPDATE sessions SET claude_sid = ? WHERE id = ?",
-                                    (claude_sid, session_id),
+                            # Detect stale --resume (conversation lost after rebuild)
+                            if (
+                                not retried
+                                and event.get("type") == "result"
+                                and event.get("is_error")
+                                and any(
+                                    "No conversation found" in e
+                                    for e in event.get("errors", [])
                                 )
-                            await self._db.commit()
-                            return  # done — exit the generator
-                    else:
-                        # for-loop exhausted without break (EOF) — we're done
-                        return
+                            ):
+                                log.warning(
+                                    "Stale resume for session %s — clearing claude_sid "
+                                    "and retrying",
+                                    session_id,
+                                )
+                                retried = True
+                                await self._kill_process(session_id)
+                                await self._db.execute(
+                                    "UPDATE sessions SET claude_sid = NULL WHERE id = ?",
+                                    (session_id,),
+                                )
+                                await self._db.commit()
+                                await self._spawn(
+                                    session_id, session["model"],
+                                    autopilot=bool(session["autopilot"]),
+                                    mind_id=mind_id,
+                                )
+                                proc = self._procs[session_id]
+                                proc.stdin.write(msg.encode())
+                                await proc.stdin.drain()
+                                break
+
+                            # Process result bookkeeping BEFORE yield so
+                            # that if the caller never resumes us (client
+                            # disconnect after reading the result event),
+                            # the flags are already correct.
+                            is_result = event.get("type") == "result"
+                            if is_result:
+                                claude_sid = event.get("session_id")
+                                if claude_sid:
+                                    await self._db.execute(
+                                        "UPDATE sessions SET claude_sid = ? WHERE id = ?",
+                                        (claude_sid, session_id),
+                                    )
+                                await self._db.commit()
+                                cli_completed = True
+                                self._cli_clean[session_id] = True
+
+                            yield event
+
+                            now = time.time()
+                            await self._db.execute(
+                                "UPDATE sessions SET last_active = ? WHERE id = ?",
+                                (now, session_id),
+                            )
+
+                            if is_result:
+                                return  # done — exit the generator
+                        else:
+                            # for-loop exhausted without break (EOF) — we're done
+                            cli_completed = True
+                            self._cli_clean[session_id] = True
+                            return
+                finally:
+                    if not cli_completed:
+                        # Client disconnected mid-stream — mark dirty so
+                        # the next send_message drains before writing.
+                        self._cli_clean[session_id] = False
 
     # ------------------------------------------------------------------
     # Model switching
@@ -647,6 +676,49 @@ class SessionManager:
             "uptime_seconds": uptime,
             "status": "closed",
         }
+
+    # ------------------------------------------------------------------
+    # Stdout drain helper
+    # ------------------------------------------------------------------
+    async def _drain_stale_stdout(
+        self, session_id: str, proc: Any, timeout: float = 30.0,
+    ) -> None:
+        """Consume leftover stdout from a previously interrupted CLI response.
+
+        Called when the prior send_message generator was abandoned (client
+        disconnect).  Reads until the stale result event arrives or timeout.
+        """
+        if proc.stdout.at_eof():
+            return
+        drained = 0
+        while True:
+            try:
+                raw = await asyncio.wait_for(proc.stdout.readline(), timeout=timeout)
+                if not raw:
+                    break  # EOF
+                drained += 1
+                line = raw.decode().strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                    if ev.get("type") == "result":
+                        # Preserve claude_sid from the stale result
+                        claude_sid = ev.get("session_id")
+                        if claude_sid:
+                            await self._db.execute(
+                                "UPDATE sessions SET claude_sid = ? WHERE id = ?",
+                                (claude_sid, session_id),
+                            )
+                            await self._db.commit()
+                        break
+                except json.JSONDecodeError:
+                    continue
+            except asyncio.TimeoutError:
+                break
+        if drained:
+            log.info("Drained %d stale stdout lines for session %s", drained, session_id)
+        self._cli_clean[session_id] = True
 
     # ------------------------------------------------------------------
     # Subprocess management
