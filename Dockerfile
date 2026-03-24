@@ -16,8 +16,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN ln -sf /usr/bin/python3 /usr/bin/python
 
-# Claude Code CLI
-RUN npm install -g @anthropic-ai/claude-code
+# Claude Code CLI + Codex CLI
+RUN npm install -g @anthropic-ai/claude-code @openai/codex
 
 # Non-root user — UID 1000 matches typical host user for bind-mount perms
 # Ubuntu 24.04 ships with uid 1000 as 'ubuntu', so rename it
