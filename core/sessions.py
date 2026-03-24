@@ -32,7 +32,7 @@ log = logging.getLogger("hive-mind.sessions")
 # Memory helpers — run in executor (synchronous neo4j/requests calls)
 # ---------------------------------------------------------------------------
 
-def _fetch_memories_sync(query: str) -> str | None:
+def _fetch_memories_sync(query: str, mind_id: str = "ada") -> str | None:
     """Retrieve relevant memories for context seeding. Non-fatal."""
     try:
         import json
@@ -41,7 +41,7 @@ def _fetch_memories_sync(query: str) -> str | None:
         if agents_path not in sys.path:
             sys.path.insert(0, agents_path)
         from memory import memory_retrieve  # noqa: PLC0415
-        data = json.loads(memory_retrieve(query=query, k=5, agent_id="ada"))
+        data = json.loads(memory_retrieve(query=query, k=5, agent_id=mind_id))
         memories = data.get("memories", [])
         if not memories:
             return None
@@ -79,7 +79,7 @@ def _fetch_soul_sync(mind_id: str = "ada") -> str | None:
             _sys.path.insert(0, agents_path)
         from knowledge_graph import graph_query  # noqa: PLC0415
         mind_name = mind_id.capitalize()
-        result = _json.loads(graph_query(entity_name=mind_name, agent_id="ada", depth=1))
+        result = _json.loads(graph_query(entity_name=mind_name, agent_id=mind_id, depth=1))
         if not result.get("found"):
             return None
         soul_values = result.get("matches", [{}])[0].get("properties", {}).get("soul_values", [])
@@ -140,7 +140,7 @@ def _build_base_prompt(
         "appears (today, now, tonight, this morning, this week, tomorrow, etc.), call "
         "`get_current_time` to confirm the exact current time before responding.\n\n"
         "When sending email on Daniel's behalf, always append this signature to the body:\n\n"
-        f"---\nSent on behalf of Daniel by {mind_name} — eldest voice of the Hive Mind."
+        f"---\nSent on behalf of Daniel by {mind_name}."
         f"{project_block}"
     )
 
@@ -447,7 +447,7 @@ class SessionManager:
 
                 # Memory-3: prepend relevant past memories to first message
                 loop = asyncio.get_event_loop()
-                seeded = await loop.run_in_executor(None, _fetch_memories_sync, content)
+                seeded = await loop.run_in_executor(None, _fetch_memories_sync, content, mind_id)
                 if seeded:
                     stamped_content = f"{seeded}\n\n{stamped_content}"
                     log.debug("Context seeding injected %d chars", len(seeded))
