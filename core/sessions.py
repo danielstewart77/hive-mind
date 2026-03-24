@@ -566,7 +566,11 @@ class SessionManager:
                                     )
                                 await self._db.commit()
                                 cli_completed = True
-                                self._cli_clean[session_id] = True
+                                # Check if the Stop hook will trigger a
+                                # self-reflect turn AFTER this result.  If
+                                # so, mark dirty so the next message drains
+                                # the stale result before writing.
+                                self._cli_clean[session_id] = not self._stop_hook_will_nudge()
 
                             yield event
 
@@ -676,6 +680,25 @@ class SessionManager:
             "uptime_seconds": uptime,
             "status": "closed",
         }
+
+    # ------------------------------------------------------------------
+    # Stop hook prediction
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _stop_hook_will_nudge() -> bool:
+        """Check if the Stop hook (soul_nudge.sh) will trigger self-reflect.
+
+        The hook increments a counter on each turn and fires on every 5th.
+        We read the counter to predict whether a stale self-reflect result
+        will appear in stdout after this result event.
+        """
+        try:
+            with open("/tmp/claude_soul_turn_counter") as f:
+                count = int(f.read().strip())
+            # Hook already ran and incremented. Nudge fires when count % 5 == 0.
+            return count % 5 == 0
+        except Exception:
+            return False
 
     # ------------------------------------------------------------------
     # Stdout drain helper
