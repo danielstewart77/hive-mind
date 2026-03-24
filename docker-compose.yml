@@ -116,6 +116,32 @@ services:
       - XDG_DATA_HOME=/home/hivemind/.claude/data
     command: ["/opt/venv/bin/python3", "-m", "clients.telegram_bot"]
 
+  hivemind-bot:
+    build: .
+    container_name: hive-mind-hivemind
+    working_dir: /usr/src/app
+    volumes:
+      - ${HOST_PROJECT_DIR:-.}:/usr/src/app
+      - ${HOST_CLAUDE_DIR:-~/.claude}:/home/hivemind/.claude
+    restart: unless-stopped
+    depends_on:
+      - server
+    networks:
+      - hivemind
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      - HIVE_MIND_SERVER_URL=http://server:8420
+      - PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring
+      - PYTHONNOUSERSITE=1
+      - XDG_DATA_HOME=/home/hivemind/.claude/data
+    command: ["/opt/venv/bin/python3", "-m", "clients.hivemind_bot"]
+
   scheduler:
     build: .
     container_name: hive-mind-scheduler

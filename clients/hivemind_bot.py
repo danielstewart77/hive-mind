@@ -1,17 +1,24 @@
 """
-Hive Mind Group Chat Discord Bot (skeleton).
+Hive Mind Group Chat Telegram Bot.
 
 Routes messages through group sessions for multi-mind conversations.
-Token not yet provisioned -- this is a structural skeleton only.
+Each mind's response is attributed by name in the chat.
 """
 
 import json
 import logging
 import os
-from typing import Optional
 
 import aiohttp
-import discord
+import keyring
+from telegram import Update
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 from config import config
 
@@ -19,138 +26,155 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
-log = logging.getLogger("hive-mind-group-bot")
+log = logging.getLogger("hive-mind-hivemind-bot")
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-DISCORD_MSG_LIMIT = 2000
-SERVER_URL = os.environ.get(
-    "HIVE_MIND_SERVER_URL", f"http://localhost:{config.server_port}"
-)
+SERVER_URL = os.environ.get("HIVE_MIND_SERVER_URL", f"http://localhost:{config.server_port}")
 
-# Group session state: channel_id -> group_session_id
+# chat_id -> group_session_id
 _active_group_sessions: dict[int, str] = {}
 
+http: aiohttp.ClientSession | None = None
 
-# ---------------------------------------------------------------------------
-# Auth helpers
-# ---------------------------------------------------------------------------
-def _get_bot_token() -> Optional[str]:
-    """Get bot token -- keyring first, env fallback."""
+
+def _get_bot_token() -> str | None:
     try:
-        import keyring
-        token = keyring.get_password("hive-mind", "HIVEMIND_DISCORD_TOKEN")
+        token = keyring.get_password("hive-mind", "HIVEMIND_TELEGRAM_BOT_TOKEN")
         if token:
             return token
     except Exception:
         pass
-    return os.getenv("HIVEMIND_DISCORD_TOKEN")
+    return os.getenv("HIVEMIND_TELEGRAM_BOT_TOKEN")
 
 
 def _is_allowed_user(user_id: int) -> bool:
-    """Fail-closed: empty allowlist = no access."""
-    return user_id in config.discord_allowed_users
+    return user_id in config.telegram_allowed_users
+
+
+async def _ensure_http() -> aiohttp.ClientSession:
+    global http
+    if http is None or http.closed:
+        http = aiohttp.ClientSession()
+    return http
+
+
+async def _get_or_create_group_session(chat_id: int) -> str:
+    if chat_id in _active_group_sessions:
+        return _active_group_sessions[chat_id]
+    session = await _ensure_http()
+    async with session.post(
+        f"{SERVER_URL}/group-sessions",
+        json={"moderator_mind_id": "ada"},
+    ) as resp:
+        data = await resp.json()
+        group_session_id = data["id"]
+        _active_group_sessions[chat_id] = group_session_id
+        log.info("Created group session %s for chat %d", group_session_id, chat_id)
+        return group_session_id
+
+
+async def _send_group_message(chat_id: int, content: str) -> list[tuple[str, str]]:
+    """Send message to group session. Returns list of (mind_id, text) tuples."""
+    group_session_id = await _get_or_create_group_session(chat_id)
+    session = await _ensure_http()
+    responses: list[tuple[str, str]] = []
+
+    timeout = aiohttp.ClientTimeout(total=0, sock_read=0)
+    async with session.post(
+        f"{SERVER_URL}/group-sessions/{group_session_id}/message",
+        json={"content": content},
+        timeout=timeout,
+    ) as resp:
+        buf = ""
+        async for chunk in resp.content.iter_any():
+            buf += chunk.decode()
+            while "\n" in buf:
+                raw_line, buf = buf.split("\n", 1)
+                raw_line = raw_line.strip()
+                if not raw_line or not raw_line.startswith("data: "):
+                    continue
+                try:
+                    event = json.loads(raw_line.removeprefix("data: "))
+                except json.JSONDecodeError:
+                    continue
+                if event.get("type") == "assistant":
+                    mind_id = event.get("mind_id", "unknown")
+                    msg = event.get("message", {})
+                    content_blocks = msg.get("content", [])
+                    if isinstance(content_blocks, list):
+                        text = " ".join(
+                            b.get("text", "") for b in content_blocks if b.get("type") == "text"
+                        ).strip()
+                    else:
+                        text = str(content_blocks)
+                    if text:
+                        responses.append((mind_id, text))
+
+    return responses
 
 
 # ---------------------------------------------------------------------------
-# Group session management
+# Handlers
 # ---------------------------------------------------------------------------
-class HiveMindGroupBot:
-    """Bot skeleton for multi-mind group conversations."""
 
-    def __init__(self) -> None:
-        self.http: Optional[aiohttp.ClientSession] = None
+async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_allowed_user(update.effective_user.id):
+        return
+    await update.message.reply_text("Hive Mind group chat. Send a message to hear from the collective.")
 
-    async def _ensure_http(self) -> aiohttp.ClientSession:
-        if self.http is None or self.http.closed:
-            self.http = aiohttp.ClientSession()
-        return self.http
 
-    async def create_group_session(
-        self, channel_id: int, moderator: str = "ada"
-    ) -> str:
-        """Create a new group session via the gateway."""
-        http = await self._ensure_http()
-        async with http.post(
-            f"{SERVER_URL}/group-sessions",
-            json={"moderator_mind_id": moderator},
-        ) as resp:
-            data = await resp.json()
-            group_session_id = data["id"]
-            _active_group_sessions[channel_id] = group_session_id
-            log.info(
-                "Created group session %s for channel %d",
-                group_session_id, channel_id,
-            )
-            return group_session_id
+async def cmd_new(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_allowed_user(update.effective_user.id):
+        return
+    chat_id = update.effective_chat.id
+    _active_group_sessions.pop(chat_id, None)
+    group_session_id = await _get_or_create_group_session(chat_id)
+    await update.message.reply_text(f"New group session started: {group_session_id[:8]}…")
 
-    async def send_group_message(
-        self, channel_id: int, content: str
-    ) -> list[str]:
-        """Send a message to the group session for this channel.
 
-        Returns a list of response text chunks with mind attribution.
-        """
-        group_session_id = _active_group_sessions.get(channel_id)
-        if not group_session_id:
-            group_session_id = await self.create_group_session(channel_id)
+async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.message.text:
+        return
+    if not _is_allowed_user(update.effective_user.id):
+        return
 
-        http = await self._ensure_http()
-        chunks: list[str] = []
+    chat_id = update.effective_chat.id
+    content = update.message.text
 
-        sse_timeout = aiohttp.ClientTimeout(total=0, sock_read=0)
-        async with http.post(
-            f"{SERVER_URL}/group-sessions/{group_session_id}/message",
-            json={"content": content},
-            timeout=sse_timeout,
-        ) as resp:
-            buf = ""
-            async for chunk in resp.content.iter_any():
-                buf += chunk.decode()
-                while "\n" in buf:
-                    raw_line, buf = buf.split("\n", 1)
-                    raw_line = raw_line.strip()
-                    if not raw_line or not raw_line.startswith("data: "):
-                        continue
-                    try:
-                        event = json.loads(raw_line.removeprefix("data: "))
-                    except json.JSONDecodeError:
-                        continue
-                    if event.get("type") == "assistant":
-                        for block in event.get("message", {}).get("content", []):
-                            if block.get("type") == "text" and block.get("text"):
-                                chunks.append(block["text"])
-
-        return chunks
-
-    async def handle_new_command(self, channel_id: int) -> str:
-        """Handle /new -- create fresh group session."""
-        group_session_id = await self.create_group_session(channel_id)
-        return f"New group session created: {group_session_id}"
-
-    async def close(self) -> None:
-        """Clean up HTTP session."""
-        if self.http and not self.http.closed:
-            await self.http.close()
+    try:
+        responses = await _send_group_message(chat_id, content)
+        if not responses:
+            await update.message.reply_text("(no response from the hive)")
+            return
+        for mind_id, text in responses:
+            label = mind_id.capitalize()
+            await update.message.reply_text(f"**{label}:** {text}")
+    except Exception as exc:
+        log.exception("Error sending group message")
+        await update.message.reply_text(f"Error: {exc}")
 
 
 # ---------------------------------------------------------------------------
-# Discord bot setup (skeleton -- token not yet provisioned)
+# Entry point
 # ---------------------------------------------------------------------------
-def _build_bot() -> discord.Client:
-    """Build the Discord client. Token binding deferred."""
-    intents = discord.Intents.default()
-    intents.message_content = True
-    client = discord.Client(intents=intents)
-    return client
 
-
-# Entry point (will be wired when token is provisioned)
-if __name__ == "__main__":
+def main() -> None:
     token = _get_bot_token()
     if not token:
-        log.error("HIVEMIND_DISCORD_TOKEN not configured -- cannot start bot")
-    else:
-        bot = _build_bot()
-        bot.run(token)
+        log.error("HIVEMIND_TELEGRAM_BOT_TOKEN not configured — cannot start bot")
+        return
+
+    app = (
+        ApplicationBuilder()
+        .token(token)
+        .build()
+    )
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("new", cmd_new))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    log.info("HiveMind Telegram bot starting…")
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
