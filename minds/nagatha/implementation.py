@@ -1,24 +1,20 @@
-"""Nagatha mind implementation — Anthropic SDK-based spawn/send/kill.
+"""Nagatha mind implementation — Codex CLI, one subprocess per turn.
 
-Nagatha uses the Anthropic Python SDK (anthropic.AsyncAnthropic) for
-direct API communication instead of the CLI subprocess model.
+Nagatha uses `codex exec --json --full-auto -` for each turn.
+The Codex thread_id (from `thread.started`) is stored as claude_sid so
+`codex exec resume <thread_id>` can continue the conversation on respawn.
 """
 
+import asyncio
+import json
 import logging
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
 log = logging.getLogger("hive-mind.minds.nagatha")
 
-# Model name mappings from short aliases to full API model IDs
-_MODEL_MAP: dict[str, str] = {
-    "sonnet": "claude-sonnet-4-20250514",
-    "opus": "claude-opus-4-20250514",
-    "haiku": "claude-haiku-4-20250514",
-}
-
-# Session state: session_id -> {client, model, system_prompt, messages}
-_sessions: dict[str, dict[str, Any]] = {}
+# Module-level state: session_id -> {"system_prompt": str, "thread_id": str | None}
+_sessions: dict[str, dict] = {}
 
 
 async def spawn(
@@ -34,132 +30,132 @@ async def spawn(
     mcp_config: str = "",
     registry: Any = None,
     config_obj: Any = None,
-) -> object:
-    """Create an Anthropic SDK client for this session.
-
-    Args:
-        session_id: Unique session identifier.
-        model: Model name (e.g. 'sonnet', 'opus').
-        build_base_prompt: Callable to build the system prompt.
-        Other args: Accepted for interface compatibility with Ada.
-
-    Returns:
-        A sentinel object representing the session (not a subprocess).
-    """
-    import anthropic
-
-    base = build_base_prompt(
-        allowed_directories=allowed_directories,
-        soul_file=soul_file,
-        mind_id=mind_id,
-    ) if build_base_prompt else ""
+) -> dict:
+    """Initialise Nagatha's per-session state. No persistent subprocess."""
+    base = (
+        build_base_prompt(
+            allowed_directories=allowed_directories,
+            soul_file=soul_file,
+            mind_id=mind_id,
+        )
+        if build_base_prompt
+        else ""
+    )
     full_prompt = base if not surface_prompt else f"{base}\n\n{surface_prompt}"
 
-    client = anthropic.AsyncAnthropic()
-    api_model = _MODEL_MAP.get(model, model)
-
-    _sessions[session_id] = {
-        "client": client,
-        "model": api_model,
+    state = {
         "system_prompt": full_prompt,
-        "messages": [],
+        "thread_id": resume_sid,  # None on first spawn, populated after first turn
     }
-
+    _sessions[session_id] = state
     log.info(
-        "Spawned SDK session for %s (model=%s, mind=%s)",
-        session_id, api_model, mind_id,
+        "Nagatha session %s initialised (resume=%s)",
+        session_id,
+        resume_sid or "new",
     )
-    return _sessions[session_id]
+    return state
 
 
 async def send(
     session_id: str,
     content: str,
     images: list[dict] | None = None,
-    **kwargs: Any,
+    db: Any = None,
 ) -> AsyncGenerator[dict, None]:
-    """Send a message via the Anthropic SDK and yield response events.
-
-    Yields events in the same NDJSON format as the CLI:
-    - {"type": "assistant", "message": {"role": "assistant", "content": [...]}}
-    - {"type": "result", "result": "...", "session_id": None}
-    """
+    """Run one Codex CLI turn and yield internal session events."""
     state = _sessions.get(session_id)
-    if not state:
-        yield {
-            "type": "result",
-            "is_error": True,
-            "errors": [f"No SDK session found for {session_id}"],
-            "result": "",
-            "session_id": None,
-        }
+    if state is None:
+        log.error("No state for Nagatha session %s", session_id)
+        yield {"type": "result", "is_error": True}
         return
 
-    client = state["client"]
-    model = state["model"]
-    system_prompt = state["system_prompt"]
-    messages = state["messages"]
+    thread_id = state.get("thread_id")
 
-    # Build user message
-    if images:
-        user_content: list[dict[str, Any]] = [{"type": "text", "text": content}]
-        for img in images:
-            user_content.append({
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": img["media_type"],
-                    "data": img["data"],
-                },
-            })
+    # Build command — resume if we have a prior thread_id
+    if thread_id:
+        cmd = ["codex", "exec", "--json", "--full-auto", "resume", thread_id, "-"]
+        stdin_content = content
     else:
-        user_content = [{"type": "text", "text": content}]
+        cmd = ["codex", "exec", "--json", "--full-auto", "-"]
+        # Inject system prompt on the first turn only
+        stdin_content = f"{state['system_prompt']}\n\n---\n\n{content}"
 
-    messages.append({"role": "user", "content": user_content})
+    if images:
+        log.warning("Nagatha session %s: image input not supported, ignoring", session_id)
 
-    try:
-        full_text = ""
-        async with client.messages.stream(
-            model=model,
-            system=system_prompt,
-            messages=messages,
-            max_tokens=8192,
-        ) as stream:
-            async for text in stream.text_stream:
-                full_text += text
-                yield {
-                    "type": "assistant",
-                    "message": {
-                        "role": "assistant",
-                        "content": [{"type": "text", "text": text}],
-                    },
-                }
+    log.info(
+        "Nagatha session %s: spawning codex turn (thread=%s)",
+        session_id,
+        thread_id or "new",
+    )
 
-        # Append assistant reply to conversation history
-        messages.append({
-            "role": "assistant",
-            "content": [{"type": "text", "text": full_text}],
-        })
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        limit=10 * 1024 * 1024,
+    )
 
-        yield {
-            "type": "result",
-            "result": full_text,
-            "session_id": None,
-        }
+    proc.stdin.write(stdin_content.encode())
+    await proc.stdin.drain()
+    proc.stdin.close()
 
-    except Exception:
-        log.exception("SDK send error for session %s", session_id)
-        yield {
-            "type": "result",
-            "is_error": True,
-            "errors": ["SDK communication error — see server logs"],
-            "result": "",
-            "session_id": None,
-        }
+    current_thread_id = thread_id
+
+    async for raw_line in proc.stdout:
+        line = raw_line.decode().strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        etype = event.get("type", "")
+
+        if etype == "thread.started":
+            current_thread_id = event.get("thread_id")
+            state["thread_id"] = current_thread_id
+            if db and current_thread_id:
+                await db.execute(
+                    "UPDATE sessions SET claude_sid = ? WHERE id = ?",
+                    (current_thread_id, session_id),
+                )
+
+        elif etype == "item.completed":
+            item = event.get("item", {})
+            if item.get("type") == "agent_message":
+                text = item.get("text", "")
+                if text:
+                    yield {
+                        "type": "assistant",
+                        "message": {"role": "assistant", "content": text},
+                    }
+
+        elif etype == "turn.completed":
+            await proc.wait()
+            yield {
+                "type": "result",
+                "session_id": current_thread_id,
+                "stop_reason": "end_turn",
+                "is_error": False,
+            }
+            return
+
+        elif etype == "turn.failed":
+            error_msg = event.get("error", {}).get("message", "Unknown error")
+            log.error("Nagatha session %s: turn failed: %s", session_id, error_msg)
+            await proc.wait()
+            yield {"type": "result", "is_error": True}
+            return
+
+    await proc.wait()
+    # Fallback — process exited without a turn.completed event
+    yield {"type": "result", "session_id": current_thread_id, "is_error": False}
 
 
 async def kill(session_id: str) -> None:
-    """Clean up SDK session state."""
-    removed = _sessions.pop(session_id, None)
-    if removed:
-        log.info("Killed SDK session %s", session_id)
+    """Clean up Nagatha session state."""
+    _sessions.pop(session_id, None)
+    log.info("Nagatha session %s killed", session_id)
