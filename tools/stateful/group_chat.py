@@ -9,7 +9,7 @@ import os
 
 import requests  # type: ignore[import-untyped]
 
-GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://localhost:8420")
+GATEWAY_URL = os.environ.get("HIVE_MIND_SERVER_URL", os.environ.get("GATEWAY_URL", "http://localhost:8420"))
 logger = logging.getLogger(__name__)
 
 
@@ -75,6 +75,8 @@ def forward_to_mind(mind_id: str, message: str, group_session_id: str) -> str:
             try:
                 event = json.loads(line.removeprefix("data: "))
             except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
                 continue
             if event.get("type") == "assistant":
                 for block in event.get("message", {}).get("content", []):

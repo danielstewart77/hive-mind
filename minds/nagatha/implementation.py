@@ -130,7 +130,10 @@ async def send(
                 if text:
                     yield {
                         "type": "assistant",
-                        "message": {"role": "assistant", "content": text},
+                        "message": {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": text}],
+                        },
                     }
 
         elif etype == "turn.completed":
