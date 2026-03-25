@@ -6,7 +6,7 @@ services:
     volumes:
       - ${HOST_PROJECT_DIR:-.}:/usr/src/app
       - ${HOST_CLAUDE_DIR:-~/.claude}:/home/hivemind/.claude
-      - codex-auth:/home/hivemind/.codex
+      - ${HOST_CODEX_DIR:-~/.codex}:/home/hivemind/.codex
       - sessions-db:/usr/src/app/data
       - ${HOST_MCP_DIR:-/home/USER/Storage/Dev/hive_mind_mcp}:/home/USER/Storage/Dev/hive_mind_mcp
       - ${HOST_SPARK_DIR:-/home/USER/Storage/Dev/spark_to_bloom}:/home/USER/Storage/Dev/spark_to_bloom
@@ -231,4 +231,3 @@ volumes:
   planka-db:
   planka-data:
   whisper-cache:
-  codex-auth:
