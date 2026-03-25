@@ -306,7 +306,7 @@ class SessionManager:
         soul_rel = mind_cfg.get("soul")
         soul_file = PROJECT_DIR / soul_rel if soul_rel else None
 
-        await self._spawn(session_id, model, autopilot=False, surface_prompt=surface_prompt, allowed_directories=allowed_directories, soul_file=soul_file, mind_id=mind_id)
+        await self._spawn(session_id, model, autopilot=False, surface_prompt=surface_prompt, allowed_directories=allowed_directories, soul_file=soul_file, mind_id=mind_id, is_group_session=(owner_type == "group"))
         log.info("Created session %s (model=%s, mind=%s, owner=%s)", session_id, model, mind_id, owner_ref)
         return await self._session_dict(session_id)
 
@@ -661,6 +661,7 @@ class SessionManager:
         allowed_directories: list[str] | None = None,
         soul_file: Path | None = None,
         mind_id: str = "ada",
+        is_group_session: bool = False,
     ) -> Any:
         impl = _load_implementation(mind_id)
         result = await impl.spawn(
@@ -676,6 +677,7 @@ class SessionManager:
             mcp_config=MCP_CONFIG,
             registry=self._registry,
             config_obj=config,
+            is_group_session=is_group_session,
         )
         self._procs[session_id] = result
         self._mind_ids[session_id] = mind_id

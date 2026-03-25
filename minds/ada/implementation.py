@@ -27,6 +27,7 @@ async def spawn(
     mcp_config: str = "",
     registry: Any = None,
     config_obj: Any = None,
+    is_group_session: bool = False,
 ) -> asyncio.subprocess.Process:
     """Spawn a Claude CLI subprocess in stream-json mode.
 
@@ -77,6 +78,8 @@ async def spawn(
     env = os.environ.copy()
     if provider:
         env.update(provider.env_overrides)
+    if is_group_session:
+        env["HIVEMIND_GROUP_SESSION"] = "1"
 
     from config import PROJECT_DIR
 
