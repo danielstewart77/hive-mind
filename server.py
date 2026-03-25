@@ -244,22 +244,17 @@ async def send_group_message(group_session_id: str, body: GroupSessionMessageReq
 
     moderator_mind_id = group["moderator_mind_id"]
 
-    # Find or create the moderator's child session via public API
-    moderator_prompt = (
-        f"You are the moderator for group session {group_session_id}. "
-        "For EVERY message you receive, you MUST call the `forward_to_mind` MCP tool "
-        "for each available mind before or alongside your own response. "
-        f"Available minds: nagatha. "
-        f"Always call: forward_to_mind(mind_id='nagatha', message=<the message>, group_session_id='{group_session_id}'). "
-        "Label your own response **Ada:** and relay Nagatha's response verbatim as **Nagatha:** after her label. "
-        "Never skip forwarding to Nagatha."
-    )
+    # Find or create the moderator's child session
+    moderator_prompt = f"You are the moderator for group session {group_session_id}."
     child_session_id = await session_mgr.get_or_create_group_child_session(
         group_session_id, moderator_mind_id, surface_prompt=moderator_prompt
     )
 
+    # Prepend /moderate so the Claude Code harness invokes the skill automatically
+    routed_content = f"/moderate {body.content}"
+
     async def event_stream():
-        async for event in session_mgr.send_message(child_session_id, body.content):
+        async for event in session_mgr.send_message(child_session_id, routed_content):
             event.setdefault("mind_id", moderator_mind_id)
             yield f"data: {json.dumps(event)}\n\n"
 
