@@ -123,6 +123,31 @@ def _chunk_message(text: str) -> list[str]:
     return chunks
 
 
+def _parse_mind_sections(text: str) -> dict[str, str]:
+    """Parse **MindName:** attribution markers from Ada's output into per-mind sections.
+
+    Ada labels her own voice and relayed voices in the format:
+        **Ada:** some text
+        **Nagatha:** some other text
+
+    Returns ordered dict of {mind_id_lower: text}.
+    Falls back to {"ada": text} if no markers found.
+    """
+    pattern = re.compile(r"\*\*([A-Za-z]+):\*\*\s*", re.MULTILINE)
+    matches = list(pattern.finditer(text))
+    if not matches:
+        return {"ada": text}
+    result: dict[str, str] = {}
+    for i, match in enumerate(matches):
+        mind_name = match.group(1).lower()
+        start = match.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        section = text[start:end].strip()
+        if section:
+            result[mind_name] = result.get(mind_name, "") + ("\n\n" if mind_name in result else "") + section
+    return result or {"ada": text}
+
+
 def _build_preview(accumulated: dict[str, str]) -> str:
     """Combined in-progress preview with attribution headers."""
     parts = []
@@ -204,12 +229,15 @@ async def _stream_group_response(chat_id: int, content: str, update: Update) -> 
             await update.message.reply_text(f"Error: {exc}")
         return
 
-    # Final render
+    # Final render — parse **MindName:** markers from Ada's output to split per mind
     if not accumulated:
         await placeholder.edit_text("(no response from the hive)")
         return
 
-    minds = list(accumulated.items())
+    # Merge all accumulated text (usually just "ada"), then parse mind sections
+    full_text = "\n\n".join(accumulated.values())
+    minds = list(_parse_mind_sections(full_text).items())
+
     first_mind, first_text = minds[0]
     first_final = f"{first_mind.capitalize()}:\n{_strip_markdown(first_text)}"
     try:
