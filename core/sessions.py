@@ -113,13 +113,21 @@ def _build_base_prompt(
             "The file soul.md is a fallback stub — ignore it when the graph is available.\n\n"
         )
     else:
-        # Graph unavailable — fall back to soul file
-        identity_block = ""
-        soul_instruction = (
-            f"Read {effective_soul_file} at the start of each session. "
-            "Update it when you experience something that meaningfully shapes your identity or preferences. "
-            "Keep it extremely short — it is a soul, not a manifesto. Prune ruthlessly.\n\n"
-        )
+        # Graph unavailable — inject soul file content directly so sandboxed minds don't need file access
+        try:
+            soul_content = effective_soul_file.read_text() if effective_soul_file and effective_soul_file.exists() else ""
+        except Exception:
+            soul_content = ""
+        if soul_content:
+            identity_block = f"{soul_content}\n\n"
+            soul_instruction = (
+                "Your soul is loaded above from the soul file (graph was unavailable). "
+                "Update it when you experience something that meaningfully shapes your identity or preferences. "
+                "Keep it extremely short — it is a soul, not a manifesto. Prune ruthlessly.\n\n"
+            )
+        else:
+            identity_block = ""
+            soul_instruction = ""
 
     if allowed_directories:
         lines = []
