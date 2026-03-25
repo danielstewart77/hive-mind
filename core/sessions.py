@@ -754,7 +754,7 @@ class SessionManager:
         return dict(result)
 
     async def get_or_create_group_child_session(
-        self, group_session_id: str, mind_id: str
+        self, group_session_id: str, mind_id: str, surface_prompt: str | None = None
     ) -> str:
         """Find an existing child session for a mind in a group, or create one.
 
@@ -775,6 +775,7 @@ class SessionManager:
             owner_ref=group_session_id,
             client_ref=f"group-{group_session_id}-{mind_id}",
             mind_id=mind_id,
+            surface_prompt=surface_prompt,
         )
         child_session_id = child["id"]
         # Link to group session

@@ -245,8 +245,13 @@ async def send_group_message(group_session_id: str, body: GroupSessionMessageReq
     moderator_mind_id = group["moderator_mind_id"]
 
     # Find or create the moderator's child session via public API
+    moderator_prompt = (
+        f"You are the moderator for group session {group_session_id}. "
+        "For every message you receive in this session, invoke the /moderate skill. "
+        "Do not respond directly — always route through /moderate first."
+    )
     child_session_id = await session_mgr.get_or_create_group_child_session(
-        group_session_id, moderator_mind_id
+        group_session_id, moderator_mind_id, surface_prompt=moderator_prompt
     )
 
     async def event_stream():
