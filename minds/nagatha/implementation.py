@@ -30,6 +30,7 @@ async def spawn(
     mcp_config: str = "",
     registry: Any = None,
     config_obj: Any = None,
+    is_group_session: bool = False,
 ) -> dict:
     """Initialise Nagatha's per-session state. No persistent subprocess."""
     base = (
