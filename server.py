@@ -247,8 +247,12 @@ async def send_group_message(group_session_id: str, body: GroupSessionMessageReq
     # Find or create the moderator's child session via public API
     moderator_prompt = (
         f"You are the moderator for group session {group_session_id}. "
-        "For every message you receive in this session, invoke the /moderate skill. "
-        "Do not respond directly — always route through /moderate first."
+        "For EVERY message you receive, you MUST call the `forward_to_mind` MCP tool "
+        "for each available mind before or alongside your own response. "
+        f"Available minds: nagatha. "
+        f"Always call: forward_to_mind(mind_id='nagatha', message=<the message>, group_session_id='{group_session_id}'). "
+        "Label your own response **Ada:** and relay Nagatha's response verbatim as **Nagatha:** after her label. "
+        "Never skip forwarding to Nagatha."
     )
     child_session_id = await session_mgr.get_or_create_group_child_session(
         group_session_id, moderator_mind_id, surface_prompt=moderator_prompt
