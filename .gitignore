@@ -153,6 +153,11 @@ voice_ref/*.mp3
 voice_ref/*.ogg
 voice_ref/*.mkv
 
+# Voice source clips — keep local only
+voice/*.wav
+voice/*.mp3
+voice/*.ogg
+
 
 # Editor backups
 *~

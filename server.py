@@ -130,10 +130,12 @@ class ActivateRequest(BaseModel):
 
 class CreateGroupSessionRequest(BaseModel):
     moderator_mind_id: str = "ada"
+    surface_prompt: str | None = None
 
 
 class GroupSessionMessageRequest(BaseModel):
     content: str
+    images: list[dict] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -218,9 +220,18 @@ async def toggle_autopilot(session_id: str):
 # ---------------------------------------------------------------------------
 # Group session endpoints
 # ---------------------------------------------------------------------------
+
+# In-memory surface_prompt store (keyed by group_session_id).
+# Avoids a DB migration — surface_prompt is a thin channel-context hint,
+# not data that needs to survive server restarts.
+_group_surface_prompts: dict[str, str] = {}
+
+
 @app.post("/group-sessions")
 async def create_group_session(body: CreateGroupSessionRequest):
     result = await session_mgr.create_group_session(body.moderator_mind_id)
+    if body.surface_prompt:
+        _group_surface_prompts[result["id"]] = body.surface_prompt
     return result
 
 
@@ -244,8 +255,12 @@ async def send_group_message(group_session_id: str, body: GroupSessionMessageReq
 
     moderator_mind_id = group["moderator_mind_id"]
 
+    # Combine stored surface_prompt (channel context) with moderator role hint
+    base_prompt = f"You are the moderator for group session {group_session_id}."
+    stored = _group_surface_prompts.get(group_session_id)
+    moderator_prompt = f"{stored}\n\n{base_prompt}" if stored else base_prompt
+
     # Find or create the moderator's child session
-    moderator_prompt = f"You are the moderator for group session {group_session_id}."
     child_session_id = await session_mgr.get_or_create_group_child_session(
         group_session_id, moderator_mind_id, surface_prompt=moderator_prompt
     )
@@ -253,8 +268,11 @@ async def send_group_message(group_session_id: str, body: GroupSessionMessageReq
     # Prepend /moderate so the Claude Code harness invokes the skill automatically
     routed_content = f"/moderate {body.content}"
 
+    # Pass images through if provided
+    images = body.images or None
+
     async def event_stream():
-        async for event in session_mgr.send_message(child_session_id, routed_content):
+        async for event in session_mgr.send_message(child_session_id, routed_content, images=images):
             event.setdefault("mind_id", moderator_mind_id)
             yield f"data: {json.dumps(event)}\n\n"
 

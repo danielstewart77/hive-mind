@@ -127,6 +127,7 @@ services:
     restart: unless-stopped
     depends_on:
       - server
+      - voice-server
     networks:
       - hivemind
     security_opt:
@@ -138,6 +139,7 @@ services:
       - /tmp
     environment:
       - HIVE_MIND_SERVER_URL=http://server:8420
+      - VOICE_SERVER_URL=http://voice-server:8422
       - PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring
       - PYTHONNOUSERSITE=1
       - XDG_DATA_HOME=/home/hivemind/.claude/data
