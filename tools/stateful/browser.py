@@ -336,19 +336,30 @@ async def web_search(
                 })).filter(r => r.title && r.url)""",
             )
         else:
+            # Use the no-JS HTML endpoint — stable selectors, no bot detection issues
             await page.goto(
-                f"https://duckduckgo.com/?q={quote_plus(query)}",
+                f"https://html.duckduckgo.com/html/?q={quote_plus(query)}",
                 timeout=30000,
             )
             await page.wait_for_load_state("networkidle")
-            await page.wait_for_selector("[data-result]", timeout=10000)
+            await page.wait_for_selector(".result.results_links", timeout=10000)
             results = await page.eval_on_selector_all(
-                "[data-result]",
-                """els => els.map(el => ({
-                    title: el.querySelector('h2 a')?.textContent || '',
-                    url: el.querySelector('h2 a')?.href || '',
-                    snippet: el.querySelector('.result__snippet')?.textContent || ''
-                })).filter(r => r.title && r.url)""",
+                ".result.results_links",
+                """els => els.map(el => {
+                    const titleEl = el.querySelector('.result__a');
+                    const rawHref = titleEl?.href || '';
+                    // DDG HTML redirects via /l/?uddg=<encoded_url> — decode to real URL
+                    let url = rawHref;
+                    try {
+                        const uddg = new URL(rawHref).searchParams.get('uddg');
+                        if (uddg) url = decodeURIComponent(uddg);
+                    } catch(e) {}
+                    return {
+                        title: titleEl?.textContent?.trim() || '',
+                        url: url,
+                        snippet: el.querySelector('.result__snippet')?.textContent?.trim() || ''
+                    };
+                }).filter(r => r.title && r.url)""",
             )
 
         return json.dumps({

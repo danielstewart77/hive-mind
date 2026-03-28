@@ -1,5 +1,8 @@
 # Core
+claude-code-sdk>=0.0.25
 python-dotenv
+cryptography>=46.0.6
+requests>=2.33.0
 pyyaml
 requests
 openai

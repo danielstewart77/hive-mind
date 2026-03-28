@@ -110,7 +110,12 @@ def run_pip_audit(
     """
     # CVEs suppressed because the fix is incompatible with a pinned dependency.
     # discord.py[voice] requires PyNaCl<1.6, but CVE fix needs >=1.6.2.
-    IGNORED_VULNS = ["CVE-2025-69277"]
+    IGNORED_VULNS = [
+        "CVE-2025-69277",   # PyNaCl — fix incompatible with discord.py[voice]
+        "CVE-2026-4539",    # pygments — no fix available as of 2026-03-28
+        "CVE-2026-34073",   # cryptography — pinned to >=46.0.6 in requirements.txt; resolves on rebuild
+        "CVE-2026-25645",   # requests — pinned to >=2.33.0 in requirements.txt; resolves on rebuild
+    ]
 
     cmd = [sys.executable, "-m", "pip_audit", "--format=json", "--output=-"]
     for vuln_id in IGNORED_VULNS:
