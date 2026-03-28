@@ -69,6 +69,7 @@ class TestGraphUpsertRequiresDataClass:
             kg_mod.graph_upsert_direct(
                 entity_type="Person",
                 name="Daniel",
+                agent_id="ada",
             )
 
     def test_graph_upsert_direct_with_data_class_upserts_successfully(self) -> None:
@@ -83,6 +84,7 @@ class TestGraphUpsertRequiresDataClass:
                 entity_type="Person",
                 name="Daniel",
                 data_class="person",
+                agent_id="ada",
             )
             result = json.loads(result_str)
             assert result["upserted"] is True

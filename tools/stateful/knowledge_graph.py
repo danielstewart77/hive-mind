@@ -106,7 +106,7 @@ def graph_upsert_direct(
     relation: str = "",
     target_name: str = "",
     target_type: str = "",
-    agent_id: str = "ada",
+    agent_id: str,
     as_of: str | None = None,
     source: str = "user",
 ) -> str:
@@ -192,7 +192,7 @@ def graph_upsert(
     relation: str = "",
     target_name: str = "",
     target_type: str = "",
-    agent_id: str = "ada",
+    agent_id: str,
     as_of: str | None = None,
     source: str = "user",
 ) -> str:
@@ -205,7 +205,7 @@ def graph_upsert(
         relation: Relationship type to create (e.g. MANAGES, WORKS_ON). Leave empty for node-only.
         target_name: Name of the target node to link to. Required if relation is set.
         target_type: Entity type of the target node (defaults to entity_type if omitted).
-        agent_id: Which agent's graph this belongs to (default "ada").
+        agent_id: Which agent's graph this belongs to. Required — pass your own agent_id explicitly.
         data_class: Data class for this entry (e.g. "person", "preference", "technical-config").
         as_of: ISO datetime for when the fact was established (defaults to now).
         source: Origin of the entry — "user", "tool", "session", or "self".
@@ -261,7 +261,7 @@ def graph_upsert(
 
 def graph_query(
     entity_name: str,
-    agent_id: str = "ada",
+    agent_id: str,
     depth: int = 1,
 ) -> str:
     """Retrieve knowledge graph node(s) and their connected relationships.
@@ -271,7 +271,7 @@ def graph_query(
 
     Args:
         entity_name: Name or name fragment to search (e.g. "Wil", "Vark", "Wil Vark", "Coach").
-        agent_id: Which agent's graph to search (default "ada").
+        agent_id: Which agent's graph to search. Required — pass your own agent_id explicitly.
         depth: How many hops to traverse (default 1, max 3).
 
     Returns:
@@ -329,7 +329,8 @@ def search_person(
     last_name: str = "",
     title: str = "",
     relationship: str = "",
-    agent_id: str = "ada",
+    *,
+    agent_id: str,
 ) -> str:
     """Search for Person nodes by any known name fragment or relationship to Daniel.
 
@@ -342,7 +343,7 @@ def search_person(
         last_name: Surname fragment (e.g. "Vark", "stew").
         title: Title or honorific fragment (e.g. "Coach", "Dr").
         relationship: How this person relates to Daniel (e.g. "wife", "doctor", "child").
-        agent_id: Which agent's graph to search (default "ada").
+        agent_id: Which agent's graph to search. Required — pass your own agent_id explicitly.
 
     Returns:
         JSON with matching Person nodes and their properties.

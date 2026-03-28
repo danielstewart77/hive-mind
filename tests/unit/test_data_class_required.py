@@ -49,9 +49,9 @@ class TestGraphUpsertRequired:
     def test_graph_upsert_without_data_class_raises(self) -> None:
         import tools.stateful.knowledge_graph as kg_mod
         with pytest.raises(TypeError):
-            kg_mod.graph_upsert(entity_type="Person", name="X")
+            kg_mod.graph_upsert(entity_type="Person", name="X", agent_id="ada")
 
     def test_graph_upsert_direct_without_data_class_raises(self) -> None:
         import tools.stateful.knowledge_graph as kg_mod
         with pytest.raises(TypeError):
-            kg_mod.graph_upsert_direct(entity_type="Person", name="X")
+            kg_mod.graph_upsert_direct(entity_type="Person", name="X", agent_id="ada")

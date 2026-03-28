@@ -80,6 +80,7 @@ class TestDisambiguationBlocksWriteFlow:
                 entity_type="Person",
                 name="Daniel",
                 data_class="person",
+                agent_id="ada",
                 source="user",
                 relation="MANAGES",
                 target_name="Hive Mind",
@@ -107,6 +108,7 @@ class TestOrphanGuardBlocksGraphUpsert:
             entity_type="Person",
             name="Daniel",
             data_class="person",
+            agent_id="ada",
             source="user",
             relation="",
             target_name="",
@@ -134,6 +136,7 @@ class TestGracePeriodAllowsOrphanViaDirect:
                 entity_type="Person",
                 name="Daniel",
                 data_class="person",
+                agent_id="ada",
                 source="session",
             )
             result = json.loads(result_str)

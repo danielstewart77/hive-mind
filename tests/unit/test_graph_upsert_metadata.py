@@ -42,6 +42,7 @@ class TestGraphUpsertDirectMetadata:
                 entity_type="Person",
                 name="Daniel",
                 data_class="person",
+                agent_id="ada",
                 source="user",
             )
             result = json.loads(result_str)
@@ -71,6 +72,7 @@ class TestGraphUpsertDirectMetadata:
                 entity_type="Person",
                 name="Daniel",
                 data_class="unknown-class",
+                agent_id="ada",
             )
             result = json.loads(result_str)
             assert "error" in result
@@ -100,6 +102,7 @@ class TestGraphUpsertDirectMetadata:
                 target_name="Hive Mind",
                 target_type="Project",
                 data_class="person",
+                agent_id="ada",
                 source="user",
             )
             result = json.loads(result_str)
@@ -130,6 +133,7 @@ class TestGraphUpsertDirectMetadata:
                 target_name="Hive Mind",
                 target_type="Project",
                 data_class="person",
+                agent_id="ada",
                 source="user",
             )
 
@@ -154,6 +158,7 @@ class TestGraphUpsertDirectMetadata:
                 entity_type="Person",
                 name="Daniel",
                 data_class="person",
+                agent_id="ada",
                 source="random",
             )
             result = json.loads(result_str)
@@ -171,6 +176,7 @@ class TestGraphUpsertDirectMetadata:
                 entity_type="Person",
                 name="Daniel",
                 data_class="person",
+                agent_id="ada",
                 source="user",
             )
             result = json.loads(result_str)
@@ -200,6 +206,7 @@ class TestGraphUpsertWithHITL:
                 entity_type="Person",
                 name="Daniel",
                 data_class="person",
+                agent_id="ada",
                 source="user",
                 relation="KNOWS_ABOUT",
                 target_name="Hive Mind",
