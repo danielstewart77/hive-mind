@@ -29,5 +29,11 @@ class TestGroupChatConfig:
         config_path = Path(__file__).resolve().parents[2] / "config.yaml"
         with open(config_path) as f:
             data = yaml.safe_load(f)
-        assert "ada" in data["group_chat"]["available_minds"]
         assert "nagatha" in data["group_chat"]["available_minds"]
+        assert "bilby" in data["group_chat"]["available_minds"]
+
+    def test_group_chat_config_has_bob_in_available_minds(self):
+        config_path = Path(__file__).resolve().parents[2] / "config.yaml"
+        with open(config_path) as f:
+            data = yaml.safe_load(f)
+        assert "bob" in data["group_chat"]["available_minds"]

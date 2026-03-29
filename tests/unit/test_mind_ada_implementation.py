@@ -35,7 +35,7 @@ class TestAdaSpawn:
         mock_provider.env_overrides = {}
         mock_registry.get_provider.return_value = mock_provider
 
-        with patch("minds.ada.implementation.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+        with patch("minds.cli_harness.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
             await spawn(
                 session_id="test-123",
                 model="sonnet",
@@ -63,7 +63,7 @@ class TestAdaSpawn:
         mock_provider.env_overrides = {}
         mock_registry.get_provider.return_value = mock_provider
 
-        with patch("minds.ada.implementation.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+        with patch("minds.cli_harness.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
             await spawn(
                 session_id="test-123",
                 model="opus",

@@ -87,3 +87,12 @@ class TestConfigYamlMindsBlock:
         assert skippy["model"] == "llama3"
         assert skippy["soul"] == "souls/skippy.md"
         assert skippy["db"] == "data/skippy.db"
+
+    def test_bob_mind_config_values(self):
+        data = self._load_config_yaml()
+        assert "bob" in data["minds"]
+        bob = data["minds"]["bob"]
+        assert bob["backend"] == "cli_ollama"
+        assert bob["model"] == "gpt-oss:20b-32k"
+        assert bob["soul"] == "souls/bob.md"
+        assert bob["db"] == "data/bob.db"

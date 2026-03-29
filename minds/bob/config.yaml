@@ -1,0 +1,6 @@
+backend: cli_ollama
+model: gpt-oss:20b-32k
+soul_node: Bob
+roles:
+  - general
+  - local-inference

@@ -55,3 +55,17 @@ class TestSoulsDirectory:
         content = skippy_path.read_text()
         assert "Skippy" in content
         assert any(word in content.lower() for word in ["placeholder", "stub"])
+
+    def test_souls_bob_exists_and_has_content(self):
+        bob_path = PROJECT_DIR / "souls" / "bob.md"
+        assert bob_path.exists()
+        content = bob_path.read_text()
+        assert len(content) > 0
+        assert "Bob" in content
+
+    def test_souls_bob_contains_identity(self):
+        bob_path = PROJECT_DIR / "souls" / "bob.md"
+        content = bob_path.read_text()
+        assert "Bob" in content
+        # Bob should have actual identity content, not just a placeholder
+        assert "Hivemind" in content or "hivemind" in content.lower()

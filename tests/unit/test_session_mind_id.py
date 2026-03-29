@@ -204,6 +204,49 @@ class TestCreateSessionMindLookup:
         await mgr._db.close()
 
     @pytest.mark.asyncio
+    async def test_create_session_looks_up_bob_mind_config(self):
+        """When mind_id='bob' and config.minds has bob with soul path, _spawn gets that path."""
+        from core.sessions import SessionManager, PROJECT_DIR
+        from core.models import ModelRegistry, Provider
+
+        registry = MagicMock(spec=ModelRegistry)
+        provider = MagicMock(spec=Provider)
+        provider.env_overrides = {}
+        registry.get_provider = MagicMock(return_value=provider)
+
+        mgr = SessionManager(registry)
+
+        import aiosqlite
+        mgr._db = await aiosqlite.connect(":memory:")
+        mgr._db.row_factory = aiosqlite.Row
+        from core.sessions import _SCHEMA
+        await mgr._db.executescript(_SCHEMA)
+        await mgr._db.commit()
+
+        minds_config = {
+            "ada": {"soul": "souls/ada.md", "backend": "cli_claude", "model": "sonnet"},
+            "bob": {"soul": "souls/bob.md", "backend": "cli_ollama", "model": "gpt-oss:20b-32k"},
+        }
+
+        with patch("core.sessions.config") as mock_config, \
+             patch.object(mgr, "_spawn", new_callable=AsyncMock) as mock_spawn:
+            mock_config.default_model = "sonnet"
+            mock_config.minds = minds_config
+
+            await mgr.create_session(
+                owner_type="test",
+                owner_ref="user-1",
+                client_ref="client-1",
+                mind_id="bob",
+            )
+
+            mock_spawn.assert_called_once()
+            call_kwargs = mock_spawn.call_args
+            assert call_kwargs.kwargs.get("soul_file") == PROJECT_DIR / "souls/bob.md"
+
+        await mgr._db.close()
+
+    @pytest.mark.asyncio
     async def test_create_session_unknown_mind_falls_back(self):
         """When mind_id is unknown, soul_file should be None (uses default _SOUL_FILE)."""
         from core.sessions import SessionManager

@@ -27,6 +27,15 @@ class TestLoadImplementation:
         assert hasattr(mod, "kill")
         _implementation_cache.clear()
 
+    def test_load_implementation_returns_bob_module(self):
+        from core.sessions import _load_implementation, _implementation_cache
+        _implementation_cache.clear()
+
+        mod = _load_implementation("bob")
+        assert hasattr(mod, "spawn")
+        assert hasattr(mod, "kill")
+        _implementation_cache.clear()
+
     def test_load_implementation_unknown_mind_falls_back_to_ada(self):
         from core.sessions import _load_implementation, _implementation_cache
         _implementation_cache.clear()
