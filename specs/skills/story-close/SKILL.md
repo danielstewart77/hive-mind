@@ -62,6 +62,21 @@ All containers healthy:
    Closed by Ada.
    ```
 
+### STEP 5.5 — Cleanup Story Directory
+
+Remove the story's working documents directory:
+
+```python
+from core.story_pipeline import cleanup_story_directory
+result = cleanup_story_directory(f"/usr/src/app/stories/{slug}")
+```
+
+If cleanup fails, log the error but DO NOT stop -- card is already closed.
+Add cleanup status to the notification message.
+
+Note: `core/story_pipeline.py` provides the underlying tested pipeline operations
+(git pull, health check, cleanup, push, PR creation, notification).
+
 ### STEP 6 — Notify
 
 Call `notify_owner` with:
