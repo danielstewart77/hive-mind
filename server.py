@@ -128,6 +128,12 @@ class ActivateRequest(BaseModel):
     client_ref: str
 
 
+class RemoteControlResponse(BaseModel):
+    url: str
+    session_id: str
+    rc_pid: int
+
+
 class CreateGroupSessionRequest(BaseModel):
     moderator_mind_id: str = "ada"
     surface_prompt: str | None = None
@@ -215,6 +221,30 @@ async def switch_model(session_id: str, body: ModelSwitchRequest):
 @app.post("/sessions/{session_id}/autopilot")
 async def toggle_autopilot(session_id: str):
     return await session_mgr.toggle_autopilot(session_id)
+
+
+# ---------------------------------------------------------------------------
+# Remote Control endpoints
+# ---------------------------------------------------------------------------
+@app.post("/sessions/{session_id}/remote-control", response_model=RemoteControlResponse)
+async def start_remote_control(session_id: str):
+    """Spawn a Remote Control subprocess and return the session URL."""
+    try:
+        result = await session_mgr.spawn_rc_process(session_id)
+        return result
+    except LookupError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except (TimeoutError, RuntimeError) as e:
+        return JSONResponse({"error": str(e)}, status_code=504)
+
+
+@app.delete("/sessions/{session_id}/remote-control")
+async def stop_remote_control(session_id: str):
+    """Stop the Remote Control subprocess for a session."""
+    await session_mgr.kill_rc_process(session_id)
+    return {"ok": True, "session_id": session_id}
 
 
 # ---------------------------------------------------------------------------

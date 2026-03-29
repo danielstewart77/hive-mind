@@ -10,6 +10,8 @@ import importlib
 import json
 import logging
 import os
+import re
+import signal
 import time
 import types
 import uuid
@@ -218,6 +220,7 @@ class SessionManager:
         self._db: aiosqlite.Connection | None = None
         self._procs: dict[str, Any] = {}  # Process (Ada/CLI) or dict (Nagatha/SDK)
         self._mind_ids: dict[str, str] = {}  # session_id -> mind_id
+        self._rc_procs: dict[str, asyncio.subprocess.Process] = {}  # RC subprocesses
         self._locks: dict[str, asyncio.Lock] = {}
         self._reaper_task: asyncio.Task | None = None
         self._guard_task: asyncio.Task | None = None
@@ -273,6 +276,9 @@ class SessionManager:
             self._reaper_task.cancel()
         if self._guard_task:
             self._guard_task.cancel()
+        # Kill RC subprocesses that may not have a corresponding main process
+        for sid in list(self._rc_procs):
+            await self.kill_rc_process(sid)
         for sid in list(self._procs):
             await self._kill_process(sid)
         if self._db:
@@ -697,6 +703,9 @@ class SessionManager:
 
     async def _kill_process(self, session_id: str):
         """Kill a session's process/state via its implementation module."""
+        # Also kill any RC subprocess for this session
+        await self.kill_rc_process(session_id)
+
         proc = self._procs.pop(session_id, None)
         mind_id = self._mind_ids.pop(session_id, "ada")
         if proc is None:
@@ -713,6 +722,134 @@ class SessionManager:
             else:
                 await impl.kill(proc)
         log.info("Killed process for session %s (mind=%s)", session_id, mind_id)
+
+    # ------------------------------------------------------------------
+    # Remote Control subprocess management
+    # ------------------------------------------------------------------
+    _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+    _RC_URL_RE = re.compile(r"(https://claude\.ai/code/\S+)")
+
+    async def spawn_rc_process(self, session_id: str, timeout: float = 10.0) -> dict:
+        """Spawn a Remote Control subprocess for an existing session.
+
+        Reads the session's claude_sid from the database, spawns
+        ``claude --remote-control --resume <claude_sid> --name <Mind>``,
+        parses the session URL from stdout, and returns it.
+
+        Args:
+            session_id: The gateway session ID.
+            timeout: Seconds to wait for the RC URL to appear on stdout.
+
+        Returns:
+            Dict with ``url``, ``session_id``, and ``rc_pid``.
+
+        Raises:
+            LookupError: If the session does not exist.
+            ValueError: If the session has no ``claude_sid``.
+            RuntimeError: If the URL cannot be parsed within *timeout*.
+        """
+        # If there is already an RC process running for this session, kill it first
+        if session_id in self._rc_procs:
+            await self.kill_rc_process(session_id)
+
+        row = await self._get_row(session_id)
+        if not row:
+            raise LookupError(f"Session not found: {session_id}")
+
+        claude_sid = row.get("claude_sid")
+        if not claude_sid:
+            raise ValueError(f"Session {session_id} has no claude_sid — cannot start Remote Control")
+
+        mind_id = row.get("mind_id", "ada")
+        mind_name = mind_id.capitalize()
+
+        cmd = [
+            "claude",
+            "--remote-control",
+            "--resume", claude_sid,
+            "--name", mind_name,
+        ]
+
+        env = os.environ.copy()
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+            cwd=str(PROJECT_DIR),
+        )
+
+        # Read stdout lines until we find the session URL or timeout
+        url: str | None = None
+        assert proc.stdout is not None  # guaranteed by stdout=PIPE
+        try:
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + timeout
+            while loop.time() < deadline:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+                try:
+                    line_bytes = await asyncio.wait_for(
+                        proc.stdout.readline(), timeout=remaining
+                    )
+                except asyncio.TimeoutError:
+                    break
+                if not line_bytes:
+                    break  # EOF
+                line = line_bytes.decode("utf-8", errors="replace")
+                # Strip ANSI escape codes
+                line = self._ANSI_ESCAPE_RE.sub("", line).strip()
+                match = self._RC_URL_RE.search(line)
+                if match:
+                    url = match.group(1)
+                    break
+        except Exception:
+            # On any unexpected error, kill the process
+            try:
+                proc.kill()
+                await proc.wait()
+            except ProcessLookupError:
+                pass
+            raise
+
+        if url is None:
+            # Kill the orphaned process
+            try:
+                proc.kill()
+                await proc.wait()
+            except ProcessLookupError:
+                pass
+            raise RuntimeError(
+                f"Failed to parse RC URL from stdout within {timeout}s for session {session_id}"
+            )
+
+        self._rc_procs[session_id] = proc
+        log.info(
+            "Spawned RC process for session %s (pid=%d, url=%s)",
+            session_id, proc.pid, url,
+        )
+        return {"url": url, "session_id": session_id, "rc_pid": proc.pid}
+
+    async def kill_rc_process(self, session_id: str) -> None:
+        """Kill the Remote Control subprocess for a session, if any.
+
+        No-op if no RC process is tracked for *session_id*.
+        """
+        proc = self._rc_procs.pop(session_id, None)
+        if proc is None:
+            return
+        if proc.returncode is None:
+            try:
+                proc.send_signal(signal.SIGTERM)
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+            except ProcessLookupError:
+                pass
+        log.info("Killed RC process for session %s", session_id)
 
     # ------------------------------------------------------------------
     # Group session management
