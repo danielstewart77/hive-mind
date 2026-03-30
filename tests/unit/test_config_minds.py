@@ -21,9 +21,9 @@ class TestConfigMindsAttribute:
 
         fake_yaml = {
             "minds": {
-                "ada": {"backend": "cli_claude", "model": "sonnet", "soul": "souls/ada.md", "db": "data/ada.db"},
-                "nagatha": {"backend": "sdk_claude", "model": "sonnet", "soul": "souls/nagatha.md", "db": "data/nagatha.db"},
-                "skippy": {"backend": "ollama", "model": "llama3", "soul": "souls/skippy.md", "db": "data/skippy.db"},
+                "ada": {"backend": "cli_claude", "model": "sonnet", "soul": "souls/ada.md"},
+                "nagatha": {"backend": "sdk_claude", "model": "sonnet", "soul": "souls/nagatha.md"},
+                "skippy": {"backend": "ollama", "model": "llama3", "soul": "souls/skippy.md"},
             }
         }
         with patch("config._yaml_config", fake_yaml):
@@ -60,7 +60,7 @@ class TestConfigYamlMindsBlock:
 
     def test_each_mind_has_required_fields(self):
         data = self._load_config_yaml()
-        required = {"backend", "model", "soul", "db"}
+        required = {"backend", "model", "soul"}
         for name, mind in data["minds"].items():
             assert required.issubset(mind.keys()), f"Mind '{name}' missing fields: {required - set(mind.keys())}"
 
@@ -70,7 +70,6 @@ class TestConfigYamlMindsBlock:
         assert ada["backend"] == "cli_claude"
         assert ada["model"] == "sonnet"
         assert ada["soul"] == "souls/ada.md"
-        assert ada["db"] == "data/ada.db"
 
     def test_nagatha_mind_config_values(self):
         data = self._load_config_yaml()
@@ -78,7 +77,6 @@ class TestConfigYamlMindsBlock:
         assert nagatha["backend"] == "sdk_claude"
         assert nagatha["model"] == "sonnet"
         assert nagatha["soul"] == "souls/nagatha.md"
-        assert nagatha["db"] == "data/nagatha.db"
 
     def test_skippy_mind_config_values(self):
         data = self._load_config_yaml()
@@ -86,7 +84,6 @@ class TestConfigYamlMindsBlock:
         assert skippy["backend"] == "ollama"
         assert skippy["model"] == "llama3"
         assert skippy["soul"] == "souls/skippy.md"
-        assert skippy["db"] == "data/skippy.db"
 
     def test_bob_mind_config_values(self):
         data = self._load_config_yaml()
@@ -95,4 +92,3 @@ class TestConfigYamlMindsBlock:
         assert bob["backend"] == "cli_ollama"
         assert bob["model"] == "gpt-oss:20b-32k"
         assert bob["soul"] == "souls/bob.md"
-        assert bob["db"] == "data/bob.db"

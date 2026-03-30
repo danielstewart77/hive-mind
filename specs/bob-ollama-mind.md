@@ -49,7 +49,6 @@ bob:
   backend: cli_ollama
   model: gpt-oss:20b-32k
   soul: souls/bob.md
-  db: data/bob.db
 ```
 
 Add `bob` to `group_chat.available_minds`.

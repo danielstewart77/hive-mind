@@ -39,8 +39,9 @@ Session Manager (sessions.py)  ← reads mind_id, looks up config
   │  Ada         Nagatha     Skippy  │
   │  CLI Claude  Codex       Ollama  │
   │  own soul    own soul    own soul│
-  │  own db      own db      own db  │
   └──────────────────────────────────┘
+        ↓
+   Shared DB (SQLite, Neo4j, vector)
         ↓
    Shared MCP Tools
 ```
@@ -63,9 +64,9 @@ graph TD
 
     subgraph Pods ["🧠 Isolated Mind Pods"]
         direction LR
-        ADA["Ada\n· own soul.md\n· own SQLite\n· own MCP config\n· CLI Claude"]
-        NAG["Nagatha\n· own soul.md\n· own SQLite\n· own MCP config\n· Codex harness [codex]"]
-        SKIP["Skippy\n· own soul.md\n· own SQLite\n· own MCP config\n· Ollama"]
+        ADA["Ada\n· own soul.md\n· own MCP config\n· CLI Claude"]
+        NAG["Nagatha\n· own soul.md\n· own MCP config\n· Codex harness [codex]"]
+        SKIP["Skippy\n· own soul.md\n· own MCP config\n· Ollama"]
     end
 
     TOOLS["🔧 Shared Tools (MCP)"]
@@ -91,19 +92,16 @@ minds:
     backend: cli_claude
     model: sonnet
     soul: souls/ada.md
-    db: data/ada.db
     mcp_config: .mcp.ada.json
   nagatha:
     backend: codex_cli
     model: codex
     soul: souls/nagatha.md
-    db: data/nagatha.db
     mcp_config: .mcp.nagatha.json
   skippy:
     backend: ollama
     model: llama3
     soul: souls/skippy.md
-    db: data/skippy.db
     mcp_config: .mcp.skippy.json
 ```
 
@@ -128,7 +126,6 @@ The Gateway passes `mind_id` to the Session Manager. The Session Manager does a 
 ```python
 mind_cfg = config["minds"].get(mind_id, config["minds"]["ada"])  # default to Ada
 soul_path = mind_cfg["soul"]
-db_path   = mind_cfg["db"]
 mcp_cfg   = mind_cfg["mcp_config"]
 backend   = mind_cfg["backend"]
 ```
@@ -146,8 +143,9 @@ and preserve the existing `spawn(...)`, `send(...)`, and `kill(...)` contract us
 
 Each mind gets:
 - `souls/<name>.md` — its own system prompt / identity file
-- `data/<name>.db` — its own SQLite session history (no cross-contamination)
 - `.mcp.<name>.json` — its own MCP tool permissions (optional: restrict what each mind can see)
+
+Database infrastructure (SQLite session history, Neo4j knowledge graph, vector store) is **shared** across all minds. Session rows are partitioned by `mind_id`. No per-mind database files.
 
 Ada's soul is already written. The others are stubs until named and defined.
 
