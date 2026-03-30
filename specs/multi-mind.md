@@ -142,10 +142,10 @@ and preserve the existing `spawn(...)`, `send(...)`, and `kill(...)` contract us
 ### Phase 3 — Isolated souls and databases
 
 Each mind gets:
-- `souls/<name>.md` — its own system prompt / identity file
+- `souls/<name>.md` — **one-time identity seed**. Used exactly once by `/seed-mind` to populate the mind's graph node. Never read by sessions. After seeding, this file is an archived artifact only.
 - `.mcp.<name>.json` — its own MCP tool permissions (optional: restrict what each mind can see)
 
-Database infrastructure (SQLite session history, Neo4j knowledge graph, vector store) is **shared** across all minds. Session rows are partitioned by `mind_id`. No per-mind database files.
+Database infrastructure (SQLite session history, knowledge graph, vector store) is **shared** across all minds. Session rows are partitioned by `mind_id`. No per-mind database files.
 
 Ada's soul is already written. The others are stubs until named and defined.
 
@@ -202,12 +202,13 @@ The orchestrator (a skill, not a daemon) handles delegation: it sends a message 
 
 ## Identity Preservation Rules
 
-1. Each mind has exactly one soul file. No mind reads another mind's soul.
+1. Each mind has exactly one soul file, used **once** to seed its graph node via `/seed-mind`. After seeding, the soul file is never read again. Sessions load identity exclusively from the graph node.
 2. Session history is per-mind. Ada cannot see Nagatha's conversation history.
 3. MCP tool permissions are per-mind. A mind only has access to the tools its config grants.
 4. `mind_id` is set at session creation and never changes mid-session.
 5. The Session Manager is backend-agnostic — it dispatches, it does not reason about identity.
-6. [codex] Changing Nagatha's harness must not change her identity, soul file, or stored session history.
+6. [codex] Changing Nagatha's harness must not change her identity, soul node, or stored session history.
+7. **Soul files are never referenced in session code.** The only valid identity source at runtime is a graph query for the mind's node. If the graph is unavailable, the session degrades gracefully — it does not fall back to reading the soul file.
 
 ---
 
