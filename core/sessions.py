@@ -61,7 +61,6 @@ def _fetch_memories_sync(query: str, mind_id: str = "ada") -> str | None:
 
 _MCP_CONTAINER = PROJECT_DIR / ".mcp.container.json"
 MCP_CONFIG = str(_MCP_CONTAINER if _MCP_CONTAINER.exists() else PROJECT_DIR / ".mcp.json")
-_SOUL_FILE = PROJECT_DIR / "souls" / "ada.md"
 _SPECS_DIR = PROJECT_DIR / "specs"
 
 # Friendly names for known project paths granted via --allowedDirectory
@@ -104,7 +103,6 @@ def _build_base_prompt(
     date_str = now.strftime("%A, %B %-d, %Y at %-I:%M %p %Z")
 
     mind_name = mind_id.capitalize()
-    effective_soul_file = soul_file or _SOUL_FILE
 
     soul = _fetch_soul_sync(mind_id=mind_id)
     if soul:
@@ -112,24 +110,12 @@ def _build_base_prompt(
         soul_instruction = (
             "Your soul is loaded above from the knowledge graph. When something meaningfully "
             f"shapes your identity, update it via graph_upsert on the {mind_name} node (soul_values field). "
-            "The file soul.md is a fallback stub — ignore it when the graph is available.\n\n"
+            "Keep it extremely short — it is a soul, not a manifesto. Prune ruthlessly.\n\n"
         )
     else:
-        # Graph unavailable — inject soul file content directly so sandboxed minds don't need file access
-        try:
-            soul_content = effective_soul_file.read_text() if effective_soul_file and effective_soul_file.exists() else ""
-        except Exception:
-            soul_content = ""
-        if soul_content:
-            identity_block = f"{soul_content}\n\n"
-            soul_instruction = (
-                "Your soul is loaded above from the soul file (graph was unavailable). "
-                "Update it when you experience something that meaningfully shapes your identity or preferences. "
-                "Keep it extremely short — it is a soul, not a manifesto. Prune ruthlessly.\n\n"
-            )
-        else:
-            identity_block = ""
-            soul_instruction = ""
+        # Graph unavailable — degrade gracefully, do not fall back to soul files
+        identity_block = ""
+        soul_instruction = ""
 
     if allowed_directories:
         lines = []

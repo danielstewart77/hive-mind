@@ -57,7 +57,6 @@ async def cli_spawn(
 
     base = build_base_prompt(
         allowed_directories=allowed_directories,
-        soul_file=soul_file,
         mind_id=mind_id,
     ) if build_base_prompt else ""
     full_prompt = base if not surface_prompt else f"{base}\n\n{surface_prompt}"

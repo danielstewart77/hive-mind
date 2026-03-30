@@ -125,24 +125,26 @@ class TestSessionDictIncludesMindId:
 class TestBuildBasePromptSoulFile:
     """Verify _build_base_prompt can accept and use a custom soul_file path."""
 
-    def test_build_base_prompt_uses_custom_soul_path(self):
-        """When soul graph is unavailable, the fallback instruction references the provided soul_file."""
+    def test_build_base_prompt_graph_unavailable_no_soul_content(self):
+        """When soul graph is unavailable, no soul content is injected. No soul file fallback."""
+        from core.sessions import _build_base_prompt
+
+        with patch("core.sessions._fetch_soul_sync", return_value=None):
+            result = _build_base_prompt()
+
+        assert "<soul>" not in result
+        assert "souls/ada.md" not in result
+
+    def test_build_base_prompt_soul_file_param_ignored_when_graph_unavailable(self):
+        """soul_file parameter is accepted but never read — graph is the only identity source."""
         from core.sessions import _build_base_prompt
 
         custom_soul = Path("/tmp/test_custom_soul.md")
         with patch("core.sessions._fetch_soul_sync", return_value=None):
             result = _build_base_prompt(soul_file=custom_soul)
 
-        assert str(custom_soul) in result
-
-    def test_build_base_prompt_default_soul_file(self):
-        """When no soul_file is passed, the default _SOUL_FILE path is referenced."""
-        from core.sessions import _build_base_prompt, _SOUL_FILE
-
-        with patch("core.sessions._fetch_soul_sync", return_value=None):
-            result = _build_base_prompt()
-
-        assert str(_SOUL_FILE) in result
+        # Soul file path must not appear in output — it is not read
+        assert str(custom_soul) not in result
 
     def test_build_base_prompt_with_soul_graph_ignores_soul_file(self):
         """When the soul graph returns data, the soul_file path is not referenced in the main instruction."""
