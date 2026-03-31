@@ -9,6 +9,8 @@ Read this file first. Load only the specs relevant to the current task.
 | Security Policy | `specs/security.md` | Hard limits, elevated-risk rules, prompt injection defense, default stance |
 | Branch Strategy | `specs/branching.md` | Branch naming, PR checklist |
 | Notification Channels | `specs/notification-channels.md` | Fallback order: Telegram → Telegram API → Gmail → alert file |
+| Architecture Principles | `specs/hive-mind-architecture.md` | Event → Specification → Tools pattern; what belongs where |
+| Testing Guidelines | `specs/testing.md` | What makes a test worth keeping; test strategy |
 
 ## Security Implementation
 | Spec | File | Summary |
@@ -17,3 +19,26 @@ Read this file first. Load only the specs relevant to the current task.
 | Tool Safety | `specs/tool-safety.md` | Ring 1 AST validation, Ring 2 subprocess isolation, blocked patterns, staging flow |
 | Container Hardening | `specs/container-hardening.md` | Ring 3 runtime restrictions, compatibility exceptions, Ring 4 production volumes |
 | HITL Approval | `specs/hitl-approval.md` | Approval flow, token lifecycle, blocking vs non-blocking, session heartbeat |
+| HITL Telegram Buttons | `specs/hitl-telegram-inline-buttons.md` | Inline keyboard button implementation for HITL approvals |
+
+## Multi-Mind Architecture
+| Spec | File | Summary |
+|------|------|---------|
+| Multi-Mind | `specs/multi-mind.md` | Named minds (Ada/Bob/Bilby/Nagatha), backends, soul isolation, inter-mind comms |
+| Bob (Ollama) | `specs/bob-ollama-mind.md` | Bob mind: Ollama-backed, local/private, CLI harness pattern |
+| Group Sessions | `specs/group-sessions-gateway.md` | Gateway endpoints for group chat, moderator routing |
+| Skill Taxonomy | `specs/skill-taxonomy.md` | Broad category skills (engineering/ops/comms/planning/info) as lifecycle routers |
+| Skills Enhancement | `specs/skills-enhancement.md` | Lessons from Claude Code skills at scale; improvement plan |
+
+## Infrastructure
+| Spec | File | Summary |
+|------|------|---------|
+| Containers | `specs/containers.md` | All Docker services: names, ports, volumes, build context |
+| Tool Migration | `specs/tool-migration.md` | Stateless vs stateful tool pattern; when to use each |
+| Remote Control | `specs/remote-control-integration.md` | Session observation endpoint; real-time stream access |
+
+## Voice
+| Spec | File | Summary |
+|------|------|---------|
+| Chatterbox TTS | `specs/chatterbox.md` | Working synthesis code reference for the Chatterbox engine |
+| Chatterbox Migration | `specs/chatterbox-migration.md` | Migration from F5-TTS to Chatterbox; zero-shot voice cloning setup |

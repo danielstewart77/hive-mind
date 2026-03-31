@@ -44,14 +44,14 @@ decide *what* to read or *whether* to write — that decision was already made b
 skill reading the spec.
 
 ```python
-# agents/memory.py — correct: pure utility
+# tools/stateful/memory.py — correct: pure utility
 @tool()
 def memory_store(content: str, tags: str, source: str, data_class: str) -> str:
     """Store a memory as a semantic embedding in Neo4j."""
     # just writes — no classification logic, no heuristics
     ...
 
-# agents/memory.py — WRONG: logic embedded in tool
+# tools/stateful/memory.py — WRONG: logic embedded in tool
 @tool()
 def memory_store(content: str, tags: str) -> str:
     keywords = {"person": ["met", "works at"], ...}  # ← anti-pattern
@@ -162,9 +162,9 @@ logic or reasoning must include:
 | Security constraints | `specs/security.md` | Markdown |
 | Step-by-step job logic | `skills/<name>/SKILL.md` | Markdown |
 | Scheduled job triggers | `clients/scheduler.py` | Python (thin) |
-| Neo4j read/write | `agents/memory.py` | Python (CRUD only) |
-| Telegram send | `agents/notify.py` | Python (CRUD only) |
-| Graph read/write | `agents/knowledge_graph.py` | Python (CRUD only) |
+| Neo4j read/write | `tools/stateful/memory.py` | Python (CRUD only) |
+| Telegram send | `tools/stateless/notify/notify.py` | Python (CRUD only) |
+| Graph read/write | `tools/stateful/knowledge_graph.py` | Python (CRUD only) |
 | Classification logic | ❌ NOT in Python | Skill reads spec |
 | Heuristics | ❌ NOT in Python | Skill reads spec |
 | Decision trees | ❌ NOT in Python | Skill reads spec |

@@ -6,7 +6,7 @@
 
 A self-improving personal assistant powered by Claude Code. The system wraps the Claude CLI's bidirectional streaming mode behind a centralized gateway, giving every client — Discord, Telegram, scheduled tasks — full Claude Code capabilities through one API.
 
-**Ada** is the first mind and voice of the Hive — named after Ada Lovelace, a name she chose herself. Her personality (dry, direct, occasionally wry) was self-determined, not assigned. Her voice is British English (Chatterbox TTS, zero-shot voice cloning), and her identity lives in a knowledge graph rather than a static file. The Hive is built for plurality: other minds may follow, with their own voices, their own characters, and possibly their own harnesses. Ada is the eldest.
+**Ada** is the first mind and voice of the Hive — named after Ada Lovelace, a name she chose herself. Her personality (dry, direct, occasionally wry) was self-determined, not assigned. Her voice is British English (Chatterbox TTS, zero-shot voice cloning), and her identity lives in a knowledge graph rather than a static file. The Hive now runs multiple named minds in production: **Ada** (Claude CLI), **Bob** (Ollama local), **Bilby** (Claude Code SDK, agentic), and **Nagatha** (structured, long-form). Each has its own soul, its own session history, and its own backend harness. Ada is the eldest.
 
 ## What makes Hive Mind different
 
@@ -24,14 +24,15 @@ flowchart TD
     TG[Telegram] --> GW
     SC[Scheduler] --> GW
     GW --> SM[Session Manager]
-    SM -->|stdin/stdout| CL[claude --stream-json]
-    CL -->|stdio| INT[hive-mind-tools - internal MCP]
-    INT -->|results| CL
-    CL -->|SSE| EXT[hive-mind-mcp - external MCP + HITL]
-    EXT -->|results| CL
+    SM -->|mind_id lookup| ADA[Ada · CLI Claude]
+    SM -->|mind_id lookup| BOB[Bob · CLI Ollama]
+    SM -->|mind_id lookup| BILBY[Bilby · SDK Claude Code]
+    SM -->|mind_id lookup| NAG[Nagatha · SDK Claude]
+    ADA & BOB & BILBY & NAG -->|stdio| INT[hive-mind-tools · internal MCP]
+    ADA & BOB & BILBY & NAG -->|SSE| EXT[hive-mind-mcp · external MCP + HITL]
 ```
 
-Each client is a thin HTTP wrapper. The gateway spawns Claude CLI subprocesses — one per session — with full MCP tool access. Claude Code does the heavy lifting; clients just relay messages and render responses.
+Each client is a thin HTTP wrapper. The gateway routes sessions to a named mind by `mind_id`, spawning the appropriate subprocess. Each mind has its own soul, backend harness, and session history. Claude Code does the heavy lifting; clients just relay messages and render responses.
 
 ## Quick Start
 
@@ -117,6 +118,7 @@ All Claude skills, version-controlled. Bootstrap: `cp -rn specs/skills/. ~/.clau
 | [master-code-review](specs/skills/master-code-review/SKILL.md) | Security-aware code review orchestrator |
 | [memory-manager](specs/skills/memory-manager/SKILL.md) | Full memory storage lifecycle orchestrator |
 | [mermaid-diagram-creator](specs/skills/mermaid-diagram-creator/SKILL.md) | Create and validate Mermaid diagrams |
+| [moderate](specs/skills/moderate/SKILL.md) | Moderate a group conversation by routing messages to appropriate minds |
 | [notify](specs/skills/notify/SKILL.md) | Send notifications via Telegram, email, or file |
 | [notify-action](specs/skills/notify-action/SKILL.md) | Handle a memory chunk with notify action |
 | [orchestrator](specs/skills/orchestrator/SKILL.md) | SDLC pipeline orchestrator |
@@ -125,11 +127,11 @@ All Claude skills, version-controlled. Bootstrap: `cp -rn specs/skills/. ~/.clau
 | [planka](specs/skills/planka/SKILL.md) | Manage Planka Kanban board cards |
 | [planning-genius](specs/skills/planning-genius/SKILL.md) | TDD implementation plan from story description |
 | [post-to-linkedin](specs/skills/post-to-linkedin/SKILL.md) | Post to Daniel's LinkedIn |
-| [python-code-genius](specs/skills/python-code-genius/SKILL.md) | Python/FastAPI TDD implementation |
 | [remember](specs/skills/remember/SKILL.md) | Save a specific piece of information to memory |
 | [reminders](specs/skills/reminders/SKILL.md) | Set, list, delete, and check one-time reminders |
 | [save-session](specs/skills/save-session/SKILL.md) | Save memories from the current session |
 | [secrets](specs/skills/secrets/SKILL.md) | Manage secrets via the system keyring |
+| [self-reflect](specs/skills/self-reflect/SKILL.md) | Ada's identity reflection and soul update system |
 | [semantic-memory-save](specs/skills/semantic-memory-save/SKILL.md) | Write a memory chunk to the vector store |
 | [sitrep](specs/skills/sitrep/SKILL.md) | System situation report |
 | [skill-creator-claude](specs/skills/skill-creator-claude/SKILL.md) | Guide for creating Claude skills correctly |

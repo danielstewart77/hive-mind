@@ -54,3 +54,5 @@ The external MCP server is protected by a bearer token:
 | POST | /hitl/request | HITL approval request |
 | GET | /hitl/status/{token} | Poll HITL status |
 | POST | /hitl/respond | Resolve HITL (Telegram bot) |
+| POST | /sessions/{id}/remote-control | Start remote observation of a session |
+| DELETE | /sessions/{id}/remote-control | Stop remote observation |

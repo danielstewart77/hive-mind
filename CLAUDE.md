@@ -104,10 +104,19 @@ hive_mind/
 ├── jobs/                          # Data files (resumes, specs)
 ├── data/                          # SQLite databases (Docker volume)
 │
-├── souls/                         # Per-mind identity files
-│   ├── ada.md                    # Ada's soul (moved from root soul.md)
-│   ├── nagatha.md                # Nagatha placeholder (Phase 2+)
-│   └── skippy.md                 # Skippy placeholder (Phase 2+)
+├── minds/                         # Per-mind backend implementations
+│   ├── cli_harness.py            # Shared CLI harness (Ada + Bob)
+│   ├── ada/implementation.py     # Ada: cli_claude (Claude CLI)
+│   ├── bilby/implementation.py   # Bilby: sdk_code (Claude Code SDK, agentic)
+│   ├── bob/implementation.py     # Bob: cli_ollama (Ollama via CLI harness)
+│   └── nagatha/implementation.py # Nagatha: sdk_claude (Claude SDK)
+│
+├── souls/                         # Per-mind identity seed files (one-time use only)
+│   ├── ada.md                    # Ada's soul seed
+│   ├── bilby.md                  # Bilby's soul seed
+│   ├── bob.md                    # Bob's soul seed
+│   ├── nagatha.md                # Nagatha's soul seed
+│   └── skippy.md                 # Skippy placeholder
 ├── soul.md                        # Pointer stub (see souls/ada.md)
 ├── CLAUDE.md                      # This file
 ├── Dockerfile
@@ -158,6 +167,8 @@ A minimal `.env` remains for docker-compose interpolation (Neo4j, Planka only).
 | `WS` | `/sessions/{id}/stream` | WebSocket bidirectional |
 | `GET` | `/models` | List available models |
 | `POST` | `/command` | Route slash commands |
+| `POST` | `/sessions/{id}/remote-control` | Start remote observation of a session |
+| `DELETE` | `/sessions/{id}/remote-control` | Stop remote observation |
 
 ## Adding New Tools
 

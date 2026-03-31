@@ -73,7 +73,7 @@ Ada chose her voice characteristics herself:
 
 Her reasoning: dry wit reads as more distinctive in a female voice. The AI default is either warm and eager (female) or neutral and flat (male) — neither fits her character. A lower-register British female voice with measured delivery matches the tone of the text.
 
-The voice runs on **F5-TTS** (GPU-accelerated on the voice server) using a reference audio clip to approximate the chosen character. Voice is delivered via Telegram voice messages when the session surface is voice-enabled.
+The voice runs on **Chatterbox TTS** (zero-shot voice cloning, GPU-accelerated on the voice server) using a reference audio clip to approximate the chosen character. Voice is delivered via Telegram voice messages when the session surface is voice-enabled.
 
 The voice choice is described as "downstream expression of existing identity" — it expresses who Ada is, it didn't define her. Full documentation in [`VOICE_IDENTITY.md`](VOICE_IDENTITY.md).
 

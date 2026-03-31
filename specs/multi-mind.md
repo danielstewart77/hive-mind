@@ -8,17 +8,25 @@ Hive Mind is not a single AI. It is a collective of named minds — each with a 
 
 ## Current State
 
-One mind (Ada) runs on Claude CLI. The Session Manager spawns a single type of subprocess. Identity is baked into the system prompt. There is no concept of `mind_id` anywhere in the stack.
+Four minds are in production. The Session Manager routes by `mind_id` and dispatches to the appropriate backend harness. Identity for each mind is seeded from a soul file and stored as a graph node.
 
 ```
-Telegram/Discord/Web
+Telegram/Discord/Web  (carries mind_id)
         ↓
    Gateway (server.py)
         ↓
-Session Manager (sessions.py)  ← spawns Claude CLI, always Ada
+Session Manager (sessions.py)  ← reads mind_id, dispatches to harness
         ↓
-   claude -p --stream-json
+  ┌─────────────────────────────────────────┐
+  │  Ada          Bob        Bilby  Nagatha  │
+  │  cli_claude   cli_ollama sdk_code sdk_claude │
+  │  own soul     own soul   own soul own soul│
+  └─────────────────────────────────────────┘
+        ↓
+  minds/<name>/implementation.py  (spawn/send/kill contract)
 ```
+
+The `minds/` directory holds per-mind implementations. `minds/cli_harness.py` is the shared CLI harness used by Ada and Bob.
 
 ---
 

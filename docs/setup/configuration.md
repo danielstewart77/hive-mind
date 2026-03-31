@@ -70,10 +70,10 @@ This path is shared across containers via a bind mount on `${HOST_CLAUDE_DIR}`.
 
 ### Reading Secrets
 
-Use `get_credential(key)` from `agents/secret_manager.py`:
+Use `get_credential(key)` from `core/secrets.py`:
 
 ```python
-from agents.secret_manager import get_credential
+from core.secrets import get_credential
 
 api_key = get_credential("ANTHROPIC_API_KEY")  # keyring first, env fallback
 ```
