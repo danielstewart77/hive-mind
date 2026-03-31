@@ -16,6 +16,7 @@ services:
       - PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring
       - PYTHONNOUSERSITE=1
       - XDG_DATA_HOME=/home/hivemind/.claude/data
+      - PYTHONPATH=/usr/src/app/vendor
     ports:
       - "8420:8420"
     restart: unless-stopped

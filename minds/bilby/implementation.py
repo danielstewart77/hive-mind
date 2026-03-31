@@ -7,6 +7,7 @@ management, native Python async API.
 Requires: claude-code-sdk>=0.0.25 (pip install claude-code-sdk)
 """
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any, AsyncGenerator
@@ -99,48 +100,58 @@ async def send(
         state.get("claude_sid") or "new",
     )
 
-    try:
-        async for message in query(prompt=content, options=options):
-            if isinstance(message, AssistantMessage):
-                content_blocks = []
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        content_blocks.append({"type": "text", "text": block.text})
-                    else:
-                        # Pass through ToolUseBlock, ThinkingBlock, etc.
-                        content_blocks.append(vars(block))
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            async for message in query(prompt=content, options=options):
+                if isinstance(message, AssistantMessage):
+                    content_blocks = []
+                    for block in message.content:
+                        if isinstance(block, TextBlock):
+                            content_blocks.append({"type": "text", "text": block.text})
+                        else:
+                            # Pass through ToolUseBlock, ThinkingBlock, etc.
+                            content_blocks.append(vars(block))
 
-                if content_blocks:
+                    if content_blocks:
+                        yield {
+                            "type": "assistant",
+                            "message": {
+                                "role": "assistant",
+                                "content": content_blocks,
+                            },
+                        }
+
+                elif isinstance(message, ResultMessage):
+                    # Persist session ID for conversation resumption
+                    if message.session_id:
+                        state["claude_sid"] = message.session_id
+                        if db:
+                            await db.execute(
+                                "UPDATE sessions SET claude_sid = ? WHERE id = ?",
+                                (message.session_id, session_id),
+                            )
+                            await db.commit()
+
                     yield {
-                        "type": "assistant",
-                        "message": {
-                            "role": "assistant",
-                            "content": content_blocks,
-                        },
+                        "type": "result",
+                        "session_id": message.session_id,
+                        "stop_reason": message.subtype,
+                        "is_error": message.is_error,
                     }
+                    return
 
-            elif isinstance(message, ResultMessage):
-                # Persist session ID for conversation resumption
-                if message.session_id:
-                    state["claude_sid"] = message.session_id
-                    if db:
-                        await db.execute(
-                            "UPDATE sessions SET claude_sid = ? WHERE id = ?",
-                            (message.session_id, session_id),
-                        )
-                        await db.commit()
-
-                yield {
-                    "type": "result",
-                    "session_id": message.session_id,
-                    "stop_reason": message.subtype,
-                    "is_error": message.is_error,
-                }
-                return
-
-    except Exception:
-        log.exception("Bilby SDK error for session %s", session_id)
-        yield {"type": "result", "is_error": True}
+        except Exception as exc:
+            if attempt < max_retries - 1:
+                wait = 2 ** attempt  # 1s, 2s
+                log.warning(
+                    "Bilby SDK error session %s (attempt %d/%d): %s — retrying in %ds",
+                    session_id, attempt + 1, max_retries, exc, wait,
+                )
+                await asyncio.sleep(wait)
+            else:
+                log.exception("Bilby SDK error session %s — retries exhausted", session_id)
+                yield {"type": "result", "is_error": True}
 
 
 async def kill(session_id: str) -> None:
