@@ -57,9 +57,11 @@ class TestStatelessNotify:
         """Asserts graceful error when credentials missing (not test mode)."""
         # Provide minimal env that still allows Python to import modules
         env = os.environ.copy()
-        # Clear credential-related vars
+        # Clear credential-related vars AND force null keyring so get_credential()
+        # cannot fall back to keyring and accidentally send a real Telegram message.
         env.pop("TELEGRAM_BOT_TOKEN", None)
         env.pop("TELEGRAM_OWNER_CHAT_ID", None)
+        env["PYTHON_KEYRING_BACKEND"] = "keyring.backends.null.Keyring"
         result = subprocess.run(
             [sys.executable, SCRIPT_PATH, "send",
              "--message", "No creds test",
