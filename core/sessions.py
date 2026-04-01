@@ -521,7 +521,7 @@ class SessionManager:
                 await proc.stdin.drain()
 
                 # Drain stderr in background so lines appear as WARNING logs
-                stderr_task = asyncio.create_task(_drain_stderr(proc, session_id))
+                asyncio.create_task(_drain_stderr(proc, session_id))  # noqa: RUF006
 
                 retried = False
                 while True:

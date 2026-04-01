@@ -1,6 +1,5 @@
 """Unit tests for structured logging in core/sessions.py — send_message lifecycle."""
 
-import asyncio
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
