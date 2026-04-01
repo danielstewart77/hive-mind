@@ -6,6 +6,7 @@ Designed for direct FastMCP registration (no @tool() decorator).
 import json
 import logging
 import os
+import time
 
 import requests  # type: ignore[import-untyped]
 
@@ -24,6 +25,8 @@ def forward_to_mind(mind_id: str, message: str, group_session_id: str) -> str:
     Returns:
         JSON string with the mind's response text and metadata.
     """
+    logger.info("forward_to_mind: start mind=%s group=%s", mind_id, group_session_id)
+    t0 = time.monotonic()
     try:
         # Look up existing child sessions for this mind in the group
         sessions_resp = requests.get(
@@ -58,6 +61,8 @@ def forward_to_mind(mind_id: str, message: str, group_session_id: str) -> str:
             create_resp.raise_for_status()
             child_session_id = create_resp.json()["id"]
 
+        logger.info("forward_to_mind: using session=%s mind=%s", child_session_id, mind_id)
+
         # Send message to the child session
         msg_resp = requests.post(
             f"{GATEWAY_URL}/sessions/{child_session_id}/message",
@@ -86,6 +91,8 @@ def forward_to_mind(mind_id: str, message: str, group_session_id: str) -> str:
                 if not response_text:
                     response_text = event.get("result", "")
 
+        elapsed = time.monotonic() - t0
+        logger.info("forward_to_mind: done mind=%s elapsed=%.1fs", mind_id, elapsed)
         return json.dumps({
             "mind_id": mind_id,
             "group_session_id": group_session_id,
@@ -93,8 +100,13 @@ def forward_to_mind(mind_id: str, message: str, group_session_id: str) -> str:
             "session_id": child_session_id,
         })
 
+    except requests.exceptions.ReadTimeout:
+        elapsed = time.monotonic() - t0
+        logger.error("forward_to_mind: timeout mind=%s after %.1fs", mind_id, elapsed)
+        return json.dumps({"error": f"Timeout after {elapsed:.1f}s"})
     except Exception as e:
-        logger.exception("forward_to_mind failed for mind=%s", mind_id)
+        elapsed = time.monotonic() - t0
+        logger.exception("forward_to_mind: error mind=%s after %.1fs", mind_id, elapsed)
         return json.dumps({"error": str(e)})
 
 

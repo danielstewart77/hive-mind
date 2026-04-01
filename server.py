@@ -29,6 +29,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("hive-mind.server")
 
 # ---------------------------------------------------------------------------
@@ -195,10 +196,13 @@ async def delete_session(session_id: str):
 @app.post("/sessions/{session_id}/message")
 async def send_message(session_id: str, body: MessageRequest):
     images = [{"media_type": img.media_type, "data": img.data} for img in body.images] if body.images else None
+    log.info("message: session=%s chars=%d", session_id, len(body.content))
+    t0 = time.monotonic()
 
     async def event_stream():
         async for event in session_mgr.send_message(session_id, body.content, images=images):
             yield f"data: {json.dumps(event)}\n\n"
+        log.info("message: done session=%s elapsed=%.1fs", session_id, time.monotonic() - t0)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 

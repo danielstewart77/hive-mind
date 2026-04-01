@@ -31,6 +31,23 @@ log = logging.getLogger("hive-mind.sessions")
 
 
 # ---------------------------------------------------------------------------
+# Subprocess stderr drain — logs stderr lines at WARNING
+# ---------------------------------------------------------------------------
+
+async def _drain_stderr(proc: Any, session_id: str) -> None:
+    """Read subprocess stderr line by line and log each non-empty line at WARNING.
+
+    No-op if proc.stderr is None (e.g. SDK-based minds or stderr not piped).
+    """
+    if proc.stderr is None:
+        return
+    async for err_line in proc.stderr:
+        err_text = err_line.decode().strip()
+        if err_text:
+            log.warning("subprocess stderr: session=%s line=%s", session_id, err_text[:200])
+
+
+# ---------------------------------------------------------------------------
 # Memory helpers — run in executor (synchronous neo4j/requests calls)
 # ---------------------------------------------------------------------------
 
@@ -401,6 +418,8 @@ class SessionManager:
                 raise ValueError(f"Session not found: {session_id}")
 
             mind_id = session.get("mind_id", "ada")
+            log.info("send_message: start session=%s mind=%s", session_id, mind_id)
+            t0 = time.monotonic()
 
             # Respawn if needed
             needs_respawn = session_id not in self._procs
@@ -411,6 +430,7 @@ class SessionManager:
                     needs_respawn = True
 
             if needs_respawn:
+                log.info("send_message: respawn session=%s mind=%s model=%s", session_id, mind_id, session["model"])
                 await self._spawn(
                     session_id,
                     session["model"],
@@ -469,6 +489,10 @@ class SessionManager:
 
                     if event.get("type") == "result":
                         await self._db.commit()
+                        elapsed = time.monotonic() - t0
+                        log.info("send_message: result session=%s elapsed=%.1fs", session_id, elapsed)
+                        if elapsed > 30:
+                            log.warning("send_message: slow response session=%s mind=%s elapsed=%.1fs", session_id, mind_id, elapsed)
                         return
             else:
                 # CLI path: stdin/stdout on the subprocess
@@ -495,6 +519,9 @@ class SessionManager:
                 }) + "\n"
                 proc.stdin.write(msg.encode())
                 await proc.stdin.drain()
+
+                # Drain stderr in background so lines appear as WARNING logs
+                stderr_task = asyncio.create_task(_drain_stderr(proc, session_id))
 
                 retried = False
                 while True:
@@ -555,6 +582,10 @@ class SessionManager:
                                     (claude_sid, session_id),
                                 )
                             await self._db.commit()
+                            elapsed = time.monotonic() - t0
+                            log.info("send_message: result session=%s elapsed=%.1fs", session_id, elapsed)
+                            if elapsed > 30:
+                                log.warning("send_message: slow response session=%s mind=%s elapsed=%.1fs", session_id, mind_id, elapsed)
                             return  # done — exit the generator
                     else:
                         # for-loop exhausted without break (EOF) — we're done
