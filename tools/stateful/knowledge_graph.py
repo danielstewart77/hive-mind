@@ -388,10 +388,129 @@ def search_person(
         return json.dumps({"error": str(e)})
 
 
+def audit_person_nodes(*, agent_id: str) -> str:
+    """Find all Person nodes missing first_name or last_name properties.
+
+    Returns nodes that have a name but are missing one or both of first_name/last_name,
+    making them invisible to search_person. Used by the person-node-audit skill to
+    identify nodes that need backfilling.
+
+    Args:
+        agent_id: Which agent's graph to search. Required.
+
+    Returns:
+        JSON with found, count, and nodes list including element_id and all properties.
+    """
+    try:
+        driver = _get_driver()
+        with driver.session() as session:
+            result = session.run(
+                """
+                MATCH (n:Person {agent_id: $agent_id})
+                WHERE n.first_name IS NULL OR n.last_name IS NULL
+                RETURN n, elementId(n) AS element_id
+                """,
+                agent_id=agent_id,
+            )
+            rows = result.data()
+
+        if not rows:
+            return json.dumps({"found": False, "count": 0, "nodes": []})
+
+        nodes = []
+        for row in rows:
+            node_props = dict(row["n"])
+            nodes.append({
+                "name": node_props.get("name"),
+                "first_name": node_props.get("first_name"),
+                "last_name": node_props.get("last_name"),
+                "element_id": row["element_id"],
+                "properties": node_props,
+            })
+
+        return json.dumps({"found": True, "count": len(nodes), "nodes": nodes})
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+def update_person_names(
+    *,
+    name: str,
+    first_name: str = "",
+    last_name: str = "",
+    agent_id: str,
+) -> str:
+    """Update first_name and/or last_name on a Person node identified by name.
+
+    At least one of first_name or last_name must be provided (non-empty).
+    Only non-empty fields are written -- partial updates are supported.
+
+    Args:
+        name: The existing name property of the Person node to update.
+        first_name: Given name to set (omit or empty string to skip).
+        last_name: Surname to set (omit or empty string to skip).
+        agent_id: Which agent's graph this belongs to. Required.
+
+    Returns:
+        JSON confirmation with updated status and the name fields that were set.
+    """
+    if not first_name and not last_name:
+        return json.dumps({
+            "error": "At least one of first_name or last_name must be provided."
+        })
+
+    try:
+        # Build SET clause dynamically based on which fields are provided
+        set_parts = []
+        params: dict[str, str] = {"name": name, "agent_id": agent_id}
+
+        if first_name:
+            set_parts.append("n.first_name = $first_name")
+            params["first_name"] = first_name
+        if last_name:
+            set_parts.append("n.last_name = $last_name")
+            params["last_name"] = last_name
+
+        set_clause = ", ".join(set_parts)
+
+        driver = _get_driver()
+        with driver.session() as session:
+            result = session.run(
+                f"""
+                MATCH (n:Person {{name: $name, agent_id: $agent_id}})
+                SET {set_clause}
+                RETURN n.name AS name
+                """,
+                **params,
+            )
+            record = result.single()
+
+        if record is None:
+            return json.dumps({
+                "updated": False,
+                "reason": f"Person node not found with name={name!r} and agent_id={agent_id!r}",
+            })
+
+        response: dict[str, object] = {
+            "updated": True,
+            "name": name,
+        }
+        if first_name:
+            response["first_name"] = first_name
+        if last_name:
+            response["last_name"] = last_name
+
+        return json.dumps(response)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
 # All knowledge graph tool functions for registration
 KG_TOOLS = [
     graph_upsert,
     graph_upsert_direct,
     graph_query,
     search_person,
+    audit_person_nodes,
+    update_person_names,
 ]
