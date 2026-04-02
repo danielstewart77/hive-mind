@@ -2,6 +2,8 @@
 
 Read this file first. Load only the specs relevant to the current task.
 
+Plans (forward-looking, not yet implemented) live in `plans/` — see `plans/` directory.
+
 ## Core Standards (always relevant)
 | Spec | File | Summary |
 |------|------|---------|
@@ -20,6 +22,7 @@ Read this file first. Load only the specs relevant to the current task.
 | Container Hardening | `specs/container-hardening.md` | Ring 3 runtime restrictions, compatibility exceptions, Ring 4 production volumes |
 | HITL Approval | `specs/hitl-approval.md` | Approval flow, token lifecycle, blocking vs non-blocking, session heartbeat |
 | HITL Telegram Buttons | `specs/hitl-telegram-inline-buttons.md` | Inline keyboard button implementation for HITL approvals |
+| OpenClaw CVE Analysis | `specs/openclaw-cve-analysis.md` | CVE pattern mapping to Hive Mind; hardening checklist |
 
 ## Multi-Mind Architecture
 | Spec | File | Summary |
@@ -27,18 +30,15 @@ Read this file first. Load only the specs relevant to the current task.
 | Multi-Mind | `specs/multi-mind.md` | Named minds (Ada/Bob/Bilby/Nagatha), backends, soul isolation, inter-mind comms |
 | Bob (Ollama) | `specs/bob-ollama-mind.md` | Bob mind: Ollama-backed, local/private, CLI harness pattern |
 | Group Sessions | `specs/group-sessions-gateway.md` | Gateway endpoints for group chat, moderator routing |
-| Skill Taxonomy | `specs/skill-taxonomy.md` | Broad category skills (engineering/ops/comms/planning/info) as lifecycle routers |
-| Skills Enhancement | `specs/skills-enhancement.md` | Lessons from Claude Code skills at scale; improvement plan |
 
 ## Infrastructure
 | Spec | File | Summary |
 |------|------|---------|
 | Containers | `specs/containers.md` | All Docker services: names, ports, volumes, build context |
-| Tool Migration | `specs/tool-migration.md` | Stateless vs stateful tool pattern; when to use each |
 | Remote Control | `specs/remote-control-integration.md` | Session observation endpoint; real-time stream access |
+| Logging | `specs/logging.md` | Structured logging levels, silence rules, rotation config |
 
 ## Voice
 | Spec | File | Summary |
 |------|------|---------|
 | Chatterbox TTS | `specs/chatterbox.md` | Working synthesis code reference for the Chatterbox engine |
-| Chatterbox Migration | `specs/chatterbox-migration.md` | Migration from F5-TTS to Chatterbox; zero-shot voice cloning setup |
