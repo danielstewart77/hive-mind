@@ -1,5 +1,12 @@
 # Soul Load + Reflect Cycle — Spec
 
+## Status
+
+Phase 1: Complete (soul_nudge.sh + SKILL.md updated)
+
+- [x] Modify `soul_nudge.sh`: turn-1 `--load`, prepend `--load` before `--reflect` on nudge turns
+- [x] Update `self-reflect` SKILL.md: deduplication check in Step 6
+
 ## Problem
 
 The self-reflect skill has two modes: `--load` and `--reflect`. Only `--reflect` is ever
