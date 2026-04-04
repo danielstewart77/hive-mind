@@ -1052,6 +1052,23 @@ class SessionManager:
             return path
         return None
 
+    # ------------------------------------------------------------------
+    # Epilogue
+    # ------------------------------------------------------------------
+    async def get_sessions_pending_epilogue(self) -> list[dict]:
+        """Return sessions eligible for epilogue processing."""
+        rows = await self._db.execute(
+            "SELECT * FROM sessions WHERE status IN ('idle', 'closed') AND epilogue_status IS NULL"
+        )
+        return [dict(r) for r in await rows.fetchall()]
+
+    async def set_epilogue_status(self, session_id: str, status: str) -> None:
+        """Update the epilogue_status column for a session."""
+        await self._db.execute(
+            "UPDATE sessions SET epilogue_status = ? WHERE id = ?", (status, session_id)
+        )
+        await self._db.commit()
+
     async def _session_dict(self, session_id: str) -> dict | None:
         row = await self._get_row(session_id)
         if not row:

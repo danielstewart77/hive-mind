@@ -345,6 +345,21 @@ async def memory_expiry_sweep(x_hitl_internal: str = Header(None)):
 
 
 # ---------------------------------------------------------------------------
+# Epilogue Sweep
+# ---------------------------------------------------------------------------
+@app.post("/epilogue/sweep")
+async def epilogue_sweep(x_hitl_internal: str = Header(None)):
+    """Trigger epilogue processing for all pending sessions."""
+    if not config.hitl_internal_token:
+        return JSONResponse({"error": "HITL not configured"}, status_code=500)
+    if x_hitl_internal != config.hitl_internal_token:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from core.epilogue import process_pending_sessions
+    results = await process_pending_sessions(session_mgr, config.epilogue_thresholds)
+    return results
+
+
+# ---------------------------------------------------------------------------
 # WebSocket endpoint
 # ---------------------------------------------------------------------------
 @app.websocket("/sessions/{session_id}/stream")
