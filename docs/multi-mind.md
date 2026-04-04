@@ -92,28 +92,28 @@ graph TD
 
 ### Phase 1 — Config (no code changes)
 
-Add a `minds` block to `config.yaml`:
+Two-level config. Top-level `config.yaml` gets a routing registry only — `mind_id` to local path or external URL. Per-mind detail lives in `minds/<name>/config.yaml`.
+
+**`config.yaml` — routing registry:**
 
 ```yaml
 minds:
-  ada:
-    backend: cli_claude
-    model: sonnet
-    soul: souls/ada.md
-    mcp_config: .mcp.ada.json
-  nagatha:
-    backend: codex_cli
-    model: codex
-    soul: souls/nagatha.md
-    mcp_config: .mcp.nagatha.json
-  skippy:
-    backend: ollama
-    model: llama3
-    soul: souls/skippy.md
-    mcp_config: .mcp.skippy.json
+  ada:     local: minds/ada
+  nagatha: local: minds/nagatha
+  skippy:  local: minds/skippy
 ```
 
-Each mind is just a parameter set. No new classes. No new modules.
+**`minds/<name>/config.yaml` — per-mind implementation detail:**
+
+```yaml
+# minds/ada/config.yaml
+backend: cli_claude
+model: sonnet
+soul: souls/ada.md
+mcp_config: .mcp.ada.json
+```
+
+Each mind is just a parameter set. No new classes. No new modules. Keeping per-mind config in the mind's own directory means the mind is portable — it carries everything it needs to run.
 
 [codex] Nagatha remains `mind_id="nagatha"`. We are replacing the backend implementation behind that
 mind, not renaming the mind itself.
@@ -129,10 +129,15 @@ POST /sessions        { "mind_id": "ada" }
 POST /sessions/{id}/message   { "mind_id": "ada", "text": "..." }
 ```
 
-The Gateway passes `mind_id` to the Session Manager. The Session Manager does a single config lookup:
+The Gateway passes `mind_id` to the Session Manager. The Session Manager does a two-step lookup:
 
 ```python
-mind_cfg = config["minds"].get(mind_id, config["minds"]["ada"])  # default to Ada
+# Step 1: routing registry (top-level config.yaml)
+registry_entry = config["minds"].get(mind_id, config["minds"]["ada"])  # default to Ada
+mind_dir = registry_entry["local"]  # or registry_entry["url"] for remote minds
+
+# Step 2: per-mind config (minds/<name>/config.yaml)
+mind_cfg  = load_yaml(f"{mind_dir}/config.yaml")
 soul_path = mind_cfg["soul"]
 mcp_cfg   = mind_cfg["mcp_config"]
 backend   = mind_cfg["backend"]
