@@ -38,7 +38,7 @@ class TestEpilogueSweepSchedulerJob:
     async def test_calls_endpoint(self) -> None:
         mock_resp = AsyncMock()
         mock_resp.json = AsyncMock(return_value={
-            "processed": 0, "auto_written": 0, "hitl_sent": 0, "skipped": 0, "errors": 0,
+            "processed": 0, "auto_written": 0, "skipped": 0, "errors": 0, "exceptions": 0,
         })
         mock_resp.status = 200
         mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
@@ -65,7 +65,7 @@ class TestEpilogueSweepSchedulerJob:
     async def test_logs_results(self, caplog: pytest.LogCaptureFixture) -> None:
         mock_resp = AsyncMock()
         mock_resp.json = AsyncMock(return_value={
-            "processed": 5, "auto_written": 3, "hitl_sent": 1, "skipped": 1, "errors": 0,
+            "processed": 5, "auto_written": 3, "skipped": 1, "errors": 0, "exceptions": 1,
         })
         mock_resp.status = 200
         mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)

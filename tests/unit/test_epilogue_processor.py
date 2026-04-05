@@ -1,14 +1,15 @@
 """Unit tests for process_session() function."""
 
+import inspect
 import json
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from config import EpilogueThresholds
 from core.epilogue import process_session
 
 
-def _make_session(session_id: str = "test-sess", transcript_path: Path | None = None) -> dict:
+def _make_session(session_id: str = "test-sess") -> dict:
     return {
         "id": session_id,
         "summary": "Test session",
@@ -42,11 +43,12 @@ def _write_transcript(path: Path, turns: int = 3, duration_minutes: float = 10.0
 class TestProcessSession:
     """Tests for process_session() function."""
 
+    @patch("core.epilogue._notify_exception")
     @patch("core.epilogue.auto_write_digest")
-    @patch("core.epilogue.hitl_write_digest")
-    async def test_below_threshold_auto_writes(self, mock_hitl_write, mock_auto_write, tmp_path: Path) -> None:
+    async def test_always_auto_writes(self, mock_auto_write, mock_notify, tmp_path: Path) -> None:
+        """Any session calls auto_write_digest(), regardless of turn count."""
         transcript_path = tmp_path / "transcript.jsonl"
-        _write_transcript(transcript_path, turns=3, duration_minutes=10.0)
+        _write_transcript(transcript_path, turns=50, duration_minutes=120.0)
 
         session = _make_session()
         session_mgr = AsyncMock()
@@ -55,29 +57,62 @@ class TestProcessSession:
 
         mock_auto_write.return_value = {"memories_written": 0, "entities_written": 0, "errors": 0}
 
-        await process_session(session, session_mgr, EpilogueThresholds())
+        await process_session(session, session_mgr)
 
         mock_auto_write.assert_called_once()
-        mock_hitl_write.assert_not_called()
 
+    @patch("core.epilogue._notify_exception")
+    @patch("core.epilogue.check_exceptions")
     @patch("core.epilogue.auto_write_digest")
-    @patch("core.epilogue.hitl_write_digest")
-    async def test_above_threshold_uses_hitl(self, mock_hitl_write, mock_auto_write, tmp_path: Path) -> None:
+    async def test_exception_triggers_hitl_notification(
+        self, mock_auto_write, mock_check, mock_notify, tmp_path: Path
+    ) -> None:
+        """When check_exceptions returns exceptions, HITL notification is sent."""
+        from core.epilogue import EpilogueException
+
         transcript_path = tmp_path / "transcript.jsonl"
-        # 25 turns exceeds default threshold of 20
-        _write_transcript(transcript_path, turns=25, duration_minutes=10.0)
+        _write_transcript(transcript_path, turns=3)
 
         session = _make_session()
         session_mgr = AsyncMock()
         session_mgr.get_transcript_path = AsyncMock(return_value=transcript_path)
         session_mgr.set_epilogue_status = AsyncMock()
 
-        mock_hitl_write.return_value = {"memories_written": 0, "entities_written": 0, "errors": 0}
+        mock_auto_write.return_value = {"memories_written": 0, "entities_written": 0, "errors": 0}
+        mock_check.return_value = [
+            EpilogueException(trigger="high_novel_entities", detail="11 novel entities"),
+        ]
 
-        await process_session(session, session_mgr, EpilogueThresholds())
+        await process_session(session, session_mgr)
 
-        mock_hitl_write.assert_called_once()
-        mock_auto_write.assert_not_called()
+        mock_notify.assert_called_once()
+
+    @patch("core.epilogue._notify_exception")
+    @patch("core.epilogue.check_exceptions")
+    @patch("core.epilogue.auto_write_digest")
+    async def test_exception_logged_at_warning(
+        self, mock_auto_write, mock_check, mock_notify, tmp_path: Path, caplog
+    ) -> None:
+        """When exceptions found, a WARNING log is emitted."""
+        from core.epilogue import EpilogueException
+
+        transcript_path = tmp_path / "transcript.jsonl"
+        _write_transcript(transcript_path, turns=3)
+
+        session = _make_session()
+        session_mgr = AsyncMock()
+        session_mgr.get_transcript_path = AsyncMock(return_value=transcript_path)
+        session_mgr.set_epilogue_status = AsyncMock()
+
+        mock_auto_write.return_value = {"memories_written": 0, "entities_written": 0, "errors": 0}
+        mock_check.return_value = [
+            EpilogueException(trigger="high_novel_entities", detail="11 novel entities"),
+        ]
+
+        with caplog.at_level(logging.WARNING, logger="core.epilogue"):
+            await process_session(session, session_mgr)
+
+        assert any("high_novel_entities" in r.message for r in caplog.records)
 
     @patch("core.epilogue.auto_write_digest")
     async def test_deletes_transcript_after_processing(self, mock_auto_write, tmp_path: Path) -> None:
@@ -91,7 +126,7 @@ class TestProcessSession:
 
         mock_auto_write.return_value = {"memories_written": 0, "entities_written": 0, "errors": 0}
 
-        await process_session(session, session_mgr, EpilogueThresholds())
+        await process_session(session, session_mgr)
 
         assert not transcript_path.exists()
 
@@ -107,7 +142,7 @@ class TestProcessSession:
 
         mock_auto_write.return_value = {"memories_written": 0, "entities_written": 0, "errors": 0}
 
-        await process_session(session, session_mgr, EpilogueThresholds())
+        await process_session(session, session_mgr)
 
         session_mgr.set_epilogue_status.assert_called_once_with("test-sess", "done")
 
@@ -117,7 +152,7 @@ class TestProcessSession:
         session_mgr.get_transcript_path = AsyncMock(return_value=None)
         session_mgr.set_epilogue_status = AsyncMock()
 
-        await process_session(session, session_mgr, EpilogueThresholds())
+        await process_session(session, session_mgr)
 
         session_mgr.set_epilogue_status.assert_called_once_with("test-sess", "skipped")
 
@@ -131,6 +166,12 @@ class TestProcessSession:
         session_mgr.get_transcript_path = AsyncMock(return_value=transcript_path)
         session_mgr.set_epilogue_status = AsyncMock()
 
-        await process_session(session, session_mgr, EpilogueThresholds())
+        await process_session(session, session_mgr)
 
         session_mgr.set_epilogue_status.assert_called_once_with("test-sess", "skipped")
+
+    def test_no_thresholds_parameter(self) -> None:
+        """process_session() takes only session and session_mgr (no thresholds)."""
+        sig = inspect.signature(process_session)
+        param_names = list(sig.parameters.keys())
+        assert param_names == ["session", "session_mgr"]

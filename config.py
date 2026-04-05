@@ -48,13 +48,6 @@ class AutopilotGuards:
 
 
 @dataclass
-class EpilogueThresholds:
-    max_turns: int = 20
-    max_duration_minutes: int = 60
-    max_novel_entities: int = 5
-
-
-@dataclass
 class ScheduledTask:
     cron: str
     prompt: str
@@ -73,9 +66,6 @@ class HiveMindConfig:
 
     # Autopilot guard rails
     autopilot_guards: AutopilotGuards = field(default_factory=AutopilotGuards)
-
-    # Epilogue thresholds — sessions below all thresholds auto-write
-    epilogue_thresholds: EpilogueThresholds = field(default_factory=EpilogueThresholds)
 
     # Provider configs: {name: {env: {...}, api_base: "..."}}
     providers: dict = field(default_factory=dict)
@@ -116,20 +106,12 @@ class HiveMindConfig:
             max_minutes_without_input=guards_raw.get("max_minutes_without_input", 30),
         )
 
-        ep_raw = _yaml_config.get("epilogue_thresholds", {})
-        ep_thresholds = EpilogueThresholds(
-            max_turns=ep_raw.get("max_turns", 20),
-            max_duration_minutes=ep_raw.get("max_duration_minutes", 60),
-            max_novel_entities=ep_raw.get("max_novel_entities", 5),
-        )
-
         return cls(
             server_port=_yaml_config.get("server_port", 8420),
             idle_timeout_minutes=_yaml_config.get("idle_timeout_minutes", 30),
             max_sessions=_yaml_config.get("max_sessions", 10),
             default_model=_yaml_config.get("default_model", "sonnet"),
             autopilot_guards=guards,
-            epilogue_thresholds=ep_thresholds,
             providers=_yaml_config.get("providers", {}),
             models=_yaml_config.get("models", {}),
             minds=_yaml_config.get("minds", {}),

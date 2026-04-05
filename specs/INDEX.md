@@ -37,6 +37,7 @@ Plans (forward-looking, not yet implemented) live in `plans/` — see `plans/` d
 | Containers | `specs/containers.md` | All Docker services: names, ports, volumes, build context |
 | Remote Control | `specs/remote-control-integration.md` | Session observation endpoint; real-time stream access |
 | Logging | `specs/logging.md` | Structured logging levels, silence rules, rotation config |
+| Epilogue Exceptions | `specs/epilogue-exceptions.md` | Exception trigger conditions for session epilogue HITL (Phase 3) |
 
 ## Voice
 | Spec | File | Summary |

@@ -14,10 +14,9 @@ class TestEpilogueSweepEndpoint:
         with patch("server.session_mgr"), \
              patch("server.config") as mock_cfg, \
              patch("core.epilogue.process_pending_sessions", new_callable=AsyncMock, return_value={
-                 "processed": 0, "auto_written": 0, "hitl_sent": 0, "skipped": 0, "errors": 0,
+                 "processed": 0, "auto_written": 0, "skipped": 0, "errors": 0, "exceptions": 0,
              }):
             mock_cfg.hitl_internal_token = "test-token"
-            mock_cfg.epilogue_thresholds = None  # will be passed through
             from server import app
 
             client = TestClient(app, raise_server_exceptions=False)
@@ -51,10 +50,9 @@ class TestEpilogueSweepEndpoint:
         with patch("server.session_mgr"), \
              patch("server.config") as mock_cfg, \
              patch("core.epilogue.process_pending_sessions", new_callable=AsyncMock, return_value={
-                 "processed": 3, "auto_written": 2, "hitl_sent": 1, "skipped": 0, "errors": 0,
+                 "processed": 3, "auto_written": 2, "skipped": 0, "errors": 0, "exceptions": 1,
              }):
             mock_cfg.hitl_internal_token = "test-token"
-            mock_cfg.epilogue_thresholds = None
             from server import app
 
             client = TestClient(app, raise_server_exceptions=False)
@@ -62,9 +60,9 @@ class TestEpilogueSweepEndpoint:
             data = response.json()
             assert data["processed"] == 3
             assert data["auto_written"] == 2
-            assert data["hitl_sent"] == 1
             assert data["skipped"] == 0
             assert data["errors"] == 0
+            assert data["exceptions"] == 1
 
     def test_unconfigured_hitl_returns_500(self) -> None:
         with patch("server.session_mgr"), \

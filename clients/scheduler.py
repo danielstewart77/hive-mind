@@ -181,12 +181,12 @@ async def _epilogue_sweep() -> None:
             async with http.post(f"{SERVER_URL}/epilogue/sweep", headers=headers) as resp:
                 data = await resp.json()
                 log.info(
-                    "Epilogue sweep: processed=%d, auto_written=%d, hitl_sent=%d, skipped=%d, errors=%d",
+                    "Epilogue sweep: processed=%d, auto_written=%d, skipped=%d, errors=%d, exceptions=%d",
                     data.get("processed", 0),
                     data.get("auto_written", 0),
-                    data.get("hitl_sent", 0),
                     data.get("skipped", 0),
                     data.get("errors", 0),
+                    data.get("exceptions", 0),
                 )
     except Exception:
         log.exception("Epilogue sweep failed")
