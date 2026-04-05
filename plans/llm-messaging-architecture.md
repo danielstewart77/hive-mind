@@ -269,3 +269,104 @@ hive_mind_broker:
 The broker is a dumb router. The two-table database is the transcript. The rolling summary makes session resets irrelevant — the callee always wakes with full context. The caller pays for context; the callee pays only for work.
 
 In Hive Mind terms: Ada orchestrates, Nagatha and Bob work, the broker routes, and the gateway wakes whoever is next.
+
+---
+
+## Three-Layer Model
+
+The architecture decomposes into three portable layers. Each can be reasoned about, deployed, and scaled independently.
+
+```
+Mind            — the AI process. Identity, soul, backend. Speaks one protocol.
+Nervous System  — routing bus. Knows where every mind is. Handles all message flow.
+Body            — peripherals. Tools, databases, MCP, skills.
+```
+
+**Minimal viable standalone unit: one Mind + Nervous System + the Body subset that Mind needs.**
+
+Extracting a mind from the hive: take its `minds/<name>/` directory, give it a Nervous System instance (local or remote), register it. The routing logic doesn't change — the registry entry switches from a local subprocess address to an HTTP endpoint.
+
+```mermaid
+graph TD
+    subgraph Clients["Clients"]
+        C["Telegram · Discord · Web · Voice"]
+    end
+
+    subgraph NS["⚡ Nervous System"]
+        GW["Gateway\nserver.py\nexternal routing"]
+        SM["Session Manager\nsessions.py\nlifecycle · session bus · inter-mind relay"]
+        REG["Registry\nwho exists · how to reach them\n⚠️ static today — see Gap section"]
+    end
+
+    subgraph Minds["🧠 Minds  (portable modules)"]
+        ADA["Ada\nCLI Claude\nminds/ada/"]
+        NAG["Nagatha\nCodex CLI\nminds/nagatha/"]
+        EXT["Remote Mind\nHTTP endpoint\noutside hive"]
+    end
+
+    subgraph Body["🔧 Body"]
+        MCP["MCP Tools"]
+        DB["Databases\nSQLite · Neo4j · Vector"]
+        SK["Skills · Agents"]
+    end
+
+    C --> GW
+    GW --> SM
+    SM --> REG
+    REG --> ADA
+    REG --> NAG
+    REG -.->|"routed by URL"| EXT
+    ADA --> MCP
+    ADA --> DB
+    NAG --> MCP
+    NAG --> DB
+    EXT -.->|"remote call"| MCP
+```
+
+The Nervous System is currently fragmented across `server.py` (external routing), `sessions.py` (lifecycle), and the not-yet-built Phase 4 broker (inter-mind). These three components answer the same question — *who are the minds and how do I reach them?* — and should be treated as a single layer.
+
+### Two-Level Config
+
+Per-mind config belongs in `minds/<name>/config.yaml` — everything needed to run that mind (backend, model, MCP config). This travels with the mind.
+
+The top-level `config.yaml` holds a **routing registry only** — `mind_id` mapped to a local path or external URL:
+
+```yaml
+# config.yaml — routing registry only
+minds:
+  ada:     local: minds/ada
+  nagatha: local: minds/nagatha
+  skippy:  local: minds/skippy
+  # future remote mind:
+  # remote_mind: url: http://remote.example.com:8421
+```
+
+Each mind's own `minds/<name>/config.yaml` holds the implementation detail:
+
+```yaml
+# minds/ada/config.yaml
+backend: cli_claude
+model: sonnet
+soul: souls/ada.md
+mcp_config: .mcp.ada.json
+```
+
+---
+
+## Gap: Dynamic Registration
+
+> **Status: not yet designed. This section is a placeholder.**
+
+Currently, mind registration is static — `config.yaml` must be edited and the container restarted to add or remove a mind. For drop-in modularity and remote minds to work, registration needs to be dynamic:
+
+- A mind announces itself to the Nervous System
+- The Nervous System acknowledges and adds it to the routing table
+- No restart required; onboarding is a procedure, not a config edit
+
+Design questions to resolve before implementing:
+
+- What is the registration handshake? (HTTP endpoint? message on the bus?)
+- How does the Nervous System verify a mind's identity?
+- What happens when a registered mind goes offline — graceful deregister vs. timeout?
+- Does the registry persist across Nervous System restarts?
+- Can a mind re-register with a new address without losing session history?

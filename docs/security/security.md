@@ -55,4 +55,4 @@ The external MCP server (`hive_mind_mcp`) is protected by a bearer token. The to
 2. **Security audit** (`docs/SEC_REVIEW.md`) — specific findings with severity ratings and remediation status
 3. **Planka board** — tracks all security findings and mitigation rings as prioritized stories
 
-See also: [HITL (Human-in-the-Loop)](../specs/hitl-approval.md) for how write operations are confirmed before execution.
+See also: [HITL (Human-in-the-Loop)](../../specs/hitl-approval.md) for how write operations are confirmed before execution.

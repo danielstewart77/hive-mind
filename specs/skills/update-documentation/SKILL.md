@@ -1,104 +1,98 @@
 ---
 name: update-documentation
-description: Update README and linked docs to match the current state of the codebase. Use when a code change has been made and docs may be stale, or when a specific doc error is spotted.
+description: Update README and all linked documentation to reflect the current state of the codebase
 user-invocable: true
-argument-hint: "[optional: feature name, commit SHA, or description of doc issue]"
+argument-hint: "[focus area or 'full']"
 ---
 
 # Update Documentation
 
-## Step 0 — Determine scope
+Keep the README and all linked docs accurate and current. Run this after significant architectural changes, new tools, or feature additions.
 
-Before touching anything, assess what kind of update this is.
+## Step 0 — Build a file inventory
 
-**If a context argument was provided:**
-- Classify it: is this about a code change, or a specific doc error?
-- Code change → Step 1A
-- Doc error → Step 1B
+Before touching anything, scan the documentation directories to build a ground-truth index of what actually exists. This is used in Step 5 to verify links — never assume a file exists without checking against this inventory first.
 
-**If no argument was provided:**
-- Run `git log --oneline -10`
-- Identify commits that likely affect docs (new features, renames, removals, architectural changes)
-- Treat those commits as context → Step 1A
+```bash
+find /usr/src/app/docs /usr/src/app/specs /usr/src/app/plans /usr/src/app/minds \
+     -name "*.md" 2>/dev/null | sort
+```
 
-**Scope decision — make this before doing any edits:**
-- Specific thing (one feature, one file, one paragraph) → **surgical mode**: fix only what's affected, then stop
-- Broad (full audit, major refactor) → **full sweep mode**: walk every linked doc
+Also include top-level files:
+```bash
+ls /usr/src/app/*.md 2>/dev/null
+```
 
-State which mode you're in before proceeding.
+Hold this inventory in context. Every link verification in Step 5 must resolve against this list, using the correct base directory for each source file (i.e. relative paths resolve from the file's own directory, not from the repo root).
 
----
+## Step 1 — Understand what changed
 
-## Step 1A — Code-change entry point
+Before touching any file, gather context:
+- Read `README.md` in full
+- Read `CLAUDE.md` in full
+- Read `specs/hive-mind-architecture.md`
+- Run `git log --oneline -20` to see recent commits
+- If a focus area was provided (e.g. "tools", "telegram"), scope the update to that area
 
-1. If a commit SHA or feature name was given, run `git show <sha> --stat` or `git log --oneline --all | grep <feature>`
-2. Identify which files/modules changed
-3. Search docs for references to those files/modules:
-   ```bash
-   grep -r "<module or feature name>" docs/ specs/ README.md CLAUDE.md
-   ```
-4. For each doc that references the changed area → Step 2
+## Step 2 — Audit README
 
----
+Check each section of README.md against reality:
+- **Architecture diagram** — does it reflect the current container structure, MCP setup, and client list?
+- **File structure** — does it match actual directory layout? (`tools/stateless/`, `tools/stateful/` moved from `agents/`)
+- **Quick Start** — still accurate?
+- **Configuration** — matches `config.yaml`?
+- **Gateway API table** — matches `server.py` endpoints?
+- **Adding New Tools** section — reflects hybrid stateless/stateful pattern?
 
-## Step 1B — Doc-issue entry point
+Update any stale sections directly.
 
-1. Identify which file and section the issue is in
-2. Read that file in full
-3. Locate the stale/incorrect content
-4. Verify the correct state by reading the actual source (code file, config, etc.)
-5. Fix the specific issue → Step 3 (check for ripple effects)
+## Step 3 — Follow all linked docs
 
----
+Extract every `.md` link from README.md, then for each:
+1. Read the linked file
+2. Check for stale references (old paths, removed tools, renamed modules)
+3. Update if needed
 
-## Step 2 — Update affected docs
-
-For each doc identified in Step 1A:
-
-- Read it in full
-- Find the section(s) that reference the changed code/feature
-- Verify the correct state by reading the actual source
-- Edit only what's wrong — do not rewrite for style or reorganise
-- Note each change made
-
-Key files to check (in priority order):
-- `README.md` — architecture diagram, file structure, API table, Adding New Tools section
-- `CLAUDE.md` — file structure listing, design principles
-- `specs/hive-mind-architecture.md` — patterns and architectural decisions
+Priority files to check:
+- `specs/hive-mind-architecture.md` — architecture decisions and patterns
 - `specs/tool-migration.md` — stateless/stateful hybrid pattern
-- Any other spec that grep found a reference in
+- `specs/conventions.md` — coding conventions
+- `specs/INDEX.md` — index of all specs
+- `docs/` subdirectories — human-readable background docs
 
----
+## Step 4 — Check CLAUDE.md
 
-## Step 3 — Check for ripple effects
+Verify `CLAUDE.md` file structure section matches reality:
+- Are all listed files still present at the stated paths?
+- Are new significant files missing from the listing?
+- Does the "Adding New Tools" section reflect current patterns?
 
-After any edit, check whether the changed doc links to other docs that may also need updating:
+## Step 5 — Verify cross-references
 
-```bash
-grep -o '\[.*\](.*\.md)' <edited-file>
-```
-
-For each linked file, ask: could the change you just made require an update there too? If yes, read it and fix. If no, move on.
-
-In surgical mode: stop after one level of ripple checking.
-In full sweep mode: follow links recursively until no more updates are needed.
-
----
-
-## Step 4 — Verify no broken links
+Using the inventory from Step 0, check every `.md` link in docs/, specs/, and README.md:
 
 ```bash
-grep -rh '\[.*\](.*\.md)' docs/ specs/ README.md CLAUDE.md | grep -o '([^)]*\.md)' | tr -d '()' | sort -u
+grep -rh '\[.*\](.*\.md)' /usr/src/app/docs/ /usr/src/app/specs/ /usr/src/app/README.md \
+  | grep -o '([^)]*\.md)' | tr -d '()' | sort -u
 ```
 
-For each unique `.md` path found, verify the file exists. Report any that don't.
+For each link found, resolve it **relative to the file it appears in** (not from repo root), then check that path against the Step 0 inventory. Report:
+- Links that resolve correctly — skip
+- Links that don't resolve — flag as broken, fix if the correct target is clear from context
 
----
+Do not use a flat path resolver. Always compute: `dirname(source_file) + "/" + link_path` and normalise.
 
-## Step 5 — Summarise
+## Step 6 — Summarise changes
 
-Output:
-- Mode used (surgical / full sweep) and why
-- Files changed, with a one-line description of what was fixed in each
-- Any broken links found and whether they were fixed
-- Anything that couldn't be verified automatically and needs human review
+After all updates, output:
+- Which files were changed and why
+- Any links that were broken and fixed
+- Any sections that were stale and what was corrected
+- Anything that couldn't be verified automatically (needs human review)
+
+## Notes
+
+- Do not rewrite docs for style — only correct facts
+- Preserve existing structure and tone
+- If unsure whether something is stale, read the referenced source file before changing
+- Do not update `soul.md` — that has its own update criteria
