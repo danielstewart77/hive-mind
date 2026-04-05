@@ -1,8 +1,8 @@
 """Session epilogue processor -- extracts memories and knowledge graph entries from completed sessions.
 
-Sub-threshold sessions (short, few entities) auto-write without HITL approval.
-Above-threshold sessions generate a digest sent to Daniel via Telegram for HITL approval.
-Transcripts are deleted after processing.
+All sessions auto-write by default. Exception triggers (anomalous conditions) send
+informational HITL notifications after writes have completed. Transcripts are deleted
+after processing.
 """
 
 from __future__ import annotations
@@ -13,8 +13,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-
-from config import EpilogueThresholds
 
 logger = logging.getLogger(__name__)
 
@@ -35,16 +33,36 @@ class EpilogueDigest:
     metrics: SessionMetrics
 
 
-def exceeds_threshold(metrics: SessionMetrics, thresholds: EpilogueThresholds) -> bool:
-    """Check whether session metrics exceed any epilogue threshold.
+@dataclass
+class EpilogueException:
+    trigger: str  # "high_novel_entities" | "high_error_rate" | "conflicting_entity"
+    detail: str   # Human-readable explanation
 
-    Returns True if any metric strictly exceeds the corresponding threshold.
+
+def check_exceptions(
+    digest: EpilogueDigest,
+    write_errors: int = 0,
+    total_writes: int = 0,
+) -> list[EpilogueException]:
+    """Check whether a digest triggers any exception conditions.
+
+    Returns a list of EpilogueException instances (empty if no exceptions).
     """
-    return (
-        metrics.turn_count > thresholds.max_turns
-        or metrics.duration_minutes > thresholds.max_duration_minutes
-        or metrics.novel_entity_count > thresholds.max_novel_entities
-    )
+    exceptions: list[EpilogueException] = []
+
+    if digest.metrics.novel_entity_count > 10:
+        exceptions.append(EpilogueException(
+            trigger="high_novel_entities",
+            detail=f"{digest.metrics.novel_entity_count} novel entities found",
+        ))
+
+    if total_writes > 0 and write_errors / total_writes > 0.5:
+        exceptions.append(EpilogueException(
+            trigger="high_error_rate",
+            detail=f"{write_errors}/{total_writes} writes failed",
+        ))
+
+    return exceptions
 
 
 def _extract_text_from_content(content: str | list) -> str:
@@ -138,51 +156,6 @@ def parse_transcript(path: Path) -> tuple[int, float, str]:
 _TELEGRAM_MAX_LEN = 4000
 
 
-def format_digest_for_telegram(digest: EpilogueDigest) -> str:
-    """Format an epilogue digest for display in a Telegram HITL approval message.
-
-    Truncates to fit within Telegram's message length limit.
-    """
-    lines = [
-        f"Session Epilogue: {digest.session_id[:8]}",
-        "",
-        f"Summary: {digest.summary}",
-        "",
-        f"Metrics: {digest.metrics.turn_count} turns, "
-        f"{digest.metrics.duration_minutes:.0f} min, "
-        f"{digest.metrics.novel_entity_count} novel entities",
-        "",
-    ]
-
-    lines.append(f"Memories ({len(digest.memories)}):")
-    if digest.memories:
-        for i, mem in enumerate(digest.memories[:5]):
-            content = mem.get("content", "")[:100]
-            data_class = mem.get("data_class", "unknown")
-            lines.append(f"  {i + 1}. [{data_class}] {content}")
-        if len(digest.memories) > 5:
-            lines.append(f"  ... and {len(digest.memories) - 5} more")
-    else:
-        lines.append("  (none)")
-
-    lines.append("")
-    lines.append(f"Entities ({len(digest.entities)}):")
-    if digest.entities:
-        for i, ent in enumerate(digest.entities[:5]):
-            name = ent.get("name", "?")
-            etype = ent.get("entity_type", "?")
-            lines.append(f"  {i + 1}. {etype}: {name}")
-        if len(digest.entities) > 5:
-            lines.append(f"  ... and {len(digest.entities) - 5} more")
-    else:
-        lines.append("  (none)")
-
-    result = "\n".join(lines)
-    if len(result) > _TELEGRAM_MAX_LEN:
-        result = result[:_TELEGRAM_MAX_LEN - 3] + "..."
-    return result
-
-
 # ---------------------------------------------------------------------------
 # Write helpers — lazy imports to avoid import-time side effects
 # ---------------------------------------------------------------------------
@@ -272,19 +245,41 @@ def auto_write_digest(digest: EpilogueDigest) -> dict:
     return {"memories_written": memories_written, "entities_written": entities_written, "errors": errors}
 
 
-def hitl_write_digest(digest: EpilogueDigest) -> dict:
-    """Send digest for HITL approval, then write if approved.
+def format_exception_notification(
+    session_id: str,
+    exceptions: list[EpilogueException],
+) -> str:
+    """Format exception details into an informational HITL notification message."""
+    lines = [
+        f"Epilogue Exception: {session_id[:8]}",
+        "",
+        f"{len(exceptions)} exception(s) detected after auto-write:",
+        "",
+    ]
+    for exc in exceptions:
+        lines.append(f"  - {exc.trigger}: {exc.detail}")
 
-    Returns:
-        Dict with memories_written, entities_written, errors, and optionally skipped.
+    result = "\n".join(lines)
+    if len(result) > _TELEGRAM_MAX_LEN:
+        result = result[:_TELEGRAM_MAX_LEN - 3] + "..."
+    return result
+
+
+def _notify_exception(
+    session_id: str,
+    exceptions: list[EpilogueException],
+) -> None:
+    """Send exception details via HITL notification (fire-and-forget).
+
+    Catches all exceptions so that notification failures never propagate.
     """
-    summary = format_digest_for_telegram(digest)
-    approved = _hitl_request(summary)
-
-    if not approved:
-        return {"memories_written": 0, "entities_written": 0, "errors": 0, "skipped": True}
-
-    return auto_write_digest(digest)
+    try:
+        message = format_exception_notification(session_id, exceptions)
+        _hitl_request(message)
+    except Exception:
+        logger.exception(
+            "Failed to send exception notification for session %s", session_id
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -294,16 +289,16 @@ def hitl_write_digest(digest: EpilogueDigest) -> dict:
 async def process_session(
     session: dict,
     session_mgr: Any,
-    thresholds: EpilogueThresholds,
 ) -> dict:
     """Process a single session's transcript for epilogue extraction.
 
     1. Get transcript path; skip if missing
     2. Parse transcript for metrics and conversation text
     3. Build a digest with summary and empty memories/entities (extraction deferred)
-    4. Check thresholds: auto-write or HITL
-    5. Delete transcript file
-    6. Set epilogue_status to 'done' (or 'skipped' on error)
+    4. Always auto-write
+    5. Check for exception conditions; notify if any
+    6. Delete transcript file
+    7. Set epilogue_status to 'done' (or 'skipped' on error)
 
     Returns:
         Dict with processing results.
@@ -336,32 +331,39 @@ async def process_session(
             metrics=metrics,
         )
 
-        # Route based on threshold
-        if exceeds_threshold(metrics, thresholds):
-            logger.info(
-                "Session %s exceeds threshold (turns=%d, duration=%.0f) -- using HITL",
-                session_id, turn_count, duration_minutes,
+        # Always auto-write
+        logger.info(
+            "Session %s auto-writing (turns=%d, duration=%.0f)",
+            session_id, turn_count, duration_minutes,
+        )
+        result = auto_write_digest(digest)
+        write_mode = "auto"
+
+        # Check for exception conditions after auto-write
+        total_writes = result["memories_written"] + result["entities_written"] + result["errors"]
+        exceptions = check_exceptions(digest, write_errors=result["errors"], total_writes=total_writes)
+
+        if exceptions:
+            trigger_names = ", ".join(e.trigger for e in exceptions)
+            logger.warning(
+                "Epilogue exceptions for session %s: %s",
+                session_id, trigger_names,
             )
-            result = hitl_write_digest(digest)
-            write_mode = "hitl"
-        else:
-            logger.info(
-                "Session %s below threshold (turns=%d, duration=%.0f) -- auto-writing",
-                session_id, turn_count, duration_minutes,
-            )
-            result = auto_write_digest(digest)
-            write_mode = "auto"
+            _notify_exception(session_id, exceptions)
 
         # Delete transcript after processing
         transcript_path.unlink(missing_ok=True)
 
         await session_mgr.set_epilogue_status(session_id, "done")
-        return {
+        output: dict[str, Any] = {
             "session_id": session_id,
             "status": "done",
             "write_mode": write_mode,
             **result,
         }
+        if exceptions:
+            output["exceptions"] = [{"trigger": e.trigger, "detail": e.detail} for e in exceptions]
+        return output
 
     except Exception:
         logger.exception("Epilogue processing failed for session %s", session_id)
@@ -371,7 +373,6 @@ async def process_session(
 
 async def process_pending_sessions(
     session_mgr: Any,
-    thresholds: EpilogueThresholds,
 ) -> dict:
     """Process all sessions pending epilogue.
 
@@ -379,27 +380,26 @@ async def process_pending_sessions(
     then processes each one.
 
     Returns:
-        Summary dict with processed, auto_written, hitl_sent, skipped, and errors counts.
+        Summary dict with processed, auto_written, skipped, errors, and exceptions counts.
     """
     pending = await session_mgr.get_sessions_pending_epilogue()
 
     processed = 0
     auto_written = 0
-    hitl_sent = 0
     skipped = 0
     errors = 0
+    exception_count = 0
 
     for session in pending:
         processed += 1
         try:
-            result = await process_session(session, session_mgr, thresholds)
+            result = await process_session(session, session_mgr)
             status = result.get("status")
-            write_mode = result.get("write_mode")
 
-            if status == "done" and write_mode == "auto":
+            if status == "done":
                 auto_written += 1
-            elif status == "done" and write_mode == "hitl":
-                hitl_sent += 1
+                if result.get("exceptions"):
+                    exception_count += 1
             elif status == "skipped":
                 skipped += 1
         except Exception:
@@ -407,13 +407,13 @@ async def process_pending_sessions(
             errors += 1
 
     logger.info(
-        "Epilogue sweep: processed=%d, auto_written=%d, hitl_sent=%d, skipped=%d, errors=%d",
-        processed, auto_written, hitl_sent, skipped, errors,
+        "Epilogue sweep: processed=%d, auto_written=%d, skipped=%d, errors=%d, exceptions=%d",
+        processed, auto_written, skipped, errors, exception_count,
     )
     return {
         "processed": processed,
         "auto_written": auto_written,
-        "hitl_sent": hitl_sent,
         "skipped": skipped,
         "errors": errors,
+        "exceptions": exception_count,
     }

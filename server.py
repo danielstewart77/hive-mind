@@ -355,7 +355,7 @@ async def epilogue_sweep(x_hitl_internal: str = Header(None)):
     if x_hitl_internal != config.hitl_internal_token:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     from core.epilogue import process_pending_sessions
-    results = await process_pending_sessions(session_mgr, config.epilogue_thresholds)
+    results = await process_pending_sessions(session_mgr)
     return results
 
 

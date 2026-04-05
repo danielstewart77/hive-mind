@@ -1,4 +1,4 @@
-"""Unit tests for auto_write_digest and hitl_write_digest functions."""
+"""Unit tests for auto_write_digest function."""
 
 import json
 from unittest.mock import patch
@@ -7,8 +7,6 @@ from core.epilogue import (
     EpilogueDigest,
     SessionMetrics,
     auto_write_digest,
-    hitl_write_digest,
-    format_digest_for_telegram,
 )
 
 
@@ -89,42 +87,3 @@ class TestAutoWriteDigest:
         assert result["memories_written"] == 0
         assert result["entities_written"] == 0
         assert result["errors"] == 0
-
-
-class TestHitlWriteDigest:
-    """Tests for hitl_write_digest() function."""
-
-    @patch("core.epilogue.auto_write_digest")
-    @patch("core.epilogue._hitl_request")
-    def test_approved_writes_all(self, mock_hitl, mock_auto) -> None:
-        mock_hitl.return_value = True
-        mock_auto.return_value = {"memories_written": 2, "entities_written": 1, "errors": 0}
-        digest = _make_digest(
-            memories=[{"content": "M1", "data_class": "obs", "tags": "", "source": "user"}],
-        )
-        result = hitl_write_digest(digest)
-        mock_auto.assert_called_once_with(digest)
-        assert result["memories_written"] == 2
-
-    @patch("core.epilogue.auto_write_digest")
-    @patch("core.epilogue._hitl_request")
-    def test_denied_writes_nothing(self, mock_hitl, mock_auto) -> None:
-        mock_hitl.return_value = False
-        digest = _make_digest(
-            memories=[{"content": "M1", "data_class": "obs", "tags": "", "source": "user"}],
-        )
-        result = hitl_write_digest(digest)
-        mock_auto.assert_not_called()
-        assert result["memories_written"] == 0
-        assert result["entities_written"] == 0
-        assert result.get("skipped") is True
-
-    @patch("core.epilogue.auto_write_digest")
-    @patch("core.epilogue._hitl_request")
-    def test_sends_formatted_digest(self, mock_hitl, mock_auto) -> None:
-        mock_hitl.return_value = True
-        mock_auto.return_value = {"memories_written": 0, "entities_written": 0, "errors": 0}
-        digest = _make_digest(memories=[{"content": "Test memory", "data_class": "obs", "tags": "", "source": "user"}])
-        expected_summary = format_digest_for_telegram(digest)
-        hitl_write_digest(digest)
-        mock_hitl.assert_called_once_with(expected_summary)

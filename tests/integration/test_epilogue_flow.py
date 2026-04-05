@@ -1,12 +1,11 @@
 """Integration tests for the full epilogue processing flow."""
 
 import json
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiosqlite
-
-from config import EpilogueThresholds
 
 
 _SCHEMA = """
@@ -70,14 +69,14 @@ async def _setup_db():
     return db
 
 
-class TestSubThresholdAutoWrite:
-    """Integration: sub-threshold session auto-writes memories."""
+class TestAutoWrite:
+    """Integration: any session auto-writes memories."""
 
     @patch("core.epilogue._graph_upsert_direct")
     @patch("core.epilogue._memory_store_direct")
-    async def test_sub_threshold_session_auto_writes(self, mock_mem, mock_graph, tmp_path: Path) -> None:
+    async def test_any_session_auto_writes(self, mock_mem, mock_graph, tmp_path: Path) -> None:
         transcript_path = tmp_path / "transcript.jsonl"
-        _write_transcript(transcript_path, turns=5, duration_minutes=10.0)
+        _write_transcript(transcript_path, turns=50, duration_minutes=120.0)
 
         from core.sessions import SessionManager
         from core.models import ModelRegistry
@@ -104,7 +103,6 @@ class TestSubThresholdAutoWrite:
         result = await process_session(
             {"id": "sess-1", "summary": "Test", "mind_id": "ada"},
             mgr,
-            EpilogueThresholds(),
         )
 
         assert result["status"] == "done"
@@ -119,31 +117,6 @@ class TestSubThresholdAutoWrite:
         assert r["epilogue_status"] == "done"
 
         await mgr._db.close()
-
-
-class TestAboveThresholdHitl:
-    """Integration: above-threshold session triggers HITL."""
-
-    @patch("core.epilogue._hitl_request", return_value=True)
-    @patch("core.epilogue._graph_upsert_direct")
-    @patch("core.epilogue._memory_store_direct")
-    async def test_above_threshold_uses_hitl(self, mock_mem, mock_graph, mock_hitl, tmp_path: Path) -> None:
-        transcript_path = tmp_path / "transcript.jsonl"
-        _write_transcript(transcript_path, turns=25, duration_minutes=10.0)
-
-        session_mgr = AsyncMock()
-        session_mgr.get_transcript_path = AsyncMock(return_value=transcript_path)
-        session_mgr.set_epilogue_status = AsyncMock()
-
-        from core.epilogue import process_session
-        result = await process_session(
-            {"id": "sess-2", "summary": "Long session", "mind_id": "ada"},
-            session_mgr,
-            EpilogueThresholds(),
-        )
-
-        assert result["write_mode"] == "hitl"
-        mock_hitl.assert_called_once()
 
 
 class TestTranscriptDeletion:
@@ -165,7 +138,6 @@ class TestTranscriptDeletion:
         await process_session(
             {"id": "sess-3", "summary": "Short session", "mind_id": "ada"},
             session_mgr,
-            EpilogueThresholds(),
         )
 
         assert not transcript_path.exists()
@@ -179,9 +151,8 @@ class TestSweepEndpointIntegration:
              patch("server.config") as mock_cfg, \
              patch("core.epilogue.process_pending_sessions", new_callable=AsyncMock) as mock_sweep:
             mock_cfg.hitl_internal_token = "test-token"
-            mock_cfg.epilogue_thresholds = EpilogueThresholds()
             mock_sweep.return_value = {
-                "processed": 1, "auto_written": 1, "hitl_sent": 0, "skipped": 0, "errors": 0,
+                "processed": 1, "auto_written": 1, "skipped": 0, "errors": 0, "exceptions": 0,
             }
 
             from fastapi.testclient import TestClient
@@ -196,3 +167,46 @@ class TestSweepEndpointIntegration:
             data = response.json()
             assert data["processed"] == 1
             mock_sweep.assert_called_once()
+
+
+class TestExceptionLogging:
+    """Integration: exception triggers are logged at WARNING level."""
+
+    @patch("core.epilogue._notify_exception")
+    @patch("core.epilogue._graph_upsert_direct")
+    @patch("core.epilogue._memory_store_direct")
+    async def test_exception_triggers_are_logged(
+        self, mock_mem, mock_graph, mock_notify, tmp_path: Path, caplog
+    ) -> None:
+        transcript_path = tmp_path / "transcript.jsonl"
+        _write_transcript(transcript_path, turns=3)
+
+        session_mgr = AsyncMock()
+        session_mgr.get_transcript_path = AsyncMock(return_value=transcript_path)
+        session_mgr.set_epilogue_status = AsyncMock()
+
+        # Make all writes fail to trigger high_error_rate
+        mock_mem.return_value = json.dumps({"error": "Neo4j down"})
+
+        from core.epilogue import process_session
+
+        # We need to provide a digest with entities/memories to trigger errors
+        # Patch auto_write_digest to return high error count
+        with patch("core.epilogue.auto_write_digest") as mock_auto, \
+             patch("core.epilogue.check_exceptions") as mock_check:
+            from core.epilogue import EpilogueException
+            mock_auto.return_value = {"memories_written": 0, "entities_written": 0, "errors": 5}
+            mock_check.return_value = [
+                EpilogueException(trigger="high_error_rate", detail="5/5 writes failed"),
+            ]
+
+            with caplog.at_level(logging.WARNING, logger="core.epilogue"):
+                await process_session(
+                    {"id": "sess-exc", "summary": "Error session", "mind_id": "ada"},
+                    session_mgr,
+                )
+
+            assert any(
+                "high_error_rate" in r.message and r.levelno == logging.WARNING
+                for r in caplog.records
+            )
