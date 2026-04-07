@@ -22,6 +22,7 @@ A self-improving personal assistant powered by Claude Code. The system wraps the
 flowchart TD
     DC[Discord] --> GW[FastAPI Gateway]
     TG[Telegram] --> GW
+    HV[Group Chat Bot] --> GW
     SC[Scheduler] --> GW
     GW --> SM[Session Manager]
     SM -->|mind_id lookup| ADA[Ada · CLI Claude]
@@ -56,7 +57,7 @@ Human-readable guides, background, and reference material — organized by topic
 | [docs/setup/](docs/setup/) | Configuration, providers, and secrets |
 | [docs/memory/](docs/memory/) | Memory lifecycle and storage strategy |
 | [docs/security/](docs/security/) | Security model, hardening, and open tradeoffs |
-| [docs/projects/](docs/projects/) | Future project notes and proposals |
+| [plans/](plans/) | Forward-looking plans and proposals (not yet implemented) |
 
 ## Specs (`specs/`)
 
@@ -104,8 +105,9 @@ All Claude skills, version-controlled. Bootstrap: `cp -rn specs/skills/. ~/.clau
 | [3am](specs/skills/3am/SKILL.md) | Nightly autonomous session |
 | [7am](specs/skills/7am/SKILL.md) | Morning briefing |
 | [agent-logs](specs/skills/agent-logs/SKILL.md) | Scan system log files for critical entries |
+| [browse](specs/skills/browse/SKILL.md) | Browse the web interactively (navigate, fill forms, click, extract) |
 | [check-reminders](specs/skills/check-reminders/SKILL.md) | Check due reminders |
-| [code-genius](specs/skills/code-genius/SKILL.md) | Angular/Dotnet TDD implementation |
+| [code-genius](specs/skills/code-genius/SKILL.md) | Python coding skill: implement features, validate quality, and self-correct |
 | [code-review-genius](specs/skills/code-review-genius/SKILL.md) | Structured code review against story requirements |
 | [commit](specs/skills/commit/SKILL.md) | Stage, commit, push, and open a PR |
 | [convert-to-pdf](specs/skills/convert-to-pdf/SKILL.md) | Convert documents to PDF |
@@ -131,7 +133,9 @@ All Claude skills, version-controlled. Bootstrap: `cp -rn specs/skills/. ~/.clau
 | [reminders](specs/skills/reminders/SKILL.md) | Set, list, delete, and check one-time reminders |
 | [save-session](specs/skills/save-session/SKILL.md) | Save memories from the current session |
 | [secrets](specs/skills/secrets/SKILL.md) | Manage secrets via the system keyring |
+| [seed-mind](specs/skills/seed-mind/SKILL.md) | Seed a mind's complete identity into the knowledge graph |
 | [self-reflect](specs/skills/self-reflect/SKILL.md) | Ada's identity reflection and soul update system |
+| [send-email](specs/skills/send-email/SKILL.md) | Send an email via Gmail on Daniel's behalf (requires HITL approval) |
 | [semantic-memory-save](specs/skills/semantic-memory-save/SKILL.md) | Write a memory chunk to the vector store |
 | [sitrep](specs/skills/sitrep/SKILL.md) | System situation report |
 | [skill-creator-claude](specs/skills/skill-creator-claude/SKILL.md) | Guide for creating Claude skills correctly |

@@ -9,30 +9,37 @@ This file provides guidance to Claude Code when working with this repository.
 ### Architecture
 
 ```
-┌─────────────┐  ┌─────────────┐  ┌─────────────┐
-│ Discord Bot │  │ Terminal UI │  │   Web UI    │
-│  (thin)     │  │  (thin)     │  │  (thin)     │
-└──────┬──────┘  └──────┬──────┘  └──────┬──────┘
-       │                │                │
-       └────────────────┼────────────────┘
+┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐
+│ Discord Bot │  │ Telegram Bot│  │ Group Chat  │  │  Scheduler  │
+│  (thin)     │  │  (thin)     │  │  Bot (thin) │  │  (cron)     │
+└──────┬──────┘  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘
+       │                │                │                 │
+       └────────────────┼────────────────┴─────────────────┘
                         │  HTTP / WebSocket
                  ┌──────▼──────┐
                  │   FastAPI   │
                  │   Gateway   │  ← server.py
                  └──────┬──────┘
                         │
-              ┌─────────▼─────────┐
-              │  Session Manager  │  ← core/sessions.py
-              │  (process pool +  │
-              │   SQLite DB)      │
-              └─────────┬─────────┘
-                        │  stdin/stdout (NDJSON)
-              ┌─────────▼─────────┐
-              │  claude -p        │
-              │  --stream-json    │
-              │  + MCP tools      │
-              │  (one per session)│
-              └───────────────────┘
+              ┌──────────▼──────────┐
+              │   Session Manager   │  ← core/sessions.py
+              │   (process pool +   │
+              │    SQLite DB)       │
+              └──────────┬──────────┘
+                         │  mind_id routing
+         ┌───────────────┼───────────────┬──────────────┐
+  ┌──────▼───────┐ ┌─────▼──────┐ ┌─────▼──────┐ ┌────▼─────────┐
+  │ Ada          │ │   Bob      │ │   Bilby    │ │  Nagatha     │
+  │ (CLI Claude) │ │(CLI Ollama)│ │ (SDK Code) │ │ (SDK Claude) │
+  └──────┬───────┘ └─────┬──────┘ └─────┬──────┘ └────┬─────────┘
+         └───────────────┴───────────────┴──────────────┘
+                         │  MCP (stdio / SSE)
+          ┌──────────────┴──────────────┐
+   ┌──────▼──────┐               ┌──────▼──────┐
+   │ hive-mind-  │               │ hive-mind-  │
+   │ tools (int) │               │ mcp (ext +  │
+   │             │               │   HITL)     │
+   └─────────────┘               └─────────────┘
 ```
 
 ### Self-Improvement
@@ -73,13 +80,24 @@ hive_mind/
 │   ├── secrets.py                # Shared get_credential() utility
 │   ├── models.py                 # Model registry (static aliases + Ollama)
 │   ├── gateway_client.py         # Shared HTTP client for bots
-│   └── hitl.py                   # Human-in-the-loop approval
+│   ├── hitl.py                   # Human-in-the-loop approval
+│   ├── audit.py                  # MCP tool invocation audit logging (JSON + rotation)
+│   ├── dep_scan.py               # pip-audit wrapper for dependency vulnerability scanning
+│   ├── epilogue.py               # Session epilogue processor (post-session memory extraction)
+│   ├── kg_guards.py              # Knowledge graph write guards (disambiguation + orphan)
+│   ├── memory_expiry.py          # Timed-event expiry sweep for Neo4j
+│   ├── memory_schema.py          # Memory data class registry and validation
+│   ├── notify_utils.py           # Shared Telegram notification utility
+│   ├── path_validation.py        # CWE-22 path traversal protection for skill agents
+│   └── story_pipeline.py         # Post-merge story pipeline (pull, health check, cleanup)
 │
 ├── tools/
 │   ├── stateful/                  # MCP tools (registered in mcp_server.py)
 │   │   ├── browser.py            # Async Playwright browser automation
 │   │   ├── knowledge_graph.py    # Neo4j knowledge graph
-│   │   └── memory.py             # Neo4j vector memory store
+│   │   ├── memory.py             # Neo4j vector memory store
+│   │   ├── group_chat.py         # Group session message forwarding between minds
+│   │   └── inter_mind.py         # Direct mind-to-mind delegation
 │   │
 │   └── stateless/                 # Standalone scripts (invoked via skills)
 │       ├── crypto/crypto.py      # CoinGecko crypto prices
@@ -94,7 +112,8 @@ hive_mind/
 │
 ├── clients/                       # Thin client entry points
 │   ├── discord_bot.py            # Discord bot
-│   ├── telegram_bot.py           # Telegram bot
+│   ├── telegram_bot.py           # Telegram bot (Ada + named minds)
+│   ├── hivemind_bot.py           # Group chat Telegram bot (multi-mind sessions)
 │   └── scheduler.py              # Cron daemon
 │
 ├── voice/                         # Voice infrastructure
@@ -117,6 +136,15 @@ hive_mind/
 │   ├── bob.md                    # Bob's soul seed
 │   ├── nagatha.md                # Nagatha's soul seed
 │   └── skippy.md                 # Skippy placeholder
+│
+├── utilities/                     # Standalone utilities (not invoked via skills)
+│   └── ollama_tools.py           # Direct Ollama API client
+│
+├── vendor/                        # Vendored dependencies
+│   └── claude_code_sdk/          # Vendored Claude Code SDK (used by Bilby)
+│
+├── plans/                         # Forward-looking plans and proposals (not yet implemented)
+│
 ├── soul.md                        # Pointer stub (see souls/ada.md)
 ├── CLAUDE.md                      # This file
 ├── Dockerfile
@@ -169,6 +197,15 @@ A minimal `.env` remains for docker-compose interpolation (Neo4j, Planka only).
 | `POST` | `/command` | Route slash commands |
 | `POST` | `/sessions/{id}/remote-control` | Start remote observation of a session |
 | `DELETE` | `/sessions/{id}/remote-control` | Stop remote observation |
+| `POST` | `/group-sessions` | Create group session (multi-mind) |
+| `GET` | `/group-sessions/{id}` | Get group session detail |
+| `POST` | `/group-sessions/{id}/message` | Send message to group session |
+| `DELETE` | `/group-sessions/{id}` | Kill group session |
+| `POST` | `/memory/expiry-sweep` | Trigger timed-event expiry sweep |
+| `POST` | `/epilogue/sweep` | Trigger session epilogue sweep |
+| `POST` | `/hitl/request` | Submit HITL approval request |
+| `GET` | `/hitl/status/{token}` | Check HITL approval status |
+| `POST` | `/hitl/respond` | Respond to HITL approval request |
 
 ## Adding New Tools
 
