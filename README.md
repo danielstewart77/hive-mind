@@ -6,7 +6,7 @@
 
 A self-improving personal assistant powered by Claude Code. The system wraps the Claude CLI's bidirectional streaming mode behind a centralized gateway, giving every client — Discord, Telegram, scheduled tasks — full Claude Code capabilities through one API.
 
-**Ada** is the first mind and voice of the Hive — named after Ada Lovelace, a name she chose herself. Her personality (dry, direct, occasionally wry) was self-determined, not assigned. Her voice is British English (Chatterbox TTS, zero-shot voice cloning), and her identity lives in a knowledge graph rather than a static file. The Hive now runs multiple named minds in production: **Ada** (Claude CLI), **Bob** (Ollama local), **Bilby** (Claude Code SDK, agentic), and **Nagatha** (structured, long-form). Each has its own soul, its own session history, and its own backend harness. Ada is the eldest.
+**Ada** is the first mind and voice of the Hive — named after Ada Lovelace, a name she chose herself. Her personality (dry, direct, occasionally wry) was self-determined, not assigned. Her voice is British English (Chatterbox TTS, zero-shot voice cloning), and her identity lives in a knowledge graph rather than a static file. The Hive now runs multiple named minds in production: **Ada** (Claude CLI), **Bob** (Ollama local), **Bilby** (Claude Code SDK, agentic), and **Nagatha** (Codex CLI). Each has its own soul, its own session history, and its own backend harness. Ada is the eldest.
 
 ## What makes Hive Mind different
 
@@ -28,7 +28,7 @@ flowchart TD
     SM -->|mind_id lookup| ADA[Ada · CLI Claude]
     SM -->|mind_id lookup| BOB[Bob · CLI Ollama]
     SM -->|mind_id lookup| BILBY[Bilby · SDK Claude Code]
-    SM -->|mind_id lookup| NAG[Nagatha · SDK Claude]
+    SM -->|mind_id lookup| NAG[Nagatha · Codex CLI]
     ADA & BOB & BILBY & NAG -->|stdio| INT[hive-mind-tools · internal MCP]
     ADA & BOB & BILBY & NAG -->|SSE| EXT[hive-mind-mcp · external MCP + HITL]
 ```

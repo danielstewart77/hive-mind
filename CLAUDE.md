@@ -30,7 +30,7 @@ This file provides guidance to Claude Code when working with this repository.
          ┌───────────────┼───────────────┬──────────────┐
   ┌──────▼───────┐ ┌─────▼──────┐ ┌─────▼──────┐ ┌────▼─────────┐
   │ Ada          │ │   Bob      │ │   Bilby    │ │  Nagatha     │
-  │ (CLI Claude) │ │(CLI Ollama)│ │ (SDK Code) │ │ (SDK Claude) │
+  │ (CLI Claude) │ │(CLI Ollama)│ │ (SDK Code) │ │ (Codex CLI)  │
   └──────┬───────┘ └─────┬──────┘ └─────┬──────┘ └────┬─────────┘
          └───────────────┴───────────────┴──────────────┘
                          │  MCP (stdio / SSE)
@@ -128,7 +128,7 @@ hive_mind/
 │   ├── ada/implementation.py     # Ada: cli_claude (Claude CLI)
 │   ├── bilby/implementation.py   # Bilby: sdk_code (Claude Code SDK, agentic)
 │   ├── bob/implementation.py     # Bob: cli_ollama (Ollama via CLI harness)
-│   └── nagatha/implementation.py # Nagatha: sdk_claude (Claude SDK)
+│   └── nagatha/implementation.py # Nagatha: codex_cli (Codex CLI, one subprocess per turn)
 │
 ├── souls/                         # Per-mind identity seed files (one-time use only)
 │   ├── ada.md                    # Ada's soul seed
