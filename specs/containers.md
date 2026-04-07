@@ -19,6 +19,7 @@ Complete reference for all Hive Mind Docker services. Load this spec when buildi
 |-------|-------------------|------|---------|
 | `${HOST_PROJECT_DIR:-.}` | `/usr/src/app` | Bind | Source code (dev hot-reload) |
 | `${HOST_CLAUDE_DIR:-~/.claude}` | `/home/hivemind/.claude` | Bind | Claude keyring + config |
+| `${HOST_CODEX_DIR:-~/.codex}` | `/home/hivemind/.codex` | Bind | Codex CLI config (Nagatha) |
 | `sessions-db` | `/usr/src/app/data` | Named volume | SQLite sessions DB |
 | `${HOST_MCP_DIR}` | `/home/USER/Storage/Dev/hive_mind_mcp` | Bind | External MCP project |
 | `${HOST_SPARK_DIR}` | `/home/USER/Storage/Dev/spark_to_bloom` | Bind | External project |
@@ -28,7 +29,9 @@ Complete reference for all Hive Mind Docker services. Load this spec when buildi
 ```
 SESSIONS_DB_PATH=/usr/src/app/data/sessions.db
 PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring
+PYTHONNOUSERSITE=1
 XDG_DATA_HOME=/home/hivemind/.claude/data
+PYTHONPATH=/usr/src/app/vendor
 ```
 
 **Security:** Full hardening (see [Security Settings](#security-settings))
@@ -96,6 +99,21 @@ Same volumes and environment as discord-bot.
 
 ---
 
+### hivemind-bot
+
+| Property | Value |
+|----------|-------|
+| Dockerfile | `Dockerfile` |
+| Container | `hive-mind-hivemind` |
+| Port | None (internal) |
+| Restart | `unless-stopped` |
+| Depends on | server, voice-server |
+| Command | `/opt/venv/bin/python3 -m clients.hivemind_bot` |
+
+Group chat Telegram bot — routes messages through group sessions for multi-mind conversations. Same volumes and environment as discord-bot.
+
+---
+
 ### scheduler
 
 | Property | Value |
@@ -117,7 +135,7 @@ Same volumes and environment as discord-bot.
 |----------|-------|
 | Image | `neo4j:5.26-community` |
 | Container | `hive-mind-neo4j` |
-| Port | None (internal only — `7687` on `hivemind` network) |
+| Port | `7474:7474` (Neo4j Browser), `7687:7687` (Bolt) |
 | Restart | `unless-stopped` |
 
 **Volumes:** `neo4j-data:/data`

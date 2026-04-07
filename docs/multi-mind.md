@@ -19,7 +19,7 @@ Session Manager (sessions.py)  ← reads mind_id, dispatches to harness
         ↓
   ┌─────────────────────────────────────────┐
   │  Ada          Bob        Bilby  Nagatha  │
-  │  cli_claude   cli_ollama sdk_code sdk_claude │
+  │  cli_claude   cli_ollama sdk_code codex_cli │
   │  own soul     own soul   own soul own soul│
   └─────────────────────────────────────────┘
         ↓

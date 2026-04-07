@@ -56,3 +56,9 @@ The external MCP server is protected by a bearer token:
 | POST | /hitl/respond | Resolve HITL (Telegram bot) |
 | POST | /sessions/{id}/remote-control | Start remote observation of a session |
 | DELETE | /sessions/{id}/remote-control | Stop remote observation |
+| POST | /group-sessions | Create group session (multi-mind) |
+| GET | /group-sessions/{id} | Get group session detail |
+| POST | /group-sessions/{id}/message | Send message to group session |
+| DELETE | /group-sessions/{id} | Kill group session |
+| POST | /memory/expiry-sweep | Trigger timed-event expiry sweep |
+| POST | /epilogue/sweep | Trigger session epilogue sweep |
