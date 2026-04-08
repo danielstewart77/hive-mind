@@ -77,6 +77,7 @@ hive_mind/
 │
 ├── core/                          # Internal libraries (not entry points)
 │   ├── sessions.py               # Session manager (process pool + SQLite)
+│   ├── broker.py                 # Message broker — async inter-mind messaging (SQLite + background wakeup)
 │   ├── secrets.py                # Shared get_credential() utility
 │   ├── models.py                 # Model registry (static aliases + Ollama)
 │   ├── gateway_client.py         # Shared HTTP client for bots
@@ -108,7 +109,8 @@ hive_mind/
 │       ├── secrets/secrets.py    # Keyring secret management
 │       ├── x_api/x_api.py       # X/Twitter search
 │       ├── agent_logs/agent_logs.py # Log file scanner
-│       └── current_time/current_time.py # Timezone-aware clock
+│       ├── current_time/current_time.py # Timezone-aware clock
+│       └── poll_broker/poll_broker.py # Polls broker for inter-mind task results (stdlib only)
 │
 ├── clients/                       # Thin client entry points
 │   ├── discord_bot.py            # Discord bot
@@ -206,6 +208,9 @@ A minimal `.env` remains for docker-compose interpolation (Neo4j, Planka only).
 | `POST` | `/hitl/request` | Submit HITL approval request |
 | `GET` | `/hitl/status/{token}` | Check HITL approval status |
 | `POST` | `/hitl/respond` | Respond to HITL approval request |
+| `POST` | `/broker/messages` | Send inter-mind message (async, returns immediately, wakes callee in background) |
+| `GET` | `/broker/messages` | Query messages by `conversation_id` (polling) |
+| `GET` | `/broker/conversations/{id}` | Get conversation with all messages |
 
 ## Adding New Tools
 

@@ -43,6 +43,27 @@ The external MCP server is protected by a bearer token:
 - Bridged into env at gateway startup
 - Referenced in `.mcp.container.json` as `${MCP_AUTH_TOKEN}`
 
+## Message Broker
+
+`core/broker.py` provides asynchronous inter-mind messaging integrated directly into `server.py`. No separate container — it runs in the same process as the gateway and shares the session manager.
+
+**How it works:**
+- A mind POSTs to `POST /broker/messages` with `from`, `to`, `content`, and optional `rolling_summary`
+- The broker writes the message to `data/broker.db` (SQLite, separate from `sessions.db`) and returns immediately: `{ "status": "dispatched", "conversation_id": "...", "message_id": "..." }`
+- An `asyncio` background task wakes the callee: creates a session via `session_mgr`, sends a wakeup prompt, collects the full SSE response, and writes it back as a new message row
+- The caller's polling agent (`tools/stateless/poll_broker/poll_broker.py`) polls `GET /broker/messages?conversation_id=<id>` every 30 seconds until the callee's response appears
+- Callee minds never know about the broker — they just respond normally through their session
+
+**Startup recovery:** On gateway start, messages stranded in `dispatched` status (session died on restart) are marked `failed`. Messages in `pending` are returned for re-dispatch.
+
+**Broker endpoints:**
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | /broker/messages | Send message, write to DB, kick off background wakeup |
+| GET | /broker/messages | Query messages by `conversation_id` |
+| GET | /broker/conversations/{id} | Get conversation with all messages |
+
 ## Key API Endpoints
 
 | Method | Path | Purpose |

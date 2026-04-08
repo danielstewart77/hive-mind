@@ -25,12 +25,15 @@ flowchart TD
     HV[Group Chat Bot] --> GW
     SC[Scheduler] --> GW
     GW --> SM[Session Manager]
+    GW --> BR[Message Broker\ncore/broker.py]
     SM -->|mind_id lookup| ADA[Ada · CLI Claude]
     SM -->|mind_id lookup| BOB[Bob · CLI Ollama]
     SM -->|mind_id lookup| BILBY[Bilby · SDK Claude Code]
     SM -->|mind_id lookup| NAG[Nagatha · Codex CLI]
     ADA & BOB & BILBY & NAG -->|stdio| INT[hive-mind-tools · internal MCP]
     ADA & BOB & BILBY & NAG -->|SSE| EXT[hive-mind-mcp · external MCP + HITL]
+    ADA & BOB & BILBY & NAG -->|POST /broker/messages| BR
+    BR -->|wakeup via session_mgr| SM
 ```
 
 Each client is a thin HTTP wrapper. The gateway routes sessions to a named mind by `mind_id`, spawning the appropriate subprocess. Each mind has its own soul, backend harness, and session history. Claude Code does the heavy lifting; clients just relay messages and render responses.
