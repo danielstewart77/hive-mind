@@ -73,11 +73,14 @@ async def send(
     thread_id = state.get("thread_id")
 
     # Build command — resume if we have a prior thread_id
+    # --dangerously-bypass-approvals-and-sandbox disables bwrap (which requires user namespaces
+    # blocked by the container's cap_drop/no-new-privileges). The Docker container itself provides
+    # external sandboxing — this flag is explicitly intended for that scenario.
     if thread_id:
-        cmd = ["codex", "exec", "--json", "--full-auto", "resume", thread_id, "-"]
+        cmd = ["codex", "exec", "--json", "--dangerously-bypass-approvals-and-sandbox", "resume", thread_id, "-"]
         stdin_content = content
     else:
-        cmd = ["codex", "exec", "--json", "--full-auto", "-"]
+        cmd = ["codex", "exec", "--json", "--dangerously-bypass-approvals-and-sandbox", "-"]
         # Inject system prompt on the first turn only
         stdin_content = f"{state['system_prompt']}\n\n---\n\n{content}"
 
