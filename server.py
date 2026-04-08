@@ -11,6 +11,7 @@ import logging
 import os
 import secrets as _secrets
 import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlencode
@@ -18,9 +19,10 @@ from urllib.parse import urlencode
 import aiohttp
 from fastapi import FastAPI, Header, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
-from config import config
+from config import PROJECT_DIR, config
+import core.broker as broker
 from core.hitl import hitl_store, DEFAULT_TTL
 from core.models import ModelRegistry, Provider
 from core.sessions import SessionManager
@@ -79,9 +81,28 @@ async def lifespan(app: FastAPI):
     global _hitl_cleanup_task
     await session_mgr.start()
     _hitl_cleanup_task = asyncio.create_task(_hitl_cleanup_loop())
+
+    # Broker DB init + startup recovery
+    _broker_db_path = os.environ.get("BROKER_DB_PATH", str(PROJECT_DIR / "data" / "broker.db"))
+    app.state.broker_db = await broker.init_db(_broker_db_path)
+    pending = await broker.recover_stranded_messages(app.state.broker_db)
+    for msg in pending:
+        asyncio.create_task(broker.wakeup_and_collect(
+            app.state.broker_db, session_mgr,
+            message_id=msg["id"],
+            conversation_id=msg["conversation_id"],
+            from_mind=msg["from_mind"],
+            to_mind=msg["to_mind"],
+            content=msg["content"],
+            rolling_summary=msg["rolling_summary"] or "",
+            message_number=msg["message_number"],
+            metadata=json.loads(msg["metadata"]) if msg.get("metadata") else None,
+        ))
+
     log.info("Gateway started on port %d", config.server_port)
     yield
     _hitl_cleanup_task.cancel()
+    await app.state.broker_db.close()
     await session_mgr.shutdown()
 
 
@@ -143,6 +164,24 @@ class CreateGroupSessionRequest(BaseModel):
 class GroupSessionMessageRequest(BaseModel):
     content: str
     images: list[dict] | None = None
+
+
+class BrokerMessageRequest(BaseModel):
+    message_id: str | None = None
+    conversation_id: str
+    from_mind: str = Field(alias="from")
+    to_mind: str = Field(alias="to")
+    content: str
+    rolling_summary: str = ""
+    metadata: dict | None = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class BrokerMessageResponse(BaseModel):
+    status: str
+    conversation_id: str
+    message_id: str
 
 
 # ---------------------------------------------------------------------------
@@ -489,6 +528,88 @@ async def _handle_command(cmd: str, parts: list[str], body: CommandRequest):
         }
 
     return {"error": f"Unknown command: {cmd}"}
+
+
+# ---------------------------------------------------------------------------
+# Broker endpoints (inter-mind messaging)
+# ---------------------------------------------------------------------------
+_MINDS_DIR = PROJECT_DIR / "minds"
+
+
+def _mind_exists(mind_id: str) -> bool:
+    """Check if a mind exists by looking for its implementation file."""
+    return (_MINDS_DIR / mind_id / "implementation.py").exists()
+
+
+@app.post("/broker/messages", response_model=BrokerMessageResponse)
+async def broker_post_message(body: BrokerMessageRequest):
+    """Receive an inter-mind message, write to DB, kick off background wakeup."""
+    if not _mind_exists(body.to_mind):
+        return JSONResponse(
+            {"error": f"Mind '{body.to_mind}' not found. No minds/{body.to_mind}/implementation.py exists."},
+            status_code=404,
+        )
+
+    db = app.state.broker_db
+    message_id = body.message_id or str(uuid.uuid4())
+    message_number = await broker.get_next_message_number(db, body.conversation_id)
+    metadata = body.metadata
+
+    result = await broker.insert_message(
+        db,
+        message_id=message_id,
+        conversation_id=body.conversation_id,
+        from_mind=body.from_mind,
+        to_mind=body.to_mind,
+        message_number=message_number,
+        content=body.content,
+        rolling_summary=body.rolling_summary,
+        metadata=metadata,
+        status="pending",
+    )
+
+    if result.get("existing"):
+        return BrokerMessageResponse(
+            status="exists",
+            conversation_id=body.conversation_id,
+            message_id=message_id,
+        )
+
+    asyncio.create_task(broker.wakeup_and_collect(
+        db, session_mgr,
+        message_id=message_id,
+        conversation_id=body.conversation_id,
+        from_mind=body.from_mind,
+        to_mind=body.to_mind,
+        content=body.content,
+        rolling_summary=body.rolling_summary,
+        message_number=message_number,
+        metadata=metadata,
+    ))
+
+    return BrokerMessageResponse(
+        status="dispatched",
+        conversation_id=body.conversation_id,
+        message_id=message_id,
+    )
+
+
+@app.get("/broker/messages")
+async def broker_get_messages(conversation_id: str):
+    """Get all messages for a conversation."""
+    db = app.state.broker_db
+    messages = await broker.get_messages(db, conversation_id)
+    return messages
+
+
+@app.get("/broker/conversations/{conversation_id}")
+async def broker_get_conversation(conversation_id: str):
+    """Get conversation detail with all messages."""
+    db = app.state.broker_db
+    messages = await broker.get_messages(db, conversation_id)
+    if not messages:
+        return JSONResponse({"error": "Conversation not found"}, status_code=404)
+    return {"conversation_id": conversation_id, "messages": messages}
 
 
 # ---------------------------------------------------------------------------
