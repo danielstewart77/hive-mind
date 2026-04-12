@@ -211,6 +211,10 @@ A minimal `.env` remains for docker-compose interpolation (Neo4j, Planka only).
 | `POST` | `/broker/messages` | Send inter-mind message (async, returns immediately, wakes callee in background) |
 | `GET` | `/broker/messages` | Query messages by `conversation_id` (polling) |
 | `GET` | `/broker/conversations/{id}` | Get conversation with all messages |
+| `GET` | `/broker/minds` | List all registered minds |
+| `POST` | `/broker/minds` | Register a mind |
+| `PUT` | `/broker/minds/{name}` | Update mind fields |
+| `DELETE` | `/broker/minds/{name}` | Deregister a mind |
 
 ## Adding New Tools
 

@@ -9,7 +9,7 @@ tools: Bash, Read, Write, Edit
 # Mermaid Diagram Creator
 
 Skill dir: `~/.claude/skills/mermaid-diagram-creator/`
-Primary editor: Obsidian (`/home/USER/Storage/Dev/HomeLab`) — diagrams valid in `mmdc` render correctly in Obsidian.
+Primary editor: Obsidian — diagrams valid in `mmdc` render correctly in Obsidian.
 
 ## STEP 1 — Parse Args
 `$ARGUMENTS[0]` = diagram type: `sequence|flowchart|gantt|class|state|er|journey|pie`. Ask if missing.

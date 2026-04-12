@@ -34,6 +34,40 @@ def broker_client(tmp_path):
     asyncio.get_event_loop().run_until_complete(db.close())
 
 
+class TestGetBrokerMinds:
+    """Tests for GET /broker/minds endpoint."""
+
+    def test_get_broker_minds_returns_list(self, broker_client):
+        response = broker_client.get("/broker/minds")
+        assert response.status_code == 200
+        data = response.json()
+        assert isinstance(data, list)
+
+    def test_get_broker_minds_contains_registered_minds(self, broker_client):
+        """After startup (which scans minds/), the endpoint returns minds that have MIND.md files."""
+        import core.broker as broker_mod
+
+        # Manually register a mind in the DB so we can verify the endpoint returns it
+        from core.broker import register_mind
+        db = broker_client.app.state.broker_db
+
+        asyncio.get_event_loop().run_until_complete(
+            register_mind(
+                db,
+                name="test_mind",
+                gateway_url="http://hive_mind:8420",
+                model="sonnet",
+                harness="claude_cli_claude",
+            )
+        )
+
+        response = broker_client.get("/broker/minds")
+        assert response.status_code == 200
+        data = response.json()
+        names = [m["name"] for m in data]
+        assert "test_mind" in names
+
+
 class TestPostBrokerMessage:
     def test_returns_dispatched(self, broker_client):
         conv_id = str(uuid.uuid4())

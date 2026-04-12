@@ -43,6 +43,22 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_messages_status ON messages(status);
+
+CREATE TABLE IF NOT EXISTS minds (
+    name           TEXT PRIMARY KEY,
+    gateway_url    TEXT NOT NULL,
+    model          TEXT NOT NULL,
+    harness        TEXT NOT NULL,
+    registered_at  REAL NOT NULL,
+    last_seen      REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS secret_scopes (
+    mind_name   TEXT NOT NULL,
+    secret_key  TEXT NOT NULL,
+    granted_at  REAL NOT NULL,
+    PRIMARY KEY (mind_name, secret_key)
+);
 """
 
 # ---------------------------------------------------------------------------
@@ -327,12 +343,18 @@ async def wakeup_and_collect(
         # 1. Dispatched
         await update_message_status(db, message_id, "dispatched")
 
-        # 2. Create callee session
+        # 2. Create callee session — use the mind's configured model
+        mind_model = None
+        if hasattr(session_mgr, "mind_registry") and session_mgr.mind_registry:
+            mind_info = session_mgr.mind_registry.get(to_mind)
+            if mind_info:
+                mind_model = mind_info.model
         session = await session_mgr.create_session(
             owner_type="broker",
             owner_ref=f"broker-{conversation_id}",
             client_ref=f"broker-{conversation_id}-{to_mind}",
             mind_id=to_mind,
+            model=mind_model,
         )
         session_id = session["id"]
         await update_message_status(db, message_id, "dispatched", recipient_session_id=session_id)
@@ -384,3 +406,131 @@ async def wakeup_and_collect(
                 await session_mgr.kill_session(session_id)
             except Exception:
                 log.warning("broker: failed to kill callee session=%s", session_id)
+
+
+# ---------------------------------------------------------------------------
+# Mind registration
+# ---------------------------------------------------------------------------
+async def register_mind(
+    db: aiosqlite.Connection,
+    *,
+    name: str,
+    gateway_url: str,
+    model: str,
+    harness: str,
+) -> None:
+    """Register (or update) a mind in the broker database.
+
+    If the mind already exists, updates gateway_url/model/harness/last_seen
+    but preserves registered_at.
+    """
+    now = time.time()
+    row = await db.execute(
+        "SELECT registered_at FROM minds WHERE name = ?", (name,)
+    )
+    existing = await row.fetchone()
+
+    if existing:
+        await db.execute(
+            "UPDATE minds SET gateway_url=?, model=?, harness=?, last_seen=? WHERE name=?",
+            (gateway_url, model, harness, now, name),
+        )
+    else:
+        await db.execute(
+            "INSERT INTO minds (name, gateway_url, model, harness, registered_at, last_seen) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (name, gateway_url, model, harness, now, now),
+        )
+    await db.commit()
+
+
+async def get_registered_minds(db: aiosqlite.Connection) -> list[dict]:
+    """Return all registered minds as a list of dicts."""
+    rows = await db.execute("SELECT * FROM minds ORDER BY name")
+    return [dict(r) for r in await rows.fetchall()]
+
+
+async def get_mind(db: aiosqlite.Connection, name: str) -> dict | None:
+    """Get a single mind by name. Returns dict or None if not found."""
+    row = await db.execute("SELECT * FROM minds WHERE name = ?", (name,))
+    result = await row.fetchone()
+    return dict(result) if result else None
+
+
+async def update_mind(db: aiosqlite.Connection, name: str, **fields) -> dict | None:
+    """Partially update a mind's fields. Always updates last_seen.
+
+    Allowed fields: gateway_url, model, harness.
+    Returns updated dict or None if mind not found.
+    """
+    existing = await get_mind(db, name)
+    if existing is None:
+        return None
+
+    allowed = {"gateway_url", "model", "harness"}
+    updates = {k: v for k, v in fields.items() if k in allowed}
+    updates["last_seen"] = time.time()
+
+    set_clause = ", ".join(f"{k} = ?" for k in updates)
+    params = list(updates.values()) + [name]
+    await db.execute(
+        f"UPDATE minds SET {set_clause} WHERE name = ?",
+        params,
+    )
+    await db.commit()
+    return await get_mind(db, name)
+
+
+async def delete_mind(db: aiosqlite.Connection, name: str) -> bool:
+    """Delete a mind by name. Returns True if deleted, False if not found."""
+    cursor = await db.execute("DELETE FROM minds WHERE name = ?", (name,))
+    await db.commit()
+    return cursor.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Secret scoping policy
+# ---------------------------------------------------------------------------
+async def grant_secret_scope(
+    db: aiosqlite.Connection, mind_name: str, secret_key: str
+) -> None:
+    """Grant a mind access to a secret key. Idempotent (INSERT OR IGNORE)."""
+    await db.execute(
+        "INSERT OR IGNORE INTO secret_scopes (mind_name, secret_key, granted_at) "
+        "VALUES (?, ?, ?)",
+        (mind_name, secret_key, time.time()),
+    )
+    await db.commit()
+
+
+async def revoke_secret_scope(
+    db: aiosqlite.Connection, mind_name: str, secret_key: str
+) -> None:
+    """Revoke a mind's access to a secret key."""
+    await db.execute(
+        "DELETE FROM secret_scopes WHERE mind_name = ? AND secret_key = ?",
+        (mind_name, secret_key),
+    )
+    await db.commit()
+
+
+async def get_secret_scopes(
+    db: aiosqlite.Connection, mind_name: str
+) -> list[str]:
+    """Return all secret keys a mind is allowed to access."""
+    rows = await db.execute(
+        "SELECT secret_key FROM secret_scopes WHERE mind_name = ? ORDER BY secret_key",
+        (mind_name,),
+    )
+    return [row["secret_key"] for row in await rows.fetchall()]
+
+
+async def check_secret_scope(
+    db: aiosqlite.Connection, mind_name: str, secret_key: str
+) -> bool:
+    """Check if a mind is allowed to access a specific secret key."""
+    row = await db.execute(
+        "SELECT 1 FROM secret_scopes WHERE mind_name = ? AND secret_key = ?",
+        (mind_name, secret_key),
+    )
+    return await row.fetchone() is not None

@@ -13,6 +13,7 @@ Plans (forward-looking, not yet implemented) live in `plans/` — see `plans/` d
 | Notification Channels | `specs/notification-channels.md` | Fallback order: Telegram → Telegram API → Gmail → alert file |
 | Architecture Principles | `specs/hive-mind-architecture.md` | Event → Specification → Tools pattern; what belongs where |
 | Testing Guidelines | `specs/testing.md` | What makes a test worth keeping; test strategy |
+| Harness-Native Ops | `specs/harness-native-operations.md` | Only write code when the harness can't do it; skills over programs; the decision boundary |
 
 ## Security Implementation
 | Spec | File | Summary |

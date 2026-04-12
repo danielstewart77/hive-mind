@@ -64,3 +64,23 @@ EOF
 ```
 
 Return the PR URL to the user.
+
+## Step 7 — Merge PR and delete remote branch
+
+```bash
+gh pr merge <pr-number> --merge --delete-branch
+```
+
+`--delete-branch` removes the remote branch immediately after merge.
+
+## Step 8 — Pull master
+
+```bash
+git checkout master && git pull origin master --rebase
+```
+
+## Step 9 — Delete local branch
+
+```bash
+git branch -d <branch-name>
+```

@@ -168,3 +168,6 @@ backups/reminders.db.bak.20260228
 
 # Story files (working docs, not for GitHub)
 stories/
+
+# Personal reminders (local only)
+reminders/

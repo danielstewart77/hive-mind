@@ -21,9 +21,9 @@ Complete reference for all Hive Mind Docker services. Load this spec when buildi
 | `${HOST_CLAUDE_DIR:-~/.claude}` | `/home/hivemind/.claude` | Bind | Claude keyring + config |
 | `${HOST_CODEX_DIR:-~/.codex}` | `/home/hivemind/.codex` | Bind | Codex CLI config (Nagatha) |
 | `sessions-db` | `/usr/src/app/data` | Named volume | SQLite sessions DB |
-| `${HOST_MCP_DIR}` | `/home/USER/Storage/Dev/hive_mind_mcp` | Bind | External MCP project |
-| `${HOST_SPARK_DIR}` | `/home/USER/Storage/Dev/spark_to_bloom` | Bind | External project |
-| `${HOST_CADDY_DIR}` | `/home/USER/Storage/Dev/caddy` | Bind | Reverse proxy config |
+| `${HOST_MCP_DIR}` | `/usr/src/mcp` | Bind | External MCP project (set in .env) |
+| `${HOST_SPARK_DIR}` | `/usr/src/spark_to_bloom` | Bind | External project (set in .env) |
+| `${HOST_CADDY_DIR}` | `/usr/src/caddy` | Bind | Reverse proxy config (set in .env) |
 
 **Environment:**
 ```
@@ -450,8 +450,8 @@ A full disk prevents container startup, image builds, and even debugging tools. 
 {
   "mcpServers": {
     "hive-mind-tools": {
-      "command": "/home/USER/Storage/Dev/hive_mind/venv/bin/python",
-      "args": ["/home/USER/Storage/Dev/hive_mind/mcp_server.py"]
+      "command": "<project-root>/venv/bin/python",
+      "args": ["<project-root>/mcp_server.py"]
     }
   }
 }

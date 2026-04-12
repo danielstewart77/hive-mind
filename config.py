@@ -73,9 +73,6 @@ class HiveMindConfig:
     # Static model -> provider mappings
     models: dict[str, str] = field(default_factory=dict)
 
-    # Named minds — each with its own backend, model, soul, and database
-    minds: dict = field(default_factory=dict)
-
     # Group chat configuration
     group_chat: dict = field(default_factory=dict)
 
@@ -114,7 +111,6 @@ class HiveMindConfig:
             autopilot_guards=guards,
             providers=_yaml_config.get("providers", {}),
             models=_yaml_config.get("models", {}),
-            minds=_yaml_config.get("minds", {}),
             group_chat=_yaml_config.get("group_chat", {}),
             mcp_port=_yaml_config.get("mcp_port", 7777),
             discord_allowed_users=_yaml_config.get("discord_allowed_users", []),

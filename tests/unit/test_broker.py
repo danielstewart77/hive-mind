@@ -297,3 +297,98 @@ class TestBackstopSeconds:
     def test_none_type_returns_default(self):
         from core.broker import get_backstop_seconds
         assert get_backstop_seconds(None) == 21600
+
+
+class TestMindsTable:
+    """Tests for the broker minds table."""
+
+    def test_init_db_creates_minds_table(self, tmp_path):
+        from core.broker import init_db
+
+        db_path = str(tmp_path / "broker.db")
+        db = _run(init_db(db_path))
+        try:
+            conn = sqlite3.connect(db_path)
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            conn.close()
+            assert "minds" in tables
+        finally:
+            _run(db.close())
+
+    def test_register_mind_inserts_row(self, broker_db):
+        from core.broker import register_mind
+
+        _run(register_mind(
+            broker_db,
+            name="ada",
+            gateway_url="http://hive_mind:8420",
+            model="sonnet",
+            harness="claude_cli_claude",
+        ))
+
+        row = _run(broker_db.execute("SELECT * FROM minds WHERE name = ?", ("ada",)))
+        result = _run(row.fetchone())
+        assert result is not None
+        assert result["name"] == "ada"
+        assert result["gateway_url"] == "http://hive_mind:8420"
+        assert result["model"] == "sonnet"
+        assert result["harness"] == "claude_cli_claude"
+        assert result["registered_at"] > 0
+        assert result["last_seen"] > 0
+
+    def test_register_mind_upsert_updates_last_seen(self, broker_db):
+        from core.broker import register_mind
+
+        _run(register_mind(
+            broker_db,
+            name="ada",
+            gateway_url="http://hive_mind:8420",
+            model="sonnet",
+            harness="claude_cli_claude",
+        ))
+
+        # Read original timestamps
+        row = _run(broker_db.execute("SELECT registered_at, last_seen FROM minds WHERE name = ?", ("ada",)))
+        first = _run(row.fetchone())
+        original_registered_at = first["registered_at"]
+
+        # Register again (upsert)
+        import time
+        time.sleep(0.01)  # ensure time difference
+        _run(register_mind(
+            broker_db,
+            name="ada",
+            gateway_url="http://hive_mind:8420",
+            model="sonnet",
+            harness="claude_cli_claude",
+        ))
+
+        row = _run(broker_db.execute("SELECT registered_at, last_seen FROM minds WHERE name = ?", ("ada",)))
+        second = _run(row.fetchone())
+        assert second["registered_at"] == original_registered_at  # unchanged
+        assert second["last_seen"] >= first["last_seen"]  # updated
+
+    def test_get_registered_minds_returns_all(self, broker_db):
+        from core.broker import register_mind, get_registered_minds
+
+        _run(register_mind(broker_db, name="ada", gateway_url="http://hive_mind:8420",
+                           model="sonnet", harness="claude_cli_claude"))
+        _run(register_mind(broker_db, name="bob", gateway_url="http://hive_mind:8420",
+                           model="gpt-oss:20b-32k", harness="claude_cli_ollama"))
+
+        minds = _run(get_registered_minds(broker_db))
+        assert len(minds) == 2
+        names = [m["name"] for m in minds]
+        assert "ada" in names
+        assert "bob" in names
+
+    def test_get_registered_minds_empty_table(self, broker_db):
+        from core.broker import get_registered_minds
+
+        minds = _run(get_registered_minds(broker_db))
+        assert minds == []

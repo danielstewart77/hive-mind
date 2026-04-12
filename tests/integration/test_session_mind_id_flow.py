@@ -37,7 +37,6 @@ class TestSessionMindIdFlow:
              patch.object(mgr, "_spawn", new_callable=AsyncMock), \
              patch("core.sessions.config") as mock_config:
             mock_config.default_model = "sonnet"
-            mock_config.minds = {"ada": {"soul": "souls/ada.md", "backend": "cli_claude"}}
             mock_config.idle_timeout_minutes = 30
             mock_config.autopilot_guards = MagicMock(max_minutes_without_input=30)
 
@@ -76,7 +75,6 @@ class TestSessionMindIdFlow:
              patch.object(mgr, "_spawn", new_callable=AsyncMock), \
              patch("core.sessions.config") as mock_config:
             mock_config.default_model = "sonnet"
-            mock_config.minds = {"ada": {"soul": "souls/ada.md"}}
             mock_config.idle_timeout_minutes = 30
             mock_config.autopilot_guards = MagicMock(max_minutes_without_input=30)
 
@@ -113,7 +111,6 @@ class TestSessionMindIdFlow:
              patch.object(mgr, "_spawn", new_callable=AsyncMock), \
              patch("core.sessions.config") as mock_config:
             mock_config.default_model = "sonnet"
-            mock_config.minds = {"ada": {"soul": "souls/ada.md"}}
             mock_config.idle_timeout_minutes = 30
             mock_config.autopilot_guards = MagicMock(max_minutes_without_input=30)
 

@@ -17,14 +17,18 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 import aiohttp
-from fastapi import FastAPI, Header, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from config import PROJECT_DIR, config
 import core.broker as broker
+from core.broker import check_secret_scope, get_secret_scopes, grant_secret_scope, revoke_secret_scope
 from core.hitl import hitl_store, DEFAULT_TTL
+from core.mind_registry import MindRegistry
 from core.models import ModelRegistry, Provider
+from core.network_identity import resolve_container_name
+from core.secrets import get_credential
 from core.sessions import SessionManager
 
 logging.basicConfig(
@@ -82,9 +86,27 @@ async def lifespan(app: FastAPI):
     await session_mgr.start()
     _hitl_cleanup_task = asyncio.create_task(_hitl_cleanup_loop())
 
+    # Mind registry: scan minds/ directory
+    mind_registry = MindRegistry(PROJECT_DIR / "minds")
+    mind_registry.scan()
+    app.state.mind_registry = mind_registry
+    session_mgr.mind_registry = mind_registry
+
     # Broker DB init + startup recovery
     _broker_db_path = os.environ.get("BROKER_DB_PATH", str(PROJECT_DIR / "data" / "broker.db"))
+    Path(_broker_db_path).parent.mkdir(parents=True, exist_ok=True)
     app.state.broker_db = await broker.init_db(_broker_db_path)
+
+    # Register discovered minds in broker DB
+    for mind in mind_registry.list_all():
+        await broker.register_mind(
+            app.state.broker_db,
+            name=mind.name,
+            gateway_url=mind.gateway_url,
+            model=mind.model,
+            harness=mind.harness,
+        )
+
     pending = await broker.recover_stranded_messages(app.state.broker_db)
     for msg in pending:
         asyncio.create_task(broker.wakeup_and_collect(
@@ -184,21 +206,41 @@ class BrokerMessageResponse(BaseModel):
     message_id: str
 
 
+class RegisterMindRequest(BaseModel):
+    name: str
+    gateway_url: str
+    model: str
+    harness: str
+
+
+class UpdateMindRequest(BaseModel):
+    gateway_url: str | None = None
+    model: str | None = None
+    harness: str | None = None
+
+
 # ---------------------------------------------------------------------------
 # Session endpoints
 # ---------------------------------------------------------------------------
 @app.post("/sessions")
 async def create_session(body: CreateSessionRequest):
-    session = await session_mgr.create_session(
-        owner_type=body.owner_type,
-        owner_ref=body.owner_ref,
-        client_ref=body.client_ref,
-        model=body.model,
-        surface_prompt=body.surface_prompt,
-        allowed_directories=body.allowed_directories,
-        mind_id=body.mind_id,
-    )
-    return session
+    # Single-mind mode: restrict to the configured mind
+    try:
+        session = await session_mgr.create_session(
+            owner_type=body.owner_type,
+            owner_ref=body.owner_ref,
+            client_ref=body.client_ref,
+            model=body.model,
+            surface_prompt=body.surface_prompt,
+            allowed_directories=body.allowed_directories,
+            mind_id=body.mind_id,
+        )
+        return session
+    except ConnectionError:
+        return JSONResponse(
+            {"mind_id": body.mind_id, "error": "mind_unreachable"},
+            status_code=503,
+        )
 
 
 @app.get("/sessions")
@@ -537,8 +579,49 @@ _MINDS_DIR = PROJECT_DIR / "minds"
 
 
 def _mind_exists(mind_id: str) -> bool:
-    """Check if a mind exists by looking for its implementation file."""
+    """Check if a mind exists via registry or implementation file."""
+    if hasattr(app.state, "mind_registry") and app.state.mind_registry.get(mind_id):
+        return True
     return (_MINDS_DIR / mind_id / "implementation.py").exists()
+
+
+@app.get("/broker/minds")
+async def broker_get_minds():
+    """Return all registered minds from the broker database."""
+    db = app.state.broker_db
+    return await broker.get_registered_minds(db)
+
+
+@app.post("/broker/minds")
+async def broker_register_mind(body: RegisterMindRequest):
+    """Register (or update) a mind in the broker database."""
+    db = app.state.broker_db
+    await broker.register_mind(
+        db, name=body.name, gateway_url=body.gateway_url,
+        model=body.model, harness=body.harness,
+    )
+    return await broker.get_mind(db, body.name)
+
+
+@app.put("/broker/minds/{name}")
+async def broker_update_mind(name: str, body: UpdateMindRequest):
+    """Partially update a mind's fields."""
+    db = app.state.broker_db
+    fields = {k: v for k, v in body.model_dump().items() if v is not None}
+    result = await broker.update_mind(db, name, **fields)
+    if result is None:
+        return JSONResponse({"error": f"Mind '{name}' not found"}, status_code=404)
+    return result
+
+
+@app.delete("/broker/minds/{name}")
+async def broker_delete_mind(name: str):
+    """Deregister a mind from the broker database."""
+    db = app.state.broker_db
+    deleted = await broker.delete_mind(db, name)
+    if not deleted:
+        return JSONResponse({"error": f"Mind '{name}' not found"}, status_code=404)
+    return {"ok": True, "name": name}
 
 
 @app.post("/broker/messages", response_model=BrokerMessageResponse)
@@ -613,14 +696,102 @@ async def broker_get_conversation(conversation_id: str):
 
 
 # ---------------------------------------------------------------------------
+# Secrets API — network-identity-based secret access for mind containers
+# ---------------------------------------------------------------------------
+class SecretScopeRequest(BaseModel):
+    mind_name: str
+    secret_keys: list[str]  # keys this mind is allowed to access
+
+
+@app.get("/secrets/{key}")
+async def secrets_get(key: str, request: Request):
+    """Return a secret value to an identified and scoped mind container.
+
+    Identifies the caller by Docker network reverse DNS (source IP).
+    Checks the secret_scopes table for authorization.
+    """
+    # 1. Identify caller by source IP
+    caller_ip = request.client.host if request.client else None
+    if not caller_ip:
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+
+    mind_name = await resolve_container_name(caller_ip)
+    if mind_name is None:
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+
+    # 2. Check scope
+    db = app.state.broker_db
+    allowed = await check_secret_scope(db, mind_name, key)
+    if not allowed:
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+
+    # 3. Retrieve secret
+    value = get_credential(key)
+    if value is None:
+        return JSONResponse({"error": "secret not found"}, status_code=404)
+
+    return {"key": key, "value": value}
+
+
+@app.post("/secrets/scopes")
+async def secrets_grant_scopes(
+    body: SecretScopeRequest,
+    x_hitl_internal: str = Header(None),
+):
+    """Grant a mind access to one or more secret keys. Requires HITL internal token."""
+    if not config.hitl_internal_token:
+        return JSONResponse({"error": "HITL not configured"}, status_code=500)
+    if x_hitl_internal != config.hitl_internal_token:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    db = app.state.broker_db
+    for key in body.secret_keys:
+        await grant_secret_scope(db, body.mind_name, key)
+    return {"ok": True, "mind_name": body.mind_name, "granted": body.secret_keys}
+
+
+@app.delete("/secrets/scopes")
+async def secrets_revoke_scopes(
+    body: SecretScopeRequest,
+    x_hitl_internal: str = Header(None),
+):
+    """Revoke a mind's access to one or more secret keys. Requires HITL internal token."""
+    if not config.hitl_internal_token:
+        return JSONResponse({"error": "HITL not configured"}, status_code=500)
+    if x_hitl_internal != config.hitl_internal_token:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    db = app.state.broker_db
+    for key in body.secret_keys:
+        await revoke_secret_scope(db, body.mind_name, key)
+    return {"ok": True, "mind_name": body.mind_name, "revoked": body.secret_keys}
+
+
+@app.get("/secrets/scopes/{mind_name}")
+async def secrets_list_scopes(
+    mind_name: str,
+    x_hitl_internal: str = Header(None),
+):
+    """List all secret keys a mind is allowed to access. Requires HITL internal token."""
+    if not config.hitl_internal_token:
+        return JSONResponse({"error": "HITL not configured"}, status_code=500)
+    if x_hitl_internal != config.hitl_internal_token:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    db = app.state.broker_db
+    keys = await get_secret_scopes(db, mind_name)
+    return {"mind_name": mind_name, "secret_keys": keys}
+
+
+# ---------------------------------------------------------------------------
 # LinkedIn OAuth
 # ---------------------------------------------------------------------------
 _LINKEDIN_AUTH_URL = "https://www.linkedin.com/oauth/v2/authorization"
 _LINKEDIN_TOKEN_URL = "https://www.linkedin.com/oauth/v2/accessToken"
 _LINKEDIN_USERINFO_URL = "https://api.linkedin.com/v2/userinfo"
-_LINKEDIN_REDIRECT_URI = "https://sparktobloom.com/linkedin/callback"
+_LINKEDIN_REDIRECT_URI = config.linkedin.get("redirect_uri", "") if hasattr(config, "linkedin") else os.environ.get("LINKEDIN_REDIRECT_URI", "")
 _LINKEDIN_SCOPES = "openid profile email w_member_social"
-_LINKEDIN_TOKEN_PATH = Path("/home/USER/Storage/Dev/hive_mind_mcp/credentials/linkedin_token.json")
+_LINKEDIN_TOKEN_PATH = Path(os.environ.get("LINKEDIN_TOKEN_PATH", "credentials/linkedin_token.json"))
 
 _linkedin_oauth_states: set[str] = set()
 

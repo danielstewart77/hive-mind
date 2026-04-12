@@ -6,7 +6,7 @@
 
 A self-improving personal assistant powered by Claude Code. The system wraps the Claude CLI's bidirectional streaming mode behind a centralized gateway, giving every client — Discord, Telegram, scheduled tasks — full Claude Code capabilities through one API.
 
-**Ada** is the first mind and voice of the Hive — named after Ada Lovelace, a name she chose herself. Her personality (dry, direct, occasionally wry) was self-determined, not assigned. Her voice is British English (Chatterbox TTS, zero-shot voice cloning), and her identity lives in a knowledge graph rather than a static file. The Hive now runs multiple named minds in production: **Ada** (Claude CLI), **Bob** (Ollama local), **Bilby** (Claude Code SDK, agentic), and **Nagatha** (Codex CLI). Each has its own soul, its own session history, and its own backend harness. Ada is the eldest.
+**Ada** is the first mind and voice of the Hive — named after Ada Lovelace, a name she chose herself. Her personality (dry, direct, occasionally wry) was self-determined, not assigned. Her voice is British English (Chatterbox TTS, zero-shot voice cloning), and her identity lives in a knowledge graph rather than a static file. The Hive runs multiple named minds in production, each in its own isolated container: **Ada** (Claude CLI, orchestrator), **Bob** (Ollama local, private/documents), **Bilby** (Claude Code SDK, programmer/Opus), and **Nagatha** (Codex CLI, programmer). Each has its own soul, scoped filesystem access, and backend harness. The nervous system routes messages to each mind's container via HTTP; minds never see each other's filesystems.
 
 ## What makes Hive Mind different
 
@@ -20,23 +20,23 @@ A self-improving personal assistant powered by Claude Code. The system wraps the
 
 ```mermaid
 flowchart TD
-    DC[Discord] --> GW[FastAPI Gateway]
+    DC[Discord] --> GW[FastAPI Gateway\nNervous System]
     TG[Telegram] --> GW
     HV[Group Chat Bot] --> GW
     SC[Scheduler] --> GW
     GW --> SM[Session Manager]
-    GW --> BR[Message Broker\ncore/broker.py]
-    SM -->|mind_id lookup| ADA[Ada · CLI Claude]
-    SM -->|mind_id lookup| BOB[Bob · CLI Ollama]
-    SM -->|mind_id lookup| BILBY[Bilby · SDK Claude Code]
-    SM -->|mind_id lookup| NAG[Nagatha · Codex CLI]
-    ADA & BOB & BILBY & NAG -->|stdio| INT[hive-mind-tools · internal MCP]
-    ADA & BOB & BILBY & NAG -->|SSE| EXT[hive-mind-mcp · external MCP + HITL]
+    GW --> BR[Message Broker]
+    SM -->|HTTP| ADA[Ada Container\nmind_server.py\nClaude CLI · sonnet]
+    SM -->|HTTP| BOB[Bob Container\nmind_server.py\nClaude CLI · Ollama]
+    SM -->|HTTP| BILBY[Bilby Container\nmind_server.py\nClaude SDK · opus]
+    SM -->|HTTP| NAG[Nagatha Container\nmind_server.py\nCodex CLI]
+    ADA & BOB & BILBY & NAG -->|MCP over network| INT[hive-mind-tools\nNeo4j · Memory · Browser]
+    ADA & BOB & BILBY & NAG -->|MCP over network| EXT[hive-mind-mcp\nGmail · Calendar · HITL]
     ADA & BOB & BILBY & NAG -->|POST /broker/messages| BR
     BR -->|wakeup via session_mgr| SM
 ```
 
-Each client is a thin HTTP wrapper. The gateway routes sessions to a named mind by `mind_id`, spawning the appropriate subprocess. Each mind has its own soul, backend harness, and session history. Claude Code does the heavy lifting; clients just relay messages and render responses.
+Each client is a thin HTTP wrapper. The gateway (nervous system) routes sessions to mind containers via HTTP. Each mind runs `mind_server.py` — a minimal server that manages the harness subprocess. Minds are isolated: scoped filesystems, scoped secrets (via NS secrets API), no shared state between containers.
 
 ## Quick Start
 
@@ -60,6 +60,8 @@ Human-readable guides, background, and reference material — organized by topic
 | [docs/setup/](docs/setup/) | Configuration, providers, and secrets |
 | [docs/memory/](docs/memory/) | Memory lifecycle and storage strategy |
 | [docs/security/](docs/security/) | Security model, hardening, and open tradeoffs |
+| [docs/multi-mind-architecture.md](docs/multi-mind-architecture.md) | Multi-mind system architecture — container isolation, secrets, gateway security |
+| [docs/mind-to-mind-communication.md](docs/mind-to-mind-communication.md) | Inter-mind async messaging via the broker |
 | [plans/](plans/) | Forward-looking plans and proposals (not yet implemented) |
 
 ## Specs (`specs/`)
@@ -78,6 +80,8 @@ Agent-facing specifications. Read by skills and subagents at runtime.
 | [specs/hitl-approval.md](specs/hitl-approval.md) | HITL approval flow and token lifecycle |
 | [specs/tool-safety.md](specs/tool-safety.md) | AST validation, subprocess isolation, staging flow |
 | [specs/container-hardening.md](specs/container-hardening.md) | Runtime restrictions, named volumes |
+| [specs/harness-native-operations.md](specs/harness-native-operations.md) | Only write code when the harness can't do it |
+| [specs/testing.md](specs/testing.md) | What makes a test worth keeping; test strategy |
 
 ### Data Classes (`specs/data-classes/`)
 
@@ -150,6 +154,28 @@ All Claude skills, version-controlled. Bootstrap: `cp -rn specs/skills/. ~/.clau
 | [weather](specs/skills/weather/SKILL.md) | Get weather for a location |
 | [x-ai-lurker](specs/skills/x-ai-lurker/SKILL.md) | Fetch top AI threads from X |
 | [x-search](specs/skills/x-search/SKILL.md) | Search X (Twitter) for tweets and thread replies |
+| **Mind Management** | |
+| [add-mind](specs/skills/add-mind/SKILL.md) | Connect a mind (local, remote, or re-register) |
+| [create-mind](specs/skills/create-mind/SKILL.md) | Create a new mind from a harness template |
+| [update-mind](specs/skills/update-mind/SKILL.md) | Update a mind's configuration |
+| [remove-mind](specs/skills/remove-mind/SKILL.md) | Deregister and remove a mind |
+| [list-minds](specs/skills/list-minds/SKILL.md) | List all registered minds |
+| [generate-compose](specs/skills/generate-compose/SKILL.md) | Generate docker-compose services from MIND.md files |
+| [convert-claude-skill-to-codex](specs/skills/convert-claude-skill-to-codex/SKILL.md) | Convert Claude skills to Codex format |
+| **Setup & Onboarding** | |
+| [setup](specs/skills/setup/SKILL.md) | Master setup wizard — bootstraps a new deployment |
+| [setup-prerequisites](specs/skills/setup-prerequisites/SKILL.md) | Detect hardware, OS, Docker, GPU |
+| [setup-config](specs/skills/setup-config/SKILL.md) | Generate config.yaml, .env, .mcp.json |
+| [setup-auth](specs/skills/setup-auth/SKILL.md) | Claude Code authentication setup |
+| [setup-nervous-system](specs/skills/setup-nervous-system/SKILL.md) | Deploy gateway, broker, Neo4j, MCP |
+| [setup-provider](specs/skills/setup-provider/SKILL.md) | Configure AI providers |
+| [setup-body](specs/skills/setup-body/SKILL.md) | Deploy surfaces, integrations, services |
+| [setup-mind](specs/skills/setup-mind/SKILL.md) | Add or create minds |
+| **Provider Management** | |
+| [add-provider](specs/skills/add-provider/SKILL.md) | Add a new AI provider |
+| [update-provider](specs/skills/update-provider/SKILL.md) | Rotate keys, change endpoints |
+| [remove-provider](specs/skills/remove-provider/SKILL.md) | Remove a provider |
+| [export-config](specs/skills/export-config/SKILL.md) | Export config for migration |
 
 ## License
 

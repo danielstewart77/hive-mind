@@ -77,7 +77,6 @@ class TestKillSessionCleansUpRc:
             mock_config.idle_timeout_minutes = 30
             mock_config.autopilot_guards = MagicMock(max_minutes_without_input=30)
             mock_config.default_model = "sonnet"
-            mock_config.minds = {"ada": {"soul": "souls/ada.md"}}
 
             await mgr.start()
 

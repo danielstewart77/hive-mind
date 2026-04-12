@@ -50,6 +50,9 @@ DATA_CLASS_REGISTRY: dict[str, DataClassDef] = {
     "nagatha-identity": DataClassDef(
         "nagatha-identity", "durable", ["durable", "identity"], False
     ),
+    "bob-identity": DataClassDef(
+        "bob-identity", "durable", ["durable", "identity"], False
+    ),
     "future-project": DataClassDef(
         "future-project", "reviewable", ["reviewable", "project"], False
     ),
