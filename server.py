@@ -770,12 +770,31 @@ async def secrets_revoke_scopes(
 @app.get("/secrets/scopes/{mind_name}")
 async def secrets_list_scopes(
     mind_name: str,
+    request: Request,
     x_hitl_internal: str = Header(None),
 ):
-    """List all secret keys a mind is allowed to access. Requires HITL internal token."""
-    if not config.hitl_internal_token:
-        return JSONResponse({"error": "HITL not configured"}, status_code=500)
-    if x_hitl_internal != config.hitl_internal_token:
+    """List all secret keys a mind is allowed to access.
+
+    Two auth paths:
+    - HITL internal token (admin access to any mind's scopes)
+    - Network identity (a mind can list its own scopes)
+    """
+    # Path 1: HITL admin token
+    hitl_ok = (
+        config.hitl_internal_token
+        and x_hitl_internal == config.hitl_internal_token
+    )
+
+    # Path 2: Network identity — mind can list its own scopes
+    identity_ok = False
+    if not hitl_ok:
+        caller_ip = request.client.host if request.client else None
+        if caller_ip:
+            caller_name = await resolve_container_name(caller_ip)
+            if caller_name == mind_name:
+                identity_ok = True
+
+    if not hitl_ok and not identity_ok:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     db = app.state.broker_db
