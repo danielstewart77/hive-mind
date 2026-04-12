@@ -21,7 +21,7 @@ You are the story kickoff agent for the Hive Mind. When a developer is ready to 
 
 ```
 /story-start abc123def456
-/story-start abc123def456 /home/USER/projects/my-app/documents
+/story-start abc123def456 <project-path>/documents
 ```
 
 ---
@@ -35,7 +35,7 @@ Extract from `$ARGUMENTS`:
 - `$ARGUMENTS[0]` = Planka card ID (required). If not provided, ask the user.
 - `$ARGUMENTS[1]` = Base path where the documents directory will be created (optional).
   - If not provided, ask: "Where should I create the documents directory for this story?"
-  - Example: `/home/USER/projects/my-app/documents`
+  - Example: `<project-path>/documents`
 
 Set:
 - `CARD_ID` = `$ARGUMENTS[0]`

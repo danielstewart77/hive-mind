@@ -24,6 +24,7 @@ add an entry here automatically. The first entry was added manually.
 | `intention` | `intention.md` | vector | A stated near-term plan from Daniel not yet acted on — lighter than future-project |
 | `timed-event` | `timed-event.md` | vector | A future scheduled event with a specific datetime; requires expires_at |
 | `nagatha-identity` | `nagatha-identity.md` | both | Confirmed facts about who Nagatha is — origin, character, values, domain strengths, communication style |
+| `bob-identity` | `bob-identity.md` | both | Confirmed facts about who Bob is — origin, character, local-only operation, practicality, and identity corrections confirmed by Daniel |
 
 ---
 

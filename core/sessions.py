@@ -81,10 +81,12 @@ MCP_CONFIG = str(_MCP_CONTAINER if _MCP_CONTAINER.exists() else PROJECT_DIR / ".
 _SPECS_DIR = PROJECT_DIR / "specs"
 
 # Friendly names for known project paths granted via --allowedDirectory
-_PROJECT_DIR_NAMES: dict[str, str] = {
-    "/home/USER/Storage/Dev/hive_mind_mcp": "Hivemind MCP",
-    "/home/USER/Storage/Dev/spark_to_bloom": "Spark to Bloom",
-}
+# Populated from env vars — no hardcoded host paths
+_PROJECT_DIR_NAMES: dict[str, str] = {}
+if os.environ.get("HOST_MCP_DIR"):
+    _PROJECT_DIR_NAMES[os.environ["HOST_MCP_DIR"]] = "Hivemind MCP"
+if os.environ.get("HOST_SPARK_DIR"):
+    _PROJECT_DIR_NAMES[os.environ["HOST_SPARK_DIR"]] = "Spark to Bloom"
 
 
 def _fetch_soul_sync(mind_id: str = "ada") -> str | None:
@@ -227,6 +229,7 @@ class SessionManager:
         self._locks: dict[str, asyncio.Lock] = {}
         self._reaper_task: asyncio.Task | None = None
         self._guard_task: asyncio.Task | None = None
+        self.mind_registry = None  # Set by server.py after scan
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -318,10 +321,8 @@ class SessionManager:
         )
         await self._db.commit()
 
-        # Resolve soul file from mind config
-        mind_cfg = config.minds.get(mind_id, {})
-        soul_rel = mind_cfg.get("soul")
-        soul_file = PROJECT_DIR / soul_rel if soul_rel else None
+        # Graph is authoritative; MIND.md soul_seed is one-time bootstrap only
+        soul_file = None
 
         await self._spawn(session_id, model, autopilot=False, surface_prompt=surface_prompt, allowed_directories=allowed_directories, soul_file=soul_file, mind_id=mind_id, is_group_session=(owner_type == "group"))
         log.info("Created session %s (model=%s, mind=%s, owner=%s)", session_id, model, mind_id, owner_ref)
@@ -347,6 +348,9 @@ class SessionManager:
         if status:
             query += " AND status = ?"
             params.append(status)
+        if client_type:
+            query += " AND owner_type = ?"
+            params.append(client_type)
         query += " ORDER BY last_active DESC"
 
         rows = await self._db.execute(query, params)
@@ -472,124 +476,100 @@ class SessionManager:
                     stamped_content = f"{seeded}\n\n{stamped_content}"
                     log.debug("Context seeding injected %d chars", len(seeded))
 
-            # Check if implementation has a send function (SDK-based minds)
-            impl = _load_implementation(mind_id)
-            if hasattr(impl, "send"):
-                # SDK path: delegate to implementation's send()
-                async for event in impl.send(
-                    session_id, stamped_content, images=images, db=self._db,
-                ):
-                    yield event
+            # Route message to mind container via HTTP, stream SSE response
+            proc_info = self._procs.get(session_id)
+            if not proc_info or not proc_info.get("_mind_url"):
+                raise ValueError(f"No mind container URL for session {session_id}")
 
-                    now = time.time()
-                    await self._db.execute(
-                        "UPDATE sessions SET last_active = ? WHERE id = ?",
-                        (now, session_id),
-                    )
+            mind_url = proc_info["_mind_url"]
 
-                    if event.get("type") == "result":
-                        await self._db.commit()
-                        elapsed = time.monotonic() - t0
-                        log.info("send_message: result session=%s elapsed=%.1fs", session_id, elapsed)
-                        if elapsed > 30:
-                            log.warning("send_message: slow response session=%s mind=%s elapsed=%.1fs", session_id, mind_id, elapsed)
-                        return
-            else:
-                # CLI path: stdin/stdout on the subprocess
-                proc = self._procs[session_id]
+            import aiohttp
+            retried = False
+            while True:
+                try:
+                    async with aiohttp.ClientSession() as http:
+                        async with http.post(
+                            f"{mind_url}/sessions/{session_id}/message",
+                            json={"content": stamped_content, "images": images},
+                            timeout=aiohttp.ClientTimeout(total=600),
+                        ) as resp:
+                            if resp.status == 404:
+                                # Session doesn't exist on mind container — respawn
+                                if not retried:
+                                    retried = True
+                                    log.info("Session %s not found on %s, respawning", session_id, mind_url)
+                                    await self._spawn(
+                                        session_id, session["model"],
+                                        autopilot=bool(session["autopilot"]),
+                                        resume_sid=session.get("claude_sid"),
+                                        mind_id=mind_id,
+                                    )
+                                    continue
+                                raise ValueError(f"Session {session_id} not found after respawn")
 
-                # Build message content — multimodal array when images present
-                if images:
-                    message_content: str | list = [{"type": "text", "text": stamped_content}]
-                    for img in images:
-                        message_content.append({
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": img["media_type"],
-                                "data": img["data"],
-                            },
-                        })
-                else:
-                    message_content = stamped_content
+                            async for line in resp.content:
+                                line = line.decode().strip()
+                                if not line or not line.startswith("data: "):
+                                    continue
+                                data = line[6:]  # strip "data: " prefix
+                                try:
+                                    event = json.loads(data)
+                                except json.JSONDecodeError:
+                                    continue
 
-                msg = json.dumps({
-                    "type": "user",
-                    "message": {"role": "user", "content": message_content},
-                }) + "\n"
-                proc.stdin.write(msg.encode())
-                await proc.stdin.drain()
+                                # Detect stale --resume
+                                if (
+                                    not retried
+                                    and event.get("type") == "result"
+                                    and event.get("is_error")
+                                    and any(
+                                        "No conversation found" in e
+                                        for e in event.get("errors", [])
+                                    )
+                                ):
+                                    log.warning("Stale resume for session %s — retrying", session_id)
+                                    retried = True
+                                    await self._kill_process(session_id)
+                                    await self._db.execute(
+                                        "UPDATE sessions SET claude_sid = NULL WHERE id = ?",
+                                        (session_id,),
+                                    )
+                                    await self._db.commit()
+                                    await self._spawn(
+                                        session_id, session["model"],
+                                        autopilot=bool(session["autopilot"]),
+                                        mind_id=mind_id,
+                                    )
+                                    break
 
-                # Drain stderr in background so lines appear as WARNING logs
-                asyncio.create_task(_drain_stderr(proc, session_id))  # noqa: RUF006
+                                yield event
 
-                retried = False
-                while True:
-                    async for line in proc.stdout:
-                        line = line.decode().strip()
-                        if not line:
-                            continue
-                        try:
-                            event = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-
-                        # Detect stale --resume (conversation lost after rebuild)
-                        if (
-                            not retried
-                            and event.get("type") == "result"
-                            and event.get("is_error")
-                            and any(
-                                "No conversation found" in e
-                                for e in event.get("errors", [])
-                            )
-                        ):
-                            log.warning(
-                                "Stale resume for session %s — clearing claude_sid "
-                                "and retrying",
-                                session_id,
-                            )
-                            retried = True
-                            await self._kill_process(session_id)
-                            await self._db.execute(
-                                "UPDATE sessions SET claude_sid = NULL WHERE id = ?",
-                                (session_id,),
-                            )
-                            await self._db.commit()
-                            await self._spawn(
-                                session_id, session["model"],
-                                autopilot=bool(session["autopilot"]),
-                                mind_id=mind_id,
-                            )
-                            proc = self._procs[session_id]
-                            proc.stdin.write(msg.encode())
-                            await proc.stdin.drain()
-                            break
-
-                        yield event
-
-                        now = time.time()
-                        await self._db.execute(
-                            "UPDATE sessions SET last_active = ? WHERE id = ?",
-                            (now, session_id),
-                        )
-
-                        if event.get("type") == "result":
-                            claude_sid = event.get("session_id")
-                            if claude_sid:
+                                now = time.time()
                                 await self._db.execute(
-                                    "UPDATE sessions SET claude_sid = ? WHERE id = ?",
-                                    (claude_sid, session_id),
+                                    "UPDATE sessions SET last_active = ? WHERE id = ?",
+                                    (now, session_id),
                                 )
-                            await self._db.commit()
-                            elapsed = time.monotonic() - t0
-                            log.info("send_message: result session=%s elapsed=%.1fs", session_id, elapsed)
-                            if elapsed > 30:
-                                log.warning("send_message: slow response session=%s mind=%s elapsed=%.1fs", session_id, mind_id, elapsed)
-                            return  # done — exit the generator
-                    else:
-                        # for-loop exhausted without break (EOF) — we're done
-                        return
+
+                                if event.get("type") == "result":
+                                    claude_sid = event.get("session_id")
+                                    if claude_sid:
+                                        await self._db.execute(
+                                            "UPDATE sessions SET claude_sid = ? WHERE id = ?",
+                                            (claude_sid, session_id),
+                                        )
+                                    await self._db.commit()
+                                    elapsed = time.monotonic() - t0
+                                    log.info("send_message: result session=%s elapsed=%.1fs", session_id, elapsed)
+                                    if elapsed > 30:
+                                        log.warning("send_message: slow response session=%s mind=%s elapsed=%.1fs", session_id, mind_id, elapsed)
+                                    return
+                            else:
+                                return  # stream exhausted
+                except aiohttp.ClientError as exc:
+                    log.error("Mind container %s unreachable for session %s: %s", mind_url, session_id, exc)
+                    yield {"type": "result", "is_error": True, "errors": [f"Mind container unreachable: {exc}"]}
+                    return
+                break  # exit retry loop on success
 
     # ------------------------------------------------------------------
     # Model switching
@@ -682,6 +662,14 @@ class SessionManager:
     # ------------------------------------------------------------------
     # Subprocess management
     # ------------------------------------------------------------------
+    def _mind_url(self, mind_id: str) -> str:
+        """Return the mind's gateway_url from the registry."""
+        if self.mind_registry:
+            info = self.mind_registry.get(mind_id)
+            if info:
+                return info.gateway_url
+        raise ValueError(f"Mind '{mind_id}' not found in registry")
+
     async def _spawn(
         self,
         session_id: str,
@@ -694,51 +682,54 @@ class SessionManager:
         mind_id: str = "ada",
         is_group_session: bool = False,
     ) -> Any:
-        impl = _load_implementation(mind_id)
-        result = await impl.spawn(
-            session_id=session_id,
-            model=model,
-            autopilot=autopilot,
-            resume_sid=resume_sid,
-            surface_prompt=surface_prompt,
-            allowed_directories=allowed_directories,
-            soul_file=soul_file,
-            mind_id=mind_id,
-            build_base_prompt=_build_base_prompt,
-            mcp_config=MCP_CONFIG,
-            registry=self._registry,
-            config_obj=config,
-            is_group_session=is_group_session,
-        )
-        self._procs[session_id] = result
+        mind_url = self._mind_url(mind_id)
+        import aiohttp
+        async with aiohttp.ClientSession() as http:
+            resp = await http.post(
+                f"{mind_url}/sessions",
+                json={
+                    "session_id": session_id,
+                    "model": model,
+                    "autopilot": autopilot,
+                    "resume_sid": resume_sid,
+                    "surface_prompt": surface_prompt,
+                    "allowed_directories": allowed_directories,
+                },
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
+            if resp.status != 200:
+                body = await resp.text()
+                raise RuntimeError(f"Mind container {mind_id} spawn failed: {body}")
+
+        self._procs[session_id] = {"_mind_url": mind_url}
         self._mind_ids[session_id] = mind_id
-        log.info(
-            "Spawned %s process for session %s (model=%s, autopilot=%s, resume=%s)",
-            mind_id, session_id, model, autopilot, resume_sid or "no",
-        )
-        return result
+        log.info("Spawned %s session %s via %s", mind_id, session_id, mind_url)
+        return self._procs[session_id]
 
     async def _kill_process(self, session_id: str):
-        """Kill a session's process/state via its implementation module."""
-        # Also kill any RC subprocess for this session
+        """Kill a session on its mind container via HTTP."""
         await self.kill_rc_process(session_id)
 
         proc = self._procs.pop(session_id, None)
         mind_id = self._mind_ids.pop(session_id, "ada")
         if proc is None:
             return
-        impl = _load_implementation(mind_id)
-        # SDK-based implementations have kill(session_id),
-        # CLI-based have kill(proc)
-        if hasattr(impl, "kill"):
-            import inspect
-            sig = inspect.signature(impl.kill)
-            params = list(sig.parameters.keys())
-            if params and params[0] in ("session_id",):
-                await impl.kill(session_id)
-            else:
-                await impl.kill(proc)
-        log.info("Killed process for session %s (mind=%s)", session_id, mind_id)
+
+        mind_url = proc.get("_mind_url")
+        if not mind_url:
+            log.warning("No mind_url for session %s, cannot kill", session_id)
+            return
+
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as http:
+                await http.delete(
+                    f"{mind_url}/sessions/{session_id}",
+                    timeout=aiohttp.ClientTimeout(total=5),
+                )
+        except Exception:
+            log.exception("Failed to kill session %s on %s", session_id, mind_url)
+        log.info("Killed session %s (mind=%s, url=%s)", session_id, mind_id, mind_url)
 
     # ------------------------------------------------------------------
     # Remote Control subprocess management
@@ -1058,7 +1049,7 @@ class SessionManager:
     async def get_sessions_pending_epilogue(self) -> list[dict]:
         """Return sessions eligible for epilogue processing."""
         rows = await self._db.execute(
-            "SELECT * FROM sessions WHERE status IN ('idle', 'closed') AND epilogue_status IS NULL"
+            "SELECT * FROM sessions WHERE status IN ('idle', 'closed') AND epilogue_status IS NULL AND owner_type != 'broker'"
         )
         return [dict(r) for r in await rows.fetchall()]
 

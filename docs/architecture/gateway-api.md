@@ -41,7 +41,7 @@ Content-Type: application/json
   "client_ref": "terminal-1",
   "model": "sonnet",
   "surface_prompt": "Optional context prepended to the session",
-  "allowed_directories": ["/home/USER/Storage/Dev/hive_mind_mcp"]
+  "allowed_directories": ["<mcp-project-path>"]
 }
 ```
 
@@ -81,15 +81,15 @@ Claude Code sessions use a two-layer model to access directories outside `/usr/s
 
 | Env var | Default host path | Container path |
 |---------|-------------------|----------------|
-| `HOST_MCP_DIR` | `/home/USER/Storage/Dev/hive_mind_mcp` | same |
-| `HOST_SPARK_DIR` | `/home/USER/Storage/Dev/spark_to_bloom` | same |
+| `HOST_MCP_DIR` | `<mcp-project-path>` | same |
+| `HOST_SPARK_DIR` | `<spark-to-bloom-path>` | same |
 
 Paths are mounted at the same location on both sides so `--allowedDirectory` values match.
 
 **Layer 2 — Per-session permission** (`--allowedDirectory`): Bind mounts alone do not grant Claude Code access. Each session must explicitly request permission at creation time via `allowed_directories`, or via the `/new` command:
 
 ```
-/new /home/USER/Storage/Dev/hive_mind_mcp
+/new <mcp-project-path>
 ```
 
 Both layers are required. Neither works without the other.

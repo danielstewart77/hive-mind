@@ -1,3 +1,8 @@
+---
+name: check-reminders
+description: Check and fire due one-time reminders. Runs every 15 minutes via scheduler. Use when checking for pending reminders.
+---
+
 # Check Reminders
 
 This skill runs every 15 minutes to fire any due one-time reminders.

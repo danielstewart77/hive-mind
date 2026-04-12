@@ -8,9 +8,9 @@ services:
       - ${HOST_CLAUDE_DIR:-~/.claude}:/home/hivemind/.claude
       - ${HOST_CODEX_DIR:-~/.codex}:/home/hivemind/.codex
       - sessions-db:/usr/src/app/data
-      - ${HOST_MCP_DIR:-/home/USER/Storage/Dev/hive_mind_mcp}:/home/USER/Storage/Dev/hive_mind_mcp
-      - ${HOST_SPARK_DIR:-/home/USER/Storage/Dev/spark_to_bloom}:/home/USER/Storage/Dev/spark_to_bloom
-      - ${HOST_CADDY_DIR:-/home/USER/Storage/Dev/caddy}:/home/USER/Storage/Dev/caddy
+      - ${HOST_MCP_DIR}:/usr/src/mcp
+      - ${HOST_SPARK_DIR}:/usr/src/spark_to_bloom
+      - ${HOST_CADDY_DIR}:/usr/src/caddy
     environment:
       - SESSIONS_DB_PATH=/usr/src/app/data/sessions.db
       - PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring
@@ -230,6 +230,101 @@ services:
       - planka-data:/app/public/project-background-images
       - planka-data:/app/private/attachments
 
+# BEGIN GENERATED MINDS
+  ada:
+    build: .
+    container_name: hive-mind-ada
+    working_dir: /usr/src/app
+    environment:
+      - MIND_ID=ada
+      - PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring
+      - XDG_DATA_HOME=/home/hivemind/.claude/data
+      - PYTHONNOUSERSITE=1
+      - PYTHONPATH=/usr/src/app/vendor
+    volumes:
+      - ${HOST_DEV_DIR}:/home/hivemind/dev:rw
+      - ${HOST_PROJECT_DIR:-.}:/usr/src/app:rw
+      - ${HOST_CLAUDE_DIR:-~/.claude}:/home/hivemind/.claude
+    restart: unless-stopped
+    depends_on:
+      - server
+    networks:
+      - hivemind
+    tmpfs:
+      - /tmp
+    command: ["/opt/venv/bin/python3", "mind_server.py"]
+
+  bob:
+    build: .
+    container_name: hive-mind-bob
+    working_dir: /usr/src/app
+    environment:
+      - MIND_ID=bob
+      - PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring
+      - XDG_DATA_HOME=/home/hivemind/.claude/data
+      - PYTHONNOUSERSITE=1
+      - PYTHONPATH=/usr/src/app/vendor
+    volumes:
+      - ${HOST_PROJECT_DIR:-.}:/usr/src/app:ro
+      - ${HOST_DOCUMENTS_DIR}:/home/hivemind/documents:rw
+      - ${HOST_HEALTH_DIR}:/home/hivemind/health:rw
+      - ${HOST_CLAUDE_DIR:-~/.claude}:/home/hivemind/.claude
+    restart: unless-stopped
+    depends_on:
+      - server
+    networks:
+      - hivemind
+    tmpfs:
+      - /tmp
+    command: ["/opt/venv/bin/python3", "mind_server.py"]
+
+  bilby:
+    build: .
+    container_name: hive-mind-bilby
+    working_dir: /usr/src/app
+    environment:
+      - MIND_ID=bilby
+      - PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring
+      - XDG_DATA_HOME=/home/hivemind/.claude/data
+      - PYTHONNOUSERSITE=1
+      - PYTHONPATH=/usr/src/app/vendor
+    volumes:
+      - ${HOST_DEV_DIR}:/home/hivemind/dev:rw
+      - ${HOST_PROJECT_DIR:-.}:/usr/src/app:rw
+      - ${HOST_CLAUDE_DIR:-~/.claude}:/home/hivemind/.claude
+    restart: unless-stopped
+    depends_on:
+      - server
+    networks:
+      - hivemind
+    tmpfs:
+      - /tmp
+    command: ["/opt/venv/bin/python3", "mind_server.py"]
+
+  nagatha:
+    build: .
+    container_name: hive-mind-nagatha
+    working_dir: /usr/src/app
+    environment:
+      - MIND_ID=nagatha
+      - PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring
+      - XDG_DATA_HOME=/home/hivemind/.codex/data
+      - PYTHONNOUSERSITE=1
+      - PYTHONPATH=/usr/src/app/vendor
+    volumes:
+      - ${HOST_DEV_DIR}:/home/hivemind/dev:rw
+      - ${HOST_PROJECT_DIR:-.}:/usr/src/app:rw
+      - ${HOST_CODEX_DIR:-~/.codex}:/home/hivemind/.codex
+    restart: unless-stopped
+    depends_on:
+      - server
+    networks:
+      - hivemind
+    tmpfs:
+      - /tmp
+    command: ["/opt/venv/bin/python3", "mind_server.py"]
+# END GENERATED MINDS
+
 networks:
   hivemind:
     external: true
@@ -241,3 +336,5 @@ volumes:
   planka-db:
   planka-data:
   whisper-cache:
+# BEGIN GENERATED VOLUMES
+# END GENERATED VOLUMES
