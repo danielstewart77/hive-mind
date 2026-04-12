@@ -29,8 +29,11 @@ async def resolve_container_name(ip: str) -> str | None:
         hostname, _aliases, _addrs = await asyncio.to_thread(
             socket.gethostbyaddr, ip
         )
-        # Strip domain suffix -- Docker DNS may return FQDN
+        # Strip domain suffix -- Docker DNS may return FQDN like "hive-mind-ada.hivemind"
         short_name = hostname.split(".")[0]
+        # Strip container name prefix -- Docker names containers as "hive-mind-<mind_id>"
+        if short_name.startswith("hive-mind-"):
+            short_name = short_name[len("hive-mind-"):]
         return short_name
     except (socket.herror, socket.gaierror, OSError) as exc:
         log.debug("Failed to resolve container name for IP %s: %s", ip, exc)

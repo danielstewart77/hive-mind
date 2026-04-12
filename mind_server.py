@@ -46,6 +46,68 @@ app = FastAPI(title=f"Mind Server: {MIND_ID}")
 # In-memory session tracking — no database
 _sessions: dict[str, dict] = {}  # session_id -> {"proc": process, "model": str, ...}
 
+# NS gateway URL — for secrets API calls
+_NS_URL = os.environ.get("HIVE_MIND_SERVER_URL", "http://server:8420")
+
+
+async def _fetch_secrets_on_startup():
+    """Fetch all scoped secrets from the NS and inject into environment.
+
+    Queries the NS for which secrets this mind is allowed to access,
+    then fetches each one. No hardcoded secret list — the scoping
+    policy in the NS determines what's available.
+    """
+    import aiohttp
+
+    # Map secret key names to environment variable names
+    _ENV_MAP = {
+        "gh_oauth_token": "GH_TOKEN",
+        "mcp_auth_token": "MCP_AUTH_TOKEN",
+    }
+
+    try:
+        async with aiohttp.ClientSession() as http:
+            # 1. Get the list of secrets this mind is scoped for
+            async with http.get(
+                f"{_NS_URL}/secrets/scopes/{MIND_ID}",
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status != 200:
+                    log.debug("Could not fetch secret scopes (status=%d)", resp.status)
+                    return
+                scopes = await resp.json()
+                secret_keys = scopes.get("secret_keys", [])
+
+            if not secret_keys:
+                log.debug("No secrets scoped for mind %s", MIND_ID)
+                return
+
+            # 2. Fetch each scoped secret
+            for key in secret_keys:
+                try:
+                    async with http.get(
+                        f"{_NS_URL}/secrets/{key}",
+                        timeout=aiohttp.ClientTimeout(total=5),
+                    ) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            value = data.get("value")
+                            if value:
+                                env_name = _ENV_MAP.get(key, key.upper())
+                                os.environ[env_name] = value
+                                log.info("Secret %s loaded into %s", key, env_name)
+                except Exception:
+                    log.debug("Could not fetch secret %s", key)
+
+            log.info("Loaded %d secrets for mind %s", len(secret_keys), MIND_ID)
+    except Exception:
+        log.debug("Could not connect to NS for secrets (NS may not be ready yet)")
+
+
+@app.on_event("startup")
+async def startup_secrets():
+    await _fetch_secrets_on_startup()
+
 
 @app.get("/health")
 async def health():

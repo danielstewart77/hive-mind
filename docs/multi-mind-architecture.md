@@ -205,7 +205,13 @@ The NS session manager calls the mind's HTTP endpoints instead of spawning local
 
 ### Secrets Access
 
-Mind containers do not store secrets. When a mind needs a credential (via MCP tools or skill code), it calls `GET http://server:8420/secrets/<key>` on the NS gateway. The NS identifies the caller by Docker network identity and checks the `secret_scopes` table.
+Mind containers do not store secrets locally. At startup, `mind_server.py` queries the NS for its scoped secret list (`GET /secrets/scopes/<mind_id>` — authenticated by network identity), fetches each secret, and injects them into the process environment. Harness subprocesses inherit these env vars.
+
+This means:
+- No hardcoded secret lists in `mind_server.py` — the NS scoping policy is the source of truth
+- New secrets are added by granting scope via `/add-mind` or `/update-mind`, then restarting the mind container
+- Secrets are held in memory only — never on disk inside the container
+- The `_ENV_MAP` in `mind_server.py` translates secret key names to env var names (e.g. `mcp_auth_token` → `MCP_AUTH_TOKEN`)
 
 ### Skills and Tools
 
