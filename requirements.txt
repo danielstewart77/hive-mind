@@ -1,7 +1,7 @@
 # Core
 claude-code-sdk>=0.0.25
 python-dotenv
-cryptography>=46.0.6
+cryptography>=46.0.7
 requests>=2.33.0
 pyyaml
 requests
@@ -43,4 +43,7 @@ python-telegram-bot[job-queue]>=21.0
 
 # Scheduler
 apscheduler>=3.10
+
+# Remote Admin SSH bridge
+paramiko>=3.0
 

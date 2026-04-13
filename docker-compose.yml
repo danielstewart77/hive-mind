@@ -178,6 +178,30 @@ services:
       - XDG_DATA_HOME=/home/hivemind/.claude/data
     command: ["/opt/venv/bin/python3", "-m", "clients.scheduler"]
 
+  remote-admin:
+    build: .
+    container_name: hive-mind-remote-admin
+    working_dir: /usr/src/app
+    restart: unless-stopped
+    networks:
+      - hivemind
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      - REMOTE_ADMIN_TOKEN=${REMOTE_ADMIN_TOKEN}
+      - PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring
+      - PYTHONNOUSERSITE=1
+    ports:
+      - "8430:8430"
+    volumes:
+      - ${HOST_PROJECT_DIR:-.}:/usr/src/app:ro
+    command: ["/opt/venv/bin/python3", "services/remote_admin.py"]
+
   neo4j:
     image: neo4j:5.26-community
     container_name: hive-mind-neo4j

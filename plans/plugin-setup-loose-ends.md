@@ -166,7 +166,7 @@ The stop hook currently runs `self-reflect --load` and `self-reflect --reflect` 
 
 ---
 
-## 8. Remote Installation via SSH
+## 8. Remote Installation via SSH ✓ DONE
 
 **Goal:** Install Hive Mind on a remote host from a running Hive Mind system, without physical access to the target.
 
@@ -198,3 +198,32 @@ Claude Code can run `ssh user@host "command"` non-interactively via the Bash too
 - New: `skills/setup-remote/SKILL.md`
 - `skills/setup-mind/SKILL.md` — add "Remote Federated" path that calls setup-remote
 - `plans/plugin-setup-loose-ends.md` — this entry
+
+**Implemented:**
+- `services/remote_admin.py` — FastAPI + WebSocket SSH bridge on port 8430, paramiko sessions, `Authorization: Bearer <token>` auth
+- `docker-compose.yml` — `remote-admin` service block (port 8430, `REMOTE_ADMIN_TOKEN` env)
+- `requirements.txt` — added `paramiko>=3.0`
+- `minds/ada/.claude/skills/remote-admin/SKILL.md` — curl-based API reference skill
+- `minds/ada/.claude/skills/setup-remote/SKILL.md` — interactive remote install workflow skill
+- Plugin: same skills + `MIND-INSTALL-MANIFEST.md` updated (remote-admin in System/Ops)
+
+---
+
+## 9. Separation of Powers — Skippy as Dormant Elder Mind
+
+**Goal:** Isolate sensitive MCP tool access (email, calendar, LinkedIn, financial ops) behind a dedicated mind rather than having all tools available to all minds. Skippy, the dormant elder mind, is the candidate for this role.
+
+**Design:**
+- Sensitive tools removed from main minds' MCP config
+- Minds request sensitive ops via broker message → Skippy validates, executes, responds
+- Skippy runs as a systemd service (non-Docker), non-federated by default
+- HITL on all broker requests to Skippy (human approval required for any sensitive action)
+- Telegram-direct channel to Skippy = full trust (bypasses HITL for Daniel's direct commands)
+- Windows SSH compatibility: OpenSSH + PowerShell works identically to Linux bash via paramiko
+- `remote-admin` is the mechanism for Skippy installation and management
+
+**Files to create:**
+- `specs/separation-of-powers.md` — policy document defining which tools belong to which tier
+- `skills/setup-skippy/SKILL.md` — guided setup for Skippy as isolated sensitive-ops mind
+- Update `docker-compose.yml` — conditionally exclude sensitive MCP tools from main minds
+- Update `minds/ada/.mcp.json` — remove sensitive tool registrations once Skippy is live
