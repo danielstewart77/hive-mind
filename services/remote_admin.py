@@ -110,7 +110,16 @@ def create_session(req: ConnectRequest, _: str = Depends(verify_token)):
     )
 
     if req.private_key:
-        pkey = paramiko.RSAKey.from_private_key(io.StringIO(req.private_key))
+        key_str = req.private_key
+        pkey = None
+        for cls in (paramiko.Ed25519Key, paramiko.RSAKey, paramiko.ECDSAKey):
+            try:
+                pkey = cls.from_private_key(io.StringIO(key_str))
+                break
+            except Exception:
+                continue
+        if pkey is None:
+            raise HTTPException(status_code=400, detail="Unable to parse private key — unsupported key type")
         connect_kwargs["pkey"] = pkey
     elif req.password:
         connect_kwargs["password"] = req.password
