@@ -10,7 +10,7 @@ from typing import Optional
 
 import requests  # type: ignore[import-untyped]
 
-GATEWAY_URL = os.environ.get("HIVE_MIND_SERVER_URL", os.environ.get("GATEWAY_URL", "http://localhost:8420"))
+GATEWAY_URL = os.environ.get("HIVE_MIND_SERVER_URL", os.environ.get("GATEWAY_URL", "http://server:8420"))
 logger = logging.getLogger(__name__)
 
 

@@ -49,6 +49,50 @@ _sessions: dict[str, dict] = {}  # session_id -> {"proc": process, "model": str,
 # NS gateway URL — for secrets API calls
 _NS_URL = os.environ.get("HIVE_MIND_SERVER_URL", "http://server:8420")
 
+# Per-mind config directory (tmpfs, writable)
+_CONFIG_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR", "/home/hivemind/.claude-config"))
+
+# Host credentials (read-only mount from host's ~/.claude)
+_HOST_CREDS = Path("/home/hivemind/.host-claude/.credentials.json")
+
+# Mind-specific skills source (from minds/<name>/.claude/ in the project)
+_MIND_SKILLS_SRC = PROJECT_DIR / "minds" / MIND_ID / ".claude"
+
+
+def _setup_config_dir():
+    """Set up the per-mind CLAUDE_CONFIG_DIR.
+
+    The config dir is bind-mounted from minds/<name>/.claude/ (read-write).
+    Skills and agents are already there. We only need to copy the host's
+    auth credentials into it.
+    """
+    import shutil
+
+    _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    os.environ["CLAUDE_CONFIG_DIR"] = str(_CONFIG_DIR)
+
+    # Copy host credentials for auth
+    target_creds = _CONFIG_DIR / ".credentials.json"
+    if _HOST_CREDS.exists():
+        if not target_creds.exists() or _HOST_CREDS.stat().st_mtime > target_creds.stat().st_mtime:
+            shutil.copy2(str(_HOST_CREDS), str(target_creds))
+            target_creds.chmod(0o600)
+            log.info("Copied credentials to %s", target_creds)
+    else:
+        log.warning("Host credentials not found at %s — mind will need manual auth", _HOST_CREDS)
+
+    # Log what skills are available
+    skills_dir = _CONFIG_DIR / "skills"
+    if skills_dir.exists():
+        skill_count = len([d for d in skills_dir.iterdir() if d.is_dir()])
+        log.info("Mind %s has %d skills available", MIND_ID, skill_count)
+    else:
+        log.warning("No skills directory found at %s", skills_dir)
+
+
+# Run config setup immediately (before FastAPI starts, before harness spawns)
+_setup_config_dir()
+
 
 async def _fetch_secrets_on_startup():
     """Fetch all scoped secrets from the NS and inject into environment.

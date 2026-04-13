@@ -487,7 +487,7 @@ class SessionManager:
             retried = False
             while True:
                 try:
-                    async with aiohttp.ClientSession() as http:
+                    async with aiohttp.ClientSession(read_bufsize=10 * 1024 * 1024) as http:
                         async with http.post(
                             f"{mind_url}/sessions/{session_id}/message",
                             json={"content": stamped_content, "images": images},

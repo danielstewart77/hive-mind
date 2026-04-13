@@ -136,8 +136,14 @@ docker-compose.production.yml
 
 # Local tool state
 .claude/
+.codex/
 .obsidian/
 .log_agent_positions
+
+# Per-mind auth and state (sensitive tokens)
+minds/*/.claude/
+minds/*/.codex/
+minds/*/.claude-config/
 
 # Generated output artifacts
 *-report.md
