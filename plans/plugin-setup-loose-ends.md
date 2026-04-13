@@ -209,21 +209,38 @@ Claude Code can run `ssh user@host "command"` non-interactively via the Bash too
 
 ---
 
-## 9. Separation of Powers — Skippy as Dormant Elder Mind
+## 9. Tools Externalization — Credentials Out of the Mind Layer
 
-**Goal:** Isolate sensitive MCP tool access (email, calendar, LinkedIn, financial ops) behind a dedicated mind rather than having all tools available to all minds. Skippy, the dormant elder mind, is the candidate for this role.
+**Goal:** Move all credential-holding functionality outside the hive_mind project entirely. Minds never hold secrets — only tool API keys. Tools enforce HITL at the service layer, not the mind layer.
+
+**Core principle:** A mind that holds a credential can leak it via prompt injection. The only fix is to ensure minds never hold credentials. Tools are standalone web API services (no mind present). Even if a tool API key leaks, the attacker hits a HITL wall with no mind to exploit.
 
 **Design:**
-- Sensitive tools removed from main minds' MCP config
-- Minds request sensitive ops via broker message → Skippy validates, executes, responds
-- Skippy runs as a systemd service (non-Docker), non-federated by default
-- HITL on all broker requests to Skippy (human approval required for any sensitive action)
-- Telegram-direct channel to Skippy = full trust (bypasses HITL for Daniel's direct commands)
-- Windows SSH compatibility: OpenSSH + PowerShell works identically to Linux bash via paramiko
-- `remote-admin` is the mechanism for Skippy installation and management
+- Tools extracted to their own projects adjacent to but separate from `hive_mind/`
+- `~/hivemind-tools/` — generic tools service (DB, notify, Planka, crypto, weather, etc.)
+- `~/remote-admin/` — SSH bridge (a la carte, own project)
+- Each tools project has its own `.env` — never inside `hive_mind/` project dir
+- HITL enforced per-call inside the tools service (hardcoded, not in mind)
+- Skills pass `user_id` not credentials — tools service resolves credentials internally
+- Install-time choice: security route (tools external) vs bundled (simpler, less secure)
+
+**Skippy's role (revised):**
+- Skippy is a *mind* (not a tools service) — Daniel's privileged delegate for operations requiring judgment
+- Awakened on demand, not always running
+- Can create tools, modify config, restructure projects — things tool services cannot do
+- Ada can relay to Skippy; Daniel can talk to Skippy directly
+- Telegram-direct = full trust; broker messages = HITL required
+- Skippy is the exception to the no-credentials-in-minds rule: local, intentionally awakened, high-trust
 
 **Files to create:**
-- `specs/separation-of-powers.md` — policy document defining which tools belong to which tier
-- `skills/setup-skippy/SKILL.md` — guided setup for Skippy as isolated sensitive-ops mind
-- Update `docker-compose.yml` — conditionally exclude sensitive MCP tools from main minds
-- Update `minds/ada/.mcp.json` — remove sensitive tool registrations once Skippy is live
+- `specs/tools-architecture.md` — policy doc: tools layer design, HITL requirements, credential placement
+- `skills/setup-tools/SKILL.md` — security-route install flow for `hivemind-tools` project
+- Update `setup` skill — add security-route branch: externalize tools? yes/no
+- Update `MIND-INSTALL-MANIFEST.md` — tools a la carte options
+
+**Migration (non-breaking, future):**
+- `services/remote_admin.py` stays in hive_mind for now (bundled route)
+- Extraction to `~/remote-admin/` is a directory move + separate docker-compose — no code changes
+- `hive-mind-mcp` project renamed conceptually to `hivemind-tools` — same codebase, new identity
+
+**Canvas:** Full spec at `sparktobloom.com` — "Hive Mind Tools Architecture — Security Redesign"
