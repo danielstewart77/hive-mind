@@ -84,7 +84,8 @@ async def _stt(ogg_bytes: bytes) -> str:
 
 async def _tts(text: str) -> bytes:
     """POST text to voice-server /tts, return OGG audio bytes."""
-    async with http.post(f"{VOICE_SERVER_URL}/tts", json={"text": text}) as resp:
+    voice_id = os.getenv("MIND_ID", "default")
+    async with http.post(f"{VOICE_SERVER_URL}/tts", json={"text": text, "voice_id": voice_id}) as resp:
         if resp.status != 200:
             raise RuntimeError(f"TTS error {resp.status}: {await resp.text()}")
         return await resp.read()
