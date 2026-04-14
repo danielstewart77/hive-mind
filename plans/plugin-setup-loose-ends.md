@@ -78,122 +78,83 @@ Browser → sparktobloom.com/graph (Cytoscape.js)
 
 ---
 
-### Step 1 — Create read-only Neo4j user ✅ DONE (2026-04-14)
+**⚠️ Updated 2026-04-14 — depends on Loose End #11 (Lucent). Original Neo4j approach superseded.**
 
-`graphviewer` user created and credentials stored in `/home/USER/Storage/Dev/spark_to_bloom/.env`.
-
-**Note:** `GRANT ROLE reader TO graphviewer` is Enterprise-only — not available in Neo4j Community Edition. `graphviewer` has full DB access at the Neo4j level. Read-only enforcement is at the application layer: the sparktobloom backend runs only `MATCH` queries, never write operations. Do not expose the Bolt port publicly.
-
-```
-NEO4J_READONLY_URI=bolt://hive-mind-neo4j:7687
-NEO4J_READONLY_USER=graphviewer
-NEO4J_READONLY_PASS=<stored in spark_to_bloom .env>
-```
+Once Lucent is running, this becomes significantly simpler. No Bolt port, no network join, no third-party driver, no credentials. sparktobloom reads `lucent.db` directly via SQLite (read-only mount) or via a hive_mind API endpoint.
 
 ---
 
-### Step 2 — Connect sparktobloom to the hivemind network
+### Approach — SQLite read-only mount
 
-The sparktobloom container runs on `traefik-global`; Neo4j runs on `hivemind`. They can't reach each other by name. Fix: add `hivemind` as a second network to the sparktobloom service.
+Mount the hive_mind data volume into sparktobloom as read-only. SQLite supports concurrent readers — the hive_mind server writes, sparktobloom reads.
 
-In `/home/USER/Storage/Dev/spark_to_bloom/docker-compose.yml`:
-
+In `spark_to_bloom/docker-compose.yml`:
 ```yaml
 services:
   frontend:
-    ...
-    networks:
-      - traefik-global
-      - hivemind          # ← add this
+    volumes:
+      - /home/USER/Storage/Dev/spark_to_bloom/src:/app
+      - hivemind-data:/data:ro        # ← read-only mount of lucent.db
 
-networks:
-  traefik-global:
+volumes:
+  hivemind-data:
     external: true
-    name: traefik-global
-  hivemind:               # ← add this
-    external: true
-    name: hivemind
+    name: hive_mind_data              # match the volume name in hive_mind docker-compose
 ```
-
-After this change, `hive-mind-neo4j:7687` is reachable from inside the sparktobloom container.
 
 ---
 
-### Step 3 — Add neo4j driver dependency
+### Step 1 — Add `/graph/data` endpoint to `main.py`
 
-In the sparktobloom project:
-```
-pip install neo4j
-```
-Add `neo4j` to `requirements.txt`.
-
----
-
-### Step 4 — Add `/graph/data` API endpoint to `main.py`
+No external driver needed — stdlib `sqlite3` only.
 
 ```python
-from neo4j import GraphDatabase
+import sqlite3, os
+
+LUCENT_DB = os.getenv("LUCENT_DB_PATH", "/data/lucent.db")
 
 @app.get("/graph/data")
 async def graph_data():
-    uri  = os.getenv("NEO4J_READONLY_URI", "bolt://hive-mind-neo4j:7687")
-    user = os.getenv("NEO4J_READONLY_USER", "graphviewer")
-    pwd  = os.getenv("NEO4J_READONLY_PASS", "")
-    driver = GraphDatabase.driver(uri, auth=(user, pwd))
-    with driver.session() as session:
-        result = session.run("""
-            MATCH (n)-[r]->(m)
-            WHERE NOT n:_Bloom_Perspective_ AND NOT m:_Bloom_Perspective_
-            RETURN
-              id(n) AS source_id, labels(n) AS source_labels, n.name AS source_name,
-              type(r) AS rel_type,
-              id(m) AS target_id, labels(m) AS target_labels, m.name AS target_name
-            LIMIT 300
-        """)
-        nodes, edges, seen = {}, [], set()
-        for row in result:
-            for nid, labels, name in [
-                (row["source_id"], row["source_labels"], row["source_name"]),
-                (row["target_id"], row["target_labels"], row["target_name"]),
-            ]:
-                if nid not in seen:
-                    seen.add(nid)
-                    nodes[nid] = {"id": str(nid), "label": name or labels[0], "type": labels[0]}
-            edges.append({"source": str(row["source_id"]), "target": str(row["target_id"]), "label": row["rel_type"]})
-    driver.close()
+    con = sqlite3.connect(f"file:{LUCENT_DB}?mode=ro", uri=True)
+    con.row_factory = sqlite3.Row
+    nodes, edges = {}, []
+    for row in con.execute(
+        "SELECT id, type, name, first_name, last_name FROM nodes LIMIT 400"
+    ):
+        label = row["first_name"] or row["name"]
+        nodes[row["id"]] = {"id": str(row["id"]), "label": label, "type": row["type"]}
+    for row in con.execute(
+        "SELECT source_id, target_id, type FROM edges "
+        "WHERE source_id IN (SELECT id FROM nodes LIMIT 400)"
+    ):
+        if row["source_id"] in nodes and row["target_id"] in nodes:
+            edges.append({
+                "source": str(row["source_id"]),
+                "target": str(row["target_id"]),
+                "label": row["type"],
+            })
+    con.close()
     return {"nodes": list(nodes.values()), "edges": edges}
 ```
 
 ---
 
-### Step 5 — Add `/graph` route and template
+### Step 2 — Add `/graph` route and template
 
-Route in `main.py`:
 ```python
 @app.get("/graph", response_class=HTMLResponse)
 async def graph(request: Request):
     return templates.TemplateResponse("graph.html", {"request": request})
 ```
 
-`templates/graph.html` — extends `layout.html`, includes Cytoscape.js via CDN:
+`templates/graph.html` — extends `layout.html`, Cytoscape.js via CDN:
 - Fetches `/graph/data` on load
-- Renders force-directed layout (`cose` or `cola`)
-- Node color by label type (Agent = gold, Memory = blue, Person = green, etc.)
-- Click a node → show name + properties in a sidebar panel
-- Zoom/pan/drag built-in to Cytoscape
+- Force-directed layout (`cose`)
+- Node color by type: Agent = gold, Memory = blue, Person = green, Concept = purple
+- Click a node → sidebar shows name + type + properties
+- Zoom/pan/drag built-in
 
-Add "graph" to the nav in `layout.html`.
-
----
-
-### Step 6 — Cypher query tuning (post-deploy)
-
-Start with `LIMIT 300` and adjust. The initial query returns everything. If the graph is too dense, narrow to Ada's identity subgraph:
-```cypher
-MATCH (a:Agent {name: 'Ada'})-[r*1..2]-(n)
-RETURN a, r, n LIMIT 200
-```
-Or add label filters to hide low-value nodes.
+Add "graph" to nav in `layout.html`.
 
 ---
 
@@ -201,13 +162,12 @@ Or add label filters to hide low-value nodes.
 
 | File | Change |
 |---|---|
-| `docker-compose.yml` (spark_to_bloom) | Add `hivemind` network |
-| `src/requirements.txt` | Add `neo4j` |
-| `src/main.py` | Add `/graph/data` + `/graph` routes |
+| `docker-compose.yml` (spark_to_bloom) | Add `hivemind-data` volume (read-only) |
+| `src/main.py` | Add `/graph/data` + `/graph` routes (sqlite3 stdlib only) |
 | `src/templates/graph.html` | New — Cytoscape.js visualization |
 | `src/templates/layout.html` | Add "graph" nav link |
-| `.env` (spark_to_bloom) | Add `NEO4J_READONLY_*` vars |
-| Neo4j (one-time) | Create `graphviewer` read-only user |
+
+No new dependencies. No credentials. No network changes.
 
 ---
 
