@@ -1,6 +1,6 @@
 # Plan: Plugin Setup Loose Ends
 
-> **Status:** 1.5 open items — #7 Phase 1 done, Phase 2 remaining; #9 open.
+> **Status:** 2.5 open items — #7 Phase 1 done, Phase 2 remaining; #9 open; #12 open.
 
 ---
 
@@ -168,6 +168,30 @@ Add "graph" to nav in `layout.html`.
 | `src/templates/layout.html` | Add "graph" nav link |
 
 No new dependencies. No credentials. No network changes.
+
+---
+
+## 12. secrets.py / remote-admin skill — broken credential retrieval
+
+**Symptoms observed (2026-04-14):** Remote-admin skill silently gets an empty token → `Authorization: Bearer ` → 401 from remote-admin service → SSH session never opens.
+
+**Root cause — two compounding bugs:**
+
+1. **Wrong call signature in skills.** Skills call `secrets.py get <key>` (positional), but argparse expects `secrets.py get --key <key>`. The call throws an argparse error, silenced by `2>/dev/null`, so TOKEN is always empty.
+
+2. **`cmd_get` intentionally hides values.** Even with correct args, `cmd_get` only returns `{"configured": true}` — it's a presence check, not a value getter. The remote-admin skill (and anything trying to read a secret at runtime) can never get the actual value this way. `core/secrets.py::get_credential()` does return values but isn't wired up in the stateless tool.
+
+**Knock-on:** Skills fall back to `$REMOTE_ADMIN_TOKEN` env var, which isn't propagated into Ada's container → always empty → permanent auth failure for any skill that calls remote-admin.
+
+**Fix options:**
+- **A (preferred):** Add a `reveal` subcommand to `tools/stateless/secrets/secrets.py` that returns the actual value. Update remote-admin SKILL.md (and any other affected skills) to call `secrets.py reveal --key <KEY>`.
+- **B (simpler short-term):** Propagate `REMOTE_ADMIN_TOKEN` into Ada's container via `docker-compose.yml` `env_file` or `environment:`. The `|| echo "$REMOTE_ADMIN_TOKEN"` fallback in the skill then works without any script change.
+- **C:** Have skills inline `python3 -c "from core.secrets import get_credential; print(get_credential('KEY') or '')"` — no script change, but brittle.
+
+**Files to fix:**
+- `tools/stateless/secrets/secrets.py` — add `reveal` subcommand (Option A)
+- `/home/hivemind/.claude-config/skills/remote-admin/SKILL.md` — update call signature
+- `docker-compose.yml` — propagate `REMOTE_ADMIN_TOKEN` (Option B)
 
 ---
 
