@@ -183,15 +183,27 @@ No new dependencies. No credentials. No network changes.
 
 **Knock-on:** Skills fall back to `$REMOTE_ADMIN_TOKEN` env var, which isn't propagated into Ada's container → always empty → permanent auth failure for any skill that calls remote-admin.
 
-**Fix options:**
-- **A (preferred):** Add a `reveal` subcommand to `tools/stateless/secrets/secrets.py` that returns the actual value. Update remote-admin SKILL.md (and any other affected skills) to call `secrets.py reveal --key <KEY>`.
-- **B (simpler short-term):** Propagate `REMOTE_ADMIN_TOKEN` into Ada's container via `docker-compose.yml` `env_file` or `environment:`. The `|| echo "$REMOTE_ADMIN_TOKEN"` fallback in the skill then works without any script change.
-- **C:** Have skills inline `python3 -c "from core.secrets import get_credential; print(get_credential('KEY') or '')"` — no script change, but brittle.
+**Architectural diagnosis:** This is over-engineering — Python where bash + CLI tools would do. `secrets.py` wraps `keyring` with argparse, a hand-rolled key registry, and a naming allowlist, none of which are needed. The keyring library already has a working CLI:
+
+```bash
+# Store
+python3 -m keyring set hive-mind REMOTE_ADMIN_TOKEN <value>
+
+# Retrieve (returns actual value — no wrapper needed)
+python3 -m keyring get hive-mind REMOTE_ADMIN_TOKEN
+```
+
+**Correct fix:** Replace all `secrets.py get/set` calls in skills with direct `python3 -m keyring` invocations. Delete or gut `tools/stateless/secrets/secrets.py` — it adds complexity and a broken abstraction layer over a tool that already works. Skills should tell bash what to do; bash should call the keyring CLI directly.
+
+```bash
+# Pattern for any skill that needs a secret:
+TOKEN=$(python3 -m keyring get hive-mind REMOTE_ADMIN_TOKEN 2>/dev/null || echo "$REMOTE_ADMIN_TOKEN")
+```
 
 **Files to fix:**
-- `tools/stateless/secrets/secrets.py` — add `reveal` subcommand (Option A)
-- `/home/hivemind/.claude-config/skills/remote-admin/SKILL.md` — update call signature
-- `docker-compose.yml` — propagate `REMOTE_ADMIN_TOKEN` (Option B)
+- `/home/hivemind/.claude-config/skills/remote-admin/SKILL.md` — replace `secrets.py` calls with `python3 -m keyring get`
+- Audit all other skills for `secrets.py get` calls — replace with same pattern
+- `tools/stateless/secrets/secrets.py` — consider deleting or reducing to `set` only (storing still benefits from the allowlist validation)
 
 ---
 
