@@ -78,20 +78,16 @@ Browser → sparktobloom.com/graph (Cytoscape.js)
 
 ---
 
-### Step 1 — Create read-only Neo4j user
+### Step 1 — Create read-only Neo4j user ✅ DONE (2026-04-14)
 
-Run in Neo4j Browser (`http://localhost:7474`):
+`graphviewer` user created and credentials stored in `/home/USER/Storage/Dev/spark_to_bloom/.env`.
 
-```cypher
-CREATE USER graphviewer SET PASSWORD 'choose-a-password' CHANGE NOT REQUIRED
-GRANT ROLE reader TO graphviewer
-```
+**Note:** `GRANT ROLE reader TO graphviewer` is Enterprise-only — not available in Neo4j Community Edition. `graphviewer` has full DB access at the Neo4j level. Read-only enforcement is at the application layer: the sparktobloom backend runs only `MATCH` queries, never write operations. Do not expose the Bolt port publicly.
 
-Store the password in the sparktobloom `.env`:
 ```
 NEO4J_READONLY_URI=bolt://hive-mind-neo4j:7687
 NEO4J_READONLY_USER=graphviewer
-NEO4J_READONLY_PASS=<password>
+NEO4J_READONLY_PASS=<stored in spark_to_bloom .env>
 ```
 
 ---
