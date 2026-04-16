@@ -30,9 +30,12 @@ uvicorn[standard]
 aiosqlite
 aiohttp
 
+# Vector operations (Lucent)
+numpy
+
 # External integrations
-neo4j
-py2neo
+neo4j  # Retained for migration only -- remove after lucent_migrate.py completes
+py2neo  # Retained for migration only -- remove after lucent_migrate.py completes
 dateparser
 
 # Discord bot

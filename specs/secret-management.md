@@ -24,14 +24,14 @@ Service name for all keys: `hive-mind`.
 
 The gateway server (`server.py`) reads `MCP_AUTH_TOKEN` and `HITL_INTERNAL_TOKEN` from keyring at startup and injects them into `os.environ`. This lets Claude CLI subprocesses resolve `${MCP_AUTH_TOKEN}` from `.mcp.container.json` without needing `.env`.
 
-## Managed Keys (10)
+## Managed Keys (8)
 
-DISCORD_BOT_TOKEN, TELEGRAM_BOT_TOKEN, NEO4J_AUTH, NEO4J_URI, HITL_INTERNAL_TOKEN, X_BEARER_TOKEN, PLANKA_EMAIL, PLANKA_PASSWORD, PLANKA_URL, MCP_AUTH_TOKEN
+DISCORD_BOT_TOKEN, TELEGRAM_BOT_TOKEN, HITL_INTERNAL_TOKEN, X_BEARER_TOKEN, PLANKA_EMAIL, PLANKA_PASSWORD, PLANKA_URL, MCP_AUTH_TOKEN
 
 ## Keys Still in .env
 
 These must stay in `.env` for docker-compose interpolation (third-party containers):
-NEO4J_AUTH, PLANKA_SECRET_KEY_BASE, PLANKA_BASE_URL, PLANKA_ADMIN_EMAIL, PLANKA_ADMIN_PASSWORD, PLANKA_ADMIN_NAME, PLANKA_ADMIN_USERNAME
+PLANKA_SECRET_KEY_BASE, PLANKA_BASE_URL, PLANKA_ADMIN_EMAIL, PLANKA_ADMIN_PASSWORD, PLANKA_ADMIN_NAME, PLANKA_ADMIN_USERNAME
 
 ## Rules
 

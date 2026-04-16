@@ -718,10 +718,15 @@ async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_T
 # Entry point
 # ---------------------------------------------------------------------------
 def _get_bot_token() -> str:
-    """Load Telegram bot token — keyring first, env fallback."""
+    """Load Telegram bot token — keyring first, env fallback.
+
+    TELEGRAM_BOT_TOKEN_KEYRING_KEY overrides which keyring key is looked up,
+    allowing multiple bot instances to run from the same image with different tokens.
+    """
+    keyring_key = os.getenv("TELEGRAM_BOT_TOKEN_KEYRING_KEY", "TELEGRAM_BOT_TOKEN")
     try:
         import keyring
-        token = keyring.get_password("hive-mind", "TELEGRAM_BOT_TOKEN")
+        token = keyring.get_password("hive-mind", keyring_key)
         if token:
             return token
     except Exception:

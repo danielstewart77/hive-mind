@@ -123,6 +123,35 @@ services:
       - XDG_DATA_HOME=/home/hivemind/.claude/data
     command: ["/opt/venv/bin/python3", "-m", "clients.telegram_bot"]
 
+  telegram-bot-2:
+    build: .
+    container_name: hive-mind-telegram-2
+    working_dir: /usr/src/app
+    volumes:
+      - ${HOST_PROJECT_DIR:-.}:/usr/src/app
+      - ${HOST_CLAUDE_DIR:-~/.claude}:/home/hivemind/.claude
+    restart: unless-stopped
+    depends_on:
+      - server
+      - voice-server
+    networks:
+      - hivemind
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      - HIVE_MIND_SERVER_URL=http://server:8420
+      - VOICE_SERVER_URL=http://voice-server:8422
+      - PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring
+      - PYTHONNOUSERSITE=1
+      - XDG_DATA_HOME=/home/hivemind/.claude/data
+      - TELEGRAM_BOT_TOKEN_KEYRING_KEY=TELEGRAM_BOT_TOKEN_2
+    command: ["/opt/venv/bin/python3", "-m", "clients.telegram_bot"]
+
   hivemind-bot:
     build: .
     container_name: hive-mind-hivemind
@@ -201,22 +230,6 @@ services:
     volumes:
       - ${HOST_PROJECT_DIR:-.}:/usr/src/app:ro
     command: ["/opt/venv/bin/python3", "services/remote_admin.py"]
-
-  neo4j:
-    image: neo4j:5.26-community
-    container_name: hive-mind-neo4j
-    restart: unless-stopped
-    networks:
-      - hivemind
-    environment:
-      - NEO4J_AUTH=${NEO4J_AUTH:-neo4j/hivemind-memory}
-      - NEO4J_PLUGINS=["apoc"]
-      - NEO4J_dbms_security_procedures_unrestricted=apoc.*
-    volumes:
-      - neo4j-data:/data
-    ports:
-      - "7474:7474"  # Neo4j Browser (HTTP)
-      - "7687:7687"  # Bolt protocol
 
   planka-db:
     image: postgres:14-alpine
@@ -359,7 +372,6 @@ networks:
 
 volumes:
   sessions-db:
-  neo4j-data:
   planka-db:
   planka-data:
   whisper-cache:

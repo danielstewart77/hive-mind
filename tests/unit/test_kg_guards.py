@@ -1,20 +1,28 @@
 """Unit tests for knowledge graph write guards (core.kg_guards).
 
 Tests disambiguation logic, orphan node guard, and Telegram notification.
+Updated for Lucent (SQLite) backend.
 """
 
+import sqlite3
 import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 
-@pytest.fixture(autouse=True)
-def _mock_deps(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Mock neo4j, agent_tooling, and keyring for importing core.kg_guards."""
-    if "neo4j" not in sys.modules:
-        neo4j_mock = MagicMock()
-        monkeypatch.setitem(sys.modules, "neo4j", neo4j_mock)
+def _make_test_conn() -> sqlite3.Connection:
+    """Create an in-memory SQLite DB with Lucent schema."""
+    import tools.stateful.lucent as lucent_mod
+
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    lucent_mod._init_schema(conn)
+    return conn
+
+
+def _patch_conn(conn):
+    return patch("tools.stateful.lucent._get_connection", return_value=conn)
 
 
 # ---------------------------------------------------------------------------
@@ -25,17 +33,10 @@ class TestCheckDisambiguation:
 
     def test_check_disambiguation_no_existing_returns_proceed(self) -> None:
         """When graph has no matching nodes, action should be 'proceed'."""
-        mock_driver = MagicMock()
-        mock_session = MagicMock()
-        mock_driver.session.return_value.__enter__ = MagicMock(return_value=mock_session)
-        mock_driver.session.return_value.__exit__ = MagicMock(return_value=False)
-        mock_result = MagicMock()
-        mock_result.data.return_value = []
-        mock_session.run.return_value = mock_result
-
+        conn = _make_test_conn()
         from core import kg_guards
 
-        with patch.object(kg_guards, "_get_driver", return_value=mock_driver):
+        with _patch_conn(conn):
             result = kg_guards.check_disambiguation("NewEntity", "Person", "ada")
 
         assert result.action == "proceed"
@@ -43,19 +44,16 @@ class TestCheckDisambiguation:
 
     def test_check_disambiguation_exact_match_returns_merge(self) -> None:
         """When exact match (case-insensitive) found, action should be 'merge'."""
-        mock_driver = MagicMock()
-        mock_session = MagicMock()
-        mock_driver.session.return_value.__enter__ = MagicMock(return_value=mock_session)
-        mock_driver.session.return_value.__exit__ = MagicMock(return_value=False)
-        mock_result = MagicMock()
-        mock_result.data.return_value = [
-            {"name": "Daniel", "labels": ["Person"], "id": "node-1"}
-        ]
-        mock_session.run.return_value = mock_result
+        conn = _make_test_conn()
+        conn.execute(
+            "INSERT INTO nodes (agent_id, type, name) VALUES (?, ?, ?)",
+            ("ada", "Person", "Daniel"),
+        )
+        conn.commit()
 
         from core import kg_guards
 
-        with patch.object(kg_guards, "_get_driver", return_value=mock_driver):
+        with _patch_conn(conn):
             result = kg_guards.check_disambiguation("Daniel", "Person", "ada")
 
         assert result.action == "merge"
@@ -63,19 +61,16 @@ class TestCheckDisambiguation:
 
     def test_check_disambiguation_similar_name_returns_disambiguate(self) -> None:
         """When a similar but not exact match found, action should be 'disambiguate'."""
-        mock_driver = MagicMock()
-        mock_session = MagicMock()
-        mock_driver.session.return_value.__enter__ = MagicMock(return_value=mock_session)
-        mock_driver.session.return_value.__exit__ = MagicMock(return_value=False)
-        mock_result = MagicMock()
-        mock_result.data.return_value = [
-            {"name": "Daniel Stewart", "labels": ["Person"], "id": "node-1"}
-        ]
-        mock_session.run.return_value = mock_result
+        conn = _make_test_conn()
+        conn.execute(
+            "INSERT INTO nodes (agent_id, type, name) VALUES (?, ?, ?)",
+            ("ada", "Person", "Daniel Stewart"),
+        )
+        conn.commit()
 
         from core import kg_guards
 
-        with patch.object(kg_guards, "_get_driver", return_value=mock_driver):
+        with _patch_conn(conn):
             result = kg_guards.check_disambiguation("Daniel", "Person", "ada")
 
         assert result.action == "disambiguate"
@@ -83,19 +78,16 @@ class TestCheckDisambiguation:
 
     def test_check_disambiguation_different_entity_type_still_checks(self) -> None:
         """Disambiguation works across entity types."""
-        mock_driver = MagicMock()
-        mock_session = MagicMock()
-        mock_driver.session.return_value.__enter__ = MagicMock(return_value=mock_session)
-        mock_driver.session.return_value.__exit__ = MagicMock(return_value=False)
-        mock_result = MagicMock()
-        mock_result.data.return_value = [
-            {"name": "Hive Mind", "labels": ["System"], "id": "node-1"}
-        ]
-        mock_session.run.return_value = mock_result
+        conn = _make_test_conn()
+        conn.execute(
+            "INSERT INTO nodes (agent_id, type, name) VALUES (?, ?, ?)",
+            ("ada", "System", "Hive Mind"),
+        )
+        conn.commit()
 
         from core import kg_guards
 
-        with patch.object(kg_guards, "_get_driver", return_value=mock_driver):
+        with _patch_conn(conn):
             result = kg_guards.check_disambiguation("Hive Mind", "Project", "ada")
 
         assert result.action == "merge"
@@ -103,60 +95,55 @@ class TestCheckDisambiguation:
 
     def test_check_disambiguation_case_insensitive_match(self) -> None:
         """Case-insensitive matching: 'daniel' matches 'Daniel'."""
-        mock_driver = MagicMock()
-        mock_session = MagicMock()
-        mock_driver.session.return_value.__enter__ = MagicMock(return_value=mock_session)
-        mock_driver.session.return_value.__exit__ = MagicMock(return_value=False)
-        mock_result = MagicMock()
-        mock_result.data.return_value = [
-            {"name": "Daniel", "labels": ["Person"], "id": "node-1"}
-        ]
-        mock_session.run.return_value = mock_result
+        conn = _make_test_conn()
+        conn.execute(
+            "INSERT INTO nodes (agent_id, type, name) VALUES (?, ?, ?)",
+            ("ada", "Person", "Daniel"),
+        )
+        conn.commit()
 
         from core import kg_guards
 
-        with patch.object(kg_guards, "_get_driver", return_value=mock_driver):
+        with _patch_conn(conn):
             result = kg_guards.check_disambiguation("daniel", "Person", "ada")
 
         assert result.action == "merge"
 
     def test_check_disambiguation_returns_existing_nodes(self) -> None:
         """existing_nodes list should be populated with matching node data."""
-        mock_driver = MagicMock()
-        mock_session = MagicMock()
-        mock_driver.session.return_value.__enter__ = MagicMock(return_value=mock_session)
-        mock_driver.session.return_value.__exit__ = MagicMock(return_value=False)
-        mock_result = MagicMock()
-        mock_result.data.return_value = [
-            {"name": "Daniel", "labels": ["Person"], "id": "node-1"},
-            {"name": "Daniel Stewart", "labels": ["Person"], "id": "node-2"},
-        ]
-        mock_session.run.return_value = mock_result
+        conn = _make_test_conn()
+        conn.execute(
+            "INSERT INTO nodes (agent_id, type, name) VALUES (?, ?, ?)",
+            ("ada", "Person", "Daniel"),
+        )
+        conn.execute(
+            "INSERT INTO nodes (agent_id, type, name) VALUES (?, ?, ?)",
+            ("ada", "Person", "Daniel Stewart"),
+        )
+        conn.commit()
 
         from core import kg_guards
 
-        with patch.object(kg_guards, "_get_driver", return_value=mock_driver):
+        with _patch_conn(conn):
             result = kg_guards.check_disambiguation("Daniel", "Person", "ada")
 
         assert len(result.existing_nodes) == 2
-        assert result.existing_nodes[0]["name"] == "Daniel"
-        assert result.existing_nodes[1]["name"] == "Daniel Stewart"
+        names = {n["name"] for n in result.existing_nodes}
+        assert "Daniel" in names
+        assert "Daniel Stewart" in names
 
     def test_check_disambiguation_message_includes_node_names(self) -> None:
         """The message string should contain both proposed and existing node names."""
-        mock_driver = MagicMock()
-        mock_session = MagicMock()
-        mock_driver.session.return_value.__enter__ = MagicMock(return_value=mock_session)
-        mock_driver.session.return_value.__exit__ = MagicMock(return_value=False)
-        mock_result = MagicMock()
-        mock_result.data.return_value = [
-            {"name": "Daniel Stewart", "labels": ["Person"], "id": "node-1"}
-        ]
-        mock_session.run.return_value = mock_result
+        conn = _make_test_conn()
+        conn.execute(
+            "INSERT INTO nodes (agent_id, type, name) VALUES (?, ?, ?)",
+            ("ada", "Person", "Daniel Stewart"),
+        )
+        conn.commit()
 
         from core import kg_guards
 
-        with patch.object(kg_guards, "_get_driver", return_value=mock_driver):
+        with _patch_conn(conn):
             result = kg_guards.check_disambiguation("Daniel", "Person", "ada")
 
         assert "Daniel" in result.message

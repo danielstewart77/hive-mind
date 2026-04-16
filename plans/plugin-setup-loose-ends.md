@@ -1,6 +1,6 @@
 # Plan: Plugin Setup Loose Ends
 
-> **Status:** 2.5 open items — #7 Phase 1 done, Phase 2 remaining; #9 open; #12 open.
+> **Status:** 3.5 open items — #7 Phase 1 done, Phase 2 remaining; #9 open; #12 open; #13 open.
 
 ---
 
@@ -368,3 +368,90 @@ If Lucent ships before the sparktobloom graph view is built, the `/graph/data` e
 | `mcp_server.py` | Swap imports (2 lines) |
 | `docker-compose.yml` | Remove `neo4j` service (post-migration) |
 | `.env` | Remove `NEO4J_AUTH`, `NEO4J_URI` (post-migration) |
+
+---
+
+## 13. remote-admin skill — shell quoting breaks exec API payload
+
+**Symptom (2026-04-16):** Any call to `/sessions/{id}/exec` where the command string contains single quotes causes a JSON decode error (`Expecting ',' delimiter: line 1 column N`). The curl payload is constructed via shell string interpolation, so a command like `echo 'hello'` corrupts the JSON body. Required base64-to-temp-file workaround throughout the session.
+
+**Root cause:** The `run()` helper in `skills/remote-admin/SKILL.md` builds the JSON payload by interpolating the command directly into a double-quoted shell string:
+
+```bash
+run() { curl -s -X POST http://localhost:8430/sessions/$SID/exec \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d "{\"command\":\"$1\",\"timeout\":${2:-30}}" | jq -r '.stdout,.stderr'; }
+```
+
+`$1` is not JSON-escaped. Single quotes, backslashes, newlines, or any character that breaks JSON will silently corrupt the request body.
+
+**Fix — file to change:**
+
+`skills/remote-admin/SKILL.md` in the plugin repo at:
+- Local: `/home/hivemind/dev/hivemind-claude-plugin/skills/remote-admin/SKILL.md`
+- On any installed host: `/home/<user>/.claude-config/skills/remote-admin/SKILL.md`
+
+**Change 1 — Step 0 credential resolution:**
+
+Replace `secrets.py` calls (broken, see Loose End #12) with `python3 -m keyring`:
+
+```bash
+TOKEN=$(python3 -m keyring get hive-mind remote_admin_token 2>/dev/null || echo "$REMOTE_ADMIN_TOKEN")
+TID="${TELEGRAM_USER_ID:-default}"
+PKEY=$(python3 -m keyring get hive-mind "remote_admin_ssh_key_${TID}" 2>/dev/null)
+```
+
+**Change 2 — `run()` helper in "Full connect-exec-close":**
+
+Replace the shell-interpolated curl with a Python stdlib one-liner that uses `json.dumps()` to safely encode the command:
+
+```bash
+run() {
+  python3 -c "
+import sys, json, urllib.request
+payload = json.dumps({'command': sys.argv[1], 'timeout': int(sys.argv[2]) if len(sys.argv) > 2 else 30}).encode()
+req = urllib.request.Request(
+    'http://localhost:8430/sessions/$SID/exec',
+    data=payload,
+    headers={'Authorization': 'Bearer $TOKEN', 'Content-Type': 'application/json'},
+    method='POST'
+)
+with urllib.request.urlopen(req) as r:
+    import json as j; d = j.loads(r.read()); print(d.get('stdout',''), d.get('stderr',''), sep='')
+" "$1" "${2:-30}"
+}
+```
+
+**Change 3 — "Run a command" one-off example:**
+
+Replace:
+```bash
+-d '{"command":"uname -a","timeout":30}'
+```
+with a note that for commands containing quotes, construct the payload via Python:
+```bash
+python3 -c "import json,sys; print(json.dumps({'command': sys.argv[1], 'timeout': 30}))" "uname -a"
+```
+
+**Change 4 — "Service management" footer:**
+
+Replace:
+```bash
+python3 tools/stateless/secrets/secrets.py set remote_admin_token <token>
+```
+with:
+```bash
+python3 -m keyring set hive-mind remote_admin_token <token>
+```
+
+**No changes needed** to the remote-admin service code (`services/remote_admin.py`). This is a purely skill/documentation fix — the service already accepts valid JSON correctly.
+
+**After fixing:** run `/update-plugin` on all installed hosts to pull the updated SKILL.md.
+
+**Files to change:**
+
+| File | Change |
+|---|---|
+| `skills/remote-admin/SKILL.md` (plugin repo) | Replace secrets.py calls + fix run() helper |
+
+No Python code changes. No container restart needed. Skill-only fix.

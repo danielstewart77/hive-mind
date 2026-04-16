@@ -24,11 +24,11 @@ class DisambiguationResult:
     message: str = ""
 
 
-def _get_driver():
-    """Lazy import to avoid circular dependency and allow mocking."""
-    from tools.stateful.knowledge_graph import _get_driver as _kg_get_driver
+def _get_connection():
+    """Lazy import to get the Lucent SQLite connection."""
+    from tools.stateful.lucent import _get_connection as _lucent_get_connection
 
-    return _kg_get_driver()
+    return _lucent_get_connection()
 
 
 def _telegram_direct(message: str) -> tuple[bool, str]:
@@ -43,7 +43,7 @@ def check_disambiguation(
 ) -> DisambiguationResult:
     """Query the knowledge graph for similar nodes before writing.
 
-    Uses a Cypher CONTAINS query (case-insensitive) to find similar nodes.
+    Uses a SQL LIKE query (case-insensitive) to find similar nodes.
 
     Args:
         name: Proposed entity name.
@@ -57,26 +57,26 @@ def check_disambiguation(
     Returns:
         DisambiguationResult with action, existing_nodes, and message.
     """
-    # NOTE: entity_type is intentionally omitted from the Cypher WHERE clause.
+    # NOTE: entity_type is intentionally omitted from the SQL WHERE clause.
     # Disambiguation must check across all node types to catch cross-entity
     # duplicates (e.g. "Hive Mind" as both a Project and a System). The
     # parameter is retained in the signature for API consistency with
     # graph_upsert and for potential future label-scoped queries.
-    driver = _get_driver()
-    with driver.session() as session:
-        result = session.run(
-            """
-            MATCH (n)
-            WHERE n.agent_id = $agent_id
-              AND (toLower(n.name) = toLower($name)
-                   OR toLower(n.name) CONTAINS toLower($name)
-                   OR toLower($name) CONTAINS toLower(n.name))
-            RETURN n.name AS name, labels(n) AS labels, elementId(n) AS id
-            """,
-            name=name,
-            agent_id=agent_id,
-        )
-        rows = result.data()
+    conn = _get_connection()
+    cursor = conn.execute(
+        """
+        SELECT name, type, id FROM nodes
+        WHERE agent_id = ?
+          AND (LOWER(name) = LOWER(?)
+               OR LOWER(name) LIKE '%' || LOWER(?) || '%'
+               OR LOWER(?) LIKE '%' || LOWER(name) || '%')
+        """,
+        (agent_id, name, name, name),
+    )
+    rows = [
+        {"name": row["name"], "labels": [row["type"]], "id": row["id"]}
+        for row in cursor.fetchall()
+    ]
 
     if not rows:
         return DisambiguationResult(
