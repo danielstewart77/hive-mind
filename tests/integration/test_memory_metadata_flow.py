@@ -1,48 +1,49 @@
-"""Integration tests for memory metadata flow -- store and retrieve with metadata."""
+"""Integration tests for memory metadata flow -- store and retrieve with metadata.
+
+Updated for Lucent (SQLite) backend.
+"""
 
 import json
-import sys
-from unittest.mock import MagicMock, patch
+import sqlite3
+from unittest.mock import patch
 
+import numpy as np
 import pytest
 
 
-@pytest.fixture(autouse=True)
-def _mock_neo4j_and_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Ensure agents.knowledge_graph can be imported by mocking neo4j and agent_tooling."""
-    if "neo4j" not in sys.modules:
-        neo4j_mock = MagicMock()
-        monkeypatch.setitem(sys.modules, "neo4j", neo4j_mock)
+def _make_test_conn() -> sqlite3.Connection:
+    """Create an in-memory SQLite DB with Lucent schema."""
+    import tools.stateful.lucent as lucent_mod
+
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    lucent_mod._init_schema(conn)
+    return conn
 
 
-def _make_mock_driver() -> MagicMock:
-    """Create a mock Neo4j driver."""
-    mock_driver = MagicMock()
-    mock_session = MagicMock()
-    mock_driver.session.return_value.__enter__ = MagicMock(return_value=mock_session)
-    mock_driver.session.return_value.__exit__ = MagicMock(return_value=False)
-    mock_result = MagicMock()
-    mock_result.single.return_value = {"id": "test-id"}
-    mock_session.run.return_value = mock_result
-    return mock_driver
+def _patch_conn(conn):
+    return patch("tools.stateful.lucent._get_connection", return_value=conn)
+
+
+def _mock_embed():
+    def fake_embed(text: str) -> list[float]:
+        h = hash(text)
+        rng = np.random.RandomState(abs(h) % (2**31))
+        return rng.randn(4096).tolist()
+
+    return patch("tools.stateful.lucent_memory._embed", side_effect=fake_embed)
 
 
 class TestStoreRetrieveMetadataFlow:
     """Tests for the full store-then-retrieve flow with metadata."""
 
     def test_store_then_retrieve_preserves_metadata(self) -> None:
-        import tools.stateful.memory as mem_mod
-
-        mock_driver = _make_mock_driver()
-        mock_session = mock_driver.session.return_value.__enter__.return_value
+        conn = _make_test_conn()
+        import tools.stateful.lucent_memory as lm
 
         # Store with data_class
-        with (
-            patch.object(mem_mod, "_get_driver", return_value=mock_driver),
-            patch.object(mem_mod, "_embed", return_value=[0.1] * 4096),
-            patch.object(mem_mod, "_index_created", True),
-        ):
-            store_result_str = mem_mod.memory_store_direct(
+        with _patch_conn(conn), _mock_embed():
+            store_result_str = lm.memory_store_direct(
                 content="Daniel prefers dark mode",
                 tags="preference",
                 source="user",
@@ -52,43 +53,19 @@ class TestStoreRetrieveMetadataFlow:
             assert store_result["stored"] is True
             assert store_result["data_class"] == "preference"
 
-            # Verify stored params
-            store_call = mock_session.run.call_args_list[-1]
-            params = store_call[1]
-            assert params["data_class"] == "preference"
-            assert params["tier"] == "durable"
+            # Verify stored data
+            row = conn.execute(
+                "SELECT data_class, tier FROM memories WHERE id = ?",
+                (store_result["id"],),
+            ).fetchone()
+            assert row["data_class"] == "preference"
+            assert row["tier"] == "durable"
 
         # Retrieve and verify metadata is included
-        record_mock = MagicMock()
-        record_mock.__getitem__ = lambda self, key: {
-            "content": "Daniel prefers dark mode",
-            "tags": "preference",
-            "source": "user",
-            "agent_id": "ada",
-            "created_at": 1000,
-            "score": 0.99,
-            "data_class": "preference",
-            "tier": "durable",
-            "as_of": "2026-01-01T00:00:00Z",
-            "expires_at": None,
-            "superseded": False,
-            "codebase_ref": None,
-            "archived": None,
-        }[key]
-        retrieve_result_mock = MagicMock()
-        retrieve_result_mock.__iter__ = MagicMock(return_value=iter([record_mock]))
-        mock_session.run.return_value = retrieve_result_mock
-
-        with (
-            patch.object(mem_mod, "_get_driver", return_value=mock_driver),
-            patch.object(mem_mod, "_embed", return_value=[0.1] * 4096),
-            patch.object(mem_mod, "_index_created", True),
-        ):
-            retrieve_result_str = mem_mod.memory_retrieve(query="dark mode preference")
+        with _patch_conn(conn), _mock_embed():
+            retrieve_result_str = lm.memory_retrieve(query="dark mode preference")
             retrieve_result = json.loads(retrieve_result_str)
             assert retrieve_result["count"] == 1
             memory = retrieve_result["memories"][0]
             assert memory["data_class"] == "preference"
             assert memory["tier"] == "durable"
-
-

@@ -37,5 +37,5 @@ class TestMCPAuditIntegration:
                 imports.append(node.module)
 
         assert "tools.stateful.browser" in imports
-        assert "tools.stateful.knowledge_graph" in imports
-        assert "tools.stateful.memory" in imports
+        assert "tools.stateful.lucent_graph" in imports
+        assert "tools.stateful.lucent_memory" in imports

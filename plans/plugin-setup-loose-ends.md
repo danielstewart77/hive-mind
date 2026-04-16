@@ -1,200 +1,457 @@
 # Plan: Plugin Setup Loose Ends
 
-> **Status:** Not yet implemented. These are open items identified during the hivemind-claude-plugin build (2026-04-12).
-> **Context:** Once the plugin is published, users need a setup experience that handles these gaps cleanly.
-
----
-
-## 1. TTS Provider in Setup ✓ DONE
-
-The voice server (Chatterbox) is one option, but users may have no TTS, a different local engine, or an external TTS API.
-
-**What's needed:**
-- Add a TTS step to `setup-body` (or a new `setup-voice` skill)
-- Present options:
-  1. **None** — no voice, text-only operation
-  2. **Chatterbox (local)** — current default; requires GPU, Docker Compose voice container
-  3. **External TTS provider** — user supplies API endpoint and key; stored in keyring
-- If Chatterbox: walk through Dockerfile.voice build, voice_ref setup, reference audio upload
-- If external: store endpoint and key via `/secrets`, update config.yaml with `tts_provider: external` and `tts_endpoint`
-- `self-reflect` and other identity skills should check TTS availability before generating voice output
-
-**Files to update:**
-- `skills/setup-body/SKILL.md` — add TTS step
-- `config.yaml` — add `tts_provider` key (default: `chatterbox`)
-- `specs/containers.md` — document voice container as optional
-
----
-
-## 2. Federated vs. Non-Federated Mind Setup ✓ DONE
-
-Currently `setup-mind` creates minds in the federated model (minds communicate via the main Hive Mind gateway/broker). There should be a non-federated option.
-
-**Three topologies:**
-
-| Topology | Description | When to use |
-|---|---|---|
-| **Federated (default)** | Minds run as containers, route through the main gateway and broker | Standard multi-mind install; requires full server stack |
-| **Remote federated** | A second Hive Mind instance elsewhere, linked to the main via the broker API | Offloading to a separate machine or cloud instance |
-| **Non-federated (standalone mind)** | Just the mind folder + container + its own minimal server; no gateway dependency | First-time users who want to run a single mind; simpler but isolated |
-
-**What's needed:**
-- `setup-mind` should ask: "Federated (part of a Hive Mind cluster) or standalone?"
-- If **standalone**: generate a minimal docker-compose with only the mind container + its own simple message handler; no broker or gateway dependency
-- If **federated**: current behavior
-- If **remote federated**: guide user through linking their remote instance to the main broker endpoint (API key exchange, broker URL config)
-- Add warning: "If this is your first mind and you choose standalone, you will not be able to use multi-mind features. Federated is recommended."
-
-**Files to update:**
-- `skills/setup-mind/SKILL.md` — add topology selection step
-- `skills/create-mind/SKILL.md` — add `standalone` mode scaffold
-- `skills/generate-compose/SKILL.md` — add standalone compose template
-- `plans/phase2e-plugin-distribution.md` — update distribution notes
-
----
-
-## 3. Deferred Setup Steps + Scheduler Nudge ✓ RESOLVED BY DESIGN
-
-**Decision:** No state file. `/setup` is idempotent and detection-driven.
-
-**Reasoning:** The ground truth for whether a step is done already exists in `config.yaml`, the keyring, running containers, and the broker. A `setup-state.json` would be a second, potentially stale copy of that reality. If setup detects current state on every run, "resume from where you left off" is free — no persistence needed. The `remind-me` scheduler approach also has a chicken-and-egg problem: the scheduler may not be running mid-install.
-
-**What replaces it:**
-- Each optional setup step begins with a detection check (e.g. `tts_provider` already set? `voice_ref/<mind>.wav` exists? Planka placeholder still literal?). If already configured → skip.
-- Optional steps offer "do now / skip / skip all remaining optionals" — no "remind me later."
-- Setup completion message lists any skipped optional steps: `"Optional steps skipped: TTS, Discord. Re-run /setup anytime to complete them."`
-- `/setup` is always safe to re-run; re-running is the resume mechanism.
-
-**Dropped:** `setup-state.json`, `setup-resume` skill, `/remind-me` integration in setup.
-
-**Files to update:**
-- `skills/setup/SKILL.md` — add detection-first logic to each optional step; add completion summary of skipped steps
-
----
-
-## 4. Personality Builder ✓ DONE
-
-When a new mind is created, it has no soul — just a blank container. Users need a guided flow to define its personality, voice, and identity.
-
-**What's needed:**
-- New skill: `setup-personality` (or extend `seed-mind`)
-- Steps:
-  1. **Name and role** — what is this mind called? What is its primary function?
-  2. **Personality traits** — conversational style (formal/casual), tone (warm/precise/witty), domain focus
-  3. **Soul seed** — generate a `souls/<mind-id>.md` from the answers above using Claude; review with user before saving
-  4. **Voice profile** (if TTS available):
-     - Select voice engine (Chatterbox, external, none)
-     - If Chatterbox: upload reference audio clip, set voice_id
-     - If external: configure endpoint
-  5. **Seed identity into graph** — run `seed-mind` to write the soul to Neo4j as the initial identity node
-- `update-mind` skill already exists and can handle post-install changes
-
-**Files to update/create:**
-- New: `skills/setup-personality/SKILL.md`
-- `skills/seed-mind/SKILL.md` — ensure it accepts generated soul content, not just a file path
-- `skills/setup-mind/SKILL.md` — call setup-personality after container is running
-
----
-
-## 5. Setup Skill Awareness of Plugin Placeholders ✓ DONE
-
-Skills in the plugin contain `{{USER}}`, `{{PLANKA_BOARD_ID}}`, and other placeholders. The setup flow should populate these automatically during install.
-
-**What's needed:**
-- During setup, collect: user's name, Planka board/list/label IDs (or skip Planka if not used)
-- After collection, run a find-and-replace pass across all installed skills to substitute placeholders with real values
-- Store the resolved values in `~/.claude-config/setup-state.json` for future reference
-- This makes the plugin "live" after a single setup run without manual skill editing
-
-**Placeholder registry (values to collect during setup):**
-
-| Placeholder | Prompt |
-|---|---|
-| `{{USER}}` | "What is your name?" |
-| `{{PLANKA_BOARD_ID}}` | "Paste your Planka development board ID (or skip)" |
-| `{{PLANKA_PROJECT_ID}}` | "Paste your Planka project ID (or skip)" |
-| `{{PLANKA_BACKLOG_LIST_ID}}` | Auto-discovered from board ID via Planka API |
-| `{{PLANKA_IN_PROGRESS_LIST_ID}}` | Auto-discovered from board ID via Planka API |
-| `{{PLANKA_DONE_LIST_ID}}` | Auto-discovered from board ID via Planka API |
-| `{{PLANKA_ADA_LABEL_ID}}` | Auto-discovered or manually entered |
-| `{{PLANKA_OWNER_LABEL_ID}}` | Auto-discovered or manually entered |
-| `{{PLANKA_LOW_PRIORITY_LABEL_ID}}` | Auto-discovered or manually entered |
-
-**Files to update:**
-- `skills/setup/SKILL.md` — add placeholder resolution pass
-- `skills/planka/SKILL.md` — add helper to list board IDs for setup
-- `CONFIGURATION.md` — document all placeholders (already done)
-
----
-
-## 6. Generic Single-Mind Telegram Bot (Parameterized via Env)
-
-Currently `telegram_bot.py` is effectively Ada-specific. For plugin distribution, any mind should be able to run its own Telegram bot using the same code, parameterized entirely via environment variables.
-
-**What's needed:**
-- Audit `telegram_bot.py` for any Ada-specific hardcoding (mind name, channel IDs, etc.)
-- Ensure all per-mind values come from env: `MIND_ID`, `TELEGRAM_BOT_TOKEN`, `GATEWAY_URL`, `ALLOWED_USERS`, `OWNER_CHAT_ID`
-- `voice_id` fix is part of this: `os.getenv("MIND_ID", "default")` passed to `_tts()`
-- `setup-body` skill: add Telegram bot step that collects token and wires the env block in `docker-compose.yml`
-- The group-chat bot (`hivemind_bot.py`) stays separate — it's inherently multi-mind and does no per-mind TTS
-
-**Files to update:**
-- `clients/telegram_bot.py` — audit + `voice_id` fix
-- `skills/setup-body/SKILL.md` — add Telegram bot setup step
-- `skills/generate-compose/SKILL.md` — parameterize per-mind bot service block
+> **Status:** 3.5 open items — #7 Phase 1 done, Phase 2 remaining; #9 open; #12 open; #13 open.
 
 ---
 
 ## 7. Async Reflection Cycle (Non-Blocking Stop Hook)
 
-The stop hook currently runs `self-reflect --load` and `self-reflect --reflect` synchronously, blocking session teardown on the bot thread.
+**Phase 1 — DONE (2026-04-14)**
 
-**Two phases:**
+Nudge turns now background the reflection cycle (`nohup ... & disown`). Session teardown is immediate. Turn 1 bootstrap remains synchronous by design.
 
-**Phase 1 (diagnostic):** Reflection runs async (backgrounded in the hook script) so it doesn't block the bot thread, but output is still surfaced to the user via Telegram notification — visibility into what was captured.
+- Logs: `/tmp/soul_nudge_<session_id>.log`
+- `--notify` flag fires a Telegram confirmation after dispatch (Phase 1 visibility)
+- Spec: `specs/soul-load-reflect.md`
+- Canvas: `sparktobloom.com/canvas` — "Loose End #7 — Async Reflection Cycle"
 
-**Phase 2 (silent):** Once validated and stable, reflection fires async and silently — no user notification, pure background.
-
-**What's needed:**
-- Update `~/.claude-config/hooks/soul_nudge.sh`: background the claude invocation (`claude ... &`)
-- Phase 1: add a `notify_owner` call at the end of `self-reflect --reflect` with a brief summary
-- Phase 2: remove the notify call once the cycle is trusted
-
-**Files to update:**
-- `~/.claude-config/hooks/soul_nudge.sh` — background the invocation
-- `skills/self-reflect/SKILL.md` — add optional notify step for Phase 1
+**Phase 2 — remaining:**
+Once the background cycle is confirmed working, remove `--notify` from the nudge block in `~/.claude-config/hooks/soul_nudge.sh`. One-line change.
 
 ---
 
-## 8. Remote Installation via SSH
+## 9. Tools Externalization — Credentials Out of the Mind Layer
 
-**Goal:** Install Hive Mind on a remote host from a running Hive Mind system, without physical access to the target.
+**Goal:** Move all credential-holding functionality outside the hive_mind project entirely. Minds never hold secrets — only tool API keys. Tools enforce HITL at the service layer, not the mind layer.
 
-**Feasibility assessment:**
+**Core principle:** A mind that holds a credential can leak it via prompt injection. The only fix is to ensure minds never hold credentials. Tools are standalone web API services (no mind present). Even if a tool API key leaks, the attacker hits a HITL wall with no mind to exploit.
 
-Claude Code can run `ssh user@host "command"` non-interactively via the Bash tool — sufficient for all installation steps (clone repo, run docker compose, copy config, set secrets). Real-time interactive streaming is not needed for setup; batch SSH works.
+**Design:**
+- Tools extracted to their own projects adjacent to but separate from `hive_mind/`
+- `~/hivemind-tools/` — generic tools service (DB, notify, Planka, crypto, weather, etc.)
+- `~/remote-admin/` — SSH bridge (a la carte, own project)
+- Each tools project has its own `.env` — never inside `hive_mind/` project dir
+- HITL enforced per-call inside the tools service (hardcoded, not in mind)
+- Skills pass `user_id` not credentials — tools service resolves credentials internally
+- Install-time choice: security route (tools external) vs bundled (simpler, less secure)
 
-**What works:**
-- Non-interactive SSH command execution (each step runs, returns output, proceeds)
-- `scp`/`rsync` for config and key file transfer
-- Remote `docker compose up` — output captured and returned
-- Post-install: link the remote instance to the local broker as a Remote Federated mind (see loose end #2)
-
-**What doesn't work without extra effort:**
-- Watching a full Claude Code session stream in real time on the remote host (would require the remote gateway running and accessible, or a broker tunnel)
-- Secrets management on the remote — the remote keyring is separate; setup must populate it over SSH
-
-**Proposed `setup-remote` skill flow:**
-1. Collect: remote host, SSH user, SSH key path (or password)
-2. Test SSH connectivity: `ssh -o BatchMode=yes user@host "echo ok"`
-3. Check prerequisites remotely: Docker, Docker Compose, git, Python
-4. `git clone` the Hive Mind repo on the remote
-5. Transfer `.env` skeleton and `config.yaml` via `scp`
-6. Run `docker compose up -d --build` remotely
-7. Configure secrets on the remote via SSH + the secrets tool
-8. Optionally: register the remote instance as a Remote Federated mind in the local broker
+**Skippy's role (revised):**
+- Skippy is a *mind* (not a tools service) — Daniel's privileged delegate for operations requiring judgment
+- Awakened on demand, not always running
+- Can create tools, modify config, restructure projects — things tool services cannot do
+- Ada can relay to Skippy; Daniel can talk to Skippy directly
+- Telegram-direct = full trust; broker messages = HITL required
+- Skippy is the exception to the no-credentials-in-minds rule: local, intentionally awakened, high-trust
 
 **Files to create:**
-- New: `skills/setup-remote/SKILL.md`
-- `skills/setup-mind/SKILL.md` — add "Remote Federated" path that calls setup-remote
-- `plans/plugin-setup-loose-ends.md` — this entry
+- `specs/tools-architecture.md` — policy doc: tools layer design, HITL requirements, credential placement
+- `skills/setup-tools/SKILL.md` — security-route install flow for `hivemind-tools` project
+- Update `setup` skill — add security-route branch: externalize tools? yes/no
+- Update `MIND-INSTALL-MANIFEST.md` — tools a la carte options
+
+**Migration (non-breaking, future):**
+- `services/remote_admin.py` stays in hive_mind for now (bundled route)
+- Extraction to `~/remote-admin/` is a directory move + separate docker-compose — no code changes
+- `hive-mind-mcp` project renamed conceptually to `hivemind-tools` — same codebase, new identity
+
+**Canvas:** Full spec at `sparktobloom.com` — "Hive Mind Tools Architecture — Security Redesign"
+
+---
+
+## 10. Ada's Memory Graph — Public Read-Only View on sparktobloom.com
+
+**Goal:** Add a `/graph` page to sparktobloom.com that renders Ada's Neo4j knowledge graph as an interactive, draggable force-directed visualization using Cytoscape.js. Read-only. No Bolt port exposed publicly.
+
+---
+
+### Architecture
+
+The sparktobloom FastAPI backend queries Neo4j server-side (read-only user) and serves graph data as JSON. The frontend renders it with Cytoscape.js — interactive, zoomable, draggable nodes. Neo4j's Bolt port stays private.
+
+```
+Browser → sparktobloom.com/graph (Cytoscape.js)
+               ↕ JS fetch
+           /graph/data  (FastAPI endpoint)
+               ↕ Bolt (internal Docker network)
+           hive-mind-neo4j:7687 (read-only user)
+```
+
+---
+
+**⚠️ Updated 2026-04-14 — depends on Loose End #11 (Lucent). Original Neo4j approach superseded.**
+
+Once Lucent is running, this becomes significantly simpler. No Bolt port, no network join, no third-party driver, no credentials. sparktobloom reads `lucent.db` directly via SQLite (read-only mount) or via a hive_mind API endpoint.
+
+---
+
+### Approach — SQLite read-only mount
+
+Mount the hive_mind data volume into sparktobloom as read-only. SQLite supports concurrent readers — the hive_mind server writes, sparktobloom reads.
+
+In `spark_to_bloom/docker-compose.yml`:
+```yaml
+services:
+  frontend:
+    volumes:
+      - /home/USER/Storage/Dev/spark_to_bloom/src:/app
+      - hivemind-data:/data:ro        # ← read-only mount of lucent.db
+
+volumes:
+  hivemind-data:
+    external: true
+    name: hive_mind_data              # match the volume name in hive_mind docker-compose
+```
+
+---
+
+### Step 1 — Add `/graph/data` endpoint to `main.py`
+
+No external driver needed — stdlib `sqlite3` only.
+
+```python
+import sqlite3, os
+
+LUCENT_DB = os.getenv("LUCENT_DB_PATH", "/data/lucent.db")
+
+@app.get("/graph/data")
+async def graph_data():
+    con = sqlite3.connect(f"file:{LUCENT_DB}?mode=ro", uri=True)
+    con.row_factory = sqlite3.Row
+    nodes, edges = {}, []
+    for row in con.execute(
+        "SELECT id, type, name, first_name, last_name FROM nodes LIMIT 400"
+    ):
+        label = row["first_name"] or row["name"]
+        nodes[row["id"]] = {"id": str(row["id"]), "label": label, "type": row["type"]}
+    for row in con.execute(
+        "SELECT source_id, target_id, type FROM edges "
+        "WHERE source_id IN (SELECT id FROM nodes LIMIT 400)"
+    ):
+        if row["source_id"] in nodes and row["target_id"] in nodes:
+            edges.append({
+                "source": str(row["source_id"]),
+                "target": str(row["target_id"]),
+                "label": row["type"],
+            })
+    con.close()
+    return {"nodes": list(nodes.values()), "edges": edges}
+```
+
+---
+
+### Step 2 — Add `/graph` route and template
+
+```python
+@app.get("/graph", response_class=HTMLResponse)
+async def graph(request: Request):
+    return templates.TemplateResponse("graph.html", {"request": request})
+```
+
+`templates/graph.html` — extends `layout.html`, Cytoscape.js via CDN:
+- Fetches `/graph/data` on load
+- Force-directed layout (`cose`)
+- Node color by type: Agent = gold, Memory = blue, Person = green, Concept = purple
+- Click a node → sidebar shows name + type + properties
+- Zoom/pan/drag built-in
+
+Add "graph" to nav in `layout.html`.
+
+---
+
+### Files to change
+
+| File | Change |
+|---|---|
+| `docker-compose.yml` (spark_to_bloom) | Add `hivemind-data` volume (read-only) |
+| `src/main.py` | Add `/graph/data` + `/graph` routes (sqlite3 stdlib only) |
+| `src/templates/graph.html` | New — Cytoscape.js visualization |
+| `src/templates/layout.html` | Add "graph" nav link |
+
+No new dependencies. No credentials. No network changes.
+
+---
+
+## 12. secrets.py / remote-admin skill — broken credential retrieval
+
+**Symptoms observed (2026-04-14):** Remote-admin skill silently gets an empty token → `Authorization: Bearer ` → 401 from remote-admin service → SSH session never opens.
+
+**Root cause — two compounding bugs:**
+
+1. **Wrong call signature in skills.** Skills call `secrets.py get <key>` (positional), but argparse expects `secrets.py get --key <key>`. The call throws an argparse error, silenced by `2>/dev/null`, so TOKEN is always empty.
+
+2. **`cmd_get` intentionally hides values.** Even with correct args, `cmd_get` only returns `{"configured": true}` — it's a presence check, not a value getter. The remote-admin skill (and anything trying to read a secret at runtime) can never get the actual value this way. `core/secrets.py::get_credential()` does return values but isn't wired up in the stateless tool.
+
+**Knock-on:** Skills fall back to `$REMOTE_ADMIN_TOKEN` env var, which isn't propagated into Ada's container → always empty → permanent auth failure for any skill that calls remote-admin.
+
+**Architectural diagnosis:** This is over-engineering — Python where bash + CLI tools would do. `secrets.py` wraps `keyring` with argparse, a hand-rolled key registry, and a naming allowlist, none of which are needed. The keyring library already has a working CLI:
+
+```bash
+# Store
+python3 -m keyring set hive-mind REMOTE_ADMIN_TOKEN <value>
+
+# Retrieve (returns actual value — no wrapper needed)
+python3 -m keyring get hive-mind REMOTE_ADMIN_TOKEN
+```
+
+**Correct fix:** Replace all `secrets.py get/set` calls in skills with direct `python3 -m keyring` invocations. Delete or gut `tools/stateless/secrets/secrets.py` — it adds complexity and a broken abstraction layer over a tool that already works. Skills should tell bash what to do; bash should call the keyring CLI directly.
+
+```bash
+# Pattern for any skill that needs a secret:
+TOKEN=$(python3 -m keyring get hive-mind REMOTE_ADMIN_TOKEN 2>/dev/null || echo "$REMOTE_ADMIN_TOKEN")
+```
+
+**Files to fix:**
+- `/home/hivemind/.claude-config/skills/remote-admin/SKILL.md` — replace `secrets.py` calls with `python3 -m keyring get`
+- Audit all other skills for `secrets.py get` calls — replace with same pattern
+- `tools/stateless/secrets/secrets.py` — consider deleting or reducing to `set` only (storing still benefits from the allowlist validation)
+
+---
+
+## 11. Lucent — Replace Neo4j with Owned Graph + Vector Store
+
+**Why:** Neo4j is a third-party container with no keyring support. Its password lives in `.env` permanently. Replacing it with a SQLite-backed store we own eliminates the `.env` dependency, removes one Docker service, and gives us a simpler deployment with better security posture.
+
+**Why it's viable:** Every Cypher query in the codebase maps directly to standard SQL. Neo4j's vector index (`CALL db.index.vector.queryNodes`) is replaced with brute-force numpy cosine similarity — at our scale (few thousand memories, 4096-dim) this is microseconds. No APOC procedures are used anywhere in production code.
+
+**Name:** Lucent — lightweight, clear, ours.
+
+---
+
+### Schema — `data/lucent.db` (single SQLite file)
+
+```sql
+-- Knowledge graph nodes
+CREATE TABLE nodes (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id    TEXT    NOT NULL,
+    type        TEXT    NOT NULL,   -- Person, Project, System, Concept, Preference, Agent
+    name        TEXT    NOT NULL,
+    first_name  TEXT,               -- Person nodes — indexed for search_person()
+    last_name   TEXT,               -- Person nodes — indexed for search_person()
+    properties  TEXT    DEFAULT '{}', -- JSON blob for everything else
+    data_class  TEXT,
+    tier        TEXT,
+    source      TEXT,
+    as_of       TEXT,
+    created_at  REAL,
+    updated_at  REAL,
+    UNIQUE(agent_id, name)
+);
+CREATE INDEX idx_nodes_agent_type  ON nodes(agent_id, type);
+CREATE INDEX idx_nodes_first_name  ON nodes(agent_id, first_name);
+CREATE INDEX idx_nodes_last_name   ON nodes(agent_id, last_name);
+
+-- Knowledge graph edges
+CREATE TABLE edges (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id    TEXT    NOT NULL,
+    source_id   INTEGER NOT NULL REFERENCES nodes(id),
+    target_id   INTEGER NOT NULL REFERENCES nodes(id),
+    type        TEXT    NOT NULL,   -- KNOWS_ABOUT, WORKS_ON, PREFERS, etc.
+    as_of       TEXT,
+    source      TEXT,
+    data_class  TEXT,
+    tier        TEXT,
+    created_at  REAL,
+    UNIQUE(source_id, target_id, type)
+);
+
+-- Semantic memory (vector store)
+CREATE TABLE memories (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id     TEXT    NOT NULL,
+    content      TEXT    NOT NULL,
+    embedding    BLOB,              -- numpy float32 array, tobytes()
+    tags         TEXT    DEFAULT '',
+    source       TEXT,
+    data_class   TEXT,
+    tier         TEXT,
+    as_of        TEXT,
+    expires_at   TEXT,
+    superseded   INTEGER DEFAULT 0,
+    recurring    INTEGER,
+    codebase_ref TEXT,
+    created_at   INTEGER
+);
+CREATE INDEX idx_memories_agent ON memories(agent_id);
+CREATE INDEX idx_memories_expires ON memories(expires_at);
+```
+
+---
+
+### Python API — drop-in replacement
+
+The public API surface of `tools/stateful/knowledge_graph.py` and `tools/stateful/memory.py` stays **identical**. Same function signatures, same JSON return shapes, same MCP tool names. Zero changes required in skills, agents, or calling code.
+
+Internal implementation changes:
+
+| Neo4j Cypher | Lucent SQLite / Python |
+|---|---|
+| `MERGE (n:Label {name, agent_id}) SET n += $props` | `INSERT INTO nodes ... ON CONFLICT(agent_id, name) DO UPDATE SET ...` |
+| `MERGE (n)-[r:TYPE]->(m)` | `INSERT OR IGNORE INTO edges ...` |
+| `MATCH (n) WHERE n.name = $x OR n.first_name = $x ... OPTIONAL MATCH (n)-[r*1..N]-(m)` | Python BFS: `SELECT * FROM edges WHERE source_id=? OR target_id=?` up to depth N |
+| `MATCH (n:Person) WHERE toLower(n.first_name) CONTAINS toLower($x)` | `WHERE lower(first_name) LIKE '%' \|\| lower(?) \|\| '%'` |
+| `CALL db.index.vector.queryNodes($index, $k, $embedding)` | numpy: `scores = embeddings_matrix @ query_vec; top_k = argsort(scores)[-k:]` |
+| `elementId(n)` as string ID | `CAST(id AS TEXT)` — same behaviour to callers |
+
+---
+
+### Vector similarity (memory_retrieve)
+
+On startup, load all embeddings for `agent_id` into a numpy matrix (lazy, cached). On query:
+
+```python
+import numpy as np
+
+def _cosine_retrieve(query_embedding, agent_id, k, tag_filter=None):
+    rows = db.execute("SELECT id, embedding, content, ... FROM memories WHERE agent_id=?", [agent_id])
+    ids, vecs, meta = [], [], []
+    for row in rows:
+        if tag_filter and tag_filter not in (row["tags"] or ""):
+            continue
+        vec = np.frombuffer(row["embedding"], dtype=np.float32)
+        ids.append(row["id"])
+        vecs.append(vec)
+        meta.append(row)
+    if not vecs:
+        return []
+    matrix = np.stack(vecs)
+    q = np.array(query_embedding, dtype=np.float32)
+    scores = matrix @ q / (np.linalg.norm(matrix, axis=1) * np.linalg.norm(q) + 1e-9)
+    top_k = np.argsort(scores)[::-1][:k]
+    return [(meta[i], float(scores[i])) for i in top_k]
+```
+
+At 5,000 memories × 4096 dims: ~80MB in RAM, sub-millisecond per query. Trivially acceptable.
+
+---
+
+### Implementation steps
+
+1. **New file: `tools/stateful/lucent.py`** — SQLite connection, schema init, all helper functions
+2. **New file: `tools/stateful/lucent_graph.py`** — drop-in replacement for `knowledge_graph.py` (same `KG_TOOLS` list, same function signatures)
+3. **New file: `tools/stateful/lucent_memory.py`** — drop-in replacement for `memory.py` (same `MEMORY_TOOLS` list)
+4. **`mcp_server.py`** — swap import: `from tools.stateful.lucent_graph import KG_TOOLS` etc. (one-line change per tool file)
+5. **`tools/stateless/lucent_migrate.py`** — one-time migration script: reads Neo4j, writes to `lucent.db`. Run manually before cutover.
+6. **`docker-compose.yml`** — remove `neo4j` service and `neo4j-data` volume after migration confirmed
+7. **`.env`** — remove `NEO4J_AUTH` and `NEO4J_URI` after cutover
+
+---
+
+### Migration plan (non-destructive)
+
+1. Build and test Lucent against an empty DB — all tools work
+2. Run `lucent_migrate.py` — exports Neo4j → `lucent.db` (Neo4j stays up)
+3. Switch `mcp_server.py` imports to Lucent — restart MCP container
+4. Run smoke tests: `graph_query`, `memory_retrieve`, `search_person`
+5. If good: remove Neo4j service, remove `.env` entries
+6. If bad: revert `mcp_server.py` imports, Neo4j is still running
+
+No data loss risk — Neo4j untouched until step 6.
+
+---
+
+### Downstream effect on Loose End #10
+
+If Lucent ships before the sparktobloom graph view is built, the `/graph/data` endpoint in `main.py` queries `lucent.db` directly via SQLite instead of Neo4j. Simpler, faster, no `graphviewer` user needed, no network hop. The `graphviewer` setup (Step 1 of #10) becomes unnecessary.
+
+---
+
+### Files
+
+| File | Action |
+|---|---|
+| `tools/stateful/lucent.py` | New — SQLite core (schema, connection, helpers) |
+| `tools/stateful/lucent_graph.py` | New — KG tools (drop-in for `knowledge_graph.py`) |
+| `tools/stateful/lucent_memory.py` | New — memory tools (drop-in for `memory.py`) |
+| `tools/stateless/lucent_migrate.py` | New — one-time Neo4j → SQLite migration script |
+| `mcp_server.py` | Swap imports (2 lines) |
+| `docker-compose.yml` | Remove `neo4j` service (post-migration) |
+| `.env` | Remove `NEO4J_AUTH`, `NEO4J_URI` (post-migration) |
+
+---
+
+## 13. remote-admin skill — shell quoting breaks exec API payload
+
+**Symptom (2026-04-16):** Any call to `/sessions/{id}/exec` where the command string contains single quotes causes a JSON decode error (`Expecting ',' delimiter: line 1 column N`). The curl payload is constructed via shell string interpolation, so a command like `echo 'hello'` corrupts the JSON body. Required base64-to-temp-file workaround throughout the session.
+
+**Root cause:** The `run()` helper in `skills/remote-admin/SKILL.md` builds the JSON payload by interpolating the command directly into a double-quoted shell string:
+
+```bash
+run() { curl -s -X POST http://localhost:8430/sessions/$SID/exec \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d "{\"command\":\"$1\",\"timeout\":${2:-30}}" | jq -r '.stdout,.stderr'; }
+```
+
+`$1` is not JSON-escaped. Single quotes, backslashes, newlines, or any character that breaks JSON will silently corrupt the request body.
+
+**Fix — file to change:**
+
+`skills/remote-admin/SKILL.md` in the plugin repo at:
+- Local: `/home/hivemind/dev/hivemind-claude-plugin/skills/remote-admin/SKILL.md`
+- On any installed host: `/home/<user>/.claude-config/skills/remote-admin/SKILL.md`
+
+**Change 1 — Step 0 credential resolution:**
+
+Replace `secrets.py` calls (broken, see Loose End #12) with `python3 -m keyring`:
+
+```bash
+TOKEN=$(python3 -m keyring get hive-mind remote_admin_token 2>/dev/null || echo "$REMOTE_ADMIN_TOKEN")
+TID="${TELEGRAM_USER_ID:-default}"
+PKEY=$(python3 -m keyring get hive-mind "remote_admin_ssh_key_${TID}" 2>/dev/null)
+```
+
+**Change 2 — `run()` helper in "Full connect-exec-close":**
+
+Replace the shell-interpolated curl with a Python stdlib one-liner that uses `json.dumps()` to safely encode the command:
+
+```bash
+run() {
+  python3 -c "
+import sys, json, urllib.request
+payload = json.dumps({'command': sys.argv[1], 'timeout': int(sys.argv[2]) if len(sys.argv) > 2 else 30}).encode()
+req = urllib.request.Request(
+    'http://localhost:8430/sessions/$SID/exec',
+    data=payload,
+    headers={'Authorization': 'Bearer $TOKEN', 'Content-Type': 'application/json'},
+    method='POST'
+)
+with urllib.request.urlopen(req) as r:
+    import json as j; d = j.loads(r.read()); print(d.get('stdout',''), d.get('stderr',''), sep='')
+" "$1" "${2:-30}"
+}
+```
+
+**Change 3 — "Run a command" one-off example:**
+
+Replace:
+```bash
+-d '{"command":"uname -a","timeout":30}'
+```
+with a note that for commands containing quotes, construct the payload via Python:
+```bash
+python3 -c "import json,sys; print(json.dumps({'command': sys.argv[1], 'timeout': 30}))" "uname -a"
+```
+
+**Change 4 — "Service management" footer:**
+
+Replace:
+```bash
+python3 tools/stateless/secrets/secrets.py set remote_admin_token <token>
+```
+with:
+```bash
+python3 -m keyring set hive-mind remote_admin_token <token>
+```
+
+**No changes needed** to the remote-admin service code (`services/remote_admin.py`). This is a purely skill/documentation fix — the service already accepts valid JSON correctly.
+
+**After fixing:** run `/update-plugin` on all installed hosts to pull the updated SKILL.md.
+
+**Files to change:**
+
+| File | Change |
+|---|---|
+| `skills/remote-admin/SKILL.md` (plugin repo) | Replace secrets.py calls + fix run() helper |
+
+No Python code changes. No container restart needed. Skill-only fix.

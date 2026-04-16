@@ -27,12 +27,14 @@ class TestDataClassRegistry:
             "preference",
             "intention",
             "ada-identity",
+            "nagatha-identity",
+            "bob-identity",
             "future-project",
             "ephemeral",
             "news-digest",
         }
         assert set(DATA_CLASS_REGISTRY.keys()) == expected
-        assert len(DATA_CLASS_REGISTRY) == 10
+        assert len(DATA_CLASS_REGISTRY) == 12
 
     def test_registry_technical_config_is_reviewable(self) -> None:
         dc = DATA_CLASS_REGISTRY["technical-config"]

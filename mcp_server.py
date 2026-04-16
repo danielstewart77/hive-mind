@@ -6,8 +6,8 @@ No agent_tooling dependency — all tools are imported and registered explicitly
 
 Tool categories:
   - Browser tools (async Playwright) from tools/stateful/browser.py
-  - Knowledge graph tools (Neo4j) from tools/stateful/knowledge_graph.py
-  - Memory tools (Neo4j + embeddings) from tools/stateful/memory.py
+  - Knowledge graph tools (Lucent SQLite) from tools/stateful/lucent_graph.py
+  - Memory tools (Lucent SQLite + numpy embeddings) from tools/stateful/lucent_memory.py
 
 Claude Code SDK connects to this server via stdio to access external integrations.
 """
@@ -20,8 +20,8 @@ from core.audit import audit_wrap, get_audit_logger
 from tools.stateful.browser import BROWSER_TOOLS
 from tools.stateful.group_chat import GROUP_CHAT_TOOLS
 from tools.stateful.inter_mind import INTER_MIND_TOOLS
-from tools.stateful.knowledge_graph import KG_TOOLS
-from tools.stateful.memory import MEMORY_TOOLS
+from tools.stateful.lucent_graph import KG_TOOLS
+from tools.stateful.lucent_memory import MEMORY_TOOLS
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger(__name__)

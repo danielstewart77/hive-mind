@@ -84,7 +84,8 @@ async def _stt(ogg_bytes: bytes) -> str:
 
 async def _tts(text: str) -> bytes:
     """POST text to voice-server /tts, return OGG audio bytes."""
-    async with http.post(f"{VOICE_SERVER_URL}/tts", json={"text": text}) as resp:
+    voice_id = os.getenv("MIND_ID", "default")
+    async with http.post(f"{VOICE_SERVER_URL}/tts", json={"text": text, "voice_id": voice_id}) as resp:
         if resp.status != 200:
             raise RuntimeError(f"TTS error {resp.status}: {await resp.text()}")
         return await resp.read()
@@ -717,10 +718,15 @@ async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_T
 # Entry point
 # ---------------------------------------------------------------------------
 def _get_bot_token() -> str:
-    """Load Telegram bot token — keyring first, env fallback."""
+    """Load Telegram bot token — keyring first, env fallback.
+
+    TELEGRAM_BOT_TOKEN_KEYRING_KEY overrides which keyring key is looked up,
+    allowing multiple bot instances to run from the same image with different tokens.
+    """
+    keyring_key = os.getenv("TELEGRAM_BOT_TOKEN_KEYRING_KEY", "TELEGRAM_BOT_TOKEN")
     try:
         import keyring
-        token = keyring.get_password("hive-mind", "TELEGRAM_BOT_TOKEN")
+        token = keyring.get_password("hive-mind", keyring_key)
         if token:
             return token
     except Exception:

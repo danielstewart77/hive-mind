@@ -1,7 +1,7 @@
 # Core
 claude-code-sdk>=0.0.25
 python-dotenv
-cryptography>=46.0.6
+cryptography>=46.0.7
 requests>=2.33.0
 pyyaml
 requests
@@ -30,9 +30,12 @@ uvicorn[standard]
 aiosqlite
 aiohttp
 
+# Vector operations (Lucent)
+numpy
+
 # External integrations
-neo4j
-py2neo
+neo4j  # Retained for migration only -- remove after lucent_migrate.py completes
+py2neo  # Retained for migration only -- remove after lucent_migrate.py completes
 dateparser
 
 # Discord bot
@@ -43,4 +46,7 @@ python-telegram-bot[job-queue]>=21.0
 
 # Scheduler
 apscheduler>=3.10
+
+# Remote Admin SSH bridge
+paramiko>=3.0
 
