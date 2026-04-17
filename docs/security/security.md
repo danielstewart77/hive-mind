@@ -7,7 +7,7 @@ Hive Mind is an AI system with filesystem access, API credentials, and the abili
 Each ring limits what a successful exploit at the previous layer can achieve.
 
 **Ring 0 — Secret Isolation.**
-All application secrets are stored in the system keyring (`keyrings.alt.file.PlaintextKeyring`), not in environment variables or `.env` files. No Python service uses `env_file: .env`. The gateway and scheduler include keyring-to-env bridges that inject only the specific keys each subprocess needs at startup. A minimal `.env` remains only for docker-compose interpolation consumed by third-party containers (Neo4j, Planka). *(Implemented.)*
+All application secrets are stored in the system keyring (`keyrings.alt.file.PlaintextKeyring`), not in environment variables or `.env` files. No Python service uses `env_file: .env`. The gateway and scheduler include keyring-to-env bridges that inject only the specific keys each subprocess needs at startup. A minimal `.env` remains only for docker-compose interpolation consumed by third-party containers (Planka). *(Implemented.)*
 
 **Ring 1 — AST Validation.**
 Before any runtime-created tool is loaded, its source code is parsed with Python's `ast` module and checked against a blocklist. Blocked: `eval`, `exec`, `compile`, `__import__`, `breakpoint`, `os.system`, `subprocess shell=True`, and imports of `pty`, `ctypes`, `socket`, `multiprocessing`, `code`, `codeop`. Code is staged in `agents/staging/`, validated, then promoted to `agents/`. Violations are rejected with full audit logging. *(Implemented.)*
@@ -30,7 +30,7 @@ Secrets follow a strict hierarchy:
 
 1. **System keyring** (primary) — `keyrings.alt.file.PlaintextKeyring`, stored at a path shared across containers via bind mount
 2. **Environment variables** (fallback) — for cases where keyring is unavailable
-3. **`.env` file** (third-party only) — consumed exclusively by docker-compose for Neo4j and Planka
+3. **`.env` file** (third-party only) — consumed exclusively by docker-compose for Planka
 
 Use `get_credential(key)` from `agents/secret_manager.py`. It checks keyring first, falls back to `os.getenv()`.
 

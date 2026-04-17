@@ -87,11 +87,13 @@ class GatewayClient:
         server_url: str,
         owner_type: str,
         surface_prompt: str | None = None,
+        mind_id: str = "ada",
     ):
         self.http = http
         self.server_url = server_url
         self.owner_type = owner_type
         self.surface_prompt = surface_prompt
+        self.mind_id = mind_id
 
     async def ensure_session(self, user_id: int, client_ref: int | str) -> str:
         """Get active session for this client, or create one."""
@@ -108,6 +110,7 @@ class GatewayClient:
             "owner_type": self.owner_type,
             "owner_ref": str(user_id),
             "client_ref": str(client_ref),
+            "mind_id": self.mind_id,
         }
         if self.surface_prompt:
             payload["surface_prompt"] = self.surface_prompt

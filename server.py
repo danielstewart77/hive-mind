@@ -1049,6 +1049,46 @@ async def hitl_respond(
 
 
 # ---------------------------------------------------------------------------
+# Knowledge graph export (for Spark to Bloom visualization)
+# ---------------------------------------------------------------------------
+
+@app.get("/graph/data")
+async def graph_data(limit: int = 400):
+    """Export Lucent knowledge graph nodes and edges for external visualization."""
+    import sqlite3 as _sqlite3
+    db_path = PROJECT_DIR / "data" / "lucent.db"
+    try:
+        conn = _sqlite3.connect(str(db_path))
+        conn.row_factory = _sqlite3.Row
+        node_rows = conn.execute(
+            "SELECT id, name, type, properties FROM nodes ORDER BY id LIMIT ?", (limit,)
+        ).fetchall()
+        nodes = []
+        for r in node_rows:
+            props = json.loads(r["properties"]) if r["properties"] else {}
+            nodes.append({
+                "id": r["id"],
+                "label": r["name"],
+                "type": r["type"],
+                **{k: v for k, v in props.items() if k not in ("id", "label", "type")},
+            })
+        node_ids = {r["id"] for r in node_rows}
+        edge_rows = conn.execute(
+            "SELECT source_id, target_id, type FROM edges"
+        ).fetchall()
+        edges = [
+            {"source": r["source_id"], "target": r["target_id"], "type": r["type"]}
+            for r in edge_rows
+            if r["source_id"] in node_ids and r["target_id"] in node_ids
+        ]
+        conn.close()
+        return {"nodes": nodes, "edges": edges}
+    except Exception:
+        log.exception("/graph/data: failed to query lucent.db")
+        return JSONResponse({"nodes": [], "edges": [], "error": "graph unavailable"}, status_code=500)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":

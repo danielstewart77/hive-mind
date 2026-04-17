@@ -20,7 +20,7 @@
 | **Harness** | Claude Code CLI (stream-json) | Unknown (GTC reveal pending) | Custom runtime + LLM API |
 | **Gateway** | FastAPI centralized gateway | Enterprise orchestration layer | Local Gateway (single control plane) |
 | **Channels** | Telegram, Discord, Web, Terminal | Enterprise software integrations | 20+ (WhatsApp, Telegram, Slack, Teams, Signal, etc.) |
-| **Memory** | Knowledge graph (Neo4j) + vector store + MEMORY.md | Unknown | Local persistent storage |
+| **Memory** | Knowledge graph (Lucent/SQLite) + vector store + MEMORY.md | Unknown | Local persistent storage |
 | **Tools** | MCP tools (auto-discovered `agents/`) | Security/privacy tools (planned) | 100+ AgentSkills |
 | **Multi-mind** | Designed for N minds (currently 1) | Multi-agent dispatch | Single agent per instance |
 | **Hardware** | Cloud container (any provider) | Hardware-agnostic (but NVIDIA-optimized) | Local machine (RTX/DGX Spark recommended) |

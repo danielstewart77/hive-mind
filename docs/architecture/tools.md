@@ -15,7 +15,7 @@ HITL = requires human approval via Telegram before executing. See [hitl-approval
 
 | Tool | HITL | Description |
 |---|---|---|
-| `memory_store` | No | Store a semantic memory (vector embedding in Neo4j) |
+| `memory_store` | No | Store a semantic memory (vector embedding in Lucent/SQLite) |
 | `memory_retrieve` | No | Retrieve memories by semantic similarity |
 | `memory_list` | No | Paginate through all stored memories |
 | `memory_update` | No | Update data class or tags on an existing memory |
@@ -106,7 +106,7 @@ Use the `/tool-creator` skill. It reads `specs/tool-migration.md` to determine t
 **Stateless tool** (API call, file op, no persistent connection):
 → Creates `tools/stateless/<name>/` with script, `requirements.txt`, venv, and a Claude skill. Editable without restart.
 
-**Stateful tool** (needs Neo4j, Playwright, or other persistent connection):
+**Stateful tool** (needs Lucent, Playwright, or other persistent connection):
 → Adds a function to `tools/stateful/` and registers it in `mcp_server.py`. Requires `hive_mind` container restart.
 
 **External tool** (OAuth, file credentials, Docker access):

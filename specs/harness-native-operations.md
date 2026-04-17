@@ -76,7 +76,7 @@ Because the harness has Bash, it has access to every CLI tool on the system. Com
 |---|---|
 | Make HTTP requests | `curl`, `httpx`, `wget` |
 | Query/modify SQL databases | `sqlite3`, `psql`, `mysql` |
-| Query/modify Neo4j | MCP tools or `cypher-shell` |
+| Query/modify Lucent (graph/vector) | MCP tools (`graph_query`, `memory_retrieve`) |
 | Parse JSON/YAML/XML | `jq`, `yq`, `python3 -c`, `xmllint` |
 | Transform data between formats | Pipe chains, `jq`, `python3 -c` |
 | Manage Docker containers | `docker`, `docker compose` |
@@ -106,7 +106,7 @@ Write code **only** when the task requires something the harness fundamentally c
 | State must persist in memory across requests | In-memory registry consulted on every API call | The harness doesn't live between requests |
 | Real-time event handling is needed | SSE stream consumption, filesystem watcher | Requires a long-running event loop |
 | Specialized computation is required | ML inference, audio synthesis, video generation | No CLI equivalent with acceptable performance |
-| A library has no CLI equivalent | Claude Code SDK, Playwright driver, Neo4j Bolt driver | Must be called programmatically |
+| A library has no CLI equivalent | Claude Code SDK, Playwright driver, Lucent SQLite driver | Must be called programmatically |
 | Performance requires optimized code | Tight loops over large datasets, custom data structures | Shell tools too slow |
 
 ## When NOT to Write Code

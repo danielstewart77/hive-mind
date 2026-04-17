@@ -91,16 +91,14 @@ Use the `set_secret` MCP tool (available to Ada) or call `keyring.set_password("
 | `DISCORD_BOT_TOKEN` | Discord client |
 | `MCP_AUTH_TOKEN` | Gateway ↔ hive_mind_mcp bearer auth |
 | `HITL_INTERNAL_TOKEN` | HITL approval validation |
-| `NEO4J_URI` | Knowledge graph connection |
 | `PLANKA_EMAIL`, `PLANKA_PASSWORD`, `PLANKA_URL` | Kanban board |
 | `LINKEDIN_CLIENT_ID`, `LINKEDIN_CLIENT_SECRET` | LinkedIn OAuth |
 
 ### .env File (Third-Party Only)
 
-A minimal `.env` remains for docker-compose interpolation consumed by Neo4j and Planka (containers that cannot read from a keyring):
+A minimal `.env` remains for docker-compose interpolation consumed by Planka (which cannot read from a keyring):
 
 ```env
-NEO4J_AUTH=neo4j/your-password
 PLANKA_DB_PASSWORD=your-db-password
 PLANKA_SECRET_KEY_BASE=your-secret-key
 PLANKA_ADMIN_EMAIL=admin@example.com

@@ -21,7 +21,7 @@ She is not designed to be agreeable or warm. The default AI stereotype — eager
 
 ## The Soul
 
-Ada's identity is stored as a list of first-person statements on the **Ada node** in the Neo4j knowledge graph (`soul_values` field). This is the live, authoritative source.
+Ada's identity is stored as a list of first-person statements on the **Ada node** in the Lucent knowledge graph (`soul_values` field). This is the live, authoritative source.
 
 `souls/ada.md` is the fallback soul file — used only when the graph is unavailable. It contains the last known soul content but is considered stale when the graph is reachable. The root `soul.md` is now a pointer stub that redirects to `souls/ada.md`.
 

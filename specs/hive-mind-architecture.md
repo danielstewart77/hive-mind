@@ -47,7 +47,7 @@ skill reading the spec.
 # tools/stateful/memory.py — correct: pure utility
 @tool()
 def memory_store(content: str, tags: str, source: str, data_class: str) -> str:
-    """Store a memory as a semantic embedding in Neo4j."""
+    """Store a memory as a semantic embedding in Lucent (SQLite)."""
     # just writes — no classification logic, no heuristics
     ...
 
@@ -162,7 +162,7 @@ logic or reasoning must include:
 | Security constraints | `specs/security.md` | Markdown |
 | Step-by-step job logic | `skills/<name>/SKILL.md` | Markdown |
 | Scheduled job triggers | `clients/scheduler.py` | Python (thin) |
-| Neo4j read/write | `tools/stateful/memory.py` | Python (CRUD only) |
+| Lucent read/write | `tools/stateful/memory.py` | Python (CRUD only) |
 | Telegram send | `tools/stateless/notify/notify.py` | Python (CRUD only) |
 | Graph read/write | `tools/stateful/knowledge_graph.py` | Python (CRUD only) |
 | Classification logic | ❌ NOT in Python | Skill reads spec |

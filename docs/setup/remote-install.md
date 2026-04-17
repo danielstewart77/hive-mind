@@ -86,7 +86,7 @@ claude /plugin marketplace add danielstewart77/hivemind-plugin
 /hivemind:setup all
 ```
 
-Or for a minimal install (no Neo4j, no Telegram bot, just Claude + broker):
+Or for a minimal install (no Telegram bot, just Claude + broker):
 ```bash
 /hivemind:setup --minimal
 ```

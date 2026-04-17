@@ -49,7 +49,7 @@ Session Manager (sessions.py)  ← reads mind_id, looks up config
   │  own soul    own soul    own soul│
   └──────────────────────────────────┘
         ↓
-   Shared DB (SQLite, Neo4j, vector)
+   Shared DB (SQLite / Lucent — graph + vector)
         ↓
    Shared MCP Tools
 ```

@@ -91,23 +91,28 @@ if os.environ.get("HOST_SPARK_DIR"):
 
 def _fetch_soul_sync(mind_id: str = "ada") -> str | None:
     """Load a mind's soul/identity from the knowledge graph. Returns formatted block or None."""
+    import sys as _sys
+    tools_path = str(PROJECT_DIR / "tools" / "stateful")
+    if tools_path not in _sys.path:
+        _sys.path.insert(0, tools_path)
     try:
-        import json as _json
-        import sys as _sys
-        agents_path = str(PROJECT_DIR / "agents")
-        if agents_path not in _sys.path:
-            _sys.path.insert(0, agents_path)
-        from knowledge_graph import graph_query  # noqa: PLC0415
+        from lucent_graph import graph_query  # noqa: PLC0415
+    except ImportError:
+        log.error("_fetch_soul_sync: could not import lucent_graph from %s", tools_path)
+        return None
+    try:
         mind_name = mind_id.capitalize()
-        result = _json.loads(graph_query(entity_name=mind_name, agent_id=mind_id, depth=1))
+        result = json.loads(graph_query(entity_name=mind_name, agent_id=mind_id, depth=1))
         if not result.get("found"):
+            log.debug("_fetch_soul_sync: no graph node found for mind_id=%r", mind_id)
             return None
         soul_values = result.get("matches", [{}])[0].get("properties", {}).get("soul_values", [])
         if not soul_values:
+            log.warning("_fetch_soul_sync: node found for %r but soul_values is empty", mind_id)
             return None
-        lines = ["<soul>"] + list(soul_values) + ["</soul>"]
-        return "\n".join(lines)
+        return "\n".join(["<soul>"] + list(soul_values) + ["</soul>"])
     except Exception:
+        log.exception("_fetch_soul_sync: unexpected error loading soul for mind_id=%r", mind_id)
         return None
 
 

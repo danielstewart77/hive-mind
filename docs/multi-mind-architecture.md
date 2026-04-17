@@ -30,8 +30,8 @@ Everything required to coordinate minds. Deployed as a single container (`hive_m
 | `core/broker.py` | Message broker — async inter-mind messaging |
 | `core/mind_registry.py` | Mind registry — filesystem discovery, in-memory registry |
 | SQLite | NS-owned persistence (sessions, broker state, secret scoping) |
-| Neo4j | Shared memory and knowledge graph |
-| `hive-mind-tools` MCP | Internal tool server — Neo4j memory, graph, browser, inter-mind delegation |
+| Lucent | Shared memory and knowledge graph (SQLite — no separate container) |
+| `hive-mind-tools` MCP | Internal tool server — Lucent memory, graph, browser, inter-mind delegation |
 
 ### Minds
 
@@ -217,7 +217,7 @@ This means:
 
 Skills are discovered from the project mount (`/usr/src/app`). The mind container mounts the project read-only (or read-write for minds like Ada). Only skills in the mount are available — a mind cannot grant itself additional skills.
 
-MCP tools (Neo4j, memory, browser) are accessed via network calls to the NS's `hive-mind-tools` MCP server. The mind container does not run its own MCP server.
+MCP tools (Lucent, memory, browser) are accessed via network calls to the NS's `hive-mind-tools` MCP server. The mind container does not run its own MCP server.
 
 ### Compose Generation
 
@@ -289,13 +289,13 @@ A layered setup system that bootstraps a new deployment from zero:
   1. /setup-prerequisites    — hardware, OS, Docker, Git, RAM, GPU
   2. /setup-config           — config.yaml, .env, .mcp.json, compose profile
   3. /setup-auth             — isolation model + auth method (independent choices)
-  4. /setup-nervous-system   — gateway, broker, Neo4j, MCP
+  4. /setup-nervous-system   — gateway, broker, Lucent, MCP
   5. /setup-provider         — Anthropic, OpenAI, Azure OpenAI, Ollama, OpenAI-compatible
   6. /setup-body             — surfaces, integrations, voice, infrastructure
   7. /setup-mind             — create, import, configure minds
 ```
 
-**Minimum viable deployment:** gateway + Neo4j + one provider + one surface + one mind.
+**Minimum viable deployment:** gateway + Lucent + one provider + one surface + one mind.
 
 ### Provider Management
 

@@ -86,7 +86,7 @@ hive_mind/
 │   ├── dep_scan.py               # pip-audit wrapper for dependency vulnerability scanning
 │   ├── epilogue.py               # Session epilogue processor (post-session memory extraction)
 │   ├── kg_guards.py              # Knowledge graph write guards (disambiguation + orphan)
-│   ├── memory_expiry.py          # Timed-event expiry sweep for Neo4j
+│   ├── memory_expiry.py          # Timed-event expiry sweep for Lucent
 │   ├── memory_schema.py          # Memory data class registry and validation
 │   ├── notify_utils.py           # Shared Telegram notification utility
 │   ├── path_validation.py        # CWE-22 path traversal protection for skill agents
@@ -95,8 +95,8 @@ hive_mind/
 ├── tools/
 │   ├── stateful/                  # MCP tools (registered in mcp_server.py)
 │   │   ├── browser.py            # Async Playwright browser automation
-│   │   ├── knowledge_graph.py    # Neo4j knowledge graph
-│   │   ├── memory.py             # Neo4j vector memory store
+│   │   ├── knowledge_graph.py    # Lucent knowledge graph
+│   │   ├── memory.py             # Lucent vector memory store
 │   │   ├── group_chat.py         # Group session message forwarding between minds
 │   │   └── inter_mind.py         # Direct mind-to-mind delegation
 │   │
@@ -180,7 +180,7 @@ models:
 
 Secrets are stored in the system keyring (`keyrings.alt.file.PlaintextKeyring`).
 Use `get_credential()` from `core/secrets.py` to read them.
-A minimal `.env` remains for docker-compose interpolation (Neo4j, Planka only).
+A minimal `.env` remains for docker-compose interpolation (Planka only).
 
 ## Gateway API
 
@@ -220,7 +220,7 @@ A minimal `.env` remains for docker-compose interpolation (Neo4j, Planka only).
 
 Use the `/tool-creator` skill, which reads `specs/tool-migration.md` to determine the right pattern:
 
-**Stateful tools** (need persistent connections — Neo4j, Playwright, etc.):
+**Stateful tools** (need persistent connections — Lucent, Playwright, etc.):
 - Add functions to `tools/stateful/` and register in `mcp_server.py`
 - Available as MCP tools immediately after container restart
 

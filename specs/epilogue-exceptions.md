@@ -16,7 +16,7 @@ Phase 3 of the session epilogue system removes all threshold-based HITL routing.
 
 **Condition:** `write_errors / total_writes > 0.5` (more than 50% of write operations failed), only when `total_writes > 0`
 
-**Rationale:** A high failure rate during auto-write suggests a systemic problem (Neo4j down, schema mismatch, corrupted data). The operator needs to know so they can investigate and potentially re-run the epilogue.
+**Rationale:** A high failure rate during auto-write suggests a systemic problem (Lucent unavailable, schema mismatch, corrupted data). The operator needs to know so they can investigate and potentially re-run the epilogue.
 
 **HITL message:** "High error rate ({errors}/{total} writes failed) in session {session_id}. Investigate write failures."
 

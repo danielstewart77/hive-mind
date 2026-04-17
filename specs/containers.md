@@ -129,23 +129,9 @@ Group chat Telegram bot — routes messages through group sessions for multi-min
 
 ---
 
-### neo4j
+### Lucent (knowledge graph + vector memory)
 
-| Property | Value |
-|----------|-------|
-| Image | `neo4j:5.26-community` |
-| Container | `hive-mind-neo4j` |
-| Port | `7474:7474` (Neo4j Browser), `7687:7687` (Bolt) |
-| Restart | `unless-stopped` |
-
-**Volumes:** `neo4j-data:/data`
-
-**Environment:**
-```
-NEO4J_AUTH=${NEO4J_AUTH:-neo4j/hivemind-memory}
-NEO4J_PLUGINS=["apoc"]
-NEO4J_dbms_security_procedures_unrestricted=apoc.*
-```
+No separate container. Lucent is an embedded SQLite-backed graph and vector store that runs inside the main `hive-mind` container. Data persists via the `sessions-db` named volume (`/usr/src/app/data`).
 
 ---
 
@@ -189,7 +175,6 @@ docker network create hivemind
 |----------|------|----------|
 | `server` | 8420 | HTTP |
 | `voice-server` | 8422 | HTTP |
-| `neo4j` | 7687 | Bolt |
 | `planka-db` | 5432 | PostgreSQL |
 | `planka` | 1337 | HTTP |
 
@@ -199,8 +184,7 @@ docker network create hivemind
 
 | Volume | Container path | Contents | Survives rebuild? |
 |--------|---------------|----------|-------------------|
-| `sessions-db` | `/usr/src/app/data` | SQLite sessions DB | Yes |
-| `neo4j-data` | `/data` | Knowledge graph | Yes |
+| `sessions-db` | `/usr/src/app/data` | SQLite sessions DB + Lucent graph/vector store | Yes |
 | `planka-db` | `/var/lib/postgresql/data` | Kanban DB | Yes |
 | `planka-data` | `/app/public/*`, `/app/private/attachments` | Kanban files | Yes |
 | `whisper-cache` | `/home/hivemind/.cache` | Whisper STT + Chatterbox TTS models | Yes |
@@ -456,7 +440,7 @@ A full disk prevents container startup, image builds, and even debugging tools. 
   }
 }
 ```
-Runs MCP server locally. Neo4j tools will fail unless `NEO4J_URI` is set in keyring to a host-reachable address (Neo4j is not port-published).
+Runs MCP server locally. Lucent uses the `sessions-db` volume path; ensure `DATA_DIR` env var points to the correct host path if running outside Docker.
 
 ### Container (`.mcp.container.json`) — for services inside Docker
 ```json
@@ -469,7 +453,7 @@ Runs MCP server locally. Neo4j tools will fail unless `NEO4J_URI` is set in keyr
   }
 }
 ```
-Uses container paths. Neo4j resolves via Docker DNS (`neo4j:7687`).
+Uses container paths. Lucent resolves via the shared `sessions-db` volume.
 
 ---
 

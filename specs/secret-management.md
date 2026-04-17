@@ -6,7 +6,7 @@ Secrets follow a strict priority order:
 
 1. **System keyring** (primary) — `keyrings.alt.file.PlaintextKeyring`, data at `/home/hivemind/.claude/data/python_keyring/keyring_pass.cfg`, shared across containers via `.claude` bind mount
 2. **Environment variables** (fallback) — for cases where keyring is unavailable
-3. **`.env` file** (third-party only) — consumed exclusively by docker-compose interpolation for Neo4j and Planka containers that cannot read from a keyring
+3. **`.env` file** (third-party only) — consumed exclusively by docker-compose interpolation for Planka (which cannot read from a keyring)
 
 ## Reading Secrets
 

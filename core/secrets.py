@@ -7,6 +7,12 @@ variables when keyring is unavailable.
 
 import os
 
+# KEY_RING is our convention for the keyring storage directory.
+# Must be applied before keyring is imported so PlaintextKeyring picks it up.
+_key_ring_dir = os.getenv("KEY_RING")
+if _key_ring_dir:
+    os.environ["XDG_DATA_HOME"] = _key_ring_dir
+
 try:
     import keyring
 except ImportError:

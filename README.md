@@ -30,7 +30,7 @@ flowchart TD
     SM -->|HTTP| BOB[Bob Container\nmind_server.py\nClaude CLI · Ollama]
     SM -->|HTTP| BILBY[Bilby Container\nmind_server.py\nClaude SDK · opus]
     SM -->|HTTP| NAG[Nagatha Container\nmind_server.py\nCodex CLI]
-    ADA & BOB & BILBY & NAG -->|MCP over network| INT[hive-mind-tools\nNeo4j · Memory · Browser]
+    ADA & BOB & BILBY & NAG -->|MCP over network| INT[hive-mind-tools\nLucent · Memory · Browser]
     ADA & BOB & BILBY & NAG -->|MCP over network| EXT[hive-mind-mcp\nGmail · Calendar · HITL]
     ADA & BOB & BILBY & NAG -->|POST /broker/messages| BR
     BR -->|wakeup via session_mgr| SM
@@ -148,7 +148,7 @@ Per-mind skill scoping: each mind gets only the skills it needs, copied into `mi
 | | [setup-prerequisites](.claude/skills/setup-prerequisites/SKILL.md) | Detect hardware, OS, Docker |
 | | [setup-config](.claude/skills/setup-config/SKILL.md) | Generate config files |
 | | [setup-auth](.claude/skills/setup-auth/SKILL.md) | Authentication setup |
-| | [setup-nervous-system](.claude/skills/setup-nervous-system/SKILL.md) | Deploy gateway, broker, Neo4j |
+| | [setup-nervous-system](.claude/skills/setup-nervous-system/SKILL.md) | Deploy gateway, broker, Lucent |
 | | [setup-provider](.claude/skills/setup-provider/SKILL.md) | Configure AI providers |
 | | [setup-body](.claude/skills/setup-body/SKILL.md) | Deploy surfaces and services |
 | | [setup-mind](.claude/skills/setup-mind/SKILL.md) | Add or create minds |
