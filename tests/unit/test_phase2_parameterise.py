@@ -68,3 +68,32 @@ class TestBuildBasePromptUsesMindName:
 
         assert "on the Ada node" in result
         assert "by Ada" in result
+
+
+class TestBuildBasePromptProfiles:
+    """Verify prompt builder selects harness and profile specific guidance."""
+
+    def test_codex_programmer_prompt_uses_codex_instructions(self):
+        with patch("core.sessions._fetch_soul_sync", return_value=None):
+            from core.sessions import _build_base_prompt
+            result = _build_base_prompt(
+                mind_id="nagatha",
+                harness="codex_cli_codex",
+                prompt_profile="programmer",
+            )
+
+        assert "Codex harness" in result
+        assert "Claude harness paths" in result
+        assert "technical accuracy" in result
+
+    def test_claude_orchestrator_prompt_uses_claude_instructions(self):
+        with patch("core.sessions._fetch_soul_sync", return_value=None):
+            from core.sessions import _build_base_prompt
+            result = _build_base_prompt(
+                mind_id="ada",
+                harness="claude_cli_claude",
+                prompt_profile="orchestrator",
+            )
+
+        assert "Claude harness" in result
+        assert "coordination, triage, and delegation discipline" in result

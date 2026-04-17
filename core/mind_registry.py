@@ -32,6 +32,7 @@ class MindInfo:
     model: str          # e.g. "claude-sonnet-4-6", "gpt-oss:20b-32k"
     harness: str        # e.g. "claude_cli_claude", "codex_cli_codex"
     gateway_url: str    # e.g. "http://hive_mind:8420"
+    prompt_profile: str = "default"
     remote: bool = False
     soul_seed: str = ""  # markdown body from MIND.md
     container: ContainerConfig | None = None  # None = runs inside NS container
@@ -95,6 +96,7 @@ def parse_mind_file(path: Path) -> MindInfo:
         model=str(data["model"]),
         harness=str(data["harness"]),
         gateway_url=str(data["gateway_url"]),
+        prompt_profile=str(data.get("prompt_profile", "default")),
         remote=bool(data.get("remote", False)),
         soul_seed=body,
         container=container,

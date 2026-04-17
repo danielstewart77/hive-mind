@@ -140,10 +140,11 @@ docker-compose.production.yml
 .obsidian/
 .log_agent_positions
 
-# Per-mind auth and state (sensitive tokens)
-minds/*/.claude/
-minds/*/.codex/
-minds/*/.claude-config/
+# Our minds are our own
+minds/*
+
+# Our art is our own
+img/*
 
 # Generated output artifacts
 *-report.md

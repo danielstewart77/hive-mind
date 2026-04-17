@@ -120,9 +120,13 @@ def _build_base_prompt(
     allowed_directories: list[str] | None = None,
     soul_file: Path | None = None,
     mind_id: str = "ada",
+    harness: str = "",
+    prompt_profile: str = "default",
 ) -> str:
     """Build the base system prompt with current date/time and soul loaded from the graph."""
     from zoneinfo import ZoneInfo
+    from core.prompt_profiles import build_prompt
+
     now = datetime.now(ZoneInfo("America/Chicago"))
     date_str = now.strftime("%A, %B %-d, %Y at %-I:%M %p %Z")
 
@@ -141,27 +145,14 @@ def _build_base_prompt(
         identity_block = ""
         soul_instruction = ""
 
-    if allowed_directories:
-        lines = []
-        for d in allowed_directories:
-            name = _PROJECT_DIR_NAMES.get(d, d)
-            lines.append(f"- **{name}**: `{d}`")
-        project_block = "\n\nYou have been given access to the following project directories:\n" + "\n".join(lines)
-    else:
-        project_block = ""
-
-    return (
-        "You are Hive Mind, a personal assistant. Keep responses concise. Use markdown formatting.\n\n"
-        f"The current date and time is: {date_str}.\n\n"
-        f"{identity_block}"
-        f"{soul_instruction}"
-        f"If a request seems security-sensitive, read {_SPECS_DIR / 'security.md'} before proceeding.\n\n"
-        "Each user message is stamped with the current date and time. When time-sensitive language "
-        "appears (today, now, tonight, this morning, this week, tomorrow, etc.), call "
-        "`get_current_time` to confirm the exact current time before responding.\n\n"
-        "When sending email on Daniel's behalf, always append this signature to the body:\n\n"
-        f"---\nSent on behalf of Daniel by {mind_name}."
-        f"{project_block}"
+    return build_prompt(
+        date_str=date_str,
+        mind_name=mind_name,
+        harness=harness,
+        prompt_profile=prompt_profile,
+        identity_block=identity_block,
+        soul_instruction=soul_instruction,
+        allowed_directories=allowed_directories,
     )
 
 # ---------------------------------------------------------------------------
@@ -688,6 +679,13 @@ class SessionManager:
         is_group_session: bool = False,
     ) -> Any:
         mind_url = self._mind_url(mind_id)
+        prompt_profile = "default"
+        harness = ""
+        if self.mind_registry:
+            info = self.mind_registry.get(mind_id)
+            if info:
+                prompt_profile = info.prompt_profile
+                harness = info.harness
         import aiohttp
         async with aiohttp.ClientSession() as http:
             resp = await http.post(
@@ -699,6 +697,8 @@ class SessionManager:
                     "resume_sid": resume_sid,
                     "surface_prompt": surface_prompt,
                     "allowed_directories": allowed_directories,
+                    "prompt_profile": prompt_profile,
+                    "harness": harness,
                 },
                 timeout=aiohttp.ClientTimeout(total=10),
             )

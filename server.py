@@ -467,6 +467,7 @@ class CommandRequest(BaseModel):
     owner_type: str = "terminal"
     owner_ref: str = ""
     client_ref: str = ""
+    mind_id: str = "ada"
 
 
 @app.post("/command")
@@ -515,6 +516,7 @@ async def _handle_command(cmd: str, parts: list[str], body: CommandRequest):
             owner_ref=body.owner_ref,
             client_ref=body.client_ref,
             allowed_directories=allowed_directories,
+            mind_id=body.mind_id,
         )
 
     if cmd == "/model":

@@ -3,6 +3,7 @@ name: bob
 model: gpt-oss:20b-32k
 harness: claude_cli_ollama
 gateway_url: http://bob:8420
+prompt_profile: default
 container:
   image: hive_mind:latest
   volumes:

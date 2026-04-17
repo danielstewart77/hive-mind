@@ -34,6 +34,8 @@ async def spawn(
     registry: Any = None,
     config_obj: Any = None,
     is_group_session: bool = False,
+    prompt_profile: str = "default",
+    harness: str = "",
     logger: logging.Logger | None = None,
     **kwargs: Any,
 ) -> asyncio.subprocess.Process:
@@ -63,6 +65,8 @@ async def spawn(
     base = build_base_prompt(
         allowed_directories=allowed_directories,
         mind_id=mind_id,
+        harness=harness,
+        prompt_profile=prompt_profile,
     ) if build_base_prompt else ""
     full_prompt = base if not surface_prompt else f"{base}\n\n{surface_prompt}"
 

@@ -175,6 +175,8 @@ async def create_session(request: Request):
     surface_prompt = body.get("surface_prompt")
     autopilot = body.get("autopilot", False)
     allowed_directories = body.get("allowed_directories")
+    prompt_profile = body.get("prompt_profile", "default")
+    harness = body.get("harness", "")
 
     try:
         # Import config and registry from the project (read-only mount)
@@ -219,6 +221,8 @@ async def create_session(request: Request):
             mcp_config=mcp_config,
             registry=registry,
             config_obj=config_obj,
+            prompt_profile=prompt_profile,
+            harness=harness,
         )
 
         _sessions[session_id] = {
