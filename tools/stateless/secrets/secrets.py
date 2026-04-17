@@ -73,7 +73,12 @@ def _save_registry(keys: list[str]) -> None:
 
 
 def cmd_set(args: argparse.Namespace) -> int:
-    """Store a secret in the system keyring."""
+    """Store a secret in the system keyring.
+
+    Note: Skills should prefer ``python3 -m keyring set hive-mind <KEY>``
+    for simplicity.  This wrapper exists only for validated writes that
+    enforce the key-naming allowlist.
+    """
     key = args.key.strip().upper()
     if not key:
         print(json.dumps({"error": "Key cannot be empty."}))
@@ -110,23 +115,6 @@ def cmd_set(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_get(args: argparse.Namespace) -> int:
-    """Check if a secret exists (does NOT reveal the value)."""
-    key = args.key.strip().upper()
-
-    # Check keyring first, then fall back to environment
-    if _keyring_get(key):
-        print(json.dumps({"configured": True, "key": key, "source": "keyring"}))
-        return 0
-
-    if os.getenv(key):
-        print(json.dumps({"configured": True, "key": key, "source": "environment"}))
-        return 0
-
-    print(json.dumps({"configured": False, "key": key}))
-    return 0
-
-
 def cmd_list(args: argparse.Namespace) -> int:
     """List all keys stored in the system keyring (values are hidden)."""
     registry = _get_registry()
@@ -142,16 +130,12 @@ def main() -> int:
     sp_set.add_argument("--key", required=True, help="Secret key name (e.g. STRIPE_API_KEY)")
     sp_set.add_argument("--value", required=True, help="Secret value")
 
-    sp_get = subparsers.add_parser("get", help="Check if a secret exists")
-    sp_get.add_argument("--key", required=True, help="Secret key name to check")
-
     subparsers.add_parser("list", help="List stored secret keys")
 
     args = parser.parse_args()
 
     commands = {
         "set": cmd_set,
-        "get": cmd_get,
         "list": cmd_list,
     }
     return commands[args.command](args)

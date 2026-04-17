@@ -55,7 +55,7 @@ Copy MIND.md files only (not implementation.py — that comes from templates).
 
 List all secret keys in the keyring (names only, not values):
 ```bash
-python3 tools/stateless/secrets/secrets.py list > hive-mind-export/secret-manifest.txt
+python3 -c "import keyring; keys = keyring.get_password('hive-mind', '_KEY_REGISTRY'); print(keys or '[]')" > hive-mind-export/secret-manifest.txt
 ```
 
 ## Step 5 — Export compose profile

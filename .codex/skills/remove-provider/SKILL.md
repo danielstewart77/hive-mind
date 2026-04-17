@@ -34,7 +34,7 @@ Delete the provider block from `providers:` and any model mappings.
 Ask: "Remove the API key from the keyring too?"
 If yes:
 ```bash
-python3 tools/stateless/secrets/secrets.py delete --key <PROVIDER>_API_KEY
+python3 -m keyring del hive-mind <PROVIDER>_API_KEY
 ```
 
 ## Step 6 — Report

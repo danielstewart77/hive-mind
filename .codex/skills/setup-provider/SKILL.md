@@ -33,11 +33,11 @@ If `$ARGUMENTS[0]` is provided, skip to that provider directly.
 
 ## Step 2 — Anthropic (if selected)
 
-Check for existing key: `python3 tools/stateless/secrets/secrets.py get --key ANTHROPIC_API_KEY`
+Check for existing key: `python3 -m keyring get hive-mind ANTHROPIC_API_KEY 2>/dev/null`
 
 If missing, ask user for their Anthropic API key. Store it:
 ```bash
-python3 tools/stateless/secrets/secrets.py set --key ANTHROPIC_API_KEY --value <key>
+echo "<key>" | python3 -m keyring set hive-mind ANTHROPIC_API_KEY
 ```
 
 Verify:
@@ -58,7 +58,7 @@ models:
 
 ## Step 3 — OpenAI (if selected)
 
-Check for existing key: `python3 tools/stateless/secrets/secrets.py get --key OPENAI_API_KEY`
+Check for existing key: `python3 -m keyring get hive-mind OPENAI_API_KEY 2>/dev/null`
 
 If missing, ask user. Store it. Verify:
 ```bash

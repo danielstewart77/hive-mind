@@ -43,27 +43,6 @@ class TestStatelessSecrets:
         assert data["key"] == "TEST_API_KEY"
         assert rc == 0
 
-    def test_get_secret_confirms_existence(self, _secrets_mod, capsys):
-        """Asserts get subcommand confirms a stored secret exists."""
-        # Store first
-        _secrets_mod.cmd_set(argparse.Namespace(key="TEST_CHECK_KEY", value="hidden-value"))
-        capsys.readouterr()  # discard set output
-
-        rc = _secrets_mod.cmd_get(argparse.Namespace(key="TEST_CHECK_KEY"))
-        out = capsys.readouterr().out
-        data = json.loads(out)
-        assert data.get("configured") is True
-        assert "hidden-value" not in out
-        assert rc == 0
-
-    def test_get_secret_reports_missing(self, _secrets_mod, capsys):
-        """Asserts get subcommand reports when secret is not found."""
-        rc = _secrets_mod.cmd_get(argparse.Namespace(key="NONEXISTENT_ZZZZZ_KEY"))
-        out = capsys.readouterr().out
-        data = json.loads(out)
-        assert data.get("configured") is False
-        assert rc == 0
-
     def test_list_secrets_returns_keys(self, _secrets_mod, capsys):
         """Asserts list subcommand returns stored key names."""
         _secrets_mod.cmd_set(argparse.Namespace(key="LIST_TEST_KEY", value="list-value"))

@@ -39,8 +39,8 @@ for i in $(seq 1 30); do curl -sf http://localhost:7474 > /dev/null && break; sl
 ```
 
 Check/store secrets:
-- NEO4J_AUTH: `python3 tools/stateless/secrets/secrets.py get --key neo4j_auth`
-- NEO4J_URI: `python3 tools/stateless/secrets/secrets.py get --key neo4j_uri`
+- NEO4J_AUTH: `python3 -m keyring get hive-mind NEO4J_AUTH 2>/dev/null`
+- NEO4J_URI: `python3 -m keyring get hive-mind NEO4J_URI 2>/dev/null`
 - If missing, ask user and store via secrets tool
 
 ## Step 4 — Verify broker and sessions
