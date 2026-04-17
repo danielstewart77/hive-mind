@@ -658,20 +658,22 @@ Daniel's preference: all mounts should be bind mounts to explicit host paths, no
 
 ## 17. Broker Registration Not Persisting — /add-mind Reports Success But Mind Absent (2026-04-16)
 
-**Symptom:** After running `/add-mind skippy` (Scenario D — local bare-metal), the skill reported success and confirmed broker registration. When Daniel later checked (`GET /broker/minds/skippy`), the mind was not there.
+**Symptom:** After running `/add-mind skippy`, the skill reported success. On next check, Skippy was gone from the broker.
 
-**Possible causes (uninvestigated):**
-1. The broker stores minds in-memory only (no SQLite persistence) — a container restart wipes all registered minds. If the hive_mind stack was restarted after registration, Skippy's entry was lost.
-2. The `POST /broker/minds` call succeeded but wrote to a different broker instance (wrong port, wrong container).
-3. The `/add-mind` skill misread the response — it may have gotten a 2xx from a different endpoint or a cached response.
+**Root cause (confirmed):** `core/broker.py` stores registered minds in-memory. A container restart wipes all entries. This violates the project rule: **nothing is stored in a Docker container without a direct host filesystem bind mount.**
 
-**What to check:**
-- `core/broker.py` — does `register_mind()` persist to SQLite or only to an in-memory dict?
-- If in-memory: broker registrations don't survive container restarts. All minds need to re-register on startup. Either add SQLite persistence to the broker, or add a startup hook that re-registers known minds.
+**Fix:** Broker mind registry must persist to SQLite on the host bind-mounted data volume (`data/broker.db` or similar). Same pattern already used by reminders, sessions, and Lucent.
 
-**Files to investigate:**
-- `core/broker.py` — persistence model
-- `skills/add-mind/SKILL.md` — does it verify the registration after the POST?
+- On `POST /broker/minds`: write to SQLite
+- On startup: load all registered minds from SQLite into memory
+- On `DELETE /broker/minds/{name}`: delete from SQLite
+
+**Files to change:**
+
+| File | Change |
+|---|---|
+| `core/broker.py` | Add SQLite persistence for mind registry; load on startup |
+| `docker-compose.yml` | Verify `data/` bind mount covers the broker DB path (likely already mounted) |
 
 ---
 
