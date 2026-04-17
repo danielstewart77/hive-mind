@@ -21,7 +21,7 @@ Valid names: `anthropic`, `openai`, `azure-openai`, `ollama`, or a custom name f
 ## Step 3 — Store secrets
 
 ```bash
-python3 tools/stateless/secrets/secrets.py set --key <PROVIDER>_API_KEY --value <key>
+echo "<key>" | python3 -m keyring set hive-mind <PROVIDER>_API_KEY
 ```
 
 ## Step 4 — Update config.yaml
