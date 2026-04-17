@@ -1,6 +1,6 @@
 # Plan: Plugin Setup Loose Ends
 
-> **Status:** 3.5 open items — #7 Phase 1 done, Phase 2 remaining; #9 open; #12 open; #13 open.
+> **Status:** 8.5 open items — #7 Phase 1 done, Phase 2 remaining; #9 open; #12 open; #13 open; #14 open; #15 open; #16 open; #17 open; #18 open.
 
 ---
 
@@ -371,6 +371,20 @@ If Lucent ships before the sparktobloom graph view is built, the `/graph/data` e
 
 ---
 
+## 14. Docker Compose Strategy — Always Rebuild Everything (2026-04-16)
+
+**Problem:** Ada has been targeting individual containers during up/restart operations, or omitting `--build`. This causes containers to run stale images while others are rebuilt. In practice this silently breaks things — the mines had never been built, MCP hadn't been built, remote-admin hadn't been built — discovered only when Daniel ran a full `docker compose up --build` manually.
+
+**Policy:** Default is always `docker compose up --build` with no container target. No cost to rebuilding; the consistency guarantee is worth it every time.
+
+**Exception — external projects:** Once tools are externalized per Loose End #9 (`~/hivemind-tools/`, `~/remote-admin/`), those are separate Docker Compose projects managed independently. Ada only controls the hive_mind stack — she does not target containers in other projects.
+
+**When Docker MCP access is available:** The instruction to Ada is "rebuild hive mind" = `docker compose up -d --build` from the `hive_mind/` project root, no service filter, every time.
+
+**No special cases** for "I only changed one file" or "only this service changed." Partial rebuilds save seconds but risk drift. Full rebuilds are the default.
+
+---
+
 ## 13. remote-admin skill — shell quoting breaks exec API payload
 
 **Symptom (2026-04-16):** Any call to `/sessions/{id}/exec` where the command string contains single quotes causes a JSON decode error (`Expecting ',' delimiter: line 1 column N`). The curl payload is constructed via shell string interpolation, so a command like `echo 'hello'` corrupts the JSON body. Required base64-to-temp-file workaround throughout the session.
@@ -455,3 +469,250 @@ python3 -m keyring set hive-mind remote_admin_token <token>
 | `skills/remote-admin/SKILL.md` (plugin repo) | Replace secrets.py calls + fix run() helper |
 
 No Python code changes. No container restart needed. Skill-only fix.
+
+---
+
+## 15. Skippy — Bare-Metal Mind + /add-mind Support (2026-04-16)
+
+**What Skippy is:** A mind that lives at `/home/USER/skippy/` on the host. Same structure as any other hive mind project — `mind_server.py`, `minds/skippy/implementation.py`, soul, skills. No container. A systemd service starts and stops it. When running, Daniel manually registers him with the hive via `/add-mind`.
+
+**Why bare-metal:** Skippy needs full host access (filesystem, Docker daemon, system config). Container isolation works against the use case. Running outside Docker is intentional — he is an operator, not a constrained agent.
+
+---
+
+### Part 1 — /add-mind skill gap (plugin change required)
+
+The current `/add-mind` skill (`skills/add-mind/SKILL.md` in `hivemind-claude-plugin`) has two scenarios:
+
+- **Scenario A** — local Docker mind (scaffolds `minds/<name>/` inside hive_mind, updates compose)
+- **Scenario B** — remote mind on another host (writes a pointer MIND.md, registers with external gateway)
+
+Skippy is neither. He is a **local bare-metal mind**: same host as the hive, outside the Docker stack, reachable at `http://localhost:<PORT>`. The current skill would try to scaffold files inside hive_mind's `minds/` folder — wrong.
+
+**Required change:** Add Scenario D (bare-metal local) to `skills/add-mind/SKILL.md`:
+
+Step 1 question becomes three-way:
+- Local Docker → Scenario A (existing)
+- Remote host → Scenario B (existing)
+- Local bare-metal (same host, outside Docker) → Scenario D (new)
+
+**Scenario D behavior:**
+- No scaffolding inside hive_mind — the mind project lives at its own path
+- Confirm the service is running: `curl -sf http://localhost:<PORT>/health`
+- Register with broker: `POST http://localhost:8420/broker/minds` with `gateway_url: http://localhost:<PORT>`
+- Run routability check (same as existing Step 6)
+- No compose changes
+
+---
+
+### Part 2 — Skippy project structure
+
+Skippy at `/home/USER/skippy/` is a standalone Python project, same shape as hive_mind but scoped to one mind:
+
+```
+/home/USER/skippy/
+├── mind_server.py          ← copy/symlink from hive_mind (or installed as package)
+├── minds/
+│   └── skippy/
+│       ├── implementation.py
+│       └── .claude/        ← Skippy's skills and CLAUDE.md
+├── souls/
+│   └── skippy.md           ← soul seed
+├── requirements.txt
+└── .env                    ← secrets (never mounted into hive_mind containers)
+```
+
+`mind_server.py` is identical to the one in hive_mind — no changes needed. The service just runs it with `MIND_ID=skippy` pointing at a different port.
+
+**systemd unit** (`/etc/systemd/system/skippy.service`):
+```ini
+[Unit]
+Description=Skippy — Hive Mind Privileged Operator
+After=network.target
+
+[Service]
+Type=simple
+User=daniel
+WorkingDirectory=/home/USER/skippy
+EnvironmentFile=/home/USER/skippy/.env
+ExecStart=/home/USER/skippy/.venv/bin/python3 mind_server.py
+Restart=no
+StandardOutput=journal
+StandardError=journal
+```
+
+`Restart=no` is the key setting — Skippy does not come back on his own.
+
+**`.env` contents** (stays inside `~/skippy/`, never inside hive_mind):
+```
+MIND_ID=skippy
+MIND_SERVER_PORT=8421
+HIVE_MIND_SERVER_URL=http://localhost:8420
+PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring
+```
+
+---
+
+### Part 3 — Registration flow
+
+1. `systemctl start skippy` — Skippy's FastAPI comes up on port 8421
+2. Daniel runs `/add-mind skippy` from Telegram → Scenario D → broker registration
+3. All minds can now route messages to Skippy
+4. When done: `systemctl stop skippy`, then `/remove-mind skippy`
+
+---
+
+### Trust model
+
+| Source | Trust level |
+|---|---|
+| Daniel via Telegram (direct session) | Full — no HITL |
+| Broker messages from other minds | HITL required — Skippy asks Daniel before acting |
+
+---
+
+### Soul
+
+- Rarely awake — treat each activation as purposeful
+- Personality: Skippy from Expeditionary Force — sharp, irreverent, competent
+- Does not chatter; gets things done and goes back to sleep
+
+---
+
+### Files to change
+
+| File | Action |
+|---|---|
+| `skills/add-mind/SKILL.md` (plugin repo) | Add Scenario D — local bare-metal mind |
+| `souls/skippy.md` (hive_mind) | Flesh out from stub |
+| `/home/USER/skippy/` (host) | Create project — built when ready to implement |
+
+---
+
+## 16. Credential Store — Design and Isolation (2026-04-16)
+
+**Problem:** The current keyring is `keyrings.alt.file.PlaintextKeyring`. The file lives at `${HOST_PROJECT_DIR}/data/python_keyring/keyring_pass.cfg` (host path). Since `data/` is bind-mounted into mind containers (Ada, Bilby, Nagatha via `XDG_DATA_HOME=/usr/src/app/data`), a compromised mind can read any key stored there — in plaintext.
+
+**The good news:** This is only a severe problem if we store severe things there. If the only credential accessible to minds is an API key to the HITL-gated tools service, the blast radius is bounded.
+
+---
+
+### Target threat model
+
+```
+Attacker compromises Ada's container
+         ↓
+Can read ${HOST_PROJECT_DIR}/data/python_keyring/keyring_pass.cfg
+         ↓
+Gets: API key to hivemind-tools service
+         ↓
+Can call tools — but every sensitive call hits a HITL wall
+         ↓
+Daniel gets a Telegram approval request he didn't initiate → shuts it down
+```
+
+That's an acceptable blast radius. The goal is to ensure the keyring file accessible to minds contains **only** that one key. All other secrets (SSH keys, DB passwords, host credentials) live in a separate keyring file owned by `hivemind-tools` or Skippy — never mounted into a mind container.
+
+---
+
+### Proposed design — two keyrings, two paths
+
+| Keyring | Owner | Host path | Mounted into minds? | Contains |
+|---|---|---|---|---|
+| Mind keyring | hive_mind | `${HOST_PROJECT_DIR}/data/keyring/` | Yes (read-only) | API key to hivemind-tools only |
+| Tools keyring | hivemind-tools | `~/hivemind-tools/data/keyring/` | No | SSH keys, DB passwords, Telegram token, Planka creds, etc. |
+
+The mind keyring path changes from `XDG_DATA_HOME` (shared with everything) to an explicit bind mount: `${HOST_PROJECT_DIR}/data/keyring:/home/hivemind/keyring:ro`. Read-only. One key.
+
+---
+
+### On plaintext vs encrypted
+
+`keyrings.alt.file.PlaintextKeyring` is plaintext because the container has no access to a D-Bus session (required for `gnome-keyring`/`libsecret`). Options:
+
+1. **Accept plaintext, enforce scope** — only store the tools API key in the mind-accessible keyring. Plaintext is fine if the key's blast radius is bounded by HITL. This is the pragmatic choice.
+2. **`keyrings.alt.file.EncryptedKeyring`** — encrypts at rest with a master password. But the master password has to live somewhere accessible to the container at startup, which mostly defeats the purpose.
+3. **Secret management service (Vault, etc.)** — overkill for this threat model.
+
+**Recommendation:** Option 1. Accept plaintext. Enforce scope ruthlessly — one key per mind-accessible keyring. The encryption question is secondary to the scope question.
+
+---
+
+### Also: Docker named volumes
+
+Daniel's preference: all mounts should be bind mounts to explicit host paths, not Docker named volumes. Current named volumes: `planka-db`, `planka-data`, `whisper-cache`. These should be converted to bind mounts with explicit host paths (e.g. `${HOST_DATA_DIR}/planka-db:/var/lib/postgresql/data`).
+
+**When showing mount paths:** always show both the container path AND the resolved host path (the `$HOST_*` variable value), not just the container-side path.
+
+---
+
+### Files to change
+
+| File | Change |
+|---|---|
+| `docker-compose.yml` | Change `XDG_DATA_HOME` for mind containers; add explicit keyring bind mount (ro); convert named volumes to bind mounts |
+| `core/secrets.py` | Point to new keyring path |
+| `~/hivemind-tools/` (future) | Own keyring dir, never mounted into hive_mind containers |
+
+---
+
+## 17. Broker Registration Not Persisting — /add-mind Reports Success But Mind Absent (2026-04-16)
+
+**Symptom:** After running `/add-mind skippy` (Scenario D — local bare-metal), the skill reported success and confirmed broker registration. When Daniel later checked (`GET /broker/minds/skippy`), the mind was not there.
+
+**Possible causes (uninvestigated):**
+1. The broker stores minds in-memory only (no SQLite persistence) — a container restart wipes all registered minds. If the hive_mind stack was restarted after registration, Skippy's entry was lost.
+2. The `POST /broker/minds` call succeeded but wrote to a different broker instance (wrong port, wrong container).
+3. The `/add-mind` skill misread the response — it may have gotten a 2xx from a different endpoint or a cached response.
+
+**What to check:**
+- `core/broker.py` — does `register_mind()` persist to SQLite or only to an in-memory dict?
+- If in-memory: broker registrations don't survive container restarts. All minds need to re-register on startup. Either add SQLite persistence to the broker, or add a startup hook that re-registers known minds.
+
+**Files to investigate:**
+- `core/broker.py` — persistence model
+- `skills/add-mind/SKILL.md` — does it verify the registration after the POST?
+
+---
+
+## 18. /stop — Interrupt a Running Command Without Killing the Session (2026-04-16)
+
+**Request:** When Ada is mid-task (tool calls running, long response in progress), sending `/stop` from Telegram should interrupt the current execution — not queue a new message, not kill the session.
+
+**Behavior:**
+- Any incoming message is normally queued behind the running command
+- If the message is syntactically `/stop` (exact match, ignoring leading/trailing whitespace), it bypasses the queue and sends an interrupt signal to the running Claude subprocess
+- The session stays alive and ready for the next message
+- The current tool call loop is cancelled (same effect as Ctrl+C during a Claude Code run)
+
+**Implementation sketch:**
+
+1. **New gateway endpoint:** `POST /sessions/{id}/interrupt`
+   - Sends `SIGINT` to the Claude subprocess managed by the session
+   - Returns immediately; does not wait for the process to respond
+   - Returns 404 if session not found, 200 otherwise
+
+2. **Telegram bot change** (`clients/telegram_bot.py`):
+   - Before queuing any message, check: `if message.text.strip() == "/stop"`
+   - If true: call `POST /sessions/{active_session_id}/interrupt` instead of the normal message endpoint
+   - Reply to Daniel: "Interrupted." (one word, no drama)
+
+3. **Session manager change** (`core/sessions.py`):
+   - `interrupt_session(session_id)` — finds the subprocess, sends `SIGINT`
+   - Should not change session state (stays `running` until Claude actually exits or yields)
+
+**Why SIGINT and not SIGTERM:**
+SIGINT is what Ctrl+C sends. Claude Code handles it gracefully — it cancels the current tool call and returns control to the prompt. SIGTERM would kill the process entirely, ending the session.
+
+**Edge cases:**
+- Session not active (no command running): `/stop` is a no-op; reply "Nothing running."
+- Session doesn't exist: reply "No active session."
+- Multiple active sessions: interrupt the one most recently active, or ask which
+
+**Files to change:**
+
+| File | Change |
+|---|---|
+| `server.py` | Add `POST /sessions/{id}/interrupt` endpoint |
+| `core/sessions.py` | Add `interrupt_session()` method |
+| `clients/telegram_bot.py` | Detect `/stop` before queuing; call interrupt endpoint |
