@@ -128,6 +128,13 @@ sessions.db
 data/*
 !data/.gitkeep
 
+# Planning documents (local working files, not versioned)
+plans/
+
+# npm packages (installed by skills/tools at runtime)
+.npm_packages/
+node_modules/
+
 # Project config (user-specific or contains sensitive IDs)
 config.yaml
 .mcp.json
