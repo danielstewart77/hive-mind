@@ -32,6 +32,7 @@ class MindInfo:
     model: str          # e.g. "claude-sonnet-4-6", "gpt-oss:20b-32k"
     harness: str        # e.g. "claude_cli_claude", "codex_cli_codex"
     gateway_url: str    # e.g. "http://hive_mind:8420"
+    prompt_files: list[str] = field(default_factory=list)
     remote: bool = False
     soul_seed: str = ""  # markdown body from MIND.md
     container: ContainerConfig | None = None  # None = runs inside NS container
@@ -90,11 +91,19 @@ def parse_mind_file(path: Path) -> MindInfo:
             networks=list(container_data.get("networks", [])),
         )
 
+    prompt_files_data = data.get("prompt_files", [])
+    if prompt_files_data is None:
+        prompt_files_data = []
+    if not isinstance(prompt_files_data, list):
+        raise ValueError(f"{path}: prompt_files must be a YAML list")
+    prompt_files = [str(item) for item in prompt_files_data]
+
     return MindInfo(
         name=str(data["name"]),
         model=str(data["model"]),
         harness=str(data["harness"]),
         gateway_url=str(data["gateway_url"]),
+        prompt_files=prompt_files,
         remote=bool(data.get("remote", False)),
         soul_seed=body,
         container=container,

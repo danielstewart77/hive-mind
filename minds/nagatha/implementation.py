@@ -31,6 +31,7 @@ async def spawn(
     registry: Any = None,
     config_obj: Any = None,
     is_group_session: bool = False,
+    prompt_files: list[str] | None = None,
 ) -> dict:
     """Initialise Nagatha's per-session state. No persistent subprocess."""
     base = (
@@ -38,6 +39,7 @@ async def spawn(
             allowed_directories=allowed_directories,
             soul_file=soul_file,
             mind_id=mind_id,
+            prompt_files=prompt_files,
         )
         if build_base_prompt
         else ""

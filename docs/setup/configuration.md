@@ -60,13 +60,15 @@ scheduled_tasks:
 
 ## Secrets
 
-All application secrets are stored in the system keyring (`keyrings.alt.file.PlaintextKeyring`), not in `.env` files. The keyring data lives at:
+All application secrets are stored in the system keyring, not in `.env` files. The keyring data lives at:
 
 ```
-/home/hivemind/.claude/data/python_keyring/keyring_pass.cfg
+/usr/src/app/data/keyring/python_keyring/keyring_pass.cfg
 ```
 
-This path is shared across containers via a bind mount on `${HOST_CLAUDE_DIR}`.
+This path is controlled by the `KEY_RING` env var and is bind-mounted from the host via `HOST_PROJECT_DIR`.
+
+The keyring backend is `core.keyring_backend.HiveMindKeyring` — a subclass of `PlaintextKeyring` that reads the storage path directly from `KEY_RING` without overloading `XDG_DATA_HOME`. Set via `PYTHON_KEYRING_BACKEND=core.keyring_backend.HiveMindKeyring` in docker-compose.
 
 ### Reading Secrets
 
@@ -116,10 +118,10 @@ Each container receives only the env vars it needs. Set in `docker-compose.yml`:
 | Var | Containers | Purpose |
 |---|---|---|
 | `SESSIONS_DB_PATH` | server | SQLite database path |
-| `PYTHON_KEYRING_BACKEND` | all Python services | Force PlaintextKeyring |
-| `XDG_DATA_HOME` | server, bots | Keyring data directory |
+| `PYTHON_KEYRING_BACKEND` | all Python services | Set to `core.keyring_backend.HiveMindKeyring` |
+| `KEY_RING` | all Python services | Keyring storage root (e.g. `/usr/src/app/data/keyring`) |
 | `HIVE_MIND_SERVER_URL` | bots, scheduler | Gateway URL |
 | `VOICE_SERVER_URL` | bots | Voice server URL |
 | `WHISPER_MODEL` | voice-server | Whisper model size |
-| `TTS_BACKEND` | voice-server | TTS engine: `chatterbox` (default), `fish`, or `bark` |
-| `FISH_REF_AUDIO` | voice-server | Path to reference WAV for voice cloning |
+| `TTS_BACKEND` | voice-server | TTS engine: `chatterbox` (default) or `bark` |
+| `VOICE_REF_DIR` | voice-server | Directory containing per-mind `{voice_id}.wav` reference clips |

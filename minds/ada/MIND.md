@@ -3,6 +3,10 @@ name: ada
 model: sonnet
 harness: claude_cli_claude
 gateway_url: http://ada:8420
+prompt_files:
+  - prompts/common.md
+  - prompts/harness.md
+  - prompts/profile.md
 container:
   image: hive_mind:latest
   volumes:

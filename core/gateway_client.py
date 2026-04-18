@@ -128,6 +128,7 @@ class GatewayClient:
                 "owner_type": self.owner_type,
                 "owner_ref": str(user_id),
                 "client_ref": str(client_ref),
+                "mind_id": self.mind_id,
             },
         ) as resp:
             return await resp.json()

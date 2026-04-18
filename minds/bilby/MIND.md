@@ -3,6 +3,10 @@ name: bilby
 model: opus
 harness: claude_sdk_claude
 gateway_url: http://bilby:8420
+prompt_files:
+  - prompts/common.md
+  - prompts/harness.md
+  - prompts/profile.md
 container:
   image: hive_mind:latest
   volumes:

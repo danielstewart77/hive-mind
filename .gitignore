@@ -125,7 +125,8 @@ venv.bak/
 
 # Session database
 sessions.db
-data/
+data/*
+!data/.gitkeep
 
 # Project config (user-specific or contains sensitive IDs)
 config.yaml
@@ -140,10 +141,11 @@ docker-compose.production.yml
 .obsidian/
 .log_agent_positions
 
-# Per-mind auth and state (sensitive tokens)
-minds/*/.claude/
-minds/*/.codex/
-minds/*/.claude-config/
+# Our minds are our own
+minds/*
+
+# Our art is our own
+img/*
 
 # Generated output artifacts
 *-report.md
@@ -152,12 +154,6 @@ reports/
 # Personal notes
 jobs/
 linkedin/
-
-# Voice reference audio (binary, large) — keep local only
-voice_ref/*.wav
-voice_ref/*.mp3
-voice_ref/*.ogg
-voice_ref/*.mkv
 
 # Voice source clips — keep local only
 voice/*.wav

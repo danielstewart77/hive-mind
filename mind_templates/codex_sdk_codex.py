@@ -29,9 +29,15 @@ async def spawn(
     registry: Any = None,
     config_obj: Any = None,
     is_group_session: bool = False,
+    prompt_files: list[str] | None = None,
 ) -> dict:
     base = (
-        build_base_prompt(allowed_directories=allowed_directories, soul_file=soul_file, mind_id=mind_id)
+        build_base_prompt(
+            allowed_directories=allowed_directories,
+            soul_file=soul_file,
+            mind_id=mind_id,
+            prompt_files=prompt_files,
+        )
         if build_base_prompt else ""
     )
     full_prompt = base if not surface_prompt else f"{base}\n\n{surface_prompt}"

@@ -13,13 +13,7 @@ import logging
 import os
 import sys
 
-# KEY_RING is our convention for the keyring storage directory.
-# Must be applied before keyring is imported so PlaintextKeyring picks it up.
-_key_ring_dir = os.getenv("KEY_RING")
-if _key_ring_dir:
-    os.environ["XDG_DATA_HOME"] = _key_ring_dir
-
-# Allow importing core modules
+# Allow importing core modules (needed for PYTHON_KEYRING_BACKEND=core.keyring_backend.*)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 log = logging.getLogger(__name__)

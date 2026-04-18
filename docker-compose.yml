@@ -12,7 +12,7 @@ services:
       - ${HOST_CADDY_DIR}:/usr/src/caddy
     environment:
       - SESSIONS_DB_PATH=/usr/src/app/data/sessions.db
-      - PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring
+      - PYTHON_KEYRING_BACKEND=core.keyring_backend.HiveMindKeyring
       - PYTHONNOUSERSITE=1
       - KEY_RING=/usr/src/app/data/keyring
       - PYTHONPATH=/usr/src/app/vendor
@@ -60,7 +60,7 @@ services:
     environment:
       - HIVE_MIND_SERVER_URL=http://server:8420
       - VOICE_SERVER_URL=http://voice-server:8422
-      - PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring
+      - PYTHON_KEYRING_BACKEND=core.keyring_backend.HiveMindKeyring
       - PYTHONNOUSERSITE=1
       - KEY_RING=/usr/src/app/data/keyring
     command: ["/opt/venv/bin/python3", "-m", "clients.discord_bot"]
@@ -84,7 +84,6 @@ services:
       - whisper-cache:/home/hivemind/.cache
     environment:
       - WHISPER_MODEL=medium
-      - VOICE_REF_DIR=/usr/src/app/voice_ref
     deploy:
       resources:
         reservations:
@@ -117,9 +116,10 @@ services:
     environment:
       - HIVE_MIND_SERVER_URL=http://server:8420
       - VOICE_SERVER_URL=http://voice-server:8422
-      - PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring
+      - PYTHON_KEYRING_BACKEND=core.keyring_backend.HiveMindKeyring
       - PYTHONNOUSERSITE=1
       - KEY_RING=/usr/src/app/data/keyring
+      - MIND_ID=ada
     command: ["/opt/venv/bin/python3", "-m", "clients.telegram_bot"]
 
   telegram-bot-2:
@@ -145,9 +145,10 @@ services:
     environment:
       - HIVE_MIND_SERVER_URL=http://server:8420
       - VOICE_SERVER_URL=http://voice-server:8422
-      - PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring
+      - PYTHON_KEYRING_BACKEND=core.keyring_backend.HiveMindKeyring
       - PYTHONNOUSERSITE=1
       - KEY_RING=/usr/src/app/data/keyring
+      - MIND_ID=ada
       - TELEGRAM_BOT_TOKEN_KEYRING_KEY=TELEGRAM_BOT_TOKEN_2
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN_2}
     command: ["/opt/venv/bin/python3", "-m", "clients.telegram_bot"]
@@ -175,7 +176,7 @@ services:
     environment:
       - HIVE_MIND_SERVER_URL=http://server:8420
       - VOICE_SERVER_URL=http://voice-server:8422
-      - PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring
+      - PYTHON_KEYRING_BACKEND=core.keyring_backend.HiveMindKeyring
       - PYTHONNOUSERSITE=1
       - KEY_RING=/usr/src/app/data/keyring
       - MIND_ID=nagatha
@@ -204,7 +205,7 @@ services:
     environment:
       - HIVE_MIND_SERVER_URL=http://server:8420
       - VOICE_SERVER_URL=http://voice-server:8422
-      - PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring
+      - PYTHON_KEYRING_BACKEND=core.keyring_backend.HiveMindKeyring
       - PYTHONNOUSERSITE=1
       - KEY_RING=/usr/src/app/data/keyring
     command: ["/opt/venv/bin/python3", "-m", "clients.scheduler"]
@@ -225,7 +226,7 @@ services:
       - /tmp
     environment:
       - REMOTE_ADMIN_TOKEN=${REMOTE_ADMIN_TOKEN}
-      - PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring
+      - PYTHON_KEYRING_BACKEND=core.keyring_backend.HiveMindKeyring
       - PYTHONNOUSERSITE=1
     ports:
       - "8430:8430"
@@ -277,7 +278,7 @@ services:
     environment:
       - MIND_ID=ada
       - CLAUDE_CONFIG_DIR=/home/hivemind/.claude-config
-      - PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring
+      - PYTHON_KEYRING_BACKEND=core.keyring_backend.HiveMindKeyring
       - PYTHONNOUSERSITE=1
       - PYTHONPATH=/usr/src/app/vendor
       - KEY_RING=/usr/src/app/data/keyring
@@ -302,7 +303,7 @@ services:
     environment:
       - MIND_ID=bob
       - CLAUDE_CONFIG_DIR=/home/hivemind/.claude-config
-      - PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring
+      - PYTHON_KEYRING_BACKEND=core.keyring_backend.HiveMindKeyring
       - PYTHONNOUSERSITE=1
       - PYTHONPATH=/usr/src/app/vendor
       - KEY_RING=/usr/src/app/data/keyring
@@ -328,7 +329,7 @@ services:
     environment:
       - MIND_ID=bilby
       - CLAUDE_CONFIG_DIR=/home/hivemind/.claude-config
-      - PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring
+      - PYTHON_KEYRING_BACKEND=core.keyring_backend.HiveMindKeyring
       - PYTHONNOUSERSITE=1
       - PYTHONPATH=/usr/src/app/vendor
       - KEY_RING=/usr/src/app/data/keyring
@@ -353,7 +354,7 @@ services:
     environment:
       - MIND_ID=nagatha
       - CODEX_HOME=/home/hivemind/.codex
-      - PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring
+      - PYTHON_KEYRING_BACKEND=core.keyring_backend.HiveMindKeyring
       - PYTHONNOUSERSITE=1
       - PYTHONPATH=/usr/src/app/vendor
       - KEY_RING=/usr/src/app/data/keyring

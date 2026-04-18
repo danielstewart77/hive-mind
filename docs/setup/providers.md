@@ -86,6 +86,17 @@ Or via slash command from any client:
 
 The session is killed and respawned with the new provider's env. Conversation history is preserved via `--resume`.
 
+## Ollama Plugin (Standalone)
+
+For Claude Code users who want Ollama access **without running Hive Mind**, the `ollama-claude-plugin` is a standalone Claude Code plugin. It provides a `/ask-ollama` skill that delegates prompts to a local Ollama instance via HTTP, with conversation history managed by a broker daemon.
+
+- **Repo:** `ollama-claude-plugin` (separate project)
+- **Transport:** HTTP to `POST /api/chat` on the Ollama server
+- **Multi-turn:** broker daemon accumulates messages per conversation ID
+- **Model selection:** per-request via skill argument
+
+Within Hive Mind, use **Bob** (the `cli_ollama` mind) for Ollama delegation rather than the standalone plugin.
+
 ## Adding a New Provider
 
 1. Add a `providers.<name>` entry in `config.yaml` with any needed `env` overrides

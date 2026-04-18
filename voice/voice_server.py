@@ -3,8 +3,7 @@ Hive Mind -- Voice Server.
 
 Provides STT (faster-whisper) and TTS (Chatterbox) over HTTP.
 Chatterbox supports zero-shot voice cloning from a reference WAV clip.
-Voice selection via voice_id parameter (maps to voice_ref/{voice_id}.wav).
-Falls back to default.wav if the requested voice file does not exist.
+Voice selection via voice_id parameter (maps to minds/{voice_id}/voice_ref.wav).
 Auto-detects CUDA; falls back to CPU gracefully.
 """
 
@@ -56,7 +55,6 @@ app = FastAPI(title="Hive Mind Voice Server")
 
 _DEVICE = "cuda" if _GPU_OK and torch.cuda.is_available() else "cpu"
 _WHISPER_MODEL = os.getenv("WHISPER_MODEL", "medium")
-_VOICE_REF_DIR = os.getenv("VOICE_REF_DIR", "/usr/src/app/voice_ref")
 
 _whisper = None
 _chatterbox_model = None
@@ -65,19 +63,11 @@ _chatterbox_model = None
 # ---------------------------------------------------------------------------
 # Voice reference resolution
 # ---------------------------------------------------------------------------
-def _resolve_voice_ref(voice_id: str, voice_ref_dir: str | None = None) -> str | None:
-    """Resolve a voice_id to the corresponding WAV file path.
-
-    Returns the path to voice_ref/{voice_id}.wav if it exists,
-    falls back to voice_ref/default.wav, or returns None if neither exists.
-    """
-    ref_dir = voice_ref_dir or _VOICE_REF_DIR
-    path = os.path.join(ref_dir, f"{voice_id}.wav")
-    if os.path.exists(path):
-        return path
-    fallback = os.path.join(ref_dir, "default.wav")
-    if os.path.exists(fallback):
-        return fallback
+def _resolve_voice_ref(voice_id: str) -> str | None:
+    """Resolve a voice_id to minds/{voice_id}/voice_ref.wav."""
+    mind_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "minds", voice_id, "voice_ref.wav")
+    if os.path.exists(mind_path):
+        return mind_path
     return None
 
 
@@ -99,10 +89,7 @@ async def startup():
     log.info("Loading Chatterbox TTS...")
     _chatterbox_model = ChatterboxTTS.from_pretrained(device=_DEVICE)
 
-    log.info(
-        "Voice server ready. TTS: Chatterbox | ref dir: %s",
-        _VOICE_REF_DIR,
-    )
+    log.info("Voice server ready. TTS: Chatterbox")
 
 
 # ---------------------------------------------------------------------------
@@ -355,7 +342,6 @@ async def health():
         "stt": "ready" if _whisper else "loading",
         "tts": "ready" if _chatterbox_model else "loading",
         "tts_engine": "chatterbox",
-        "voice_ref_dir": _VOICE_REF_DIR,
         "device": _DEVICE,
         "whisper_model": _WHISPER_MODEL,
     }
