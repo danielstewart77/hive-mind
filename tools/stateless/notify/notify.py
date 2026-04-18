@@ -155,8 +155,9 @@ def cmd_voice(args: argparse.Namespace) -> int:
     # Child process
     os.setsid()
     try:
+        voice_id = os.getenv("MIND_ID", "default")
         tts_resp = httpx.post(
-            f"{voice_url}/tts", json={"text": args.message}, timeout=None,
+            f"{voice_url}/tts", json={"text": args.message, "voice_id": voice_id}, timeout=None,
         )
         if tts_resp.status_code == 200:
             httpx.post(

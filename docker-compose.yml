@@ -84,7 +84,6 @@ services:
       - whisper-cache:/home/hivemind/.cache
     environment:
       - WHISPER_MODEL=medium
-      - VOICE_REF_DIR=/usr/src/app/voice_ref
     deploy:
       resources:
         reservations:
@@ -120,6 +119,7 @@ services:
       - PYTHON_KEYRING_BACKEND=core.keyring_backend.HiveMindKeyring
       - PYTHONNOUSERSITE=1
       - KEY_RING=/usr/src/app/data/keyring
+      - MIND_ID=ada
     command: ["/opt/venv/bin/python3", "-m", "clients.telegram_bot"]
 
   telegram-bot-2:
@@ -148,6 +148,7 @@ services:
       - PYTHON_KEYRING_BACKEND=core.keyring_backend.HiveMindKeyring
       - PYTHONNOUSERSITE=1
       - KEY_RING=/usr/src/app/data/keyring
+      - MIND_ID=ada
       - TELEGRAM_BOT_TOKEN_KEYRING_KEY=TELEGRAM_BOT_TOKEN_2
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN_2}
     command: ["/opt/venv/bin/python3", "-m", "clients.telegram_bot"]

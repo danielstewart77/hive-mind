@@ -106,8 +106,7 @@ async def _stt(ogg_bytes: bytes) -> str:
 async def _tts(text: str, voice_id: str = "default") -> bytes:
     """POST text to voice-server /tts, return OGG audio bytes.
 
-    voice_id maps to voice_ref/{voice_id}.wav on the voice server.
-    Falls back to default.wav if the file does not exist.
+    voice_id maps to minds/{voice_id}/voice_ref.wav on the voice server.
     """
     session = await _ensure_http()
     async with session.post(f"{VOICE_SERVER_URL}/tts", json={"text": text, "voice_id": voice_id}) as resp:

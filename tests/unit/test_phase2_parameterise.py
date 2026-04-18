@@ -71,28 +71,24 @@ class TestBuildBasePromptUsesMindName:
 
 
 class TestBuildBasePromptProfiles:
-    """Verify prompt builder selects harness and profile specific guidance."""
+    """Verify prompt builder loads prompt guidance from the mind folder."""
 
-    def test_codex_programmer_prompt_uses_codex_instructions(self):
+    def test_codex_prompt_files_use_codex_instructions(self):
         with patch("core.sessions._fetch_soul_sync", return_value=None):
             from core.sessions import _build_base_prompt
             result = _build_base_prompt(
                 mind_id="nagatha",
-                harness="codex_cli_codex",
-                prompt_profile="programmer",
             )
 
         assert "Codex harness" in result
         assert "Claude harness paths" in result
         assert "technical accuracy" in result
 
-    def test_claude_orchestrator_prompt_uses_claude_instructions(self):
+    def test_claude_prompt_files_use_orchestrator_instructions(self):
         with patch("core.sessions._fetch_soul_sync", return_value=None):
             from core.sessions import _build_base_prompt
             result = _build_base_prompt(
                 mind_id="ada",
-                harness="claude_cli_claude",
-                prompt_profile="orchestrator",
             )
 
         assert "Claude harness" in result

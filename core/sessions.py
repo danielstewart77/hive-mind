@@ -120,17 +120,21 @@ def _build_base_prompt(
     allowed_directories: list[str] | None = None,
     soul_file: Path | None = None,
     mind_id: str = "ada",
-    harness: str = "",
-    prompt_profile: str = "default",
+    prompt_files: list[str] | None = None,
 ) -> str:
     """Build the base system prompt with current date/time and soul loaded from the graph."""
     from zoneinfo import ZoneInfo
+    from core.mind_registry import parse_mind_file
     from core.prompt_profiles import build_prompt
 
     now = datetime.now(ZoneInfo("America/Chicago"))
     date_str = now.strftime("%A, %B %-d, %Y at %-I:%M %p %Z")
 
     mind_name = mind_id.capitalize()
+    mind_dir = PROJECT_DIR / "minds" / mind_id
+    if prompt_files is None:
+        info = parse_mind_file(mind_dir / "MIND.md")
+        prompt_files = info.prompt_files
 
     soul = _fetch_soul_sync(mind_id=mind_id)
     if soul:
@@ -148,11 +152,11 @@ def _build_base_prompt(
     return build_prompt(
         date_str=date_str,
         mind_name=mind_name,
-        harness=harness,
-        prompt_profile=prompt_profile,
         identity_block=identity_block,
         soul_instruction=soul_instruction,
         allowed_directories=allowed_directories,
+        mind_dir=mind_dir,
+        prompt_files=prompt_files,
     )
 
 # ---------------------------------------------------------------------------
@@ -679,13 +683,11 @@ class SessionManager:
         is_group_session: bool = False,
     ) -> Any:
         mind_url = self._mind_url(mind_id)
-        prompt_profile = "default"
-        harness = ""
+        prompt_files: list[str] = []
         if self.mind_registry:
             info = self.mind_registry.get(mind_id)
             if info:
-                prompt_profile = info.prompt_profile
-                harness = info.harness
+                prompt_files = info.prompt_files
         import aiohttp
         async with aiohttp.ClientSession() as http:
             resp = await http.post(
@@ -697,8 +699,7 @@ class SessionManager:
                     "resume_sid": resume_sid,
                     "surface_prompt": surface_prompt,
                     "allowed_directories": allowed_directories,
-                    "prompt_profile": prompt_profile,
-                    "harness": harness,
+                    "prompt_files": prompt_files,
                 },
                 timeout=aiohttp.ClientTimeout(total=10),
             )

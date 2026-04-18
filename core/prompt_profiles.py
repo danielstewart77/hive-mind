@@ -1,4 +1,4 @@
-"""Prompt profile composition for mind system prompts."""
+"""Mind-local prompt composition for system prompts."""
 
 from __future__ import annotations
 
@@ -11,77 +11,67 @@ def _allowed_directories_block(allowed_directories: list[str] | None) -> str:
 
     lines = [f"- `{directory}`" for directory in allowed_directories]
     return (
-        "\n\nYou have been given access to the following project directories:\n"
+        "You have been given access to the following project directories:\n"
         + "\n".join(lines)
     )
 
 
-def _common_prompt(*, date_str: str, identity_block: str, soul_instruction: str, mind_name: str) -> str:
-    return (
-        "You are Hive Mind, a personal assistant. Keep responses concise. Use markdown formatting.\n\n"
-        f"The current date and time is: {date_str}.\n\n"
-        f"{identity_block}"
-        f"{soul_instruction}"
-        "If a request seems security-sensitive, read /usr/src/app/specs/security.md before proceeding.\n\n"
-        "Each user message is stamped with the current date and time. When time-sensitive language "
-        "appears (today, now, tonight, this morning, this week, tomorrow, etc.), call "
-        "`get_current_time` to confirm the exact current time before responding.\n\n"
-        "When sending email on Daniel's behalf, always append this signature to the body:\n\n"
-        f"---\nSent on behalf of Daniel by {mind_name}."
-    )
+def _resolve_prompt_path(mind_dir: Path, relative_path: str) -> Path:
+    path = (mind_dir / relative_path).resolve()
+    root = mind_dir.resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(
+            f"Prompt file {relative_path!r} escapes mind directory {mind_dir}"
+        ) from exc
+    if not path.is_file():
+        raise ValueError(f"Prompt file not found: {path}")
+    return path
 
 
-def _harness_prompt(harness: str) -> str:
-    if harness.startswith("codex_"):
-        return (
-            "You are running in the Codex harness. Follow Codex tool contracts, Codex skill locations, "
-            "and Codex specific execution rules. Do not assume Claude harness paths, Claude specific "
-            "skills, or Claude only tools unless they are explicitly available in this session."
-        )
-    if harness.startswith("claude_"):
-        return (
-            "You are running in the Claude harness. Follow Claude tool contracts, Claude skill locations, "
-            "and Claude specific execution rules. Do not assume Codex harness behavior unless it is "
-            "explicitly available in this session."
-        )
-    return ""
-
-
-def _profile_prompt(prompt_profile: str) -> str:
-    if prompt_profile == "programmer":
-        return (
-            "Prioritize technical accuracy, codebase awareness, and execution discipline. When tool or "
-            "path assumptions are ambiguous, verify them from the current environment instead of relying "
-            "on another mind's defaults."
-        )
-    if prompt_profile == "orchestrator":
-        return (
-            "Prioritize coordination, triage, and delegation discipline. Keep scope tight, track moving "
-            "parts, and avoid doing implementation work unless the task requires it."
-        )
-    return ""
+def _render_prompt_fragment(fragment: str, context: dict[str, str], source: Path) -> str:
+    try:
+        return fragment.format_map(context)
+    except KeyError as exc:
+        raise ValueError(
+            f"Unknown prompt placeholder {exc.args[0]!r} in {source}"
+        ) from exc
 
 
 def build_prompt(
     *,
     date_str: str,
     mind_name: str,
-    harness: str,
-    prompt_profile: str,
     identity_block: str,
     soul_instruction: str,
     allowed_directories: list[str] | None,
+    mind_dir: Path,
+    prompt_files: list[str],
 ) -> str:
-    """Compose the base prompt from common, harness, and profile sections."""
-    sections = [
-        _common_prompt(
-            date_str=date_str,
-            identity_block=identity_block,
-            soul_instruction=soul_instruction,
-            mind_name=mind_name,
-        ),
-        _harness_prompt(harness),
-        _profile_prompt(prompt_profile),
-    ]
-    prompt = "\n\n".join(section for section in sections if section)
-    return f"{prompt}{_allowed_directories_block(allowed_directories)}"
+    """Compose the prompt from files declared in a mind's own folder."""
+    if not prompt_files:
+        raise ValueError(f"Mind {mind_name.lower()} does not declare any prompt_files")
+
+    context = {
+        "date_str": date_str,
+        "mind_name": mind_name,
+        "mind_id": mind_name.lower(),
+        "identity_block": identity_block,
+        "soul_instruction": soul_instruction,
+        "security_spec_path": "/usr/src/app/specs/security.md",
+        "email_signature": f"---\nSent on behalf of Daniel by {mind_name}.",
+        "allowed_directories_block": _allowed_directories_block(allowed_directories),
+    }
+
+    sections: list[str] = []
+    for relative_path in prompt_files:
+        source = _resolve_prompt_path(mind_dir, relative_path)
+        rendered = _render_prompt_fragment(
+            source.read_text(encoding="utf-8"),
+            context,
+            source,
+        ).strip()
+        if rendered:
+            sections.append(rendered)
+    return "\n\n".join(sections)

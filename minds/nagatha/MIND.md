@@ -3,7 +3,10 @@ name: nagatha
 model: codex
 harness: codex_cli_codex
 gateway_url: http://nagatha:8420
-prompt_profile: programmer
+prompt_files:
+  - prompts/common.md
+  - prompts/harness.md
+  - prompts/profile.md
 container:
   image: hive_mind:latest
   volumes:

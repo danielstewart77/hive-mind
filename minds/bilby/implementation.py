@@ -32,8 +32,7 @@ async def spawn(
     registry: Any = None,
     config_obj: Any = None,
     is_group_session: bool = False,
-    prompt_profile: str = "default",
-    harness: str = "",
+    prompt_files: list[str] | None = None,
 ) -> dict:
     """Initialise Bilby's per-session state. No subprocess — SDK manages the process."""
     base = (
@@ -41,8 +40,7 @@ async def spawn(
             allowed_directories=allowed_directories,
             soul_file=soul_file,
             mind_id=mind_id,
-            harness=harness,
-            prompt_profile=prompt_profile,
+            prompt_files=prompt_files,
         )
         if build_base_prompt
         else ""

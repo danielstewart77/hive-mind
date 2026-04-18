@@ -34,10 +34,10 @@ class TestParseMindFile:
         assert info.model == "sonnet"
         assert info.harness == "claude_cli_claude"
         assert info.gateway_url == "http://hive_mind:8420"
-        assert info.prompt_profile == "default"
+        assert info.prompt_files == []
 
-    def test_parse_mind_file_extracts_prompt_profile(self, tmp_path):
-        """Optional prompt_profile field is parsed into MindInfo."""
+    def test_parse_mind_file_extracts_prompt_files(self, tmp_path):
+        """Optional prompt_files field is parsed into MindInfo."""
         from core.mind_registry import parse_mind_file
 
         mind_file = tmp_path / "MIND.md"
@@ -47,13 +47,15 @@ class TestParseMindFile:
             "model: codex\n"
             "harness: codex_cli_codex\n"
             "gateway_url: http://nagatha:8420\n"
-            "prompt_profile: programmer\n"
+            "prompt_files:\n"
+            "  - prompts/common.md\n"
+            "  - prompts/profile.md\n"
             "---\n"
             "I am Nagatha.\n"
         )
 
         info = parse_mind_file(mind_file)
-        assert info.prompt_profile == "programmer"
+        assert info.prompt_files == ["prompts/common.md", "prompts/profile.md"]
 
     def test_parse_mind_file_extracts_soul_seed(self, tmp_path):
         """Markdown body after closing --- is returned as soul_seed."""
@@ -175,17 +177,20 @@ class TestParseMindFile:
 def _write_mind_md(mind_dir: Path, name: str, model: str = "sonnet",
                    harness: str = "claude_cli_claude",
                    gateway_url: str = "http://hive_mind:8420",
-                   prompt_profile: str = "default",
+                   prompt_files: list[str] | None = None,
                    body: str = "") -> None:
     """Helper to write a valid MIND.md into a directory."""
     mind_dir.mkdir(parents=True, exist_ok=True)
+    prompt_files = prompt_files or []
+    prompt_lines = "".join(f"  - {path}\n" for path in prompt_files)
     (mind_dir / "MIND.md").write_text(
         f"---\n"
         f"name: {name}\n"
         f"model: {model}\n"
         f"harness: {harness}\n"
         f"gateway_url: {gateway_url}\n"
-        f"prompt_profile: {prompt_profile}\n"
+        f"prompt_files:\n"
+        f"{prompt_lines}"
         f"---\n"
         f"{body}\n"
     )
@@ -226,10 +231,10 @@ class TestMindRegistry:
         assert info.model == "sonnet"
         assert info.harness == "claude_cli_claude"
         assert info.gateway_url == "http://hive_mind:8420"
-        assert info.prompt_profile == "default"
+        assert info.prompt_files == []
 
-    def test_registry_get_returns_prompt_profile(self, tmp_path):
-        """get() returns prompt profile metadata for prompt selection."""
+    def test_registry_get_returns_prompt_files(self, tmp_path):
+        """get() returns prompt file metadata for prompt selection."""
         from core.mind_registry import MindRegistry
 
         _write_mind_md(
@@ -238,7 +243,7 @@ class TestMindRegistry:
             model="codex",
             harness="codex_cli_codex",
             gateway_url="http://nagatha:8420",
-            prompt_profile="programmer",
+            prompt_files=["prompts/common.md", "prompts/profile.md"],
         )
 
         registry = MindRegistry(tmp_path)
@@ -246,7 +251,7 @@ class TestMindRegistry:
 
         info = registry.get("nagatha")
         assert info is not None
-        assert info.prompt_profile == "programmer"
+        assert info.prompt_files == ["prompts/common.md", "prompts/profile.md"]
 
     def test_registry_get_unknown_returns_none(self, tmp_path):
         """get() for nonexistent mind returns None."""
