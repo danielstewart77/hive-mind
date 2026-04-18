@@ -632,6 +632,41 @@ class SessionManager:
         return await self._session_dict(session_id)
 
     # ------------------------------------------------------------------
+    # Interrupt (SIGINT without killing)
+    # ------------------------------------------------------------------
+    async def interrupt_session(self, session_id: str) -> dict:
+        """Forward an interrupt request to the mind container.
+
+        Sends SIGINT to the running subprocess without killing the session.
+        The session stays alive and ready for the next message.
+
+        Raises:
+            LookupError: If session_id is not in _procs.
+            ValueError: If the session has no mind container URL.
+            RuntimeError: If the mind container is unreachable.
+        """
+        if session_id not in self._procs:
+            raise LookupError(f"Session not found: {session_id}")
+
+        proc_info = self._procs[session_id]
+        mind_url = proc_info.get("_mind_url")
+        if not mind_url:
+            raise ValueError(f"No mind container URL for session {session_id}")
+
+        import aiohttp
+        try:
+            async with aiohttp.ClientSession() as http:
+                async with http.post(
+                    f"{mind_url}/sessions/{session_id}/interrupt",
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    return await resp.json()
+        except aiohttp.ClientError as exc:
+            raise RuntimeError(
+                f"Mind container unreachable for session {session_id}: {exc}"
+            ) from exc
+
+    # ------------------------------------------------------------------
     # Kill / close
     # ------------------------------------------------------------------
     async def kill_session(self, session_id: str) -> dict:

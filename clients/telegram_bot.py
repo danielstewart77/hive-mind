@@ -394,6 +394,29 @@ async def cmd_kill(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
 
 
+async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Interrupt the running command without killing the session.
+
+    Bypasses the message queue entirely — does NOT acquire the chat lock.
+    """
+    if not await _auth_check(update):
+        return
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    session_id = await gateway.find_active_session(user_id, chat_id)
+
+    if session_id is None:
+        await update.message.reply_text("No active session.")
+        return
+
+    result = await gateway.interrupt_session(session_id)
+
+    if result.get("message") == "nothing_running":
+        await update.message.reply_text("Nothing running.")
+    else:
+        await update.message.reply_text("Interrupted.")
+
+
 async def cmd_skills(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _auth_check(update):
         return
@@ -784,6 +807,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("switch", cmd_switch))
     app.add_handler(CommandHandler("kill", cmd_kill))
     app.add_handler(CommandHandler("remember", cmd_remember))
+    app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CommandHandler("skills", cmd_skills))
     app.add_handler(CommandHandler("skill", cmd_skill))
     app.add_handler(CallbackQueryHandler(handle_hitl_callback, pattern=r"^hitl_(approve|deny)_"))

@@ -13,6 +13,7 @@ import importlib
 import json
 import logging
 import os
+import signal
 import sys
 from pathlib import Path
 from uuid import uuid4
@@ -294,6 +295,21 @@ async def send_message(session_id: str, request: Request):
                 continue
 
     return StreamingResponse(stream_response(), media_type="text/event-stream")
+
+
+@app.post("/sessions/{session_id}/interrupt")
+async def interrupt_session(session_id: str):
+    session = _sessions.get(session_id)
+    if not session:
+        return JSONResponse({"error": f"Session {session_id} not found"}, status_code=404)
+
+    proc = session.get("proc")
+    if proc is None or (hasattr(proc, "returncode") and proc.returncode is not None):
+        return {"ok": True, "session_id": session_id, "message": "nothing_running"}
+
+    proc.send_signal(signal.SIGINT)
+    log.info("Sent SIGINT to session %s", session_id)
+    return {"ok": True, "session_id": session_id}
 
 
 @app.delete("/sessions/{session_id}")
