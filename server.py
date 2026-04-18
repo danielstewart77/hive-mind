@@ -309,6 +309,23 @@ async def toggle_autopilot(session_id: str):
 
 
 # ---------------------------------------------------------------------------
+# Interrupt endpoint
+# ---------------------------------------------------------------------------
+@app.post("/sessions/{session_id}/interrupt")
+async def interrupt_session(session_id: str):
+    """Send SIGINT to the running subprocess without killing the session."""
+    try:
+        result = await session_mgr.interrupt_session(session_id)
+        return result
+    except LookupError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except RuntimeError as e:
+        return JSONResponse({"error": str(e)}, status_code=502)
+
+
+# ---------------------------------------------------------------------------
 # Remote Control endpoints
 # ---------------------------------------------------------------------------
 @app.post("/sessions/{session_id}/remote-control", response_model=RemoteControlResponse)

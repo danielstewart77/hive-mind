@@ -95,6 +95,24 @@ class GatewayClient:
         self.surface_prompt = surface_prompt
         self.mind_id = mind_id
 
+    async def find_active_session(
+        self, user_id: int, client_ref: int | str
+    ) -> str | None:
+        """Look up an active session for this client. Returns the session ID
+        if one exists, or ``None`` if there is no active session.
+
+        Unlike :meth:`ensure_session`, this never creates a new session.
+        """
+        async with self.http.get(
+            f"{self.server_url}/sessions",
+            params={"client_type": self.owner_type, "client_ref": str(client_ref)},
+        ) as resp:
+            data = await resp.json()
+            for s in data:
+                if s.get("is_active"):
+                    return s["id"]
+        return None
+
     async def ensure_session(self, user_id: int, client_ref: int | str) -> str:
         """Get active session for this client, or create one."""
         async with self.http.get(
@@ -130,6 +148,13 @@ class GatewayClient:
                 "client_ref": str(client_ref),
                 "mind_id": self.mind_id,
             },
+        ) as resp:
+            return await resp.json()
+
+    async def interrupt_session(self, session_id: str) -> dict:
+        """Send an interrupt request for a session. Returns the JSON response."""
+        async with self.http.post(
+            f"{self.server_url}/sessions/{session_id}/interrupt"
         ) as resp:
             return await resp.json()
 
