@@ -288,6 +288,20 @@ async def send_message(session_id: str, body: MessageRequest):
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+@app.get("/sessions/{session_id}/events")
+async def stream_session_events(session_id: str):
+    """Read-only SSE stream for passive session observers."""
+    session = await session_mgr.get_session(session_id)
+    if not session:
+        return JSONResponse({"error": "Session not found"}, status_code=404)
+
+    async def event_stream():
+        async for event in session_mgr.stream_session_events(session_id):
+            yield f"data: {json.dumps(event)}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
 # ---------------------------------------------------------------------------
 # Session management endpoints
 # ---------------------------------------------------------------------------

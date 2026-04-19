@@ -1,7 +1,7 @@
 """Integration tests for the /stop interrupt signal chain.
 
-Covers: gateway session manager forwarding to mind container,
-and verifying session status is not changed by interrupt.
+Covers: gateway session manager forwarding to the mind container,
+recycling the live process, and reusing the saved thread on the next message.
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -33,6 +33,8 @@ class TestInterruptSignalChain:
         """Gateway session manager forwards POST to the correct mind container URL."""
         mind_url = "http://mind-ada:8420"
         session_mgr._procs["sess-chain"] = {"_mind_url": mind_url}
+        session_mgr._get_row = AsyncMock(return_value={"id": "sess-chain", "claude_sid": "conv-1"})
+        session_mgr._kill_process = AsyncMock()
 
         mock_resp = AsyncMock()
         mock_resp.status = 200
@@ -56,16 +58,50 @@ class TestInterruptSignalChain:
         # Verify the response is passed through
         assert result["ok"] is True
         assert result["session_id"] == "sess-chain"
+        assert result["resume_ready"] is True
+        session_mgr._kill_process.assert_awaited_once_with("sess-chain")
 
     @pytest.mark.asyncio
-    async def test_interrupt_does_not_change_session_status(self, session_mgr):
-        """After interrupt_session(), the session remains in _procs (not removed)."""
-        mind_url = "http://mind-ada:8420"
-        session_mgr._procs["sess-alive"] = {"_mind_url": mind_url}
+    async def test_send_message_respawns_with_saved_thread_after_recycle(self, session_mgr):
+        """If the live proc is gone but claude_sid exists, the next message respawns with resume."""
+        from core.sessions import SessionManager
+
+        class _AsyncBytesIter:
+            def __init__(self, items):
+                self._iter = iter(items)
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                try:
+                    return next(self._iter)
+                except StopIteration as exc:
+                    raise StopAsyncIteration from exc
+
+        session_mgr._db = AsyncMock()
+        session_mgr._locks = {}
+        session_mgr._procs = {}
+        session_mgr._mind_ids = {}
+        session_mgr._get_row = AsyncMock(return_value={
+            "id": "sess-resume",
+            "mind_id": "ada",
+            "model": "sonnet",
+            "autopilot": 0,
+            "claude_sid": "conv-1",
+            "summary": "Existing session",
+        })
+
+        async def fake_spawn(*args, **kwargs):
+            session_mgr._procs["sess-resume"] = {"_mind_url": "http://mind-ada:8420"}
+
+        session_mgr._spawn = AsyncMock(side_effect=fake_spawn)
 
         mock_resp = AsyncMock()
         mock_resp.status = 200
-        mock_resp.json = AsyncMock(return_value={"ok": True, "session_id": "sess-alive"})
+        mock_resp.content = _AsyncBytesIter([
+            b'data: {"type":"result","result":"ok","session_id":"conv-1"}\n'
+        ])
 
         mock_session_ctx = AsyncMock()
         mock_session_ctx.__aenter__ = AsyncMock(return_value=mock_session_ctx)
@@ -76,9 +112,8 @@ class TestInterruptSignalChain:
         ))
 
         with patch("aiohttp.ClientSession", return_value=mock_session_ctx):
-            await session_mgr.interrupt_session("sess-alive")
+            events = [event async for event in SessionManager.send_message(session_mgr, "sess-resume", "hello")]
 
-        # Session is still tracked (not removed from _procs)
-        assert "sess-alive" in session_mgr._procs
-        # The proc info is unchanged
-        assert session_mgr._procs["sess-alive"]["_mind_url"] == mind_url
+        session_mgr._spawn.assert_awaited_once()
+        assert session_mgr._spawn.await_args.kwargs["resume_sid"] == "conv-1"
+        assert events[-1]["type"] == "result"

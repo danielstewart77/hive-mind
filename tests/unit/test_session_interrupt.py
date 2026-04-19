@@ -1,7 +1,7 @@
 """Unit tests for SessionManager.interrupt_session().
 
-Covers: forwarding interrupt to mind container, session not found,
-missing mind_url, and mind container unreachable.
+Covers: forwarding interrupt, recycling the live process, missing sessions,
+missing mind_url, and unreachable mind containers.
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -29,9 +29,11 @@ class TestInterruptSession:
     """SessionManager.interrupt_session() tests."""
 
     @pytest.mark.asyncio
-    async def test_interrupt_session_forwards_to_mind_container(self, session_mgr):
-        """interrupt_session() POSTs to {mind_url}/sessions/{id}/interrupt and returns the response."""
+    async def test_interrupt_session_recycles_live_process(self, session_mgr):
+        """interrupt_session() POSTs interrupt, then clears the stale live process."""
         session_mgr._procs["sess-1"] = {"_mind_url": "http://mind-ada:8420"}
+        session_mgr._get_row = AsyncMock(return_value={"id": "sess-1", "claude_sid": "conv-1"})
+        session_mgr._kill_process = AsyncMock()
 
         mock_resp = AsyncMock()
         mock_resp.status = 200
@@ -48,21 +50,24 @@ class TestInterruptSession:
         with patch("aiohttp.ClientSession", return_value=mock_session_ctx):
             result = await session_mgr.interrupt_session("sess-1")
 
-        assert result == {"ok": True, "session_id": "sess-1"}
+        assert result == {"ok": True, "session_id": "sess-1", "resume_ready": True}
         mock_session_ctx.post.assert_called_once()
         call_url = mock_session_ctx.post.call_args[0][0]
         assert call_url == "http://mind-ada:8420/sessions/sess-1/interrupt"
+        session_mgr._kill_process.assert_awaited_once_with("sess-1")
 
     @pytest.mark.asyncio
     async def test_interrupt_session_not_found_raises_lookup_error(self, session_mgr):
-        """interrupt_session() raises LookupError when session_id not in _procs."""
+        """interrupt_session() raises LookupError when session is not in the database."""
+        session_mgr._get_row = AsyncMock(return_value=None)
         with pytest.raises(LookupError, match="Session not found"):
             await session_mgr.interrupt_session("nonexistent")
 
     @pytest.mark.asyncio
     async def test_interrupt_session_no_mind_url_raises_value_error(self, session_mgr):
         """interrupt_session() raises ValueError when _procs entry has no _mind_url."""
-        session_mgr._procs["sess-no-url"] = {}
+        session_mgr._procs["sess-no-url"] = {"_placeholder": True}
+        session_mgr._get_row = AsyncMock(return_value={"id": "sess-no-url", "claude_sid": None})
 
         with pytest.raises(ValueError, match="No mind container URL"):
             await session_mgr.interrupt_session("sess-no-url")
@@ -72,6 +77,7 @@ class TestInterruptSession:
         """interrupt_session() raises RuntimeError when the mind container HTTP call fails."""
         import aiohttp
         session_mgr._procs["sess-down"] = {"_mind_url": "http://mind-ada:8420"}
+        session_mgr._get_row = AsyncMock(return_value={"id": "sess-down", "claude_sid": None})
 
         mock_session_ctx = AsyncMock()
         mock_session_ctx.__aenter__ = AsyncMock(return_value=mock_session_ctx)
@@ -81,3 +87,17 @@ class TestInterruptSession:
         with patch("aiohttp.ClientSession", return_value=mock_session_ctx):
             with pytest.raises(RuntimeError, match="Mind container unreachable"):
                 await session_mgr.interrupt_session("sess-down")
+
+    @pytest.mark.asyncio
+    async def test_interrupt_session_returns_nothing_running_when_proc_missing(self, session_mgr):
+        """interrupt_session() preserves the logical session even if no live proc exists."""
+        session_mgr._get_row = AsyncMock(return_value={"id": "sess-idle", "claude_sid": "conv-1"})
+
+        result = await session_mgr.interrupt_session("sess-idle")
+
+        assert result == {
+            "ok": True,
+            "session_id": "sess-idle",
+            "message": "nothing_running",
+            "resume_ready": True,
+        }

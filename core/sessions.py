@@ -227,6 +227,7 @@ class SessionManager:
         self._mind_ids: dict[str, str] = {}  # session_id -> mind_id
         self._rc_procs: dict[str, asyncio.subprocess.Process] = {}  # RC subprocesses
         self._locks: dict[str, asyncio.Lock] = {}
+        self._observer_queues: dict[str, set[asyncio.Queue]] = {}
         self._reaper_task: asyncio.Task | None = None
         self._guard_task: asyncio.Task | None = None
         self.mind_registry = None  # Set by server.py after scan
@@ -379,6 +380,46 @@ class SessionManager:
         if not result:
             return None
         return await self._session_dict(result["session_id"])
+
+    async def stream_session_events(self, session_id: str):
+        """Yield live session events to passive observers."""
+        session = await self._get_row(session_id)
+        if not session:
+            raise ValueError(f"Session not found: {session_id}")
+
+        if session.get("status") == "closed":
+            yield {"type": "session_closed", "session_id": session_id}
+            return
+
+        queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+        self._observer_queues.setdefault(session_id, set()).add(queue)
+
+        try:
+            while True:
+                event = await queue.get()
+                yield event
+                if event.get("type") == "session_closed":
+                    return
+        finally:
+            watchers = self._observer_queues.get(session_id)
+            if watchers is not None:
+                watchers.discard(queue)
+                if not watchers:
+                    self._observer_queues.pop(session_id, None)
+
+    async def _publish_session_event(self, session_id: str, event: dict[str, Any]) -> None:
+        """Fan out a session event to all passive observers."""
+        watchers = list(self._observer_queues.get(session_id, ()))
+        for queue in watchers:
+            if queue.full():
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            try:
+                queue.put_nowait(event)
+            except asyncio.QueueFull:
+                continue
 
     async def activate_session(
         self, session_id: str, client_type: str, client_ref: str
@@ -542,6 +583,7 @@ class SessionManager:
                                     )
                                     break
 
+                                await self._publish_session_event(session_id, event)
                                 yield event
 
                                 now = time.time()
@@ -635,20 +677,30 @@ class SessionManager:
     # Interrupt (SIGINT without killing)
     # ------------------------------------------------------------------
     async def interrupt_session(self, session_id: str) -> dict:
-        """Forward an interrupt request to the mind container.
+        """Interrupt the current run and recycle the live process.
 
-        Sends SIGINT to the running subprocess without killing the session.
-        The session stays alive and ready for the next message.
+        This approximates an interactive escape keypress: stop the current
+        request, discard the stale subprocess, but keep the logical session
+        active so the next message can respawn with ``claude_sid``.
 
         Raises:
-            LookupError: If session_id is not in _procs.
-            ValueError: If the session has no mind container URL.
+            LookupError: If session_id does not exist in the database.
+            ValueError: If the live session has no mind container URL.
             RuntimeError: If the mind container is unreachable.
         """
-        if session_id not in self._procs:
+        session = await self._get_row(session_id)
+        if not session:
             raise LookupError(f"Session not found: {session_id}")
 
-        proc_info = self._procs[session_id]
+        proc_info = self._procs.get(session_id)
+        if not proc_info:
+            return {
+                "ok": True,
+                "session_id": session_id,
+                "message": "nothing_running",
+                "resume_ready": bool(session.get("claude_sid")),
+            }
+
         mind_url = proc_info.get("_mind_url")
         if not mind_url:
             raise ValueError(f"No mind container URL for session {session_id}")
@@ -660,11 +712,21 @@ class SessionManager:
                     f"{mind_url}/sessions/{session_id}/interrupt",
                     timeout=aiohttp.ClientTimeout(total=5),
                 ) as resp:
-                    return await resp.json()
+                    result = await resp.json()
         except aiohttp.ClientError as exc:
             raise RuntimeError(
                 f"Mind container unreachable for session {session_id}: {exc}"
             ) from exc
+
+        # The interrupted subprocess is no longer trustworthy. Remove the live
+        # process so the next message respawns cleanly against the saved thread.
+        await self._kill_process(session_id)
+
+        if not isinstance(result, dict):
+            result = {"ok": True}
+        result.setdefault("session_id", session_id)
+        result["resume_ready"] = bool(session.get("claude_sid"))
+        return result
 
     # ------------------------------------------------------------------
     # Kill / close
@@ -683,6 +745,10 @@ class SessionManager:
             "DELETE FROM active_sessions WHERE session_id = ?", (session_id,)
         )
         await self._db.commit()
+        await self._publish_session_event(
+            session_id,
+            {"type": "session_closed", "session_id": session_id},
+        )
 
         uptime = time.time() - session["created_at"]
         return {
@@ -1012,6 +1078,10 @@ class SessionManager:
                 for row in await rows.fetchall():
                     sid = row["id"]
                     await self._kill_process(sid)
+                    await self._publish_session_event(
+                        sid, {"type": "session_closed", "session_id": sid}
+                    )
+                    self._observer_queues.pop(sid, None)
                     await self._db.execute(
                         "UPDATE sessions SET status = 'idle' WHERE id = ?", (sid,)
                     )
