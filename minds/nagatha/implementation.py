@@ -120,6 +120,15 @@ async def send(
 
         etype = event.get("type", "")
 
+        # Preserve the full Codex event stream for passive console observers
+        # without changing the main chat stream consumed by Telegram.
+        yield {
+            "type": "codex_event",
+            "session_id": session_id,
+            "event": event,
+            "_observer_only": True,
+        }
+
         if etype == "thread.started":
             current_thread_id = event.get("thread_id")
             state["thread_id"] = current_thread_id
