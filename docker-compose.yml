@@ -159,7 +159,7 @@ services:
     working_dir: /usr/src/app
     volumes:
       - ${HOST_PROJECT_DIR:-.}:/usr/src/app
-      - ${HOST_CLAUDE_DIR:-~/.claude}:/home/hivemind/.claude
+      - ${HOST_PROJECT_DIR:-.}/minds/nagatha/.codex:/home/hivemind/.codex
     restart: unless-stopped
     depends_on:
       - server
@@ -180,6 +180,7 @@ services:
       - PYTHONNOUSERSITE=1
       - KEY_RING=/usr/src/app/data/keyring
       - MIND_ID=nagatha
+      - CODEX_HOME=/home/hivemind/.codex
       - TELEGRAM_BOT_TOKEN_KEYRING_KEY=HIVEMIND_TELEGRAM_BOT_TOKEN
     command: ["/opt/venv/bin/python3", "-m", "clients.telegram_bot"]
 

@@ -150,9 +150,11 @@ docker-compose.production.yml
 
 # Our minds are our own
 minds/*
+!minds/.gitkeep
 
 # Our art is our own
 img/*
+!img/.gitkeep
 
 # Generated output artifacts
 *-report.md
