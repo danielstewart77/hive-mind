@@ -62,7 +62,7 @@ Human-readable guides, background, and reference material — organized by topic
 | [docs/security/](docs/security/) | Security model, hardening, and open tradeoffs |
 | [docs/multi-mind-architecture.md](docs/multi-mind-architecture.md) | Multi-mind system architecture — container isolation, secrets, gateway security |
 | [docs/mind-to-mind-communication.md](docs/mind-to-mind-communication.md) | Inter-mind async messaging via the broker |
-| [plans/](plans/) | Forward-looking plans and proposals (not yet implemented) |
+| [docs/mind-claude-folder.md](docs/mind-claude-folder.md) | Per-mind `.claude` folder convention and Docker wiring |
 
 ## Specs (`specs/`)
 
@@ -102,84 +102,9 @@ Memory classification specs used by the memory pipeline.
 | [specs/data-classes/technical-config.md](specs/data-classes/technical-config.md) | Technical configuration and setup details |
 | [specs/data-classes/timed-event.md](specs/data-classes/timed-event.md) | Calendar events and scheduled occurrences |
 
-### Skills (`.claude/skills/`)
+### Skills
 
-Per-mind skill scoping: each mind gets only the skills it needs, copied into `minds/<name>/.claude/skills/` during setup.
-
-| Category | Skill | Description |
-|----------|-------|-------------|
-| **Scheduling** | [1pm](.claude/skills/1pm/SKILL.md) | Afternoon briefing |
-| | [3am](.claude/skills/3am/SKILL.md) | Nightly autonomous session |
-| | [7am](.claude/skills/7am/SKILL.md) | Morning briefing |
-| | [morning-briefing](.claude/skills/morning-briefing/SKILL.md) | Calendar + reminders overview |
-| | [remind-me](.claude/skills/remind-me/SKILL.md) | Read active reminders |
-| | [check-reminders](.claude/skills/check-reminders/SKILL.md) | Fire due one-time reminders |
-| | [reminders](.claude/skills/reminders/SKILL.md) | Set, list, delete reminders |
-| **Memory** | [remember](.claude/skills/remember/SKILL.md) | Save information to memory |
-| | [save-session](.claude/skills/save-session/SKILL.md) | Save session memories |
-| | [memory-manager](.claude/skills/memory-manager/SKILL.md) | Full memory storage lifecycle |
-| | [semantic-memory-save](.claude/skills/semantic-memory-save/SKILL.md) | Write to vector store |
-| | [knowledge-graph-save](.claude/skills/knowledge-graph-save/SKILL.md) | Write to knowledge graph |
-| | [pin-memory-action](.claude/skills/pin-memory-action/SKILL.md) | Write to MEMORY.md |
-| | [notify-action](.claude/skills/notify-action/SKILL.md) | Handle notify memory chunks |
-| | [create-data-class](.claude/skills/create-data-class/SKILL.md) | Create memory data class spec |
-| | [self-reflect](.claude/skills/self-reflect/SKILL.md) | Identity reflection and soul updates |
-| | [seed-mind](.claude/skills/seed-mind/SKILL.md) | Seed mind identity into graph |
-| **Dev Pipeline** | [planning-genius](.claude/skills/planning-genius/SKILL.md) | Implementation plan from story |
-| | [code-genius](.claude/skills/code-genius/SKILL.md) | Implement features with TDD |
-| | [code-review-genius](.claude/skills/code-review-genius/SKILL.md) | Structured code review |
-| | [master-code-review](.claude/skills/master-code-review/SKILL.md) | Security-aware code review |
-| | [commit](.claude/skills/commit/SKILL.md) | Stage, commit, push, open PR |
-| | [story-start](.claude/skills/story-start/SKILL.md) | Start a dev story from Planka |
-| | [story-close](.claude/skills/story-close/SKILL.md) | Close story after PR merge |
-| | [orchestrator](.claude/skills/orchestrator/SKILL.md) | SDLC pipeline orchestrator |
-| | [design-session](.claude/skills/design-session/SKILL.md) | Multi-turn architecture design |
-| | [tool-creator](.claude/skills/tool-creator/SKILL.md) | Create a new Hive Mind tool |
-| | [mcp-tool-builder](.claude/skills/mcp-tool-builder/SKILL.md) | Build and register MCP tools |
-| | [update-documentation](.claude/skills/update-documentation/SKILL.md) | Update docs to match code |
-| **Mind Management** | [add-mind](.claude/skills/add-mind/SKILL.md) | Connect a mind (local/remote) |
-| | [create-mind](.claude/skills/create-mind/SKILL.md) | Create from harness template |
-| | [update-mind](.claude/skills/update-mind/SKILL.md) | Update mind configuration |
-| | [remove-mind](.claude/skills/remove-mind/SKILL.md) | Deregister and remove |
-| | [list-minds](.claude/skills/list-minds/SKILL.md) | List registered minds |
-| | [generate-compose](.claude/skills/generate-compose/SKILL.md) | Generate compose from MIND.md |
-| | [update-hivemind](.claude/skills/update-hivemind/SKILL.md) | Update the Hive Mind system |
-| **Setup & Onboarding** | [setup](.claude/skills/setup/SKILL.md) | Master setup wizard |
-| | [setup-prerequisites](.claude/skills/setup-prerequisites/SKILL.md) | Detect hardware, OS, Docker |
-| | [setup-config](.claude/skills/setup-config/SKILL.md) | Generate config files |
-| | [setup-auth](.claude/skills/setup-auth/SKILL.md) | Authentication setup |
-| | [setup-nervous-system](.claude/skills/setup-nervous-system/SKILL.md) | Deploy gateway, broker, Lucent |
-| | [setup-provider](.claude/skills/setup-provider/SKILL.md) | Configure AI providers |
-| | [setup-body](.claude/skills/setup-body/SKILL.md) | Deploy surfaces and services |
-| | [setup-mind](.claude/skills/setup-mind/SKILL.md) | Add or create minds |
-| **Provider Management** | [add-provider](.claude/skills/add-provider/SKILL.md) | Add a new AI provider |
-| | [update-provider](.claude/skills/update-provider/SKILL.md) | Rotate keys, change endpoints |
-| | [remove-provider](.claude/skills/remove-provider/SKILL.md) | Remove a provider |
-| | [export-config](.claude/skills/export-config/SKILL.md) | Export config for migration |
-| **Communication** | [send-message-to-mind](.claude/skills/send-message-to-mind/SKILL.md) | Async inter-mind messaging |
-| | [moderate](.claude/skills/moderate/SKILL.md) | Moderate group conversations |
-| | [send-email](.claude/skills/send-email/SKILL.md) | Send email via Gmail (HITL) |
-| | [post-to-linkedin](.claude/skills/post-to-linkedin/SKILL.md) | Post to LinkedIn |
-| | [notify](.claude/skills/notify/SKILL.md) | Send notifications |
-| **Tools** | [secrets](.claude/skills/secrets/SKILL.md) | Manage keyring secrets |
-| | [planka](.claude/skills/planka/SKILL.md) | Manage Kanban board |
-| | [create-story](.claude/skills/create-story/SKILL.md) | Create Planka story card |
-| | [browse](.claude/skills/browse/SKILL.md) | Browse web interactively |
-| | [weather](.claude/skills/weather/SKILL.md) | Get weather |
-| | [crypto-price](.claude/skills/crypto-price/SKILL.md) | Get crypto prices |
-| | [current-time](.claude/skills/current-time/SKILL.md) | Get time for any timezone |
-| | [agent-logs](.claude/skills/agent-logs/SKILL.md) | Scan system log files |
-| | [sitrep](.claude/skills/sitrep/SKILL.md) | System situation report |
-| | [person-node-audit](.claude/skills/person-node-audit/SKILL.md) | Audit person nodes in graph |
-| | [x-ai-lurker](.claude/skills/x-ai-lurker/SKILL.md) | Fetch top AI threads from X |
-| | [x-search](.claude/skills/x-search/SKILL.md) | Search X for tweets |
-| **Content** | [convert-to-pdf](.claude/skills/convert-to-pdf/SKILL.md) | Convert documents to PDF |
-| | [pdf-formatter](.claude/skills/pdf-formatter/SKILL.md) | Reformat PDF files |
-| | [mermaid-diagram-creator](.claude/skills/mermaid-diagram-creator/SKILL.md) | Create Mermaid diagrams |
-| **Meta** | [skill-creator-claude](.claude/skills/skill-creator-claude/SKILL.md) | Guide for creating skills |
-| | [create-agents-claude](.claude/skills/create-agents-claude/SKILL.md) | Guide for creating subagents |
-| | [convert-claude-skill-to-codex](.claude/skills/convert-claude-skill-to-codex/SKILL.md) | Convert skills to Codex |
-| | [sync-discord-slash-commands](.claude/skills/sync-discord-slash-commands/SKILL.md) | Sync skills to Discord |
+Skills are per-mind and live in each mind's `.claude` folder (`minds/<name>/.claude/skills/`), not in this repo. See [docs/mind-claude-folder.md](docs/mind-claude-folder.md) for the convention.
 
 ## License
 
