@@ -517,6 +517,18 @@ class SessionManager:
                     stamped_content = f"{seeded}\n\n{stamped_content}"
                     log.debug("Context seeding injected %d chars", len(seeded))
 
+            await self._publish_session_event(
+                session_id,
+                {
+                    "type": "user",
+                    "session_id": session_id,
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": content}],
+                    },
+                },
+            )
+
             # Route message to mind container via HTTP, stream SSE response
             proc_info = self._procs.get(session_id)
             if not proc_info or not proc_info.get("_mind_url"):
