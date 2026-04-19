@@ -558,6 +558,8 @@ class SessionManager:
                                 except json.JSONDecodeError:
                                     continue
 
+                                observer_only = bool(event.pop("_observer_only", False))
+
                                 # Detect stale --resume
                                 if (
                                     not retried
@@ -584,6 +586,8 @@ class SessionManager:
                                     break
 
                                 await self._publish_session_event(session_id, event)
+                                if observer_only:
+                                    continue
                                 yield event
 
                                 now = time.time()
