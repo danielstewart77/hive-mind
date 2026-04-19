@@ -1,13 +1,14 @@
-"""Unit tests for GatewayClient.interrupt_session().
+"""Unit tests for GatewayClient helpers and interrupt_session().
 
 Covers: correct endpoint call and handling of error responses.
 """
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from core.gateway_client import GatewayClient
+from core.gateway_client import GatewayClient, _resolve_skills_dir, get_skills
 
 
 @pytest.fixture()
@@ -116,3 +117,73 @@ class TestGatewayClientFindActiveSession:
         result = await gateway.find_active_session(123, 456)
 
         assert result is None
+
+
+class TestGatewayClientQueryStream:
+    """GatewayClient.query_stream() error-path tests."""
+
+    @pytest.mark.asyncio
+    async def test_query_stream_raises_on_non_200_message_response(self, gateway):
+        """A non-200 /message response should surface an explicit error."""
+        gateway.ensure_session = AsyncMock(return_value="sess-1")
+
+        mock_resp = AsyncMock()
+        mock_resp.status = 500
+        mock_resp.json = AsyncMock(return_value={"error": "Process not running"})
+
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        gateway.http.post = MagicMock(return_value=mock_ctx)
+
+        with pytest.raises(RuntimeError, match="Process not running"):
+            async for _ in gateway.query_stream(123, 456, "hello"):
+                pass
+
+
+class TestGatewayClientSkillDiscovery:
+    """Skill directory resolution and parsing tests."""
+
+    def test_resolve_skills_dir_prefers_codex_home(self, monkeypatch, tmp_path: Path):
+        codex_home = tmp_path / "nagatha-codex"
+        claude_dir = tmp_path / "nagatha-claude"
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_dir))
+
+        assert _resolve_skills_dir() == str(codex_home / "skills")
+
+    def test_resolve_skills_dir_uses_claude_config_when_codex_missing(
+        self, monkeypatch, tmp_path: Path
+    ):
+        claude_dir = tmp_path / "ada-claude"
+        monkeypatch.delenv("CODEX_HOME", raising=False)
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_dir))
+
+        assert _resolve_skills_dir() == str(claude_dir / "skills")
+
+    def test_get_skills_reads_active_codex_home(self, monkeypatch, tmp_path: Path):
+        skills_dir = tmp_path / ".codex" / "skills" / "demo"
+        skills_dir.mkdir(parents=True)
+        skill_path = skills_dir / "SKILL.md"
+        skill_path.write_text(
+            "---\n"
+            "name: demo\n"
+            "description: Demo skill\n"
+            "user-invocable: true\n"
+            "argument-hint: <arg>\n"
+            "---\n"
+            "\n"
+            "# Demo\n"
+        )
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+
+        skills = get_skills()
+
+        assert skills == [
+            {
+                "name": "demo",
+                "description": "Demo skill",
+                "argument_hint": "<arg>",
+            }
+        ]

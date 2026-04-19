@@ -15,7 +15,6 @@ from typing import AsyncGenerator
 
 import aiohttp
 
-_SKILLS_DIR = os.path.expanduser("~/.claude/skills")
 _locks: dict[int, asyncio.Lock] = {}
 _chat_queues: dict[int, asyncio.Queue] = {}
 
@@ -24,10 +23,28 @@ _chat_queues: dict[int, asyncio.Queue] = {}
 # Shared utilities
 # ---------------------------------------------------------------------------
 
+def _resolve_skills_dir() -> str:
+    """Return the active skills directory for the current harness."""
+    codex_home = os.environ.get("CODEX_HOME")
+    if codex_home:
+        return os.path.join(os.path.expanduser(codex_home), "skills")
+
+    claude_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if claude_config_dir:
+        return os.path.join(os.path.expanduser(claude_config_dir), "skills")
+
+    default_codex_dir = os.path.expanduser("~/.codex/skills")
+    if os.path.isdir(default_codex_dir):
+        return default_codex_dir
+
+    return os.path.expanduser("~/.claude/skills")
+
+
 def get_skills() -> list[dict]:
     """Read all user-invocable skills from SKILL.md files."""
     skills = []
-    for path in sorted(glob.glob(os.path.join(_SKILLS_DIR, "*/SKILL.md"))):
+    skills_dir = _resolve_skills_dir()
+    for path in sorted(glob.glob(os.path.join(skills_dir, "*/SKILL.md"))):
         try:
             with open(path) as f:
                 content = f.read()
@@ -184,6 +201,20 @@ class GatewayClient:
             json=payload,
             timeout=sse_timeout,
         ) as resp:
+            if resp.status != 200:
+                error_text = ""
+                try:
+                    data = await resp.json()
+                    if isinstance(data, dict):
+                        error_text = str(data.get("error", ""))
+                    else:
+                        error_text = str(data)
+                except Exception:
+                    error_text = await resp.text()
+                error_text = error_text or f"HTTP {resp.status}"
+                raise RuntimeError(
+                    f"Gateway message request failed for session {session_id}: {error_text}"
+                )
             buf = ""
             async for chunk in resp.content.iter_any():
                 buf += chunk.decode()
