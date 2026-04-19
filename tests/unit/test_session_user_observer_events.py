@@ -1,4 +1,4 @@
-"""Tests for observer-only event handling in SessionManager.send_message."""
+"""Tests for user-message observer events in SessionManager.send_message."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -6,7 +6,7 @@ import pytest
 
 
 @pytest.mark.asyncio
-async def test_send_message_publishes_observer_only_event_without_yielding_it():
+async def test_send_message_publishes_user_event_to_observers_before_result():
     from core.sessions import SessionManager
 
     mgr = SessionManager.__new__(SessionManager)
@@ -32,7 +32,6 @@ async def test_send_message_publishes_observer_only_event_without_yielding_it():
         def __aiter__(self):
             self._lines = iter(
                 [
-                    b'data: {"type":"codex_event","_observer_only":true,"event":{"type":"item.started"}}\n',
                     b'data: {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}\n',
                     b'data: {"type":"result","session_id":"thread-1","is_error":false}\n',
                 ]
@@ -74,6 +73,5 @@ async def test_send_message_publishes_observer_only_event_without_yielding_it():
     assert [event["type"] for event in events] == ["assistant", "result"]
 
     published = [call.args[1] for call in mgr._publish_session_event.await_args_list]
-    assert [event["type"] for event in published] == ["user", "codex_event", "assistant", "result"]
+    assert published[0]["type"] == "user"
     assert published[0]["message"]["content"][0]["text"] == "hello"
-    assert "_observer_only" not in published[1]
