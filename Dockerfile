@@ -23,7 +23,7 @@ RUN npm install -g @anthropic-ai/claude-code @openai/codex
 # Ubuntu 24.04 ships with uid 1000 as 'ubuntu', so rename it
 RUN usermod -l hivemind -d /home/hivemind -m ubuntu \
     && groupmod -n hivemind ubuntu \
-    && mkdir -p /home/hivemind/.claude /home/hivemind/.cache \
+    && mkdir -p /home/hivemind/.cache \
     && chown -R hivemind:hivemind /home/hivemind
 
 # Python venv + deps — installed to /opt/venv so bind mounts don't clobber it
