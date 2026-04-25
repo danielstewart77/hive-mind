@@ -51,10 +51,10 @@ _sessions: dict[str, dict] = {}  # session_id -> {"proc": process, "model": str,
 _NS_URL = os.environ.get("HIVE_MIND_SERVER_URL", "http://server:8420")
 
 # Per-mind config directory (tmpfs, writable)
-_CONFIG_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR", "/home/hivemind/.claude-config"))
+_CONFIG_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR", "/home/hivemind/.claude"))
 
 # Host credentials (read-only mount from host's ~/.claude)
-_HOST_CREDS = Path("/home/hivemind/.host-claude/.credentials.json")
+_HOST_CREDS = Path("/mnt/host-claude/.credentials.json")
 
 # Mind-specific skills source (from minds/<name>/.claude/ in the project)
 _MIND_SKILLS_SRC = PROJECT_DIR / "minds" / MIND_ID / ".claude"

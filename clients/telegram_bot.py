@@ -6,6 +6,7 @@ Supports text messages and voice notes (STT/TTS via voice-server).
 All Claude Code interaction flows through the gateway — no SDK dependency.
 """
 
+import asyncio
 import io
 import json
 import logging
@@ -582,36 +583,36 @@ async def handle_hitl_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.answer("Unknown action.")
         return
 
+    # Brief shimmer, then acknowledge and remove buttons
+    await asyncio.sleep(0.6)
+    await query.answer()
+
     approved = action == "approve"
-    hitl_secret = config.hitl_internal_token
+    original_text = query.message.text or ""
+    body = original_text.split("\n\n", 1)[-1] if "\n\n" in original_text else original_text
+
+    await query.edit_message_text("\u23f3 Processing\u2026\n\n" + body, reply_markup=None)
+
+    hive_tools_url = os.environ.get("HIVE_TOOLS_URL", "http://203.0.113.10:9421")
+    from core.secrets import get_credential
+    hive_tools_token = get_credential("HIVE_TOOLS_TOKEN") or ""
 
     try:
         async with http.post(
-            f"{SERVER_URL}/hitl/respond",
-            json={"token": token, "approved": approved},
-            headers={"X-HITL-Internal": hitl_secret},
+            f"{hive_tools_url}/hitl/{token}/respond",
+            json={"action": action},
+            headers={"Authorization": f"Bearer {hive_tools_token}"},
         ) as resp:
             if resp.status == 200:
-                # Success: update message with status
-                original_text = query.message.text or ""
-                # Replace the header with the status
-                body = original_text.split("\n\n", 1)[-1] if "\n\n" in original_text else original_text
-                if approved:
-                    new_text = f"\u2705 Approved\n\n{body}"
-                else:
-                    new_text = f"\u274c Denied\n\n{body}"
-                await query.edit_message_text(new_text)
-                await query.edit_message_reply_markup(reply_markup=None)
+                label = "\u2705 Approved" if approved else "\u274c Denied"
             else:
-                # 404 = expired or already resolved (double-tap)
-                original_text = query.message.text or ""
-                body = original_text.split("\n\n", 1)[-1] if "\n\n" in original_text else original_text
-                await query.edit_message_text(f"\u23f0 Expired\n\n{body}")
-                await query.edit_message_reply_markup(reply_markup=None)
+                error_body = await resp.text()
+                label = f"\u26a0\ufe0f Error {resp.status}: {error_body[:120]}"
     except Exception:
         log.exception("HITL callback handler failed")
+        label = "\u26a0\ufe0f Failed — check logs"
 
-    await query.answer()
+    await query.edit_message_text(f"{label}\n\n{body}")
 
 
 # ---------------------------------------------------------------------------

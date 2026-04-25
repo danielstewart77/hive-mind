@@ -5,8 +5,6 @@ services:
     working_dir: /usr/src/app
     volumes:
       - ${HOST_PROJECT_DIR:-.}:/usr/src/app
-      - ${HOST_CLAUDE_DIR:-~/.claude}:/home/hivemind/.claude
-      - ${HOST_CODEX_DIR:-~/.codex}:/home/hivemind/.codex
       - ${HOST_MCP_DIR}:/usr/src/mcp
       - ${HOST_SPARK_DIR}:/usr/src/spark_to_bloom
       - ${HOST_CADDY_DIR}:/usr/src/caddy
@@ -43,7 +41,6 @@ services:
     working_dir: /usr/src/app
     volumes:
       - ${HOST_PROJECT_DIR:-.}:/usr/src/app
-      - ${HOST_CLAUDE_DIR:-~/.claude}:/home/hivemind/.claude
     restart: unless-stopped
     depends_on:
       - server
@@ -72,6 +69,8 @@ services:
     container_name: hive-mind-voice
     working_dir: /usr/src/app
     restart: always
+    ports:
+      - "8422:8422"
     networks:
       - hivemind
     security_opt:
@@ -99,7 +98,6 @@ services:
     working_dir: /usr/src/app
     volumes:
       - ${HOST_PROJECT_DIR:-.}:/usr/src/app
-      - ${HOST_CLAUDE_DIR:-~/.claude}:/home/hivemind/.claude
     restart: unless-stopped
     depends_on:
       - server
@@ -128,7 +126,6 @@ services:
     working_dir: /usr/src/app
     volumes:
       - ${HOST_PROJECT_DIR:-.}:/usr/src/app
-      - ${HOST_CLAUDE_DIR:-~/.claude}:/home/hivemind/.claude
     restart: unless-stopped
     depends_on:
       - server
@@ -159,7 +156,6 @@ services:
     working_dir: /usr/src/app
     volumes:
       - ${HOST_PROJECT_DIR:-.}:/usr/src/app
-      - ${HOST_PROJECT_DIR:-.}/minds/nagatha/.codex:/home/hivemind/.codex
     restart: unless-stopped
     depends_on:
       - server
@@ -180,7 +176,6 @@ services:
       - PYTHONNOUSERSITE=1
       - KEY_RING=/usr/src/app/data/keyring
       - MIND_ID=nagatha
-      - CODEX_HOME=/home/hivemind/.codex
       - TELEGRAM_BOT_TOKEN_KEYRING_KEY=HIVEMIND_TELEGRAM_BOT_TOKEN
     command: ["/opt/venv/bin/python3", "-m", "clients.telegram_bot"]
 
@@ -189,7 +184,7 @@ services:
     container_name: hive-mind-scheduler
     working_dir: /usr/src/app
     volumes:
-      - ${HOST_CLAUDE_DIR:-~/.claude}:/home/hivemind/.claude
+      - ${HOST_PROJECT_DIR:-.}:/usr/src/app
     restart: unless-stopped
     depends_on:
       - server
@@ -278,16 +273,15 @@ services:
     working_dir: /usr/src/app
     environment:
       - MIND_ID=ada
-      - CLAUDE_CONFIG_DIR=/home/hivemind/.claude-config
+      - CLAUDE_CONFIG_DIR=/usr/src/app/minds/ada/.claude
       - PYTHON_KEYRING_BACKEND=core.keyring_backend.HiveMindKeyring
       - PYTHONNOUSERSITE=1
       - PYTHONPATH=/usr/src/app/vendor
       - KEY_RING=/usr/src/app/data/keyring
     volumes:
-      - ${HOST_DEV_DIR}:/home/hivemind/dev:rw
+      - ${HOST_DEV_DIR}:/mnt/dev:rw
       - ${HOST_PROJECT_DIR:-.}:/usr/src/app:rw
-      - ${HOST_CLAUDE_DIR:-~/.claude}:/home/hivemind/.host-claude:ro
-      - ${HOST_PROJECT_DIR:-.}/minds/ada/.claude:/home/hivemind/.claude-config:rw
+      - ${HOST_CLAUDE_DIR:-~/.claude}:/mnt/host-claude:ro
     restart: unless-stopped
     depends_on:
       - server
@@ -303,17 +297,16 @@ services:
     working_dir: /usr/src/app
     environment:
       - MIND_ID=bob
-      - CLAUDE_CONFIG_DIR=/home/hivemind/.claude-config
+      - CLAUDE_CONFIG_DIR=/usr/src/app/minds/bob/.claude
       - PYTHON_KEYRING_BACKEND=core.keyring_backend.HiveMindKeyring
       - PYTHONNOUSERSITE=1
       - PYTHONPATH=/usr/src/app/vendor
       - KEY_RING=/usr/src/app/data/keyring
     volumes:
       - ${HOST_PROJECT_DIR:-.}:/usr/src/app:ro
-      - ${HOST_DOCUMENTS_DIR}:/home/hivemind/documents:rw
-      - ${HOST_HEALTH_DIR}:/home/hivemind/health:rw
-      - ${HOST_CLAUDE_DIR:-~/.claude}:/home/hivemind/.host-claude:ro
-      - ${HOST_PROJECT_DIR:-.}/minds/bob/.claude:/home/hivemind/.claude-config:rw
+      - ${HOST_DOCUMENTS_DIR}:/mnt/documents:rw
+      - ${HOST_HEALTH_DIR}:/mnt/health:rw
+      - ${HOST_CLAUDE_DIR:-~/.claude}:/mnt/host-claude:ro
     restart: unless-stopped
     depends_on:
       - server
@@ -329,16 +322,15 @@ services:
     working_dir: /usr/src/app
     environment:
       - MIND_ID=bilby
-      - CLAUDE_CONFIG_DIR=/home/hivemind/.claude-config
+      - CLAUDE_CONFIG_DIR=/usr/src/app/minds/bilby/.claude
       - PYTHON_KEYRING_BACKEND=core.keyring_backend.HiveMindKeyring
       - PYTHONNOUSERSITE=1
       - PYTHONPATH=/usr/src/app/vendor
       - KEY_RING=/usr/src/app/data/keyring
     volumes:
-      - ${HOST_DEV_DIR}:/home/hivemind/dev:rw
+      - ${HOST_DEV_DIR}:/mnt/dev:rw
       - ${HOST_PROJECT_DIR:-.}:/usr/src/app:rw
-      - ${HOST_CLAUDE_DIR:-~/.claude}:/home/hivemind/.host-claude:ro
-      - ${HOST_PROJECT_DIR:-.}/minds/bilby/.claude:/home/hivemind/.claude-config:rw
+      - ${HOST_CLAUDE_DIR:-~/.claude}:/mnt/host-claude:ro
     restart: unless-stopped
     depends_on:
       - server
@@ -354,15 +346,14 @@ services:
     working_dir: /usr/src/app
     environment:
       - MIND_ID=nagatha
-      - CODEX_HOME=/home/hivemind/.codex
+      - CODEX_HOME=/usr/src/app/minds/nagatha/.codex
       - PYTHON_KEYRING_BACKEND=core.keyring_backend.HiveMindKeyring
       - PYTHONNOUSERSITE=1
       - PYTHONPATH=/usr/src/app/vendor
       - KEY_RING=/usr/src/app/data/keyring
     volumes:
-      - ${HOST_DEV_DIR}:/home/hivemind/dev:rw
+      - ${HOST_DEV_DIR}:/mnt/dev:rw
       - ${HOST_PROJECT_DIR:-.}:/usr/src/app:rw
-      - ${HOST_PROJECT_DIR:-.}/minds/nagatha/.codex:/home/hivemind/.codex:rw
     restart: unless-stopped
     depends_on:
       - server

@@ -396,7 +396,12 @@ class SessionManager:
 
         try:
             while True:
-                event = await queue.get()
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=20)
+                except asyncio.TimeoutError:
+                    # Send SSE keepalive comment to prevent proxy/browser timeout
+                    yield {"__keepalive": True}
+                    continue
                 yield event
                 if event.get("type") == "session_closed":
                     return

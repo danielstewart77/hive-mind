@@ -297,7 +297,10 @@ async def stream_session_events(session_id: str):
 
     async def event_stream():
         async for event in session_mgr.stream_session_events(session_id):
-            yield f"data: {json.dumps(event)}\n\n"
+            if event.get("__keepalive"):
+                yield ": ping\n\n"
+            else:
+                yield f"data: {json.dumps(event)}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 

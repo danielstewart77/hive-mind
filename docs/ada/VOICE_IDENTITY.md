@@ -1,6 +1,6 @@
 # Hive Mind — Voice Identity
 
-## Decision
+## Ada's Voice Character
 
 **Female. Dry, measured, wry.** Not warm and eager — competent and direct.
 The "dry, occasionally wry" character reads more distinctively in a female voice and cuts against
@@ -10,43 +10,112 @@ Register: **contralto or lower mezzo** — not artificially deep, but not high o
 Pacing: deliberate, not rushed. Wit comes through cadence, not exaggerated inflection.
 Warmth: present but not performed. Sounds like it means what it says.
 
+Ada's reference clip is a 10-second clip of Joanna Lumley speaking — naturally embodies the dry,
+measured British female register Ada aims for.
+
 ---
 
 ## Current Implementation — Chatterbox TTS
 
 **Engine:** Chatterbox TTS (ResembleAI, 0.5B, MIT licence)
-**Server:** `voice_server.py` on port 8422
-**Config var:** `TTS_BACKEND=chatterbox` in docker-compose environment
+**Server:** `voice/voice_server.py`, port 8422
+**Entry point:** `Dockerfile.voice`
 
 Voice identity is achieved through **zero-shot voice cloning** — Chatterbox conditions every
-utterance on a 10-second reference clip rather than selecting from a preset voice list.
+utterance on a reference WAV clip rather than selecting from a preset voice list. No reference
+clip means Chatterbox falls back to its default untrained voice.
 
-**Reference audio:** `voice_ref/{voice_id}.wav` (default: `voice_ref/default.wav`)
-The `voice_id` parameter on the TTS endpoint selects the reference clip. Falls back to
-`default.wav` if the requested file doesn't exist.
+### Voice Reference Resolution
 
-Ada's reference clip is `voice_ref/ada.wav` — a 10-second clip of Joanna Lumley speaking.
-Chosen because it naturally embodies the dry, measured British female register Ada aims for.
+The voice server resolves a `voice_id` to a file path via `_resolve_voice_ref(voice_id)`:
 
-**Reference transcript:** `voice_ref/hive_mind_voice.txt`
-"I've loved it since I was a child ffff for the reasons that, what, I don't think my parents
-read me poetry, but I had a kind of a feeling I liked the sound of the pattern it made."
+```
+minds/{voice_id}/voice_ref.wav
+```
+
+For example, Ada's reference is at `minds/ada/voice_ref.wav` inside the container. The voice
+server container mounts the full hive_mind project directory at `/usr/src/app`, so it has
+read access to all `minds/*/voice_ref.wav` files automatically — no extra mounts needed for
+minds that live inside hive_mind.
+
+If `voice_ref.wav` is not found for the requested `voice_id`, the function returns `None` and
+Chatterbox synthesises using its default voice (no cloning).
+
+### TTS Request
+
+```http
+POST http://voice-server:8422/tts
+Content-Type: application/json
+
+{
+  "text": "Hello.",
+  "voice_id": "ada",
+  "speed": 0.9
+}
+```
+
+Response: `audio/ogg` (Opus-encoded, ready for Telegram voice notes).
 
 ### Performance
 
-- ~2–3GB VRAM (vs 22GB for Fish Speech S2-Pro)
-- EOS detection at ~60–210 steps (fast)
-- Generation speed: ~63 tokens/sec on RTX A6000
+- ~2–3GB VRAM
+- EOS detection at ~60–210 steps
+- ~63 tokens/sec on RTX A6000
 
-### Updating the voice
+---
 
-To change Ada's reference voice, replace `voice_ref/ada.wav` with a new 10-second clean mono WAV.
-To add a voice for another mind, add `voice_ref/{mind_id}.wav`. Reload via:
-```bash
-curl -X POST http://voice-server:8422/backend \
-  -H 'Content-Type: application/json' \
-  -d '{"backend": "chatterbox"}'
+## Mind Folder Convention
+
+Every mind that wants a cloned voice needs **one file** inside hive_mind:
+
 ```
+minds/{mind_id}/voice_ref.wav
+```
+
+For minds that live entirely within hive_mind (Ada, Bob, Bilby, Nagatha), this file lives
+alongside their `implementation.py`, `.claude/`, etc.
+
+For **external/standalone minds** that share the voice server but run outside hive_mind,
+the convention is the same: add a minimal `minds/{mind_id}/` folder to hive_mind containing
+only `voice_ref.wav`. No `.claude/`, no implementation, no other files — just the reference
+clip. This is the correct approach rather than inventing a separate lookup path.
+
+Example for Skippy (standalone mind, shared voice server):
+
+```
+hive_mind/
+└── minds/
+    └── skippy/
+        └── voice_ref.wav   ← only file needed
+```
+
+Skippy's actual implementation, config, and data live in its own separate project directory.
+
+---
+
+## Adding or Replacing a Voice Reference
+
+1. Obtain a clean 10-second mono WAV clip (16kHz recommended; Chatterbox resamples if needed).
+2. Place it at `minds/{mind_id}/voice_ref.wav` inside the hive_mind project directory.
+3. No server restart needed — `_resolve_voice_ref` reads the file at synthesis time.
+
+---
+
+## Accessing the Voice Server
+
+**From within the hivemind Docker network (hive_mind minds):**
+```
+http://voice-server:8422
+```
+
+**From external minds or the host:**
+```
+http://{host_ip}:8422
+```
+
+Port 8422 is bound to the host in `docker-compose.yml` (`ports: - "8422:8422"`), making it
+reachable from any process on the host or the local network. External minds should set
+`VOICE_SERVER_URL=http://{host_ip}:8422` in their environment.
 
 ---
 
@@ -60,7 +129,10 @@ Lower quality than Chatterbox but fully local and does not depend on a reference
 
 ---
 
-## Speed
+## Health Check
 
-Default speed (`1.0`) is fine. Slightly faster (`1.05–1.1`) could suit the direct cadence
-without sounding rushed — worth testing if latency allows.
+```
+GET http://voice-server:8422/health
+```
+
+Returns STT/TTS readiness, engine in use, and device (cuda/cpu).
