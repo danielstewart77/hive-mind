@@ -25,6 +25,7 @@ add an entry here automatically. The first entry was added manually.
 | `timed-event` | `timed-event.md` | vector | A future scheduled event with a specific datetime; requires expires_at |
 | `nagatha-identity` | `nagatha-identity.md` | both | Confirmed facts about who Nagatha is — origin, character, values, domain strengths, communication style |
 | `bob-identity` | `bob-identity.md` | both | Confirmed facts about who Bob is — origin, character, local-only operation, practicality, and identity corrections confirmed by Daniel |
+| `ada-behavior-rule` | `ada-behavior-rule.md` | vector | Prescriptive behavioral rules for Ada — actionable "when X, do Y" rules derived from session feedback and corrections |
 
 ---
 
