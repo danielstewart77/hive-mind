@@ -141,6 +141,7 @@ config.yaml
 .mcp.container.json
 docker-compose.override.yml
 docker-compose.production.yml
+docker-compose.yml
 
 # Local tool state
 .claude/
