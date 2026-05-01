@@ -23,16 +23,6 @@ models:
   opus: anthropic
   haiku: anthropic
 
-scheduled_tasks:
-  - cron: "0 7 * * *"
-    voice: true
-    prompt: "Run /7am"
-  - cron: "0 13 * * *"
-    voice: false
-    prompt: "Run /1pm"
-  - cron: "0 3 * * *"
-    voice: false
-    prompt: "Run /3am"
 ```
 
 ### Fields
@@ -45,18 +35,10 @@ scheduled_tasks:
 | `default_model` | `sonnet` | Model alias to use when none specified |
 | `providers` | — | Provider configs (see [Providers](providers.md)) |
 | `models` | — | Map of model alias → provider name |
-| `scheduled_tasks` | `[]` | Cron jobs run by the scheduler service |
 
 ### Scheduled Tasks
 
-Each entry in `scheduled_tasks` is fired by the scheduler container at the given cron expression:
-
-```yaml
-scheduled_tasks:
-  - cron: "0 7 * * *"   # 7am daily
-    voice: true          # respond via voice (TTS)
-    prompt: "Run /7am"   # message sent to Ada
-```
+Schedules are declared in skill frontmatter, not in `config.yaml`. See [Scheduled Tasks](scheduled-tasks.md).
 
 ## Secrets
 

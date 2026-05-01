@@ -37,7 +37,7 @@ class TestForwardToMindLogging:
             mock_requests.get.return_value = mock_sessions_resp
             mock_requests.post.side_effect = [mock_create_resp, mock_msg_resp]
 
-            from tools.stateful.group_chat import forward_to_mind
+            from nervous_system.inter_mind_api.group_chat import forward_to_mind
             forward_to_mind(
                 mind_id="nagatha",
                 message="Hello",
@@ -76,7 +76,7 @@ class TestForwardToMindLogging:
             # Only message post, no create needed since session exists
             mock_requests.post.return_value = mock_msg_resp
 
-            from tools.stateful.group_chat import forward_to_mind
+            from nervous_system.inter_mind_api.group_chat import forward_to_mind
             forward_to_mind(
                 mind_id="nagatha",
                 message="Hello",
@@ -102,7 +102,7 @@ class TestForwardToMindLogging:
             mock_requests.get.return_value = mock_sessions_resp
             mock_requests.post.side_effect = [mock_create_resp, mock_msg_resp]
 
-            from tools.stateful.group_chat import forward_to_mind
+            from nervous_system.inter_mind_api.group_chat import forward_to_mind
             forward_to_mind(
                 mind_id="nagatha",
                 message="Hello",
@@ -156,7 +156,7 @@ class TestForwardToMindLogging:
                 ReadTimeout("Timed out"),
             ]
 
-            from tools.stateful.group_chat import forward_to_mind
+            from nervous_system.inter_mind_api.group_chat import forward_to_mind
             result = forward_to_mind(
                 mind_id="bob",
                 message="Hello",

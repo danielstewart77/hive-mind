@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 def _get_connection():
     """Lazy import to get the Lucent SQLite connection."""
-    from tools.stateful.lucent import _get_connection as _lucent_get_connection
+    from nervous_system.lucent_api.lucent import _get_connection as _lucent_get_connection
     return _lucent_get_connection()
 
 

@@ -190,7 +190,7 @@ class TestGraphUpsertWithHITL:
     def test_graph_upsert_with_hitl_passes_data_class_through(self) -> None:
         mock_driver = _make_mock_driver()
         import tools.stateful.knowledge_graph as kg_mod
-        from core.kg_guards import DisambiguationResult
+        from nervous_system.lucent_api.kg_guards import DisambiguationResult
 
         proceed_result = DisambiguationResult(
             action="proceed", existing_nodes=[], message="No match."

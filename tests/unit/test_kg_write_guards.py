@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from core.kg_guards import DisambiguationResult
+from nervous_system.lucent_api.kg_guards import DisambiguationResult
 
 
 @pytest.fixture(autouse=True)

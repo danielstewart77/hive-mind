@@ -30,7 +30,7 @@ def migrate(dry_run: bool = False) -> dict:
     """
     from core.secrets import get_credential
     from neo4j import GraphDatabase
-    from tools.stateful.lucent import _get_connection
+    from nervous_system.lucent_api.lucent import _get_connection
 
     # Connect to Neo4j
     neo4j_uri = get_credential("NEO4J_URI") or "bolt://neo4j:7687"

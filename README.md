@@ -60,6 +60,7 @@ Human-readable guides, background, and reference material — organized by topic
 | [docs/setup/](docs/setup/) | Configuration, providers, and secrets |
 | [docs/memory/](docs/memory/) | Memory lifecycle and storage strategy |
 | [docs/security/](docs/security/) | Security model, hardening, and open tradeoffs |
+| [docs/architecture/mind-body-nervous-system.md](docs/architecture/mind-body-nervous-system.md) | The mind / body / nervous system organism model — privilege tiers, auth boundaries, design decisions |
 | [docs/multi-mind-architecture.md](docs/multi-mind-architecture.md) | Multi-mind system architecture — container isolation, secrets, gateway security |
 | [docs/mind-to-mind-communication.md](docs/mind-to-mind-communication.md) | Inter-mind async messaging via the broker |
 | [docs/mind-claude-folder.md](docs/mind-claude-folder.md) | Per-mind `.claude` folder convention and Docker wiring |

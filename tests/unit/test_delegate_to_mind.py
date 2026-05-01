@@ -9,11 +9,11 @@ class TestDelegateToMindInterface:
     """Verify delegate_to_mind function exists and has correct signature."""
 
     def test_delegate_to_mind_function_exists(self):
-        from tools.stateful.inter_mind import delegate_to_mind
+        from nervous_system.inter_mind_api.inter_mind import delegate_to_mind
         assert callable(delegate_to_mind)
 
     def test_delegate_to_mind_has_correct_signature(self):
-        from tools.stateful.inter_mind import delegate_to_mind
+        from nervous_system.inter_mind_api.inter_mind import delegate_to_mind
         sig = inspect.signature(delegate_to_mind)
         params = list(sig.parameters.keys())
         assert "mind_id" in params
@@ -22,7 +22,7 @@ class TestDelegateToMindInterface:
         assert "chain" in params
 
     def test_inter_mind_tools_list_exports(self):
-        from tools.stateful.inter_mind import INTER_MIND_TOOLS, delegate_to_mind
+        from nervous_system.inter_mind_api.inter_mind import INTER_MIND_TOOLS, delegate_to_mind
         assert delegate_to_mind in INTER_MIND_TOOLS
 
 
@@ -30,7 +30,7 @@ class TestDelegateToMindCyclePrevention:
     """Verify cycle prevention and hop limit."""
 
     def test_delegate_to_mind_rejects_cycle(self):
-        from tools.stateful.inter_mind import delegate_to_mind
+        from nervous_system.inter_mind_api.inter_mind import delegate_to_mind
 
         result = delegate_to_mind(
             mind_id="nagatha",
@@ -42,7 +42,7 @@ class TestDelegateToMindCyclePrevention:
         assert "Cycle detected" in parsed["error"]
 
     def test_delegate_to_mind_enforces_one_hop_limit(self):
-        from tools.stateful.inter_mind import delegate_to_mind
+        from nervous_system.inter_mind_api.inter_mind import delegate_to_mind
 
         result = delegate_to_mind(
             mind_id="nagatha",
@@ -54,7 +54,7 @@ class TestDelegateToMindCyclePrevention:
         assert "Hop limit exceeded" in parsed["error"]
 
     def test_delegate_to_mind_initialises_empty_chain(self):
-        from tools.stateful.inter_mind import delegate_to_mind
+        from nervous_system.inter_mind_api.inter_mind import delegate_to_mind
 
         mock_create_resp = MagicMock()
         mock_create_resp.json.return_value = {"id": "sess-1"}
@@ -83,7 +83,7 @@ class TestDelegateToMindResponse:
     """Verify delegate_to_mind returns correct response."""
 
     def test_delegate_to_mind_returns_response_json(self):
-        from tools.stateful.inter_mind import delegate_to_mind
+        from nervous_system.inter_mind_api.inter_mind import delegate_to_mind
 
         mock_create_resp = MagicMock()
         mock_create_resp.json.return_value = {"id": "sess-2"}

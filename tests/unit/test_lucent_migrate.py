@@ -99,7 +99,7 @@ class TestMigrateNodes:
             patch("tools.stateful.lucent._get_connection", return_value=conn),
         ):
             # Manually exercise the migration logic with mock driver
-            from tools.stateful.lucent import _init_schema
+            from nervous_system.lucent_api.lucent import _init_schema
             _init_schema(conn)
 
             # Simulate node migration

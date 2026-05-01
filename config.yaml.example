@@ -43,22 +43,19 @@ telegram_allowed_users:
   - 0000000000
 telegram_owner_chat_id: 0000000000  # DM chat ID for HITL approval notifications
 
-# Scheduled tasks (cron in 5-field format: min hour day month weekday)
-# voice: true  → TTS delivery via Telegram voice note (uses voice surface prompt)
-# voice: false → Text delivery via Telegram message (uses dev surface prompt — allows code)
-scheduled_tasks:
-  - cron: "0 7 * * *"
-    timezone: "America/Chicago"
-    voice: true
-    prompt: >-
-      Give me a voice overview of my day. Check my calendar for today's events.
-      Summarize everything in a friendly conversational way.
-
-  # Weekly autonomous self-improvement run
-  - cron: "0 3 * * 0"
-    timezone: "America/Chicago"
-    voice: false
-    prompt: >-
-      This is your weekly self-improvement session. Read /usr/src/app/goals.md,
-      execute the next concrete step for the highest-priority incomplete goal,
-      update goals.md with progress, and respond with a plain-text summary.
+# Scheduled tasks live on the skills themselves. Each skill that wants to be
+# fired by the scheduler declares `schedule:` (cron) and optionally
+# `schedule_timezone:`, `voice:`, and `notify:` in its SKILL.md frontmatter.
+# Example:
+#
+#   # minds/ada/.claude/skills/7am/SKILL.md
+#   ---
+#   name: 7am
+#   schedule: "0 7 * * *"
+#   schedule_timezone: "America/Chicago"
+#   voice: true
+#   ---
+#
+# The scheduler container walks minds/*/.claude/skills/*/SKILL.md at startup
+# and registers a job per discovered (mind, skill) pair. Each fire creates a
+# fresh session, runs the skill, kills the session, and delivers the result.

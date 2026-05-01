@@ -271,9 +271,9 @@ Criteria: request to fire at the same time every day, indefinitely.
 Examples: "remind me every morning at 7am to take my vitamins"
 
 1. Extract message and daily time.
-2. Add entry to config.yaml under scheduled_tasks with appropriate cron (e.g., 0 7 * * *).
-3. Notify Daniel: this is added and requires a container restart to take effect.
-4. Note: this runs indefinitely — removal requires deleting from config.yaml and restarting.
+2. Create or update a skill under `minds/ada/.claude/skills/<skill-name>/SKILL.md` with `schedule:` and `schedule_timezone:` in its frontmatter (e.g., `schedule: "0 7 * * *"`, `schedule_timezone: "America/Chicago"`).
+3. Notify Daniel: this is added and requires a scheduler container restart to take effect.
+4. Note: this runs indefinitely — removal requires editing the skill's frontmatter (or deleting the skill) and restarting the scheduler.
 
 ## Case 3 — Non-daily recurring (unsupported)
 

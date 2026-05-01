@@ -61,7 +61,7 @@ def _validate_relation(relation: str) -> str:
 
 def _get_conn():
     """Lazy import to get the Lucent SQLite connection."""
-    from tools.stateful.lucent import _get_connection
+    from nervous_system.lucent_api.lucent import _get_connection
     return _get_connection()
 
 
@@ -234,7 +234,7 @@ def graph_upsert(
         JSON confirmation with node id and relationship created (if any).
     """
     try:
-        from core.kg_guards import check_disambiguation, check_orphan_guard, send_disambiguation_message
+        from nervous_system.lucent_api.kg_guards import check_disambiguation, check_orphan_guard, send_disambiguation_message
 
         label = _validate_label(entity_type)
         props = json.loads(properties) if properties.strip() != "{}" else {}
@@ -286,11 +286,14 @@ def graph_query(
 ) -> str:
     """Retrieve knowledge graph node(s) and their connected relationships.
 
-    Searches by full name (exact), first_name, last_name, or aliases.
-    Returns all matching nodes.
+    Identity-only matching: name (exact, case-insensitive), first_name,
+    last_name, or alias-element (substring within the JSON aliases list,
+    bounded by JSON quotes for exact-element semantics).
+
+    Property text mentions do NOT match. For mention search, use graph_search.
 
     Args:
-        entity_name: Name or name fragment to search.
+        entity_name: Name to look up. Empty string returns no results.
         agent_id: Which agent's graph to search.
         depth: How many hops to traverse (default 1, max 3).
 
@@ -298,23 +301,30 @@ def graph_query(
         JSON with matching nodes, their properties, and connected relationships.
     """
     depth = min(max(depth, 1), 3)
+    if not entity_name:
+        return json.dumps({"found": False, "entity": entity_name})
     try:
         conn = _get_conn()
 
-        # Find matching nodes by name, first_name, last_name, or aliases
+        # Identity-only match: name / first_name / last_name (exact, case-insensitive),
+        # or alias-element within the JSON aliases array.
+        # The alias LIKE pattern is bounded with JSON quotes ('%"<name>"%') so that
+        # 'Dan' does not match 'Daniel' unless 'Dan' is itself an array element.
+        # json_extract scopes the substring scan to the aliases field only — other
+        # property values do not pollute identity lookup.
+        alias_pattern = f'%"{entity_name}"%'
         rows = conn.execute(
             """
             SELECT id, name, type, first_name, last_name, properties,
                    data_class, tier, source, as_of, created_at, updated_at
             FROM nodes
             WHERE agent_id = ?
-              AND (name = ?
-                   OR first_name = ?
-                   OR last_name = ?
-                   OR properties LIKE ?)
+              AND (name = ? COLLATE NOCASE
+                   OR first_name = ? COLLATE NOCASE
+                   OR last_name = ? COLLATE NOCASE
+                   OR json_extract(properties, '$.aliases') LIKE ?)
             """,
-            (agent_id, entity_name, entity_name, entity_name,
-             f'%"aliases"%{entity_name}%'),
+            (agent_id, entity_name, entity_name, entity_name, alias_pattern),
         ).fetchall()
 
         if not rows:
@@ -394,6 +404,63 @@ def graph_query(
         })
     except Exception as e:
         return json.dumps({"error": str(e)})
+
+
+def graph_search(text: str, limit: int = 25) -> str:
+    """Mention search: full-text scan across all property strings.
+
+    Returns nodes whose property values *mention* the query text. This is
+    a separate concern from identity lookup (graph_query) — the return
+    shape makes that explicit.
+
+    Args:
+        text: Substring to search for. Empty string returns an empty list.
+        limit: Max number of results (default 25).
+
+    Returns:
+        JSON-encoded list of {"node_id", "node_type", "property", "snippet"}.
+        One result per matching node — the first property hit wins.
+    """
+    if not text:
+        return json.dumps([])
+    try:
+        conn = _get_conn()
+        rows = conn.execute(
+            "SELECT id, type, properties FROM nodes WHERE properties LIKE ? LIMIT ?",
+            (f"%{text}%", limit),
+        ).fetchall()
+
+        results: list[dict[str, object]] = []
+        lower = text.lower()
+        for row in rows:
+            try:
+                props = json.loads(row["properties"]) if row["properties"] else {}
+            except json.JSONDecodeError:
+                continue
+            for k, v in props.items():
+                if isinstance(v, str) and lower in v.lower():
+                    results.append({
+                        "node_id": row["id"],
+                        "node_type": row["type"],
+                        "property": k,
+                        "snippet": _snippet(v, text),
+                    })
+                    break  # one hit per node — first property wins
+        return json.dumps(results)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+def _snippet(value: str, query: str, ctx_chars: int = 40) -> str:
+    """Return a short context window around the first occurrence of query in value."""
+    idx = value.lower().find(query.lower())
+    if idx == -1:
+        return value[: ctx_chars * 2]
+    start = max(0, idx - ctx_chars)
+    end = min(len(value), idx + len(query) + ctx_chars)
+    prefix = "..." if start > 0 else ""
+    suffix = "..." if end < len(value) else ""
+    return f"{prefix}{value[start:end]}{suffix}"
 
 
 def search_person(

@@ -214,7 +214,7 @@ def graph_upsert(
         JSON confirmation with node id and relationship created (if any).
     """
     try:
-        from core.kg_guards import check_disambiguation, check_orphan_guard, send_disambiguation_message
+        from nervous_system.lucent_api.kg_guards import check_disambiguation, check_orphan_guard, send_disambiguation_message
 
         label = _validate_label(entity_type)
         props = json.loads(properties) if properties.strip() != "{}" else {}

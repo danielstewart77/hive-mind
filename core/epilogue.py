@@ -162,13 +162,13 @@ _TELEGRAM_MAX_LEN = 4000
 
 def _memory_store_direct(**kwargs: Any) -> str:
     """Lazy wrapper around memory_store_direct to avoid import-time connections."""
-    from tools.stateful.lucent_memory import memory_store_direct
+    from nervous_system.lucent_api.lucent_memory import memory_store_direct
     return memory_store_direct(**kwargs)
 
 
 def _graph_upsert_direct(**kwargs: Any) -> str:
     """Lazy wrapper around graph_upsert_direct to avoid import-time connections."""
-    from tools.stateful.lucent_graph import graph_upsert_direct
+    from nervous_system.lucent_api.lucent_graph import graph_upsert_direct
     return graph_upsert_direct(**kwargs)
 
 

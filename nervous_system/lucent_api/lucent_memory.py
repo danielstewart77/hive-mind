@@ -58,7 +58,7 @@ def _embed(text: str) -> list[float]:
 
 def _get_conn():
     """Lazy import to get the Lucent SQLite connection."""
-    from tools.stateful.lucent import _get_connection
+    from nervous_system.lucent_api.lucent import _get_connection
     return _get_connection()
 
 

@@ -48,15 +48,6 @@ class AutopilotGuards:
 
 
 @dataclass
-class ScheduledTask:
-    cron: str
-    prompt: str
-    voice: bool = True
-    notify: bool = True  # False = run for side effects only, no Telegram delivery
-    timezone: str = "America/Chicago"
-
-
-@dataclass
 class HiveMindConfig:
     # Gateway server
     server_port: int = 8420
@@ -90,9 +81,6 @@ class HiveMindConfig:
     # HITL (Human-in-the-Loop)
     hitl_internal_token: str = ""  # shared secret between gateway and bot
 
-    # Scheduled tasks
-    scheduled_tasks: list[ScheduledTask] = field(default_factory=list)
-
     @classmethod
     def from_yaml(cls) -> "HiveMindConfig":
         """Load config from config.yaml."""
@@ -118,16 +106,6 @@ class HiveMindConfig:
             telegram_allowed_users=_yaml_config.get("telegram_allowed_users", []),
             telegram_owner_chat_id=_yaml_config.get("telegram_owner_chat_id", 0),
             hitl_internal_token=_get_secret("HITL_INTERNAL_TOKEN"),
-            scheduled_tasks=[
-                ScheduledTask(
-                    cron=t["cron"],
-                    prompt=t["prompt"],
-                    voice=t.get("voice", True),
-                    notify=t.get("notify", True),
-                    timezone=t.get("timezone", "America/Chicago"),
-                )
-                for t in _yaml_config.get("scheduled_tasks", [])
-            ],
         )
 
 

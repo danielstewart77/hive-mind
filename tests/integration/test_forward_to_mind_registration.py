@@ -5,7 +5,7 @@ class TestForwardToMindRegistration:
     """Verify forward_to_mind is registered as an MCP tool."""
 
     def test_forward_to_mind_registered_in_mcp(self):
-        from tools.stateful.group_chat import GROUP_CHAT_TOOLS
+        from nervous_system.inter_mind_api.group_chat import GROUP_CHAT_TOOLS
 
         tool_names = [f.__name__ for f in GROUP_CHAT_TOOLS]
         assert "forward_to_mind" in tool_names

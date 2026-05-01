@@ -127,7 +127,7 @@ class TestGraphUpsertWithHITL:
     def test_hitl_approved(self):
         conn = _make_test_conn()
         import tools.stateful.lucent_graph as lg
-        from core.kg_guards import DisambiguationResult
+        from nervous_system.lucent_api.kg_guards import DisambiguationResult
 
         proceed = DisambiguationResult(action="proceed", existing_nodes=[], message="ok")
         with (
@@ -145,7 +145,7 @@ class TestGraphUpsertWithHITL:
     def test_hitl_denied(self):
         conn = _make_test_conn()
         import tools.stateful.lucent_graph as lg
-        from core.kg_guards import DisambiguationResult
+        from nervous_system.lucent_api.kg_guards import DisambiguationResult
 
         proceed = DisambiguationResult(action="proceed", existing_nodes=[], message="ok")
         with (
@@ -164,7 +164,7 @@ class TestGraphUpsertWithHITL:
     def test_disambiguation_required(self):
         conn = _make_test_conn()
         import tools.stateful.lucent_graph as lg
-        from core.kg_guards import DisambiguationResult
+        from nervous_system.lucent_api.kg_guards import DisambiguationResult
 
         disambig = DisambiguationResult(
             action="disambiguate",
