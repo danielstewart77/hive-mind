@@ -59,17 +59,19 @@ class TestThresholds:
 
 
 class TestCheckForResult:
+    def _mock_urlopen(self, payload):
+        """Build a urllib.request.urlopen replacement that returns `payload` JSON."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(payload).encode()
+        return MagicMock(return_value=mock_resp)
+
     def test_finds_callee_response(self):
         mod = _import_poll()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = [
+        payload = [
             {"from_mind": "ada", "to_mind": "nagatha", "status": "completed", "content": "request"},
             {"from_mind": "nagatha", "to_mind": "ada", "status": "completed", "content": "done"},
         ]
-        mock_resp.raise_for_status = MagicMock()
-
-        with patch("tools.stateless.poll_broker.poll_broker.requests") as mock_requests:
-            mock_requests.get.return_value = mock_resp
+        with patch("tools.stateless.poll_broker.poll_broker.urllib.request.urlopen", self._mock_urlopen(payload)):
             result = mod.check_for_result("http://localhost:8420", "conv-1", "nagatha")
 
         assert result is not None
@@ -77,29 +79,21 @@ class TestCheckForResult:
 
     def test_returns_none_when_no_response(self):
         mod = _import_poll()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = [
+        payload = [
             {"from_mind": "ada", "to_mind": "nagatha", "status": "completed", "content": "request"},
         ]
-        mock_resp.raise_for_status = MagicMock()
-
-        with patch("tools.stateless.poll_broker.poll_broker.requests") as mock_requests:
-            mock_requests.get.return_value = mock_resp
+        with patch("tools.stateless.poll_broker.poll_broker.urllib.request.urlopen", self._mock_urlopen(payload)):
             result = mod.check_for_result("http://localhost:8420", "conv-1", "nagatha")
 
         assert result is None
 
     def test_ignores_pending_callee_messages(self):
         mod = _import_poll()
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = [
+        payload = [
             {"from_mind": "ada", "to_mind": "nagatha", "status": "completed", "content": "request"},
             {"from_mind": "nagatha", "to_mind": "ada", "status": "pending", "content": "not ready"},
         ]
-        mock_resp.raise_for_status = MagicMock()
-
-        with patch("tools.stateless.poll_broker.poll_broker.requests") as mock_requests:
-            mock_requests.get.return_value = mock_resp
+        with patch("tools.stateless.poll_broker.poll_broker.urllib.request.urlopen", self._mock_urlopen(payload)):
             result = mod.check_for_result("http://localhost:8420", "conv-1", "nagatha")
 
         assert result is None

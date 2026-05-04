@@ -66,7 +66,7 @@ class TestDelegateToMindCyclePrevention:
             'data: {"type": "result", "result": "ok"}'
         ]
 
-        with patch("tools.stateful.inter_mind.requests") as mock_requests:
+        with patch("nervous_system.inter_mind_api.inter_mind.requests") as mock_requests:
             mock_requests.post.side_effect = [mock_create_resp, mock_msg_resp]
 
             # chain=None should not raise cycle error
@@ -95,7 +95,7 @@ class TestDelegateToMindResponse:
             'data: {"type": "result", "result": "Hello from delegate"}'
         ]
 
-        with patch("tools.stateful.inter_mind.requests") as mock_requests:
+        with patch("nervous_system.inter_mind_api.inter_mind.requests") as mock_requests:
             mock_requests.post.side_effect = [mock_create_resp, mock_msg_resp]
 
             result = delegate_to_mind(

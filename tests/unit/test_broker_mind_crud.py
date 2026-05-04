@@ -25,7 +25,7 @@ def broker_db(tmp_path):
 def _register(db, name="test", gateway_url="http://localhost:8420", model="sonnet", harness="claude_cli_claude"):
     """Helper to register a mind."""
     from core.broker import register_mind
-    _run(register_mind(db, name=name, gateway_url=gateway_url, model=model, harness=harness))
+    _run(register_mind(db, mind_id=name, gateway_url=gateway_url, model=model, harness=harness))
 
 
 class TestGetMind:
@@ -39,7 +39,7 @@ class TestGetMind:
 
         assert result is not None
         assert isinstance(result, dict)
-        assert result["name"] == "test"
+        assert result["mind_id"] == "test"
         assert result["gateway_url"] == "http://localhost:8420"
         assert result["model"] == "sonnet"
         assert result["harness"] == "claude_cli_claude"

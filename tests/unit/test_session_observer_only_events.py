@@ -15,6 +15,7 @@ async def test_send_message_publishes_observer_only_event_without_yielding_it():
     mgr._mind_ids = {}
     mgr._locks = {}
     mgr._registry = MagicMock()
+    mgr.mind_registry = None  # Phase 3: _resolve_short_name uses this
     mgr._observer_queues = {}
     mgr._publish_session_event = AsyncMock()
 

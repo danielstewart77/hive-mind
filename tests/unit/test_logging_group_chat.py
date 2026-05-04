@@ -31,8 +31,8 @@ class TestForwardToMindLogging:
         mock_sessions_resp, mock_create_resp, mock_msg_resp = _build_mock_requests()
 
         with (
-            patch("tools.stateful.group_chat.requests") as mock_requests,
-            patch("tools.stateful.group_chat.logger") as mock_logger,
+            patch("nervous_system.inter_mind_api.group_chat.requests") as mock_requests,
+            patch("nervous_system.inter_mind_api.group_chat.logger") as mock_logger,
         ):
             mock_requests.get.return_value = mock_sessions_resp
             mock_requests.post.side_effect = [mock_create_resp, mock_msg_resp]
@@ -69,8 +69,8 @@ class TestForwardToMindLogging:
         )
 
         with (
-            patch("tools.stateful.group_chat.requests") as mock_requests,
-            patch("tools.stateful.group_chat.logger") as mock_logger,
+            patch("nervous_system.inter_mind_api.group_chat.requests") as mock_requests,
+            patch("nervous_system.inter_mind_api.group_chat.logger") as mock_logger,
         ):
             mock_requests.get.return_value = mock_sessions_resp
             # Only message post, no create needed since session exists
@@ -96,8 +96,8 @@ class TestForwardToMindLogging:
         mock_sessions_resp, mock_create_resp, mock_msg_resp = _build_mock_requests()
 
         with (
-            patch("tools.stateful.group_chat.requests") as mock_requests,
-            patch("tools.stateful.group_chat.logger") as mock_logger,
+            patch("nervous_system.inter_mind_api.group_chat.requests") as mock_requests,
+            patch("nervous_system.inter_mind_api.group_chat.logger") as mock_logger,
         ):
             mock_requests.get.return_value = mock_sessions_resp
             mock_requests.post.side_effect = [mock_create_resp, mock_msg_resp]
@@ -144,8 +144,8 @@ class TestForwardToMindLogging:
         mock_sessions_resp, mock_create_resp, _ = _build_mock_requests()
 
         with (
-            patch("tools.stateful.group_chat.requests") as mock_requests,
-            patch("tools.stateful.group_chat.logger") as mock_logger,
+            patch("nervous_system.inter_mind_api.group_chat.requests") as mock_requests,
+            patch("nervous_system.inter_mind_api.group_chat.logger") as mock_logger,
         ):
             # Wire real exception classes so the except clause can match
             mock_requests.exceptions = real_exceptions

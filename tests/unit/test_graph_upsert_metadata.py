@@ -200,7 +200,7 @@ class TestGraphUpsertWithHITL:
             patch.object(kg_mod, "_hitl_gate", return_value=True),
             patch.object(kg_mod, "_get_driver", return_value=mock_driver),
             patch.object(kg_mod, "_kg_index_created", True),
-            patch("core.kg_guards.check_disambiguation", return_value=proceed_result),
+            patch("nervous_system.lucent_api.kg_guards.check_disambiguation", return_value=proceed_result),
         ):
             result_str = kg_mod.graph_upsert(
                 entity_type="Person",

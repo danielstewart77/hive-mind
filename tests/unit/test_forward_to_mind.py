@@ -45,7 +45,7 @@ class TestForwardToMindBehavior:
             'data: {"type": "result", "result": "Hello from Nagatha"}'
         ]
 
-        with patch("tools.stateful.group_chat.requests") as mock_requests:
+        with patch("nervous_system.inter_mind_api.group_chat.requests") as mock_requests:
             mock_requests.get.return_value = mock_sessions_resp
             mock_requests.post.side_effect = [mock_create_resp, mock_msg_resp]
 
@@ -75,7 +75,7 @@ class TestForwardToMindBehavior:
             'data: {"type": "result", "result": "response"}'
         ]
 
-        with patch("tools.stateful.group_chat.requests") as mock_requests:
+        with patch("nervous_system.inter_mind_api.group_chat.requests") as mock_requests:
             mock_requests.get.return_value = mock_sessions_resp
             mock_requests.post.side_effect = [mock_create_resp, mock_msg_resp]
 

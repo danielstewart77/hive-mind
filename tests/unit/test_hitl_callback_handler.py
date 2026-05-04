@@ -66,11 +66,12 @@ class TestHandleHitlCallback:
 
             await handle_hitl_callback(update, context)
 
-        # Check that POST was made
+        # POST goes to /hitl/{token}/respond with body {"action": "approve"|"deny"}
         call_args = mock_http.post.call_args
+        url = call_args[0][0]
         body = call_args[1].get("json") or call_args[0][1]
-        assert body["token"] == "abc123"
-        assert body["approved"] is True
+        assert "/hitl/abc123/respond" in url
+        assert body["action"] == "approve"
 
     async def test_handle_hitl_callback_deny_posts_to_gateway(self) -> None:
         """Denying should POST to /hitl/respond with approved=false."""
@@ -98,9 +99,10 @@ class TestHandleHitlCallback:
             await handle_hitl_callback(update, context)
 
         call_args = mock_http.post.call_args
+        url = call_args[0][0]
         body = call_args[1].get("json") or call_args[0][1]
-        assert body["token"] == "abc123"
-        assert body["approved"] is False
+        assert "/hitl/abc123/respond" in url
+        assert body["action"] == "deny"
 
     async def test_handle_hitl_callback_edits_message_on_approve(self) -> None:
         """After approval, the message should be edited to show Approved."""
@@ -183,9 +185,10 @@ class TestHandleHitlCallback:
 
             await handle_hitl_callback(update, context)
 
-        query.edit_message_reply_markup.assert_called_once()
-        call_kwargs = query.edit_message_reply_markup.call_args[1]
-        assert call_kwargs.get("reply_markup") is None
+        # The handler now removes the keyboard by calling edit_message_text
+        # with reply_markup=None on its first call (the "Processing…" frame).
+        first_call_kwargs = query.edit_message_text.call_args_list[0].kwargs
+        assert first_call_kwargs.get("reply_markup") is None
 
     async def test_handle_hitl_callback_answers_query(self) -> None:
         """query.answer() must be called to dismiss the loading spinner."""
@@ -241,10 +244,9 @@ class TestHandleHitlCallback:
 
         # Should answer the query
         query.answer.assert_called()
-        # Should edit message to show expired
-        query.edit_message_text.assert_called_once()
+        # Final edit shows the gateway's error status
         edit_text = query.edit_message_text.call_args[0][0]
-        assert "Expired" in edit_text
+        assert "404" in edit_text
 
     async def test_handle_hitl_callback_rejects_unauthorized_user(self) -> None:
         """Unauthorized user should get 'Not authorized' and no POST made."""
@@ -321,7 +323,7 @@ class TestHandleHitlCallback:
 
             await handle_hitl_callback(update, context)
 
-        # Keyboard should be removed on non-200 too
-        query.edit_message_reply_markup.assert_called_once()
-        call_kwargs = query.edit_message_reply_markup.call_args[1]
-        assert call_kwargs.get("reply_markup") is None
+        # Keyboard removed via edit_message_text(reply_markup=None) on the
+        # "Processing…" frame, before the gateway responds with 404.
+        first_call_kwargs = query.edit_message_text.call_args_list[0].kwargs
+        assert first_call_kwargs.get("reply_markup") is None

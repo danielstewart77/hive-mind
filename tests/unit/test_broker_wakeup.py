@@ -59,6 +59,9 @@ def _mock_session_mgr(response_text="I did the thing"):
 
     mgr.send_message = MagicMock(side_effect=fake_send)
     mgr.kill_session = AsyncMock()
+    # broker.py:348 takes the registry path only when mind_registry is truthy.
+    # The wakeup tests don't exercise registry lookups, so disable the path.
+    mgr.mind_registry = None
     return mgr
 
 
@@ -197,6 +200,7 @@ class TestWakeupAndCollect:
         mgr = AsyncMock()
         mgr.create_session = AsyncMock(side_effect=ValueError("mind not found"))
         mgr.kill_session = AsyncMock()
+        mgr.mind_registry = None
 
         _run(wakeup_and_collect(
             broker_db, mgr,
@@ -218,6 +222,7 @@ class TestWakeupAndCollect:
         mgr = AsyncMock()
         mgr.create_session = AsyncMock(return_value={"id": "sess-1"})
         mgr.kill_session = AsyncMock()
+        mgr.mind_registry = None
 
         async def failing_send(session_id, content, **kwargs):
             raise RuntimeError("subprocess crashed")
@@ -246,6 +251,7 @@ class TestWakeupAndCollect:
         mgr = AsyncMock()
         mgr.create_session = AsyncMock(return_value={"id": "sess-1"})
         mgr.kill_session = AsyncMock()
+        mgr.mind_registry = None
 
         async def empty_send(session_id, content, **kwargs):
             yield {"type": "result", "result": ""}
@@ -272,6 +278,7 @@ class TestWakeupAndCollect:
         mgr = AsyncMock()
         mgr.create_session = AsyncMock(return_value={"id": "sess-1"})
         mgr.kill_session = AsyncMock()
+        mgr.mind_registry = None
 
         async def hanging_send(session_id, content, **kwargs):
             await asyncio.sleep(999)
