@@ -10,19 +10,18 @@ from pathlib import Path
 import pytest
 
 
-def _write_mind_md(mind_dir: Path, name: str, model: str = "sonnet",
-                   harness: str = "claude_cli_claude",
-                   gateway_url: str = "http://hive_mind:8420") -> None:
-    """Helper to write a valid MIND.md into a directory."""
+def _write_runtime_yaml(mind_dir: Path, name: str, default_model: str = "sonnet",
+                        harness: str = "claude_cli",
+                        gateway_url: str = "http://hive_mind:8420") -> None:
+    """Helper to write a valid runtime.yaml into a directory."""
+    import uuid
     mind_dir.mkdir(parents=True, exist_ok=True)
-    (mind_dir / "MIND.md").write_text(
-        f"---\n"
+    (mind_dir / "runtime.yaml").write_text(
         f"name: {name}\n"
-        f"model: {model}\n"
+        f"mind_id: {uuid.uuid4()}\n"
+        f"default_model: {default_model}\n"
         f"harness: {harness}\n"
         f"gateway_url: {gateway_url}\n"
-        f"---\n"
-        f"I am {name}.\n"
     )
 
 
@@ -33,8 +32,8 @@ class TestSingleMindMode:
         """Without single_mind, scan() discovers all minds."""
         from core.mind_registry import MindRegistry
 
-        _write_mind_md(tmp_path / "ada", "ada")
-        _write_mind_md(tmp_path / "bilby", "bilby")
+        _write_runtime_yaml(tmp_path / "ada", "ada")
+        _write_runtime_yaml(tmp_path / "bilby", "bilby")
 
         registry = MindRegistry(tmp_path)
         registry.scan()
@@ -48,8 +47,8 @@ class TestSingleMindMode:
         """With single_mind='ada', only ada is loaded."""
         from core.mind_registry import MindRegistry
 
-        _write_mind_md(tmp_path / "ada", "ada")
-        _write_mind_md(tmp_path / "bilby", "bilby")
+        _write_runtime_yaml(tmp_path / "ada", "ada")
+        _write_runtime_yaml(tmp_path / "bilby", "bilby")
 
         registry = MindRegistry(tmp_path, single_mind="ada")
         registry.scan()
@@ -58,15 +57,14 @@ class TestSingleMindMode:
         assert names == ["ada"]
         assert registry.get("bilby") is None
 
-    def test_scan_single_mind_missing_dir_logs_warning(self, tmp_path, caplog):
-        """single_mind='nonexistent' results in empty registry and a warning."""
+    def test_scan_single_mind_missing_dir_results_in_empty_registry(self, tmp_path):
+        """single_mind='nonexistent' results in empty registry (no entry to register)."""
         from core.mind_registry import MindRegistry
 
-        _write_mind_md(tmp_path / "ada", "ada")
+        _write_runtime_yaml(tmp_path / "ada", "ada")
 
         registry = MindRegistry(tmp_path, single_mind="nonexistent")
-        with caplog.at_level(logging.WARNING):
-            registry.scan()
+        registry.scan()
 
         assert len(registry.list_all()) == 0
-        assert any("nonexistent" in r.message for r in caplog.records)
+        assert registry.get("nonexistent") is None

@@ -43,7 +43,7 @@ class TestPostBrokerMinds:
         })
         assert response.status_code == 200
         data = response.json()
-        assert data["name"] == "test"
+        assert data["mind_id"] == "test"
         assert data["gateway_url"] == "http://localhost:8420"
         assert data["model"] == "sonnet"
         assert data["harness"] == "claude_cli_claude"
@@ -70,7 +70,7 @@ class TestPostBrokerMinds:
         # Verify GET reflects updated model
         r3 = broker_client.get("/broker/minds")
         minds = r3.json()
-        test_mind = [m for m in minds if m["name"] == "test"]
+        test_mind = [m for m in minds if m["mind_id"] == "test"]
         assert len(test_mind) == 1
         assert test_mind[0]["model"] == "opus"
 
@@ -115,7 +115,7 @@ class TestPutBrokerMinds:
         response = broker_client.put("/broker/minds/test", json={})
         assert response.status_code == 200
         data = response.json()
-        assert data["name"] == "test"
+        assert data["mind_id"] == "test"
 
 
 class TestDeleteBrokerMinds:
@@ -139,8 +139,8 @@ class TestDeleteBrokerMinds:
 
         # Verify GET confirms absent
         r = broker_client.get("/broker/minds")
-        names = [m["name"] for m in r.json()]
-        assert "test" not in names
+        ids = [m["mind_id"] for m in r.json()]
+        assert "test" not in ids
 
     def test_delete_broker_minds_not_found(self, broker_client):
         response = broker_client.delete("/broker/minds/nonexistent")

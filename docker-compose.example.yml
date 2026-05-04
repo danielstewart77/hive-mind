@@ -1,3 +1,11 @@
+# ─────────────────────────────────────────────────────────────
+# Per-mind container fragments live in minds/<name>/container/compose.yaml.
+# Each fragment is a complete Compose document with a single `services:` entry.
+# Add one `- path:` line per mind below to wire it into the deployment.
+# ─────────────────────────────────────────────────────────────
+include:
+  - path: minds/example/container/compose.yaml
+
 services:
   # ─────────────────────────────────────────────────────────────
   # Gateway server — every client routes through this.
@@ -139,33 +147,10 @@ services:
       - MIND_ID=example
     command: ["/opt/venv/bin/python3", "-m", "clients.discord_bot"]
 
-# BEGIN GENERATED MINDS
-  # Example mind container. The /generate-compose skill replicates and
-  # parameterizes this block for each registered mind based on its MIND.md.
-  example:
-    build: .
-    container_name: hive-mind-example
-    working_dir: /usr/src/app
-    environment:
-      - MIND_ID=example
-      - CLAUDE_CONFIG_DIR=/home/hivemind/.claude-config
-      - PYTHON_KEYRING_BACKEND=core.keyring_backend.HiveMindKeyring
-      - PYTHONNOUSERSITE=1
-      - PYTHONPATH=/usr/src/app/vendor
-      - KEY_RING=/usr/src/app/data/keyring
-    volumes:
-      - ${HOST_PROJECT_DIR:-.}:/usr/src/app:rw
-      - ${HOST_CLAUDE_DIR:-~/.claude}:/home/hivemind/.host-claude:ro
-      - ${HOST_PROJECT_DIR:-.}/minds/example/.claude:/home/hivemind/.claude-config:rw
-    restart: unless-stopped
-    depends_on:
-      - server
-    networks:
-      - hivemind
-    tmpfs:
-      - /tmp
-    command: ["/opt/venv/bin/python3", "mind_server.py"]
-# END GENERATED MINDS
+# Per-mind service definitions are pulled in via the `include:` block at the top of
+# this file. See minds/example/container/compose.yaml for a fragment template.
+# The /generate-compose skill scaffolds new fragments; wire each one into `include:`
+# explicitly when you add it.
 
 networks:
   hivemind:

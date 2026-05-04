@@ -152,6 +152,8 @@ docker-compose.yml
 # Our minds are our own
 minds/*
 !minds/.gitkeep
+!minds/example/
+!minds/example/**
 
 # Our art is our own
 img/*

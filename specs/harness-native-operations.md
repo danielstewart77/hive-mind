@@ -14,7 +14,7 @@ The Claude Code harness is a composable runtime environment, not just a code edi
 | **Read** | Read files (text, images, PDFs, notebooks). Supports offset/limit for large files, page ranges for PDFs. |
 | **Write** | Create or overwrite files. |
 | **Edit** | Targeted string replacement in files. Supports `replace_all` for bulk renames. |
-| **Glob** | Find files by pattern (e.g. `**/*.md`, `minds/*/MIND.md`). |
+| **Glob** | Find files by pattern (e.g. `**/*.md`, `minds/*/runtime.yaml`). |
 | **Grep** | Regex search across files. Output modes: content, file paths, counts. Context lines, type filtering. |
 | **NotebookEdit** | Modify Jupyter notebook cells. |
 
@@ -114,7 +114,7 @@ Write code **only** when the task requires something the harness fundamentally c
 | Don't code this... | The harness does it with... |
 |---|---|
 | "List all registered minds" | `curl GET /broker/minds \| jq` or a skill |
-| "Create a MIND.md file" | Read template + Write tool |
+| "Create a runtime.yaml file" | Read template + Write tool |
 | "Register a mind with the broker" | `curl POST /broker/minds -d '{...}'` |
 | "Check if a service is healthy" | `curl GET /health` or `docker ps` |
 | "Parse YAML and extract a field" | `yq '.field' file.yaml` |

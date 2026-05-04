@@ -1,0 +1,24 @@
+services:
+  example:
+    build: .
+    container_name: hive-mind-example
+    working_dir: /usr/src/app
+    environment:
+      - MIND_ID=example
+      - CLAUDE_CONFIG_DIR=/home/hivemind/.claude-config
+      - PYTHON_KEYRING_BACKEND=core.keyring_backend.HiveMindKeyring
+      - PYTHONNOUSERSITE=1
+      - PYTHONPATH=/usr/src/app/vendor
+      - KEY_RING=/usr/src/app/data/keyring
+    volumes:
+      - ${HOST_PROJECT_DIR:-.}:/usr/src/app:rw
+      - ${HOST_CLAUDE_DIR:-~/.claude}:/home/hivemind/.host-claude:ro
+      - ${HOST_PROJECT_DIR:-.}/minds/example/.claude:/home/hivemind/.claude-config:rw
+    restart: unless-stopped
+    depends_on:
+      - server
+    networks:
+      - hivemind
+    tmpfs:
+      - /tmp
+    command: ["/opt/venv/bin/python3", "-m", "minds.example.implementation"]
