@@ -445,21 +445,6 @@ async def list_models():
 
 
 # ---------------------------------------------------------------------------
-# Memory Expiry
-# ---------------------------------------------------------------------------
-@app.post("/memory/expiry-sweep")
-async def memory_expiry_sweep(x_hitl_internal: str = Header(None)):
-    """Trigger memory expiry sweep for expired timed-event entries."""
-    if not config.hitl_internal_token:
-        return JSONResponse({"error": "HITL not configured"}, status_code=500)
-    if x_hitl_internal != config.hitl_internal_token:
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    from core.memory_expiry import sweep_expired_events
-    results = await asyncio.to_thread(sweep_expired_events)
-    return results
-
-
-# ---------------------------------------------------------------------------
 # Epilogue Sweep
 # ---------------------------------------------------------------------------
 @app.post("/epilogue/sweep")
@@ -1124,38 +1109,13 @@ async def hitl_respond(
 
 @app.get("/graph/data")
 async def graph_data(limit: int = 400):
-    """Export Lucent knowledge graph nodes and edges for external visualization."""
-    import sqlite3 as _sqlite3
-    db_path = PROJECT_DIR / "data" / "lucent.db"
+    """Proxy to the shared hive_nervous_system /graph/data endpoint."""
+    from core.lucent_client import graph_data as _graph_data, LucentClientError
     try:
-        conn = _sqlite3.connect(str(db_path))
-        conn.row_factory = _sqlite3.Row
-        node_rows = conn.execute(
-            "SELECT id, name, type, properties FROM nodes ORDER BY id LIMIT ?", (limit,)
-        ).fetchall()
-        nodes = []
-        for r in node_rows:
-            props = json.loads(r["properties"]) if r["properties"] else {}
-            nodes.append({
-                "id": r["id"],
-                "label": r["name"],
-                "type": r["type"],
-                **{k: v for k, v in props.items() if k not in ("id", "label", "type")},
-            })
-        node_ids = {r["id"] for r in node_rows}
-        edge_rows = conn.execute(
-            "SELECT source_id, target_id, type FROM edges"
-        ).fetchall()
-        edges = [
-            {"source": r["source_id"], "target": r["target_id"], "type": r["type"]}
-            for r in edge_rows
-            if r["source_id"] in node_ids and r["target_id"] in node_ids
-        ]
-        conn.close()
-        return {"nodes": nodes, "edges": edges}
-    except Exception:
-        log.exception("/graph/data: failed to query lucent.db")
-        return JSONResponse({"nodes": [], "edges": [], "error": "graph unavailable"}, status_code=500)
+        return await asyncio.to_thread(_graph_data, limit)
+    except LucentClientError as exc:
+        log.exception("/graph/data: shared lucent service unavailable: %s", exc)
+        return JSONResponse({"nodes": [], "edges": [], "error": "graph unavailable"}, status_code=502)
 
 
 # ---------------------------------------------------------------------------

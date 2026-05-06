@@ -115,6 +115,35 @@ services:
       - TELEGRAM_BOT_TOKEN_KEYRING_KEY=EXAMPLE_TELEGRAM_BOT_TOKEN
     command: ["/opt/venv/bin/python3", "-m", "clients.telegram_bot"]
 
+  bilby-bot:
+    build: .
+    container_name: hive-mind-bilby-bot
+    working_dir: /usr/src/app
+    volumes:
+      - ${HOST_PROJECT_DIR:-.}:/usr/src/app
+    restart: unless-stopped
+    depends_on:
+      - server
+      - voice-server
+    networks:
+      - hivemind
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      - HIVE_MIND_SERVER_URL=http://server:8420
+      - VOICE_SERVER_URL=http://voice-server:8422
+      - PYTHON_KEYRING_BACKEND=core.keyring_backend.HiveMindKeyring
+      - PYTHONNOUSERSITE=1
+      - KEY_RING=/usr/src/app/data/keyring
+      - MIND_ID=bilby
+      - TELEGRAM_BOT_TOKEN_KEYRING_KEY=BILBY_TELEGRAM_BOT_TOKEN
+    command: ["/opt/venv/bin/python3", "-m", "clients.telegram_bot"]
+
   # ─────────────────────────────────────────────────────────────
   # Example Discord bot.
   # ─────────────────────────────────────────────────────────────

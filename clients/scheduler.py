@@ -222,25 +222,6 @@ async def fire_skill(skill: ScheduledSkill) -> None:
         asyncio.create_task(_try_send_voice(bot_token, chat_id, response, label))
 
 
-async def _memory_expiry_sweep() -> None:
-    """Call the gateway's memory expiry sweep endpoint to process expired timed-events."""
-    log.info("Running memory expiry sweep")
-    try:
-        timeout = aiohttp.ClientTimeout(total=120)
-        headers = {"X-HITL-Internal": config.hitl_internal_token or ""}
-        async with aiohttp.ClientSession(timeout=timeout) as http:
-            async with http.post(f"{SERVER_URL}/memory/expiry-sweep", headers=headers) as resp:
-                data = await resp.json()
-                log.info(
-                    "Memory expiry sweep: deleted=%d, prompted=%d, errors=%d",
-                    data.get("deleted", 0),
-                    data.get("prompted", 0),
-                    data.get("errors", 0),
-                )
-    except Exception:
-        log.exception("Memory expiry sweep failed")
-
-
 async def _epilogue_sweep() -> None:
     """Call the gateway's epilogue sweep endpoint to process completed sessions."""
     log.info("Running epilogue sweep")
@@ -336,10 +317,6 @@ async def main() -> None:
             "No scheduled skills found under %s — scheduler will only run sweep jobs",
             MINDS_ROOT,
         )
-
-    memory_expiry_trigger = CronTrigger(hour="3", minute="30", timezone="America/Chicago")
-    scheduler.add_job(_memory_expiry_sweep, memory_expiry_trigger, id="memory-expiry-sweep")
-    log.info("Scheduled memory expiry sweep @ 30 3 * * *")
 
     epilogue_trigger = CronTrigger(minute="*/15", timezone="America/Chicago")
     scheduler.add_job(_epilogue_sweep, epilogue_trigger, id="epilogue-sweep")

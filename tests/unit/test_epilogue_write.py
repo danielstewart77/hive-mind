@@ -1,6 +1,5 @@
 """Unit tests for auto_write_digest function."""
 
-import json
 from unittest.mock import patch
 
 from core.epilogue import (
@@ -29,7 +28,7 @@ class TestAutoWriteDigest:
     @patch("core.epilogue._graph_upsert_direct")
     @patch("core.epilogue._memory_store_direct")
     def test_calls_memory_store_for_each_memory(self, mock_mem, mock_graph) -> None:
-        mock_mem.return_value = json.dumps({"ok": True})
+        mock_mem.return_value = {"id": 1}
         digest = _make_digest(memories=[
             {"content": "M1", "data_class": "observation", "tags": "t1", "source": "user"},
             {"content": "M2", "data_class": "observation", "tags": "t2", "source": "user"},
@@ -41,7 +40,7 @@ class TestAutoWriteDigest:
     @patch("core.epilogue._graph_upsert_direct")
     @patch("core.epilogue._memory_store_direct")
     def test_calls_graph_upsert_for_each_entity(self, mock_mem, mock_graph) -> None:
-        mock_graph.return_value = json.dumps({"ok": True})
+        mock_graph.return_value = {"upserted": True, "id": 1}
         digest = _make_digest(entities=[
             {"entity_type": "Person", "name": "Alice", "data_class": "contact", "properties": "{}", "agent_id": "ada"},
             {"entity_type": "Project", "name": "Hive Mind", "data_class": "project", "properties": "{}", "agent_id": "ada"},
@@ -52,8 +51,8 @@ class TestAutoWriteDigest:
     @patch("core.epilogue._graph_upsert_direct")
     @patch("core.epilogue._memory_store_direct")
     def test_returns_counts(self, mock_mem, mock_graph) -> None:
-        mock_mem.return_value = json.dumps({"ok": True})
-        mock_graph.return_value = json.dumps({"ok": True})
+        mock_mem.return_value = {"id": 1}
+        mock_graph.return_value = {"upserted": True, "id": 1}
         digest = _make_digest(
             memories=[{"content": "M1", "data_class": "obs", "tags": "", "source": "user"}],
             entities=[{"entity_type": "Person", "name": "A", "data_class": "c", "properties": "{}", "agent_id": "ada"}],
@@ -66,9 +65,9 @@ class TestAutoWriteDigest:
     @patch("core.epilogue._memory_store_direct")
     def test_handles_partial_failure(self, mock_mem, mock_graph) -> None:
         mock_mem.side_effect = [
-            json.dumps({"ok": True}),
-            json.dumps({"error": "write failed"}),
-            json.dumps({"ok": True}),
+            {"id": 1},
+            {"stored": False, "error": "write failed"},
+            {"id": 2},
         ]
         digest = _make_digest(memories=[
             {"content": "M1", "data_class": "obs", "tags": "", "source": "user"},

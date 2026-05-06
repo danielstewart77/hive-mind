@@ -330,7 +330,7 @@ class SessionManager:
         # Graph is authoritative for soul; runtime.yaml has no soul field
         soul_file = None
 
-        await self._spawn(session_id, model, autopilot=False, surface_prompt=surface_prompt, allowed_directories=allowed_directories, soul_file=soul_file, mind_id=mind_id, is_group_session=(owner_type == "group"))
+        await self._spawn(session_id, model, autopilot=False, surface_prompt=surface_prompt, allowed_directories=allowed_directories, soul_file=soul_file, mind_id=mind_id, is_group_session=(owner_type == "group"), owner_type=owner_type)
         log.info("Created session %s (model=%s, mind=%s, owner=%s)", session_id, model, mind_id, owner_ref)
         return await self._session_dict(session_id)
 
@@ -828,6 +828,7 @@ class SessionManager:
         soul_file: Path | None = None,
         mind_id: str = "ada",
         is_group_session: bool = False,
+        owner_type: str | None = None,
     ) -> Any:
         mind_url = self._mind_url(mind_id)
         prompt_files: list[str] = []
@@ -847,6 +848,7 @@ class SessionManager:
                     "surface_prompt": surface_prompt,
                     "allowed_directories": allowed_directories,
                     "prompt_files": prompt_files,
+                    "owner_type": owner_type,
                 },
                 timeout=aiohttp.ClientTimeout(total=10),
             )

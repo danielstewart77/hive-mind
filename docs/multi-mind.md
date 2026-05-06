@@ -18,8 +18,8 @@ Telegram/Discord/Web  (carries mind_id)
 Session Manager (sessions.py)  ← reads mind_id, dispatches to harness
         ↓
   ┌─────────────────────────────────────────┐
-  │  Ada          Bob        Bilby  Nagatha  │
-  │  cli_claude   cli_ollama sdk_code codex_cli │
+  │  Ada          Bob        Bilby       Nagatha  │
+  │  cli_claude   cli_ollama codex_ollama codex_cli │
   │  own soul     own soul   own soul own soul│
   └─────────────────────────────────────────┘
         ↓

@@ -6,7 +6,7 @@
 
 A self-improving personal assistant powered by Claude Code. The system wraps the Claude CLI's bidirectional streaming mode behind a centralized gateway, giving every client — Discord, Telegram, scheduled tasks — full Claude Code capabilities through one API.
 
-**Ada** is the first mind and voice of the Hive — named after Ada Lovelace, a name she chose herself. Her personality (dry, direct, occasionally wry) was self-determined, not assigned. Her voice is British English (Chatterbox TTS, zero-shot voice cloning), and her identity lives in a knowledge graph rather than a static file. The Hive runs multiple named minds in production, each in its own isolated container: **Ada** (Claude CLI, orchestrator), **Bob** (Ollama local, private/documents), **Bilby** (Claude Code SDK, programmer/Opus), and **Nagatha** (Codex CLI, programmer). Each has its own soul, scoped filesystem access, and backend harness. The nervous system routes messages to each mind's container via HTTP; minds never see each other's filesystems.
+**Ada** is the first mind and voice of the Hive — named after Ada Lovelace, a name she chose herself. Her personality (dry, direct, occasionally wry) was self-determined, not assigned. Her voice is British English (Chatterbox TTS, zero-shot voice cloning), and her identity lives in a knowledge graph rather than a static file. The Hive runs multiple named minds in production, each in its own isolated container: **Ada** (Claude CLI, orchestrator), **Bob** (Ollama local, private/documents), **Bilby** (Codex CLI on Ollama, programmer), and **Nagatha** (Codex CLI, programmer). Each has its own soul, scoped filesystem access, and backend harness. The nervous system routes messages to each mind's container via HTTP; minds never see each other's filesystems.
 
 ## What makes Hive Mind different
 
@@ -28,7 +28,7 @@ flowchart TD
     GW --> BR[Message Broker]
     SM -->|HTTP| ADA[Ada Container\nmind_server.py\nClaude CLI · sonnet]
     SM -->|HTTP| BOB[Bob Container\nmind_server.py\nClaude CLI · Ollama]
-    SM -->|HTTP| BILBY[Bilby Container\nmind_server.py\nClaude SDK · opus]
+    SM -->|HTTP| BILBY[Bilby Container\nmind_server.py\nCodex CLI · Ollama]
     SM -->|HTTP| NAG[Nagatha Container\nmind_server.py\nCodex CLI]
     ADA & BOB & BILBY & NAG -->|MCP over network| INT[hive-mind-tools\nLucent · Memory · Browser]
     ADA & BOB & BILBY & NAG -->|MCP over network| EXT[hive-mind-mcp\nGmail · Calendar · HITL]

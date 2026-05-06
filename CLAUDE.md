@@ -6,6 +6,8 @@ This file provides guidance to Claude Code when working with this repository.
 
 **Hive Mind** is a self-improving personal assistant powered by Claude Code. The system uses a **centralized gateway server** that wraps the Claude CLI's bidirectional stream-json mode, giving every client (Discord, terminal, web) full CLI capabilities through one API.
 
+The vector store and knowledge graph (lucent) live in a separate, shared **`hive_nervous_system`** container at `~/Storage/Dev/hive_nervous_system/`. Hive_mind code reaches it over HTTP+bearer via `core/lucent_client.py`. The in-repo `lucent-api` service was retired in F13 of the memory-system migration.
+
 ### Architecture
 
 ```
@@ -85,20 +87,16 @@ hive_mind/
 │   ├── audit.py                  # MCP tool invocation audit logging (JSON + rotation)
 │   ├── dep_scan.py               # pip-audit wrapper for dependency vulnerability scanning
 │   ├── epilogue.py               # Session epilogue processor (post-session memory extraction)
-│   ├── kg_guards.py              # Knowledge graph write guards (disambiguation + orphan)
-│   ├── memory_expiry.py          # Timed-event expiry sweep for Lucent
+│   ├── lucent_client.py          # HTTP+bearer client for the shared hive_nervous_system container
 │   ├── memory_schema.py          # Memory data class registry and validation
 │   ├── notify_utils.py           # Shared Telegram notification utility
 │   ├── path_validation.py        # CWE-22 path traversal protection for skill agents
 │   └── story_pipeline.py         # Post-merge story pipeline (pull, health check, cleanup)
 │
 ├── tools/
-│   ├── stateful/                  # MCP tools (registered in mcp_server.py)
+│   ├── stateful/                  # MCP tools
 │   │   ├── browser.py            # Async Playwright browser automation
-│   │   ├── knowledge_graph.py    # Lucent knowledge graph
-│   │   ├── memory.py             # Lucent vector memory store
-│   │   ├── group_chat.py         # Group session message forwarding between minds
-│   │   └── inter_mind.py         # Direct mind-to-mind delegation
+│   │   └── memory.py             # Vector memory store (legacy — being migrated to shared container)
 │   │
 │   └── stateless/                 # Standalone scripts (invoked via skills)
 │       ├── crypto/crypto.py      # CoinGecko crypto prices
@@ -128,7 +126,7 @@ hive_mind/
 ├── minds/                         # Per-mind backend implementations
 │   ├── cli_harness.py            # Shared CLI harness (Ada + Bob)
 │   ├── ada/implementation.py     # Ada: cli_claude (Claude CLI)
-│   ├── bilby/implementation.py   # Bilby: sdk_code (Claude Code SDK, agentic)
+│   ├── bilby/implementation.py   # Bilby: codex_cli on Ollama
 │   ├── bob/implementation.py     # Bob: cli_ollama (Ollama via CLI harness)
 │   └── nagatha/implementation.py # Nagatha: codex_cli (Codex CLI, one subprocess per turn)
 │
@@ -143,7 +141,7 @@ hive_mind/
 │   └── ollama_tools.py           # Direct Ollama API client
 │
 ├── vendor/                        # Vendored dependencies
-│   └── claude_code_sdk/          # Vendored Claude Code SDK (used by Bilby)
+│   └── claude_code_sdk/          # Vendored Claude Code SDK (legacy/template support)
 │
 ├── plans/                         # Forward-looking plans and proposals (not yet implemented)
 │

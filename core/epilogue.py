@@ -157,18 +157,16 @@ _TELEGRAM_MAX_LEN = 4000
 
 
 # ---------------------------------------------------------------------------
-# Write helpers — lazy imports to avoid import-time side effects
+# Write helpers — HTTP calls to the shared hive_nervous_system container
 # ---------------------------------------------------------------------------
 
-def _memory_store_direct(**kwargs: Any) -> str:
-    """Lazy wrapper around memory_store_direct to avoid import-time connections."""
-    from nervous_system.lucent_api.lucent_memory import memory_store_direct
-    return memory_store_direct(**kwargs)
+def _memory_store_direct(**kwargs: Any) -> dict:
+    from core.lucent_client import memory_store
+    return memory_store(**kwargs)
 
 
-def _graph_upsert_direct(**kwargs: Any) -> str:
-    """Lazy wrapper around graph_upsert_direct to avoid import-time connections."""
-    from nervous_system.lucent_api.lucent_graph import graph_upsert_direct
+def _graph_upsert_direct(**kwargs: Any) -> dict:
+    from core.lucent_client import graph_upsert_direct
     return graph_upsert_direct(**kwargs)
 
 
@@ -203,16 +201,20 @@ def auto_write_digest(digest: EpilogueDigest) -> dict:
     errors = 0
 
     for mem in digest.memories:
+        agent_id = mem.get("agent_id")
+        if not agent_id:
+            logger.error("Skipping memory with missing agent_id: %s", mem.get("content", "")[:80])
+            errors += 1
+            continue
         try:
-            result_str = _memory_store_direct(
+            result = _memory_store_direct(
                 content=mem.get("content", ""),
                 data_class=mem.get("data_class", "observation"),
                 tags=mem.get("tags", ""),
                 source=mem.get("source", "self"),
-                agent_id=mem.get("agent_id", "ada"),
+                agent_id=agent_id,
             )
-            result = json.loads(result_str)
-            if "error" in result:
+            if "error" in result or result.get("stored") is False:
                 errors += 1
             else:
                 memories_written += 1
@@ -221,8 +223,13 @@ def auto_write_digest(digest: EpilogueDigest) -> dict:
             errors += 1
 
     for ent in digest.entities:
+        agent_id = ent.get("agent_id")
+        if not agent_id:
+            logger.error("Skipping entity with missing agent_id: %s", ent.get("name", "")[:80])
+            errors += 1
+            continue
         try:
-            result_str = _graph_upsert_direct(
+            result = _graph_upsert_direct(
                 entity_type=ent.get("entity_type", "Concept"),
                 name=ent.get("name", ""),
                 data_class=ent.get("data_class", ""),
@@ -230,10 +237,9 @@ def auto_write_digest(digest: EpilogueDigest) -> dict:
                 relation=ent.get("relation", ""),
                 target_name=ent.get("target_name", ""),
                 target_type=ent.get("target_type", ""),
-                agent_id=ent.get("agent_id", "ada"),
+                agent_id=agent_id,
                 source=ent.get("source", "self"),
             )
-            result = json.loads(result_str)
             if "error" in result:
                 errors += 1
             else:

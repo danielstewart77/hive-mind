@@ -1,8 +1,7 @@
 """Shared notification utilities for core modules.
 
 Extracts _telegram_direct from agents/notify.py so that core/ modules
-(kg_guards, memory_expiry) can send Telegram messages without importing
-from agents/.
+(kg_guards) can send Telegram messages without importing from agents/.
 """
 
 import logging
