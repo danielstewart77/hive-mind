@@ -56,11 +56,14 @@ Human-readable guides, background, and reference material — organized by topic
 | Folder | Description |
 |--------|-------------|
 | [docs/ada/](docs/ada/) | Ada's identity, personality, voice, and visual design |
-| [docs/architecture/](docs/architecture/) | Gateway, API, external MCP server, and tool reference |
+| [docs/architecture/](docs/architecture/) | Gateway, API, external MCP, mind/body/nervous-system tiers |
 | [docs/setup/](docs/setup/) | Configuration, providers, and secrets |
-| [docs/memory/](docs/memory/) | Memory lifecycle and storage strategy |
+| [docs/memory/](docs/memory/) | Memory architecture (lucent now lives in [hive_nervous_system](https://github.com/danielstewart77/hive_nervous_system)) |
 | [docs/security/](docs/security/) | Security model, hardening, and open tradeoffs |
+| [docs/architecture/nervous-system.md](docs/architecture/nervous-system.md) | Lucent (vector store + KG) — consumer-side overview, links to the standalone [hive_nervous_system](https://github.com/danielstewart77/hive_nervous_system) repo |
+| [docs/architecture/mind-folder-contract.md](docs/architecture/mind-folder-contract.md) | The "drop a folder, the hive picks it up" contract: layout, env, per-harness hook registration |
 | [docs/architecture/mind-body-nervous-system.md](docs/architecture/mind-body-nervous-system.md) | The mind / body / nervous system organism model — privilege tiers, auth boundaries, design decisions |
+| [docs/standalone-mind.md](docs/standalone-mind.md) | Bare-metal systemd deployment pattern (reference: [hive_mind_skippy](https://github.com/danielstewart77/hive_mind_skippy)) |
 | [docs/multi-mind-architecture.md](docs/multi-mind-architecture.md) | Multi-mind system architecture — container isolation, secrets, gateway security |
 | [docs/mind-to-mind-communication.md](docs/mind-to-mind-communication.md) | Inter-mind async messaging via the broker |
 | [docs/mind-claude-folder.md](docs/mind-claude-folder.md) | Per-mind `.claude` folder convention and Docker wiring |
@@ -86,22 +89,15 @@ Agent-facing specifications. Read by skills and subagents at runtime.
 
 ### Data Classes (`specs/data-classes/`)
 
-Memory classification specs used by the memory pipeline.
+Four-class memory taxonomy loaded at runtime by the capture hook (`auto_remember.sh`). Each spec carries the description, action, anchor fields, and pruning strategy. Adding a new class = writing a new spec; no code change.
 
 | File | Description |
 |------|-------------|
-| [specs/data-classes/index.md](specs/data-classes/index.md) | Data class index — loaded by classify-memory |
-| [specs/data-classes/ada-identity.md](specs/data-classes/ada-identity.md) | Ada identity and character |
-| [specs/data-classes/ephemeral.md](specs/data-classes/ephemeral.md) | Short-lived, session-scoped information |
-| [specs/data-classes/future-project.md](specs/data-classes/future-project.md) | Future project ideas and proposals |
-| [specs/data-classes/intention.md](specs/data-classes/intention.md) | Stated plans and intentions |
-| [specs/data-classes/news-digest.md](specs/data-classes/news-digest.md) | Curated news summaries |
-| [specs/data-classes/news-event.md](specs/data-classes/news-event.md) | Individual news events |
-| [specs/data-classes/person.md](specs/data-classes/person.md) | People in Daniel's life and network |
-| [specs/data-classes/preference.md](specs/data-classes/preference.md) | Daniel's preferences and settings |
-| [specs/data-classes/project-task.md](specs/data-classes/project-task.md) | Project tasks and work items |
-| [specs/data-classes/technical-config.md](specs/data-classes/technical-config.md) | Technical configuration and setup details |
-| [specs/data-classes/timed-event.md](specs/data-classes/timed-event.md) | Calendar events and scheduled occurrences |
+| [specs/data-classes/index.md](specs/data-classes/index.md) | Class index — loaded by the classifier |
+| [specs/data-classes/ephemeral.md](specs/data-classes/ephemeral.md) | Discard fall-through (no-op pruner) |
+| [specs/data-classes/current-state.md](specs/data-classes/current-state.md) | Things that are true right now (anchor priority: codebase_ref → expires_at → kg_entity → decay) |
+| [specs/data-classes/future-state.md](specs/data-classes/future-state.md) | Plans / intentions (Ollama shipped-check + 90d decay) |
+| [specs/data-classes/feedback.md](specs/data-classes/feedback.md) | Behavioral guidance to the mind (decay only; standing tier exempt) |
 
 ### Skills
 
