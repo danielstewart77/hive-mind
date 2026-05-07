@@ -554,7 +554,11 @@ class SessionManager:
                         async with http.post(
                             f"{mind_url}/sessions/{session_id}/message",
                             json={"content": stamped_content, "images": images},
-                            timeout=aiohttp.ClientTimeout(total=600),
+                            # Long Claude/Codex turns (heavy thinking + tool use) can exceed
+                            # 10 min. Cap on no-data-received instead of total elapsed so we
+                            # don't truncate legitimate long turns (which the bot then sees
+                            # as ClientPayloadError / TransferEncodingError mid-stream).
+                            timeout=aiohttp.ClientTimeout(total=None, sock_read=600),
                         ) as resp:
                             if resp.status == 404:
                                 # Session doesn't exist on mind container — respawn
