@@ -113,6 +113,10 @@ class TestGroupSessionApi:
             )
 
             assert response.status_code == 200
-            mock_mgr.get_or_create_group_child_session.assert_called_once_with(
-                "group-msg-1", "ada"
-            )
+            # The handler now passes a surface_prompt for the moderator. The test
+            # only cares that it called the public child-session helper with the
+            # right session and moderator mind, so don't constrain the kwargs.
+            mock_mgr.get_or_create_group_child_session.assert_called_once()
+            args, kwargs = mock_mgr.get_or_create_group_child_session.call_args
+            assert args[0] == "group-msg-1"
+            assert args[1] == "ada"

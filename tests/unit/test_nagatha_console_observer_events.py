@@ -43,8 +43,8 @@ class _FakeProcess:
 async def test_nagatha_send_emits_observer_only_codex_events():
     from minds.nagatha import implementation as nagatha_impl
 
-    nagatha_impl._sessions.clear()
-    nagatha_impl._sessions["sess-1"] = {
+    nagatha_impl.SESSIONS.clear()
+    nagatha_impl.SESSIONS["sess-1"] = {
         "system_prompt": "system",
         "thread_id": None,
     }
@@ -61,7 +61,7 @@ async def test_nagatha_send_emits_observer_only_codex_events():
     ]
 
     with patch("minds.nagatha.implementation.asyncio.create_subprocess_exec", return_value=_FakeProcess(lines)):
-        events = [event async for event in nagatha_impl.send("sess-1", "hello")]
+        events = [event async for event in nagatha_impl._run_codex_turn("sess-1", "hello", None)]
 
     codex_events = [event for event in events if event["type"] == "codex_event"]
     assert len(codex_events) == 3
@@ -77,4 +77,4 @@ async def test_nagatha_send_emits_observer_only_codex_events():
     assert events[-1]["type"] == "result"
     assert events[-1]["session_id"] == "thread-123"
 
-    nagatha_impl._sessions.clear()
+    nagatha_impl.SESSIONS.clear()

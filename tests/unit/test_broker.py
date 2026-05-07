@@ -325,16 +325,16 @@ class TestMindsTable:
 
         _run(register_mind(
             broker_db,
-            name="ada",
+            mind_id="ada",
             gateway_url="http://hive_mind:8420",
             model="sonnet",
             harness="claude_cli_claude",
         ))
 
-        row = _run(broker_db.execute("SELECT * FROM minds WHERE name = ?", ("ada",)))
+        row = _run(broker_db.execute("SELECT * FROM minds WHERE mind_id = ?", ("ada",)))
         result = _run(row.fetchone())
         assert result is not None
-        assert result["name"] == "ada"
+        assert result["mind_id"] == "ada"
         assert result["gateway_url"] == "http://hive_mind:8420"
         assert result["model"] == "sonnet"
         assert result["harness"] == "claude_cli_claude"
@@ -346,14 +346,14 @@ class TestMindsTable:
 
         _run(register_mind(
             broker_db,
-            name="ada",
+            mind_id="ada",
             gateway_url="http://hive_mind:8420",
             model="sonnet",
             harness="claude_cli_claude",
         ))
 
         # Read original timestamps
-        row = _run(broker_db.execute("SELECT registered_at, last_seen FROM minds WHERE name = ?", ("ada",)))
+        row = _run(broker_db.execute("SELECT registered_at, last_seen FROM minds WHERE mind_id = ?", ("ada",)))
         first = _run(row.fetchone())
         original_registered_at = first["registered_at"]
 
@@ -362,13 +362,13 @@ class TestMindsTable:
         time.sleep(0.01)  # ensure time difference
         _run(register_mind(
             broker_db,
-            name="ada",
+            mind_id="ada",
             gateway_url="http://hive_mind:8420",
             model="sonnet",
             harness="claude_cli_claude",
         ))
 
-        row = _run(broker_db.execute("SELECT registered_at, last_seen FROM minds WHERE name = ?", ("ada",)))
+        row = _run(broker_db.execute("SELECT registered_at, last_seen FROM minds WHERE mind_id = ?", ("ada",)))
         second = _run(row.fetchone())
         assert second["registered_at"] == original_registered_at  # unchanged
         assert second["last_seen"] >= first["last_seen"]  # updated
@@ -376,16 +376,16 @@ class TestMindsTable:
     def test_get_registered_minds_returns_all(self, broker_db):
         from core.broker import register_mind, get_registered_minds
 
-        _run(register_mind(broker_db, name="ada", gateway_url="http://hive_mind:8420",
+        _run(register_mind(broker_db, mind_id="ada", gateway_url="http://hive_mind:8420",
                            model="sonnet", harness="claude_cli_claude"))
-        _run(register_mind(broker_db, name="bob", gateway_url="http://hive_mind:8420",
+        _run(register_mind(broker_db, mind_id="bob", gateway_url="http://hive_mind:8420",
                            model="gpt-oss:20b-32k", harness="claude_cli_ollama"))
 
         minds = _run(get_registered_minds(broker_db))
         assert len(minds) == 2
-        names = [m["name"] for m in minds]
-        assert "ada" in names
-        assert "bob" in names
+        ids = [m["mind_id"] for m in minds]
+        assert "ada" in ids
+        assert "bob" in ids
 
     def test_get_registered_minds_empty_table(self, broker_db):
         from core.broker import get_registered_minds

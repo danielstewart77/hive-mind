@@ -15,6 +15,7 @@ async def test_send_message_publishes_user_event_to_observers_before_result():
     mgr._mind_ids = {}
     mgr._locks = {}
     mgr._registry = MagicMock()
+    mgr.mind_registry = None  # Phase 3: _resolve_short_name uses this
     mgr._observer_queues = {}
     mgr._publish_session_event = AsyncMock()
 

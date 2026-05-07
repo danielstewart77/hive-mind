@@ -31,13 +31,13 @@ class TestForwardToMindLogging:
         mock_sessions_resp, mock_create_resp, mock_msg_resp = _build_mock_requests()
 
         with (
-            patch("tools.stateful.group_chat.requests") as mock_requests,
-            patch("tools.stateful.group_chat.logger") as mock_logger,
+            patch("nervous_system.inter_mind_api.group_chat.requests") as mock_requests,
+            patch("nervous_system.inter_mind_api.group_chat.logger") as mock_logger,
         ):
             mock_requests.get.return_value = mock_sessions_resp
             mock_requests.post.side_effect = [mock_create_resp, mock_msg_resp]
 
-            from tools.stateful.group_chat import forward_to_mind
+            from nervous_system.inter_mind_api.group_chat import forward_to_mind
             forward_to_mind(
                 mind_id="nagatha",
                 message="Hello",
@@ -69,14 +69,14 @@ class TestForwardToMindLogging:
         )
 
         with (
-            patch("tools.stateful.group_chat.requests") as mock_requests,
-            patch("tools.stateful.group_chat.logger") as mock_logger,
+            patch("nervous_system.inter_mind_api.group_chat.requests") as mock_requests,
+            patch("nervous_system.inter_mind_api.group_chat.logger") as mock_logger,
         ):
             mock_requests.get.return_value = mock_sessions_resp
             # Only message post, no create needed since session exists
             mock_requests.post.return_value = mock_msg_resp
 
-            from tools.stateful.group_chat import forward_to_mind
+            from nervous_system.inter_mind_api.group_chat import forward_to_mind
             forward_to_mind(
                 mind_id="nagatha",
                 message="Hello",
@@ -96,13 +96,13 @@ class TestForwardToMindLogging:
         mock_sessions_resp, mock_create_resp, mock_msg_resp = _build_mock_requests()
 
         with (
-            patch("tools.stateful.group_chat.requests") as mock_requests,
-            patch("tools.stateful.group_chat.logger") as mock_logger,
+            patch("nervous_system.inter_mind_api.group_chat.requests") as mock_requests,
+            patch("nervous_system.inter_mind_api.group_chat.logger") as mock_logger,
         ):
             mock_requests.get.return_value = mock_sessions_resp
             mock_requests.post.side_effect = [mock_create_resp, mock_msg_resp]
 
-            from tools.stateful.group_chat import forward_to_mind
+            from nervous_system.inter_mind_api.group_chat import forward_to_mind
             forward_to_mind(
                 mind_id="nagatha",
                 message="Hello",
@@ -144,8 +144,8 @@ class TestForwardToMindLogging:
         mock_sessions_resp, mock_create_resp, _ = _build_mock_requests()
 
         with (
-            patch("tools.stateful.group_chat.requests") as mock_requests,
-            patch("tools.stateful.group_chat.logger") as mock_logger,
+            patch("nervous_system.inter_mind_api.group_chat.requests") as mock_requests,
+            patch("nervous_system.inter_mind_api.group_chat.logger") as mock_logger,
         ):
             # Wire real exception classes so the except clause can match
             mock_requests.exceptions = real_exceptions
@@ -156,7 +156,7 @@ class TestForwardToMindLogging:
                 ReadTimeout("Timed out"),
             ]
 
-            from tools.stateful.group_chat import forward_to_mind
+            from nervous_system.inter_mind_api.group_chat import forward_to_mind
             result = forward_to_mind(
                 mind_id="bob",
                 message="Hello",

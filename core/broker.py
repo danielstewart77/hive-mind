@@ -45,7 +45,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation
 CREATE INDEX IF NOT EXISTS idx_messages_status ON messages(status);
 
 CREATE TABLE IF NOT EXISTS minds (
-    name           TEXT PRIMARY KEY,
+    mind_id        TEXT PRIMARY KEY,
     gateway_url    TEXT NOT NULL,
     model          TEXT NOT NULL,
     harness        TEXT NOT NULL,
@@ -54,10 +54,10 @@ CREATE TABLE IF NOT EXISTS minds (
 );
 
 CREATE TABLE IF NOT EXISTS secret_scopes (
-    mind_name   TEXT NOT NULL,
+    mind_id     TEXT NOT NULL,
     secret_key  TEXT NOT NULL,
     granted_at  REAL NOT NULL,
-    PRIMARY KEY (mind_name, secret_key)
+    PRIMARY KEY (mind_id, secret_key)
 );
 """
 
@@ -366,14 +366,25 @@ async def wakeup_and_collect(
             timeout=backstop,
         )
 
-        # 4. Write response as new message
+        # 4. Write response as new message — store canonical UUIDs in
+        # from_mind / to_mind so the persisted record matches the rest of the
+        # post-Phase-3 schema. Falls back to the short name if no mapping.
+        from_uuid = to_mind
+        to_uuid = from_mind
+        if hasattr(session_mgr, "mind_registry") and session_mgr.mind_registry:
+            info_to = session_mgr.mind_registry.get(to_mind)
+            if info_to is not None:
+                from_uuid = info_to.mind_id
+            info_from = session_mgr.mind_registry.get(from_mind)
+            if info_from is not None:
+                to_uuid = info_from.mind_id
         next_num = await get_next_message_number(db, conversation_id)
         await insert_message(
             db,
             message_id=str(uuid.uuid4()),
             conversation_id=conversation_id,
-            from_mind=to_mind,
-            to_mind=from_mind,
+            from_mind=from_uuid,
+            to_mind=to_uuid,
             message_number=next_num,
             content=response_text,
             rolling_summary="",
@@ -414,56 +425,57 @@ async def wakeup_and_collect(
 async def register_mind(
     db: aiosqlite.Connection,
     *,
-    name: str,
+    mind_id: str,
     gateway_url: str,
     model: str,
     harness: str,
 ) -> None:
     """Register (or update) a mind in the broker database.
 
-    If the mind already exists, updates gateway_url/model/harness/last_seen
-    but preserves registered_at.
+    ``mind_id`` is the canonical UUID (post-Phase-3). If the mind already
+    exists, updates gateway_url/model/harness/last_seen but preserves
+    registered_at.
     """
     now = time.time()
     row = await db.execute(
-        "SELECT registered_at FROM minds WHERE name = ?", (name,)
+        "SELECT registered_at FROM minds WHERE mind_id = ?", (mind_id,)
     )
     existing = await row.fetchone()
 
     if existing:
         await db.execute(
-            "UPDATE minds SET gateway_url=?, model=?, harness=?, last_seen=? WHERE name=?",
-            (gateway_url, model, harness, now, name),
+            "UPDATE minds SET gateway_url=?, model=?, harness=?, last_seen=? WHERE mind_id=?",
+            (gateway_url, model, harness, now, mind_id),
         )
     else:
         await db.execute(
-            "INSERT INTO minds (name, gateway_url, model, harness, registered_at, last_seen) "
+            "INSERT INTO minds (mind_id, gateway_url, model, harness, registered_at, last_seen) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            (name, gateway_url, model, harness, now, now),
+            (mind_id, gateway_url, model, harness, now, now),
         )
     await db.commit()
 
 
 async def get_registered_minds(db: aiosqlite.Connection) -> list[dict]:
     """Return all registered minds as a list of dicts."""
-    rows = await db.execute("SELECT * FROM minds ORDER BY name")
+    rows = await db.execute("SELECT * FROM minds ORDER BY mind_id")
     return [dict(r) for r in await rows.fetchall()]
 
 
-async def get_mind(db: aiosqlite.Connection, name: str) -> dict | None:
-    """Get a single mind by name. Returns dict or None if not found."""
-    row = await db.execute("SELECT * FROM minds WHERE name = ?", (name,))
+async def get_mind(db: aiosqlite.Connection, mind_id: str) -> dict | None:
+    """Get a single mind by its canonical UUID. Returns dict or None."""
+    row = await db.execute("SELECT * FROM minds WHERE mind_id = ?", (mind_id,))
     result = await row.fetchone()
     return dict(result) if result else None
 
 
-async def update_mind(db: aiosqlite.Connection, name: str, **fields) -> dict | None:
+async def update_mind(db: aiosqlite.Connection, mind_id: str, **fields) -> dict | None:
     """Partially update a mind's fields. Always updates last_seen.
 
     Allowed fields: gateway_url, model, harness.
     Returns updated dict or None if mind not found.
     """
-    existing = await get_mind(db, name)
+    existing = await get_mind(db, mind_id)
     if existing is None:
         return None
 
@@ -472,18 +484,18 @@ async def update_mind(db: aiosqlite.Connection, name: str, **fields) -> dict | N
     updates["last_seen"] = time.time()
 
     set_clause = ", ".join(f"{k} = ?" for k in updates)
-    params = list(updates.values()) + [name]
+    params = list(updates.values()) + [mind_id]
     await db.execute(
-        f"UPDATE minds SET {set_clause} WHERE name = ?",
+        f"UPDATE minds SET {set_clause} WHERE mind_id = ?",
         params,
     )
     await db.commit()
-    return await get_mind(db, name)
+    return await get_mind(db, mind_id)
 
 
-async def delete_mind(db: aiosqlite.Connection, name: str) -> bool:
-    """Delete a mind by name. Returns True if deleted, False if not found."""
-    cursor = await db.execute("DELETE FROM minds WHERE name = ?", (name,))
+async def delete_mind(db: aiosqlite.Connection, mind_id: str) -> bool:
+    """Delete a mind by its canonical UUID. Returns True if deleted."""
+    cursor = await db.execute("DELETE FROM minds WHERE mind_id = ?", (mind_id,))
     await db.commit()
     return cursor.rowcount > 0
 
@@ -492,45 +504,48 @@ async def delete_mind(db: aiosqlite.Connection, name: str) -> bool:
 # Secret scoping policy
 # ---------------------------------------------------------------------------
 async def grant_secret_scope(
-    db: aiosqlite.Connection, mind_name: str, secret_key: str
+    db: aiosqlite.Connection, mind_id: str, secret_key: str
 ) -> None:
-    """Grant a mind access to a secret key. Idempotent (INSERT OR IGNORE)."""
+    """Grant a mind access to a secret key. Idempotent (INSERT OR IGNORE).
+
+    ``mind_id`` is the canonical UUID; callers must translate from short name.
+    """
     await db.execute(
-        "INSERT OR IGNORE INTO secret_scopes (mind_name, secret_key, granted_at) "
+        "INSERT OR IGNORE INTO secret_scopes (mind_id, secret_key, granted_at) "
         "VALUES (?, ?, ?)",
-        (mind_name, secret_key, time.time()),
+        (mind_id, secret_key, time.time()),
     )
     await db.commit()
 
 
 async def revoke_secret_scope(
-    db: aiosqlite.Connection, mind_name: str, secret_key: str
+    db: aiosqlite.Connection, mind_id: str, secret_key: str
 ) -> None:
     """Revoke a mind's access to a secret key."""
     await db.execute(
-        "DELETE FROM secret_scopes WHERE mind_name = ? AND secret_key = ?",
-        (mind_name, secret_key),
+        "DELETE FROM secret_scopes WHERE mind_id = ? AND secret_key = ?",
+        (mind_id, secret_key),
     )
     await db.commit()
 
 
 async def get_secret_scopes(
-    db: aiosqlite.Connection, mind_name: str
+    db: aiosqlite.Connection, mind_id: str
 ) -> list[str]:
     """Return all secret keys a mind is allowed to access."""
     rows = await db.execute(
-        "SELECT secret_key FROM secret_scopes WHERE mind_name = ? ORDER BY secret_key",
-        (mind_name,),
+        "SELECT secret_key FROM secret_scopes WHERE mind_id = ? ORDER BY secret_key",
+        (mind_id,),
     )
     return [row["secret_key"] for row in await rows.fetchall()]
 
 
 async def check_secret_scope(
-    db: aiosqlite.Connection, mind_name: str, secret_key: str
+    db: aiosqlite.Connection, mind_id: str, secret_key: str
 ) -> bool:
     """Check if a mind is allowed to access a specific secret key."""
     row = await db.execute(
-        "SELECT 1 FROM secret_scopes WHERE mind_name = ? AND secret_key = ?",
-        (mind_name, secret_key),
+        "SELECT 1 FROM secret_scopes WHERE mind_id = ? AND secret_key = ?",
+        (mind_id, secret_key),
     )
     return await row.fetchone() is not None

@@ -122,22 +122,18 @@ class TestShutdownKillsRc:
 
             await mgr.start()
 
-            # Register main processes so _kill_process is called during shutdown,
-            # which in turn calls kill_rc_process for each session.
-            main_proc_1 = _make_mock_rc_proc()
-            main_proc_2 = _make_mock_rc_proc()
-            mgr._procs["sess-1"] = main_proc_1
-            mgr._procs["sess-2"] = main_proc_2
+            # Register main "process" entries — under the new architecture
+            # these are dicts holding a per-mind container URL. Use one with
+            # no _mind_url so _kill_process short-circuits before any HTTP.
+            mgr._procs["sess-1"] = {"_mind_url": ""}
+            mgr._procs["sess-2"] = {"_mind_url": ""}
             mgr._mind_ids["sess-1"] = "ada"
             mgr._mind_ids["sess-2"] = "ada"
 
             mgr._rc_procs["sess-1"] = rc_proc_1
             mgr._rc_procs["sess-2"] = rc_proc_2
 
-            mock_impl = MagicMock()
-            del mock_impl.kill  # Simulate no kill method so _kill_process skips it
-            with patch("core.sessions._load_implementation", return_value=mock_impl):
-                await mgr.shutdown()
+            await mgr.shutdown()
 
             # Both RC processes should have been killed via _kill_process -> kill_rc_process
             rc_proc_1.send_signal.assert_called_with(signal.SIGTERM)

@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "hive-mind-tools": {
-      "command": "/path/to/your/venv/bin/python",
-      "args": ["/path/to/hive_mind/mcp_server.py"]
-    }
-  }
-}

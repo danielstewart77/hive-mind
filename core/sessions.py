@@ -6,14 +6,12 @@ Each session maps to one claude -p subprocess in stream-json mode.
 """
 
 import asyncio
-import importlib
 import json
 import logging
 import os
 import re
 import signal
 import time
-import types
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -28,6 +26,54 @@ from core.models import ModelRegistry
 _TRANSCRIPT_DIR = Path.home() / ".claude" / "projects" / "-usr-src-app"
 
 log = logging.getLogger("hive-mind.sessions")
+
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def _name_to_uuid(short_name: str) -> str | None:
+    """Translate a mind short name to its canonical UUID.
+
+    Reads minds/<short_name>/runtime.yaml directly so it does not depend on the
+    in-process registry singleton (which may not be reachable from this module).
+    Returns the UUID string, or None if the runtime.yaml is missing/invalid.
+    If ``short_name`` is already a UUID, returns it unchanged.
+    """
+    if _UUID_RE.match(short_name):
+        return short_name
+    import yaml  # local import — only used at the lucent boundary
+    rt = PROJECT_DIR / "minds" / short_name / "runtime.yaml"
+    if not rt.exists():
+        return None
+    try:
+        data = yaml.safe_load(rt.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return None
+    mid = data.get("mind_id")
+    return mid if isinstance(mid, str) else None
+
+
+async def _migrate_mind_id_to_uuid(con, name_to_uuid: dict[str, str]) -> None:
+    """One-time conversion of sessions.mind_id from short name to UUID.
+
+    Idempotent: if the value is already a UUID, skip. If it's a short name
+    that's in name_to_uuid, rewrite. If it's a short name we don't know
+    about (e.g. 'skippy' from a different deployment), leave it.
+
+    Operates on an aiosqlite.Connection (matches SessionManager._db).
+    """
+    for table, col in [("sessions", "mind_id"), ("group_sessions", "moderator_mind_id")]:
+        cur = await con.execute(f"SELECT DISTINCT {col} FROM {table}")
+        rows = await cur.fetchall()
+        for row in rows:
+            val = row[0]
+            if val is None or _UUID_RE.match(val):
+                continue
+            if val in name_to_uuid:
+                await con.execute(
+                    f"UPDATE {table} SET {col} = ? WHERE {col} = ?",
+                    (name_to_uuid[val], val),
+                )
+    await con.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -52,7 +98,12 @@ async def _drain_stderr(proc: Any, session_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _fetch_memories_sync(query: str, mind_id: str = "ada") -> str | None:
-    """Retrieve relevant memories for context seeding. Non-fatal."""
+    """Retrieve relevant memories for context seeding. Non-fatal.
+
+    ``mind_id`` is the operational short name (e.g. ``"ada"``); lucent stores
+    UUIDs in ``agent_id`` after the Phase 3 migration, so we translate at the
+    boundary via the runtime.yaml mapping.
+    """
     try:
         import json
         import sys
@@ -60,7 +111,8 @@ def _fetch_memories_sync(query: str, mind_id: str = "ada") -> str | None:
         if agents_path not in sys.path:
             sys.path.insert(0, agents_path)
         from memory import memory_retrieve  # noqa: PLC0415
-        data = json.loads(memory_retrieve(query=query, k=5, agent_id=mind_id))
+        agent_uuid = _name_to_uuid(mind_id) or mind_id
+        data = json.loads(memory_retrieve(query=query, k=5, agent_id=agent_uuid))
         memories = data.get("memories", [])
         if not memories:
             return None
@@ -74,113 +126,6 @@ def _fetch_memories_sync(query: str, mind_id: str = "ada") -> str | None:
 
 
 
-
-
-_MCP_CONTAINER = PROJECT_DIR / ".mcp.container.json"
-MCP_CONFIG = str(_MCP_CONTAINER if _MCP_CONTAINER.exists() else PROJECT_DIR / ".mcp.json")
-_SPECS_DIR = PROJECT_DIR / "specs"
-
-# Friendly names for known project paths granted via --allowedDirectory
-# Populated from env vars — no hardcoded host paths
-_PROJECT_DIR_NAMES: dict[str, str] = {}
-if os.environ.get("HOST_MCP_DIR"):
-    _PROJECT_DIR_NAMES[os.environ["HOST_MCP_DIR"]] = "Hivemind MCP"
-if os.environ.get("HOST_SPARK_DIR"):
-    _PROJECT_DIR_NAMES[os.environ["HOST_SPARK_DIR"]] = "Spark to Bloom"
-
-
-def _fetch_soul_sync(mind_id: str = "ada") -> str | None:
-    """Load a mind's soul/identity from the knowledge graph. Returns formatted block or None."""
-    import sys as _sys
-    tools_path = str(PROJECT_DIR / "tools" / "stateful")
-    if tools_path not in _sys.path:
-        _sys.path.insert(0, tools_path)
-    try:
-        from lucent_graph import graph_query  # noqa: PLC0415
-    except ImportError:
-        log.error("_fetch_soul_sync: could not import lucent_graph from %s", tools_path)
-        return None
-    try:
-        mind_name = mind_id.capitalize()
-        result = json.loads(graph_query(entity_name=mind_name, agent_id=mind_id, depth=1))
-        if not result.get("found"):
-            log.debug("_fetch_soul_sync: no graph node found for mind_id=%r", mind_id)
-            return None
-        soul_values = result.get("matches", [{}])[0].get("properties", {}).get("soul_values", [])
-        if not soul_values:
-            log.warning("_fetch_soul_sync: node found for %r but soul_values is empty", mind_id)
-            return None
-        return "\n".join(["<soul>"] + list(soul_values) + ["</soul>"])
-    except Exception:
-        log.exception("_fetch_soul_sync: unexpected error loading soul for mind_id=%r", mind_id)
-        return None
-
-
-def _build_base_prompt(
-    allowed_directories: list[str] | None = None,
-    soul_file: Path | None = None,
-    mind_id: str = "ada",
-    prompt_files: list[str] | None = None,
-) -> str:
-    """Build the base system prompt with current date/time and soul loaded from the graph."""
-    from zoneinfo import ZoneInfo
-    from core.mind_registry import parse_mind_file
-    from core.prompt_profiles import build_prompt
-
-    now = datetime.now(ZoneInfo("America/Chicago"))
-    date_str = now.strftime("%A, %B %-d, %Y at %-I:%M %p %Z")
-
-    mind_name = mind_id.capitalize()
-    mind_dir = PROJECT_DIR / "minds" / mind_id
-    if prompt_files is None:
-        info = parse_mind_file(mind_dir / "MIND.md")
-        prompt_files = info.prompt_files
-
-    soul = _fetch_soul_sync(mind_id=mind_id)
-    if soul:
-        identity_block = f"{soul}\n\n"
-        soul_instruction = (
-            "Your soul is loaded above from the knowledge graph. When something meaningfully "
-            f"shapes your identity, update it via graph_upsert on the {mind_name} node (soul_values field). "
-            "Keep it extremely short — it is a soul, not a manifesto. Prune ruthlessly.\n\n"
-        )
-    else:
-        # Graph unavailable — degrade gracefully, do not fall back to soul files
-        identity_block = ""
-        soul_instruction = ""
-
-    return build_prompt(
-        date_str=date_str,
-        mind_name=mind_name,
-        identity_block=identity_block,
-        soul_instruction=soul_instruction,
-        allowed_directories=allowed_directories,
-        mind_dir=mind_dir,
-        prompt_files=prompt_files,
-    )
-
-# ---------------------------------------------------------------------------
-# Dynamic mind implementation loading
-# ---------------------------------------------------------------------------
-_implementation_cache: dict[str, types.ModuleType] = {}
-
-
-def _load_implementation(mind_id: str) -> types.ModuleType:
-    """Load the implementation module for a given mind.
-
-    Falls back to Ada's implementation if the requested mind has no module.
-    """
-    if mind_id in _implementation_cache:
-        return _implementation_cache[mind_id]
-    try:
-        mod = importlib.import_module(f"minds.{mind_id}.implementation")
-        _implementation_cache[mind_id] = mod
-        return mod
-    except (ImportError, ModuleNotFoundError):
-        log.warning("No implementation for mind %s, falling back to ada", mind_id)
-        if "ada" not in _implementation_cache:
-            _implementation_cache["ada"] = importlib.import_module("minds.ada.implementation")
-        return _implementation_cache["ada"]
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +213,15 @@ class SessionManager:
             await self._db.commit()
         except Exception:
             pass  # Column already exists
+        # Migration: rewrite short-name mind identifiers to UUIDs (idempotent).
+        # Builds the mapping directly from minds/<name>/runtime.yaml so it does
+        # not depend on the registry having been wired up yet.
+        try:
+            name_to_uuid = self._load_mind_id_mapping()
+            if name_to_uuid:
+                await _migrate_mind_id_to_uuid(self._db, name_to_uuid)
+        except Exception:
+            log.exception("mind_id UUID migration failed")
         # Mark any previously "running" sessions as idle (stale from crash)
         await self._db.execute(
             "UPDATE sessions SET status = 'idle' WHERE status = 'running'"
@@ -276,6 +230,33 @@ class SessionManager:
         self._reaper_task = asyncio.create_task(self._idle_reaper())
         self._guard_task = asyncio.create_task(self._autopilot_guard())
         log.info("Session manager started (db=%s)", db_path)
+
+    def _load_mind_id_mapping(self) -> dict[str, str]:
+        """Read each minds/<name>/runtime.yaml and build a {short_name: mind_id} dict.
+
+        Returns an empty dict if the directory or yaml is unavailable.
+        """
+        import yaml  # local import — only needed at startup
+        minds_dir = PROJECT_DIR / "minds"
+        mapping: dict[str, str] = {}
+        if not minds_dir.exists():
+            return mapping
+        for sub in minds_dir.iterdir():
+            if not sub.is_dir():
+                continue
+            rt = sub / "runtime.yaml"
+            if not rt.exists():
+                continue
+            try:
+                data = yaml.safe_load(rt.read_text(encoding="utf-8")) or {}
+            except Exception:
+                log.warning("failed to parse %s during mind_id mapping load", rt)
+                continue
+            name = data.get("name")
+            mid = data.get("mind_id")
+            if isinstance(name, str) and isinstance(mid, str):
+                mapping[name] = mid
+        return mapping
 
     async def shutdown(self):
         """Kill all subprocesses and close DB."""
@@ -305,15 +286,39 @@ class SessionManager:
         allowed_directories: list[str] | None = None,
         mind_id: str = "ada",
     ) -> dict:
-        """Create a new session, spawn process, return session info."""
-        model = model or config.default_model
+        """Create a new session, spawn process, return session info.
+
+        ``mind_id`` is the operational short name. We persist the canonical
+        UUID (Phase 3) when the registry knows the mind; otherwise the value
+        is stored as-is (e.g. for a 'skippy' deployment where we have no
+        runtime.yaml locally).
+        """
+        if model is None:
+            if self.mind_registry is None:
+                raise ValueError(
+                    "create_session called without explicit model and registry is unavailable"
+                )
+            mind_info = self.mind_registry.get(mind_id)
+            if mind_info is None:
+                raise ValueError(
+                    f"Unknown mind_id {mind_id!r}: no entry in registry "
+                    f"(missing or invalid minds/{mind_id}/runtime.yaml?)"
+                )
+            model = mind_info.model
         session_id = str(uuid.uuid4())
         now = time.time()
+
+        # Persist canonical UUID when available
+        persist_mind_id = mind_id
+        if self.mind_registry is not None:
+            info = self.mind_registry.get(mind_id)
+            if info is not None:
+                persist_mind_id = info.mind_id
 
         await self._db.execute(
             """INSERT INTO sessions (id, owner_type, owner_ref, model, created_at, last_active, status, mind_id)
                VALUES (?, ?, ?, ?, ?, ?, 'running', ?)""",
-            (session_id, owner_type, owner_ref, model, now, now, mind_id),
+            (session_id, owner_type, owner_ref, model, now, now, persist_mind_id),
         )
         await self._db.execute(
             """INSERT OR REPLACE INTO active_sessions (client_type, client_ref, session_id)
@@ -322,10 +327,10 @@ class SessionManager:
         )
         await self._db.commit()
 
-        # Graph is authoritative; MIND.md soul_seed is one-time bootstrap only
+        # Graph is authoritative for soul; runtime.yaml has no soul field
         soul_file = None
 
-        await self._spawn(session_id, model, autopilot=False, surface_prompt=surface_prompt, allowed_directories=allowed_directories, soul_file=soul_file, mind_id=mind_id, is_group_session=(owner_type == "group"))
+        await self._spawn(session_id, model, autopilot=False, surface_prompt=surface_prompt, allowed_directories=allowed_directories, soul_file=soul_file, mind_id=mind_id, is_group_session=(owner_type == "group"), owner_type=owner_type)
         log.info("Created session %s (model=%s, mind=%s, owner=%s)", session_id, model, mind_id, owner_ref)
         return await self._session_dict(session_id)
 
@@ -447,7 +452,7 @@ class SessionManager:
                 session["model"],
                 autopilot=bool(session["autopilot"]),
                 resume_sid=session["claude_sid"],
-                mind_id=session.get("mind_id", "ada"),
+                mind_id=self._resolve_short_name(session.get("mind_id") or "ada"),
             )
             await self._db.execute(
                 "UPDATE sessions SET status = 'running' WHERE id = ?", (session_id,)
@@ -467,7 +472,7 @@ class SessionManager:
             if not session:
                 raise ValueError(f"Session not found: {session_id}")
 
-            mind_id = session.get("mind_id", "ada")
+            mind_id = self._resolve_short_name(session.get("mind_id") or "ada")
             log.info("send_message: start session=%s mind=%s", session_id, mind_id)
             t0 = time.monotonic()
 
@@ -658,7 +663,7 @@ class SessionManager:
             model,
             autopilot=bool(session["autopilot"]),
             resume_sid=session["claude_sid"],
-            mind_id=session.get("mind_id", "ada"),
+            mind_id=self._resolve_short_name(session.get("mind_id") or "ada"),
         )
 
         result = await self._session_dict(session_id)
@@ -690,7 +695,7 @@ class SessionManager:
             session["model"],
             autopilot=bool(new_autopilot),
             resume_sid=session["claude_sid"],
-            mind_id=session.get("mind_id", "ada"),
+            mind_id=self._resolve_short_name(session.get("mind_id") or "ada"),
         )
         return await self._session_dict(session_id)
 
@@ -784,10 +789,30 @@ class SessionManager:
     # ------------------------------------------------------------------
     # Subprocess management
     # ------------------------------------------------------------------
+    def _resolve_short_name(self, mind_identifier: str) -> str:
+        """Translate a stored mind identifier (UUID or short name) into a
+        short name suitable for routing.
+
+        After Phase 3, sessions.mind_id stores UUIDs; everything operational
+        in this codebase still keys off short names (folder, env var, registry
+        key, container DNS). This helper bridges the two — if the caller hands
+        us a UUID we look up the matching MindInfo and return its name.
+        Unknown identifiers (e.g. a deployment-foreign 'skippy' row) pass
+        through unchanged.
+        """
+        if self.mind_registry is None:
+            return mind_identifier
+        if _UUID_RE.match(mind_identifier):
+            info = self.mind_registry.lookup_by_id(mind_identifier)
+            if info is not None:
+                return info.name
+        return mind_identifier
+
     def _mind_url(self, mind_id: str) -> str:
         """Return the mind's gateway_url from the registry."""
         if self.mind_registry:
-            info = self.mind_registry.get(mind_id)
+            short = self._resolve_short_name(mind_id)
+            info = self.mind_registry.get(short)
             if info:
                 return info.gateway_url
         raise ValueError(f"Mind '{mind_id}' not found in registry")
@@ -803,6 +828,7 @@ class SessionManager:
         soul_file: Path | None = None,
         mind_id: str = "ada",
         is_group_session: bool = False,
+        owner_type: str | None = None,
     ) -> Any:
         mind_url = self._mind_url(mind_id)
         prompt_files: list[str] = []
@@ -822,6 +848,7 @@ class SessionManager:
                     "surface_prompt": surface_prompt,
                     "allowed_directories": allowed_directories,
                     "prompt_files": prompt_files,
+                    "owner_type": owner_type,
                 },
                 timeout=aiohttp.ClientTimeout(total=10),
             )
@@ -896,7 +923,7 @@ class SessionManager:
         if not claude_sid:
             raise ValueError(f"Session {session_id} has no claude_sid — cannot start Remote Control")
 
-        mind_id = row.get("mind_id", "ada")
+        mind_id = self._resolve_short_name(row.get("mind_id") or "ada")
         mind_name = mind_id.capitalize()
 
         cmd = [
@@ -995,9 +1022,15 @@ class SessionManager:
         assert self._db is not None
         group_id = str(uuid.uuid4())
         now = time.time()
+        # Persist canonical UUID for the moderator
+        persist_moderator = moderator_mind_id
+        if self.mind_registry is not None:
+            info = self.mind_registry.get(moderator_mind_id)
+            if info is not None:
+                persist_moderator = info.mind_id
         await self._db.execute(
             "INSERT INTO group_sessions (id, moderator_mind_id, created_at) VALUES (?, ?, ?)",
-            (group_id, moderator_mind_id, now),
+            (group_id, persist_moderator, now),
         )
         await self._db.commit()
         log.info("Created group session %s (moderator=%s)", group_id, moderator_mind_id)
@@ -1017,7 +1050,11 @@ class SessionManager:
         result = await row.fetchone()
         if not result:
             return None
-        return dict(result)
+        out = dict(result)
+        # Surface the operational short name to API consumers
+        if out.get("moderator_mind_id"):
+            out["moderator_mind_id"] = self._resolve_short_name(out["moderator_mind_id"])
+        return out
 
     async def delete_group_session(self, group_session_id: str) -> dict:
         """End a group session by setting ended_at."""
@@ -1034,7 +1071,10 @@ class SessionManager:
         result = await row.fetchone()
         if not result:
             raise ValueError(f"Group session not found: {group_session_id}")
-        return dict(result)
+        out = dict(result)
+        if out.get("moderator_mind_id"):
+            out["moderator_mind_id"] = self._resolve_short_name(out["moderator_mind_id"])
+        return out
 
     async def get_or_create_group_child_session(
         self, group_session_id: str, mind_id: str, surface_prompt: str | None = None
@@ -1044,9 +1084,16 @@ class SessionManager:
         Returns the child session ID.
         """
         assert self._db is not None
+        # Persisted mind_id is the canonical UUID; translate the operational
+        # short name through the registry before querying.
+        persist_mind_id = mind_id
+        if self.mind_registry is not None:
+            info = self.mind_registry.get(mind_id)
+            if info is not None:
+                persist_mind_id = info.mind_id
         rows = await self._db.execute(
             "SELECT id FROM sessions WHERE group_session_id = ? AND mind_id = ? AND status != 'closed'",
-            (group_session_id, mind_id),
+            (group_session_id, persist_mind_id),
         )
         existing = await rows.fetchone()
 
@@ -1076,7 +1123,13 @@ class SessionManager:
             "SELECT * FROM sessions WHERE group_session_id = ? ORDER BY last_active ASC",
             (group_session_id,),
         )
-        return [dict(r) for r in await rows.fetchall()]
+        result = []
+        for r in await rows.fetchall():
+            d = dict(r)
+            if d.get("mind_id"):
+                d["mind_id"] = self._resolve_short_name(d["mind_id"])
+            result.append(d)
+        return result
 
     # ------------------------------------------------------------------
     # Background tasks
@@ -1208,5 +1261,5 @@ class SessionManager:
             "last_active": row["last_active"],
             "status": row["status"],
             "epilogue_status": row.get("epilogue_status"),
-            "mind_id": row.get("mind_id", "ada"),
+            "mind_id": self._resolve_short_name(row.get("mind_id") or "ada"),
         }

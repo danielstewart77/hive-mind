@@ -51,9 +51,10 @@ async def spawn(
         "--permission-mode", "bypassPermissions",
         "--dangerously-skip-permissions",
         "--model", model,
-        "--mcp-config", mcp_config,
         "--append-system-prompt", full_prompt,
     ]
+    if mcp_config:
+        cmd.extend(["--mcp-config", mcp_config])
     if autopilot:
         if config_obj:
             cmd.extend(["--max-budget-usd", str(config_obj.autopilot_guards.max_budget_usd)])

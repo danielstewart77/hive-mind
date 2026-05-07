@@ -14,12 +14,10 @@ minds/
 │       ├── skills/
 │       ├── agents/
 │       └── plugins/
-├── bilby/
-│   └── .claude/          ← Bilby's complete Claude config
 ├── bob/
 │   └── .claude/
-└── nagatha/
-    └── .claude/          ← (if/when Nagatha uses Claude harness)
+└── bilby/
+    └── .claude/          ← Historical only; Bilby now uses `.codex`
 ```
 
 ## What Goes Here
@@ -78,11 +76,11 @@ cp /tmp/my-skill.md /usr/src/app/specs/skills/my-skill/SKILL.md
 Skills are not automatically shared. To give another mind a skill:
 
 ```bash
-cp -r $CLAUDE_CONFIG_DIR/skills/my-skill /usr/src/app/minds/bilby/.claude/skills/
+cp -r $CLAUDE_CONFIG_DIR/skills/my-skill /usr/src/app/minds/ada/.claude/skills/
 ```
 
 Or bootstrap from the canonical copy in `specs/skills/`.
 
 ## Codex Equivalent
 
-The same convention applies to Codex minds (Nagatha). Replace `.claude` with `.codex` and `CLAUDE_CONFIG_DIR` with `CODEX_HOME`. See `docs/mind-codex-folder.md` (TODO) for details.
+The same convention applies to Codex minds (Nagatha and Bilby). Replace `.claude` with `.codex` and `CLAUDE_CONFIG_DIR` with `CODEX_HOME`. See `docs/mind-codex-folder.md` (TODO) for details.

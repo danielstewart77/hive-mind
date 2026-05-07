@@ -97,11 +97,11 @@ async def lifespan(app: FastAPI):
     Path(_broker_db_path).parent.mkdir(parents=True, exist_ok=True)
     app.state.broker_db = await broker.init_db(_broker_db_path)
 
-    # Register discovered minds in broker DB
+    # Register discovered minds in broker DB (keyed by canonical UUID)
     for mind in mind_registry.list_all():
         await broker.register_mind(
             app.state.broker_db,
-            name=mind.name,
+            mind_id=mind.mind_id,
             gateway_url=mind.gateway_url,
             model=mind.model,
             harness=mind.harness,
@@ -445,21 +445,6 @@ async def list_models():
 
 
 # ---------------------------------------------------------------------------
-# Memory Expiry
-# ---------------------------------------------------------------------------
-@app.post("/memory/expiry-sweep")
-async def memory_expiry_sweep(x_hitl_internal: str = Header(None)):
-    """Trigger memory expiry sweep for expired timed-event entries."""
-    if not config.hitl_internal_token:
-        return JSONResponse({"error": "HITL not configured"}, status_code=500)
-    if x_hitl_internal != config.hitl_internal_token:
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    from core.memory_expiry import sweep_expired_events
-    results = await asyncio.to_thread(sweep_expired_events)
-    return results
-
-
-# ---------------------------------------------------------------------------
 # Epilogue Sweep
 # ---------------------------------------------------------------------------
 @app.post("/epilogue/sweep")
@@ -621,6 +606,24 @@ def _mind_exists(mind_id: str) -> bool:
     return (_MINDS_DIR / mind_id / "implementation.py").exists()
 
 
+def _resolve_mind_id(name: str) -> str | None:
+    """Translate a short-name URL parameter to the canonical UUID via the registry.
+
+    Falls back to ``name`` if it is already a UUID (so callers that already
+    speak UUIDs still work). Returns None if the name is unknown.
+    """
+    registry = getattr(app.state, "mind_registry", None)
+    if registry is not None:
+        info = registry.get(name)
+        if info is not None:
+            return info.mind_id
+        # Allow direct UUID addressing too
+        info = registry.lookup_by_id(name)
+        if info is not None:
+            return info.mind_id
+    return None
+
+
 @app.get("/broker/minds")
 async def broker_get_minds():
     """Return all registered minds from the broker database."""
@@ -630,21 +633,27 @@ async def broker_get_minds():
 
 @app.post("/broker/minds")
 async def broker_register_mind(body: RegisterMindRequest):
-    """Register (or update) a mind in the broker database."""
+    """Register (or update) a mind in the broker database.
+
+    The request still uses ``name`` (short operational handle); the gateway
+    translates to the canonical UUID via the registry before writing.
+    """
     db = app.state.broker_db
+    mind_id = _resolve_mind_id(body.name) or body.name
     await broker.register_mind(
-        db, name=body.name, gateway_url=body.gateway_url,
+        db, mind_id=mind_id, gateway_url=body.gateway_url,
         model=body.model, harness=body.harness,
     )
-    return await broker.get_mind(db, body.name)
+    return await broker.get_mind(db, mind_id)
 
 
 @app.put("/broker/minds/{name}")
 async def broker_update_mind(name: str, body: UpdateMindRequest):
-    """Partially update a mind's fields."""
+    """Partially update a mind's fields. URL key is short name."""
     db = app.state.broker_db
+    mind_id = _resolve_mind_id(name) or name
     fields = {k: v for k, v in body.model_dump().items() if v is not None}
-    result = await broker.update_mind(db, name, **fields)
+    result = await broker.update_mind(db, mind_id, **fields)
     if result is None:
         return JSONResponse({"error": f"Mind '{name}' not found"}, status_code=404)
     return result
@@ -652,9 +661,10 @@ async def broker_update_mind(name: str, body: UpdateMindRequest):
 
 @app.delete("/broker/minds/{name}")
 async def broker_delete_mind(name: str):
-    """Deregister a mind from the broker database."""
+    """Deregister a mind from the broker database. URL key is short name."""
     db = app.state.broker_db
-    deleted = await broker.delete_mind(db, name)
+    mind_id = _resolve_mind_id(name) or name
+    deleted = await broker.delete_mind(db, mind_id)
     if not deleted:
         return JSONResponse({"error": f"Mind '{name}' not found"}, status_code=404)
     return {"ok": True, "name": name}
@@ -674,12 +684,17 @@ async def broker_post_message(body: BrokerMessageRequest):
     message_number = await broker.get_next_message_number(db, body.conversation_id)
     metadata = body.metadata
 
+    # Persist UUIDs (canonical archival keys) for from_mind/to_mind. The
+    # routing-side wakeup still uses the short name (operational handle).
+    from_mind_uuid = _resolve_mind_id(body.from_mind) or body.from_mind
+    to_mind_uuid = _resolve_mind_id(body.to_mind) or body.to_mind
+
     result = await broker.insert_message(
         db,
         message_id=message_id,
         conversation_id=body.conversation_id,
-        from_mind=body.from_mind,
-        to_mind=body.to_mind,
+        from_mind=from_mind_uuid,
+        to_mind=to_mind_uuid,
         message_number=message_number,
         content=body.content,
         rolling_summary=body.rolling_summary,
@@ -755,9 +770,10 @@ async def secrets_get(key: str, request: Request):
     if mind_name is None:
         return JSONResponse({"error": "forbidden"}, status_code=403)
 
-    # 2. Check scope
+    # 2. Check scope (translate short name -> canonical UUID for DB lookup)
     db = app.state.broker_db
-    allowed = await check_secret_scope(db, mind_name, key)
+    mind_id = _resolve_mind_id(mind_name) or mind_name
+    allowed = await check_secret_scope(db, mind_id, key)
     if not allowed:
         return JSONResponse({"error": "forbidden"}, status_code=403)
 
@@ -781,8 +797,9 @@ async def secrets_grant_scopes(
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     db = app.state.broker_db
+    target_mind_id = _resolve_mind_id(body.mind_name) or body.mind_name
     for key in body.secret_keys:
-        await grant_secret_scope(db, body.mind_name, key)
+        await grant_secret_scope(db, target_mind_id, key)
     return {"ok": True, "mind_name": body.mind_name, "granted": body.secret_keys}
 
 
@@ -798,8 +815,9 @@ async def secrets_revoke_scopes(
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     db = app.state.broker_db
+    target_mind_id = _resolve_mind_id(body.mind_name) or body.mind_name
     for key in body.secret_keys:
-        await revoke_secret_scope(db, body.mind_name, key)
+        await revoke_secret_scope(db, target_mind_id, key)
     return {"ok": True, "mind_name": body.mind_name, "revoked": body.secret_keys}
 
 
@@ -834,7 +852,8 @@ async def secrets_list_scopes(
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     db = app.state.broker_db
-    keys = await get_secret_scopes(db, mind_name)
+    target_mind_id = _resolve_mind_id(mind_name) or mind_name
+    keys = await get_secret_scopes(db, target_mind_id)
     return {"mind_name": mind_name, "secret_keys": keys}
 
 
@@ -1090,38 +1109,13 @@ async def hitl_respond(
 
 @app.get("/graph/data")
 async def graph_data(limit: int = 400):
-    """Export Lucent knowledge graph nodes and edges for external visualization."""
-    import sqlite3 as _sqlite3
-    db_path = PROJECT_DIR / "data" / "lucent.db"
+    """Proxy to the shared hive_nervous_system /graph/data endpoint."""
+    from core.lucent_client import graph_data as _graph_data, LucentClientError
     try:
-        conn = _sqlite3.connect(str(db_path))
-        conn.row_factory = _sqlite3.Row
-        node_rows = conn.execute(
-            "SELECT id, name, type, properties FROM nodes ORDER BY id LIMIT ?", (limit,)
-        ).fetchall()
-        nodes = []
-        for r in node_rows:
-            props = json.loads(r["properties"]) if r["properties"] else {}
-            nodes.append({
-                "id": r["id"],
-                "label": r["name"],
-                "type": r["type"],
-                **{k: v for k, v in props.items() if k not in ("id", "label", "type")},
-            })
-        node_ids = {r["id"] for r in node_rows}
-        edge_rows = conn.execute(
-            "SELECT source_id, target_id, type FROM edges"
-        ).fetchall()
-        edges = [
-            {"source": r["source_id"], "target": r["target_id"], "type": r["type"]}
-            for r in edge_rows
-            if r["source_id"] in node_ids and r["target_id"] in node_ids
-        ]
-        conn.close()
-        return {"nodes": nodes, "edges": edges}
-    except Exception:
-        log.exception("/graph/data: failed to query lucent.db")
-        return JSONResponse({"nodes": [], "edges": [], "error": "graph unavailable"}, status_code=500)
+        return await asyncio.to_thread(_graph_data, limit)
+    except LucentClientError as exc:
+        log.exception("/graph/data: shared lucent service unavailable: %s", exc)
+        return JSONResponse({"nodes": [], "edges": [], "error": "graph unavailable"}, status_code=502)
 
 
 # ---------------------------------------------------------------------------

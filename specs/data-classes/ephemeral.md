@@ -1,13 +1,18 @@
 # Data Class: ephemeral
 
 ## Description
-Point-in-time data that was only accurate when retrieved and has no lasting relevance. Recognizable by a specific timestamp and data that changes constantly — weather, live prices, current system state, "what is X right now" query results. No durable fact can be extracted from it.
+A chunk lands here if it does not match any of `current-state`,
+`future-state`, or `feedback`. Includes time-bounded data (weather lookups,
+live prices, query snapshots), news headlines and digests with no
+engagement, world events Daniel did not act on, Planka task events that
+are pure operational records, and anything that doesn't fit one of the
+three storage classes.
+
+The classifier evaluates the three storage classes first; ephemeral is
+the fall-through.
 
 ## Actions
 - discard
 
-## Notes
-- Always discard — no human verification needed
-- Examples: weather lookups, crypto/stock price checks, live API status results, one-time query snapshots
-- If a fact derived from ephemeral data IS durable (e.g. "Daniel prefers to check weather before outdoor plans"), that fact belongs in `preference`, not here
-- Distinguished from `timed-event` (which is a future scheduled event worth tracking until it occurs)
+## Pruning
+- strategy: none

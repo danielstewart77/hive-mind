@@ -44,7 +44,7 @@ class TestGetBrokerMinds:
         assert isinstance(data, list)
 
     def test_get_broker_minds_contains_registered_minds(self, broker_client):
-        """After startup (which scans minds/), the endpoint returns minds that have MIND.md files."""
+        """After startup (which scans minds/), the endpoint returns minds that have runtime.yaml files."""
         import core.broker as broker_mod
 
         # Manually register a mind in the DB so we can verify the endpoint returns it
@@ -54,7 +54,7 @@ class TestGetBrokerMinds:
         asyncio.get_event_loop().run_until_complete(
             register_mind(
                 db,
-                name="test_mind",
+                mind_id="test_mind",
                 gateway_url="http://hive_mind:8420",
                 model="sonnet",
                 harness="claude_cli_claude",
@@ -64,8 +64,8 @@ class TestGetBrokerMinds:
         response = broker_client.get("/broker/minds")
         assert response.status_code == 200
         data = response.json()
-        names = [m["name"] for m in data]
-        assert "test_mind" in names
+        ids = [m["mind_id"] for m in data]
+        assert "test_mind" in ids
 
 
 class TestPostBrokerMessage:

@@ -9,11 +9,11 @@ class TestForwardToMindInterface:
     """Verify forward_to_mind function exists and has correct signature."""
 
     def test_forward_to_mind_function_exists(self):
-        from tools.stateful.group_chat import forward_to_mind
+        from nervous_system.inter_mind_api.group_chat import forward_to_mind
         assert callable(forward_to_mind)
 
     def test_forward_to_mind_has_correct_signature(self):
-        from tools.stateful.group_chat import forward_to_mind
+        from nervous_system.inter_mind_api.group_chat import forward_to_mind
         sig = inspect.signature(forward_to_mind)
         params = list(sig.parameters.keys())
         assert "mind_id" in params
@@ -21,7 +21,7 @@ class TestForwardToMindInterface:
         assert "group_session_id" in params
 
     def test_group_chat_tools_list_exports(self):
-        from tools.stateful.group_chat import GROUP_CHAT_TOOLS, forward_to_mind
+        from nervous_system.inter_mind_api.group_chat import GROUP_CHAT_TOOLS, forward_to_mind
         assert forward_to_mind in GROUP_CHAT_TOOLS
 
 
@@ -29,7 +29,7 @@ class TestForwardToMindBehavior:
     """Verify forward_to_mind makes correct gateway calls."""
 
     def test_forward_to_mind_returns_json_string(self):
-        from tools.stateful.group_chat import forward_to_mind
+        from nervous_system.inter_mind_api.group_chat import forward_to_mind
 
         mock_sessions_resp = MagicMock()
         mock_sessions_resp.json.return_value = []
@@ -45,7 +45,7 @@ class TestForwardToMindBehavior:
             'data: {"type": "result", "result": "Hello from Nagatha"}'
         ]
 
-        with patch("tools.stateful.group_chat.requests") as mock_requests:
+        with patch("nervous_system.inter_mind_api.group_chat.requests") as mock_requests:
             mock_requests.get.return_value = mock_sessions_resp
             mock_requests.post.side_effect = [mock_create_resp, mock_msg_resp]
 
@@ -59,7 +59,7 @@ class TestForwardToMindBehavior:
         assert "response" in parsed
 
     def test_forward_to_mind_creates_child_session_if_needed(self):
-        from tools.stateful.group_chat import forward_to_mind
+        from nervous_system.inter_mind_api.group_chat import forward_to_mind
 
         mock_sessions_resp = MagicMock()
         mock_sessions_resp.json.return_value = []  # No existing sessions
@@ -75,7 +75,7 @@ class TestForwardToMindBehavior:
             'data: {"type": "result", "result": "response"}'
         ]
 
-        with patch("tools.stateful.group_chat.requests") as mock_requests:
+        with patch("nervous_system.inter_mind_api.group_chat.requests") as mock_requests:
             mock_requests.get.return_value = mock_sessions_resp
             mock_requests.post.side_effect = [mock_create_resp, mock_msg_resp]
 

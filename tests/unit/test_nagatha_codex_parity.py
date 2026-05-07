@@ -54,9 +54,15 @@ def test_nagatha_orchestrator_references_codex_agents() -> None:
         assert agent_name in orchestrator
 
 
-def test_nagatha_bot_uses_codex_home_mount() -> None:
-    compose = (REPO_ROOT / "docker-compose.yml").read_text()
+def test_nagatha_mind_fragment_sets_codex_home() -> None:
+    """The Nagatha mind container is the one that needs CODEX_HOME, not the bot.
 
-    assert "nagatha-bot:" in compose
-    assert "CODEX_HOME=/home/hivemind/.codex" in compose
-    assert "minds/nagatha/.codex:/home/hivemind/.codex" in compose
+    Post-Phase-1 consolidation moved per-mind config into
+    minds/<name>/container/compose.yaml.  The repo bind-mounts the project
+    into the container, so CODEX_HOME points at the in-project codex dir
+    directly rather than a separate volume mount.
+    """
+    fragment = (REPO_ROOT / "minds" / "nagatha" / "container" / "compose.yaml").read_text()
+
+    assert "nagatha:" in fragment
+    assert "CODEX_HOME=/usr/src/app/minds/nagatha/.codex" in fragment

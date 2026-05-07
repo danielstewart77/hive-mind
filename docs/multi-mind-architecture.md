@@ -8,6 +8,7 @@ The architectural specification for the Hive Mind multi-mind system. Covers how 
 > **Phase 2C** (setup & onboarding): Complete.
 > **Phase 2D** (container isolation): Complete. All 4 minds running in isolated containers.
 > **Phase 2E** (plugin distribution): See `plans/phase2e-plugin-distribution.md`.
+> **Post-Phase 1 consolidation**: `runtime.yaml` is now the single source of truth per mind; the `MIND.md` file is gone.
 
 ---
 
@@ -50,47 +51,44 @@ Thin, stateless surfaces connecting the system to the outside world.
 
 ---
 
-## MIND.md — Canonical Mind Definition
+## `runtime.yaml` — Canonical Mind Definition
 
-Each mind folder contains a `MIND.md` at its root. This is the single source of truth for that mind's identity and configuration.
+Each mind folder contains a `runtime.yaml` at its root. This is the single source of truth for that mind's operational config. Identity prose (soul) lives in the knowledge graph under the mind's node (`soul_values` field), not in the file.
 
-**Location:** `minds/<name>/MIND.md`
+**Location:** `minds/<name>/runtime.yaml`
 
 **Format:**
 
-```markdown
----
+```yaml
 name: <name>
-model: <model>
-harness: <harness>
 gateway_url: <url>
 remote: false
-container:
-  image: hive_mind:latest
-  volumes:
-    - /host/path:/container/path:ro
-  environment:
-    - CUSTOM_VAR=value
----
+description: "<one-line operational identity>"
 
-# <Name>
+harness: <harness>
+provider: <provider>
+default_model: <model>
+runtime_config_dir: /usr/src/app/minds/<name>/.claude
+resume_policy: always
 
-<Soul seed — one-time identity bootstrap. The knowledge graph owns identity after first activation.>
+prompt_files:
+  - prompts/common.md
+  - prompts/harness.md
+
+env:
+  CUSTOM_VAR: value
+
+startup:
+  skip_host_credentials: false
+  sync_repo_config: true
+
+transport:
+  type: cli_stream_json
 ```
 
-**Frontmatter fields:**
+**Container spec** lives separately in `minds/<name>/container/compose.yaml` — a standalone Compose fragment wired into the top-level `docker-compose.yml` via an explicit `include:` entry.
 
-| Field | Required | Notes |
-|---|---|---|
-| `name` | yes | Unique identifier |
-| `model` | yes | e.g. `claude-sonnet-4-6`, `ollama/llama3` |
-| `harness` | yes | e.g. `claude_cli_claude`, `codex_cli_codex` |
-| `gateway_url` | yes | Where this mind's gateway is reachable |
-| `remote` | no | `true` if outside this Docker stack. Default: `false` |
-| `container` | no | Per-mind container config. Omit to run inside the main container. |
-| `container.image` | no | Default: `hive_mind:latest` |
-| `container.volumes` | no | Host:container[:mode] mount strings |
-| `container.environment` | no | Additional env vars |
+**Required fields:** `name`, `default_model`, `harness`, `gateway_url`. The rest are optional.
 
 ---
 
@@ -98,9 +96,9 @@ container:
 
 ### Filesystem Discovery
 
-The gateway scans `minds/` on startup. For each subdirectory containing a `MIND.md`, it:
+The gateway scans `minds/` on startup. For each subdirectory containing a `runtime.yaml`, it:
 
-1. Parses the frontmatter
+1. Parses the YAML
 2. Populates an in-memory mind registry (`mind_id → MindInfo`)
 3. Registers the mind in the broker's `minds` table
 4. Logs `Registered mind: <name> @ <gateway_url>`
@@ -133,7 +131,7 @@ The gateway scans `minds/` on startup. For each subdirectory containing a `MIND.
 |---|---|
 | `/create-mind` | Scaffold from harness template, register |
 | `/add-mind` | Connect existing mind (local, remote, or re-register). Calls `/generate-compose` if containerised. |
-| `/update-mind` | Edit MIND.md frontmatter + broker |
+| `/update-mind` | Edit runtime.yaml fields + broker |
 | `/remove-mind` | Deregister, stop container, optional cleanup |
 | `/list-minds` | Show all registered minds |
 
@@ -163,40 +161,43 @@ Each mind's `implementation.py` is fully self-contained — no shared imports be
 ### Mind Containers
 
 A mind container is a sandboxed environment — not a cloned nervous system. It contains:
-- `mind_server.py` — a minimal HTTP server (~100 lines) that manages the harness subprocess
-- The mind's `implementation.py` — loaded by mind_server.py
-- The harness CLI (claude, codex) — spawned as a subprocess
+- The mind's `implementation.py` — runs as PID 1 and IS the in-container service (FastAPI app + harness subprocess management)
+- The harness CLI (claude, codex) — spawned as a subprocess by `implementation.py`
 - Scoped filesystem mounts — only the directories this mind is allowed to access
 - Skill files — read from the project mount
 
 A mind container does NOT contain: `server.py`, the broker, SQLite databases, the mind registry, secret storage, HITL, or any nervous system component.
 
-### `mind_server.py` — Mind Container Server
+There is no separate `mind_server.py` intermediary. Each mind's `implementation.py` is the complete in-container service: FastAPI routes, in-memory session table, soul fetch, prompt assembly, and harness lifecycle all live in one self-contained file per mind.
 
-A minimal FastAPI app that exposes only subprocess management:
+### `implementation.py` — In-Container Service
+
+Each mind's `implementation.py` exposes the following routes:
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/sessions` | Spawn a harness process via `implementation.spawn()` |
+| `GET` | `/health` | `{"name": ..., "mind_id": ..., "ok": true, "sessions": <count>}` |
+| `POST` | `/sessions` | Spawn the harness subprocess for this session |
 | `POST` | `/sessions/{id}/message` | Send content to harness stdin, stream response as SSE |
+| `POST` | `/sessions/{id}/interrupt` | Send SIGINT to the harness without killing |
 | `DELETE` | `/sessions/{id}` | Kill the harness subprocess |
 | `GET` | `/sessions` | List active sessions (in-memory) |
 
-No broker, no database, no mind registry, no secret scoping. Sessions are tracked in-memory. The mind_server loads `minds/<MIND_ID>/implementation.py` on startup and delegates all subprocess management to it.
+No broker, no database, no mind registry, no secret scoping. Sessions are tracked in memory. On startup the file reads its own `runtime.yaml`, fetches its soul from the KG (via the NS gateway), and fetches its scoped secrets — same protocol as before, only the host code is now per-mind.
 
 ### Communication Flow
 
 ```
-User → Telegram bot → NS gateway (:8420) → http://ada:8420 → mind_server.py → claude CLI
-                                          → http://bob:8420 → mind_server.py → claude CLI (ollama)
+User → Telegram bot → NS gateway (:8420) → http://ada:8420 → implementation.py → claude CLI
+                                          → http://bob:8420 → implementation.py → claude CLI (ollama)
 
-Ada → /send-message-to-mind → NS broker → http://nagatha:8420 → mind_server.py → codex CLI
+Ada → /send-message-to-mind → NS broker → http://nagatha:8420 → implementation.py → codex CLI
 ```
 
 The NS session manager calls the mind's HTTP endpoints instead of spawning local subprocesses:
-- `impl.spawn()` becomes `POST http://<mind>:8420/sessions`
-- Stdin/stdout piping becomes `POST http://<mind>:8420/sessions/{id}/message` (SSE stream)
-- `impl.kill()` becomes `DELETE http://<mind>:8420/sessions/{id}`
+- spawn becomes `POST http://<mind>:8420/sessions`
+- stdin/stdout piping becomes `POST http://<mind>:8420/sessions/{id}/message` (SSE stream)
+- kill becomes `DELETE http://<mind>:8420/sessions/{id}`
 
 ### Session Behavior
 
@@ -205,13 +206,13 @@ The NS session manager calls the mind's HTTP endpoints instead of spawning local
 
 ### Secrets Access
 
-Mind containers do not store secrets locally. At startup, `mind_server.py` queries the NS for its scoped secret list (`GET /secrets/scopes/<mind_id>` — authenticated by network identity), fetches each secret, and injects them into the process environment. Harness subprocesses inherit these env vars.
+Mind containers do not store secrets locally. At startup, the mind's `implementation.py` queries the NS for its scoped secret list (`GET /secrets/scopes/<mind_id>` — authenticated by network identity), fetches each secret, and injects them into the process environment. Harness subprocesses inherit these env vars.
 
 This means:
-- No hardcoded secret lists in `mind_server.py` — the NS scoping policy is the source of truth
+- No hardcoded secret lists in `implementation.py` — the NS scoping policy is the source of truth
 - New secrets are added by granting scope via `/add-mind` or `/update-mind`, then restarting the mind container
 - Secrets are held in memory only — never on disk inside the container
-- The `_ENV_MAP` in `mind_server.py` translates secret key names to env var names (e.g. `mcp_auth_token` → `MCP_AUTH_TOKEN`)
+- The `_ENV_MAP` in each `implementation.py` translates secret key names to env var names (e.g. `mcp_auth_token` → `MCP_AUTH_TOKEN`)
 
 ### Skills and Tools
 
@@ -221,7 +222,7 @@ MCP tools (Lucent, memory, browser) are accessed via network calls to the NS's `
 
 ### Compose Generation
 
-The `/generate-compose` skill reads all `MIND.md` files with `container:` blocks and writes per-mind service definitions between `# BEGIN GENERATED MINDS` / `# END GENERATED MINDS` markers in `docker-compose.yml`. Each generated service runs `mind_server.py` (not `server.py`).
+The `/generate-compose` skill scaffolds a per-mind Compose fragment at `minds/<name>/container/compose.yaml` (a complete document with one `services:` entry). Each fragment runs `python3 -m minds.<name>.implementation` (the mind's in-container service). Wire a fragment into the deployment by adding `- path: minds/<name>/container/compose.yaml` to the `include:` block at the top of the top-level `docker-compose.yml`. The skill does not touch the top-level compose — wiring is an explicit user step.
 
 ---
 
