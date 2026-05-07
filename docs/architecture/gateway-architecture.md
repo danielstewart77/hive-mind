@@ -36,13 +36,6 @@ Clients are thin — they handle surface-specific I/O and delegate all intellige
 - **Ollama** — auto-discovered local models
 - Per-subprocess env isolation — no global env mutation
 
-## MCP Authentication
-
-The external MCP server is protected by a bearer token:
-- Token stored in keyring as `MCP_AUTH_TOKEN`
-- Bridged into env at gateway startup
-- Referenced in `.mcp.container.json` as `${MCP_AUTH_TOKEN}`
-
 ## Message Broker
 
 `core/broker.py` provides asynchronous inter-mind messaging integrated directly into `server.py`. No separate container — it runs in the same process as the gateway and shares the session manager.

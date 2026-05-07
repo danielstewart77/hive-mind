@@ -35,12 +35,12 @@ The vector store and knowledge graph (lucent) live in a separate, shared **`hive
   │ (CLI Claude) │ │(CLI Ollama)│ │ (SDK Code) │ │ (Codex CLI)  │
   └──────┬───────┘ └─────┬──────┘ └─────┬──────┘ └────┬─────────┘
          └───────────────┴───────────────┴──────────────┘
-                         │  MCP (stdio / SSE)
+                         │  HTTP + bearer
           ┌──────────────┴──────────────┐
    ┌──────▼──────┐               ┌──────▼──────┐
-   │ hive-mind-  │               │ hive-mind-  │
-   │ tools (int) │               │ mcp (ext +  │
-   │             │               │   HITL)     │
+   │ hive-lucent │               │ hive-tools  │
+   │ vector + KG │               │ Gmail/Cal/  │
+   │ (shared)    │               │ Docker/HITL │
    └─────────────┘               └─────────────┘
 ```
 
@@ -71,11 +71,8 @@ docker compose up -d --build
 ```
 hive_mind/
 ├── server.py                      # FastAPI gateway (HTTP + WebSocket endpoints)
-├── mcp_server.py                  # MCP server (FastMCP, direct registration)
 ├── config.py                      # Centralized config (loads config.yaml)
 ├── config.yaml                    # Non-secret settings (providers, models, server)
-├── .mcp.json                      # Wires MCP tools into Claude Code (host paths)
-├── .mcp.container.json            # MCP config for container context
 │
 ├── core/                          # Internal libraries (not entry points)
 │   ├── sessions.py               # Session manager (process pool + SQLite)
@@ -84,7 +81,7 @@ hive_mind/
 │   ├── models.py                 # Model registry (static aliases + Ollama)
 │   ├── gateway_client.py         # Shared HTTP client for bots
 │   ├── hitl.py                   # Human-in-the-loop approval
-│   ├── audit.py                  # MCP tool invocation audit logging (JSON + rotation)
+│   ├── audit.py                  # Tool invocation audit logging (JSON + rotation)
 │   ├── dep_scan.py               # pip-audit wrapper for dependency vulnerability scanning
 │   ├── epilogue.py               # Session epilogue processor (post-session memory extraction)
 │   ├── lucent_client.py          # HTTP+bearer client for the shared hive_nervous_system container
@@ -94,9 +91,9 @@ hive_mind/
 │   └── story_pipeline.py         # Post-merge story pipeline (pull, health check, cleanup)
 │
 ├── tools/
-│   ├── stateful/                  # MCP tools
+│   ├── stateful/                  # In-process Python tools (legacy — most are dead code; minds reach lucent over HTTP and use stateless skills for everything else)
 │   │   ├── browser.py            # Async Playwright browser automation
-│   │   └── memory.py             # Vector memory store (legacy — being migrated to shared container)
+│   │   └── memory.py             # Vector memory store (legacy — talk to hive-lucent over HTTP instead)
 │   │
 │   └── stateless/                 # Standalone scripts (invoked via skills)
 │       ├── crypto/crypto.py      # CoinGecko crypto prices
@@ -216,23 +213,20 @@ A minimal `.env` remains for docker-compose interpolation (Planka only).
 
 ## Adding New Tools
 
-Use the `/tool-creator` skill, which reads `specs/tool-migration.md` to determine the right pattern:
+Use the `/tool-creator` skill, which reads `specs/tool-migration.md` to determine the right pattern. Preferred is **stateless** — a standalone script wired via a Claude skill:
 
-**Stateful tools** (need persistent connections — Lucent, Playwright, etc.):
-- Add functions to `tools/stateful/` and register in `mcp_server.py`
-- Available as MCP tools immediately after container restart
-
-**Stateless tools** (standalone scripts — API calls, file ops, etc.):
-- Create a script in `tools/stateless/<name>/<name>.py` with argparse + JSON stdout
+- Create `tools/stateless/<name>/<name>.py` with argparse + JSON stdout
 - Create a Claude skill in `.claude/skills/<name>/SKILL.md` to invoke it
 - Editable without any container restart
+
+If a tool genuinely needs a persistent connection (e.g., a long-lived browser session), it can become a small FastAPI service reached over HTTP — same pattern as `hive-lucent` and `hive-tools`.
 
 ## Key Design Principles
 
 1. **Claude Code does the heavy lifting** — don't reimplement what it does natively
-2. **MCP tools are pure data fetchers** — return raw data, no LLM formatting layers
+2. **Tools return raw data** — no LLM formatting layers; the model formats
 3. **Self-improvement via tool creation** — new capabilities generated on demand
 4. **Less code is better** — if Claude Code already does it, don't wrap it
 5. **Gateway is the single source of truth** — all clients go through server.py
 6. **Per-process isolation** — env vars set per subprocess, never globally
-7. **Always echo directory paths exactly** — whenever a directory path is mentioned (by either party), spell it out character-for-character as you understand it (e.g. `hive_mind_mcp`, not "hive mind mcp") so Daniel can catch hyphen/underscore/casing errors before any action is taken.
+7. **Always echo directory paths exactly** — whenever a directory path is mentioned (by either party), spell it out character-for-character as you understand it (e.g. `hive_nervous_system`, not "hive nervous system") so Daniel can catch hyphen/underscore/casing errors before any action is taken.

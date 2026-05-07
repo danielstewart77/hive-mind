@@ -49,7 +49,7 @@ ALTER TABLE sessions ADD COLUMN group_session_id TEXT REFERENCES group_sessions(
 
 ### Architecture
 
-The gateway routes to the moderator only. The moderator fans out via `forward_to_mind` MCP tool (Phase 4a). The gateway never performs independent fan-out.
+The gateway routes to the moderator only. The moderator fans out via `forward_to_mind` tool (Phase 4a). The gateway never performs independent fan-out.
 
 ## Code References
 

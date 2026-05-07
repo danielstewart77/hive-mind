@@ -21,7 +21,7 @@
 | **Gateway** | FastAPI centralized gateway | Enterprise orchestration layer | Local Gateway (single control plane) |
 | **Channels** | Telegram, Discord, Web, Terminal | Enterprise software integrations | 20+ (WhatsApp, Telegram, Slack, Teams, Signal, etc.) |
 | **Memory** | Knowledge graph (Lucent/SQLite) + vector store + MEMORY.md | Unknown | Local persistent storage |
-| **Tools** | MCP tools (auto-discovered `agents/`) | Security/privacy tools (planned) | 100+ AgentSkills |
+| **Tools** | Stateless skills + HTTP services (`hive-tools`, `hive-lucent`) | Security/privacy tools (planned) | 100+ AgentSkills |
 | **Multi-mind** | Designed for N minds (currently 1) | Multi-agent dispatch | Single agent per instance |
 | **Hardware** | Cloud container (any provider) | Hardware-agnostic (but NVIDIA-optimized) | Local machine (RTX/DGX Spark recommended) |
 | **Self-improvement** | Runtime tool creation via `create_tool` | Unknown | Extensible skills |
@@ -36,7 +36,7 @@
 
 4. **HITL approval flow** — human-in-the-loop with token-based approval before write actions. OpenClaw has no mention of approval gates; NemoClaw emphasizes security but details are pending.
 
-5. **Self-improving tool creation** — Ada generates new MCP tools at runtime when a capability is needed. OpenClaw has a skills ecosystem but doesn't appear to generate new skills autonomously.
+5. **Self-improving tool creation** — Ada generates new tools and skills at runtime when a capability is needed. OpenClaw has a skills ecosystem but doesn't appear to generate new skills autonomously.
 
 6. **Identity** — Ada has a name, a voice, a soul file, and a character that emerged through interaction. This isn't a feature — it's a consequence of the architecture being personal rather than enterprise.
 

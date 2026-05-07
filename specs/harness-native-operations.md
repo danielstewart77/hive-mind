@@ -2,7 +2,7 @@
 
 ## Principle
 
-The Claude Code harness is a composable runtime environment, not just a code editor. It can execute shell commands, make HTTP requests, query databases, call MCP tools, parse and transform data, manage processes, automate browsers, search the web, and orchestrate multi-step workflows — all without writing a single line of application code.
+The Claude Code harness is a composable runtime environment, not just a code editor. It can execute shell commands, make HTTP requests, query databases, parse and transform data, manage processes, automate browsers, search the web, and orchestrate multi-step workflows — all without writing a single line of application code.
 
 **Only write code when the harness cannot accomplish the task.** If the harness can do it, let the harness do it.
 
@@ -51,13 +51,6 @@ Bash alone covers: HTTP requests, database queries, data transformation, process
 | **EnterPlanMode / ExitPlanMode** | Read-only design mode with approval gate before execution. |
 | **EnterWorktree / ExitWorktree** | Isolated git worktree for parallel work. |
 
-### MCP Integration
-| Tool | What it does |
-|---|---|
-| **MCP tools** | Any tool exposed by connected MCP servers — appears alongside built-in tools. |
-| **ToolSearch** | Discover and load deferred MCP tools on demand. |
-| **ListMcpResourcesTool / ReadMcpResourceTool** | Access MCP server resources. |
-
 ### Skills
 | Tool | What it does |
 |---|---|
@@ -76,7 +69,7 @@ Because the harness has Bash, it has access to every CLI tool on the system. Com
 |---|---|
 | Make HTTP requests | `curl`, `httpx`, `wget` |
 | Query/modify SQL databases | `sqlite3`, `psql`, `mysql` |
-| Query/modify Lucent (graph/vector) | MCP tools (`graph_query`, `memory_retrieve`) |
+| Query/modify Lucent (graph/vector) | `curl` to hive-lucent (`/graph/query`, `/memory/retrieve`) with bearer token |
 | Parse JSON/YAML/XML | `jq`, `yq`, `python3 -c`, `xmllint` |
 | Transform data between formats | Pipe chains, `jq`, `python3 -c` |
 | Manage Docker containers | `docker`, `docker compose` |
@@ -88,7 +81,7 @@ Because the harness has Bash, it has access to every CLI tool on the system. Com
 | File archiving | `tar`, `zip`, `rsync` |
 | Text processing | `sed`, `awk`, `sort`, `uniq`, `wc` |
 | Cron/scheduling | `crontab`, CronCreate |
-| Send notifications | MCP tools, `curl` to Telegram/Slack/email APIs |
+| Send notifications | `notify_owner` skill, or `curl` to Telegram/Slack/email APIs |
 | Browser automation | Chrome tool, or Bash with headless browsers |
 | Search the web | WebSearch, WebFetch |
 | Read/write any file format | Read + Write tools, or Bash with appropriate CLI |
@@ -120,7 +113,7 @@ Write code **only** when the task requires something the harness fundamentally c
 | "Parse YAML and extract a field" | `yq '.field' file.yaml` |
 | "Delete old config files" | `rm` via Bash |
 | "Query SQLite for a value" | `sqlite3 data/broker.db "SELECT ..."` |
-| "Send a notification" | MCP tool or `curl` to Telegram API |
+| "Send a notification" | `notify_owner` skill or `curl` to Telegram API |
 | "Search code for a pattern" | Grep tool |
 | "Run a test suite" | `pytest` via Bash |
 | "Build and restart containers" | `docker compose up -d --build` |

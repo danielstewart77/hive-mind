@@ -51,7 +51,7 @@ Session Manager (sessions.py)  ← reads mind_id, looks up config
         ↓
    Shared DB (SQLite / Lucent — graph + vector)
         ↓
-   Shared MCP Tools
+   Shared Tools
 ```
 
 ---
@@ -72,12 +72,12 @@ graph TD
 
     subgraph Pods ["🧠 Isolated Mind Pods"]
         direction LR
-        ADA["Ada\n· own soul.md\n· own MCP config\n· CLI Claude"]
-        NAG["Nagatha\n· own soul.md\n· own MCP config\n· Codex harness [codex]"]
-        SKIP["Skippy\n· own soul.md\n· own MCP config\n· Ollama"]
+        ADA["Ada\n· own soul.md\n· own tool config\n· CLI Claude"]
+        NAG["Nagatha\n· own soul.md\n· own tool config\n· Codex harness [codex]"]
+        SKIP["Skippy\n· own soul.md\n· own tool config\n· Ollama"]
     end
 
-    TOOLS["🔧 Shared Tools (MCP)"]
+    TOOLS["🔧 Shared Tools"]
 
     Clients --> GW
     GW --> SM
@@ -110,7 +110,6 @@ minds:
 backend: cli_claude
 model: sonnet
 soul: souls/ada.md
-mcp_config: .mcp.ada.json
 ```
 
 Each mind is just a parameter set. No new classes. No new modules. Keeping per-mind config in the mind's own directory means the mind is portable — it carries everything it needs to run.
@@ -156,7 +155,7 @@ and preserve the existing `spawn(...)`, `send(...)`, and `kill(...)` contract us
 
 Each mind gets:
 - `souls/<name>.md` — **one-time identity seed**. Used exactly once by `/seed-mind` to populate the mind's graph node. Never read by sessions. After seeding, this file is an archived artifact only.
-- `.mcp.<name>.json` — its own MCP tool permissions (optional: restrict what each mind can see)
+- tool access policies (optional: restrict what each mind can see)
 
 Database infrastructure (SQLite session history, knowledge graph, vector store) is **shared** across all minds. Session rows are partitioned by `mind_id`. No per-mind database files.
 
@@ -195,7 +194,7 @@ Prompt piped via stdin. JSONL events streamed to stdout.
 | `turn.completed` | `result` |
 | `turn.failed` | error |
 
-**What does NOT change**: Nagatha's soul node, session history, MCP tool access, `mind_id`.
+**What does NOT change**: Nagatha's soul node, session history, tool access, `mind_id`.
 
 **Remove**: all `sdk_claude` implementation code from `minds/nagatha/implementation.py`.
 
@@ -217,7 +216,7 @@ The orchestrator (a skill, not a daemon) handles delegation: it sends a message 
 
 1. Each mind has exactly one soul file, used **once** to seed its graph node via `/seed-mind`. After seeding, the soul file is never read again. Sessions load identity exclusively from the graph node.
 2. Session history is per-mind. Ada cannot see Nagatha's conversation history.
-3. MCP tool permissions are per-mind. A mind only has access to the tools its config grants.
+3. tool access policies are per-mind. A mind only has access to the tools its config grants.
 4. `mind_id` is set at session creation and never changes mid-session.
 5. The Session Manager is backend-agnostic — it dispatches, it does not reason about identity.
 6. [codex] Changing Nagatha's harness must not change her identity, soul node, or stored session history.
@@ -264,7 +263,7 @@ This separation means:
 ## What Does NOT Change
 
 - `server.py` gateway endpoints — only `mind_id` is added as an optional param (defaults to `ada`)
-- MCP tool implementations — shared tools work for any mind
+- tool implementations — shared tools work for any mind
 - The `Event → Specification → Tools` architecture pattern
 - Deployment — all minds run in the same container unless explicitly split out later
 

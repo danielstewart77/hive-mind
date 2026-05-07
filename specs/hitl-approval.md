@@ -25,10 +25,10 @@ The tool subprocess never sees the confirmation token. It cannot forge approval 
 ## Two Modes
 
 ### Blocking (`wait=True`, default)
-The gateway holds the HTTP connection open until approved, denied, or timeout. The MCP tool gets back `{"approved": true/false}`.
+The gateway holds the HTTP connection open until approved, denied, or timeout. The caller gets back `{"approved": true/false}`.
 
 ### Non-blocking (`wait=False`)
-The gateway returns a token immediately: `{"token": "abc123", "state": "pending"}`. The MCP tool polls `GET /hitl/status/{token}` until it gets `approved`, `denied`, or `expired`.
+The gateway returns a token immediately: `{"token": "abc123", "state": "pending"}`. The caller polls `GET /hitl/status/{token}` until it gets `approved`, `denied`, or `expired`.
 
 ## Session Heartbeat
 

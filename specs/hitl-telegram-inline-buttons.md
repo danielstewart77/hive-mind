@@ -25,15 +25,15 @@ Daniel receives HITL approval requests via Telegram. Currently these arrive as p
 
 ### Current Flow
 
-1. MCP tool calls `POST /hitl/request` with action + summary
+1. A caller (skill, hive-tools endpoint, etc.) calls `POST /hitl/request` with action + summary
 2. `server.py:_send_telegram_approval_request()` sends a plain text message via Telegram Bot API with `/approve_<token>` and `/deny_<token>` as clickable commands
 3. User types or taps the command in Telegram
 4. `telegram_bot.py:cmd_hitl_approve/deny` regex-matches the command, POSTs to `POST /hitl/respond`
-5. `hitl_store.resolve()` sets the event, unblocking the waiting MCP tool
+5. `hitl_store.resolve()` sets the event, unblocking the waiting caller
 
 ### New Flow
 
-1. MCP tool calls `POST /hitl/request` — unchanged
+1. The caller calls `POST /hitl/request` — unchanged
 2. `server.py:_send_telegram_approval_request()` sends a message with `InlineKeyboardMarkup` containing two `InlineKeyboardButton`s on **separate rows** for easy tapping:
    - Row 1: "✅ Approve" with `callback_data = f"hitl_approve_{token}"`
    - Row 2: "❌ Reject" with `callback_data = f"hitl_deny_{token}"`

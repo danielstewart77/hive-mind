@@ -12,7 +12,7 @@ Outstanding security findings that require an explicit decision before remediati
 
 **What needs to be decided:** Whether to build a separate error channel (agent-visible, not user-visible) before closing these findings. This requires architecture work — not just a one-line fix.
 
-**Current posture:** Error details are returned to the MCP caller. In practice this means Ada sees them; end users may also see them depending on how the client renders tool output.
+**Current posture:** Error details are returned to the tool caller. In practice this means the mind sees them; end users may also see them depending on how the client renders tool output.
 
 ---
 
@@ -34,5 +34,5 @@ Outstanding security findings that require an explicit decision before remediati
 ## Long-term (no urgency decision needed)
 
 - Sandboxed execution for dynamically created tools (`create_tool` writes and loads code in-process)
-- Expanded audit logging to all MCP tool invocations (currently only `create_tool` and `install_dependency`)
+- Expanded audit logging to all tool invocations (currently only `create_tool` and `install_dependency`)
 - `pip-audit` or `safety` in development workflow
