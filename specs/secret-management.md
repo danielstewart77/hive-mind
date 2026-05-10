@@ -22,11 +22,11 @@ Service name for all keys: `hive-mind`.
 
 ## Keyring-to-Env Bridge
 
-The gateway server (`server.py`) reads `MCP_AUTH_TOKEN` and `HITL_INTERNAL_TOKEN` from keyring at startup and injects them into `os.environ`. This lets Claude CLI subprocesses resolve `${MCP_AUTH_TOKEN}` from `.mcp.container.json` without needing `.env`.
+The gateway server (`server.py`) reads `HITL_INTERNAL_TOKEN` from keyring at startup and injects it into `os.environ` so Claude CLI subprocesses can resolve it.
 
-## Managed Keys (8)
+## Managed Keys
 
-DISCORD_BOT_TOKEN, TELEGRAM_BOT_TOKEN, HITL_INTERNAL_TOKEN, X_BEARER_TOKEN, PLANKA_EMAIL, PLANKA_PASSWORD, PLANKA_URL, MCP_AUTH_TOKEN
+DISCORD_BOT_TOKEN, TELEGRAM_BOT_TOKEN, HITL_INTERNAL_TOKEN, X_BEARER_TOKEN, PLANKA_EMAIL, PLANKA_PASSWORD, PLANKA_URL, LUCENT_BEARER_TOKEN, HIVE_TOOLS_TOKEN
 
 ## Keys Still in .env
 
@@ -37,6 +37,6 @@ PLANKA_SECRET_KEY_BASE, PLANKA_BASE_URL, PLANKA_ADMIN_EMAIL, PLANKA_ADMIN_PASSWO
 
 - Never hardcode secrets in source code
 - Never put secrets in `.env` for Python services
-- New secrets go in keyring via `set_secret` MCP tool
+- New secrets go in keyring via the `/secrets` skill
 - Use `get_credential()` to read — never `os.getenv()` directly for secrets
 - No `env_file: .env` on any Python service in docker-compose

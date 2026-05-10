@@ -38,7 +38,7 @@ skills/
     SKILL.md              ← step-by-step instructions that reference the spec
 ```
 
-### Tools (MCP, Python)
+### Tools (Python)
 Atomic CRUD operations only. A tool reads from or writes to a system. It does not
 decide *what* to read or *whether* to write — that decision was already made by the
 skill reading the spec.
@@ -133,7 +133,7 @@ in Python heuristics.
 | Requires reading context or nuance | Skill (reads spec) |
 | Requires deciding between options | Skill (reads spec) |
 | Behavior might need to change | Skill/spec (edit markdown, not code) |
-| Pure read/write to a system | Tool (MCP) |
+| Pure read/write to a system | Tool (skill or HTTP service call) |
 | Date arithmetic, string formatting | Tool or inline code |
 | Sending a notification | Tool (`notify_owner`) |
 | Classifying, interpreting, reasoning | Skill (NEVER a tool) |

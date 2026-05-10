@@ -21,7 +21,7 @@ Before any runtime-created tool is loaded, its source code is parsed with Python
 
 ## Ring 2: Process Isolation
 
-Dynamically created MCP tools run in child subprocesses with a stripped environment.
+Dynamically created tools run in child subprocesses with a stripped environment.
 
 ### Subprocess Environment
 The child process receives only 5 base env vars:
@@ -36,7 +36,7 @@ The child process receives only 5 base env vars:
 
 ## Rules for New Tools
 
-- All `@tool()` decorated functions in `tools/stateful/` are auto-discovered by the MCP server
+- Stateful tools live in `tools/stateful/`; stateless tools live in `tools/stateless/<name>/<name>.py` and are wired via skills
 - Return raw data (JSON strings preferred) — never format for display
 - Read credentials via `get_credential(key)` — never hardcode
 - No module-level side effects (no DB connections at import time)

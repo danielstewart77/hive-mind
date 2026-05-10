@@ -7,7 +7,7 @@ Plans (forward-looking, not yet implemented) live in `plans/` — see `plans/` d
 ## Core Standards (always relevant)
 | Spec | File | Summary |
 |------|------|---------|
-| Conventions | `specs/conventions.md` | Build order (CLI → skill → spec → code), when to use skill-creator-claude / mcp-tool-builder |
+| Conventions | `specs/conventions.md` | Build order (CLI → skill → spec → code), when to use skill-creator-claude / tool-creator |
 | Security Policy | `specs/security.md` | Hard limits, elevated-risk rules, prompt injection defense, default stance |
 | Branch Strategy | `specs/branching.md` | Branch naming, PR checklist |
 | Notification Channels | `specs/notification-channels.md` | Fallback order: Telegram → Telegram API → Gmail → alert file |

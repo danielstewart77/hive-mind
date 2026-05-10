@@ -6,9 +6,9 @@ The system uses layered notification with automatic fallback. Always prefer the 
 
 | Priority | Channel | When to use |
 |----------|---------|-------------|
-| 1 | **Telegram bot** (`notify_owner` MCP tool) | Normal operation — bot is up and gateway is running |
-| 2 | **Direct Telegram API** (`notify_owner` MCP tool fallback) | Gateway down, bot still has API access |
-| 3 | **Gmail** (via MCP email tool) | Telegram unreachable |
+| 1 | **Telegram bot** (`notify_owner` skill) | Normal operation — bot is up and gateway is running |
+| 2 | **Direct Telegram API** (`notify_owner` skill fallback) | Gateway down, bot still has API access |
+| 3 | **Gmail** (via `hive-tools` `/gmail/send`) | Telegram unreachable |
 | 4 | **Alert file** (`/usr/src/app/data/alerts.log`) | Last resort — always works, no network required |
 
 The `notify_owner` tool in `tools/stateless/notify/notify.py` implements channels 1–4 automatically.

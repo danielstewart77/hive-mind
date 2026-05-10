@@ -10,11 +10,11 @@ A self-improving personal assistant powered by Claude Code. The system wraps the
 
 ## What makes Hive Mind different
 
-**The backend is swappable by design.** Hive Mind doesn't use the Anthropic SDK — that's intentional. The SDK locks every session to Anthropic's models; swap it out and you're rewriting infrastructure. Instead, the gateway drives `claude --stream-json` directly, which means you get the full Claude Code harness (tool use, subagents, MCP integration, session streaming) without the SDK's model constraint. Point one environment variable at a local Ollama instance and the same system runs on local models, no code changes required. Claude Code's capabilities; your choice of model. Anthropic is the default — not the assumption.
+**The backend is swappable by design.** Hive Mind doesn't use the Anthropic SDK — that's intentional. The SDK locks every session to Anthropic's models; swap it out and you're rewriting infrastructure. Instead, the gateway drives `claude --stream-json` directly, which means you get the full Claude Code harness (tool use, subagents, session streaming) without the SDK's model constraint. Point one environment variable at a local Ollama instance and the same system runs on local models, no code changes required. Claude Code's capabilities; your choice of model. Anthropic is the default — not the assumption.
 
 **Memory is a first-class system, not an afterthought.** Two things drove this. The first is practical: when you say "remember this" or "do you remember," there needs to be a real mechanism behind it — not a chat log search. Every piece of information is classified by data type, stored as a semantic embedding, and retrieved by meaning, not recency. The second runs deeper. Ada's personality is designed to grow organically over time, and a static file can't do that. Semantic memories and knowledge graph relationships are the infrastructure a person would actually need to develop a continuous identity — not simulate one.
 
-**Two MCP servers, sensitive capabilities deliberately isolated.** The internal MCP server runs inside the main container with complete, unrestricted access — memory, knowledge graph, self-improvement tools, all open. The external server is where the sensitive capabilities live: email, calendar, Docker Compose, infrastructure. Moving them out doesn't remove access; it routes every write action through a mandatory human approval step before anything executes. The AI can still send email or restart a container — just not without you knowing about it first.
+**Sensitive capabilities deliberately isolated.** Email, calendar, Docker Compose, and other write/destructive operations live in the external [`hive-tools`](https://github.com/danielstewart77/hive-mind-tools) service — a separate FastAPI process with bearer auth and a HITL approval gate. Minds reach it over HTTP; they cannot perform these operations in-process. A compromised mind can ask, but can't execute without explicit human approval routed through Telegram.
 
 ## Architecture
 
@@ -30,8 +30,8 @@ flowchart TD
     SM -->|HTTP| BOB[Bob Container\nmind_server.py\nClaude CLI · Ollama]
     SM -->|HTTP| BILBY[Bilby Container\nmind_server.py\nCodex CLI · Ollama]
     SM -->|HTTP| NAG[Nagatha Container\nmind_server.py\nCodex CLI]
-    ADA & BOB & BILBY & NAG -->|MCP over network| INT[hive-mind-tools\nLucent · Memory · Browser]
-    ADA & BOB & BILBY & NAG -->|MCP over network| EXT[hive-mind-mcp\nGmail · Calendar · HITL]
+    ADA & BOB & BILBY & NAG -->|HTTP+bearer| LUC[hive-lucent\nVector store + KG]
+    ADA & BOB & BILBY & NAG -->|HTTP+bearer| EXT[hive-tools\nGmail · Calendar · Docker · HITL]
     ADA & BOB & BILBY & NAG -->|POST /broker/messages| BR
     BR -->|wakeup via session_mgr| SM
 ```
@@ -56,7 +56,7 @@ Human-readable guides, background, and reference material — organized by topic
 | Folder | Description |
 |--------|-------------|
 | [docs/ada/](docs/ada/) | Ada's identity, personality, voice, and visual design |
-| [docs/architecture/](docs/architecture/) | Gateway, API, external MCP, mind/body/nervous-system tiers |
+| [docs/architecture/](docs/architecture/) | Gateway, API, hive-tools, mind/body/nervous-system tiers |
 | [docs/setup/](docs/setup/) | Configuration, providers, and secrets |
 | [docs/memory/](docs/memory/) | Memory architecture (lucent now lives in [hive_nervous_system](https://github.com/danielstewart77/hive_nervous_system)) |
 | [docs/security/](docs/security/) | Security model, hardening, and open tradeoffs |

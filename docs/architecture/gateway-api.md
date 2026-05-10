@@ -26,7 +26,7 @@ The FastAPI gateway (`server.py`, port 8420) is the single entry point for all c
 | `POST` | `/command` | Route slash commands (`/new`, `/clear`, `/model`, etc.) |
 | `GET` | `/linkedin/auth` | Initiate LinkedIn OAuth flow |
 | `GET` | `/linkedin/callback` | LinkedIn OAuth callback (exchanges code, stores token) |
-| `POST` | `/hitl/request` | Create a HITL approval request (used by MCP tools) |
+| `POST` | `/hitl/request` | Create a HITL approval request |
 | `GET` | `/hitl/status/{token}` | Poll HITL approval status |
 
 ## Creating a Session
@@ -41,7 +41,7 @@ Content-Type: application/json
   "client_ref": "terminal-1",
   "model": "sonnet",
   "surface_prompt": "Optional context prepended to the session",
-  "allowed_directories": ["<mcp-project-path>"]
+  "allowed_directories": ["<external-project-path>"]
 }
 ```
 
@@ -81,7 +81,7 @@ Claude Code sessions use a two-layer model to access directories outside `/usr/s
 
 | Env var | Default host path | Container path |
 |---------|-------------------|----------------|
-| `HOST_MCP_DIR` | `<mcp-project-path>` | same |
+| `HOST_MCP_DIR` | `<external-project-path>` | same |
 | `HOST_SPARK_DIR` | `<spark-to-bloom-path>` | same |
 
 Paths are mounted at the same location on both sides so `--allowedDirectory` values match.
@@ -89,7 +89,7 @@ Paths are mounted at the same location on both sides so `--allowedDirectory` val
 **Layer 2 — Per-session permission** (`--allowedDirectory`): Bind mounts alone do not grant Claude Code access. Each session must explicitly request permission at creation time via `allowed_directories`, or via the `/new` command:
 
 ```
-/new <mcp-project-path>
+/new <external-project-path>
 ```
 
 Both layers are required. Neither works without the other.

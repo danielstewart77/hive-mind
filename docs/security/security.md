@@ -13,7 +13,7 @@ All application secrets are stored in the system keyring (`keyrings.alt.file.Pla
 Before any runtime-created tool is loaded, its source code is parsed with Python's `ast` module and checked against a blocklist. Blocked: `eval`, `exec`, `compile`, `__import__`, `breakpoint`, `os.system`, `subprocess shell=True`, and imports of `pty`, `ctypes`, `socket`, `multiprocessing`, `code`, `codeop`. Code is staged in `agents/staging/`, validated, then promoted to `agents/`. Violations are rejected with full audit logging. *(Implemented.)*
 
 **Ring 2 — Process Isolation.**
-Dynamically created MCP tools run in child subprocesses with a stripped environment (`core/tool_runner.py`). The subprocess receives only 5 base env vars (PATH, PYTHONPATH, HOME, VIRTUAL_ENV, LANG) plus any explicitly declared via the `allowed_env` parameter on `create_tool`. A 30-second timeout kills runaway tools. First-party tools (committed to the repo) continue to run in-process. *(Implemented.)*
+Dynamically created tools run in child subprocesses with a stripped environment (`core/tool_runner.py`). The subprocess receives only 5 base env vars (PATH, PYTHONPATH, HOME, VIRTUAL_ENV, LANG) plus any explicitly declared via the `allowed_env` parameter on `create_tool`. A 30-second timeout kills runaway tools. First-party tools (committed to the repo) continue to run in-process. *(Implemented.)*
 
 **Ring 3 — Container Hardening.**
 All Python services run with `no-new-privileges`, `cap_drop: ALL`, `read_only: true`, and `tmpfs: /tmp`. Exceptions: the server container adds `tmpfs: /home/hivemind` for Claude Code's config; the voice server uses a named volume for Whisper model downloads and omits `cap_drop` for NVIDIA GPU access. *(Implemented.)*
@@ -34,11 +34,11 @@ Secrets follow a strict hierarchy:
 
 Use `get_credential(key)` from `agents/secret_manager.py`. It checks keyring first, falls back to `os.getenv()`.
 
-The gateway includes a keyring-to-env bridge that reads `MCP_AUTH_TOKEN` and `HITL_INTERNAL_TOKEN` from the keyring at startup and injects them into `os.environ` so Claude CLI subprocesses can resolve them.
+The gateway includes a keyring-to-env bridge that reads `HITL_INTERNAL_TOKEN` from the keyring at startup and injects it into `os.environ` so Claude CLI subprocesses can resolve it.
 
-## MCP Authentication
+## hive-tools Authentication
 
-The external MCP server (`hive_mind_mcp`) is protected by a bearer token. The token is stored in the keyring, bridged into the environment at gateway startup, and referenced in `.mcp.container.json` as `${MCP_AUTH_TOKEN}`. The connection is confined to the `hivemind` Docker network.
+The external `hive-tools` HTTP service is protected by a bearer token. The token is stored in the keyring as `HIVE_TOOLS_TOKEN`, propagated into mind containers via compose `env_file`, and required on every `Authorization: Bearer …` request. See [docs/architecture/hive-tools.md](../architecture/hive-tools.md).
 
 ## Hard Limits
 

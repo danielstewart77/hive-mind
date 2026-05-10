@@ -21,7 +21,7 @@ Complete reference for all Hive Mind Docker services. Load this spec when buildi
 | `${HOST_CLAUDE_DIR:-~/.claude}` | `/home/hivemind/.claude` | Bind | Claude keyring + config |
 | `${HOST_CODEX_DIR:-~/.codex}` | `/home/hivemind/.codex` | Bind | Codex CLI config (Nagatha) |
 | `sessions-db` | `/usr/src/app/data` | Named volume | SQLite sessions DB |
-| `${HOST_MCP_DIR}` | `/usr/src/mcp` | Bind | External MCP project (set in .env) |
+| `${HOST_MCP_DIR}` | `/usr/src/mcp` | Bind | External project bind mount (legacy var name from the retired MCP era; set in .env) |
 | `${HOST_SPARK_DIR}` | `/usr/src/spark_to_bloom` | Bind | External project (set in .env) |
 | `${HOST_CADDY_DIR}` | `/usr/src/caddy` | Bind | Reverse proxy config (set in .env) |
 
@@ -427,35 +427,6 @@ A full disk prevents container startup, image builds, and even debugging tools. 
 
 ---
 
-## MCP Configuration
-
-### Host (`.mcp.json`) — for Claude Code CLI on host
-```json
-{
-  "mcpServers": {
-    "hive-mind-tools": {
-      "command": "<project-root>/venv/bin/python",
-      "args": ["<project-root>/mcp_server.py"]
-    }
-  }
-}
-```
-Runs MCP server locally. Lucent uses the `sessions-db` volume path; ensure `DATA_DIR` env var points to the correct host path if running outside Docker.
-
-### Container (`.mcp.container.json`) — for services inside Docker
-```json
-{
-  "mcpServers": {
-    "hive-mind-tools": {
-      "command": "/opt/venv/bin/python3",
-      "args": ["/usr/src/app/mcp_server.py"]
-    }
-  }
-}
-```
-Uses container paths. Lucent resolves via the shared `sessions-db` volume.
-
----
 
 ## Common Operations
 

@@ -64,7 +64,7 @@ api_key = get_credential("ANTHROPIC_API_KEY")  # keyring first, env fallback
 
 ### Writing Secrets
 
-Use the `set_secret` MCP tool (available to Ada) or call `keyring.set_password("hive-mind", key, value)` directly.
+Use the `/secrets` skill or call `keyring.set_password("hive-mind", key, value)` directly.
 
 ### Required Secrets
 

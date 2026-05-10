@@ -30,7 +30,7 @@ These principles are generalized from real vulnerability classes found in compar
 JavaScript in any browser tab can reach localhost. WebSocket connections bypass CORS. Never assume that "running locally" means "protected." Rate limiting and origin checks apply everywhere.
 
 **Config files are code.**
-`.claude/settings.json`, `.mcp.json`, and any file that triggers execution must be reviewed as code. Supply chain attacks exploit the assumption that config is inert. Any PR touching these files gets the same scrutiny as application code.
+`.claude/settings.json` and any file that triggers execution must be reviewed as code. Supply chain attacks exploit the assumption that config is inert. Any PR touching these files gets the same scrutiny as application code.
 
 **What the user approves must be exactly what executes.**
 Normalize before display, never after. The approval UI and the execution engine must operate on the same canonical representation of a command. Post-approval transformation invalidates the approval.

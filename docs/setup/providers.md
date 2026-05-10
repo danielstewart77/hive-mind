@@ -8,10 +8,9 @@ Hive Mind does **not** use the Anthropic Python SDK or the Claude API directly. 
 
 The Claude CLI provides capabilities the SDK does not expose:
 
-- **Full Claude Code toolset** — file editing, shell execution, web search, MCP tool integration, and the entire built-in Claude Code toolchain are available out of the box
-- **MCP protocol** — the CLI handles the MCP client/server lifecycle natively; replicating this with the SDK would require implementing the full MCP protocol from scratch
+- **Full Claude Code toolset** — file editing, shell execution, web search, and the entire built-in Claude Code toolchain are available out of the box
 - **Session continuity** — the CLI manages its own session state, context window, and tool call loops; the gateway just relays messages
-- **Self-improvement** — Ada can create new MCP tools that are immediately available in the same session, because the CLI reloads tool registrations dynamically
+- **Self-improvement** — Ada can create new tools and skills at runtime that become available in the same session, because the CLI re-reads its skill directory dynamically
 
 The trade-off: the CLI is a subprocess, so the gateway communicates over pipes rather than in-process function calls. This is intentional — it provides process isolation and makes the Claude runtime replaceable.
 
@@ -58,7 +57,7 @@ ollama:
     ANTHROPIC_BASE_URL: "http://host:11434"  # points CLI at Ollama's API
 ```
 
-The Claude CLI sends requests in Anthropic API format; Ollama's OpenAI-compatible endpoint translates them. This works for text generation — tool calling and MCP protocol support depend on the model's capability.
+The Claude CLI sends requests in Anthropic API format; Ollama's OpenAI-compatible endpoint translates them. This works for text generation — tool calling support depends on the model's capability.
 
 **Model discovery**: at startup, the model registry queries `api_base/api/tags` and registers all available Ollama models by their tag name (e.g. `llama3.1:8b`, `qwen2.5:14b`). These are added to the model map alongside the static Anthropic aliases.
 

@@ -8,7 +8,7 @@ It runs outside the Hive Mind container stack and is not mounted into any mind c
 
 ## Why it exists
 
-MCP was removed from all skills. Skills previously called `mcp__hive-mind-mcp__*` tools directly. Those tools are now REST endpoints in hive-tools, called with a bearer token.
+External integrations (Gmail, Calendar, browser, Docker ops, HITL) live outside the mind containers behind a bearer-gated REST API so any compromised mind can only reach them via authenticated network calls — no direct in-process access, no shared memory.
 
 ## Authentication
 
@@ -40,6 +40,5 @@ Full schema at `http://hive-tools:9421/openapi.json`.
 
 ## Anti-patterns
 
-- Do not call `mcp__hive-mind-mcp__*` tools in skills — MCP is removed
 - Do not use `secrets.py get` to retrieve the token — it has no `get` subcommand; use `python3 -m keyring get` directly
 - Do not hardcode the token value anywhere
