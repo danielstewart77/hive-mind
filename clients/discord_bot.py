@@ -60,9 +60,16 @@ def _is_allowed_channel(channel_id: int) -> bool:
 # Voice / TTS helpers
 # ---------------------------------------------------------------------------
 
-async def _tts(text: str) -> bytes:
-    """POST text to voice-server /tts, return OGG audio bytes."""
-    async with http.post(f"{VOICE_SERVER_URL}/tts", json={"text": text}) as resp:
+async def _tts(text: str, voice_id: str) -> bytes:
+    """POST text to voice-server /tts, return OGG audio bytes.
+
+    `voice_id` selects the per-mind reference clip on the voice server
+    (resolves to `minds/<voice_id>/voice_ref.wav`). Without it the voice
+    server falls back to chatterbox's built-in default voice.
+    """
+    async with http.post(
+        f"{VOICE_SERVER_URL}/tts", json={"text": text, "voice_id": voice_id}
+    ) as resp:
         if resp.status != 200:
             raise RuntimeError(f"TTS error {resp.status}: {await resp.text()}")
         return await resp.read()
@@ -90,7 +97,7 @@ async def _play_tts_for_member(member: discord.Member | discord.User, text: str)
         return
 
     try:
-        ogg_bytes = await _tts(text)
+        ogg_bytes = await _tts(text, voice_id=gateway.mind_id)
     except Exception:
         log.exception("TTS synthesis failed")
         return
