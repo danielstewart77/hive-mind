@@ -42,8 +42,8 @@ class TestAutoWriteDigest:
     def test_calls_graph_upsert_for_each_entity(self, mock_mem, mock_graph) -> None:
         mock_graph.return_value = {"upserted": True, "id": 1}
         digest = _make_digest(entities=[
-            {"entity_type": "Person", "name": "Alice", "data_class": "contact", "properties": "{}", "agent_id": "ada"},
-            {"entity_type": "Project", "name": "Hive Mind", "data_class": "project", "properties": "{}", "agent_id": "ada"},
+            {"entity_type": "Person", "name": "Alice", "data_class": "contact", "properties": "{}", "mind_id": "ada"},
+            {"entity_type": "Project", "name": "Hive Mind", "data_class": "project", "properties": "{}", "mind_id": "ada"},
         ])
         auto_write_digest(digest)
         assert mock_graph.call_count == 2
@@ -55,7 +55,7 @@ class TestAutoWriteDigest:
         mock_graph.return_value = {"upserted": True, "id": 1}
         digest = _make_digest(
             memories=[{"content": "M1", "data_class": "obs", "tags": "", "source": "user"}],
-            entities=[{"entity_type": "Person", "name": "A", "data_class": "c", "properties": "{}", "agent_id": "ada"}],
+            entities=[{"entity_type": "Person", "name": "A", "data_class": "c", "properties": "{}", "mind_id": "ada"}],
         )
         result = auto_write_digest(digest)
         assert result["memories_written"] == 1

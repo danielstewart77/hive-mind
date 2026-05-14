@@ -216,6 +216,12 @@ class GatewayClient:
                     f"Gateway message request failed for session {session_id}: {error_text}"
                 )
             buf = ""
+            # When a mind spawns claude with --include-partial-messages, we
+            # receive stream_event events containing per-token text_delta
+            # payloads in addition to the buffered `assistant` event at the
+            # end of each content block. Prefer the deltas when present and
+            # suppress the buffered text to avoid duplication.
+            saw_partial_text = False
             async for chunk in resp.content.iter_any():
                 buf += chunk.decode()
                 while "\n" in buf:
@@ -228,7 +234,21 @@ class GatewayClient:
                     except json.JSONDecodeError:
                         continue
                     etype = event.get("type")
-                    if etype == "assistant":
+                    if etype == "stream_event":
+                        # Anthropic-shaped partial event. We care about
+                        # text_delta payloads inside content_block_delta.
+                        inner = event.get("event", {})
+                        if inner.get("type") == "content_block_delta":
+                            delta = inner.get("delta", {})
+                            if delta.get("type") == "text_delta" and delta.get("text"):
+                                yield delta["text"]
+                                yielded_any = True
+                                saw_partial_text = True
+                    elif etype == "assistant":
+                        if saw_partial_text:
+                            # Already streamed via deltas; skip the buffered
+                            # text to avoid duplication.
+                            continue
                         for block in event.get("message", {}).get("content", []):
                             if block.get("type") == "text" and block.get("text"):
                                 yield block["text"]

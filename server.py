@@ -599,10 +599,13 @@ async def _handle_command(cmd: str, parts: list[str], body: CommandRequest):
 _MINDS_DIR = PROJECT_DIR / "minds"
 
 
-def _mind_exists(mind_id: str) -> bool:
-    """Check if a mind exists via registry or implementation file."""
+async def _mind_exists(mind_id: str) -> bool:
+    """Check if a mind exists via registry, broker DB, or implementation file."""
     if hasattr(app.state, "mind_registry") and app.state.mind_registry.get(mind_id):
         return True
+    if hasattr(app.state, "broker_db"):
+        if await broker.get_mind(app.state.broker_db, mind_id):
+            return True
     return (_MINDS_DIR / mind_id / "implementation.py").exists()
 
 
@@ -673,7 +676,7 @@ async def broker_delete_mind(name: str):
 @app.post("/broker/messages", response_model=BrokerMessageResponse)
 async def broker_post_message(body: BrokerMessageRequest):
     """Receive an inter-mind message, write to DB, kick off background wakeup."""
-    if not _mind_exists(body.to_mind):
+    if not await _mind_exists(body.to_mind):
         return JSONResponse(
             {"error": f"Mind '{body.to_mind}' not found. No minds/{body.to_mind}/implementation.py exists."},
             status_code=404,

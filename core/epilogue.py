@@ -201,9 +201,9 @@ def auto_write_digest(digest: EpilogueDigest) -> dict:
     errors = 0
 
     for mem in digest.memories:
-        agent_id = mem.get("agent_id")
-        if not agent_id:
-            logger.error("Skipping memory with missing agent_id: %s", mem.get("content", "")[:80])
+        mind_id = mem.get("mind_id")
+        if not mind_id:
+            logger.error("Skipping memory with missing mind_id: %s", mem.get("content", "")[:80])
             errors += 1
             continue
         try:
@@ -212,7 +212,7 @@ def auto_write_digest(digest: EpilogueDigest) -> dict:
                 data_class=mem.get("data_class", "observation"),
                 tags=mem.get("tags", ""),
                 source=mem.get("source", "self"),
-                agent_id=agent_id,
+                mind_id=mind_id,
             )
             if "error" in result or result.get("stored") is False:
                 errors += 1
@@ -223,9 +223,9 @@ def auto_write_digest(digest: EpilogueDigest) -> dict:
             errors += 1
 
     for ent in digest.entities:
-        agent_id = ent.get("agent_id")
-        if not agent_id:
-            logger.error("Skipping entity with missing agent_id: %s", ent.get("name", "")[:80])
+        mind_id = ent.get("mind_id")
+        if not mind_id:
+            logger.error("Skipping entity with missing mind_id: %s", ent.get("name", "")[:80])
             errors += 1
             continue
         try:
@@ -237,7 +237,7 @@ def auto_write_digest(digest: EpilogueDigest) -> dict:
                 relation=ent.get("relation", ""),
                 target_name=ent.get("target_name", ""),
                 target_type=ent.get("target_type", ""),
-                agent_id=agent_id,
+                mind_id=mind_id,
                 source=ent.get("source", "self"),
             )
             if "error" in result:

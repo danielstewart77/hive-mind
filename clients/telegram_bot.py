@@ -188,7 +188,10 @@ async def _stream_to_message(
     last_edit = 0.0
 
     async for text_chunk in gateway.query_stream(user_id, chat_id, prompt, images=images):
-        accumulated += ("\n\n" if accumulated else "") + text_chunk
+        # Concatenate without separator. Per-token deltas (when the mind has
+        # --include-partial-messages enabled) include their own whitespace;
+        # buffered assistant text already has its own paragraph breaks.
+        accumulated += text_chunk
         now = time.monotonic()
         if now - last_edit >= edit_interval:
             preview = _chunk_message(_strip_markdown(accumulated))[0]
@@ -207,15 +210,22 @@ async def _stream_to_message(
     except Exception:
         pass
 
-    # Send one voice message with the complete response
+    # Send one voice message with the complete response — detached so it
+    # doesn't hold the chat lock while TTS round-trips. The text response is
+    # already shown above; the voice arrives whenever the TTS service is
+    # done. Without this, holding the lock through TTS makes follow-up
+    # messages queue up and creates the "response held until next message"
+    # n+1 sync glitch.
     if voice and chat:
         full_text = _strip_markdown(accumulated).strip()
         if full_text:
-            try:
-                ogg = await _tts(full_text)
-                await chat.send_voice(voice=io.BytesIO(ogg))
-            except Exception:
-                log.warning("Final voice TTS/send failed", exc_info=True)
+            async def _send_voice_bg() -> None:
+                try:
+                    ogg = await _tts(full_text)
+                    await chat.send_voice(voice=io.BytesIO(ogg))
+                except Exception:
+                    log.warning("Final voice TTS/send failed", exc_info=True)
+            asyncio.create_task(_send_voice_bg())
 
     return final_chunks
 
