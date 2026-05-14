@@ -28,7 +28,7 @@ LUCENT_URL=http://127.0.0.1:8425        # standalone (host)
 LUCENT_URL=http://hive-lucent:8424      # containerized (docker network)
 ```
 
-Identity convention is the same. A standalone mind without a registry-issued UUID uses a stable literal string as its `MIND_AGENT_ID` (Skippy uses the literal `"skippy"`).
+Identity convention is the same. `MIND_ID` is a UUID stored in `.env`, used in every write to lucent's `mind_id` column. `MIND_NAME` is the short display label (e.g. `"skippy"`) used for log paths and the capitalized entity name in graph queries.
 
 ## When NOT to use this pattern
 

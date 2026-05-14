@@ -20,9 +20,9 @@ This repo (`hive_mind`) contains only the **consumer side**:
 
 ## Identity convention
 
-Every write to lucent uses the **canonical mind id** (`MIND_AGENT_ID`), not the human-readable short name. For registry-managed minds this is a UUID issued by `core/sessions.py`. For unmanaged/bare-metal minds it's a stable literal string.
+Every write to lucent uses the **canonical mind id** (`MIND_ID`), a UUID issued by `core/sessions.py` for registry-managed minds and a stable literal string for unmanaged/bare-metal minds.
 
-`MIND_ID` (`ada`, `bob`, …) is for log paths, container names, and display only — **never written to lucent**.
+`MIND_NAME` (`ada`, `bob`, …) is for log paths, container names, and the capitalized entity name used in graph queries — **never written to lucent's `mind_id` column**.
 
 See the [implementation playbook](https://github.com/danielstewart77/hive_nervous_system/blob/main/docs/memory-system-implementation.md#identity-convention) for the full convention and recovery recipe.
 

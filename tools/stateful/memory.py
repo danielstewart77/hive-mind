@@ -105,7 +105,7 @@ def memory_store_direct(
     data_class: str,
     tags: str = "",
     source: str = "user",
-    agent_id: str = "ada",
+    mind_id: str = "ada",
     as_of: str | None = None,
     expires_at: str | None = None,
     recurring: bool | None = None,
@@ -140,7 +140,7 @@ def memory_store_direct(
                     content: $content,
                     tags: $tags,
                     source: $source,
-                    agent_id: $agent_id,
+                    mind_id: $mind_id,
                     created_at: $created_at,
                     embedding: $embedding,
                     data_class: $data_class,
@@ -156,7 +156,7 @@ def memory_store_direct(
                 content=content,
                 tags=tags,
                 source=meta.get("source", source),
-                agent_id=agent_id,
+                mind_id=mind_id,
                 created_at=int(time.time()),
                 embedding=embedding,
                 data_class=meta.get("data_class"),
@@ -172,7 +172,7 @@ def memory_store_direct(
         return json.dumps({
             "stored": True,
             "id": memory_id,
-            "agent_id": agent_id,
+            "mind_id": mind_id,
             "data_class": meta.get("data_class"),
         })
     except Exception as e:
@@ -186,7 +186,7 @@ def memory_store(
     data_class: str,
     tags: str = "",
     source: str = "user",
-    agent_id: str = "ada",
+    mind_id: str = "ada",
     as_of: str | None = None,
     expires_at: str | None = None,
     recurring: bool | None = None,
@@ -199,7 +199,7 @@ def memory_store(
         data_class: Memory data class (e.g. "person", "preference", "technical-config"). Required.
         tags: Comma-separated tags for categorisation (e.g. "session,preference")
         source: Origin of the memory -- "user", "tool", "session", "self"
-        agent_id: Which agent this memory belongs to (default "ada")
+        mind_id: Which agent this memory belongs to (default "ada")
         as_of: ISO datetime for when the fact was established (defaults to now)
         expires_at: ISO datetime for when a timed-event expires (required for timed-event)
         recurring: Explicit recurring flag for timed-events (overrides heuristic detection)
@@ -215,7 +215,7 @@ def memory_store(
             content=content,
             tags=tags,
             source=source,
-            agent_id=agent_id,
+            mind_id=mind_id,
             data_class=data_class,
             as_of=as_of,
             expires_at=expires_at,
@@ -230,14 +230,14 @@ def memory_store(
 def memory_list(
     offset: int = 0,
     limit: int = 25,
-    agent_id: str = "ada",
+    mind_id: str = "ada",
 ) -> str:
     """List all Memory nodes sequentially by creation time for review and cleanup.
 
     Args:
         offset: Number of entries to skip (for pagination).
         limit: Number of entries to return (default 25, max 100).
-        agent_id: Which agent's memories to list (default "ada").
+        mind_id: Which agent's memories to list (default "ada").
 
     Returns:
         JSON with entries (id, content, tags, source, data_class, created_at),
@@ -249,14 +249,14 @@ def memory_list(
         with driver.session() as session:
             _ensure_index(session)
             total_result = session.run(
-                "MATCH (m:Memory) WHERE m.agent_id = $agent_id RETURN count(m) AS total",
-                agent_id=agent_id,
+                "MATCH (m:Memory) WHERE m.mind_id = $mind_id RETURN count(m) AS total",
+                mind_id=mind_id,
             )
             total = total_result.single()["total"]
             result = session.run(
                 """
                 MATCH (m:Memory)
-                WHERE m.agent_id = $agent_id
+                WHERE m.mind_id = $mind_id
                 RETURN elementId(m) AS id,
                        m.content AS content,
                        m.tags AS tags,
@@ -267,7 +267,7 @@ def memory_list(
                 SKIP $offset
                 LIMIT $limit
                 """,
-                agent_id=agent_id,
+                mind_id=mind_id,
                 offset=offset,
                 limit=limit,
             )
@@ -391,7 +391,7 @@ def memory_update(
 def memory_retrieve(
     query: str,
     k: int = 10,
-    agent_id: str = "ada",
+    mind_id: str = "ada",
     tag_filter: Optional[str] = None,
 ) -> str:
     """Retrieve the most semantically relevant memories for a query.
@@ -399,12 +399,12 @@ def memory_retrieve(
     Args:
         query: Natural language query to search for related memories.
         k: Number of results to return (default 10, max 50).
-        agent_id: Which agent's memories to search (default "ada").
+        mind_id: Which agent's memories to search (default "ada").
         tag_filter: Optional tag to filter results (e.g. "session").
 
     Returns:
         JSON array of memories sorted by relevance (highest first), each with
-        content, tags, source, agent_id, created_at, and similarity score.
+        content, tags, source, mind_id, created_at, and similarity score.
     """
     k = min(k, 50)
     try:
@@ -417,11 +417,11 @@ def memory_retrieve(
                     """
                     CALL db.index.vector.queryNodes($index, $k, $embedding)
                     YIELD node AS m, score
-                    WHERE m.agent_id = $agent_id AND m.tags CONTAINS $tag_filter
+                    WHERE m.mind_id = $mind_id AND m.tags CONTAINS $tag_filter
                     RETURN m.content AS content,
                            m.tags AS tags,
                            m.source AS source,
-                           m.agent_id AS agent_id,
+                           m.mind_id AS mind_id,
                            m.created_at AS created_at,
                            m.data_class AS data_class,
                            m.tier AS tier,
@@ -435,7 +435,7 @@ def memory_retrieve(
                     index=VECTOR_INDEX,
                     k=k,
                     embedding=embedding,
-                    agent_id=agent_id,
+                    mind_id=mind_id,
                     tag_filter=tag_filter,
                 )
             else:
@@ -443,11 +443,11 @@ def memory_retrieve(
                     """
                     CALL db.index.vector.queryNodes($index, $k, $embedding)
                     YIELD node AS m, score
-                    WHERE m.agent_id = $agent_id
+                    WHERE m.mind_id = $mind_id
                     RETURN m.content AS content,
                            m.tags AS tags,
                            m.source AS source,
-                           m.agent_id AS agent_id,
+                           m.mind_id AS mind_id,
                            m.created_at AS created_at,
                            m.data_class AS data_class,
                            m.tier AS tier,
@@ -461,14 +461,14 @@ def memory_retrieve(
                     index=VECTOR_INDEX,
                     k=k,
                     embedding=embedding,
-                    agent_id=agent_id,
+                    mind_id=mind_id,
                 )
             memories = [
                 {
                     "content": record["content"],
                     "tags": record["tags"],
                     "source": record["source"],
-                    "agent_id": record["agent_id"],
+                    "mind_id": record["mind_id"],
                     "created_at": record["created_at"],
                     "score": round(record["score"], 4),
                     "data_class": record["data_class"],

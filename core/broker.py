@@ -310,6 +310,66 @@ async def _collect_response(send_generator) -> str:
     return response_text
 
 
+async def _remote_mind_wakeup(gateway_url: str, prompt: str, backstop: float) -> str:
+    """Create a session on a remote mind gateway, send the wakeup prompt, collect response.
+
+    Used for minds registered in the broker DB with a gateway_url but no local
+    implementation.py (e.g. bare-metal minds in separate repos).
+    """
+    import aiohttp
+
+    session_id = None
+    stream_timeout = aiohttp.ClientTimeout(total=backstop, sock_read=backstop)
+
+    async with aiohttp.ClientSession() as http:
+        async with http.post(
+            f"{gateway_url}/sessions",
+            json={"owner_type": "broker", "owner_ref": "broker-wakeup", "client_ref": "broker-wakeup"},
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as resp:
+            data = await resp.json()
+            session_id = data.get("session_id") or data.get("id")
+
+        if not session_id:
+            raise RuntimeError(f"Remote mind at {gateway_url} did not return a session_id")
+
+        try:
+            response_text = ""
+            async with http.post(
+                f"{gateway_url}/sessions/{session_id}/message",
+                json={"content": prompt},
+                timeout=stream_timeout,
+            ) as resp:
+                buf = ""
+                async for chunk in resp.content.iter_any():
+                    buf += chunk.decode()
+                    while "\n" in buf:
+                        line, buf = buf.split("\n", 1)
+                        line = line.strip()
+                        if not line or not line.startswith("data: "):
+                            continue
+                        try:
+                            event = json.loads(line[6:])
+                        except json.JSONDecodeError:
+                            continue
+                        if event.get("type") == "assistant":
+                            for block in event.get("message", {}).get("content", []):
+                                if block.get("type") == "text":
+                                    response_text += block.get("text", "")
+                        elif event.get("type") == "result":
+                            if not response_text:
+                                response_text = event.get("result", "")
+            return response_text
+        finally:
+            try:
+                await http.delete(
+                    f"{gateway_url}/sessions/{session_id}",
+                    timeout=aiohttp.ClientTimeout(total=5),
+                )
+            except Exception:
+                pass
+
+
 # ---------------------------------------------------------------------------
 # Wakeup and collect
 # ---------------------------------------------------------------------------
@@ -343,28 +403,45 @@ async def wakeup_and_collect(
         # 1. Dispatched
         await update_message_status(db, message_id, "dispatched")
 
-        # 2. Create callee session — use the mind's configured model
-        mind_model = None
-        if hasattr(session_mgr, "mind_registry") and session_mgr.mind_registry:
-            mind_info = session_mgr.mind_registry.get(to_mind)
-            if mind_info:
-                mind_model = mind_info.model
-        session = await session_mgr.create_session(
-            owner_type="broker",
-            owner_ref=f"broker-{conversation_id}",
-            client_ref=f"broker-{conversation_id}-{to_mind}",
-            mind_id=to_mind,
-            model=mind_model,
-        )
-        session_id = session["id"]
-        await update_message_status(db, message_id, "dispatched", recipient_session_id=session_id)
-
-        # 3. Send wakeup and collect response
+        # 2. Create callee session — use the mind's configured model.
+        # If the callee is not in the local session manager registry (e.g. a
+        # bare-metal mind with only a broker DB entry), go direct over HTTP.
         prompt = build_wakeup_prompt(from_mind, to_mind, conversation_id, content, rolling_summary, message_number)
-        response_text = await asyncio.wait_for(
-            _collect_response(session_mgr.send_message(session_id, prompt)),
-            timeout=backstop,
-        )
+
+        registry = getattr(session_mgr, "mind_registry", None)
+        in_registry = bool(registry and registry.get(to_mind))
+
+        if not in_registry:
+            broker_mind = await get_mind(db, to_mind)
+            if not broker_mind:
+                raise ValueError(f"Unknown mind_id '{to_mind}': not in registry or broker DB")
+            gateway_url = broker_mind["gateway_url"]
+            log.info("broker: direct HTTP wakeup for remote mind %s at %s", to_mind, gateway_url)
+            response_text = await asyncio.wait_for(
+                _remote_mind_wakeup(gateway_url, prompt, backstop),
+                timeout=backstop,
+            )
+        else:
+            mind_model = None
+            if registry:
+                mind_info = registry.get(to_mind)
+                if mind_info:
+                    mind_model = mind_info.model
+            session = await session_mgr.create_session(
+                owner_type="broker",
+                owner_ref=f"broker-{conversation_id}",
+                client_ref=f"broker-{conversation_id}-{to_mind}",
+                mind_id=to_mind,
+                model=mind_model,
+            )
+            session_id = session["id"]
+            await update_message_status(db, message_id, "dispatched", recipient_session_id=session_id)
+
+            # 3. Send wakeup and collect response
+            response_text = await asyncio.wait_for(
+                _collect_response(session_mgr.send_message(session_id, prompt)),
+                timeout=backstop,
+            )
 
         # 4. Write response as new message — store canonical UUIDs in
         # from_mind / to_mind so the persisted record matches the rest of the

@@ -101,7 +101,7 @@ def _fetch_memories_sync(query: str, mind_id: str = "ada") -> str | None:
     """Retrieve relevant memories for context seeding. Non-fatal.
 
     ``mind_id`` is the operational short name (e.g. ``"ada"``); lucent stores
-    UUIDs in ``agent_id`` after the Phase 3 migration, so we translate at the
+    UUIDs in ``mind_id`` after the Phase 3 migration, so we translate at the
     boundary via the runtime.yaml mapping.
     """
     try:
@@ -112,7 +112,7 @@ def _fetch_memories_sync(query: str, mind_id: str = "ada") -> str | None:
             sys.path.insert(0, agents_path)
         from memory import memory_retrieve  # noqa: PLC0415
         agent_uuid = _name_to_uuid(mind_id) or mind_id
-        data = json.loads(memory_retrieve(query=query, k=5, agent_id=agent_uuid))
+        data = json.loads(memory_retrieve(query=query, k=5, mind_id=agent_uuid))
         memories = data.get("memories", [])
         if not memories:
             return None
