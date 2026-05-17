@@ -46,17 +46,30 @@ Every mind container must have these env vars set (via compose `environment:` + 
 ```
 MIND_ID=<canonical_uuid>                 # 565e5a66-… — written to lucent's mind_id column
 MIND_NAME=<short_name>                   # ada, bob, bilby, nagatha — display, log paths, entity-name source
-LUCENT_URL=http://hive-lucent:8424
+LUCENT_URL=http://hive-lucent:8424       # legacy reader name, retained for back-compat
+LUCENT_URL_SELF=http://hive-lucent:8424  # NS-migration reader name (Skippy convention)
 LUCENT_BEARER_TOKEN=${LUCENT_BEARER_TOKEN}
 HIVE_TOOLS_URL=http://hive-tools:9421
 HIVE_TOOLS_TOKEN=${HIVE_TOOLS_TOKEN}
-GATEWAY_URL=http://server:8420
+COMMS_URL=http://hive-comms:8424         # NS gateway — used by the per-turn rotation hook
+COMMS_BEARER_TOKEN=${COMMS_BEARER_TOKEN}
+GATEWAY_URL=http://server:8420           # legacy in-repo gateway (Phase 1 cuts this over to COMMS_URL)
 SESSIONS_DB_PATH=/usr/src/app/data/sessions.db
 SPECS_DIR=/usr/src/app/specs/data-classes
 AUTO_REMEMBER_LOG_DIR=/usr/src/app/minds/${MIND_NAME}/data/auto-remember
 ```
 
 The bearer tokens come from the host-level `.env` and are interpolated by Docker Compose at container start.
+
+> **NS-migration state (2026-05-17):** Cutover is live for all four minds.
+> Each bot now reaches its mind backend through `hive-comms` at
+> `HIVE_MIND_SERVER_URL=http://hive-comms:8424`; comms composes the full
+> `system_prompt_blocks` (soul + standing + decay-weighted recent +
+> session-memory carry-forward) and ships them to the mind as part of the
+> dispatch payload. Each mind is registered in `broker.minds` by UUID.
+> The legacy `LUCENT_URL` env is retained as a fallback reader name
+> alongside `LUCENT_URL_SELF`; `GATEWAY_URL` is dead and can be removed
+> from per-mind compose files on the next cleanup pass.
 
 ## Identity-node guard
 

@@ -17,6 +17,7 @@ import time
 
 import aiohttp
 from telegram import Update
+from telegram.error import NetworkError, TimedOut
 from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
@@ -636,10 +637,20 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lock = get_lock(chat_id)
     queue = get_queue(chat_id)
 
-    # STT happens outside the lock so we have text to queue if busy
-    try:
+    # STT happens outside the lock so we have text to queue if busy.
+    # Telegram's getFile/download occasionally stalls; retry once on transient
+    # network errors so a single blip doesn't surface to the user.
+    async def _fetch_voice_bytes() -> bytes:
         voice_file = await update.message.voice.get_file()
-        ogg_bytes = bytes(await voice_file.download_as_bytearray())
+        return bytes(await voice_file.download_as_bytearray())
+
+    try:
+        try:
+            ogg_bytes = await _fetch_voice_bytes()
+        except (TimedOut, NetworkError) as exc:
+            log.warning("voice fetch transient failure (%s) — retrying once", exc.__class__.__name__)
+            await asyncio.sleep(1.0)
+            ogg_bytes = await _fetch_voice_bytes()
         text = await _stt(ogg_bytes)
     except Exception:
         log.exception("STT failed in chat %s", chat_id)
@@ -804,6 +815,11 @@ if __name__ == "__main__":
         ApplicationBuilder()
         .token(token)
         .concurrent_updates(True)
+        .connect_timeout(10.0)
+        .read_timeout(20.0)
+        .write_timeout(20.0)
+        .pool_timeout(5.0)
+        .get_updates_read_timeout(30.0)
         .post_init(_on_startup)
         .post_shutdown(_on_shutdown)
         .build()
