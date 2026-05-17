@@ -61,14 +61,15 @@ AUTO_REMEMBER_LOG_DIR=/usr/src/app/minds/${MIND_NAME}/data/auto-remember
 
 The bearer tokens come from the host-level `.env` and are interpolated by Docker Compose at container start.
 
-> **NS-migration state (2026-05-17):** Phase 0 preflight is complete. The
-> three NS env vars (`LUCENT_URL_SELF`, `COMMS_URL`, `COMMS_BEARER_TOKEN`)
-> are now present in every mind's `compose.yaml`; they take effect on next
-> container restart. The legacy `LUCENT_URL` and `GATEWAY_URL` are kept in
-> place until Phase 1 rewires the dispatch path. Per-mind broker
-> registration (`POST /broker/minds`) is deferred to Phase 1 because the
-> per-mind backend URL (the value that goes into `gateway_url`) is itself
-> a Phase-1 build. See [upstream-minds-ns-migration-punchlist.md](https://github.com/danielstewart77/spark_to_bloom/blob/main/src/backlog/upstream-minds-ns-migration-punchlist.md).
+> **NS-migration state (2026-05-17):** Cutover is live for all four minds.
+> Each bot now reaches its mind backend through `hive-comms` at
+> `HIVE_MIND_SERVER_URL=http://hive-comms:8424`; comms composes the full
+> `system_prompt_blocks` (soul + standing + decay-weighted recent +
+> session-memory carry-forward) and ships them to the mind as part of the
+> dispatch payload. Each mind is registered in `broker.minds` by UUID.
+> The legacy `LUCENT_URL` env is retained as a fallback reader name
+> alongside `LUCENT_URL_SELF`; `GATEWAY_URL` is dead and can be removed
+> from per-mind compose files on the next cleanup pass.
 
 ## Identity-node guard
 
