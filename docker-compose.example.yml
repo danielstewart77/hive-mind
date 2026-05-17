@@ -113,7 +113,7 @@ services:
       - KEY_RING=/usr/src/app/data/keyring
       - MIND_ID=example
       - TELEGRAM_BOT_TOKEN_KEYRING_KEY=EXAMPLE_TELEGRAM_BOT_TOKEN
-    command: ["/opt/venv/bin/python3", "-m", "clients.telegram_bot"]
+    command: ["/opt/venv/bin/python3", "-m", "bots.telegram_bot"]
 
   bilby-bot:
     build: .
@@ -142,7 +142,7 @@ services:
       - KEY_RING=/usr/src/app/data/keyring
       - MIND_ID=bilby
       - TELEGRAM_BOT_TOKEN_KEYRING_KEY=BILBY_TELEGRAM_BOT_TOKEN
-    command: ["/opt/venv/bin/python3", "-m", "clients.telegram_bot"]
+    command: ["/opt/venv/bin/python3", "-m", "bots.telegram_bot"]
 
   # ─────────────────────────────────────────────────────────────
   # Example Discord bot.
@@ -174,7 +174,7 @@ services:
       - PYTHONNOUSERSITE=1
       - KEY_RING=/usr/src/app/data/keyring
       - MIND_ID=example
-    command: ["/opt/venv/bin/python3", "-m", "clients.discord_bot"]
+    command: ["/opt/venv/bin/python3", "-m", "bots.discord_bot"]
 
 # Per-mind service definitions are pulled in via the `include:` block at the top of
 # this file. See minds/example/container/compose.yaml for a fragment template.

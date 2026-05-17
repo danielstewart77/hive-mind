@@ -111,6 +111,11 @@ class GatewayClient:
         self.owner_type = owner_type
         self.surface_prompt = surface_prompt
         self.mind_id = mind_id
+        # Bearer auth: set when the bot talks to hive-comms (which requires
+        # it). Legacy `server.py` ignores the header, so attaching it
+        # unconditionally is safe and avoids a forked code path.
+        token = os.environ.get("COMMS_BEARER_TOKEN", "").strip()
+        self._headers = {"Authorization": f"Bearer {token}"} if token else {}
 
     async def find_active_session(
         self, user_id: int, client_ref: int | str
@@ -123,6 +128,7 @@ class GatewayClient:
         async with self.http.get(
             f"{self.server_url}/sessions",
             params={"client_type": self.owner_type, "client_ref": str(client_ref)},
+            headers=self._headers,
         ) as resp:
             data = await resp.json()
             for s in data:
@@ -135,6 +141,7 @@ class GatewayClient:
         async with self.http.get(
             f"{self.server_url}/sessions",
             params={"client_type": self.owner_type, "client_ref": str(client_ref)},
+            headers=self._headers,
         ) as resp:
             data = await resp.json()
             for s in data:
@@ -149,7 +156,9 @@ class GatewayClient:
         }
         if self.surface_prompt:
             payload["surface_prompt"] = self.surface_prompt
-        async with self.http.post(f"{self.server_url}/sessions", json=payload) as resp:
+        async with self.http.post(
+            f"{self.server_url}/sessions", json=payload, headers=self._headers
+        ) as resp:
             return (await resp.json())["id"]
 
     async def server_command(
@@ -165,13 +174,15 @@ class GatewayClient:
                 "client_ref": str(client_ref),
                 "mind_id": self.mind_id,
             },
+            headers=self._headers,
         ) as resp:
             return await resp.json()
 
     async def interrupt_session(self, session_id: str) -> dict:
         """Send an interrupt request for a session. Returns the JSON response."""
         async with self.http.post(
-            f"{self.server_url}/sessions/{session_id}/interrupt"
+            f"{self.server_url}/sessions/{session_id}/interrupt",
+            headers=self._headers,
         ) as resp:
             return await resp.json()
 
@@ -200,6 +211,7 @@ class GatewayClient:
             f"{self.server_url}/sessions/{session_id}/message",
             json=payload,
             timeout=sse_timeout,
+            headers=self._headers,
         ) as resp:
             if resp.status != 200:
                 error_text = ""

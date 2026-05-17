@@ -46,17 +46,29 @@ Every mind container must have these env vars set (via compose `environment:` + 
 ```
 MIND_ID=<canonical_uuid>                 # 565e5a66-… — written to lucent's mind_id column
 MIND_NAME=<short_name>                   # ada, bob, bilby, nagatha — display, log paths, entity-name source
-LUCENT_URL=http://hive-lucent:8424
+LUCENT_URL=http://hive-lucent:8424       # legacy reader name, retained for back-compat
+LUCENT_URL_SELF=http://hive-lucent:8424  # NS-migration reader name (Skippy convention)
 LUCENT_BEARER_TOKEN=${LUCENT_BEARER_TOKEN}
 HIVE_TOOLS_URL=http://hive-tools:9421
 HIVE_TOOLS_TOKEN=${HIVE_TOOLS_TOKEN}
-GATEWAY_URL=http://server:8420
+COMMS_URL=http://hive-comms:8424         # NS gateway — used by the per-turn rotation hook
+COMMS_BEARER_TOKEN=${COMMS_BEARER_TOKEN}
+GATEWAY_URL=http://server:8420           # legacy in-repo gateway (Phase 1 cuts this over to COMMS_URL)
 SESSIONS_DB_PATH=/usr/src/app/data/sessions.db
 SPECS_DIR=/usr/src/app/specs/data-classes
 AUTO_REMEMBER_LOG_DIR=/usr/src/app/minds/${MIND_NAME}/data/auto-remember
 ```
 
 The bearer tokens come from the host-level `.env` and are interpolated by Docker Compose at container start.
+
+> **NS-migration state (2026-05-17):** Phase 0 preflight is complete. The
+> three NS env vars (`LUCENT_URL_SELF`, `COMMS_URL`, `COMMS_BEARER_TOKEN`)
+> are now present in every mind's `compose.yaml`; they take effect on next
+> container restart. The legacy `LUCENT_URL` and `GATEWAY_URL` are kept in
+> place until Phase 1 rewires the dispatch path. Per-mind broker
+> registration (`POST /broker/minds`) is deferred to Phase 1 because the
+> per-mind backend URL (the value that goes into `gateway_url`) is itself
+> a Phase-1 build. See [upstream-minds-ns-migration-punchlist.md](https://github.com/danielstewart77/spark_to_bloom/blob/main/src/backlog/upstream-minds-ns-migration-punchlist.md).
 
 ## Identity-node guard
 

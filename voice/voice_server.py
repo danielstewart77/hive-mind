@@ -323,6 +323,15 @@ async def tts(req: TTSRequest):
         raise HTTPException(status_code=503, detail="TTS not ready")
 
     ref_path = _resolve_voice_ref(req.voice_id)
+    if ref_path is None:
+        # Chatterbox keeps the last-used reference clip cached; passing None
+        # silently reuses the previous callers voice. Fail loud at the
+        # boundary so cross-mind voice bleed is impossible.
+        log.warning("TTS voice_ref not found for voice_id=%r", req.voice_id)
+        raise HTTPException(
+            status_code=400,
+            detail=f"voice_ref not found for voice_id={req.voice_id!r}",
+        )
     wav = _synthesize_chunked(_strip_markdown(req.text), ref_path)
 
     wav_buf = io.BytesIO()

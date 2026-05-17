@@ -15,8 +15,6 @@ services:
       - ${HOST_CLAUDE_DIR:-~/.claude}:/home/hivemind/.host-claude:ro
       - ${HOST_PROJECT_DIR:-.}/minds/example/.claude:/home/hivemind/.claude-config:rw
     restart: unless-stopped
-    depends_on:
-      - server
     networks:
       - hivemind
     tmpfs:
