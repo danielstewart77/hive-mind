@@ -24,7 +24,8 @@ DEFAULT_TIMEZONE = "America/Chicago"
 class ScheduledSkill:
     """A single scheduled invocation: which mind, which skill, what cron."""
 
-    mind_id: str
+    mind_id: str          # canonical UUID, used in gateway payloads
+    mind_name: str        # short folder name, used in log labels
     skill_name: str
     cron: str
     timezone: str
@@ -79,11 +80,19 @@ def discover_scheduled_skills(minds_root: Path) -> list[ScheduledSkill]:
         return found
 
     for skill_md in sorted(minds_root.glob("*/.claude/skills/*/SKILL.md")):
-        # minds_root/<mind_id>/.claude/skills/<skill_name>/SKILL.md
+        # minds_root/<mind_name>/.claude/skills/<skill_name>/SKILL.md
         try:
-            mind_id = skill_md.relative_to(minds_root).parts[0]
+            mind_name = skill_md.relative_to(minds_root).parts[0]
             skill_name = skill_md.parent.name
         except (ValueError, IndexError):
+            continue
+
+        mind_id = _load_mind_uuid(minds_root / mind_name)
+        if not mind_id:
+            log.warning(
+                "Skipping %s/%s — no mind_id in %s/runtime.yaml",
+                mind_name, skill_name, mind_name,
+            )
             continue
 
         try:
@@ -100,12 +109,13 @@ def discover_scheduled_skills(minds_root: Path) -> list[ScheduledSkill]:
         if not _validate_cron(cron):
             log.warning(
                 "Skipping %s/%s — invalid cron %r (need 5 fields)",
-                mind_id, skill_name, cron,
+                mind_name, skill_name, cron,
             )
             continue
 
         found.append(ScheduledSkill(
             mind_id=mind_id,
+            mind_name=mind_name,
             skill_name=skill_name,
             cron=cron,
             timezone=fm.get("schedule_timezone", DEFAULT_TIMEZONE),
@@ -114,3 +124,19 @@ def discover_scheduled_skills(minds_root: Path) -> list[ScheduledSkill]:
         ))
 
     return found
+
+
+_MIND_ID_RE = re.compile(r"^\s*mind_id\s*:\s*(.+?)\s*$", re.MULTILINE)
+
+
+def _load_mind_uuid(mind_dir: Path) -> str | None:
+    """Read `mind_id:` out of a mind's runtime.yaml. Returns None if absent."""
+    runtime = mind_dir / "runtime.yaml"
+    try:
+        text = runtime.read_text()
+    except OSError:
+        return None
+    m = _MIND_ID_RE.search(text)
+    if not m:
+        return None
+    return m.group(1).strip().strip('"').strip("'") or None

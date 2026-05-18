@@ -151,7 +151,6 @@ class TestSessionMindIdFlow:
             created_at    REAL NOT NULL,
             last_active   REAL NOT NULL,
             status        TEXT NOT NULL DEFAULT 'running',
-            epilogue_status TEXT DEFAULT NULL
         );
 
         CREATE TABLE IF NOT EXISTS active_sessions (

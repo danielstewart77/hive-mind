@@ -13,14 +13,24 @@ from core.scheduled_skills import (
 )
 
 
+_TEST_UUIDS = {
+    "ada": "565e5a66-d20c-4266-872a-3268c4c894fc",
+    "bob": "11111111-2222-3333-4444-555555555555",
+}
+
+
 def _write_skill(
     minds_root: Path,
-    mind_id: str,
+    mind_name: str,
     skill_name: str,
     frontmatter: str,
     body: str = "skill body",
 ) -> Path:
-    skill_dir = minds_root / mind_id / ".claude" / "skills" / skill_name
+    mind_dir = minds_root / mind_name
+    mind_dir.mkdir(parents=True, exist_ok=True)
+    uuid_ = _TEST_UUIDS.get(mind_name, f"00000000-0000-0000-0000-{mind_name:>012s}")
+    (mind_dir / "runtime.yaml").write_text(f"name: {mind_name}\nmind_id: {uuid_}\n")
+    skill_dir = mind_dir / ".claude" / "skills" / skill_name
     skill_dir.mkdir(parents=True, exist_ok=True)
     skill_md = skill_dir / "SKILL.md"
     skill_md.write_text(f"---\n{frontmatter}\n---\n\n{body}\n")
@@ -44,7 +54,8 @@ def test_discovers_basic_cron(tmp_path: Path):
     found = discover_scheduled_skills(tmp_path)
     assert found == [
         ScheduledSkill(
-            mind_id="ada",
+            mind_id=_TEST_UUIDS["ada"],
+            mind_name="ada",
             skill_name="7am",
             cron="0 7 * * *",
             timezone="America/Chicago",
@@ -89,8 +100,21 @@ def test_walks_multiple_minds(tmp_path: Path):
     _write_skill(tmp_path, "ada", "morning", "name: morning\nschedule: \"0 7 * * *\"")
     _write_skill(tmp_path, "bob", "evening", "name: evening\nschedule: \"0 19 * * *\"")
     found = discover_scheduled_skills(tmp_path)
-    minds = {(s.mind_id, s.skill_name) for s in found}
+    minds = {(s.mind_name, s.skill_name) for s in found}
     assert minds == {("ada", "morning"), ("bob", "evening")}
+    by_name = {s.mind_name: s.mind_id for s in found}
+    assert by_name == {"ada": _TEST_UUIDS["ada"], "bob": _TEST_UUIDS["bob"]}
+
+
+def test_skips_when_runtime_yaml_missing(tmp_path: Path, caplog: pytest.LogCaptureFixture):
+    """A skill is only schedulable if its mind has a runtime.yaml with mind_id."""
+    skill_dir = tmp_path / "orphan" / ".claude" / "skills" / "fire"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: fire\nschedule: \"0 7 * * *\"\n---\nbody\n"
+    )
+    assert discover_scheduled_skills(tmp_path) == []
+    assert any("no mind_id" in r.message.lower() for r in caplog.records)
 
 
 def test_quoted_and_unquoted_cron_values_both_accepted(tmp_path: Path):

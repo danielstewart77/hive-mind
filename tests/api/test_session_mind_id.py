@@ -25,7 +25,6 @@ class TestSessionMindIdApi:
                 "created_at": 1000.0,
                 "last_active": 1000.0,
                 "status": "running",
-                "epilogue_status": None,
                 "mind_id": "ada",
             })
 
@@ -56,7 +55,6 @@ class TestSessionMindIdApi:
                 "created_at": 1000.0,
                 "last_active": 1000.0,
                 "status": "running",
-                "epilogue_status": None,
                 "mind_id": "nagatha",
             })
 
@@ -87,7 +85,6 @@ class TestSessionMindIdApi:
                 "created_at": 1000.0,
                 "last_active": 1000.0,
                 "status": "running",
-                "epilogue_status": None,
                 "mind_id": "ada",
             })
 

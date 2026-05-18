@@ -111,7 +111,7 @@ def memory_store_direct(
     recurring: bool | None = None,
     codebase_ref: str | None = None,
 ) -> str:
-    """Write to vector memory without HITL. Called by the epilogue after batch approval."""
+    """Write to vector memory without HITL."""
     try:
         try:
             validate_source(source)

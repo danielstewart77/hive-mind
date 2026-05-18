@@ -50,6 +50,10 @@ log = logging.getLogger("hive-mind-scheduler")
 SERVER_URL = os.environ.get("HIVE_MIND_SERVER_URL", f"http://localhost:{config.server_port}")
 VOICE_SERVER_URL = os.environ.get("VOICE_SERVER_URL", "http://localhost:8422")
 MINDS_ROOT = Path(os.environ.get("MINDS_ROOT", "/usr/src/app/minds"))
+COMMS_BEARER_TOKEN = os.environ.get("COMMS_BEARER_TOKEN", "")
+GATEWAY_AUTH_HEADERS = (
+    {"Authorization": f"Bearer {COMMS_BEARER_TOKEN}"} if COMMS_BEARER_TOKEN else {}
+)
 
 VOICE_SURFACE_PROMPT = (
     "You are responding via Telegram. Your responses will be spoken aloud as voice. "
@@ -122,7 +126,7 @@ async def _send_text(bot_token: str, chat_id: int, text: str) -> None:
 
 async def _create_session(http: aiohttp.ClientSession, skill: ScheduledSkill, surface_prompt: str) -> str:
     """Create a fresh session for this fire. Returns session id."""
-    client_ref = f"scheduler-{skill.mind_id}-{skill.skill_name}-{uuid.uuid4().hex[:8]}"
+    client_ref = f"scheduler-{skill.mind_name}-{skill.skill_name}-{uuid.uuid4().hex[:8]}"
     payload = {
         "owner_type": "scheduler",
         "owner_ref": str(config.telegram_owner_chat_id or "scheduler"),
@@ -183,7 +187,7 @@ async def _kill_session(http: aiohttp.ClientSession, session_id: str) -> None:
 
 async def fire_skill(skill: ScheduledSkill) -> None:
     """Fire a single scheduled skill: fresh session → run → kill → deliver."""
-    label = f"{skill.mind_id}/{skill.skill_name}"
+    label = f"{skill.mind_name}/{skill.skill_name}"
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     chat_id = config.telegram_owner_chat_id
 
@@ -195,7 +199,7 @@ async def fire_skill(skill: ScheduledSkill) -> None:
     surface_prompt = VOICE_SURFACE_PROMPT if skill.voice else DEV_SURFACE_PROMPT
 
     timeout = aiohttp.ClientTimeout(total=300)
-    async with aiohttp.ClientSession(timeout=timeout) as http:
+    async with aiohttp.ClientSession(timeout=timeout, headers=GATEWAY_AUTH_HEADERS) as http:
         session_id: str | None = None
         try:
             session_id = await _create_session(http, skill, surface_prompt)
@@ -222,27 +226,6 @@ async def fire_skill(skill: ScheduledSkill) -> None:
         asyncio.create_task(_try_send_voice(bot_token, chat_id, response, label))
 
 
-async def _epilogue_sweep() -> None:
-    """Call the gateway's epilogue sweep endpoint to process completed sessions."""
-    log.info("Running epilogue sweep")
-    try:
-        timeout = aiohttp.ClientTimeout(total=120)
-        headers = {"X-HITL-Internal": config.hitl_internal_token or ""}
-        async with aiohttp.ClientSession(timeout=timeout) as http:
-            async with http.post(f"{SERVER_URL}/epilogue/sweep", headers=headers) as resp:
-                data = await resp.json()
-                log.info(
-                    "Epilogue sweep: processed=%d, auto_written=%d, skipped=%d, errors=%d, exceptions=%d",
-                    data.get("processed", 0),
-                    data.get("auto_written", 0),
-                    data.get("skipped", 0),
-                    data.get("errors", 0),
-                    data.get("exceptions", 0),
-                )
-    except Exception:
-        log.exception("Epilogue sweep failed")
-
-
 RECONCILE_INTERVAL_SEC = 30
 SKILL_JOB_PREFIX = "skill:"
 
@@ -251,7 +234,7 @@ def _skill_job_id(skill: ScheduledSkill) -> str:
     """Encode skill identity + schedule into the job id, so any change to the
     schedule produces a different job id and triggers a clean replace.
     """
-    return f"{SKILL_JOB_PREFIX}{skill.mind_id}/{skill.skill_name}|{skill.cron}|{skill.timezone}|v={skill.voice}|n={skill.notify}"
+    return f"{SKILL_JOB_PREFIX}{skill.mind_name}/{skill.skill_name}|{skill.cron}|{skill.timezone}|v={skill.voice}|n={skill.notify}"
 
 
 def _reconcile_skill_jobs(scheduler: AsyncIOScheduler) -> tuple[int, int, int]:
@@ -290,7 +273,7 @@ def _reconcile_skill_jobs(scheduler: AsyncIOScheduler) -> tuple[int, int, int]:
         )
         log.info(
             "Scheduled %s/%s @ %s (%s)",
-            skill.mind_id, skill.skill_name, skill.cron, skill.timezone,
+            skill.mind_name, skill.skill_name, skill.cron, skill.timezone,
         )
 
     return len(to_add), len(to_remove), len(desired_ids)
@@ -318,14 +301,9 @@ async def main() -> None:
             MINDS_ROOT,
         )
 
-    epilogue_trigger = CronTrigger(minute="*/15", timezone="America/Chicago")
-    scheduler.add_job(_epilogue_sweep, epilogue_trigger, id="epilogue-sweep")
-    log.info("Scheduled epilogue sweep @ */15 * * * *")
-
     scheduler.start()
     log.info(
-        "Scheduler running — %d skill job(s) + memory expiry sweep + epilogue sweep "
-        "(reconcile every %ds)",
+        "Scheduler running — %d skill job(s) (reconcile every %ds)",
         total, RECONCILE_INTERVAL_SEC,
     )
 
