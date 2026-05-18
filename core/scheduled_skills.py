@@ -1,8 +1,8 @@
 """Scheduled skill discovery.
 
-Walks every mind's `.claude/skills/*/SKILL.md`, extracts skills that declare
-a `schedule:` cron expression in frontmatter, and returns them as a flat
-list the scheduler can register with APScheduler.
+Walks every mind's `.claude/skills/*/SKILL.md` and `.codex/skills/*/SKILL.md`,
+extracts skills that declare a `schedule:` cron expression in frontmatter,
+and returns them as a flat list the scheduler can register with APScheduler.
 
 Schedule lives on the skill, not in `config.yaml`. Adding or removing a
 scheduled task is the same operation as adding or removing a skill.
@@ -79,8 +79,12 @@ def discover_scheduled_skills(minds_root: Path) -> list[ScheduledSkill]:
     if not minds_root.is_dir():
         return found
 
-    for skill_md in sorted(minds_root.glob("*/.claude/skills/*/SKILL.md")):
-        # minds_root/<mind_name>/.claude/skills/<skill_name>/SKILL.md
+    skill_files = sorted(
+        list(minds_root.glob("*/.claude/skills/*/SKILL.md"))
+        + list(minds_root.glob("*/.codex/skills/*/SKILL.md"))
+    )
+    for skill_md in skill_files:
+        # minds_root/<mind_name>/(.claude|.codex)/skills/<skill_name>/SKILL.md
         try:
             mind_name = skill_md.relative_to(minds_root).parts[0]
             skill_name = skill_md.parent.name

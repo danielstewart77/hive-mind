@@ -1,8 +1,9 @@
 """Hive Mind Scheduler — cron-driven proactive tasks.
 
 Discovers scheduled skills from each mind's `.claude/skills/*/SKILL.md`
-(via frontmatter `schedule:` field), runs them on their cron, and delivers
-the result as a voice note (with text fallback) via Telegram.
+or `.codex/skills/*/SKILL.md` (via frontmatter `schedule:` field), runs
+them on their cron, and delivers the result as a voice note (with text
+fallback) via Telegram.
 
 Each fire creates a fresh session, sends the skill invocation, reads the
 response, and kills the session. Sessions are not resumed across fires —

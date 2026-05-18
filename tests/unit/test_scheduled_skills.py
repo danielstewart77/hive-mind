@@ -25,12 +25,13 @@ def _write_skill(
     skill_name: str,
     frontmatter: str,
     body: str = "skill body",
+    harness: str = ".claude",
 ) -> Path:
     mind_dir = minds_root / mind_name
     mind_dir.mkdir(parents=True, exist_ok=True)
     uuid_ = _TEST_UUIDS.get(mind_name, f"00000000-0000-0000-0000-{mind_name:>012s}")
     (mind_dir / "runtime.yaml").write_text(f"name: {mind_name}\nmind_id: {uuid_}\n")
-    skill_dir = mind_dir / ".claude" / "skills" / skill_name
+    skill_dir = mind_dir / harness / "skills" / skill_name
     skill_dir.mkdir(parents=True, exist_ok=True)
     skill_md = skill_dir / "SKILL.md"
     skill_md.write_text(f"---\n{frontmatter}\n---\n\n{body}\n")
@@ -115,6 +116,27 @@ def test_skips_when_runtime_yaml_missing(tmp_path: Path, caplog: pytest.LogCaptu
     )
     assert discover_scheduled_skills(tmp_path) == []
     assert any("no mind_id" in r.message.lower() for r in caplog.records)
+
+
+def test_discovers_codex_harness_skills(tmp_path: Path):
+    """Codex-harness minds keep their skills under `.codex/skills/` instead
+    of `.claude/skills/`, but the SKILL.md schema is identical and the
+    scheduler must walk both."""
+    _write_skill(
+        tmp_path, "ada", "morning",
+        "name: morning\nschedule: \"0 7 * * *\"",
+        harness=".claude",
+    )
+    _write_skill(
+        tmp_path, "bob", "evening",
+        "name: evening\nschedule: \"0 19 * * *\"",
+        harness=".codex",
+    )
+    found = discover_scheduled_skills(tmp_path)
+    by_skill = {(s.mind_name, s.skill_name): s for s in found}
+    assert set(by_skill) == {("ada", "morning"), ("bob", "evening")}
+    assert by_skill[("bob", "evening")].mind_id == _TEST_UUIDS["bob"]
+    assert by_skill[("bob", "evening")].cron == "0 19 * * *"
 
 
 def test_quoted_and_unquoted_cron_values_both_accepted(tmp_path: Path):
