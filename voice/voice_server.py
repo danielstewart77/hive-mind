@@ -63,11 +63,56 @@ _chatterbox_model = None
 # ---------------------------------------------------------------------------
 # Voice reference resolution
 # ---------------------------------------------------------------------------
+_MINDS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "minds")
+_MIND_ID_TO_NAME: dict[str, str] = {}
+
+
+def _load_mind_id_map() -> dict[str, str]:
+    """Build {mind_id (UUID) -> short_name} by scanning minds/*/runtime.yaml.
+    Lets the voice server resolve a UUID voice_id back to the on-disk folder
+    name when callers (post agent_id→mind_id rename) pass the UUID.
+    """
+    mapping: dict[str, str] = {}
+    if not os.path.isdir(_MINDS_DIR):
+        return mapping
+    for short_name in os.listdir(_MINDS_DIR):
+        rt = os.path.join(_MINDS_DIR, short_name, "runtime.yaml")
+        if not os.path.isfile(rt):
+            continue
+        try:
+            with open(rt) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("mind_id:"):
+                        mid = line.split(":", 1)[1].strip().strip('"').strip("'")
+                        if mid:
+                            mapping[mid] = short_name
+                        break
+        except OSError:
+            continue
+    return mapping
+
+
 def _resolve_voice_ref(voice_id: str) -> str | None:
-    """Resolve a voice_id to minds/{voice_id}/voice_ref.wav."""
-    mind_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "minds", voice_id, "voice_ref.wav")
-    if os.path.exists(mind_path):
-        return mind_path
+    """Resolve a voice_id to minds/{short_name}/voice_ref.wav.
+
+    Accepts either the short name ("ada") or the canonical mind_id (UUID).
+    Short-name lookup is tried first; if that misses, we fall through to a
+    UUID→short-name map built from each mind's runtime.yaml.
+    """
+    direct = os.path.join(_MINDS_DIR, voice_id, "voice_ref.wav")
+    if os.path.exists(direct):
+        return direct
+
+    short = _MIND_ID_TO_NAME.get(voice_id)
+    if short is None:
+        # Lazy refresh: a mind may have been added since startup.
+        _MIND_ID_TO_NAME.update(_load_mind_id_map())
+        short = _MIND_ID_TO_NAME.get(voice_id)
+    if short:
+        by_id = os.path.join(_MINDS_DIR, short, "voice_ref.wav")
+        if os.path.exists(by_id):
+            return by_id
     return None
 
 
@@ -89,7 +134,8 @@ async def startup():
     log.info("Loading Chatterbox TTS...")
     _chatterbox_model = ChatterboxTTS.from_pretrained(device=_DEVICE)
 
-    log.info("Voice server ready. TTS: Chatterbox")
+    _MIND_ID_TO_NAME.update(_load_mind_id_map())
+    log.info("Voice server ready. TTS: Chatterbox | known mind_ids: %d", len(_MIND_ID_TO_NAME))
 
 
 # ---------------------------------------------------------------------------
