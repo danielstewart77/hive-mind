@@ -21,7 +21,7 @@ def _make_update(user_id: int = 123, chat_id: int = 456):
 @pytest.fixture(autouse=True)
 def _patch_config():
     """Patch config so telegram_allowed_users includes test user."""
-    with patch("clients.telegram_bot.config") as mock_config:
+    with patch("bots.telegram_bot.config") as mock_config:
         mock_config.telegram_allowed_users = {123}
         mock_config.server_port = 8420
         mock_config.hitl_internal_token = "test-token"
@@ -32,7 +32,7 @@ def _patch_config():
 def mock_gateway():
     """Patch the module-level gateway with a mock GatewayClient."""
     mock_gw = AsyncMock()
-    with patch("clients.telegram_bot.gateway", mock_gw):
+    with patch("bots.telegram_bot.gateway", mock_gw):
         yield mock_gw
 
 
@@ -42,7 +42,7 @@ class TestStopCommand:
     @pytest.mark.asyncio
     async def test_stop_calls_interrupt_on_active_session(self, mock_gateway):
         """/stop calls find_active_session then interrupt_session and replies 'Interrupted.'"""
-        from clients.telegram_bot import cmd_stop
+        from bots.telegram_bot import cmd_stop
 
         mock_gateway.find_active_session = AsyncMock(return_value="sess-1")
         mock_gateway.interrupt_session = AsyncMock(
@@ -59,7 +59,7 @@ class TestStopCommand:
     @pytest.mark.asyncio
     async def test_stop_replies_no_active_session_when_not_found(self, mock_gateway):
         """When find_active_session returns None, bot replies 'No active session.' without calling interrupt."""
-        from clients.telegram_bot import cmd_stop
+        from bots.telegram_bot import cmd_stop
 
         mock_gateway.find_active_session = AsyncMock(return_value=None)
 
@@ -72,7 +72,7 @@ class TestStopCommand:
     @pytest.mark.asyncio
     async def test_stop_replies_nothing_running(self, mock_gateway):
         """When interrupt returns nothing_running message, bot replies 'Nothing running.'"""
-        from clients.telegram_bot import cmd_stop
+        from bots.telegram_bot import cmd_stop
 
         mock_gateway.find_active_session = AsyncMock(return_value="sess-1")
         mock_gateway.interrupt_session = AsyncMock(
@@ -87,7 +87,7 @@ class TestStopCommand:
     @pytest.mark.asyncio
     async def test_stop_bypasses_queue_when_lock_held(self, mock_gateway):
         """/stop does NOT add to the queue even when lock is held; calls interrupt directly."""
-        from clients.telegram_bot import cmd_stop
+        from bots.telegram_bot import cmd_stop
         from core.gateway_client import get_lock, get_queue
 
         mock_gateway.find_active_session = AsyncMock(return_value="sess-1")
@@ -117,7 +117,7 @@ class TestStopCommand:
     @pytest.mark.asyncio
     async def test_stop_unauthorized_user_rejected(self, mock_gateway):
         """An unauthorized user gets 'Not authorized.' reply."""
-        from clients.telegram_bot import cmd_stop
+        from bots.telegram_bot import cmd_stop
 
         update = _make_update(user_id=999)  # Not in allowed users
         await cmd_stop(update, MagicMock())

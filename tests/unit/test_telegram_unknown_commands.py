@@ -37,7 +37,7 @@ class TestHandleUnknownCommand:
     """Tests for the Telegram bot's handle_unknown_command function."""
 
     async def test_unknown_command_routes_to_stream(self) -> None:
-        from clients.telegram_bot import handle_unknown_command
+        from bots.telegram_bot import handle_unknown_command
 
         update = _make_update("/remember buy milk")
         context = _make_context()
@@ -47,10 +47,10 @@ class TestHandleUnknownCommand:
         update.message.reply_text = AsyncMock(return_value=sent_msg)
 
         with (
-            patch("clients.telegram_bot._is_allowed_user", return_value=True),
-            patch("clients.telegram_bot.get_lock", return_value=mock_lock),
+            patch("bots.telegram_bot._is_allowed_user", return_value=True),
+            patch("bots.telegram_bot.get_lock", return_value=mock_lock),
             patch(
-                "clients.telegram_bot._stream_to_message",
+                "bots.telegram_bot._stream_to_message",
                 new_callable=AsyncMock,
                 return_value=["Memory stored."],
             ) as mock_stream,
@@ -64,7 +64,7 @@ class TestHandleUnknownCommand:
         assert prompt == "/remember buy milk"
 
     async def test_unknown_command_strips_bot_mention(self) -> None:
-        from clients.telegram_bot import handle_unknown_command
+        from bots.telegram_bot import handle_unknown_command
 
         update = _make_update("/remember@testbot something", chat_type="group")
         context = _make_context("testbot")
@@ -74,10 +74,10 @@ class TestHandleUnknownCommand:
         update.message.reply_text = AsyncMock(return_value=sent_msg)
 
         with (
-            patch("clients.telegram_bot._is_allowed_user", return_value=True),
-            patch("clients.telegram_bot.get_lock", return_value=mock_lock),
+            patch("bots.telegram_bot._is_allowed_user", return_value=True),
+            patch("bots.telegram_bot.get_lock", return_value=mock_lock),
             patch(
-                "clients.telegram_bot._stream_to_message",
+                "bots.telegram_bot._stream_to_message",
                 new_callable=AsyncMock,
                 return_value=["Done."],
             ) as mock_stream,
@@ -91,18 +91,18 @@ class TestHandleUnknownCommand:
         assert prompt == "/remember something"
 
     async def test_unknown_command_auth_check_blocks_unauthorized(self) -> None:
-        from clients.telegram_bot import handle_unknown_command
+        from bots.telegram_bot import handle_unknown_command
 
         update = _make_update("/remember something")
         context = _make_context()
 
-        with patch("clients.telegram_bot._is_allowed_user", return_value=False):
+        with patch("bots.telegram_bot._is_allowed_user", return_value=False):
             await handle_unknown_command(update, context)
 
         update.message.reply_text.assert_called_once_with("Not authorized.")
 
     async def test_unknown_command_applies_sanitize(self) -> None:
-        from clients.telegram_bot import handle_unknown_command
+        from bots.telegram_bot import handle_unknown_command
 
         update = _make_update("/remember buy milk")
         context = _make_context()
@@ -112,10 +112,10 @@ class TestHandleUnknownCommand:
         update.message.reply_text = AsyncMock(return_value=sent_msg)
 
         with (
-            patch("clients.telegram_bot._is_allowed_user", return_value=True),
-            patch("clients.telegram_bot.get_lock", return_value=mock_lock),
+            patch("bots.telegram_bot._is_allowed_user", return_value=True),
+            patch("bots.telegram_bot.get_lock", return_value=mock_lock),
             patch(
-                "clients.telegram_bot._stream_to_message",
+                "bots.telegram_bot._stream_to_message",
                 new_callable=AsyncMock,
                 return_value=["Done."],
             ),
@@ -127,7 +127,7 @@ class TestHandleUnknownCommand:
             assert "{" not in str(call)
 
     async def test_unknown_command_waits_when_locked(self) -> None:
-        from clients.telegram_bot import handle_unknown_command
+        from bots.telegram_bot import handle_unknown_command
 
         update = _make_update("/remember something")
         context = _make_context()
@@ -138,9 +138,9 @@ class TestHandleUnknownCommand:
         mock_queue.put = AsyncMock()
 
         with (
-            patch("clients.telegram_bot._is_allowed_user", return_value=True),
-            patch("clients.telegram_bot.get_lock", return_value=mock_lock),
-            patch("clients.telegram_bot.get_queue", return_value=mock_queue),
+            patch("bots.telegram_bot._is_allowed_user", return_value=True),
+            patch("bots.telegram_bot.get_lock", return_value=mock_lock),
+            patch("bots.telegram_bot.get_queue", return_value=mock_queue),
         ):
             await handle_unknown_command(update, context)
 

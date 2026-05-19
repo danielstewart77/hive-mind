@@ -8,7 +8,7 @@ import ast
 
 def _get_source():
     from pathlib import Path
-    return (Path(__file__).resolve().parents[2] / "clients" / "telegram_bot.py").read_text()
+    return (Path(__file__).resolve().parents[2] / "bots" / "telegram_bot.py").read_text()
 
 
 def test_lock_locked_guards_present():

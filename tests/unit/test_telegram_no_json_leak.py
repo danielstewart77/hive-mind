@@ -38,7 +38,7 @@ class TestNoJsonLeak:
     """End-to-end tests verifying no raw JSON reaches the user."""
 
     async def test_server_command_new_returns_readable(self) -> None:
-        from clients.telegram_bot import cmd_new
+        from bots.telegram_bot import cmd_new
 
         update = _make_update("/new")
         context = _make_context()
@@ -49,8 +49,8 @@ class TestNoJsonLeak:
         )
 
         with (
-            patch("clients.telegram_bot._is_allowed_user", return_value=True),
-            patch("clients.telegram_bot.gateway", mock_gateway),
+            patch("bots.telegram_bot._is_allowed_user", return_value=True),
+            patch("bots.telegram_bot.gateway", mock_gateway),
         ):
             await cmd_new(update, context)
 
@@ -59,7 +59,7 @@ class TestNoJsonLeak:
         assert "abcd1234" in reply_text
 
     async def test_server_command_clear_returns_readable(self) -> None:
-        from clients.telegram_bot import cmd_clear
+        from bots.telegram_bot import cmd_clear
 
         update = _make_update("/clear")
         context = _make_context()
@@ -70,8 +70,8 @@ class TestNoJsonLeak:
         )
 
         with (
-            patch("clients.telegram_bot._is_allowed_user", return_value=True),
-            patch("clients.telegram_bot.gateway", mock_gateway),
+            patch("bots.telegram_bot._is_allowed_user", return_value=True),
+            patch("bots.telegram_bot.gateway", mock_gateway),
         ):
             await cmd_clear(update, context)
 
@@ -80,7 +80,7 @@ class TestNoJsonLeak:
         assert "efgh5678" in reply_text
 
     async def test_skill_command_json_result_sanitized(self) -> None:
-        from clients.telegram_bot import cmd_skill
+        from bots.telegram_bot import cmd_skill
 
         update = _make_update("/skill remember")
         context = _make_context(args=["remember"])
@@ -96,9 +96,9 @@ class TestNoJsonLeak:
         mock_gateway.query_stream = mock_query_stream
 
         with (
-            patch("clients.telegram_bot._is_allowed_user", return_value=True),
-            patch("clients.telegram_bot.gateway", mock_gateway),
-            patch("clients.telegram_bot.get_lock", return_value=mock_lock),
+            patch("bots.telegram_bot._is_allowed_user", return_value=True),
+            patch("bots.telegram_bot.gateway", mock_gateway),
+            patch("bots.telegram_bot.get_lock", return_value=mock_lock),
         ):
             await cmd_skill(update, context)
 
@@ -108,7 +108,7 @@ class TestNoJsonLeak:
         assert final_text == "Done."
 
     async def test_unknown_slash_command_json_result_sanitized(self) -> None:
-        from clients.telegram_bot import handle_unknown_command
+        from bots.telegram_bot import handle_unknown_command
 
         update = _make_update("/remember buy milk")
         context = _make_context()
@@ -124,9 +124,9 @@ class TestNoJsonLeak:
         mock_gateway.query_stream = mock_query_stream
 
         with (
-            patch("clients.telegram_bot._is_allowed_user", return_value=True),
-            patch("clients.telegram_bot.gateway", mock_gateway),
-            patch("clients.telegram_bot.get_lock", return_value=mock_lock),
+            patch("bots.telegram_bot._is_allowed_user", return_value=True),
+            patch("bots.telegram_bot.gateway", mock_gateway),
+            patch("bots.telegram_bot.get_lock", return_value=mock_lock),
         ):
             await handle_unknown_command(update, context)
 
@@ -135,7 +135,7 @@ class TestNoJsonLeak:
         assert final_text == "Done."
 
     async def test_regular_text_json_result_sanitized(self) -> None:
-        from clients.telegram_bot import handle_text
+        from bots.telegram_bot import handle_text
 
         update = _make_update("tell me about something")
         context = _make_context()
@@ -151,9 +151,9 @@ class TestNoJsonLeak:
         mock_gateway.query_stream = mock_query_stream
 
         with (
-            patch("clients.telegram_bot._is_allowed_user", return_value=True),
-            patch("clients.telegram_bot.gateway", mock_gateway),
-            patch("clients.telegram_bot.get_lock", return_value=mock_lock),
+            patch("bots.telegram_bot._is_allowed_user", return_value=True),
+            patch("bots.telegram_bot.gateway", mock_gateway),
+            patch("bots.telegram_bot.get_lock", return_value=mock_lock),
         ):
             await handle_text(update, context)
 
@@ -163,7 +163,7 @@ class TestNoJsonLeak:
 
     async def test_session_completion_payload_never_leaks(self) -> None:
         """The exact payload from the bug report must not leak."""
-        from clients.telegram_bot import handle_unknown_command
+        from bots.telegram_bot import handle_unknown_command
 
         update = _make_update("/plan weekly")
         context = _make_context()
@@ -179,9 +179,9 @@ class TestNoJsonLeak:
         mock_gateway.query_stream = mock_query_stream
 
         with (
-            patch("clients.telegram_bot._is_allowed_user", return_value=True),
-            patch("clients.telegram_bot.gateway", mock_gateway),
-            patch("clients.telegram_bot.get_lock", return_value=mock_lock),
+            patch("bots.telegram_bot._is_allowed_user", return_value=True),
+            patch("bots.telegram_bot.gateway", mock_gateway),
+            patch("bots.telegram_bot.get_lock", return_value=mock_lock),
         ):
             await handle_unknown_command(update, context)
 

@@ -3,8 +3,10 @@
 import stat
 from pathlib import Path
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-SCRIPTS_DIR = Path("/usr/src/app/scripts")
+
+SCRIPTS_DIR = Path(str(_PROJECT_ROOT / "scripts"))
 INSTALL_SCRIPT = SCRIPTS_DIR / "install-hooks.sh"
 
 

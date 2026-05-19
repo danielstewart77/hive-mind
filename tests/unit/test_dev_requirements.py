@@ -2,18 +2,19 @@
 
 from pathlib import Path
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-PROJECT_ROOT = Path("/usr/src/app")
+
 
 
 class TestDevRequirements:
     """Tests for requirements-dev.txt content and structure."""
 
     def test_requirements_dev_file_exists(self) -> None:
-        assert (PROJECT_ROOT / "requirements-dev.txt").exists()
+        assert (_PROJECT_ROOT / "requirements-dev.txt").exists()
 
     def test_requirements_dev_contains_pip_audit(self) -> None:
-        content = (PROJECT_ROOT / "requirements-dev.txt").read_text()
+        content = (_PROJECT_ROOT / "requirements-dev.txt").read_text()
         lines = [
             line.strip()
             for line in content.splitlines()
@@ -22,7 +23,7 @@ class TestDevRequirements:
         assert any(line.startswith("pip-audit") for line in lines)
 
     def test_requirements_dev_contains_pytest(self) -> None:
-        content = (PROJECT_ROOT / "requirements-dev.txt").read_text()
+        content = (_PROJECT_ROOT / "requirements-dev.txt").read_text()
         lines = [
             line.strip()
             for line in content.splitlines()
@@ -32,8 +33,8 @@ class TestDevRequirements:
 
     def test_requirements_dev_no_production_deps(self) -> None:
         """Dev requirements should not duplicate core production deps."""
-        prod_content = (PROJECT_ROOT / "requirements.txt").read_text()
-        dev_content = (PROJECT_ROOT / "requirements-dev.txt").read_text()
+        prod_content = (_PROJECT_ROOT / "requirements.txt").read_text()
+        dev_content = (_PROJECT_ROOT / "requirements-dev.txt").read_text()
 
         # Extract package names (first word before any version specifier)
         def extract_packages(text: str) -> set[str]:

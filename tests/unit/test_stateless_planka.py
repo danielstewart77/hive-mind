@@ -3,9 +3,12 @@
 import json
 import subprocess
 import sys
+from pathlib import Path as _Path
+
+_PROJECT_ROOT = _Path(__file__).resolve().parents[2]
 
 
-SCRIPT_PATH = "/usr/src/app/tools/stateless/planka/planka.py"
+SCRIPT_PATH = str(_PROJECT_ROOT / "tools/stateless/planka/planka.py")
 
 
 class TestStatelessPlanka:

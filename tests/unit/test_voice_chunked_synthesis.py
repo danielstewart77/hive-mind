@@ -14,6 +14,9 @@ import sys
 from unittest.mock import MagicMock, call, patch
 
 import pytest
+from pathlib import Path as _Path
+
+_PROJECT_ROOT = _Path(__file__).resolve().parents[2]
 
 
 def _can_import(name: str) -> bool:
@@ -122,7 +125,7 @@ def test_synthesize_chunked_passes_ref_path() -> None:
     mock_model.generate.return_value = MagicMock()
     vs._chatterbox_model = mock_model
 
-    ref = "/usr/src/app/voice_ref/ada.wav"
+    ref = str(_PROJECT_ROOT / "voice_ref/ada.wav")
     vs._synthesize_chunked("One. Two. Three.", ref)
 
     for c in mock_model.generate.call_args_list:

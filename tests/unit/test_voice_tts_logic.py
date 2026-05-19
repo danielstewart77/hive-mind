@@ -11,6 +11,9 @@ import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pathlib import Path as _Path
+
+_PROJECT_ROOT = _Path(__file__).resolve().parents[2]
 
 
 def _can_import(name: str) -> bool:
@@ -91,7 +94,7 @@ def test_synthesize_calls_chatterbox_generate() -> None:
     mock_model.generate.return_value = MagicMock()  # tensor
     vs._chatterbox_model = mock_model
 
-    ref_path = "/usr/src/app/voice_ref/ada.wav"
+    ref_path = str(_PROJECT_ROOT / "voice_ref/ada.wav")
     vs._synthesize("Hello Daniel", ref_path)
 
     mock_model.generate.assert_called_once_with(

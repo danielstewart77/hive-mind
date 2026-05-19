@@ -12,8 +12,9 @@ from core.gateway_client import GatewayClient, _resolve_skills_dir, get_skills
 
 
 @pytest.fixture()
-def gateway():
-    """Create a GatewayClient with a mocked HTTP session."""
+def gateway(monkeypatch):
+    """Create a GatewayClient with a mocked HTTP session and no auth header."""
+    monkeypatch.delenv("COMMS_BEARER_TOKEN", raising=False)
     mock_http = MagicMock()
     return GatewayClient(
         http=mock_http,
@@ -41,7 +42,8 @@ class TestGatewayClientInterrupt:
 
         assert result == {"ok": True, "session_id": "sess-1"}
         gateway.http.post.assert_called_once_with(
-            "http://localhost:8420/sessions/sess-1/interrupt"
+            "http://localhost:8420/sessions/sess-1/interrupt",
+            headers={},
         )
 
     @pytest.mark.asyncio
@@ -84,6 +86,7 @@ class TestGatewayClientFindActiveSession:
         gateway.http.get.assert_called_once_with(
             "http://localhost:8420/sessions",
             params={"client_type": "telegram:ada", "client_ref": "456"},
+            headers={},
         )
 
     @pytest.mark.asyncio

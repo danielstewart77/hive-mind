@@ -5,9 +5,12 @@ import subprocess
 import sys
 import tempfile
 import os
+from pathlib import Path as _Path
+
+_PROJECT_ROOT = _Path(__file__).resolve().parents[2]
 
 
-SCRIPT_PATH = "/usr/src/app/tools/stateless/notify/notify.py"
+SCRIPT_PATH = str(_PROJECT_ROOT / "tools/stateless/notify/notify.py")
 
 
 class TestStatelessNotify:

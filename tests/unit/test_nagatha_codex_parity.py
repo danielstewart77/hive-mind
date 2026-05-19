@@ -3,6 +3,8 @@
 from pathlib import Path
 import tomllib
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 NAGATHA_CODEX_HOME = REPO_ROOT / "minds" / "nagatha" / ".codex"
