@@ -44,20 +44,24 @@ decide *what* to read or *whether* to write — that decision was already made b
 skill reading the spec.
 
 ```python
-# tools/stateful/memory.py — correct: pure utility
-@tool()
-def memory_store(content: str, tags: str, source: str, data_class: str) -> str:
-    """Store a memory as a semantic embedding in Lucent (SQLite)."""
-    # just writes — no classification logic, no heuristics
+# tools/stateless/notify/notify.py — correct: pure utility
+def send_telegram(chat_id: str, text: str) -> str:
+    """POST to Telegram sendMessage. No retry logic, no formatting decisions."""
+    # just sends — no decision about who to notify or when
     ...
 
-# tools/stateful/memory.py — WRONG: logic embedded in tool
-@tool()
-def memory_store(content: str, tags: str) -> str:
-    keywords = {"person": ["met", "works at"], ...}  # ← anti-pattern
-    data_class = _infer_class(content, keywords)      # ← anti-pattern
+# tools/stateless/notify/notify.py — WRONG: logic embedded in tool
+def send_telegram(chat_id: str, text: str) -> str:
+    if "urgent" in text.lower():                       # ← anti-pattern
+        text = f"🚨 URGENT: {text}"                     # ← anti-pattern
+    if _is_quiet_hours():                              # ← anti-pattern
+        _queue_for_morning(chat_id, text)              # ← anti-pattern
     ...
 ```
+
+Lucent reads/writes live on the shared `hive_nervous_system` container and
+are reached over HTTP+bearer at `LUCENT_URL` — no in-repo Python module
+fronts them.
 
 ---
 
@@ -162,9 +166,9 @@ logic or reasoning must include:
 | Security constraints | `specs/security.md` | Markdown |
 | Step-by-step job logic | `skills/<name>/SKILL.md` | Markdown |
 | Scheduled job triggers | `clients/scheduler.py` | Python (thin) |
-| Lucent read/write | `tools/stateful/memory.py` | Python (CRUD only) |
+| Lucent read/write | `hive_nervous_system` HTTP API (`LUCENT_URL`) | External service |
 | Telegram send | `tools/stateless/notify/notify.py` | Python (CRUD only) |
-| Graph read/write | `tools/stateful/knowledge_graph.py` | Python (CRUD only) |
+| Graph read/write | `hive_nervous_system` HTTP API (`LUCENT_URL`) | External service |
 | Classification logic | ❌ NOT in Python | Skill reads spec |
 | Heuristics | ❌ NOT in Python | Skill reads spec |
 | Decision trees | ❌ NOT in Python | Skill reads spec |

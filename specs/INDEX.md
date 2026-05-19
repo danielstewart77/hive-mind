@@ -19,7 +19,6 @@ Plans (forward-looking, not yet implemented) live in `plans/` — see `plans/` d
 | Spec | File | Summary |
 |------|------|---------|
 | Secret Management | `specs/secret-management.md` | Keyring hierarchy, get_credential(), managed keys, keyring-to-env bridge |
-| Tool Safety | `specs/tool-safety.md` | Ring 1 AST validation, Ring 2 subprocess isolation, blocked patterns, staging flow |
 | Container Hardening | `specs/container-hardening.md` | Ring 3 runtime restrictions, compatibility exceptions, Ring 4 production volumes |
 | HITL Approval | `specs/hitl-approval.md` | Approval flow, token lifecycle, blocking vs non-blocking, session heartbeat |
 | HITL Telegram Buttons | `specs/hitl-telegram-inline-buttons.md` | Inline keyboard button implementation for HITL approvals |

@@ -118,22 +118,6 @@ log.warning("subprocess stderr: session=%s line=%s", session_id, err_line)
 
 ---
 
-## Group Chat — `tools/stateful/group_chat.py`
-
-### `forward_to_mind()`
-
-```python
-logger.info("forward_to_mind: start mind=%s group=%s", mind_id, group_session_id)
-# after session lookup:
-logger.info("forward_to_mind: using session=%s mind=%s", child_session_id, mind_id)
-# on completion:
-logger.info("forward_to_mind: done mind=%s elapsed=%.1fs", mind_id, elapsed)
-# on timeout (already in except):
-logger.error("forward_to_mind: timeout mind=%s after %.1fs", mind_id, elapsed)
-```
-
----
-
 ## Log Rotation
 
 Configure in `docker-compose.yml` for the `hivemind` service:
@@ -172,7 +156,6 @@ Six lines. Immediately tells you the subprocess was spawned but never returned.
 |------|--------|
 | `server.py` | Silence httpx; add request entry/exit logging to message endpoint |
 | `core/sessions.py` | Log spawn, respawn, send start, result, slow-response warning |
-| `tools/stateful/group_chat.py` | Log forward_to_mind start, session lookup, completion, timeout |
 | `docker-compose.yml` | Add log rotation config to hivemind service |
 
 ---
@@ -181,6 +164,5 @@ Six lines. Immediately tells you the subprocess was spawned but never returned.
 
 1. `server.py` — silence `httpx` at INFO; add entry/exit logs to `send_message` endpoint
 2. `core/sessions.py` — add `send_message` start log, spawn/respawn logs, slow-response warning
-3. `tools/stateful/group_chat.py` — add start, session-found, completion, and timeout logs with elapsed timing
-4. `docker-compose.yml` — add `logging` block with `json-file` driver and rotation options
-5. Run existing tests to confirm no regressions; verify log output manually against acceptance criteria
+3. `docker-compose.yml` — add `logging` block with `json-file` driver and rotation options
+4. Run existing tests to confirm no regressions; verify log output manually against acceptance criteria

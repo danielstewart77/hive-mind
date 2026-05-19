@@ -82,7 +82,6 @@ Agent-facing specifications. Read by skills and subagents at runtime.
 | [specs/notification-channels.md](specs/notification-channels.md) | Notification fallback order |
 | [specs/secret-management.md](specs/secret-management.md) | Keyring hierarchy, `get_credential()` |
 | [specs/hitl-approval.md](specs/hitl-approval.md) | HITL approval flow and token lifecycle |
-| [specs/tool-safety.md](specs/tool-safety.md) | AST validation, subprocess isolation, staging flow |
 | [specs/container-hardening.md](specs/container-hardening.md) | Runtime restrictions, named volumes |
 | [specs/harness-native-operations.md](specs/harness-native-operations.md) | Only write code when the harness can't do it |
 | [specs/testing.md](specs/testing.md) | What makes a test worth keeping; test strategy |
