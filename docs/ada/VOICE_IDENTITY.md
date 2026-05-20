@@ -27,19 +27,23 @@ clip means Chatterbox falls back to its default untrained voice.
 
 ### Voice Reference Resolution
 
-The voice server resolves a `voice_id` to a file path via `_resolve_voice_ref(voice_id)`:
+The voice server resolves a `voice_id` to a file path via `_resolve_voice_ref(voice_id)`.
+The resolver accepts either form:
 
-```
-minds/{voice_id}/voice_ref.wav
-```
+- **Short name** — `voice_id="ada"` resolves directly to `minds/ada/voice_ref.wav`.
+- **UUID** — `voice_id="565e5a66-d20c-4266-872a-3268c4c894fc"` is looked up against
+  the mind-id → short-name table at startup, then resolves to
+  `minds/<short_name>/voice_ref.wav`.
 
-For example, Ada's reference is at `minds/ada/voice_ref.wav` inside the container. The voice
-server container mounts the full hive_mind project directory at `/usr/src/app`, so it has
-read access to all `minds/*/voice_ref.wav` files automatically — no extra mounts needed for
-minds that live inside hive_mind.
+Either form yields the same file. The dual lookup lets callers pass the
+canonical `MIND_ID` (UUID) without needing to know each mind's display name.
 
-If `voice_ref.wav` is not found for the requested `voice_id`, the function returns `None` and
-Chatterbox synthesises using its default voice (no cloning).
+The voice server container mounts the full hive_mind project directory at `/usr/src/app`,
+so it has read access to all `minds/*/voice_ref.wav` files automatically — no extra mounts
+needed for minds that live inside hive_mind.
+
+If `voice_ref.wav` is not found for the requested `voice_id`, the function returns `None`
+and Chatterbox synthesises using its default voice (no cloning).
 
 ### TTS Request
 
@@ -69,8 +73,12 @@ Response: `audio/ogg` (Opus-encoded, ready for Telegram voice notes).
 Every mind that wants a cloned voice needs **one file** inside hive_mind:
 
 ```
-minds/{mind_id}/voice_ref.wav
+minds/{short_name}/voice_ref.wav
 ```
+
+One mind, one voice clip. The folder name is the mind's short name
+(`ada`, `bob`, `bilby`, `nagatha`, `skippy`); UUID-keyed callers route
+to the same file via the resolver's id-to-name table.
 
 For minds that live entirely within hive_mind (Ada, Bob, Bilby, Nagatha), this file lives
 alongside their `implementation.py`, `.claude/`, etc.
