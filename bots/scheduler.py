@@ -86,18 +86,18 @@ def _strip_markdown(text: str) -> str:
     return text.strip()
 
 
-async def _tts(http: aiohttp.ClientSession, text: str) -> bytes:
-    async with http.post(f"{VOICE_SERVER_URL}/tts", json={"text": text}) as resp:
+async def _tts(http: aiohttp.ClientSession, text: str, voice_id: str) -> bytes:
+    async with http.post(f"{VOICE_SERVER_URL}/tts", json={"text": text, "voice_id": voice_id}) as resp:
         if resp.status != 200:
             raise RuntimeError(f"TTS error {resp.status}: {await resp.text()}")
         return await resp.read()
 
 
-async def _try_send_voice(bot_token: str, chat_id: int, text: str, label: str) -> None:
+async def _try_send_voice(bot_token: str, chat_id: int, text: str, voice_id: str, label: str) -> None:
     """Fire-and-forget: synthesise TTS and send voice note. Logs but never raises."""
     try:
         async with aiohttp.ClientSession() as http:
-            audio = await _tts(http, text)
+            audio = await _tts(http, text, voice_id)
         await _send_voice(bot_token, chat_id, audio)
         log.info("Voice delivery complete for %s", label)
     except Exception:
@@ -224,7 +224,7 @@ async def fire_skill(skill: ScheduledSkill) -> None:
 
     await _send_text(bot_token, chat_id, response)
     if skill.voice:
-        asyncio.create_task(_try_send_voice(bot_token, chat_id, response, label))
+        asyncio.create_task(_try_send_voice(bot_token, chat_id, response, skill.mind_id, label))
 
 
 RECONCILE_INTERVAL_SEC = 30
