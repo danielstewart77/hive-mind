@@ -7,8 +7,7 @@ The vector store + knowledge graph that backs every mind's memory lives in a sep
 This repo (`hive_mind`) contains only the **consumer side**:
 
 - `core/lucent_client.py` — HTTP+bearer wrapper, the single Python entry point for memory + graph writes from hive_mind code.
-- `minds/_shared/hooks/` — the four bash hooks each mind installs (capture, bootstrap, retrieval, rotation).
-- `minds/_shared/scripts/` — `/remember` and `/always-remember` skill backends.
+- `minds/<name>/.claude/hooks/` (or `.codex/hooks/`) — the per-turn hook scripts each mind owns its own copy of: capture, retrieval, rotation.
 
 ## Network wiring
 

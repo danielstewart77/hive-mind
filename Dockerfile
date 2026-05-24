@@ -3,7 +3,7 @@ FROM ubuntu:24.04
 WORKDIR /usr/src/app
 
 # System deps + Node.js (for Claude Code CLI) + GitHub CLI
-# jq required by the shared bash hooks under minds/_shared/hooks/.
+# jq required by the per-mind bash hooks under minds/<name>/.claude/hooks/ and .codex/hooks/.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip python3-venv python3-dev gcc libpq-dev curl jq \
     nodejs npm \

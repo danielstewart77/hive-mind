@@ -87,20 +87,21 @@ every feedback rule.
     ],
     "Stop": [
       {"hooks": [
-        {"type": "command", "command": "bash /usr/src/app/minds/_shared/hooks/auto_remember.sh"},
-        {"type": "command", "command": "python3 /usr/src/app/minds/_shared/hooks/rotation_check.py"}
+        {"type": "command", "command": "bash /usr/src/app/minds/<name>/.claude/hooks/auto_remember.sh"},
+        {"type": "command", "command": "python3 /usr/src/app/minds/<name>/.claude/hooks/rotation_check.py"}
       ]}
     ],
     "UserPromptSubmit": [
-      {"hooks": [{"type": "command", "command": "bash /usr/src/app/minds/_shared/hooks/contextual_retrieval.sh"}]}
+      {"hooks": [{"type": "command", "command": "bash /usr/src/app/minds/<name>/.claude/hooks/contextual_retrieval.sh"}]}
     ]
   }
 }
 ```
 
-Stop and UserPromptSubmit hooks point at `minds/_shared/hooks/` directly;
-`plugin_skills_sync.sh` is per-mind because it manages that mind's own
-plugin-skill symlinks.
+Each mind keeps its own copies of all four hooks under
+`minds/<name>/.claude/hooks/`. The scripts are byte-identical across
+minds today, but the files are physically separate so changes to one
+mind's hooks never affect another.
 
 ### Codex CLI (Bilby, Nagatha)
 
@@ -127,10 +128,10 @@ command = "python3 /usr/src/app/minds/<name>/.codex/hooks/rotation_check.py"
 ```
 
 Codex addresses scripts by absolute path; each Codex-CLI mind keeps its
-own copies of the three shared scripts inside its `.codex/hooks/`
-directory. The scripts themselves are byte-identical to the
-`minds/_shared/hooks/` originals — Codex and Claude CLI emit the same
-hook event JSON shape, so a single script body serves both harnesses.
+own copies of the three hook scripts inside its `.codex/hooks/`
+directory. Claude CLI and Codex emit the same hook event JSON shape,
+so a single script body serves both harnesses — but every mind owns
+its own copy.
 
 ## Logs
 

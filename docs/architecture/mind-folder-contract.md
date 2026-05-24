@@ -11,7 +11,7 @@ minds/<any_name>/
 ├── prompts/                  # per-mind prompt fragments (common.md, harness.md, profile.md)
 ├── .claude/                  # for Claude CLI / SDK minds
 │   ├── settings.json         #   declares Stop / SessionStart / UserPromptSubmit hooks
-│   └── hooks/                #   per-mind hook scripts (or symlinks to minds/_shared/hooks/)
+│   └── hooks/                #   per-mind hook scripts (one copy per mind, no sharing)
 ├── .codex/                   # for Codex CLI minds (instead of .claude)
 │   ├── config.toml           #   declares hooks via [[hooks.X]] blocks
 │   └── hooks/                #   identical scripts
@@ -31,14 +31,16 @@ minds/<any_name>/
 
 The three hooks that carry capture, retrieval, and rotation
 (`auto_remember.sh`, `contextual_retrieval.sh`, `rotation_check.py`)
-live at `minds/_shared/hooks/`. Codex-CLI minds keep per-mind copies of
-the same scripts under their own `.codex/hooks/` directory because the
-Codex hook config addresses scripts by absolute path. Each mind's
-harness loads them differently:
+live in each mind's own hook directory — Claude-CLI minds under
+`minds/<name>/.claude/hooks/`, Codex-CLI minds under
+`minds/<name>/.codex/hooks/`. The script bodies are byte-identical
+across minds today, but every mind owns its own copy so a change to
+one mind's hooks never affects another. Each mind's harness loads
+them differently:
 
 | Harness | Config file | How |
 |---|---|---|
-| **Claude CLI** (Ada, Bob) | `.claude/settings.json` | Native — JSON `hooks` block, scripts loaded from `minds/_shared/hooks/` |
+| **Claude CLI** (Ada, Bob) | `.claude/settings.json` | Native — JSON `hooks` block, scripts loaded from `minds/<name>/.claude/hooks/` |
 | **Codex CLI** (Bilby, Nagatha) | `.codex/config.toml` | `[features] codex_hooks = true` + `[[hooks.X]]` blocks, scripts loaded from `minds/<name>/.codex/hooks/` |
 
 All hooks emit the same JSON output schema (`systemMessage`, `continue`, `suppressOutput`, `stopReason`) so the scripts themselves are identical across harnesses.
