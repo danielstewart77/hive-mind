@@ -1,0 +1,35 @@
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV HF_HOME=/data/hf_cache
+
+RUN apt-get update && apt-get install -y \
+    python3 python3-pip git libopus-dev ffmpeg build-essential pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/personaplex
+
+RUN git clone https://github.com/NVIDIA/personaplex.git .
+
+# Install ONLY NVIDIA's patched moshi (distname moshi-personaplex, module moshi).
+# Do NOT also `pip install moshi[server]` — without a `./` prefix that pulls the
+# upstream Kyutai moshi package from PyPI and overwrites NVIDIA's patched loader,
+# which then crashes with KeyError: 'dep_q' when loading nvidia/personaplex-7b-v1.
+#
+# pip+setuptools must be modern enough to honor PEP 621's [project] table in
+# pyproject.toml; Ubuntu 22.04's distro pip ships an old setuptools that silently
+# falls back to an UNKNOWN wheel with zero deps.
+RUN pip3 install --upgrade pip setuptools wheel
+RUN pip3 install ./moshi
+
+EXPOSE 8998
+
+# Persona: set via the Gradio web UI at https://ada.sparktobloom.com on first launch.
+# Voice: PersonaPlex uses built-in embeddings (NATF0–NATF3, NATM0–NATM3, etc.).
+# Custom voice from voice_ref.wav requires moshi-finetune (separate step, not wired yet).
+# HF_TOKEN is read from the env (compose passes it); moshi.server has no --hf-token flag.
+CMD python3 -m moshi.server \
+    --host 0.0.0.0 \
+    --port 8998 \
+    --hf-repo nvidia/personaplex-7b-v1
