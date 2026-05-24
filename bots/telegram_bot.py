@@ -11,7 +11,6 @@ import io
 import json
 import logging
 import os
-import re
 import sys
 import time
 
@@ -94,37 +93,6 @@ async def _tts(text: str) -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# Markdown stripping (Telegram renders plain text only)
-# ---------------------------------------------------------------------------
-def _strip_markdown(text: str) -> str:
-    """Remove markdown syntax, leaving plain readable text."""
-    # Fenced code blocks — preserve content, drop fences
-    text = re.sub(r"```[^\n]*\n(.*?)```", r"\1", text, flags=re.DOTALL)
-    # Save inline code content as placeholders before bold/italic processing,
-    # so underscores inside code spans aren't consumed by the italic regex.
-    saved: list[str] = []
-    def _save(m: re.Match) -> str:
-        saved.append(m.group(1))
-        return f"\x00CODE{len(saved) - 1}\x00"
-    text = re.sub(r"`([^`]+)`", _save, text)
-    # Headers
-    text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
-    # Bold / italic (*** ** * ___ __ _)
-    text = re.sub(r"\*{1,3}([^*\n]+)\*{1,3}", r"\1", text)
-    text = re.sub(r"_{1,3}([^_\n]+)_{1,3}", r"\1", text)
-    # Links: [label](url) → label
-    text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
-    # Horizontal rules
-    text = re.sub(r"^[-*_]{3,}\s*$", "", text, flags=re.MULTILINE)
-    # Table separator rows (---|---|---)
-    text = re.sub(r"^\|?[\s\-:|]+\|[\s\-:|]*\|?\s*$", "", text, flags=re.MULTILINE)
-    # Restore code span content
-    for i, content in enumerate(saved):
-        text = text.replace(f"\x00CODE{i}\x00", content)
-    return text.strip()
-
-
-# ---------------------------------------------------------------------------
 # JSON detection / sanitization helpers
 # ---------------------------------------------------------------------------
 def _looks_like_json(text: str) -> bool:
@@ -179,8 +147,7 @@ async def _stream_to_message(
 ) -> list[str]:
     """Stream a gateway response, progressively editing sent as chunks arrive.
 
-    Returns the final list of message chunks (after markdown stripping).
-    Telegram-specific: strips markdown before each edit and final send.
+    Returns the final list of message chunks.
 
     When voice=True, the full response is converted to a single voice message
     after streaming completes, so text arrives progressively and voice follows.
@@ -195,7 +162,7 @@ async def _stream_to_message(
         accumulated += text_chunk
         now = time.monotonic()
         if now - last_edit >= edit_interval:
-            preview = _chunk_message(_strip_markdown(accumulated))[0]
+            preview = _chunk_message(accumulated)[0]
             try:
                 await sent.edit_text(preview)
             except Exception:
@@ -205,7 +172,7 @@ async def _stream_to_message(
     if not accumulated:
         accumulated = "(No response)"
 
-    final_chunks = [_sanitize_response(c) for c in _chunk_message(_strip_markdown(accumulated))]
+    final_chunks = [_sanitize_response(c) for c in _chunk_message(accumulated)]
     try:
         await sent.edit_text(final_chunks[0])
     except Exception:
@@ -218,7 +185,7 @@ async def _stream_to_message(
     # messages queue up and creates the "response held until next message"
     # n+1 sync glitch.
     if voice and chat:
-        full_text = _strip_markdown(accumulated).strip()
+        full_text = accumulated.strip()
         if full_text:
             async def _send_voice_bg() -> None:
                 try:

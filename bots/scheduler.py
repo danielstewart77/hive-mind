@@ -15,7 +15,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 import uuid
 from pathlib import Path
 
@@ -69,21 +68,6 @@ DEV_SURFACE_PROMPT = (
     "Your final text response will be delivered as a Telegram message — write it in plain "
     "prose summarizing what was accomplished. No markdown formatting in the response."
 )
-
-
-def _strip_markdown(text: str) -> str:
-    text = re.sub(r"```[^\n]*\n(.*?)```", r"\1", text, flags=re.DOTALL)
-    text = re.sub(r"`([^`]+)`", r"\1", text)
-    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
-    text = re.sub(r"\*(.+?)\*", r"\1", text)
-    text = re.sub(r"__(.+?)__", r"\1", text)
-    text = re.sub(r"_(.+?)_", r"\1", text)
-    text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
-    text = re.sub(r"^\s*[-*+]\s+", "", text, flags=re.MULTILINE)
-    text = re.sub(r"^\s*\d+\.\s+", "", text, flags=re.MULTILINE)
-    text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
 
 
 async def _tts(http: aiohttp.ClientSession, text: str, voice_id: str) -> bytes:
@@ -205,7 +189,6 @@ async def fire_skill(skill: ScheduledSkill) -> None:
         try:
             session_id = await _create_session(http, skill, surface_prompt)
             response = await _send_message(http, session_id, f"Run /{skill.skill_name}")
-            response = _strip_markdown(response)
         except Exception:
             log.exception("Gateway failure for %s", label)
             if skill.notify:

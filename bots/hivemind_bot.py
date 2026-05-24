@@ -139,25 +139,6 @@ async def _get_or_create_group_session(chat_id: int) -> str:
 # Text helpers
 # ---------------------------------------------------------------------------
 
-def _strip_markdown(text: str) -> str:
-    """Remove markdown syntax, leaving plain readable text."""
-    text = re.sub(r"```[^\n]*\n(.*?)```", r"\1", text, flags=re.DOTALL)
-    saved: list[str] = []
-    def _save(m: re.Match) -> str:
-        saved.append(m.group(1))
-        return f"\x00CODE{len(saved) - 1}\x00"
-    text = re.sub(r"`([^`]+)`", _save, text)
-    text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
-    text = re.sub(r"\*{1,3}([^*\n]+)\*{1,3}", r"\1", text)
-    text = re.sub(r"_{1,3}([^_\n]+)_{1,3}", r"\1", text)
-    text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
-    text = re.sub(r"^[-*_]{3,}\s*$", "", text, flags=re.MULTILINE)
-    text = re.sub(r"^\|?[\s\-:|]+\|[\s\-:|]*\|?\s*$", "", text, flags=re.MULTILINE)
-    for i, content in enumerate(saved):
-        text = text.replace(f"\x00CODE{i}\x00", content)
-    return text.strip()
-
-
 def _looks_like_json(text: str) -> bool:
     stripped = text.strip()
     if not stripped or not (stripped.startswith("{") or stripped.startswith("[")):
@@ -215,7 +196,7 @@ def _parse_mind_sections(text: str) -> dict[str, str]:
 def _build_preview(accumulated: dict[str, str]) -> str:
     parts = []
     for mind_id, text in accumulated.items():
-        parts.append(f"{mind_id.capitalize()}:\n{_strip_markdown(text)}")
+        parts.append(f"{mind_id.capitalize()}:\n{text}")
     return "\n\n---\n\n".join(parts)
 
 
@@ -308,14 +289,14 @@ async def _stream_group_response(
     minds = list(_parse_mind_sections(full_text).items())
 
     first_mind, first_text = minds[0]
-    first_final = _sanitize_response(f"{first_mind.capitalize()}:\n{_strip_markdown(first_text)}")
+    first_final = _sanitize_response(f"{first_mind.capitalize()}:\n{first_text}")
     try:
         await placeholder.edit_text(first_final[:TELEGRAM_MSG_LIMIT])
     except Exception:
         pass
 
     for mind_id, text in minds[1:]:
-        label = _sanitize_response(f"{mind_id.capitalize()}:\n{_strip_markdown(text)}")
+        label = _sanitize_response(f"{mind_id.capitalize()}:\n{text}")
         for chunk in _chunk_message(label):
             try:
                 await update.message.reply_text(chunk)
@@ -525,7 +506,7 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             minds = await _stream_group_response(chat_id, text, update)
             if minds:
                 for mind_id, mind_text in minds.items():
-                    stripped = _strip_markdown(mind_text).strip()
+                    stripped = mind_text.strip()
                     if not stripped:
                         continue
                     try:
