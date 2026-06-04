@@ -48,15 +48,18 @@ def get_hard_ceiling(request_type: str) -> int:
 # ---------------------------------------------------------------------------
 # Result checking
 # ---------------------------------------------------------------------------
-def check_for_result(gateway_url: str, conversation_id: str, to_mind: str) -> dict | None:
+def check_for_result(gateway_url: str, conversation_id: str, to_mind: str, bearer_token: str | None = None) -> dict | None:
     """Check if the callee has responded.
 
     Returns the response message dict if found, None otherwise.
     Only considers messages with status='completed' from the callee.
     """
     url = f"{gateway_url}/broker/messages?" + urllib.parse.urlencode({"conversation_id": conversation_id})
-    req = urllib.request.urlopen(url, timeout=10)
-    messages = json.loads(req.read().decode())
+    req = urllib.request.Request(url)
+    if bearer_token:
+        req.add_header("Authorization", f"Bearer {bearer_token}")
+    resp = urllib.request.urlopen(req, timeout=10)
+    messages = json.loads(resp.read().decode())
 
     for msg in messages:
         if msg.get("from_mind") == to_mind and msg.get("status") == "completed":
@@ -107,7 +110,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--from_mind", required=True)
     parser.add_argument("--to_mind", required=True)
     parser.add_argument("--request_type", required=True)
-    parser.add_argument("--gateway_url", default="http://localhost:8420")
+    parser.add_argument(
+        "--gateway_url",
+        default=os.environ.get("HIVEMIND_BROKER_URL", "http://localhost:8420"),
+        help="Broker base URL. Defaults to $HIVEMIND_BROKER_URL.",
+    )
+    parser.add_argument(
+        "--bearer_token",
+        default=os.environ.get("HIVEMIND_BROKER_TOKEN", ""),
+        help="Bearer token. Defaults to $HIVEMIND_BROKER_TOKEN. Omit for no-auth brokers.",
+    )
     return parser.parse_args(argv)
 
 
@@ -130,7 +142,12 @@ def main(argv: list[str] | None = None) -> int:
 
     while True:
         try:
-            result = check_for_result(args.gateway_url, args.conversation_id, args.to_mind)
+            result = check_for_result(
+                args.gateway_url,
+                args.conversation_id,
+                args.to_mind,
+                bearer_token=args.bearer_token or None,
+            )
         except Exception as e:
             print(f"Poll error: {e}", file=sys.stderr)
             result = None

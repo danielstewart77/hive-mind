@@ -12,9 +12,11 @@ Prints a one-line status to stdout for the scheduling mind to echo back.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
+import sys
 import time
 import urllib.parse
 import urllib.request
@@ -178,36 +180,64 @@ def broker_skippy(detail: str) -> None:
         print(f"Broker dispatch failed: {exc}")
 
 
-def main() -> None:
+def _build_sample(anomalies, total_budget=8000, per_line_cap=1500) -> str:
+    parts: list[str] = []
+    running = 0
+    for svc, _, msg in anomalies[:20]:
+        cleaned = msg.strip()
+        if len(cleaned) > per_line_cap:
+            cleaned = cleaned[:per_line_cap] + "…[truncated]"
+        entry = f"[{svc}] {cleaned}"
+        if running + len(entry) + 1 > total_budget:
+            parts.append(
+                f"…[{len(anomalies[:20]) - len(parts)} more line(s) omitted for budget]"
+            )
+            break
+        parts.append(entry)
+        running += len(entry) + 1
+    return "\n".join(parts)
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit anomalies as JSON to stdout and skip broker dispatch. "
+        "The caller (Bilby) is expected to classify and dispatch.",
+    )
+    args = parser.parse_args(argv)
+
     lines = pull_loki_lines()
     anomalies = pick_anomalies(lines)
     if not anomalies:
-        print("No anomalies in the last 15 minutes.")
+        if args.json:
+            print(json.dumps({"anomalies": [], "count": 0}))
+        else:
+            print("No anomalies in the last 15 minutes.")
         return
+
     count = len(anomalies)
     services = sorted({svc for svc, _, _ in anomalies})
     first_svc, _, first_msg = anomalies[0]
     first_line = first_msg.strip().replace("\n", " ")[:240]
-    # Ship full unwrapped lines with a generous total budget rather than a
-    # tight per-line cap, so one rich stack trace doesn't get chopped while
-    # twenty short lines still fit.
-    SAMPLE_TOTAL_BUDGET = 8000
-    PER_LINE_HARD_CAP = 1500
-    sample_parts: list[str] = []
-    running = 0
-    for svc, _, msg in anomalies[:20]:
-        cleaned = msg.strip()
-        if len(cleaned) > PER_LINE_HARD_CAP:
-            cleaned = cleaned[:PER_LINE_HARD_CAP] + "…[truncated]"
-        entry = f"[{svc}] {cleaned}"
-        if running + len(entry) + 1 > SAMPLE_TOTAL_BUDGET:
-            sample_parts.append(
-                f"…[{len(anomalies[:20]) - len(sample_parts)} more line(s) omitted for budget]"
-            )
-            break
-        sample_parts.append(entry)
-        running += len(entry) + 1
-    sample = "\n".join(sample_parts)
+
+    if args.json:
+        payload = {
+            "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "count": count,
+            "services": services,
+            "first_line": first_line,
+            "anomalies": [
+                {"service": svc, "ts": ts, "message": msg}
+                for svc, ts, msg in anomalies[:20]
+            ],
+        }
+        json.dump(payload, sys.stdout)
+        sys.stdout.write("\n")
+        return
+
+    sample = _build_sample(anomalies)
     detail = (
         f"NetSage alert at {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}. "
         f"{count} anomalous log line(s) across {len(services)} service(s). "

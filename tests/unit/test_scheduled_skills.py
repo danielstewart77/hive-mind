@@ -48,7 +48,7 @@ def test_skips_skills_without_schedule_field(tmp_path: Path):
 
 
 def test_discovers_basic_cron(tmp_path: Path):
-    _write_skill(
+    skill_md = _write_skill(
         tmp_path, "ada", "7am",
         "name: 7am\nschedule: \"0 7 * * *\"\nschedule_timezone: \"America/Chicago\"",
     )
@@ -58,6 +58,7 @@ def test_discovers_basic_cron(tmp_path: Path):
             mind_id=_TEST_UUIDS["ada"],
             mind_name="ada",
             skill_name="7am",
+            skill_path=str(skill_md),
             cron="0 7 * * *",
             timezone="America/Chicago",
             voice=True,
