@@ -123,6 +123,10 @@ def discover_scheduled_skills(minds_root: Path) -> list[ScheduledSkill]:
             continue
 
         cron = fm["schedule"].strip()
+        if cron.lower() in {"", "null", "none"}:
+            # Explicit opt-out — author wrote `schedule: null` or similar.
+            # Silent skip; only real cron strings deserve a warning.
+            continue
         if not _validate_cron(cron):
             log.warning(
                 "Skipping %s/%s — invalid cron %r (need 5 fields)",
