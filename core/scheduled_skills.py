@@ -15,6 +15,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+import yaml
+
 log = logging.getLogger(__name__)
 
 DEFAULT_TIMEZONE = "America/Chicago"
@@ -22,15 +24,26 @@ DEFAULT_TIMEZONE = "America/Chicago"
 
 @dataclass(frozen=True)
 class ScheduledSkill:
-    """A single scheduled invocation: which mind, which skill, what cron."""
+    """A single scheduled invocation: which mind, which skill, what cron.
+
+    Sources: either a mind's SKILL.md frontmatter (dispatched by path
+    reference) or a scheduler-owned YAML entry (dispatched with the
+    instruction body embedded inline). YAML-sourced tasks set
+    `instructions_path`; the scheduler reads the file at fire time so an
+    edit to the instructions takes effect on the next fire without a
+    container restart.
+    """
 
     mind_id: str          # canonical UUID, used in gateway payloads
     mind_name: str        # short folder name, used in log labels
     skill_name: str
+    skill_path: str       # absolute path to SKILL.md (SKILL.md-sourced) or
+                          # the instructions file (YAML-sourced); used for logs
     cron: str
     timezone: str
     voice: bool
     notify: bool
+    instructions_path: str | None = None  # when set, scheduler reads at fire time
 
 
 _FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---", re.DOTALL)
@@ -121,10 +134,80 @@ def discover_scheduled_skills(minds_root: Path) -> list[ScheduledSkill]:
             mind_id=mind_id,
             mind_name=mind_name,
             skill_name=skill_name,
+            skill_path=str(skill_md),
             cron=cron,
             timezone=fm.get("schedule_timezone", DEFAULT_TIMEZONE),
             voice=_coerce_bool(fm.get("voice"), default=True),
             notify=_coerce_bool(fm.get("notify"), default=True),
+        ))
+
+    return found
+
+
+def discover_scheduler_tasks(tasks_yaml: Path, minds_root: Path) -> list[ScheduledSkill]:
+    """Discover scheduler-owned recurring tasks from `tasks_yaml`.
+
+    Each entry names a mind, a cron, and an `instructions_file` (relative
+    to the tasks_yaml's parent directory). The instruction body is read
+    once at discovery time and stored on the ScheduledSkill so the
+    scheduler can embed it inline in the dispatch message — no skill
+    file involved, no discovery on the receiver.
+    """
+    found: list[ScheduledSkill] = []
+    if not tasks_yaml.is_file():
+        return found
+
+    try:
+        data = yaml.safe_load(tasks_yaml.read_text()) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        log.warning("Could not read %s: %s", tasks_yaml, exc)
+        return found
+
+    entries = data.get("tasks") or []
+    instructions_root = tasks_yaml.parent / "instructions"
+
+    for entry in entries:
+        name = entry.get("name")
+        mind_name = entry.get("mind")
+        cron = (entry.get("cron") or "").strip()
+        instructions_file = entry.get("instructions_file")
+        if not (name and mind_name and cron and instructions_file):
+            log.warning("Skipping malformed scheduler task entry: %r", entry)
+            continue
+
+        if not _validate_cron(cron):
+            log.warning(
+                "Skipping scheduler task %s — invalid cron %r (need 5 fields)",
+                name, cron,
+            )
+            continue
+
+        mind_id = _load_mind_uuid(minds_root / mind_name)
+        if not mind_id:
+            log.warning(
+                "Skipping scheduler task %s — no mind_id in %s/runtime.yaml",
+                name, mind_name,
+            )
+            continue
+
+        instructions_path = (instructions_root / instructions_file).resolve()
+        if not instructions_path.is_file():
+            log.warning(
+                "Skipping scheduler task %s — instructions file not found: %s",
+                name, instructions_path,
+            )
+            continue
+
+        found.append(ScheduledSkill(
+            mind_id=mind_id,
+            mind_name=mind_name,
+            skill_name=name,
+            skill_path=str(instructions_path),
+            cron=cron,
+            timezone=entry.get("timezone") or DEFAULT_TIMEZONE,
+            voice=bool(entry.get("voice", True)),
+            notify=bool(entry.get("notify", True)),
+            instructions_path=str(instructions_path),
         ))
 
     return found

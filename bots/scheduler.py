@@ -23,7 +23,11 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from config import config
-from core.scheduled_skills import ScheduledSkill, discover_scheduled_skills
+from core.scheduled_skills import (
+    ScheduledSkill,
+    discover_scheduled_skills,
+    discover_scheduler_tasks,
+)
 
 # ---------------------------------------------------------------------------
 # Keyring → env bridge: the scheduler needs TELEGRAM_BOT_TOKEN in os.environ
@@ -50,6 +54,10 @@ log = logging.getLogger("hive-mind-scheduler")
 SERVER_URL = os.environ.get("HIVE_MIND_SERVER_URL", f"http://localhost:{config.server_port}")
 VOICE_SERVER_URL = os.environ.get("VOICE_SERVER_URL", "http://localhost:8422")
 MINDS_ROOT = Path(os.environ.get("MINDS_ROOT", "/usr/src/app/minds"))
+SCHEDULER_TASKS_YAML = Path(os.environ.get(
+    "SCHEDULER_TASKS_YAML",
+    "/usr/src/app/bots/scheduled_tasks/tasks.yaml",
+))
 COMMS_BEARER_TOKEN = os.environ.get("COMMS_BEARER_TOKEN", "")
 GATEWAY_AUTH_HEADERS = (
     {"Authorization": f"Bearer {COMMS_BEARER_TOKEN}"} if COMMS_BEARER_TOKEN else {}
@@ -188,7 +196,29 @@ async def fire_skill(skill: ScheduledSkill) -> None:
         session_id: str | None = None
         try:
             session_id = await _create_session(http, skill, surface_prompt)
-            response = await _send_message(http, session_id, f"Run /{skill.skill_name}")
+            instructions_text: str | None = None
+            if skill.instructions_path:
+                try:
+                    instructions_text = Path(skill.instructions_path).read_text()
+                except OSError as exc:
+                    log.warning(
+                        "Could not read instructions for %s at %s: %s — "
+                        "falling back to path-reference dispatch",
+                        label, skill.instructions_path, exc,
+                    )
+            if instructions_text:
+                dispatch_msg = (
+                    f"You are running the scheduled task '{skill.skill_name}'. "
+                    "Execute the following instructions exactly. Do not search "
+                    "for a skill file — the instructions are embedded below.\n\n"
+                    f"{instructions_text}"
+                )
+            else:
+                dispatch_msg = (
+                    f"Run the {skill.skill_name} skill. "
+                    f"Read its instructions from {skill.skill_path} and follow them exactly."
+                )
+            response = await _send_message(http, session_id, dispatch_msg)
         except Exception:
             log.exception("Gateway failure for %s", label)
             if skill.notify:
@@ -224,9 +254,22 @@ def _skill_job_id(skill: ScheduledSkill) -> str:
 def _reconcile_skill_jobs(scheduler: AsyncIOScheduler) -> tuple[int, int, int]:
     """Sync APScheduler's skill-job set to the current on-disk discovery.
 
-    Returns (added, removed, total) for logging. Sweep jobs are never touched.
+    Merges two sources: SKILL.md frontmatter discovery (legacy, dispatched
+    by path) and scheduler-owned YAML tasks (instructions embedded inline).
+    YAML wins on collisions so a migrated task can co-exist with a stale
+    SKILL.md during transition. Returns (added, removed, total) for
+    logging. Sweep jobs are never touched.
     """
-    discovered = discover_scheduled_skills(MINDS_ROOT)
+    skill_md_tasks = discover_scheduled_skills(MINDS_ROOT)
+    yaml_tasks = discover_scheduler_tasks(SCHEDULER_TASKS_YAML, MINDS_ROOT)
+
+    by_identity: dict[tuple[str, str], ScheduledSkill] = {}
+    for task in skill_md_tasks:
+        by_identity[(task.mind_name, task.skill_name)] = task
+    for task in yaml_tasks:
+        by_identity[(task.mind_name, task.skill_name)] = task
+
+    discovered = list(by_identity.values())
     desired_ids = {_skill_job_id(s): s for s in discovered}
 
     existing_ids = {
