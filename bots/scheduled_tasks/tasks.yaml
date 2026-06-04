@@ -1,0 +1,20 @@
+# Scheduler-owned recurring tasks.
+#
+# Each entry is a recurring instruction sent to a mind on a cron schedule.
+# The instruction body lives in instructions/<name>.md and is embedded
+# inline into the dispatch message — the receiving mind never has to
+# discover a skill file, which makes the dispatch deterministic across
+# every harness (Claude, codex, openai-cloud).
+#
+# Use this file for tasks that are purely scheduler-fired and not meant
+# to be user-invocable in chat. User-invocable skills still live under
+# the mind's .claude/skills/ or .codex/skills/ tree.
+
+tasks:
+  - name: netsage-alert
+    mind: bilby
+    cron: "*/15 * * * *"
+    timezone: America/Chicago
+    voice: false
+    notify: false
+    instructions_file: netsage-alert.md
