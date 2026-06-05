@@ -282,7 +282,10 @@ async def _stream_group_response(
         return None
 
     if not accumulated:
-        await placeholder.edit_text("(no response from the hive)")
+        await placeholder.edit_text(
+            "ERROR: hive group stream closed with no text from any mind. "
+            "Check the mind container logs for the real failure."
+        )
         return None
 
     full_text = "\n\n".join(accumulated.values())

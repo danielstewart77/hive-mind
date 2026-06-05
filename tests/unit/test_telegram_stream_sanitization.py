@@ -74,8 +74,8 @@ class TestStreamToMessageSanitization:
         # Final result must be sanitized
         assert final_chunks[0] == "Done."
 
-    async def test_stream_to_message_no_response_not_sanitized(self) -> None:
-        """(No response) should pass through without sanitization."""
+    async def test_stream_to_message_empty_stream_surfaces_error(self) -> None:
+        """An empty stream must surface a real error string, never '(No response)'."""
         from bots.telegram_bot import _stream_to_message
 
         sent = AsyncMock()
@@ -91,4 +91,6 @@ class TestStreamToMessageSanitization:
         with patch("bots.telegram_bot.gateway", mock_gateway):
             final_chunks = await _stream_to_message(sent, 123, 456, "test prompt")
 
-        assert final_chunks[0] == "(No response)"
+        assert "(No response)" not in final_chunks[0]
+        assert final_chunks[0].startswith("ERROR:")
+        assert "mind container logs" in final_chunks[0]

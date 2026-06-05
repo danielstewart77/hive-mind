@@ -60,11 +60,6 @@ class TestSanitizeResponse:
         assert "{" not in result
         assert result == "Done."
 
-    def test_sanitize_response_preserves_no_response(self) -> None:
-        from bots.telegram_bot import _sanitize_response
-
-        assert _sanitize_response("(No response)") == "(No response)"
-
     def test_sanitize_response_replaces_json_array(self) -> None:
         from bots.telegram_bot import _sanitize_response
 

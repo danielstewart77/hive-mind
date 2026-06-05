@@ -138,6 +138,10 @@ async def _send_message(http: aiohttp.ClientSession, session_id: str, content: s
     """Send a single message and consume the SSE stream into one combined string."""
     texts: list[str] = []
     result_fallback = ""
+    events_seen = 0
+    event_type_counts: dict[str, int] = {}
+    last_event_type: str | None = None
+    json_decode_errors = 0
     sse_timeout = aiohttp.ClientTimeout(total=0, sock_read=0)
     async with http.post(
         f"{SERVER_URL}/sessions/{session_id}/message",
@@ -157,15 +161,27 @@ async def _send_message(http: aiohttp.ClientSession, session_id: str, content: s
                 try:
                     event = json.loads(raw_line.removeprefix("data: "))
                 except json.JSONDecodeError:
+                    json_decode_errors += 1
                     continue
-                etype = event.get("type")
+                events_seen += 1
+                etype = event.get("type") or "<no-type>"
+                event_type_counts[etype] = event_type_counts.get(etype, 0) + 1
+                last_event_type = etype
                 if etype == "assistant":
                     for block in event.get("message", {}).get("content", []):
                         if block.get("type") == "text" and block.get("text"):
                             texts.append(block["text"])
                 elif etype == "result":
                     result_fallback = event.get("result", "")
-    return "\n\n".join(texts) or result_fallback or "(No response)"
+    combined = "\n\n".join(texts) or result_fallback
+    if not combined:
+        raise RuntimeError(
+            f"Empty response from session {session_id}: "
+            f"events_seen={events_seen}, types={event_type_counts}, "
+            f"last_event_type={last_event_type}, json_decode_errors={json_decode_errors}, "
+            f"result_fallback={result_fallback!r}"
+        )
+    return combined
 
 
 async def _kill_session(http: aiohttp.ClientSession, session_id: str) -> None:
@@ -233,6 +249,7 @@ async def fire_skill(skill: ScheduledSkill) -> None:
 
     if not skill.notify:
         log.info("%s complete (notify=false, no delivery)", label)
+        log.info("%s response (first 4000 chars): %s", label, (response or "")[:4000])
         return
 
     await _send_text(bot_token, chat_id, response)

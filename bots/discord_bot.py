@@ -214,7 +214,10 @@ def _chunk_message(text: str) -> list[str]:
     if current.strip():
         chunks.append(current.rstrip("\n"))
 
-    return chunks or ["(No response)"]
+    return chunks or [
+        "ERROR: empty response from gateway. "
+        "Check the mind container logs for the real failure."
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +247,10 @@ async def _stream_to_message(
             last_edit = now
 
     if not accumulated:
-        accumulated = "(No response)"
+        accumulated = (
+            "ERROR: mind stream closed with no text output. "
+            "Check the mind container logs for the real failure."
+        )
 
     chunks = _chunk_message(accumulated)
     with contextlib.suppress(discord.HTTPException):

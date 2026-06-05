@@ -170,7 +170,10 @@ async def _stream_to_message(
             last_edit = now
 
     if not accumulated:
-        accumulated = "(No response)"
+        accumulated = (
+            "ERROR: mind stream closed with no text output. "
+            "Check the mind container logs for the real failure."
+        )
 
     final_chunks = [_sanitize_response(c) for c in _chunk_message(accumulated)]
     try:

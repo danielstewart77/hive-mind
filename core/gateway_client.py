@@ -277,4 +277,10 @@ class GatewayClient:
         texts: list[str] = []
         async for text in self.query_stream(user_id, client_ref, prompt, images=images):
             texts.append(text)
-        return "\n\n".join(texts) or "(No response)"
+        combined = "\n\n".join(texts)
+        if not combined:
+            raise RuntimeError(
+                f"Empty response from gateway for user={user_id} client_ref={client_ref}: "
+                "stream produced no text and no result fallback."
+            )
+        return combined
