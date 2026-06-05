@@ -10,12 +10,16 @@ Fetch the approved auto-apply rules with `curl -s -H "Authorization: Bearer $EVE
 
 For each group, classify it against the catalog. Always set `source` to `bilby_netsage` and `severity` to one of `low`, `medium`, or `high`.
 
-If the group matches a catalog slug AND that class has an approved auto-apply rule with `action_kind=record_only`, POST the event with that `event_class_id`, `status=ignored`, and `response_rule_id` set to the matching rule id. Do not dispatch to Skippy — the rule is the policy. Increment a local `R` counter.
+Your only built-in action is `record_only`. Everything else is Skippy's job.
 
-If the group matches a catalog slug but the class has no approved auto-apply rule, POST the event with `status=awaiting_triage`, then dispatch a broker message to Skippy with the group's representative anomaly and `metadata.expects_reply=true` so he can decide the policy. Increment a local `D` counter.
+If the group matches a catalog slug AND that class has an approved auto-apply rule with `action_kind=record_only`, POST the event with that `event_class_id`, `status=ignored`, and `response_rule_id` set to the matching rule id. Do not dispatch to Skippy. Increment a local `R` counter.
 
-If the group matches no catalog slug, do not invent one. Do not POST an event. Dispatch a broker message to Skippy with the representative anomaly and `metadata.expects_reply=true`, asking him to name a class. Increment `D`.
+If the group matches a catalog slug but the matching rule's `action_kind` is anything other than `record_only`, or no approved auto-apply rule exists for the class, do not POST the event yourself. Dispatch a broker message to Skippy with the classified slug, the representative anomaly, and `metadata.expects_reply=true`. Skippy will record the event and execute the action. Increment a local `D` counter.
+
+If the group matches no catalog slug, do not invent one and do not POST. Dispatch a broker message to Skippy with the representative anomaly and `metadata.expects_reply=true`, asking him to classify it and decide on a response. Increment `D`.
+
+Never notify Daniel. You record silent noise; Skippy handles everything else, including any notification.
 
 Dispatch broker messages with `POST $HIVEMIND_BROKER_URL/broker/messages` using header `Authorization: Bearer $HIVEMIND_BROKER_TOKEN`. From id `37cd48f9-1ed5-4875-91c1-a3b0464deafc`, to id `14cb820b-4a42-4f04-a593-54f532fd1d2f`. Use one `conversation_id` per netsage fire.
 
-Print `OK: processed <N> groups from <M> anomalies, recorded silently <R>, dispatched <D> to Skippy.` and exit.
+Print `OK: processed <N> groups from <M> anomalies, recorded silently <R>, escalated <D> to Skippy.` and exit.
