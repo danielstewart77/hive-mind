@@ -34,7 +34,10 @@ class ScheduledSkill:
     container restart.
     """
 
-    mind_id: str          # canonical UUID, used in gateway payloads
+    mind_id: str          # canonical UUID, used in gateway payloads.
+                          # For command-typed tasks this is "scheduler" — no
+                          # gateway dispatch happens, the field is kept for
+                          # log labelling.
     mind_name: str        # short folder name, used in log labels
     skill_name: str
     skill_path: str       # absolute path to SKILL.md (SKILL.md-sourced) or
@@ -44,6 +47,9 @@ class ScheduledSkill:
     voice: bool
     notify: bool
     instructions_path: str | None = None  # when set, scheduler reads at fire time
+    command: tuple[str, ...] | None = None  # when set, scheduler runs subprocess
+                          # instead of dispatching a turn to a mind. Tasks
+                          # with `command` set ignore mind / instructions_file.
 
 
 _FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---", re.DOTALL)
@@ -172,18 +178,46 @@ def discover_scheduler_tasks(tasks_yaml: Path, minds_root: Path) -> list[Schedul
 
     for entry in entries:
         name = entry.get("name")
-        mind_name = entry.get("mind")
         cron = (entry.get("cron") or "").strip()
-        instructions_file = entry.get("instructions_file")
-        if not (name and mind_name and cron and instructions_file):
+        if not (name and cron):
             log.warning("Skipping malformed scheduler task entry: %r", entry)
             continue
-
         if not _validate_cron(cron):
             log.warning(
                 "Skipping scheduler task %s — invalid cron %r (need 5 fields)",
                 name, cron,
             )
+            continue
+
+        command = entry.get("command")
+        if command:
+            if isinstance(command, str):
+                command_tuple: tuple[str, ...] = tuple(command.split())
+            elif isinstance(command, list) and all(isinstance(p, str) for p in command):
+                command_tuple = tuple(command)
+            else:
+                log.warning(
+                    "Skipping scheduler task %s — `command` must be a string or list[str]",
+                    name,
+                )
+                continue
+            found.append(ScheduledSkill(
+                mind_id="scheduler",
+                mind_name="scheduler",
+                skill_name=name,
+                skill_path=command_tuple[0],
+                cron=cron,
+                timezone=entry.get("timezone") or DEFAULT_TIMEZONE,
+                voice=bool(entry.get("voice", False)),
+                notify=bool(entry.get("notify", False)),
+                command=command_tuple,
+            ))
+            continue
+
+        mind_name = entry.get("mind")
+        instructions_file = entry.get("instructions_file")
+        if not (mind_name and instructions_file):
+            log.warning("Skipping malformed scheduler task entry: %r", entry)
             continue
 
         mind_id = _load_mind_uuid(minds_root / mind_name)

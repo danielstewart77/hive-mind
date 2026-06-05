@@ -194,8 +194,40 @@ async def _kill_session(http: aiohttp.ClientSession, session_id: str) -> None:
         log.exception("Failed to delete session %s", session_id)
 
 
+async def _fire_command(skill: ScheduledSkill) -> None:
+    """Run a command-type scheduled task as a subprocess.
+
+    Output goes to scheduler logs. Notify/voice are intentionally ignored
+    here — these tasks talk to the system (broker, event_triage, etc.) on
+    their own; they don't return text to deliver.
+    """
+    label = f"{skill.mind_name}/{skill.skill_name}"
+    cmd = list(skill.command or ())
+    if not cmd:
+        log.error("Command task %s has empty command list", label)
+        return
+    log.info("Firing %s as command: %s", label, cmd)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        stdout_bytes, _ = await proc.communicate()
+        stdout_text = (stdout_bytes or b"").decode(errors="replace").strip()
+        if proc.returncode == 0:
+            log.info("%s exit=0 output=%r", label, stdout_text[:2000])
+        else:
+            log.error("%s exit=%s output=%r", label, proc.returncode, stdout_text[:2000])
+    except Exception:
+        log.exception("Command task %s failed", label)
+
+
 async def fire_skill(skill: ScheduledSkill) -> None:
     """Fire a single scheduled skill: fresh session → run → kill → deliver."""
+    if skill.command:
+        await _fire_command(skill)
+        return
     label = f"{skill.mind_name}/{skill.skill_name}"
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     chat_id = config.telegram_owner_chat_id
