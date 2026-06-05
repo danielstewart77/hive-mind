@@ -3,11 +3,10 @@
 
 Runs once per scheduler fire. Pulls the last 15 minutes of logs from
 Loki, picks out anomalous lines, and on a real finding dispatches a
-detailed report to Skippy via the broker. Skippy's event-triage
-pipeline owns classification, recommendation, and notifying Daniel —
-this script no longer pings Daniel directly so there's only one
-source of NetSage notifications.
-Prints a one-line status to stdout for the scheduling mind to echo back.
+detailed report to Skippy via the broker as a self-message. Bilby is
+no longer involved. Skippy's event-triage pipeline owns classification,
+rule application, and notifying Daniel when something warrants his hands.
+Prints a one-line status to stdout for the scheduler to echo back.
 """
 
 from __future__ import annotations
@@ -24,7 +23,6 @@ import uuid
 
 LOKI_URL = "http://sentinel-loki:3100/loki/api/v1/query_range"
 SKIPPY_MIND_ID = "14cb820b-4a42-4f04-a593-54f532fd1d2f"
-BILBY_MIND_ID = "37cd48f9-1ed5-4875-91c1-a3b0464deafc"
 
 ANOMALY_PATTERNS = ("error", "critical", "panic", "traceback", "denied", "fatal")
 ANOMALY_REGEX = re.compile(
@@ -155,12 +153,12 @@ def broker_skippy(detail: str) -> None:
     body = {
         "message_id": str(uuid.uuid4()),
         "conversation_id": str(uuid.uuid4()),
-        "from": BILBY_MIND_ID,
+        "from": SKIPPY_MIND_ID,
         "to": SKIPPY_MIND_ID,
         "content": detail,
         "rolling_summary": "",
         "metadata": {
-            "request_type": "security_triage",
+            "request_type": "netsage_alert",
             "triggered_by": "scheduler",
             "expects_reply": False,
         },
@@ -203,8 +201,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--json",
         action="store_true",
-        help="Emit anomalies as JSON to stdout and skip broker dispatch. "
-        "The caller (Bilby) is expected to classify and dispatch.",
+        help="Emit anomalies as JSON to stdout and skip broker dispatch.",
     )
     args = parser.parse_args(argv)
 
