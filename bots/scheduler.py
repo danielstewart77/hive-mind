@@ -191,7 +191,7 @@ async def fire_skill(skill: ScheduledSkill) -> None:
     log.info("Firing %s", label)
     surface_prompt = VOICE_SURFACE_PROMPT if skill.voice else DEV_SURFACE_PROMPT
 
-    timeout = aiohttp.ClientTimeout(total=300)
+    timeout = aiohttp.ClientTimeout(total=780)
     async with aiohttp.ClientSession(timeout=timeout, headers=GATEWAY_AUTH_HEADERS) as http:
         session_id: str | None = None
         try:
