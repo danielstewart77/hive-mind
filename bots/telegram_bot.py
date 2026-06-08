@@ -778,6 +778,14 @@ async def _on_shutdown(app) -> None:
         await http.close()
 
 
+async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    err = context.error
+    if isinstance(err, (NetworkError, TimedOut)):
+        log.info("transient telegram network error (%s): %s", err.__class__.__name__, err)
+        return
+    log.exception("unhandled exception in telegram handler", exc_info=err)
+
+
 if __name__ == "__main__":
     token = _get_bot_token()
 
@@ -794,6 +802,8 @@ if __name__ == "__main__":
         .post_shutdown(_on_shutdown)
         .build()
     )
+
+    app.add_error_handler(_on_error)
 
     app.add_handler(CommandHandler("sessions", cmd_sessions))
     app.add_handler(CommandHandler("new", cmd_new))
