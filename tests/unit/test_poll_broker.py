@@ -31,7 +31,8 @@ class TestParseArgs:
         assert args.to_mind == "nagatha"
         assert args.request_type == "quick_query"
 
-    def test_parse_args_gateway_url_default(self):
+    def test_parse_args_gateway_url_default(self, monkeypatch):
+        monkeypatch.delenv("HIVEMIND_BROKER_URL", raising=False)
         mod = _import_poll()
         args = mod.parse_args([
             "--conversation_id", "conv-1",
