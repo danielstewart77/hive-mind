@@ -29,6 +29,14 @@ ANOMALY_REGEX = re.compile(
     r"\b(?:" + "|".join(ANOMALY_PATTERNS) + r")\b", re.IGNORECASE
 )
 MAX_JOURNAL_PRIORITY = 4
+
+# Suricata IDS expresses badness through a numeric severity field and a
+# signature name, not the English crisis words ANOMALY_REGEX hunts for, so
+# eve.json alerts slip past the generic text filter entirely. Suricata
+# severity is inverted: 1 is the most severe (active attack), 3 the least
+# (informational noise such as "Ethertype unknown" or our own Telegram
+# traffic showing up in ET HUNTING rules). Forward severity 1 and 2; drop 3.
+SURICATA_SEVERITY_CEILING = 2
 BENIGN_SUBSTRINGS = (
     "auto_remember",
     "scheduled_skill",
@@ -126,10 +134,53 @@ def _service_label(record: dict | None, raw_svc: str) -> str:
     return raw_svc
 
 
+def _suricata_alert(record: dict | None) -> str | None:
+    """Return a readable one-liner for a worth-forwarding Suricata alert.
+
+    Vector merges the parsed eve.json line into the record, so an alert event
+    carries a top-level event_type=="alert" and an alert sub-object with
+    severity/signature/category. Returns None for non-alert Suricata events
+    (flow, dns, tls, stats…) and for alerts at or below the noise ceiling.
+    """
+    if not record or record.get("event_type") != "alert":
+        return None
+    alert = record.get("alert")
+    if not isinstance(alert, dict):
+        return None
+    try:
+        severity = int(alert.get("severity"))
+    except (TypeError, ValueError):
+        severity = None
+    if severity is not None and severity > SURICATA_SEVERITY_CEILING:
+        return None
+    signature = alert.get("signature") or "unknown signature"
+    category = alert.get("category") or ""
+    src = record.get("src_ip")
+    dst = record.get("dest_ip")
+    sev_label = severity if severity is not None else "?"
+    parts = [f"Suricata alert severity {sev_label}: {signature}"]
+    if category:
+        parts.append(f"({category})")
+    if src or dst:
+        parts.append(f"{src or '?'} to {dst or '?'}")
+    return " ".join(parts)
+
+
 def pick_anomalies(lines):
     out = []
     for svc, ts, msg in lines:
         record = _decode_envelope(msg)
+        suricata_line = _suricata_alert(record)
+        if suricata_line is not None:
+            host = record.get("host") if record else None
+            out.append((f"suricata@{host or svc}", ts, suricata_line))
+            continue
+        if record and record.get("source_app") == "suricata":
+            # Any other Suricata event (stats, flow, dns, tls…) only ever
+            # surfaces via the alert path above. Skip it before the generic
+            # text filter, whose crisis words (e.g. "error") match substrings
+            # in Suricata's own internal stats counter names.
+            continue
         priority = _journal_priority(record)
         if priority is not None and priority > MAX_JOURNAL_PRIORITY:
             continue
