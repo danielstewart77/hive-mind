@@ -2,30 +2,33 @@
 
 The per-harness consumer for the Claude Code side of the harness
 fine-tuning dataset. It reads a Claude Code session JSONL transcript off
-disk, normalizes it into the turn array defined in the spec, applies
-tool-call normalization, and upserts one row via
-:func:`core.training_capture.upsert_example`.
+disk, parses it into the turn array defined in the spec, and upserts one
+row via :func:`core.training_capture.upsert_example`.
 
 This module is pure transcript→row logic. It does not fork, load ``.env``,
 or read a Stop payload — that orchestration lives in each mind's own
 Stop-hook wrapper (Skippy's lives under ``~/.claude/hooks/``). Keeping the
-parse/normalize logic here makes it importable and testable against
-fixture transcripts, and lets Ada reuse the exact same consumer.
+parse logic here makes it importable and testable against fixture
+transcripts, and lets Ada reuse the exact same consumer.
 
-Capture is **lossless** in the sense the spec means: every user turn,
-assistant turn, tool call, and tool result is preserved in order, with
-tool results stored raw. The only transforms applied at capture time are:
+Capture is **fully raw**. Every user turn, assistant turn, tool call, and
+tool result is preserved in order, with tool results stored raw and the
+real tool names kept verbatim — ``Bash``, ``Skill`` with its actual skill
+name, ``mcp__hive-mind-tools__graph_query``, ``Task`` with its actual
+``subagent_type``. The model we are training is a specialist in *this*
+hive mind, so the concrete tool identities are the most valuable signal in
+the data, not noise to be bucketed away. Any anonymization (collapsing
+skill / MCP / sub-agent identifiers to category buckets) is an optional
+export-time transform over this immutable raw store, applied only if a
+more general model is ever wanted — never at capture time.
 
-- **Tool-call normalization** — leaky identifiers (skill names, MCP tool
-  names, sub-agent types) are rewritten to their category bucket so the
-  student learns harness-shaped syntax, not a skill roster that changes
-  weekly. The wrapper, parameter structure, and result blocks are kept
-  verbatim.
+The only transforms applied at capture time:
+
 - **Thinking blocks are dropped** — extended-reasoning content is pure
   token bloat for harness fidelity and is never graded, so it is not
   stored.
 - **Sidechains are skipped** — sub-agent transcripts (``isSidechain``)
-  belong to their own session; the parent session keeps only the ``Agent``
+  belong to their own session; the parent session keeps only the sub-agent
   tool call and its result.
 """
 
@@ -42,15 +45,6 @@ from core.training_capture import (
     upsert_example,
 )
 
-# Anonymization buckets — the leaky specific is replaced with these.
-SKILL_NAME_PLACEHOLDER = "<SKILL_NAME>"
-AGENT_TYPE_PLACEHOLDER = "<AGENT_TYPE>"
-MCP_TOOL_TYPE = "MCPTool"
-
-# Tool names that map to the ``Agent`` bucket (sub-agent invocation has been
-# named both ``Task`` and ``Agent`` across harness versions).
-_AGENT_TOOL_NAMES = frozenset({"Task", "Agent"})
-
 # The training DB lives next to the other state databases in this repo.
 # Module-relative so it resolves correctly whether Skippy runs it bare-metal
 # or Ada's container imports it at a different absolute path. Override with
@@ -62,31 +56,6 @@ def default_db_path() -> Path:
     """Resolve the training DB path, honoring ``TRAINING_DB_PATH``."""
     override = os.environ.get("TRAINING_DB_PATH")
     return Path(override) if override else _DEFAULT_DB_PATH
-
-
-def normalize_tool_call(name: str, tool_input: dict) -> dict:
-    """Return a normalized ``tool_calls`` entry: ``{"type", "input"}``.
-
-    Harness primitives (``Bash``, ``Read``, ``Edit`` …) keep their name and
-    their input verbatim. Skill / sub-agent / MCP calls keep their parameter
-    structure but have the leaky identifier swapped for a category bucket.
-    """
-    tool_input = tool_input if isinstance(tool_input, dict) else {}
-    if name == "Skill":
-        anon = dict(tool_input)
-        if "skill" in anon:
-            anon["skill"] = SKILL_NAME_PLACEHOLDER
-        return {"type": "Skill", "input": anon}
-    if name in _AGENT_TOOL_NAMES:
-        anon = dict(tool_input)
-        if "subagent_type" in anon:
-            anon["subagent_type"] = AGENT_TYPE_PLACEHOLDER
-        return {"type": "Agent", "input": anon}
-    if name.startswith("mcp__"):
-        # The tool *name* is the leaky specific; the type bucket drops it.
-        return {"type": MCP_TOOL_TYPE, "input": tool_input}
-    # Stable harness primitive — kept as-is.
-    return {"type": name, "input": tool_input}
 
 
 def _content_text(content) -> str:
@@ -125,7 +94,7 @@ def _tool_result_text(content) -> str:
 
 
 def parse_transcript(transcript_path: str | Path) -> list[dict]:
-    """Parse a Claude Code JSONL transcript into the normalized turn array.
+    """Parse a Claude Code JSONL transcript into the raw turn array.
 
     Each turn is one of::
 
@@ -133,8 +102,10 @@ def parse_transcript(transcript_path: str | Path) -> list[dict]:
         {"role": "assistant", "content": "...", "tool_calls": [...]}
         {"role": "tool", "content": "...", "tool_call_id": "..."}
 
-    Turns are emitted in transcript order. Sidechain (sub-agent) events and
-    non user/assistant events are skipped. Thinking blocks are dropped.
+    Each ``tool_calls`` entry is ``{"type": <raw tool name>, "input": {...},
+    "id": "..."}`` — the real tool name, kept verbatim. Turns are emitted in
+    transcript order. Sidechain (sub-agent) events and non user/assistant
+    events are skipped. Thinking blocks are dropped.
     """
     path = Path(transcript_path)
     turns: list[dict] = []
@@ -165,9 +136,11 @@ def parse_transcript(transcript_path: str | Path) -> list[dict]:
             if isinstance(content, list):
                 for c in content:
                     if isinstance(c, dict) and c.get("type") == "tool_use":
-                        call = normalize_tool_call(c.get("name", ""), c.get("input") or {})
-                        call["id"] = c.get("id", "")
-                        tool_calls.append(call)
+                        tool_calls.append({
+                            "type": c.get("name", ""),
+                            "input": c.get("input") or {},
+                            "id": c.get("id", ""),
+                        })
             if not text and not tool_calls:
                 continue
             turn: dict = {"role": "assistant", "content": text}

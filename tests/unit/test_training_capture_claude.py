@@ -1,9 +1,8 @@
 """Unit tests for the Claude Code transcript consumer.
 
-Covers transcript parsing into the normalized turn array, tool-call
-normalization (skill / agent / MCP anonymization, primitives kept),
-thinking-block dropping, sidechain skipping, metadata extraction, and the
-end-to-end ``capture_session`` upsert.
+Covers transcript parsing into the raw turn array (real tool names kept
+verbatim), thinking-block dropping, sidechain skipping, metadata
+extraction, and the end-to-end ``capture_session`` upsert.
 """
 
 from __future__ import annotations
@@ -14,12 +13,8 @@ import pytest
 
 from core.training_capture import HARNESS_CLAUDE_CODE, count_examples, get_example
 from core.training_capture_claude import (
-    AGENT_TYPE_PLACEHOLDER,
-    MCP_TOOL_TYPE,
-    SKILL_NAME_PLACEHOLDER,
     build_example,
     capture_session,
-    normalize_tool_call,
     parse_transcript,
 )
 
@@ -85,44 +80,6 @@ def transcript(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# normalize_tool_call
-# ---------------------------------------------------------------------------
-
-def test_primitive_kept_verbatim():
-    assert normalize_tool_call("Bash", {"command": "ls"}) == {
-        "type": "Bash", "input": {"command": "ls"}
-    }
-
-
-def test_skill_name_anonymized_structure_kept():
-    out = normalize_tool_call("Skill", {"skill": "hivemind:planka", "args": "x"})
-    assert out["type"] == "Skill"
-    assert out["input"]["skill"] == SKILL_NAME_PLACEHOLDER
-    assert out["input"]["args"] == "x"
-
-
-def test_agent_subagent_type_anonymized():
-    out = normalize_tool_call("Agent", {"subagent_type": "Explore", "prompt": "p"})
-    assert out["type"] == "Agent"
-    assert out["input"]["subagent_type"] == AGENT_TYPE_PLACEHOLDER
-    assert out["input"]["prompt"] == "p"
-
-
-def test_task_normalizes_to_agent_bucket():
-    assert normalize_tool_call("Task", {"subagent_type": "Plan"})["type"] == "Agent"
-
-
-def test_mcp_tool_bucketed():
-    out = normalize_tool_call("mcp__hive-mind-tools__graph_query", {"query": "q"})
-    assert out["type"] == MCP_TOOL_TYPE
-    assert out["input"] == {"query": "q"}
-
-
-def test_non_dict_input_tolerated():
-    assert normalize_tool_call("Bash", None) == {"type": "Bash", "input": {}}
-
-
-# ---------------------------------------------------------------------------
 # parse_transcript
 # ---------------------------------------------------------------------------
 
@@ -151,13 +108,19 @@ def test_sidechain_skipped(transcript):
     assert "subagent internal" not in blob
 
 
-def test_tool_calls_normalized_in_turn(transcript):
+def test_tool_calls_kept_raw_in_turn(transcript):
     turns = parse_transcript(transcript)
+    # First assistant turn: a single Bash call, name and input verbatim.
+    bash_turn = turns[1]
+    assert bash_turn["tool_calls"] == [
+        {"type": "Bash", "input": {"command": "ls"}, "id": "t1"}
+    ]
+    # Second assistant turn: Skill / MCP / Task with real identities kept.
     skill_turn = turns[3]
     types = [c["type"] for c in skill_turn["tool_calls"]]
-    assert types == ["Skill", MCP_TOOL_TYPE, "Agent"]
-    assert skill_turn["tool_calls"][0]["input"]["skill"] == SKILL_NAME_PLACEHOLDER
-    assert skill_turn["tool_calls"][2]["input"]["subagent_type"] == AGENT_TYPE_PLACEHOLDER
+    assert types == ["Skill", "mcp__hive-mind-tools__graph_query", "Task"]
+    assert skill_turn["tool_calls"][0]["input"]["skill"] == "hivemind:planka"
+    assert skill_turn["tool_calls"][2]["input"]["subagent_type"] == "Explore"
 
 
 def test_tool_result_links_id_and_flattens_blocks(transcript):
