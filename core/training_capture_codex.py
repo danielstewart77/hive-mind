@@ -1,12 +1,11 @@
-"""Codex CLI rollout → ``TrainingExample``.
+"""Codex CLI rollout → per-turn ``TrainingTurn`` rows.
 
 The per-harness consumer for the Codex side of the harness fine-tuning
-dataset. It reads a Codex CLI rollout JSONL off disk, parses it into the
-same normalized turn array the Claude consumer produces, and upserts one
-row via :func:`core.training_capture.upsert_example` with
-``harness="codex"``.
+dataset. It reads a Codex CLI rollout JSONL off disk, groups it into the
+same per-turn rows the Claude consumer produces, and upserts one row per
+turn via :func:`core.training_capture.upsert_turns` with ``harness="codex"``.
 
-Like the Claude consumer this module is pure transcript→row logic: it does
+Like the Claude consumer this module is pure transcript→rows logic: it does
 not fork, load ``.env``, or read a Stop payload. That orchestration lives
 in each Codex mind's own Stop-hook wrapper (Mordecai's lives under
 ``.codex/hooks/``). Keeping the parse logic here makes it importable and
@@ -30,29 +29,26 @@ A Codex rollout is JSONL where each line is ``{"type": ..., "payload":
   ``arguments`` JSON string, ``call_id``), ``function_call_output`` (a tool
   result: ``call_id``, ``output``), or ``reasoning`` (dropped).
 
-Normalization mirrors the Claude consumer exactly so both harnesses land in
-one schema:
+Grain mirrors the Claude consumer: a turn spans from one human (user)
+message to the next. A ``user`` message opens a new turn; ``assistant``
+text, ``function_call``, and ``function_call_output`` items append to the
+current turn's ``assistant_blocks`` in order.
 
-    {"role": "user", "content": "..."}
-    {"role": "assistant", "content": "...", "tool_calls": [...]}
-    {"role": "tool", "content": "...", "tool_call_id": "..."}
+Each ``tool_use`` block is ``{"type": "tool_use", "name": <real tool name>,
+"input": {...}, "id": "..."}`` — the Codex tool name kept verbatim
+(``exec_command``, ``apply_patch``, ``shell``, an MCP tool, …), with
+``arguments`` decoded from its JSON string into ``input``. Capture is
+**fully raw**: tool results are stored as emitted and tool identities are
+preserved, because the model we are training is a specialist in driving
+*this* harness.
 
-Each ``tool_calls`` entry is ``{"type": <real tool name>, "input": {...},
-"id": "..."}`` — the Codex tool name kept verbatim (``exec_command``,
-``apply_patch``, ``shell``, an MCP tool, …), with ``arguments`` decoded from
-its JSON string into ``input``. Capture is **fully raw**: tool results are
-stored as emitted and tool identities are preserved, because the model we
-are training is a specialist in driving *this* harness.
+The transforms applied at capture time:
 
-The only transforms applied at capture time:
-
-- **Reasoning items are dropped** — encrypted/extended reasoning is pure
-  token bloat for harness fidelity and is never graded, so it is not
-  stored. This is the Codex analog of dropping Claude thinking blocks.
-- **Developer / system messages are skipped from the turn array** — they
-  are harness-injected scaffolding (permissions, apps, skills preambles),
-  not conversational turns. The real system prompt is captured separately
-  from ``session_meta.base_instructions``.
+- **Reasoning items are dropped** — Codex exposes no readable reasoning, so
+  Codex rows always carry ``has_reasoning = 0``.
+- **Developer / system messages are skipped from the turn body** — they are
+  harness-injected scaffolding. The real system prompt is captured
+  separately from ``session_meta.base_instructions``.
 """
 
 from __future__ import annotations
@@ -64,18 +60,18 @@ from pathlib import Path
 
 from core.training_capture import (
     HARNESS_CODEX,
-    TrainingExample,
-    upsert_example,
+    TrainingTurn,
+    upsert_turns,
 )
 
 # The training DB lives next to the other state databases in this repo.
 # Module-relative so it resolves whether a mind runs it bare-metal or a
 # container imports it at a different absolute path. Override with
 # ``TRAINING_DB_PATH`` for tests or an alternate location.
-_DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "training_examples.db"
+_DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "training_turns.db"
 
 # Message roles that are real conversational turns. ``developer`` / ``system``
-# carry harness scaffolding and are excluded from the turn array.
+# carry harness scaffolding and are excluded from the turn body.
 _TURN_ROLES = frozenset({"user", "assistant"})
 
 
@@ -136,7 +132,7 @@ def _parse_arguments(arguments) -> dict:
     if isinstance(arguments, str):
         try:
             decoded = json.loads(arguments)
-        except Exception:
+        except json.JSONDecodeError:
             return {"raw": arguments}
         return decoded if isinstance(decoded, dict) else {"raw": arguments}
     if arguments is None:
@@ -144,34 +140,47 @@ def _parse_arguments(arguments) -> dict:
     return {"raw": str(arguments)}
 
 
-def _append_tool_call(turns: list[dict], call: dict) -> None:
-    """Attach a tool call to the open assistant turn, or open a new one.
+class _TurnAccumulator:
+    """Groups rollout items into per-turn ``(user_content, blocks)``.
 
-    Consecutive ``function_call`` items (an assistant firing several tools
-    before any result) accrue onto the same assistant turn. A call that
-    follows a ``tool`` turn or a ``user`` turn opens a fresh assistant turn
-    with empty content, matching how the model actually stepped.
+    A new turn opens only on a ``user`` message. Assistant text, tool calls,
+    and tool results append to the current turn. Items that arrive before the
+    first user message attach to a leading turn with empty ``user_content``.
     """
-    if turns and turns[-1]["role"] == "assistant":
-        turns[-1].setdefault("tool_calls", []).append(call)
-    else:
-        turns.append({"role": "assistant", "content": "", "tool_calls": [call]})
+
+    def __init__(self) -> None:
+        self._turns: list[tuple[str, list[dict]]] = []
+
+    def _ensure_current(self) -> list[dict]:
+        if not self._turns:
+            self._turns.append(("", []))
+        return self._turns[-1][1]
+
+    def start_turn(self, user_content: str) -> None:
+        self._turns.append((user_content, []))
+
+    def add_block(self, block: dict) -> None:
+        self._ensure_current().append(block)
+
+    @property
+    def turns(self) -> list[tuple[str, list[dict]]]:
+        return self._turns
 
 
-def parse_transcript(transcript_path: str | Path) -> list[dict]:
-    """Parse a Codex rollout JSONL into the normalized turn array.
+def _parse_grouped(transcript_path: str | Path) -> list[tuple[str, list[dict]]]:
+    """Group a Codex rollout JSONL into per-turn rows.
 
-    Turns are emitted in rollout order. ``response_item`` lines drive the
-    output; ``reasoning`` items and ``developer`` / ``system`` messages are
+    Returns a list of ``(user_content, assistant_blocks)`` tuples in rollout
+    order. ``reasoning`` items and ``developer`` / ``system`` messages are
     dropped; ``event_msg`` / ``session_meta`` / ``turn_context`` lines are
     ignored here (metadata is read separately).
     """
     path = Path(transcript_path)
-    turns: list[dict] = []
+    acc = _TurnAccumulator()
     try:
         raw = path.read_text()
-    except Exception:
-        return turns
+    except OSError:
+        return []
 
     for line in raw.splitlines():
         line = line.strip()
@@ -179,7 +188,7 @@ def parse_transcript(transcript_path: str | Path) -> list[dict]:
             continue
         try:
             ev = json.loads(line)
-        except Exception:
+        except json.JSONDecodeError:
             continue
         if ev.get("type") != "response_item":
             continue
@@ -191,28 +200,33 @@ def parse_transcript(transcript_path: str | Path) -> list[dict]:
             if role not in _TURN_ROLES:
                 continue
             text = _content_text(payload.get("content"))
-            if text:
-                turns.append({"role": role, "content": text})
+            if role == "user":
+                if text:
+                    acc.start_turn(text)
+            else:  # assistant
+                if text:
+                    acc.add_block({"type": "text", "text": text})
             continue
 
         if ptype == "function_call":
-            _append_tool_call(turns, {
-                "type": payload.get("name", ""),
+            acc.add_block({
+                "type": "tool_use",
+                "name": payload.get("name", ""),
                 "input": _parse_arguments(payload.get("arguments")),
                 "id": payload.get("call_id", ""),
             })
             continue
 
         if ptype == "function_call_output":
-            turns.append({
-                "role": "tool",
+            acc.add_block({
+                "type": "tool_result",
                 "content": _output_text(payload.get("output")),
                 "tool_call_id": payload.get("call_id", ""),
             })
             continue
 
         # reasoning and any other item types are intentionally dropped.
-    return turns
+    return acc.turns
 
 
 def _session_metadata(transcript_path: str | Path) -> dict:
@@ -228,7 +242,7 @@ def _session_metadata(transcript_path: str | Path) -> dict:
     system_prompt = None
     try:
         raw = path.read_text()
-    except Exception:
+    except OSError:
         return {"source_model": None, "harness_version": None, "system_prompt": None}
     for line in raw.splitlines():
         line = line.strip()
@@ -236,7 +250,7 @@ def _session_metadata(transcript_path: str | Path) -> dict:
             continue
         try:
             ev = json.loads(line)
-        except Exception:
+        except json.JSONDecodeError:
             continue
         etype = ev.get("type")
         payload = ev.get("payload") or {}
@@ -259,33 +273,39 @@ def _session_metadata(transcript_path: str | Path) -> dict:
     }
 
 
-def build_example(
+def build_turns(
     transcript_path: str | Path,
     *,
     session_id: str,
     mind_id: str | None = None,
     captured_at: int | None = None,
-) -> TrainingExample | None:
-    """Build a :class:`TrainingExample` from a rollout, or ``None``.
+) -> list[TrainingTurn]:
+    """Build the list of :class:`TrainingTurn` rows from a rollout.
 
-    Returns ``None`` when the rollout yields no turns (nothing to store).
+    Returns an empty list when the rollout yields no turns (nothing to
+    store). The ``system_prompt`` from ``session_meta`` is denormalized onto
+    every row of the session.
     """
-    turns = parse_transcript(transcript_path)
-    if not turns:
-        return None
+    grouped = _parse_grouped(transcript_path)
+    if not grouped:
+        return []
     meta = _session_metadata(transcript_path)
-    length_chars = sum(len(t.get("content") or "") for t in turns)
-    return TrainingExample.from_turns(
-        session_id=session_id,
-        harness=HARNESS_CODEX,
-        turns=turns,
-        mind_id=mind_id,
-        source_model=meta["source_model"],
-        harness_version=meta["harness_version"],
-        captured_at=captured_at if captured_at is not None else int(time.time()),
-        system_prompt=meta["system_prompt"],
-        length_tokens=length_chars // 4,
-    )
+    stamp = captured_at if captured_at is not None else int(time.time())
+    return [
+        TrainingTurn.from_blocks(
+            session_id=session_id,
+            turn_index=idx,
+            harness=HARNESS_CODEX,
+            user_content=user_content,
+            assistant_blocks=blocks,
+            mind_id=mind_id,
+            source_model=meta["source_model"],
+            harness_version=meta["harness_version"],
+            captured_at=stamp,
+            system_prompt=meta["system_prompt"],
+        )
+        for idx, (user_content, blocks) in enumerate(grouped)
+    ]
 
 
 def capture_session(
@@ -295,12 +315,12 @@ def capture_session(
     mind_id: str | None = None,
     db_path: str | Path | None = None,
 ) -> bool:
-    """Parse a rollout and upsert one row. Returns ``True`` if written.
+    """Parse a rollout and upsert its turn rows. ``True`` if any written.
 
     No-op (returns ``False``) when the rollout has no usable turns.
     """
-    example = build_example(transcript_path, session_id=session_id, mind_id=mind_id)
-    if example is None:
+    turns = build_turns(transcript_path, session_id=session_id, mind_id=mind_id)
+    if not turns:
         return False
-    upsert_example(db_path if db_path is not None else default_db_path(), example)
+    upsert_turns(db_path if db_path is not None else default_db_path(), turns)
     return True
