@@ -148,6 +148,14 @@ docker-compose.yml
 .codex/
 .obsidian/
 .log_agent_positions
+.local/
+
+# Personal data — never publish to the remote
+docs/financial/
+
+# Host-local mind tests: these import gitignored minds/* code, so they would
+# break any fresh clone or CI. They live with their host-local mind, not here.
+tests/unit/test_bilby_empty_turn_diagnostic.py
 
 # Our minds are our own
 minds/*
