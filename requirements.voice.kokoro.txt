@@ -1,0 +1,24 @@
+# Kokoro voice server dependencies -- Python 3.11 required
+# This file is used ONLY by Dockerfile.voice.kokoro / the voice-server-kokoro service.
+# Shares voice/voice_server.py with the Chatterbox image via the TTS_ENGINE toggle;
+# kept in a separate image so the two model stacks never collide.
+
+# STT (shared with the Chatterbox image)
+faster-whisper>=1.0.0
+
+# TTS -- Kokoro 82M, fast non-cloning engine (Apache-licensed weights)
+kokoro>=0.9.4
+soundfile
+
+# Torch stack -- Kokoro depends on torch; torchaudio encodes the WAV before ffmpeg.
+# Left unpinned so pip resolves a matching torch/torchaudio CUDA pair.
+torch
+torchaudio
+
+# Audio numerics
+numpy
+
+# HTTP server
+fastapi
+uvicorn[standard]
+python-multipart

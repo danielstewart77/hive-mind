@@ -79,6 +79,44 @@ services:
               capabilities: [gpu]
     command: ["/opt/venv/bin/python3", "-m", "voice.voice_server"]
 
+  # Kokoro voice server -- fast, non-cloning TTS for minds that don't need a
+  # cloned voice. Same module/STT as voice-server, selected via TTS_ENGINE.
+  # Reachable in-network at http://voice-server-kokoro:8422, host port 8423.
+  # Point a mind's VOICE_SERVER_URL here instead of voice-server to use it.
+  voice-server-kokoro:
+    build:
+      context: .
+      dockerfile: Dockerfile.voice.kokoro
+    container_name: hive-mind-voice-kokoro
+    working_dir: /usr/src/app
+    restart: always
+    ports:
+      - "8423:8422"
+    networks:
+      - hivemind
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - ${HOST_PROJECT_DIR:-.}:/usr/src/app
+      - kokoro-cache:/home/hivemind/.cache
+    environment:
+      - WHISPER_MODEL=medium
+      - TTS_ENGINE=kokoro
+      - KOKORO_DEFAULT_VOICE=${KOKORO_DEFAULT_VOICE:-af_heart}
+      # Optional per-mind voice overrides, JSON: {"ada":"af_bella","bob":"am_michael"}
+      - KOKORO_VOICE_MAP=${KOKORO_VOICE_MAP:-}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: ["/opt/venv/bin/python3", "-m", "voice.voice_server"]
+
   # ─────────────────────────────────────────────────────────────
   # Example Telegram bot.
   # Duplicate this block per mind. Set MIND_ID to the mind's id and
@@ -188,5 +226,6 @@ networks:
 
 volumes:
   whisper-cache:
+  kokoro-cache:
 # BEGIN GENERATED VOLUMES
 # END GENERATED VOLUMES

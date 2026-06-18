@@ -1,13 +1,23 @@
 """
 Hive Mind -- Voice Server.
 
-Provides STT (faster-whisper) and TTS (Chatterbox) over HTTP.
-Chatterbox supports zero-shot voice cloning from a reference WAV clip.
-Voice selection via voice_id parameter (maps to minds/{voice_id}/voice_ref.wav).
+Provides STT (faster-whisper) and TTS over HTTP. The TTS engine is selected at
+startup via the ``TTS_ENGINE`` env var:
+
+- ``chatterbox`` (default) -- zero-shot voice cloning from a reference WAV clip.
+  Voice selection via ``voice_id`` (maps to ``minds/{voice_id}/voice_ref.wav``).
+- ``kokoro`` -- fast non-cloning engine for minds that don't need a cloned
+  voice. ``voice_id`` maps to a Kokoro voice name via ``KOKORO_VOICE_MAP``,
+  falling back to ``KOKORO_DEFAULT_VOICE``.
+
+The STT half (faster-whisper) is shared by both engines. The two engines ship
+in separate images (Dockerfile.voice / Dockerfile.voice.kokoro) so their model
+stacks never collide; this single module serves both via the toggle.
 Auto-detects CUDA; falls back to CPU gracefully.
 """
 
 import io
+import json
 import logging
 import os
 import re
@@ -56,8 +66,15 @@ app = FastAPI(title="Hive Mind Voice Server")
 _DEVICE = "cuda" if _GPU_OK and torch.cuda.is_available() else "cpu"
 _WHISPER_MODEL = os.getenv("WHISPER_MODEL", "medium")
 
+# TTS engine selection -- "chatterbox" (default, cloning) or "kokoro" (fast, non-cloning)
+_TTS_ENGINE = os.getenv("TTS_ENGINE", "chatterbox").lower()
+_KOKORO_LANG = os.getenv("KOKORO_LANG", "a")  # 'a' = American English
+_KOKORO_DEFAULT_VOICE = os.getenv("KOKORO_DEFAULT_VOICE", "af_heart")
+_KOKORO_SR = 24000  # Kokoro's native output sample rate
+
 _whisper = None
 _chatterbox_model = None
+_kokoro_pipeline = None
 
 
 # ---------------------------------------------------------------------------
@@ -117,25 +134,78 @@ def _resolve_voice_ref(voice_id: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Kokoro voice resolution
+# ---------------------------------------------------------------------------
+_KOKORO_VOICE_MAP: dict[str, str] = {}
+
+
+def _load_kokoro_voice_map() -> dict[str, str]:
+    """Build {voice_id -> kokoro_voice_name} from the KOKORO_VOICE_MAP env var.
+
+    The env value is a JSON object mapping each mind's voice_id (short name or
+    UUID) to a Kokoro voice name (e.g. ``{"ada": "af_bella"}``). Returns an
+    empty map if unset or malformed.
+    """
+    raw = os.getenv("KOKORO_VOICE_MAP", "").strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        log.warning("KOKORO_VOICE_MAP is not valid JSON; ignoring")
+        return {}
+    if not isinstance(data, dict):
+        log.warning("KOKORO_VOICE_MAP is not a JSON object; ignoring")
+        return {}
+    return {str(k): str(v) for k, v in data.items()}
+
+
+def _resolve_kokoro_voice(voice_id: str) -> str:
+    """Map a voice_id to a Kokoro voice name.
+
+    Falls back to KOKORO_DEFAULT_VOICE when unmapped. Unlike Chatterbox, Kokoro
+    takes an explicit voice string on every call, so there is no last-used-clip
+    cache and no cross-mind voice bleed to guard against -- a sane default is safe.
+    """
+    return _KOKORO_VOICE_MAP.get(voice_id, _KOKORO_DEFAULT_VOICE)
+
+
+# ---------------------------------------------------------------------------
 # Startup -- load all models once
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
 async def startup():
-    global _whisper, _chatterbox_model
+    global _whisper, _chatterbox_model, _kokoro_pipeline
 
-    log.info("Voice server starting on device: %s | TTS engine: chatterbox", _DEVICE)
+    log.info("Voice server starting on device: %s | TTS engine: %s", _DEVICE, _TTS_ENGINE)
 
     from faster_whisper import WhisperModel
     compute_type = "float16" if _DEVICE == "cuda" else "int8"
     log.info("Loading faster-whisper %s (%s)...", _WHISPER_MODEL, compute_type)
     _whisper = WhisperModel(_WHISPER_MODEL, device=_DEVICE, compute_type=compute_type)
 
-    from chatterbox.tts import ChatterboxTTS
-    log.info("Loading Chatterbox TTS...")
-    _chatterbox_model = ChatterboxTTS.from_pretrained(device=_DEVICE)
+    if _TTS_ENGINE == "kokoro":
+        from kokoro import KPipeline
+        log.info("Loading Kokoro TTS (lang=%s)...", _KOKORO_LANG)
+        _kokoro_pipeline = KPipeline(lang_code=_KOKORO_LANG)
+        _KOKORO_VOICE_MAP.update(_load_kokoro_voice_map())
+        log.info(
+            "Voice server ready. TTS: Kokoro | default voice: %s | voice map entries: %d",
+            _KOKORO_DEFAULT_VOICE, len(_KOKORO_VOICE_MAP),
+        )
+    else:
+        from chatterbox.tts import ChatterboxTTS
+        log.info("Loading Chatterbox TTS...")
+        _chatterbox_model = ChatterboxTTS.from_pretrained(device=_DEVICE)
+        _MIND_ID_TO_NAME.update(_load_mind_id_map())
+        log.info("Voice server ready. TTS: Chatterbox | known mind_ids: %d", len(_MIND_ID_TO_NAME))
 
-    _MIND_ID_TO_NAME.update(_load_mind_id_map())
-    log.info("Voice server ready. TTS: Chatterbox | known mind_ids: %d", len(_MIND_ID_TO_NAME))
+
+def _tts_ready() -> bool:
+    """Whether the active TTS engine's model is loaded."""
+    if _TTS_ENGINE == "kokoro":
+        return _kokoro_pipeline is not None
+    return _chatterbox_model is not None
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +314,24 @@ def _synthesize(text: str, ref_path: str | None = None):
     if _chatterbox_model is None:
         raise RuntimeError("TTS model not loaded")
     return _chatterbox_model.generate(text, audio_prompt_path=ref_path)
+
+
+def _synthesize_kokoro(text: str, voice: str):
+    """Synthesize text to a WAV tensor using Kokoro.
+
+    Kokoro does its own internal sentence chunking and yields one audio segment
+    per chunk; we concatenate them along the time axis. Returns a
+    ``(channels, time)`` tensor ready for :func:`torchaudio.save`.
+    """
+    if _kokoro_pipeline is None:
+        raise RuntimeError("TTS model not loaded")
+    segments = []
+    for _, _, audio in _kokoro_pipeline(text, voice=voice):
+        segments.append(audio if torch.is_tensor(audio) else torch.from_numpy(audio))
+    if not segments:
+        raise RuntimeError("Kokoro produced no audio")
+    wav = torch.cat(segments, dim=-1)
+    return wav.unsqueeze(0) if wav.dim() == 1 else wav
 
 
 # ---------------------------------------------------------------------------
@@ -365,26 +453,36 @@ class TTSRequest(BaseModel):
 @app.post("/tts")
 async def tts(req: TTSRequest):
     """Synthesise text to OGG/Opus audio."""
-    if _chatterbox_model is None:
+    if not _tts_ready():
         raise HTTPException(status_code=503, detail="TTS not ready")
 
-    ref_path = _resolve_voice_ref(req.voice_id)
-    if ref_path is None:
-        # Chatterbox keeps the last-used reference clip cached; passing None
-        # silently reuses the previous callers voice. Fail loud at the
-        # boundary so cross-mind voice bleed is impossible.
-        log.warning("TTS voice_ref not found for voice_id=%r", req.voice_id)
-        raise HTTPException(
-            status_code=400,
-            detail=f"voice_ref not found for voice_id={req.voice_id!r}",
-        )
-    wav = _synthesize_chunked(_strip_markdown(req.text), ref_path)
+    text = _strip_markdown(req.text)
+
+    if _TTS_ENGINE == "kokoro":
+        voice = _resolve_kokoro_voice(req.voice_id)
+        wav = _synthesize_kokoro(text, voice)
+        sample_rate = _KOKORO_SR
+        engine_label = "Kokoro"
+    else:
+        ref_path = _resolve_voice_ref(req.voice_id)
+        if ref_path is None:
+            # Chatterbox keeps the last-used reference clip cached; passing None
+            # silently reuses the previous callers voice. Fail loud at the
+            # boundary so cross-mind voice bleed is impossible.
+            log.warning("TTS voice_ref not found for voice_id=%r", req.voice_id)
+            raise HTTPException(
+                status_code=400,
+                detail=f"voice_ref not found for voice_id={req.voice_id!r}",
+            )
+        wav = _synthesize_chunked(text, ref_path)
+        sample_rate = _chatterbox_model.sr
+        engine_label = "Chatterbox"
 
     wav_buf = io.BytesIO()
-    torchaudio.save(wav_buf, wav, _chatterbox_model.sr, format="WAV")
+    torchaudio.save(wav_buf, wav, sample_rate, format="WAV")
     ogg_bytes = _wav_to_ogg(wav_buf.getvalue(), speed=req.speed)
 
-    log.info("TTS (Chatterbox): %d chars -> %d bytes OGG", len(req.text), len(ogg_bytes))
+    log.info("TTS (%s): %d chars -> %d bytes OGG", engine_label, len(req.text), len(ogg_bytes))
     return Response(content=ogg_bytes, media_type="audio/ogg")
 
 
@@ -395,8 +493,8 @@ async def tts(req: TTSRequest):
 async def health():
     return {
         "stt": "ready" if _whisper else "loading",
-        "tts": "ready" if _chatterbox_model else "loading",
-        "tts_engine": "chatterbox",
+        "tts": "ready" if _tts_ready() else "loading",
+        "tts_engine": _TTS_ENGINE,
         "device": _DEVICE,
         "whisper_model": _WHISPER_MODEL,
     }
