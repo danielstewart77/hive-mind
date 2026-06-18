@@ -20,12 +20,18 @@ RUN python3 -m venv /opt/venv \
 COPY requirements.voice.kokoro.txt .
 RUN /opt/venv/bin/pip install --no-cache-dir -r requirements.voice.kokoro.txt
 
+# Kokoro's English G2P (misaki) loads spaCy's en_core_web_sm and, if missing,
+# tries to pip-download it at runtime -- which fails in our read-only container.
+# Bake it into the venv (not under the cache volume) so it's always present.
+RUN /opt/venv/bin/python -m spacy download en_core_web_sm
+
 # Build-time validation -- if any voice dep is broken the BUILD fails, not the container.
 # Add new critical imports here whenever new voice deps are introduced.
 RUN /opt/venv/bin/python -c "\
 from kokoro import KPipeline; \
 from faster_whisper import WhisperModel; \
 import torchaudio; \
+import spacy; spacy.load('en_core_web_sm'); \
 import multipart; \
 print('Kokoro voice deps OK')"
 

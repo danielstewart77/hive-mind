@@ -36,6 +36,12 @@ def test_dockerfile_validation_imports_whisper(dockerfile_content: str) -> None:
     assert "from faster_whisper import WhisperModel" in dockerfile_content
 
 
+def test_dockerfile_bakes_spacy_model(dockerfile_content: str) -> None:
+    """misaki's English G2P needs en_core_web_sm baked in; the read-only
+    container can't pip-download it at runtime."""
+    assert "spacy download en_core_web_sm" in dockerfile_content
+
+
 def test_dockerfile_sets_kokoro_engine(dockerfile_content: str) -> None:
     assert "TTS_ENGINE=kokoro" in dockerfile_content
 

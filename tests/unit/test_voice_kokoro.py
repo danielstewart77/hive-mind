@@ -120,16 +120,19 @@ def test_load_kokoro_voice_map_ignores_non_object(monkeypatch) -> None:
 
 def test_synthesize_kokoro_drives_pipeline_and_concats() -> None:
     vs = _import_voice_server()
+    import numpy as np
+
     mock_pipeline = MagicMock()
     # Kokoro yields (graphemes, phonemes, audio) tuples
-    mock_pipeline.return_value = iter([("g1", "p1", "a1"), ("g2", "p2", "a2")])
+    mock_pipeline.return_value = iter([("g1", "p1", MagicMock()), ("g2", "p2", MagicMock())])
     vs._kokoro_pipeline = mock_pipeline
 
     vs._synthesize_kokoro("Hello Daniel", "af_heart")
 
     mock_pipeline.assert_called_once_with("Hello Daniel", voice="af_heart")
-    # Both segments concatenated via torch.cat
-    assert vs.torch.cat.called
+    # Segments are concatenated into a single 1-D numpy array (not torch.cat) so
+    # soundfile can encode the WAV without torchaudio/torchcodec.
+    assert np.concatenate.called
 
 
 def test_synthesize_kokoro_raises_when_not_loaded() -> None:
@@ -178,3 +181,9 @@ def test_tts_endpoint_branches_to_kokoro() -> None:
     assert '_TTS_ENGINE == "kokoro"' in tts_source
     assert "_synthesize_kokoro(" in tts_source
     assert "_resolve_kokoro_voice(" in tts_source
+    # The Kokoro WAV encode must go through soundfile, not torchaudio.save:
+    # torchaudio's save() routes through torchcodec, which the slim Kokoro
+    # image deliberately does not ship. A torchaudio.save on the Kokoro path
+    # 500s every synthesis (the bug that silenced Mordecai).
+    assert "sf.write(" in tts_source
+    assert "import soundfile" in tts_source

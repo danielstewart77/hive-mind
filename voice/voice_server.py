@@ -317,21 +317,24 @@ def _synthesize(text: str, ref_path: str | None = None):
 
 
 def _synthesize_kokoro(text: str, voice: str):
-    """Synthesize text to a WAV tensor using Kokoro.
+    """Synthesize text to a mono waveform using Kokoro.
 
     Kokoro does its own internal sentence chunking and yields one audio segment
-    per chunk; we concatenate them along the time axis. Returns a
-    ``(channels, time)`` tensor ready for :func:`torchaudio.save`.
+    per chunk; we concatenate them into a single 1-D float array (24 kHz) that
+    :func:`soundfile.write` can encode directly.
     """
     if _kokoro_pipeline is None:
         raise RuntimeError("TTS model not loaded")
+    import numpy as np
+
     segments = []
     for _, _, audio in _kokoro_pipeline(text, voice=voice):
-        segments.append(audio if torch.is_tensor(audio) else torch.from_numpy(audio))
+        if torch.is_tensor(audio):
+            audio = audio.detach().cpu().numpy()
+        segments.append(np.asarray(audio).reshape(-1))
     if not segments:
         raise RuntimeError("Kokoro produced no audio")
-    wav = torch.cat(segments, dim=-1)
-    return wav.unsqueeze(0) if wav.dim() == 1 else wav
+    return np.concatenate(segments)
 
 
 # ---------------------------------------------------------------------------
@@ -479,7 +482,13 @@ async def tts(req: TTSRequest):
         engine_label = "Chatterbox"
 
     wav_buf = io.BytesIO()
-    torchaudio.save(wav_buf, wav, sample_rate, format="WAV")
+    if _TTS_ENGINE == "kokoro":
+        # Kokoro returns a 1-D float array; soundfile avoids torchaudio's
+        # torchcodec dependency for WAV encoding.
+        import soundfile as sf
+        sf.write(wav_buf, wav, sample_rate, format="WAV")
+    else:
+        torchaudio.save(wav_buf, wav, sample_rate, format="WAV")
     ogg_bytes = _wav_to_ogg(wav_buf.getvalue(), speed=req.speed)
 
     log.info("TTS (%s): %d chars -> %d bytes OGG", engine_label, len(req.text), len(ogg_bytes))
