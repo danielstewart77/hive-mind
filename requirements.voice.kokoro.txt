@@ -11,9 +11,14 @@ kokoro>=0.9.4
 soundfile
 
 # Torch stack -- Kokoro depends on torch; torchaudio encodes the WAV before ffmpeg.
-# Left unpinned so pip resolves a matching torch/torchaudio CUDA pair.
-torch
-torchaudio
+# PINNED to the CUDA 12 build. faster-whisper's backend (ctranslate2) is built
+# against CUDA 12 and dlopens libcublas.so.12. torch preloads its bundled CUDA
+# libs at import, so torch MUST be the cu12 build or whisper-on-GPU fails with
+# "Library libcublas.so.12 is not found". Leaving this unpinned resolved to
+# torch 2.12+cu130 (CUDA 13, libcublas.so.13) and broke STT on the GPU. This
+# matches the proven Chatterbox image (requirements.voice.txt).
+torch==2.6.0
+torchaudio==2.6.0
 
 # Audio numerics
 numpy

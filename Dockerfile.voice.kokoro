@@ -35,6 +35,16 @@ import spacy; spacy.load('en_core_web_sm'); \
 import multipart; \
 print('Kokoro voice deps OK')"
 
+# CUDA-12 invariant -- ctranslate2 (faster-whisper's GPU backend) dlopens
+# libcublas.so.12. torch preloads its bundled CUDA libs at import, so a cu12
+# torch makes that library resolvable. If a future unpinned/bumped torch lands
+# on CUDA 13 (libcublas.so.13), this load fails and the BUILD fails here --
+# loudly, at build time -- instead of every voice note 500'ing at runtime.
+RUN /opt/venv/bin/python -c "\
+import torch, ctypes; \
+ctypes.CDLL('libcublas.so.12'); \
+print('CUDA 12 cublas loadable for whisper GPU backend')"
+
 RUN chown -R hivemind:hivemind /usr/src/app
 
 USER hivemind
