@@ -225,6 +225,68 @@ def test_stt_endpoint_unchanged(client, monkeypatch) -> None:
     assert "text" in data
 
 
+def test_stt_falls_back_to_cpu_on_cublas_error(client, monkeypatch) -> None:
+    """A missing cuBLAS library on the GPU backend must degrade to a CPU
+    reinit and still return transcribed text — not a 500.
+
+    Regression: the Kokoro image ships torch+CUDA but not the full ctranslate2
+    CUDA stack, so whisper raised "Library libcublas.so.12 is not found or
+    cannot be loaded". The old fallback only matched the literal word "CUDA",
+    let this escape, and every voice note 500'd.
+    """
+    import voice.voice_server as vs
+
+    # GPU whisper raises the cuBLAS load failure on transcribe.
+    gpu_whisper = MagicMock()
+    gpu_whisper.transcribe.side_effect = RuntimeError(
+        "Library libcublas.so.12 is not found or cannot be loaded"
+    )
+    vs._whisper = gpu_whisper
+
+    # The CPU reinit constructs a fresh WhisperModel; stub it to succeed.
+    cpu_segment = MagicMock()
+    cpu_segment.text = "transcribed on cpu"
+    cpu_whisper = MagicMock()
+    cpu_whisper.transcribe.return_value = ([cpu_segment], None)
+
+    fake_fw = MagicMock()
+    fake_fw.WhisperModel.return_value = cpu_whisper
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_fw)
+
+    monkeypatch.setattr(vs, "_ogg_to_wav", lambda x: b"RIFF" + b"\x00" * 100)
+
+    resp = client.post(
+        "/stt",
+        files={"file": ("test.ogg", io.BytesIO(b"fake audio data"), "audio/ogg")},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["text"] == "transcribed on cpu"
+    # The CPU model was constructed with device="cpu".
+    _, kwargs = fake_fw.WhisperModel.call_args
+    assert kwargs.get("device") == "cpu"
+
+
+def test_stt_reraises_non_gpu_runtime_error(client, monkeypatch) -> None:
+    """A RuntimeError unrelated to the GPU must NOT be swallowed by the CPU
+    fallback — it should propagate so genuine failures stay visible."""
+    import voice.voice_server as vs
+
+    whisper = MagicMock()
+    whisper.transcribe.side_effect = RuntimeError("corrupt audio frame")
+    vs._whisper = whisper
+
+    monkeypatch.setattr(vs, "_ogg_to_wav", lambda x: b"RIFF" + b"\x00" * 100)
+
+    resp = client.post(
+        "/stt",
+        files={"file": ("test.ogg", io.BytesIO(b"fake audio data"), "audio/ogg")},
+    )
+    # raise_server_exceptions=False on the client turns the propagated error
+    # into a 500 — proving it was re-raised, not caught by the GPU fallback.
+    assert resp.status_code == 500
+
+
 def test_tts_endpoint_uses_chunked_synthesis(client, monkeypatch) -> None:
     """POST /tts with multi-sentence text calls _synthesize_chunked and returns 200."""
     import voice.voice_server as vs

@@ -430,9 +430,16 @@ async def stt(file: UploadFile):
             segments, _ = _whisper.transcribe(tmp_path, language="en")
             text = " ".join(s.text for s in segments).strip()
         except RuntimeError as exc:
-            if "CUDA" not in str(exc):
+            # Whisper's GPU backend (ctranslate2) fails when a CUDA support
+            # library is missing or unloadable. The message varies: a bare
+            # "CUDA ..." on driver faults, but "Library libcublas.so.12 is not
+            # found or cannot be loaded" / cuDNN on slim images that ship torch
+            # but not the full ctranslate2 CUDA stack (e.g. the Kokoro image).
+            # Match GPU-library failures broadly so all of them degrade to CPU.
+            msg = str(exc).lower()
+            if not any(tok in msg for tok in ("cuda", "cublas", "cudnn", "libcu")):
                 raise
-            log.warning("CUDA error in STT — reinitialising whisper on CPU: %s", exc)
+            log.warning("GPU error in STT — reinitialising whisper on CPU: %s", exc)
             from faster_whisper import WhisperModel
             _whisper = WhisperModel(_WHISPER_MODEL, device="cpu", compute_type="int8")
             segments, _ = _whisper.transcribe(tmp_path, language="en")
