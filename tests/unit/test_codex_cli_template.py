@@ -1,4 +1,4 @@
-"""Tests for the inlined empty-turn diagnostic helper in the codex_cli_ollama template.
+"""Tests for the inlined empty-turn diagnostic helper in the codex_cli template.
 
 When Codex closes a turn with no `agent_message` item — typically because
 the model emitted its tool call in a non-Responses dialect that landed
@@ -22,7 +22,7 @@ from typing import Callable
 TEMPLATE_PATH = (
     Path(__file__).resolve().parents[2]
     / "mind_templates"
-    / "codex_cli_ollama.py"
+    / "codex_cli.py"
 )
 
 
