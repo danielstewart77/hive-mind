@@ -1,9 +1,13 @@
-"""Codex CLI + Ollama models template.
+"""Codex CLI harness template — provider-agnostic.
 
-Tested. Based on Bilby's implementation. Spawns one Codex subprocess
-per turn (`codex exec --json --dangerously-bypass-approvals-and-sandbox`)
-against an Ollama-hosted model via a per-mind model_provider override.
-Stores `thread_id` so subsequent turns resume the same Codex thread.
+Spawns one Codex subprocess per turn (`codex exec --json
+--dangerously-bypass-approvals-and-sandbox`) and stores the `thread_id`
+so subsequent turns resume the same Codex thread. The provider is chosen
+in ``runtime.yaml``: ``provider: openai`` (or any non-ollama value) runs
+Codex against its native backend, while ``provider: ollama`` injects a
+per-mind ``model_provider`` override pointing at the configured base URL.
+The live minds Nagatha and Mordecai run this shape on OpenAI; Bilby runs
+it on Ollama. One template, both paths.
 
 The system prompt is composed upstream by hive-comms and shipped as
 ``system_prompt_blocks`` in the spawn payload — this module does not
