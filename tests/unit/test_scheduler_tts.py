@@ -41,6 +41,26 @@ async def test_tts_sends_voice_id_in_payload():
 
 
 @pytest.mark.asyncio
+async def test_tts_sets_explicit_timeout():
+    """The TTS POST must carry an explicit generous timeout so a long
+    synthesis queued ahead of it on a busy GPU server can't trip aiohttp's
+    silent 300s default."""
+    resp = MagicMock()
+    resp.status = 200
+    resp.read = AsyncMock(return_value=b"OGG")
+
+    http = MagicMock()
+    http.post = MagicMock(return_value=_AsyncCtx(resp))
+
+    await scheduler._tts(http, "hello", "ada-uuid-1234")
+
+    _, kwargs = http.post.call_args
+    timeout = kwargs["timeout"]
+    assert timeout.total == scheduler.VOICE_TTS_TIMEOUT_SECONDS
+    assert timeout.total >= 600
+
+
+@pytest.mark.asyncio
 async def test_try_send_voice_threads_voice_id_to_tts():
     with (
         patch.object(scheduler, "_tts", new=AsyncMock(return_value=b"OGG")) as tts_mock,

@@ -53,6 +53,12 @@ log = logging.getLogger("hive-mind-scheduler")
 
 SERVER_URL = os.environ.get("HIVE_MIND_SERVER_URL", f"http://localhost:{config.server_port}")
 VOICE_SERVER_URL = os.environ.get("VOICE_SERVER_URL", "http://localhost:8422")
+# The TTS server is GPU-bound and serialises requests. When several voice
+# jobs fire on the same cron minute (e.g. the 6:30am batch), a long
+# synthesis can queue ahead of a short one. aiohttp's silent 300s default
+# total timeout was tripping the queued job; give it an explicit, generous
+# ceiling instead.
+VOICE_TTS_TIMEOUT_SECONDS = float(os.environ.get("VOICE_TTS_TIMEOUT_SECONDS", "600"))
 MINDS_ROOT = Path(os.environ.get("MINDS_ROOT", "/usr/src/app/minds"))
 SCHEDULER_TASKS_YAML = Path(os.environ.get(
     "SCHEDULER_TASKS_YAML",
@@ -79,7 +85,12 @@ DEV_SURFACE_PROMPT = (
 
 
 async def _tts(http: aiohttp.ClientSession, text: str, voice_id: str) -> bytes:
-    async with http.post(f"{VOICE_SERVER_URL}/tts", json={"text": text, "voice_id": voice_id}) as resp:
+    timeout = aiohttp.ClientTimeout(total=VOICE_TTS_TIMEOUT_SECONDS)
+    async with http.post(
+        f"{VOICE_SERVER_URL}/tts",
+        json={"text": text, "voice_id": voice_id},
+        timeout=timeout,
+    ) as resp:
         if resp.status != 200:
             raise RuntimeError(f"TTS error {resp.status}: {await resp.text()}")
         return await resp.read()
