@@ -26,10 +26,13 @@ Default-OFF: the proposer reads ``enabled: false`` from an optional
 disabled it returns ``{"enabled": False, "proposed": []}`` and writes nothing —
 no model, no ``skill_manage`` call.
 
-Scheduling fork (same as the Phase 3 curator): Ada carries ``schedule:`` in its
-``skill-proposer`` SKILL.md frontmatter; Nagatha gets a ``command:`` task in
-``bots/scheduled_tasks/tasks.yaml`` (Codex strips ``schedule:``). The scheduler
-runs this backend directly as a subprocess.
+Scheduling (same as the Phase 3 curator): both Ada and Nagatha carry
+``schedule:`` in their ``skill-proposer`` SKILL.md frontmatter. ``schedule:`` is
+a custom field read only by our scheduler
+(``core.scheduled_skills.discover_scheduled_skills``), which globs both
+``.claude/skills`` and ``.codex/skills`` — neither harness reads or strips it.
+The scheduler dispatches the skill as an agent turn through the mind's gateway
+regardless of harness, and that agent runs this backend.
 """
 
 from __future__ import annotations
