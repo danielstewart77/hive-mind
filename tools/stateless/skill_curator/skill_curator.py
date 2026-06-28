@@ -54,6 +54,7 @@ import importlib.util
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -334,7 +335,7 @@ def apply_automatic_transitions(
     now: Optional[datetime] = None,
     stale_after_days: Optional[int] = None,
     archive_after_days: Optional[int] = None,
-) -> Dict[str, int]:
+) -> Dict[str, Any]:
     """Walk every eligible skill and move active/stale/archived based on the
     latest real activity timestamp. Pinned skills are never touched.
 
@@ -345,7 +346,11 @@ def apply_automatic_transitions(
     they are read from ``<config-dir>/skills/curator.yaml``. ``now`` is injectable
     so tests seed a deterministic clock.
 
-    Returns the counter dict ``{checked, marked_stale, archived, reactivated}``.
+    Returns the counter dict ``{checked, marked_stale, archived, reactivated}``
+    plus an ``events`` list — one ``{name, from_state, to_state, action}`` per
+    transition actually made (``action`` ∈ ``stale`` / ``archive`` /
+    ``reactivate``). The named events make each run observable and let the audit
+    ledger record exactly what moved.
     """
     if now is None:
         now = datetime.now(timezone.utc)
@@ -359,7 +364,10 @@ def apply_automatic_transitions(
     stale_cutoff = now - timedelta(days=stale_after_days)
     archive_cutoff = now - timedelta(days=archive_after_days)
 
-    counts = {"marked_stale": 0, "archived": 0, "reactivated": 0, "checked": 0}
+    counts: Dict[str, Any] = {
+        "marked_stale": 0, "archived": 0, "reactivated": 0, "checked": 0,
+    }
+    events: List[Dict[str, Any]] = []
 
     for row in eligible_skill_rows(config_dir):
         counts["checked"] += 1
@@ -380,13 +388,26 @@ def apply_automatic_transitions(
             ok, _dest = archive_skill(config_dir, name)
             if ok:
                 counts["archived"] += 1
+                events.append({
+                    "name": name, "from_state": current,
+                    "to_state": STATE_ARCHIVED, "action": "archive",
+                })
         elif anchor <= stale_cutoff and current == STATE_ACTIVE:
             telemetry.set_state(config_dir, name, STATE_STALE)
             counts["marked_stale"] += 1
+            events.append({
+                "name": name, "from_state": STATE_ACTIVE,
+                "to_state": STATE_STALE, "action": "stale",
+            })
         elif anchor > stale_cutoff and current == STATE_STALE:
             telemetry.set_state(config_dir, name, STATE_ACTIVE)
             counts["reactivated"] += 1
+            events.append({
+                "name": name, "from_state": STATE_STALE,
+                "to_state": STATE_ACTIVE, "action": "reactivate",
+            })
 
+    counts["events"] = events
     return counts
 
 
@@ -568,12 +589,13 @@ def _curator_state_path(config_dir: Path) -> Path:
 
 
 def write_run_report(
-    config_dir: Path, counts: Dict[str, int], *, now: Optional[datetime] = None
+    config_dir: Path, counts: Dict[str, Any], *, now: Optional[datetime] = None
 ) -> Path:
     """Atomically write ``<config-dir>/skills/.curator_state`` (JSON).
 
-    Payload is ``{last_run_at, **counts}``. Same tempfile + ``os.replace``
-    pattern the Phase 1/2 tools use.
+    Payload is ``{last_run_at, **counts}`` — so the named ``events`` list rides
+    in alongside the four counters, making the latest snapshot self-describing.
+    Same tempfile + ``os.replace`` pattern the Phase 1/2 tools use.
     """
     if now is None:
         now = datetime.now(timezone.utc)
@@ -604,11 +626,14 @@ def _compute_dry_run_counts(
     now: datetime,
     stale_after_days: int,
     archive_after_days: int,
-) -> Dict[str, int]:
-    """Compute would-be transition counts WITHOUT mutating anything."""
+) -> Dict[str, Any]:
+    """Compute would-be transition counts + events WITHOUT mutating anything."""
     stale_cutoff = now - timedelta(days=stale_after_days)
     archive_cutoff = now - timedelta(days=archive_after_days)
-    counts = {"marked_stale": 0, "archived": 0, "reactivated": 0, "checked": 0}
+    counts: Dict[str, Any] = {
+        "marked_stale": 0, "archived": 0, "reactivated": 0, "checked": 0,
+    }
+    events: List[Dict[str, Any]] = []
     for row in eligible_skill_rows(config_dir):
         counts["checked"] += 1
         if row.get("pinned"):
@@ -623,10 +648,17 @@ def _compute_dry_run_counts(
         current = row.get("state", STATE_ACTIVE)
         if anchor <= archive_cutoff and current != STATE_ARCHIVED:
             counts["archived"] += 1
+            events.append({"name": row["name"], "from_state": current,
+                           "to_state": STATE_ARCHIVED, "action": "archive"})
         elif anchor <= stale_cutoff and current == STATE_ACTIVE:
             counts["marked_stale"] += 1
+            events.append({"name": row["name"], "from_state": STATE_ACTIVE,
+                           "to_state": STATE_STALE, "action": "stale"})
         elif anchor > stale_cutoff and current == STATE_STALE:
             counts["reactivated"] += 1
+            events.append({"name": row["name"], "from_state": STATE_STALE,
+                           "to_state": STATE_ACTIVE, "action": "reactivate"})
+    counts["events"] = events
     return counts
 
 
@@ -679,6 +711,26 @@ def run(
         config_dir, harness, enabled=bool(effective_consolidate)
     )
 
+    # Durable audit trail: one curator entry per live run, capturing the named
+    # transitions AND whether the consolidation pass ran. This is what makes a
+    # run observable and (via restore_skill) reversible after the fact.
+    events = counts.get("events", [])
+    counts_only = {k: v for k, v in counts.items() if k != "events"}
+    consolidation_summary = {
+        "ran": bool(consolidation.get("ran")),
+        "reason": consolidation.get("reason"),
+        "harness": consolidation.get("harness"),
+    }
+    try:
+        telemetry.append_audit(config_dir, {
+            "kind": "curator",
+            "counts": counts_only,
+            "events": events,
+            "consolidation": consolidation_summary,
+        }, now=now)
+    except Exception:  # pragma: no cover - audit is best-effort
+        pass
+
     return {
         "harness": harness,
         "dry_run": False,
@@ -686,6 +738,83 @@ def run(
         "consolidation": consolidation,
         "report_path": str(report_path),
     }
+
+
+# ---------------------------------------------------------------------------
+# Notify — concise on-change summary with an undo hint (best-effort)
+# ---------------------------------------------------------------------------
+
+_NOTIFY_PATH = _THIS_DIR.parent / "notify" / "notify.py"
+
+
+def _run_changed(summary: Dict[str, Any]) -> bool:
+    """True when a live curator run actually moved something or consolidated."""
+    counts = summary.get("counts", {})
+    if any(int(counts.get(k, 0) or 0) > 0
+           for k in ("marked_stale", "archived", "reactivated")):
+        return True
+    return bool(summary.get("consolidation", {}).get("ran"))
+
+
+def compose_notify_message(config_dir: Path, summary: Dict[str, Any]) -> str:
+    """Build a concise one-message curator summary that NAMES what changed and
+    carries the undo hint.
+
+    Lists the skills that staled / archived / reactivated by name and appends the
+    ``skill_telemetry.py --action restore`` recovery command so the recipient can
+    reverse an archive without hunting for the syntax.
+    """
+    counts = summary.get("counts", {})
+    events = counts.get("events", []) or []
+    by_action: Dict[str, List[str]] = {"stale": [], "archive": [], "reactivate": []}
+    for ev in events:
+        by_action.setdefault(ev.get("action", ""), []).append(ev.get("name", ""))
+
+    parts: List[str] = []
+    if by_action.get("archive"):
+        parts.append("archived " + ", ".join(by_action["archive"]))
+    if by_action.get("stale"):
+        parts.append("staled " + ", ".join(by_action["stale"]))
+    if by_action.get("reactivate"):
+        parts.append("reactivated " + ", ".join(by_action["reactivate"]))
+
+    consolidation = summary.get("consolidation", {})
+    if consolidation.get("ran"):
+        parts.append("ran consolidation pass")
+
+    summary_line = "; ".join(parts) if parts else "no transitions"
+    msg = f"Skill curator: {summary_line}."
+
+    archived = by_action.get("archive") or []
+    if archived:
+        example = archived[0]
+        msg += (
+            f" Undo an archive with: skill_telemetry.py --action restore "
+            f"--skill {example} --config-dir {config_dir}"
+        )
+    return msg
+
+
+def maybe_notify(config_dir: Path, summary: Dict[str, Any]) -> Optional[List[str]]:
+    """Shell out to the notify tool with a one-message change summary.
+
+    No-op (returns ``None``) when nothing changed. Best-effort: a notify failure
+    is swallowed so it never fails the run. When ``HERMES_NOTIFY_TEST`` is set,
+    ``--test-mode`` is passed so no real Telegram is sent — tests assert the
+    composed message and the invoked argv. Returns the argv that was invoked (or
+    would have been), or ``None`` when no notification was warranted.
+    """
+    if not _run_changed(summary):
+        return None
+    message = compose_notify_message(config_dir, summary)
+    cmd = [sys.executable, str(_NOTIFY_PATH), "send", "--message", message]
+    if os.getenv("HERMES_NOTIFY_TEST"):
+        cmd.append("--test-mode")
+    try:
+        subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+    except Exception:  # pragma: no cover - notify is best-effort
+        pass
+    return cmd
 
 
 # ---------------------------------------------------------------------------
@@ -708,6 +837,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--dry-run", action="store_true",
         help="Compute would-be transitions without mutating; write no report",
     )
+    parser.add_argument(
+        "--notify", action="store_true",
+        help="On a changed live run, send a concise notify summary (best-effort)",
+    )
     args = parser.parse_args(argv)
 
     consolidate_arg = True if args.consolidate else None
@@ -715,6 +848,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         Path(args.config_dir), args.harness,
         consolidate=consolidate_arg, dry_run=args.dry_run,
     )
+    if args.notify and not args.dry_run:
+        maybe_notify(Path(args.config_dir), summary)
     print(json.dumps(summary, sort_keys=True))
     return 0
 

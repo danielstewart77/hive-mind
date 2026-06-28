@@ -34,6 +34,7 @@ import argparse
 import json
 import logging
 import os
+import shutil
 import sys
 import tempfile
 from contextlib import contextmanager
@@ -78,6 +79,16 @@ def usage_file(config_dir: Path) -> Path:
     ``.codex`` dir.
     """
     return _skills_dir(config_dir) / ".usage.json"
+
+
+def audit_log_file(config_dir: Path) -> Path:
+    """Resolve the append-only audit-ledger path for *config_dir*.
+
+    The ledger is ``<config_dir>/skills/.skill_audit.log`` — one JSON object
+    per line, append-only history. This is the single durable record both the
+    curator and skill_manage write to when they transition or archive a skill.
+    """
+    return _skills_dir(config_dir) / ".skill_audit.log"
 
 
 @contextmanager
@@ -366,6 +377,129 @@ def forget(config_dir: Path, skill_name: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Shared audit ledger — append-only history both other tools write to
+# ---------------------------------------------------------------------------
+
+def append_audit(
+    config_dir: Path, entry: Dict[str, Any], *, now: Optional[datetime] = None
+) -> None:
+    """Append one JSON line to ``<config_dir>/skills/.skill_audit.log``.
+
+    The ledger is append-only history: every entry is merged with an ``at``
+    ISO-8601 timestamp and written as a single line. Parents are created on
+    demand and the write is serialized through the module's lock so concurrent
+    appends never interleave a partial line. Best-effort — failures log at
+    DEBUG and return silently; a broken ledger never breaks the caller.
+    """
+    path = audit_log_file(config_dir)
+    stamp = (now or datetime.now(timezone.utc)).isoformat()
+    record = {"at": stamp, **dict(entry)}
+    try:
+        with _usage_file_lock(config_dir):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            line = json.dumps(record, sort_keys=True, ensure_ascii=False)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+    except Exception as e:  # pragma: no cover - best-effort
+        logger.debug("skill_telemetry.append_audit failed: %s", e, exc_info=True)
+
+
+def read_audit(config_dir: Path, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Read the audit ledger, returning the most-recent *limit* entries.
+
+    Entries come back oldest-first (newest last); when *limit* is given only
+    the trailing ``limit`` entries are returned. Corrupt or empty lines are
+    skipped. A missing ledger yields ``[]``.
+    """
+    path = audit_log_file(config_dir)
+    if not path.exists():
+        return []
+    entries: List[Dict[str, Any]] = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    obj = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(obj, dict):
+                    entries.append(obj)
+    except OSError as e:  # pragma: no cover - defensive
+        logger.debug("skill_telemetry.read_audit failed: %s", e, exc_info=True)
+        return []
+    if limit is not None and limit >= 0:
+        return entries[-limit:] if limit else []
+    return entries
+
+
+# ---------------------------------------------------------------------------
+# restore_skill — the exact inverse of the curator/skill_manage archive move
+# ---------------------------------------------------------------------------
+
+def _archived_copies(config_dir: Path, name: str) -> List[Path]:
+    """Return every archived copy of *name* under ``skills/.archive/``.
+
+    Matches both the plain ``<name>`` directory and any timestamp-suffixed
+    ``<name>-<stamp>`` collision copy (the suffix scheme used by both
+    ``skill_curator.archive_skill`` and ``skill_manage`` delete). Sorted so the
+    most recent copy is last.
+    """
+    archive_root = _skills_dir(config_dir) / ".archive"
+    if not archive_root.is_dir():
+        return []
+    copies: List[Path] = []
+    for entry in archive_root.iterdir():
+        if not entry.is_dir():
+            continue
+        if entry.name == name or entry.name.startswith(f"{name}-"):
+            copies.append(entry)
+    # Plain "<name>" sorts before any "<name>-<stamp>"; the lexicographically
+    # largest timestamp suffix is the newest, so a plain sort puts newest last.
+    copies.sort(key=lambda p: p.name)
+    return copies
+
+
+def restore_skill(config_dir: Path, name: str) -> "tuple[bool, Optional[str]]":
+    """Move an archived skill back to live and re-activate it — inverse of
+    ``archive_skill``.
+
+    Locates ``<config_dir>/skills/.archive/<name>`` (picking the most-recent
+    timestamp-suffixed copy on collision), moves it back to
+    ``<config_dir>/skills/<name>``, sets its sidecar state ``active``, and
+    appends a ``{kind: "restore", name}`` audit entry. Refuses (returns
+    ``(False, reason)``) when a live skill of that name already exists or no
+    archived copy is found — and mutates nothing on refusal.
+    """
+    if not name:
+        return False, "no skill name given"
+
+    live = _skills_dir(config_dir) / name
+    if live.exists() or os.path.islink(str(live)):
+        return False, f"skill '{name}' already exists live; refusing to overwrite"
+
+    copies = _archived_copies(config_dir, name)
+    if not copies:
+        return False, f"no archived copy of '{name}' found"
+
+    source = copies[-1]
+    try:
+        live.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(source), str(live))
+    except Exception as e:  # pragma: no cover - defensive
+        logger.debug("restore_skill move failed: %s", e, exc_info=True)
+        return False, f"could not move archive copy ({type(e).__name__})"
+
+    set_state(config_dir, name, STATE_ACTIVE)
+    append_audit(config_dir, {"kind": "restore", "name": name})
+    return True, str(live)
+
+
+# ---------------------------------------------------------------------------
 # Shared bump helper — the thin entry point the Stop-hooks call
 # ---------------------------------------------------------------------------
 
@@ -438,6 +572,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         choices=[
             "bump-use", "bump-view", "bump-patch", "mark-agent-created",
             "set-state", "set-pinned", "forget", "list", "seed",
+            "restore", "audit",
         ],
         help="Telemetry action to perform",
     )
@@ -445,6 +580,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--skill", help="Skill name (required for all per-skill actions)")
     parser.add_argument("--state", help="Lifecycle state for --action set-state")
     parser.add_argument("--pinned", help="Bool for --action set-pinned (true/false)")
+    parser.add_argument("--limit", type=int, default=None, help="Tail length for --action audit")
 
     args = parser.parse_args(argv)
     config_dir = Path(args.config_dir)
@@ -462,6 +598,22 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if action == "seed":
         print(json.dumps(seed_existing_skills(config_dir), sort_keys=True))
+        return 0
+
+    if action == "audit":
+        print(json.dumps(read_audit(config_dir, args.limit), indent=2, sort_keys=True))
+        return 0
+
+    if action == "restore":
+        rc = _needs_skill()
+        if rc is not None:
+            return rc
+        ok, info = restore_skill(config_dir, args.skill)
+        if not ok:
+            print(json.dumps({"ok": False, "skill": args.skill, "error": info}, sort_keys=True))
+            return 1
+        print(json.dumps({"ok": True, "skill": args.skill, "restored_to": info},
+                         sort_keys=True))
         return 0
 
     rc = _needs_skill()

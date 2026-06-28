@@ -37,3 +37,15 @@ def test_nagatha_proposer_task_registered():
 
     # A cron string is present.
     assert isinstance(task.get("cron"), str) and task["cron"].strip()
+
+
+def test_nagatha_curator_and_proposer_tasks_notify_on_change():
+    """Both scheduled Nagatha command tasks pass --notify so a changed run
+    surfaces a Telegram summary (with the restore undo hint) on cron cadence."""
+    tasks = _load_tasks()
+    by_name = {t.get("name"): t for t in tasks if isinstance(t, dict)}
+    for name in ("nagatha-skill-curator", "nagatha-skill-proposer"):
+        assert name in by_name, by_name.keys()
+        command = by_name[name].get("command")
+        assert isinstance(command, list), command
+        assert "--notify" in command, (name, command)

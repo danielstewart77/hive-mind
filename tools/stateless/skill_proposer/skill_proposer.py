@@ -39,6 +39,7 @@ import importlib.util
 import json
 import os
 import re
+import subprocess
 import sys
 from collections import Counter
 from dataclasses import dataclass
@@ -410,6 +411,61 @@ def run(
 
 
 # ---------------------------------------------------------------------------
+# Notify — concise on-change summary with an undo hint (best-effort)
+# ---------------------------------------------------------------------------
+
+_NOTIFY_PATH = _THIS_DIR.parent / "notify" / "notify.py"
+
+
+def _created_names(summary: Dict[str, Any]) -> List[str]:
+    """Names of skills the proposer actually created this run."""
+    return [p["name"] for p in summary.get("proposed", []) if p.get("created")]
+
+
+def compose_notify_message(config_dir: Path, summary: Dict[str, Any]) -> str:
+    """Build a concise one-message proposer summary that NAMES the created
+    skills and carries the undo hint.
+
+    Each auto-created skill is agent-provenance and Curator-eligible; the message
+    names them and appends the ``skill_telemetry.py --action restore`` recovery
+    command (a created skill can be deleted via skill_manage and brought back the
+    same way an archive is), so the recipient has the reversal syntax inline.
+    """
+    created = _created_names(summary)
+    summary_line = "created " + ", ".join(created) if created else "created nothing"
+    msg = f"Skill proposer: {summary_line}."
+    if created:
+        example = created[0]
+        msg += (
+            f" Undo with: skill_telemetry.py --action restore "
+            f"--skill {example} --config-dir {config_dir}"
+        )
+    return msg
+
+
+def maybe_notify(config_dir: Path, summary: Dict[str, Any]) -> Optional[List[str]]:
+    """Shell out to the notify tool with a one-message change summary.
+
+    No-op (returns ``None``) when nothing was created. Best-effort: a notify
+    failure is swallowed so it never fails the run. When ``HERMES_NOTIFY_TEST``
+    is set, ``--test-mode`` is passed so no real Telegram is sent — tests assert
+    the composed message and the invoked argv. Returns the argv invoked (or that
+    would have been), or ``None`` when no notification was warranted.
+    """
+    if not _created_names(summary):
+        return None
+    message = compose_notify_message(config_dir, summary)
+    cmd = [sys.executable, str(_NOTIFY_PATH), "send", "--message", message]
+    if os.getenv("HERMES_NOTIFY_TEST"):
+        cmd.append("--test-mode")
+    try:
+        subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+    except Exception:  # pragma: no cover - notify is best-effort
+        pass
+    return cmd
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -426,12 +482,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Path to training_turns.db (read-only)",
     )
     parser.add_argument("--mind-id", required=True, help="This mind's MIND_ID")
+    parser.add_argument(
+        "--notify", action="store_true",
+        help="On a run that created skills, send a concise notify summary (best-effort)",
+    )
     args = parser.parse_args(argv)
 
     summary = run(
         Path(args.config_dir), args.harness,
         db_path=args.db_path, mind_id=args.mind_id,
     )
+    if args.notify:
+        maybe_notify(Path(args.config_dir), summary)
     print(json.dumps(summary, sort_keys=True))
     return 0
 

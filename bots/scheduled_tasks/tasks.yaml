@@ -43,6 +43,7 @@ tasks:
       - /usr/src/app/minds/nagatha/.codex
       - --harness
       - codex_cli
+      - --notify
 
   # Nagatha (codex_cli) autonomous skill-proposer. Same scheduling rationale as
   # the curator: Codex frontmatter strips `schedule:`, so the cadence lives in a
@@ -68,3 +69,4 @@ tasks:
       - /usr/src/app/data/training_turns.db
       - --mind-id
       - 128c1768-b659-4c83-86df-706690e344f4
+      - --notify

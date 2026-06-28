@@ -756,9 +756,29 @@ def _delete_skill(config_dir: Path, name: str,
         dest = archive_root / f"{name}-{stamp}"
     shutil.move(str(skill_dir), str(dest))
 
+    absorbed = (
+        absorbed_into.strip()
+        if isinstance(absorbed_into, str) and absorbed_into.strip()
+        else None
+    )
+
+    # Durable, reversible record: log where the dir went and which umbrella (if
+    # any) it was absorbed into. This is what makes a consolidation merge
+    # undoable — every absorbed sibling appears in the ledger paired with both
+    # its umbrella and its archive path, so restore_skill can bring it back.
+    try:
+        telemetry.append_audit(config_dir, {
+            "kind": "archive",
+            "name": name,
+            "absorbed_into": absorbed,
+            "archive_path": str(dest),
+        })
+    except Exception:  # pragma: no cover - audit is best-effort
+        pass
+
     message = f"Skill '{name}' archived to {dest}."
-    if absorbed_into is not None and isinstance(absorbed_into, str) and absorbed_into.strip():
-        message += f" Content absorbed into '{absorbed_into.strip()}'."
+    if absorbed is not None:
+        message += f" Content absorbed into '{absorbed}'."
 
     return {"success": True, "message": message, "archived_to": str(dest)}
 
