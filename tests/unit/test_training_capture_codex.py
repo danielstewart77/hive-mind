@@ -136,10 +136,12 @@ def test_tool_result_links_call_id(rollout):
     grouped = _parse_grouped(rollout)
     results = [b for b in grouped[0][1] if b["type"] == "tool_result"]
     assert results[0] == {
-        "type": "tool_result", "content": "file.txt", "tool_call_id": "c1"
+        "type": "tool_result", "content": "file.txt", "tool_call_id": "c1",
+        "is_error": False,
     }
     assert results[1] == {
-        "type": "tool_result", "content": "patched", "tool_call_id": "c2"
+        "type": "tool_result", "content": "patched", "tool_call_id": "c2",
+        "is_error": False,
     }
 
 
@@ -182,6 +184,21 @@ def test_dict_output_flattened(tmp_path):
     grouped = _parse_grouped(p)
     result = next(b for b in grouped[0][1] if b["type"] == "tool_result")
     assert result["content"] == "wrapped text"
+
+
+def test_output_is_error_from_nonzero_exit(tmp_path):
+    p = tmp_path / "r.jsonl"
+    p.write_text(
+        _message("user", "go") + "\n"
+        + _call("exec_command", {"cmd": "false"}, "e1") + "\n"
+        + _output("e1", {"output": "boom", "metadata": {"exit_code": 1}}) + "\n"
+        + _call("exec_command", {"cmd": "true"}, "e2") + "\n"
+        + _output("e2", {"output": "ok", "metadata": {"exit_code": 0}}) + "\n"
+    )
+    grouped = _parse_grouped(p)
+    results = [b for b in grouped[0][1] if b["type"] == "tool_result"]
+    assert results[0]["is_error"] is True
+    assert results[1]["is_error"] is False
 
 
 def test_missing_file_returns_empty(tmp_path):

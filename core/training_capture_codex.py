@@ -120,6 +120,24 @@ def _output_text(output) -> str:
     return str(output)
 
 
+def _output_is_error(output) -> bool:
+    """Best-effort error verdict for a ``function_call_output``.
+
+    Codex wraps the tool result as a dict that may carry ``metadata.exit_code``
+    or a ``success`` flag. A non-zero exit or ``success: false`` is an error;
+    anything else (including a bare string) is treated as success so the flag
+    only tightens success-gating when the signal is actually present."""
+    if isinstance(output, dict):
+        meta = output.get("metadata")
+        if isinstance(meta, dict):
+            ec = meta.get("exit_code")
+            if isinstance(ec, int):
+                return ec != 0
+        if output.get("success") is False:
+            return True
+    return False
+
+
 def _parse_arguments(arguments) -> dict:
     """Decode a ``function_call`` ``arguments`` value into an input dict.
 
@@ -222,6 +240,7 @@ def _parse_grouped(transcript_path: str | Path) -> list[tuple[str, list[dict]]]:
                 "type": "tool_result",
                 "content": _output_text(payload.get("output")),
                 "tool_call_id": payload.get("call_id", ""),
+                "is_error": _output_is_error(payload.get("output")),
             })
             continue
 

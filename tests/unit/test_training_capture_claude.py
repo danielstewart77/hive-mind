@@ -69,10 +69,10 @@ def transcript(tmp_path):
             {"type": "tool_use", "id": "t4", "name": "Task",
              "input": {"subagent_type": "Explore", "prompt": "look around"}},
         ]),
-        # tool_result content as a block array (not a bare string)
+        # tool_result content as a block array (not a bare string); errored.
         _user([
             {"type": "tool_result", "tool_use_id": "t2",
-             "content": [{"type": "text", "text": "card list"}]},
+             "content": [{"type": "text", "text": "card list"}], "is_error": True},
         ]),
         # sidechain (sub-agent) events must be skipped entirely
         _assistant([{"type": "text", "text": "subagent internal chatter"}], sidechain=True),
@@ -148,10 +148,12 @@ def test_tool_result_links_id_and_flattens_blocks(transcript):
     blocks = grouped[0][1]
     results = [b for b in blocks if b["type"] == "tool_result"]
     assert results[0] == {
-        "type": "tool_result", "content": "file.txt", "tool_call_id": "t1"
+        "type": "tool_result", "content": "file.txt", "tool_call_id": "t1",
+        "is_error": False,
     }
     assert results[1] == {
-        "type": "tool_result", "content": "card list", "tool_call_id": "t2"
+        "type": "tool_result", "content": "card list", "tool_call_id": "t2",
+        "is_error": True,
     }
 
 

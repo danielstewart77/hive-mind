@@ -181,6 +181,7 @@ def _parse_grouped(transcript_path: str | Path) -> list[tuple[str, list[dict]]]:
                         "type": "tool_result",
                         "content": _tool_result_text(c.get("content")),
                         "tool_call_id": c.get("tool_use_id", ""),
+                        "is_error": bool(c.get("is_error")),
                     })
                 elif ctype == "text" and c.get("text"):
                     acc.start_turn(c["text"])
