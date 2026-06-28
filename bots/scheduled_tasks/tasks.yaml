@@ -25,3 +25,46 @@ tasks:
     command:
       - /opt/venv/bin/python3
       - /usr/src/app/bots/scheduled_tasks/scripts/netsage_run.py
+
+  # Nagatha (codex_cli) skill-lifecycle curator. Codex frontmatter strips
+  # `schedule:`, so Nagatha cannot carry the schedule in a SKILL.md — the
+  # deterministic curator needs no LLM, so the scheduler runs the backend
+  # directly as a subprocess at cron time. Ada (claude_cli) carries `schedule:`
+  # in skill-curator/SKILL.md frontmatter instead.
+  - name: nagatha-skill-curator
+    cron: "30 4 * * 1"
+    timezone: America/Chicago
+    voice: false
+    notify: false
+    command:
+      - /opt/venv/bin/python3
+      - /usr/src/app/tools/stateless/skill_curator/skill_curator.py
+      - --config-dir
+      - /usr/src/app/minds/nagatha/.codex
+      - --harness
+      - codex_cli
+
+  # Nagatha (codex_cli) autonomous skill-proposer. Same scheduling rationale as
+  # the curator: Codex frontmatter strips `schedule:`, so the cadence lives in a
+  # `command:` task. The proposer is deterministic (no model turn) — the
+  # scheduler runs the backend directly. Default-OFF behind the per-mind
+  # `<config-dir>/skills/proposer.yaml` `enabled: false`; this task is a no-op
+  # until that flag is flipped. Runs monthly (less frequent than the weekly
+  # curator) since authoring a new skill is a heavier, rarer action. Ada
+  # (claude_cli) carries `schedule:` in skill-proposer/SKILL.md frontmatter.
+  - name: nagatha-skill-proposer
+    cron: "0 5 1 * *"
+    timezone: America/Chicago
+    voice: false
+    notify: false
+    command:
+      - /opt/venv/bin/python3
+      - /usr/src/app/tools/stateless/skill_proposer/skill_proposer.py
+      - --config-dir
+      - /usr/src/app/minds/nagatha/.codex
+      - --harness
+      - codex_cli
+      - --db-path
+      - /usr/src/app/data/training_turns.db
+      - --mind-id
+      - 128c1768-b659-4c83-86df-706690e344f4
