@@ -47,15 +47,32 @@ BENIGN_SUBSTRINGS = (
     "cron fired",
 )
 
+LOKI_WINDOW_NS = 15 * 60 * 1_000_000_000
+LOKI_LIMIT = 2000
 
-def pull_loki_lines() -> list[tuple[str, str, str, str]]:
+# The feed is pulled with two queries, not one. Suricata floods Loki with
+# sev-3 eve noise (Ethertype unknown, our own Telegram traffic, CLOSE_WAIT) at
+# thousands of lines per 15-minute window — far over LOKI_LIMIT. A single
+# `{service_name=~".+"}` pull therefore returns almost nothing but that noise,
+# burying both the rare real Suricata alerts and genuine errors from every
+# other service. So:
+#   1. the generic query EXCLUDES Suricata, keeping the budget for everyone else;
+#   2. Suricata is pulled on its own, pre-filtered to forward-worthy severities
+#      at the Loki layer. Vector nests the eve.json as a JSON string inside the
+#      envelope's `message` field, so severity appears in the escaped form
+#      `\"severity\":N`; the regex below matches the two escape chars with `..`.
+GENERIC_QUERY = '{service_name=~".+", source!="suricata"}'
+SURICATA_ALERT_QUERY = r'{source="suricata", event_type="alert"} |~ `severity..:[12]`'
+
+
+def _query_loki(logql: str) -> list[tuple[str, str, str, str]]:
     end_ns = time.time_ns()
-    start_ns = end_ns - 15 * 60 * 1_000_000_000
+    start_ns = end_ns - LOKI_WINDOW_NS
     query = urllib.parse.urlencode({
-        "query": '{service_name=~".+"}',
+        "query": logql,
         "start": start_ns,
         "end": end_ns,
-        "limit": 2000,
+        "limit": LOKI_LIMIT,
         "direction": "backward",
     })
     try:
@@ -86,8 +103,14 @@ def pull_loki_lines() -> list[tuple[str, str, str, str]]:
     return lines
 
 
-def _decode_envelope(msg: str) -> dict | None:
+def pull_loki_lines() -> list[tuple[str, str, str, str]]:
+    return _query_loki(GENERIC_QUERY) + _query_loki(SURICATA_ALERT_QUERY)
+
+
+def _decode_envelope(msg: str | None) -> dict | None:
     """Return the parsed dict if msg is a JSON log envelope, else None."""
+    if not isinstance(msg, str):
+        return None
     stripped = msg.lstrip()
     if not stripped.startswith("{"):
         return None
@@ -138,11 +161,27 @@ def _service_label(record: dict | None, raw_svc: str) -> str:
     return raw_svc
 
 
+def _eve_record(envelope: dict | None) -> dict | None:
+    """Unwrap the real Suricata eve.json record from a Loki envelope.
+
+    Vector tails eve.json (each line already JSON) and ships it as a *string*
+    in the envelope's ``message`` field — it does NOT flatten the eve fields to
+    the top level. So the event_type, alert{} sub-object, and src_ip/dest_ip
+    that matter all live inside ``envelope["message"]``, not on ``envelope``
+    itself. Parse that nested string; fall back to the envelope only if there
+    is no message to unwrap (so a future flattened shape still works).
+    """
+    if not envelope:
+        return None
+    inner = _decode_envelope(envelope.get("message"))
+    return inner if inner is not None else envelope
+
+
 def _suricata_alert(record: dict | None) -> str | None:
     """Return a readable one-liner for a worth-forwarding Suricata alert.
 
-    Vector merges the parsed eve.json line into the record, so an alert event
-    carries a top-level event_type=="alert" and an alert sub-object with
+    ``record`` is the unwrapped eve.json record (see :func:`_eve_record`): an
+    alert event carries event_type=="alert" and an alert sub-object with
     severity/signature/category. Returns None for non-alert Suricata events
     (flow, dns, tls, stats…) and for alerts at or below the noise ceiling.
     """
@@ -174,18 +213,20 @@ def pick_anomalies(lines):
     out = []
     for src, svc, ts, msg in lines:
         record = _decode_envelope(msg)
-        suricata_line = _suricata_alert(record)
-        if suricata_line is not None:
-            host = record.get("host") if record else None
-            out.append((f"suricata@{host or svc}", ts, suricata_line))
-            continue
         if src == "suricata":
-            # Any other Suricata event (stats, flow, dns, tls…) only ever
-            # surfaces via the alert path above. Gate on the Loki stream's
-            # `source` label, not a body field: eve.json lines carry no source
-            # marker of their own, and their stats counters embed crisis words
-            # ("errors", "invalid") that would otherwise trip the generic text
-            # filter below and page Daniel with routine telemetry.
+            # Suricata is gated entirely on the Loki stream's `source` label,
+            # never the generic text filter: its eve.json carries no source
+            # marker of its own, and its stats counters embed crisis words
+            # ("errors", "invalid") that would otherwise page on routine
+            # telemetry. The real eve record is nested as a JSON string in
+            # record["message"] — unwrap it before reading event_type/alert.
+            eve = _eve_record(record)
+            suricata_line = _suricata_alert(eve)
+            if suricata_line is not None:
+                host = (record.get("host") if record else None) or svc
+                out.append((f"suricata@{host}", ts, suricata_line))
+            # Everything else Suricata (stats/flow/dns/tls, sub-ceiling
+            # alerts) is intentionally dropped here, never text-filtered.
             continue
         priority = _journal_priority(record)
         if priority is not None and priority > MAX_JOURNAL_PRIORITY:
