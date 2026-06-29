@@ -48,7 +48,7 @@ BENIGN_SUBSTRINGS = (
 )
 
 
-def pull_loki_lines() -> list[tuple[str, str, str]]:
+def pull_loki_lines() -> list[tuple[str, str, str, str]]:
     end_ns = time.time_ns()
     start_ns = end_ns - 15 * 60 * 1_000_000_000
     query = urllib.parse.urlencode({
@@ -64,7 +64,7 @@ def pull_loki_lines() -> list[tuple[str, str, str]]:
     except Exception as exc:
         print(f"Loki query failed: {exc}")
         return []
-    lines: list[tuple[str, str, str]] = []
+    lines: list[tuple[str, str, str, str]] = []
     for stream in data.get("data", {}).get("result", []):
         meta = stream.get("stream", {})
         svc = (
@@ -76,9 +76,13 @@ def pull_loki_lines() -> list[tuple[str, str, str]]:
         )
         if isinstance(svc, str):
             svc = svc.lstrip("/")
+        # Vector tags every Loki stream with its origin in the `source` label
+        # (docker / journald / auth / suricata / zeek / clamav). The anomaly
+        # picker gates on this, so carry it through rather than discard it.
+        src = meta.get("source") or ""
         for entry in stream.get("values", []):
             ts, msg = entry[0], entry[1]
-            lines.append((svc, ts, msg))
+            lines.append((src, svc, ts, msg))
     return lines
 
 
@@ -168,18 +172,20 @@ def _suricata_alert(record: dict | None) -> str | None:
 
 def pick_anomalies(lines):
     out = []
-    for svc, ts, msg in lines:
+    for src, svc, ts, msg in lines:
         record = _decode_envelope(msg)
         suricata_line = _suricata_alert(record)
         if suricata_line is not None:
             host = record.get("host") if record else None
             out.append((f"suricata@{host or svc}", ts, suricata_line))
             continue
-        if record and record.get("source_app") == "suricata":
+        if src == "suricata":
             # Any other Suricata event (stats, flow, dns, tls…) only ever
-            # surfaces via the alert path above. Skip it before the generic
-            # text filter, whose crisis words (e.g. "error") match substrings
-            # in Suricata's own internal stats counter names.
+            # surfaces via the alert path above. Gate on the Loki stream's
+            # `source` label, not a body field: eve.json lines carry no source
+            # marker of their own, and their stats counters embed crisis words
+            # ("errors", "invalid") that would otherwise trip the generic text
+            # filter below and page Daniel with routine telemetry.
             continue
         priority = _journal_priority(record)
         if priority is not None and priority > MAX_JOURNAL_PRIORITY:
