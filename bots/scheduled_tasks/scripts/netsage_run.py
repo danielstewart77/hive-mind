@@ -3,9 +3,11 @@
 
 Runs once per scheduler fire. Pulls the last 15 minutes of logs from
 Loki, picks out anomalous lines, and on a real finding dispatches a
-detailed report to Skippy via the broker as a self-message. Bilby is
-no longer involved. Skippy's event-triage pipeline owns classification,
-rule application, and notifying Daniel when something warrants his hands.
+detailed report to Hex via the broker as a self-message. Hex's
+sentinel-triage pipeline owns classification, rule application, and
+deciding whether anything warrants paging Daniel — most routine fires
+are silenced by an approved rule without anyone being notified. Only
+findings that survive triage escalate to Daniel, with Skippy as backup.
 Prints a one-line status to stdout for the scheduler to echo back.
 """
 
@@ -22,7 +24,7 @@ import urllib.request
 import uuid
 
 LOKI_URL = "http://sentinel-loki:3100/loki/api/v1/query_range"
-SKIPPY_MIND_ID = "14cb820b-4a42-4f04-a593-54f532fd1d2f"
+HEX_MIND_ID = "1d284b0a-0a45-40db-82a4-c4a984d0ee49"
 
 ANOMALY_PATTERNS = ("error", "critical", "panic", "traceback", "denied", "fatal")
 ANOMALY_REGEX = re.compile(
@@ -242,21 +244,21 @@ def pick_anomalies(lines):
     return out
 
 
-def broker_skippy(detail: str) -> None:
+def broker_hex(detail: str) -> None:
     broker_url = os.environ.get("HIVEMIND_BROKER_URL")
     broker_token = os.environ.get("HIVEMIND_BROKER_TOKEN")
     if not (broker_url and broker_token):
-        print("Broker env missing; skipping Skippy dispatch")
+        print("Broker env missing; skipping Hex dispatch")
         return
     body = {
         "message_id": str(uuid.uuid4()),
         "conversation_id": str(uuid.uuid4()),
-        "from": SKIPPY_MIND_ID,
-        "to": SKIPPY_MIND_ID,
+        "from": HEX_MIND_ID,
+        "to": HEX_MIND_ID,
         "content": detail,
         "rolling_summary": "",
         "metadata": {
-            "request_type": "netsage_alert",
+            "request_type": "sentinel_alert",
             "triggered_by": "scheduler",
             "expects_reply": False,
         },
@@ -334,13 +336,13 @@ def main(argv: list[str] | None = None) -> None:
 
     sample = _build_sample(anomalies)
     detail = (
-        f"NetSage alert at {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}. "
+        f"Sentinel alert at {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}. "
         f"{count} anomalous log line(s) across {len(services)} service(s). "
         f"First line: {first_line}\n\n"
         f"Sample lines:\n{sample}"
     )
-    broker_skippy(detail)
-    print(f"OK: dispatched {count} anomalies to Skippy")
+    broker_hex(detail)
+    print(f"OK: dispatched {count} anomalies to Hex")
 
 
 if __name__ == "__main__":

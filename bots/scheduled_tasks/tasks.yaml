@@ -16,12 +16,8 @@
 # to be user-invocable in chat. User-invocable skills still live under
 # the mind's .claude/skills/ or .codex/skills/ tree.
 
-tasks:
-  - name: netsage-alert
-    cron: "*/15 * * * *"
-    timezone: America/Chicago
-    voice: false
-    notify: false
-    command:
-      - /opt/venv/bin/python3
-      - /usr/src/app/bots/scheduled_tasks/scripts/netsage_run.py
+# NetSage/Sentinel triage no longer runs here. This central scheduler can't
+# resolve sentinel-loki, so the pass failed every fire. It now runs on the
+# Sentinel host via a 15-min cron that exec's netsage_run.py inside the
+# hive-mind-hex container, where Loki is reachable and Hex owns triage.
+tasks: []

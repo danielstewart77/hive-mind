@@ -264,3 +264,43 @@ def test_query_loki_returns_empty_on_failure(monkeypatch):
 
     monkeypatch.setattr(netsage.urllib.request, "urlopen", boom)
     assert netsage._query_loki(netsage.GENERIC_QUERY) == []
+
+
+# ---------------------------------------------------------------------------
+# broker_hex — the dispatch target. Triage belongs to Hex now: the report is
+# a self-message to Hex's mind id so his sentinel-triage fires, NOT a page to
+# Skippy. A regression here is the bug Daniel hit — raw alerts forwarded to
+# Skippy while Hex stayed silent.
+# ---------------------------------------------------------------------------
+
+def test_broker_hex_dispatches_to_hex_as_self_message(monkeypatch):
+    monkeypatch.setenv("HIVEMIND_BROKER_URL", "http://broker.local")
+    monkeypatch.setenv("HIVEMIND_BROKER_TOKEN", "tok")
+    captured = {}
+
+    def fake_urlopen(req, timeout=0):
+        captured["url"] = req.full_url
+        captured["body"] = json.loads(req.data.decode())
+        captured["auth"] = req.headers.get("Authorization")
+        return _FakeResp({})
+
+    monkeypatch.setattr(netsage.urllib.request, "urlopen", fake_urlopen)
+    netsage.broker_hex("Sentinel alert: ET ATTACK X from 10.0.0.5 to 10.0.0.1")
+
+    assert captured["url"] == "http://broker.local/broker/messages"
+    assert captured["auth"] == "Bearer tok"
+    assert captured["body"]["from"] == netsage.HEX_MIND_ID
+    assert captured["body"]["to"] == netsage.HEX_MIND_ID
+    assert captured["body"]["metadata"]["triggered_by"] == "scheduler"
+    assert captured["body"]["metadata"]["expects_reply"] is False
+
+
+def test_broker_hex_skips_without_broker_env(monkeypatch, capsys):
+    monkeypatch.delenv("HIVEMIND_BROKER_URL", raising=False)
+    monkeypatch.delenv("HIVEMIND_BROKER_TOKEN", raising=False)
+    sent = []
+    monkeypatch.setattr(netsage.urllib.request, "urlopen",
+                        lambda *a, **k: sent.append(1))
+    netsage.broker_hex("anything")
+    assert sent == []
+    assert "skipping Hex dispatch" in capsys.readouterr().out
