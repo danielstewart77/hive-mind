@@ -64,6 +64,7 @@ def _load_skill_manage():
     if spec is None or spec.loader is None:  # pragma: no cover - import guard
         raise ImportError(f"cannot load skill_manage module from {_SKILL_MANAGE_PATH}")
     mod = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault(spec.name, mod)
     spec.loader.exec_module(mod)
     return mod
 
@@ -85,6 +86,7 @@ def _load_training_capture():
         if spec is None or spec.loader is None:
             raise ImportError(f"cannot load training_capture from {path}")
         mod = importlib.util.module_from_spec(spec)
+        sys.modules.setdefault(spec.name, mod)
         spec.loader.exec_module(mod)
         return mod
 
