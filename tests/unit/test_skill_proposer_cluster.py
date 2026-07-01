@@ -7,6 +7,7 @@ counts/filters identical sequences deterministically.
 """
 
 import importlib.util
+import builtins
 import sys
 from pathlib import Path
 
@@ -55,6 +56,22 @@ def test_read_recent_sequences_extracts_tool_names(tmp_path):
     seqs = mod.read_recent_sequences(str(db), "ada", lookback_turns=500)
     assert ("Read", "Grep", "Edit") in seqs
     assert ("Bash",) in seqs
+
+
+def test_load_training_capture_fallback_registers_module(monkeypatch):
+    mod = _load()
+    real_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "core":
+            raise ModuleNotFoundError("forced fallback")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    sys.modules.pop("core.training_capture", None)
+    loaded = mod._load_training_capture()
+    assert loaded.TrainingTurn.__module__ == "core.training_capture"
+    assert sys.modules["core.training_capture"] is loaded
 
 
 def test_read_filters_by_mind_id(tmp_path):
