@@ -72,21 +72,26 @@ def _load_skill_manage():
 def _load_training_capture():
     """Import ``core.training_capture`` — the authoritative DB layer.
 
-    Tries a normal package import first (works under pytest with the repo root
-    on the path); falls back to loading by file path so the standalone CLI runs
-    without the package installed.
+    Ensures the repo root is on sys.path so the normal package import works
+    whether running under pytest or as a standalone CLI script. Falls back to
+    loading by file path (bypassing builtins.__import__) when tests mock the
+    import machinery.
     """
+    repo_root = _THIS_DIR.parents[2]
+    repo_root_str = str(repo_root)
+    if repo_root_str not in sys.path:
+        sys.path.insert(0, repo_root_str)
+
     try:
         from core import training_capture as tc  # type: ignore
         return tc
-    except Exception:  # pragma: no cover - CLI fallback
-        repo_root = _THIS_DIR.parents[2]
+    except Exception:
         path = repo_root / "core" / "training_capture.py"
         spec = importlib.util.spec_from_file_location("core.training_capture", str(path))
         if spec is None or spec.loader is None:
             raise ImportError(f"cannot load training_capture from {path}")
         mod = importlib.util.module_from_spec(spec)
-        sys.modules.setdefault(spec.name, mod)
+        sys.modules["core.training_capture"] = mod
         spec.loader.exec_module(mod)
         return mod
 
