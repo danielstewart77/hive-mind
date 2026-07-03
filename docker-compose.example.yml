@@ -151,6 +151,10 @@ services:
       - KEY_RING=/usr/src/app/data/keyring
       - MIND_ID=example
       - TELEGRAM_BOT_TOKEN_KEYRING_KEY=EXAMPLE_TELEGRAM_BOT_TOKEN
+      # Direct channel to this mind's backend for proactive (unsolicited)
+      # delivery. Point at the backend service on the hivemind network, e.g.
+      # http://<mind>:8420. Requires COMMS_BEARER_TOKEN in this env to auth.
+      # - MIND_BACKEND_URL=http://example:8420
     command: ["/opt/venv/bin/python3", "-m", "bots.telegram_bot"]
 
   bilby-bot:
@@ -180,6 +184,10 @@ services:
       - KEY_RING=/usr/src/app/data/keyring
       - MIND_ID=bilby
       - TELEGRAM_BOT_TOKEN_KEYRING_KEY=BILBY_TELEGRAM_BOT_TOKEN
+      # Direct channel to this mind's backend for proactive (unsolicited)
+      # delivery. Point at the backend service on the hivemind network, e.g.
+      # http://<mind>:8420. Requires COMMS_BEARER_TOKEN in this env to auth.
+      # - MIND_BACKEND_URL=http://bilby:8420
     command: ["/opt/venv/bin/python3", "-m", "bots.telegram_bot"]
 
   # ─────────────────────────────────────────────────────────────

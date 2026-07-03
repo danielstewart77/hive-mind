@@ -42,6 +42,16 @@ TELEGRAM_MSG_LIMIT = 4096
 SERVER_URL = os.environ.get("HIVE_MIND_SERVER_URL", f"http://localhost:{config.server_port}")
 VOICE_SERVER_URL = os.environ.get("VOICE_SERVER_URL", "http://localhost:8422")
 
+# Direct private channel to this bot's own mind backend for proactive
+# (unsolicited) delivery. The backend buffers assistant turns produced while no
+# request is in flight and exposes them at GET {MIND_BACKEND_URL}/proactive
+# (bearer-protected with COMMS_BEARER_TOKEN). This bot polls that endpoint and
+# posts each item to Telegram. Empty MIND_BACKEND_URL disables the poller.
+MIND_BACKEND_URL = os.environ.get("MIND_BACKEND_URL", "")
+COMMS_BEARER_TOKEN = os.environ.get("COMMS_BEARER_TOKEN", "")
+# How often to poll the backend for buffered proactive items.
+PROACTIVE_POLL_INTERVAL = float(os.environ.get("PROACTIVE_POLL_INTERVAL", "5.0"))
+
 # Surface-specific system prompt appended when spawning Telegram sessions.
 # Telegram renders plain text only; voice output is spoken aloud.
 # Instruct Claude to respond conversationally — no code blocks, no markdown,
@@ -753,9 +763,54 @@ def _get_bot_token() -> str:
     return token
 
 
+async def _proactive_poller(app) -> None:
+    """Poll this bot's own mind backend for unsolicited turns and deliver them.
+
+    Runs for the lifetime of the bot. Every ``PROACTIVE_POLL_INTERVAL`` seconds
+    it GETs ``{MIND_BACKEND_URL}/proactive`` (bearer-protected). The endpoint
+    drains the backend's buffer and returns ``[{"chat_id", "text"}, ...]``. Each
+    item is an assistant turn produced without an inbound user message
+    (background agent completion, scheduled wakeup, rotation notice); it is
+    posted to Telegram split over the 4096-char limit. Backend errors and empty
+    responses never kill the loop.
+    """
+    if not MIND_BACKEND_URL:
+        log.info("MIND_BACKEND_URL unset — proactive poller disabled")
+        return
+
+    url = f"{MIND_BACKEND_URL.rstrip('/')}/proactive"
+    headers = {"Authorization": f"Bearer {COMMS_BEARER_TOKEN}"} if COMMS_BEARER_TOKEN else {}
+    log.info("Proactive poller started (backend=%s, interval=%ss)", url, PROACTIVE_POLL_INTERVAL)
+
+    while True:
+        try:
+            await asyncio.sleep(PROACTIVE_POLL_INTERVAL)
+            assert http is not None
+            async with http.get(
+                url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                if resp.status != 200:
+                    log.warning("proactive poll got HTTP %s from %s", resp.status, url)
+                    continue
+                items = await resp.json()
+            for item in items or []:
+                chat_id = item.get("chat_id")
+                text = item.get("text")
+                if not chat_id or not text:
+                    continue
+                for chunk in _chunk_message(text):
+                    await app.bot.send_message(chat_id=chat_id, text=chunk)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("proactive poll cycle failed")
+
+
 async def _on_startup(app) -> None:
     global http, gateway
     http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=0, sock_read=0))
+    # Background poller for proactive (unsolicited) turns from the mind backend.
+    app.bot_data["_proactive_task"] = asyncio.ensure_future(_proactive_poller(app))
     # Namespace the session client_type so two telegram bots with the same
     # authorized user don't share a session (private DM chat_id == user_id).
     # MIND_ID takes priority; fall back to TELEGRAM_BOT_TOKEN_KEYRING_KEY (already
@@ -774,6 +829,13 @@ async def _on_startup(app) -> None:
 
 
 async def _on_shutdown(app) -> None:
+    task = app.bot_data.get("_proactive_task") if hasattr(app, "bot_data") else None
+    if task is not None and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
     if http:
         await http.close()
 
