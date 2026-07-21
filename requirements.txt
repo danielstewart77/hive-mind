@@ -5,6 +5,7 @@ cryptography>=46.0.7
 requests>=2.33.0
 pyyaml
 requests
+httpx
 openai
 anthropic
 setuptools<81
