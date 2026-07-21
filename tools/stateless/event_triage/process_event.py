@@ -9,11 +9,20 @@ session forwards the alert content to this tool, which:
      unclassified_anomaly as the catch-all).
   2. Writes an event row directly to events.db.
   3. Looks up the first approved auto-apply response_rule for that class.
-  4. Executes the action (notify_daniel template substitution and a
+     An approved rule always wins: record_only silences the event, no
+     matter how many times the class has fired before or how long it has
+     been recurring. Rewriting a class's disposition is a deliberate act
+     (see sentinel-decide) — POST a new/narrower rule, don't let a
+     background counter overrule it.
+  4. Only when NO approved rule matches does the recurrence gate run: an
+     unclassified / undecided event that keeps repeating without anyone
+     ever writing a rule for it pages Skippy, then Daniel, so it does not
+     sit in awaiting_decision forever unnoticed.
+  5. Executes the action (notify_daniel template substitution and a
      subprocess call into tools/stateless/notify/notify.py; record_only
      is a no-op; escalate_for_review pages via Telegram with the
      raw alert).
-  5. Updates the event row's status and response_rule_id.
+  6. Updates the event row's status and response_rule_id.
 
 Prints a one-line JSON summary the session can forward as its broker reply.
 
@@ -55,7 +64,18 @@ DB_PATH = Path(
     )
 )
 NOTIFY_SCRIPT = Path(__file__).resolve().parents[1] / "notify" / "notify.py"
+# Preferred first: process_event.py is invoked as a bare `python3 ...` by
+# whatever shell the caller (Hex's codex exec_command, a cron line, a test
+# runner) happens to be using, and that shell's PATH does not always resolve
+# to the venv with httpx/anthropic/etc installed. Fall back to sys.executable
+# (correct on the bare host and in tests) when the venv path does not exist.
+SERVICE_PYTHON = Path("/opt/venv/bin/python3")
 ENV_PATH = Path(os.environ.get("EVENT_TRIAGE_ENV_PATH", str(_REPO_ROOT / ".env")))
+RECURRENCE_WINDOW = _dt.timedelta(minutes=15)
+RECURRENCE_RATE_THRESHOLD = 10
+RECURRENCE_PERSISTENCE_THRESHOLD = _dt.timedelta(minutes=15)
+RECURRENCE_DANIEL_RATE_THRESHOLD = 50
+_RECURRENCE_STATUSES = ("escalated_to_skippy", "escalated_to_daniel")
 
 
 def _load_env() -> None:
@@ -211,6 +231,9 @@ def classify(
     count_match = _COUNT_RE.search(content)
     count = int(count_match.group(1)) if count_match else None
     payload: dict[str, Any] = {"count": count, "excerpt": content[:4000]}
+    eve = _extract_embedded_eve(content)
+    if eve is not None:
+        payload["eve"] = eve
 
     catalog = [
         {
@@ -266,7 +289,79 @@ def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    _ensure_events_status_schema(conn)
     return conn
+
+
+def _ensure_events_status_schema(conn: sqlite3.Connection) -> None:
+    """Allow recurrence escalation statuses in older local event stores."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'events'"
+    ).fetchone()
+    if row is None or row["sql"] is None:
+        return
+    table_sql = row["sql"]
+    if all(status in table_sql for status in _RECURRENCE_STATUSES):
+        return
+    if "CHECK(status IN" not in table_sql:
+        return
+
+    conn.executescript(
+        """
+        PRAGMA foreign_keys = OFF;
+        ALTER TABLE events RENAME TO events_old_status_check;
+        CREATE TABLE events (
+            id                INTEGER PRIMARY KEY,
+            event_class_id    INTEGER NOT NULL REFERENCES event_classes(id),
+            source            TEXT NOT NULL,
+            occurred_at       TEXT NOT NULL,
+            payload_json      TEXT NOT NULL DEFAULT '{}',
+            summary           TEXT,
+            severity          TEXT CHECK(severity IN ('info','low','medium','high','critical')),
+            status            TEXT NOT NULL DEFAULT 'awaiting_triage' CHECK(status IN (
+                                  'awaiting_triage',
+                                  'auto_acted',
+                                  'notified_daniel',
+                                  'escalated',
+                                  'ignored',
+                                  'awaiting_decision',
+                                  'escalated_to_skippy',
+                                  'escalated_to_daniel'
+                              )),
+            response_rule_id  INTEGER REFERENCES response_rules(id),
+            action_log        TEXT,
+            created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO events (
+            id,
+            event_class_id,
+            source,
+            occurred_at,
+            payload_json,
+            summary,
+            severity,
+            status,
+            response_rule_id,
+            action_log,
+            created_at
+        )
+        SELECT
+            id,
+            event_class_id,
+            source,
+            occurred_at,
+            payload_json,
+            summary,
+            severity,
+            status,
+            response_rule_id,
+            action_log,
+            created_at
+        FROM events_old_status_check;
+        DROP TABLE events_old_status_check;
+        PRAGMA foreign_keys = ON;
+        """
+    )
 
 
 def _get_class_by_slug(conn: sqlite3.Connection, slug: str) -> sqlite3.Row | None:
@@ -290,6 +385,8 @@ def _insert_event(
         """,
         (event_class_id, source, occurred_at, json.dumps(payload), summary),
     )
+    if cur.lastrowid is None:
+        raise RuntimeError("event insert did not return a row id")
     return int(cur.lastrowid)
 
 
@@ -297,6 +394,27 @@ def _insert_event(
 _SRC_DST_RE = re.compile(
     r"(\d{1,3}(?:\.\d{1,3}){3})\s+to\s+(\d{1,3}(?:\.\d{1,3}){3})"
 )
+
+
+def _extract_embedded_eve(content: str) -> dict[str, Any] | None:
+    """Find a raw Suricata eve object embedded as a JSON line in alert text."""
+    for line in content.splitlines():
+        text = line.strip()
+        if text.startswith("EVE:"):
+            text = text[4:].strip()
+        if not text.startswith("{"):
+            continue
+        try:
+            record = json.loads(text)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        if record.get("src_ip") and record.get("dest_ip") and isinstance(
+            record.get("alert"), dict
+        ):
+            return record
+    return None
 
 
 def _extract_source_ip(payload: dict[str, Any]) -> str | None:
@@ -456,7 +574,8 @@ def _find_rule(
 
     Rules are tried in id order; the first whose ``condition_expr`` matches
     the payload wins. When none match, the caller falls through to
-    awaiting_decision — exactly what should happen for an out-of-scope hit.
+    awaiting_decision (or the recurrence gate) — exactly what should happen
+    for an out-of-scope hit.
     """
     rows = conn.execute(
         """
@@ -495,6 +614,114 @@ def _touch_rule(conn: sqlite3.Connection, rule_id: int) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Recurrence gate
+# ---------------------------------------------------------------------------
+#
+# For a class with NO approved auto-apply rule, an event can otherwise sit in
+# awaiting_decision forever without anyone ever noticing it needs a decision.
+# The recurrence gate exists only for that gap: it pages Skippy, then Daniel,
+# when an undecided class keeps recurring, so it does not go unaddressed
+# indefinitely. It must never run for a class that already has an approved
+# rule — see process() below, which only reaches this gate when _find_rule
+# returned None. A record_only rule is a deliberate decision that a class is
+# routine; a background counter must not be able to override that decision
+# just because the class is old or fires often. Tightening or replacing that
+# decision is what sentinel-decide is for.
+
+
+def _parse_utc(value: str) -> _dt.datetime:
+    text = value.strip()
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = _dt.datetime.fromisoformat(text)
+    except ValueError:
+        return _dt.datetime.now(_dt.UTC)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=_dt.UTC)
+    return parsed.astimezone(_dt.UTC)
+
+
+def _recurrence_meta(
+    conn: sqlite3.Connection,
+    event_class_id: int,
+    occurred_at: str,
+) -> dict[str, Any]:
+    current = _parse_utc(occurred_at)
+    window_start = current - RECURRENCE_WINDOW
+    rows = conn.execute(
+        """
+        SELECT id, occurred_at, status
+          FROM events
+         WHERE event_class_id = ?
+         ORDER BY occurred_at, id
+        """,
+        (event_class_id,),
+    ).fetchall()
+    total_count = len(rows)
+    window_rows = [r for r in rows if _parse_utc(r["occurred_at"]) >= window_start]
+    first_seen = _parse_utc(rows[0]["occurred_at"]) if rows else current
+    last_seen = _parse_utc(rows[-1]["occurred_at"]) if rows else current
+    persisted_for = max(_dt.timedelta(0), current - first_seen)
+    previous_skippy = any(r["status"] == "escalated_to_skippy" for r in rows[:-1])
+    previous_daniel = any(r["status"] == "escalated_to_daniel" for r in rows[:-1])
+    return {
+        "total_count": total_count,
+        "window_count": len(window_rows),
+        "first_seen": first_seen.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "last_seen": last_seen.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "window_minutes": int(RECURRENCE_WINDOW.total_seconds() // 60),
+        "persisted_minutes": int(persisted_for.total_seconds() // 60),
+        "previous_skippy_escalation": previous_skippy,
+        "previous_daniel_escalation": previous_daniel,
+    }
+
+
+def _recurrence_target(meta: dict[str, Any]) -> str | None:
+    window_count = int(meta["window_count"])
+    persisted = _dt.timedelta(minutes=int(meta["persisted_minutes"]))
+    if (
+        window_count >= RECURRENCE_DANIEL_RATE_THRESHOLD
+        or (
+            meta["previous_skippy_escalation"]
+            and (
+                window_count >= RECURRENCE_RATE_THRESHOLD
+                or persisted >= RECURRENCE_PERSISTENCE_THRESHOLD
+            )
+        )
+    ):
+        return "daniel"
+    if (
+        window_count >= RECURRENCE_RATE_THRESHOLD
+        or persisted >= RECURRENCE_PERSISTENCE_THRESHOLD
+    ):
+        return "skippy"
+    return None
+
+
+def _send_recurrence_alert(
+    target: str,
+    class_row: sqlite3.Row,
+    payload: dict[str, Any],
+    event_id: int,
+) -> tuple[str, str]:
+    meta = payload["recurrence"]
+    alert_line = _alert_line_from_payload(payload)
+    message = (
+        f"Sentinel recurrence gate routed event #{event_id} to {target}. "
+        f"Class {class_row['slug']} has {meta['window_count']} repeat(s) in "
+        f"{meta['window_minutes']} minutes, {meta['total_count']} total, first seen "
+        f"{meta['first_seen']}, last seen {meta['last_seen']}. "
+        f"Excerpt: {payload.get('excerpt', '')[:240]}"
+    )
+    if alert_line:
+        message = f"{alert_line}\n{message}"
+    ok, detail = _send_notify(message, ["telegram", "file"])
+    status = "escalated_to_daniel" if target == "daniel" else "escalated_to_skippy"
+    return status, f"recurrence_gate target={target} ok={ok} detail={detail}"
+
+
+# ---------------------------------------------------------------------------
 # Actions
 # ---------------------------------------------------------------------------
 
@@ -502,10 +729,11 @@ def _touch_rule(conn: sqlite3.Connection, rule_id: int) -> None:
 def _send_notify(message: str, channels: list[str]) -> tuple[bool, str]:
     if not NOTIFY_SCRIPT.exists():
         return False, f"notify.py not found at {NOTIFY_SCRIPT}"
+    python_executable = str(SERVICE_PYTHON if SERVICE_PYTHON.exists() else sys.executable)
     try:
         result = subprocess.run(
             [
-                sys.executable,
+                python_executable,
                 str(NOTIFY_SCRIPT),
                 "send",
                 "--message",
@@ -609,7 +837,10 @@ def process(
         if class_slug:
             count_match = _COUNT_RE.search(content)
             count = int(count_match.group(1)) if count_match else None
-            payload = {"count": count, "excerpt": content[:4000]}
+            payload: dict[str, Any] = {"count": count, "excerpt": content[:4000]}
+            eve = _extract_embedded_eve(content)
+            if eve is not None:
+                payload["eve"] = eve
             classify_meta = {
                 "path": "caller_provided",
                 "reasoning": classifier_reasoning or "",
@@ -638,16 +869,34 @@ def process(
             payload=payload,
             summary=summary,
         )
+        recurrence = _recurrence_meta(conn, int(class_row["id"]), occurred_at)
+        payload["recurrence"] = recurrence
+        conn.execute(
+            "UPDATE events SET payload_json = ? WHERE id = ?",
+            (json.dumps(payload), event_id),
+        )
+
+        # An approved auto-apply rule always wins. The recurrence gate only
+        # ever runs for classes nobody has made a call on yet — see the
+        # module docstring and the comment above _parse_utc.
         rule = _find_rule(conn, int(class_row["id"]), payload)
-        if rule is None:
-            status, log = escalate_no_rule(class_row, payload, event_id)
-            _mark_event(conn, event_id, status, None, log)
-            rule_id = None
-        else:
+        if rule is not None:
             status, log = execute_action(rule, payload, class_row, event_id)
             _mark_event(conn, event_id, status, int(rule["id"]), log)
             _touch_rule(conn, int(rule["id"]))
             rule_id = int(rule["id"])
+        else:
+            recurrence_target = _recurrence_target(recurrence)
+            if recurrence_target is not None:
+                status, log = _send_recurrence_alert(
+                    recurrence_target, class_row, payload, event_id
+                )
+                _mark_event(conn, event_id, status, None, log)
+                rule_id = None
+            else:
+                status, log = escalate_no_rule(class_row, payload, event_id)
+                _mark_event(conn, event_id, status, None, log)
+                rule_id = None
         conn.commit()
     finally:
         conn.close()
