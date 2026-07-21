@@ -34,7 +34,7 @@ netsage = _load_module()
 
 def _eve_record(event_type="alert", severity=1, signature="ET ATTACK Something",
                 category="A Network Trojan was Detected", src="10.0.0.5",
-                dst="10.0.0.1"):
+                dst="10.0.0.1", src_port=None, dst_port=None, proto=None):
     """The real Suricata eve.json record — what lives INSIDE the envelope's
     nested `message` string, where event_type, alert{}, and src/dest_ip sit."""
     record = {
@@ -45,6 +45,12 @@ def _eve_record(event_type="alert", severity=1, signature="ET ATTACK Something",
         "src_ip": src,
         "dest_ip": dst,
     }
+    if src_port is not None:
+        record["src_port"] = src_port
+    if dst_port is not None:
+        record["dest_port"] = dst_port
+    if proto is not None:
+        record["proto"] = proto
     if event_type == "alert":
         record["alert"] = {
             "action": "allowed",
@@ -85,6 +91,22 @@ def test_high_severity_alert_is_surfaced():
     assert "severity 1" in line
     assert "ET ATTACK X" in line
     assert "10.0.0.5 to 10.0.0.1" in line
+
+
+def test_suricata_alert_includes_ports_and_protocol_when_available():
+    record = _eve_record(
+        severity=1,
+        signature="ET SCAN RDP inbound",
+        src="192.0.2.10",
+        dst="192.0.2.20",
+        src_port=51514,
+        dst_port=3389,
+        proto="tcp",
+    )
+    line = netsage._suricata_alert(record)
+    assert line is not None
+    assert "192.0.2.10:51514 to 192.0.2.20:3389" in line
+    assert "proto TCP" in line
 
 
 def test_ceiling_severity_alert_is_surfaced():
@@ -304,3 +326,28 @@ def test_broker_hex_skips_without_broker_env(monkeypatch, capsys):
     netsage.broker_hex("anything")
     assert sent == []
     assert "skipping Hex dispatch" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Daily heartbeat — "no anomalies" and "the pass silently died" must not look
+# identical from Daniel's side, so a quiet pass pings Hex once a day.
+# ---------------------------------------------------------------------------
+
+
+def test_daily_heartbeat_sends_once_per_interval(tmp_path, monkeypatch):
+    state_path = tmp_path / "heartbeat.json"
+    sent = []
+    monkeypatch.setattr(netsage, "HEARTBEAT_STATE_PATH", state_path)
+    monkeypatch.setattr(netsage, "broker_hex", sent.append)
+
+    assert netsage.maybe_send_heartbeat(now=1_000_000) is True
+    assert len(sent) == 1
+    assert "Sentinel daily heartbeat" in sent[0]
+
+    assert netsage.maybe_send_heartbeat(now=1_000_000 + 60) is False
+    assert len(sent) == 1
+
+    assert netsage.maybe_send_heartbeat(
+        now=1_000_000 + netsage.HEARTBEAT_INTERVAL_SECONDS
+    ) is True
+    assert len(sent) == 2
