@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from pathlib import Path
 import re
 import sys
 import time
@@ -51,6 +52,10 @@ BENIGN_SUBSTRINGS = (
 
 LOKI_WINDOW_NS = 15 * 60 * 1_000_000_000
 LOKI_LIMIT = 2000
+HEARTBEAT_INTERVAL_SECONDS = 24 * 60 * 60
+HEARTBEAT_STATE_PATH = Path(
+    os.environ.get("NETSAGE_HEARTBEAT_STATE_PATH", str(Path(__file__).resolve().parents[3] / "data" / "netsage_heartbeat.json"))
+)
 
 # The feed is pulled with two queries, not one. Suricata floods Loki with
 # sev-3 eve noise (Ethertype unknown, our own Telegram traffic, CLOSE_WAIT) at
@@ -201,13 +206,21 @@ def _suricata_alert(record: dict | None) -> str | None:
     signature = alert.get("signature") or "unknown signature"
     category = alert.get("category") or ""
     src = record.get("src_ip")
+    src_port = record.get("src_port")
     dst = record.get("dest_ip")
+    dst_port = record.get("dest_port")
+    proto = record.get("proto")
     sev_label = severity if severity is not None else "?"
     parts = [f"Suricata alert severity {sev_label}: {signature}"]
     if category:
         parts.append(f"({category})")
     if src or dst:
-        parts.append(f"{src or '?'} to {dst or '?'}")
+        has_ports = src_port is not None or dst_port is not None
+        src_label = f"{src or '?'}:{src_port or '?'}" if has_ports else f"{src or '?'}"
+        dst_label = f"{dst or '?'}:{dst_port or '?'}" if has_ports else f"{dst or '?'}"
+        parts.append(f"{src_label} to {dst_label}")
+    if proto:
+        parts.append(f"proto {str(proto).upper()}")
     return " ".join(parts)
 
 
@@ -278,6 +291,54 @@ def broker_hex(detail: str) -> None:
         print(f"Broker dispatch failed: {exc}")
 
 
+def _heartbeat_due(now: float, state_path: Path | None = None) -> bool:
+    state_path = HEARTBEAT_STATE_PATH if state_path is None else state_path
+    try:
+        state = json.loads(state_path.read_text())
+    except (OSError, ValueError, TypeError):
+        return True
+    try:
+        last_sent = float(state.get("last_sent", 0))
+    except (TypeError, ValueError):
+        return True
+    return now - last_sent >= HEARTBEAT_INTERVAL_SECONDS
+
+
+def _mark_heartbeat_sent(now: float, state_path: Path | None = None) -> None:
+    state_path = HEARTBEAT_STATE_PATH if state_path is None else state_path
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(
+            json.dumps(
+                {
+                    "last_sent": now,
+                    "last_sent_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+                }
+            )
+        )
+    except OSError as exc:
+        print(f"Heartbeat state write failed: {exc}")
+
+
+def maybe_send_heartbeat(now: float | None = None) -> bool:
+    """Dispatch a once-a-day liveness ping to Hex when a scheduler pass finds
+
+    nothing anomalous. Without this, "no anomalies" and "the whole NetSage
+    pass silently died" look identical from Daniel's side — a quiet pass
+    should be distinguishable from no pass at all.
+    """
+    now = time.time() if now is None else now
+    if not _heartbeat_due(now):
+        return False
+    broker_hex(
+        "Sentinel daily heartbeat at "
+        f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now))}. "
+        "NetSage scheduler pass is alive; no anomalous lines required for this heartbeat."
+    )
+    _mark_heartbeat_sent(now)
+    return True
+
+
 def _build_sample(anomalies, total_budget=8000, per_line_cap=1500) -> str:
     parts: list[str] = []
     running = 0
@@ -308,10 +369,12 @@ def main(argv: list[str] | None = None) -> None:
     lines = pull_loki_lines()
     anomalies = pick_anomalies(lines)
     if not anomalies:
+        heartbeat_sent = maybe_send_heartbeat()
         if args.json:
-            print(json.dumps({"anomalies": [], "count": 0}))
+            print(json.dumps({"anomalies": [], "count": 0, "heartbeat_sent": heartbeat_sent}))
         else:
-            print("No anomalies in the last 15 minutes.")
+            suffix = " Daily heartbeat dispatched." if heartbeat_sent else ""
+            print(f"No anomalies in the last 15 minutes.{suffix}")
         return
 
     count = len(anomalies)
