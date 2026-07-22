@@ -175,6 +175,39 @@ class TestAdaWiring:
         assert (captured["cols"], captured["rows"]) == (100, 30)
 
 
+class TestBobWiring:
+    """Bob is Ada's harness pointed at Ollama. Same Claude CLI, so the same
+    conversation-flag rule and the same terminal."""
+
+    @pytest.fixture
+    def bob(self):
+        import minds.bob.implementation as impl
+        return impl
+
+    def test_the_attach_route_is_mounted(self, bob):
+        paths = {getattr(r, "path", "") for r in bob.app.routes}
+        assert "/sessions/{session_id}/attach-pty" in paths
+
+    def test_pty_command_pins_the_gateway_conversation_id(self, bob, monkeypatch):
+        captured = {}
+
+        def _fake_open(cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured.update(kwargs)
+            return (types_SimpleNamespace(pid=1, poll=lambda: None), -1)
+
+        monkeypatch.setattr(bob, "open_pty_process", _fake_open)
+        bob._spawn_pty(session_id="b1", model="qwen", conversation_id="conv-b",
+                       cols=90, rows=28)
+
+        cmd = captured["cmd"]
+        assert cmd[0] == "claude"
+        assert "conv-b" in cmd
+        assert "-p" not in cmd
+        assert "--input-format" not in cmd
+        assert (captured["cols"], captured["rows"]) == (90, 28)
+
+
 class TestNagathaCodexThreads:
     """Codex will not adopt a conversation id it was handed, so the gateway's
     id and the codex thread are two different things and the mapping lives in
@@ -219,3 +252,69 @@ class TestNagathaCodexThreads:
         client = TestClient(nagatha.app)
         client.delete("/sessions/n4")
         assert "n4" not in nagatha.THREADS
+
+
+class TestBilbyCodexThreads:
+    """Bilby is the Ollama-backed Codex mind — same thread-ownership rule as
+    Nagatha, plus the provider override its per-turn spawn already carries."""
+
+    @pytest.fixture
+    def bilby(self):
+        import minds.bilby.implementation as impl
+        return impl
+
+    def test_gateway_conversation_id_is_not_used_as_a_codex_thread(self, bilby):
+        bilby.SESSIONS.clear()
+        bilby.THREADS.clear()
+        client = TestClient(bilby.app)
+        client.post("/sessions", json={
+            "session_id": "b1", "resume_sid": "gateway-uuid", "model": "gpt-oss",
+        })
+        assert bilby.SESSIONS["b1"]["thread_id"] is None
+
+    def test_a_known_thread_is_rejoined_on_respawn(self, bilby):
+        bilby.SESSIONS.clear()
+        bilby.THREADS.clear()
+        bilby.THREADS["b2"] = "codex-thread-3"
+        client = TestClient(bilby.app)
+        client.post("/sessions", json={
+            "session_id": "b2", "resume_sid": "gateway-uuid", "model": "gpt-oss",
+        })
+        assert bilby.SESSIONS["b2"]["thread_id"] == "codex-thread-3"
+
+    def test_attach_before_the_first_turn_is_refused_not_forked(self, bilby):
+        bilby.THREADS.clear()
+        with pytest.raises(pty_attach.PtyUnavailable):
+            bilby._spawn_pty(
+                session_id="b3", model="gpt-oss", conversation_id="gateway-uuid",
+                cols=80, rows=24,
+            )
+
+    def test_the_terminal_carries_the_same_provider_override_as_a_turn(
+        self, bilby, monkeypatch
+    ):
+        """An Ollama-backed mind whose TUI talked to the default provider
+        would answer as a different model than its own turns do."""
+        captured = {}
+
+        def _fake_open(cmd, **kwargs):
+            captured["cmd"] = cmd
+            return (types_SimpleNamespace(pid=1, poll=lambda: None), -1)
+
+        monkeypatch.setattr(bilby, "open_pty_process", _fake_open)
+        bilby.THREADS["b4"] = "codex-thread-4"
+        bilby._spawn_pty(session_id="b4", model="gpt-oss",
+                         conversation_id="gateway-uuid", cols=80, rows=24)
+
+        cmd = captured["cmd"]
+        assert cmd[0] == "codex"
+        assert cmd[-2:] == ["resume", "codex-thread-4"]
+        for arg in bilby._provider_args():
+            assert arg in cmd
+
+    def test_kill_forgets_the_thread(self, bilby):
+        bilby.SESSIONS.clear()
+        bilby.THREADS["b5"] = "codex-thread-5"
+        client = TestClient(bilby.app)
+        client.delete("/sessions/b5")
+        assert "b5" not in bilby.THREADS
