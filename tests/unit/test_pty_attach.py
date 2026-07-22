@@ -9,7 +9,11 @@ on a conversation id that has no transcript, and a Codex mind handed a
 conversation id its CLI cannot adopt.
 """
 
+import fcntl
 import os
+import pty
+import struct
+import termios
 from pathlib import Path
 from types import SimpleNamespace as types_SimpleNamespace
 
@@ -40,6 +44,19 @@ def _app(spawn):
     app = FastAPI()
     pty_attach.install_pty_attach(app, mind_name="testmind", spawn=spawn)
     return app
+
+
+def _get_winsize(fd: int) -> tuple[int, int]:
+    rows, cols, _, _ = struct.unpack(
+        "HHHH", fcntl.ioctl(fd, termios.TIOCGWINSZ, struct.pack("HHHH", 0, 0, 0, 0))
+    )
+    return cols, rows
+
+
+def _handle(master_fd: int, cols: int = 80, rows: int = 24) -> pty_attach._PtyHandle:
+    """A handle around a bare pty — no subprocess needed to test geometry."""
+    return pty_attach._PtyHandle("sid", proc=None, master_fd=master_fd,
+                                 conversation_id="conv", cols=cols, rows=rows)
 
 
 class TestConversationFlags:
@@ -138,6 +155,116 @@ class TestAttachRoute:
         assert pty_attach.clamp_winsize(0, 0) == (20, 5)
         assert pty_attach.clamp_winsize(9999, 9999) == (500, 200)
         assert pty_attach.clamp_winsize(100, 30) == (100, 30)
+
+
+class TestScrollbackGeometry:
+    """Captured output carries hard line breaks at the width it was emitted
+    for. Replaying an 80-column capture into a 44-column tile shreds it into
+    ragged half-lines rather than reflowing, which is what a phone showed
+    after a session had last been driven from a desktop."""
+
+    def test_resize_to_a_new_width_drops_unreplayable_scrollback(self):
+        master_fd, slave_fd = pty.openpty()
+        try:
+            handle = _handle(master_fd, cols=80, rows=24)
+            handle.feed(b"x" * 80 + b"\r\n")
+            assert handle.scrollback
+
+            handle.resize(44, 27)
+
+            assert bytes(handle.scrollback) == b""
+            assert (handle.cols, handle.rows) == (44, 27)
+            assert _get_winsize(slave_fd) == (44, 27)
+        finally:
+            os.close(master_fd)
+            os.close(slave_fd)
+
+    def test_resize_of_height_alone_keeps_scrollback(self):
+        # Same width wraps identically, so the capture is still replayable
+        # and a keyboard opening should not cost the tile its history.
+        master_fd, slave_fd = pty.openpty()
+        try:
+            handle = _handle(master_fd, cols=80, rows=24)
+            handle.feed(b"still readable\r\n")
+
+            handle.resize(80, 40)
+
+            assert bytes(handle.scrollback) == b"still readable\r\n"
+            assert _get_winsize(slave_fd) == (80, 40)
+        finally:
+            os.close(master_fd)
+            os.close(slave_fd)
+
+    def test_resize_compares_clamped_widths(self):
+        # A degenerate request clamps to the width it already had, so it must
+        # not be mistaken for a width change and throw history away.
+        master_fd, slave_fd = pty.openpty()
+        try:
+            handle = _handle(master_fd, cols=20, rows=24)
+            handle.feed(b"narrow\r\n")
+
+            handle.resize(1, 24)
+
+            assert bytes(handle.scrollback) == b"narrow\r\n"
+            assert handle.cols == 20
+        finally:
+            os.close(master_fd)
+            os.close(slave_fd)
+
+    def test_control_frame_resize_drops_stale_scrollback(self):
+        master_fd, slave_fd = pty.openpty()
+        try:
+            handle = _handle(master_fd, cols=80, rows=24)
+            handle.feed(b"wrapped for eighty columns\r\n")
+
+            assert pty_attach._control_frame(
+                handle, '{"type":"resize","cols":44,"rows":27}') is True
+
+            assert bytes(handle.scrollback) == b""
+            assert _get_winsize(slave_fd) == (44, 27)
+        finally:
+            os.close(master_fd)
+            os.close(slave_fd)
+
+    def test_control_frame_swallows_a_malformed_resize(self):
+        master_fd, slave_fd = pty.openpty()
+        try:
+            handle = _handle(master_fd, cols=90, rows=25)
+            pty_attach.set_winsize(master_fd, 90, 25)
+
+            assert pty_attach._control_frame(
+                handle, '{"type":"resize","cols":"wide"}') is True
+
+            assert _get_winsize(slave_fd) == (90, 25)  # unchanged
+        finally:
+            os.close(master_fd)
+            os.close(slave_fd)
+
+    def test_control_frame_rejects_plain_text_and_other_json(self):
+        master_fd, slave_fd = pty.openpty()
+        try:
+            handle = _handle(master_fd)
+            assert pty_attach._control_frame(handle, "ls -la\n") is False
+            assert pty_attach._control_frame(handle, "{not json") is False
+            assert pty_attach._control_frame(handle, '{"type":"ping"}') is False
+            assert pty_attach._control_frame(handle, '"just a string"') is False
+        finally:
+            os.close(master_fd)
+            os.close(slave_fd)
+
+    def test_reattaching_at_a_new_width_replays_nothing(self):
+        client = TestClient(_app(_echo_spawn))
+        with client.websocket_connect(
+                "/sessions/s7/attach-pty?resume_sid=c7&cols=80&rows=24") as ws:
+            ws.send_bytes(b"eighty\n")
+            assert b"eighty" in ws.receive_bytes()
+
+        with client.websocket_connect(
+                "/sessions/s7/attach-pty?resume_sid=c7&cols=44&rows=27") as ws:
+            assert pty_attach.PTYS["s7"].cols == 44
+            assert not pty_attach.PTYS["s7"].scrollback
+            ws.send_bytes(b"forty-four\n")
+            assert b"forty-four" in ws.receive_bytes()
 
 
 class TestAdaWiring:
