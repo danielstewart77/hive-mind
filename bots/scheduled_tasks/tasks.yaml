@@ -16,8 +16,11 @@
 # to be user-invocable in chat. User-invocable skills still live under
 # the mind's .claude/skills/ or .codex/skills/ tree.
 
-# NetSage/Sentinel triage no longer runs here. This central scheduler can't
-# resolve sentinel-loki, so the pass failed every fire. It now runs on the
-# Sentinel host via a 15-min cron that exec's netsage_run.py inside the
-# hive-mind-hex container, where Loki is reachable and Hex owns triage.
+# NetSage/Sentinel triage doesn't run here. This central scheduler can't
+# resolve sentinel-loki, so the pass failed every fire. It runs on the
+# Sentinel host instead, via a 15-min root cron that execs netsage_run.py
+# inside the hive-mind-hex container, where Loki is reachable. That script,
+# the event_triage classifier, and the sentinel-* skills are Hex's own code
+# in his own repo (hive-sentinel) — none of it lives in hive_mind. hive_mind
+# only knows Hex as a mind_id to dispatch to.
 tasks: []
