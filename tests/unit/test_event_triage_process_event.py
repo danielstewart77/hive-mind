@@ -1,12 +1,16 @@
-"""Guards for event_triage's rule-application and recurrence-gate behavior.
+"""Guards for event_triage's rule-application and recurrence-advisory behavior.
 
 An approved auto-apply response_rule is a deliberate decision that a class
-of alert is routine. The recurrence gate exists only to nag Skippy/Daniel
-about classes NOBODY has decided on yet (no approved rule) so they don't
-sit in awaiting_decision forever. It must never override an approved rule —
-these tests lock that precedence in as a regression guard after a live
-incident where the recurrence gate re-escalated already-silenced,
-weeks-old, approved-noise classes on every recurrence.
+of alert is routine, and it always wins — locked in after a live incident
+where a recurrence gate re-escalated already-silenced, weeks-old,
+approved-noise classes on every recurrence.
+
+The recurrence tracker itself is ADVISORY ONLY: for a class with no approved
+rule it returns a recurrence_target ("skippy"/"daniel"/None) in the result so
+Hex's sentinel-triage knows investigate+decide are mandatory, but it never
+sends a notification — paging from inside the deterministic tool bypassed
+Hex's decision legs entirely (the "dumb claxon" incident). sentinel-decide is
+the only notifier, and it acts via the add-rule subcommand, also guarded here.
 """
 
 from __future__ import annotations
@@ -203,11 +207,12 @@ def test_approved_rule_class_stays_ignored_despite_heavy_recurrence(tmp_path, mo
 
 
 # ---------------------------------------------------------------------------
-# The recurrence gate still does its job for classes nobody has ruled on.
+# The recurrence tracker is advisory only: it never notifies, it just tells
+# the caller (Hex's session) that investigate+decide are mandatory this turn.
 # ---------------------------------------------------------------------------
 
 
-def test_rate_recurrence_routes_unruled_class_to_skippy(tmp_path, monkeypatch):
+def test_rate_recurrence_advises_skippy_without_notifying(tmp_path, monkeypatch):
     db = tmp_path / "events.db"
     _init_db(db)
     monkeypatch.setattr(process_event, "DB_PATH", db)
@@ -220,6 +225,7 @@ def test_rate_recurrence_routes_unruled_class_to_skippy(tmp_path, monkeypatch):
             class_slug="unclassified_repeat_noise",
         )
         assert result["status"] == "awaiting_decision"
+        assert result["recurrence_target"] is None
 
     result = process_event.process(
         "Sentinel alert at 2026-07-12T12:09:30Z. 1 anomalous log line.",
@@ -227,56 +233,75 @@ def test_rate_recurrence_routes_unruled_class_to_skippy(tmp_path, monkeypatch):
         class_slug="unclassified_repeat_noise",
     )
 
-    assert result["status"] == "escalated_to_skippy"
+    assert result["status"] == "awaiting_decision"
     assert result["rule_id"] is None
+    assert result["recurrence_target"] == "skippy"
     assert result["payload"]["recurrence"]["window_count"] == 10
-    assert "routed event #10 to skippy" in sent[0][0]
-    assert "10 repeat(s) in 15 minutes" in sent[0][0]
-    assert sent[0][1] == ["telegram", "file"]
+    assert sent == []
 
 
 def test_recurrence_statuses_are_allowed_in_checked_event_store(tmp_path, monkeypatch):
+    """Hex writes escalated_to_skippy/escalated_to_daniel directly to events.db
+    after sentinel-decide acts on a recurrence advisory (see the ladder test
+    below); older local stores predate those statuses in their CHECK
+    constraint, so _connect() must migrate the schema to allow them."""
     db = tmp_path / "events.db"
     _init_checked_db(db)
     monkeypatch.setattr(process_event, "DB_PATH", db)
     _patch_notify(monkeypatch)
 
-    for minute in range(9):
-        process_event.process(
-            f"Sentinel alert at 2026-07-12T12:{minute:02d}:00Z. 1 anomalous log line.",
-            occurred_at=f"2026-07-12T12:{minute:02d}:00Z",
-            class_slug="unclassified_repeat_noise",
-        )
-
     result = process_event.process(
-        "Sentinel alert at 2026-07-12T12:09:30Z. 1 anomalous log line.",
-        occurred_at="2026-07-12T12:09:30Z",
+        "Sentinel alert at 2026-07-12T12:00:00Z. 1 anomalous log line.",
+        occurred_at="2026-07-12T12:00:00Z",
         class_slug="unclassified_repeat_noise",
     )
+    assert result["status"] == "awaiting_decision"
 
-    assert result["status"] == "escalated_to_skippy"
-    conn = sqlite3.connect(db)
-    stored = conn.execute("SELECT status FROM events ORDER BY id DESC LIMIT 1").fetchone()
+    conn = process_event._connect()
+    conn.execute(
+        "UPDATE events SET status = 'escalated_to_skippy' WHERE id = ?",
+        (result["event_id"],),
+    )
+    conn.commit()
+    stored = conn.execute(
+        "SELECT status FROM events WHERE id = ?", (result["event_id"],)
+    ).fetchone()
     schema = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'events'"
     ).fetchone()[0]
     conn.close()
-    assert stored == ("escalated_to_skippy",)
+    assert stored["status"] == "escalated_to_skippy"
     assert "escalated_to_daniel" in schema
 
 
-def test_continuation_after_skippy_escalation_routes_to_daniel(tmp_path, monkeypatch):
+def test_continuation_after_skippy_escalation_advises_daniel(tmp_path, monkeypatch):
+    """Once Hex has already routed a recurring class to Skippy (marked on the
+    event row by sentinel-decide, simulated here directly), the next
+    recurrence of that class advises Daniel instead -- the escalation ladder
+    still never notifies from inside this deterministic tool."""
     db = tmp_path / "events.db"
     _init_db(db)
     monkeypatch.setattr(process_event, "DB_PATH", db)
     sent = _patch_notify(monkeypatch)
 
+    last_event_id = None
     for minute in range(10):
-        process_event.process(
+        result = process_event.process(
             f"Sentinel alert at 2026-07-12T12:{minute:02d}:00Z. 1 anomalous log line.",
             occurred_at=f"2026-07-12T12:{minute:02d}:00Z",
             class_slug="unclassified_repeat_noise",
         )
+        last_event_id = result["event_id"]
+    assert result["recurrence_target"] == "skippy"
+
+    # Simulate sentinel-decide having routed that last event to Skippy.
+    conn = process_event._connect()
+    conn.execute(
+        "UPDATE events SET status = 'escalated_to_skippy' WHERE id = ?",
+        (last_event_id,),
+    )
+    conn.commit()
+    conn.close()
 
     result = process_event.process(
         "Sentinel alert at 2026-07-12T12:10:00Z. 1 anomalous log line.",
@@ -284,11 +309,15 @@ def test_continuation_after_skippy_escalation_routes_to_daniel(tmp_path, monkeyp
         class_slug="unclassified_repeat_noise",
     )
 
-    assert result["status"] == "escalated_to_daniel"
-    assert "routed event #11 to daniel" in sent[-1][0]
+    assert result["status"] == "awaiting_decision"
+    assert result["recurrence_target"] == "daniel"
+    assert sent == []
 
 
-def test_recurrence_alert_includes_explicit_eve_fields(tmp_path, monkeypatch):
+def test_recurrence_advisory_carries_eve_fields_for_the_caller(tmp_path, monkeypatch):
+    """process_event.py never composes or sends the notification itself --
+    it just stores the raw eve record on the payload so sentinel-decide can
+    render the explicit alert line when it decides to notify."""
     db = tmp_path / "events.db"
     _init_db(db)
     monkeypatch.setattr(process_event, "DB_PATH", db)
@@ -302,7 +331,7 @@ def test_recurrence_alert_includes_explicit_eve_fields(tmp_path, monkeypatch):
         "alert": {"signature": "ET SCAN RDP inbound"},
     }
 
-    for minute in range(10):
+    for minute in range(9):
         process_event.process(
             "Sentinel alert at 2026-07-12T12:00:00Z. 1 anomalous log line.",
             occurred_at=f"2026-07-12T12:{minute:02d}:00Z",
@@ -310,17 +339,17 @@ def test_recurrence_alert_includes_explicit_eve_fields(tmp_path, monkeypatch):
         )
 
     result = process_event.process(
-        "Sentinel alert at 2026-07-12T12:10:00Z. 1 anomalous log line.\n"
+        "Sentinel alert at 2026-07-12T12:09:30Z. 1 anomalous log line.\n"
         + json.dumps(eve),
-        occurred_at="2026-07-12T12:10:00Z",
+        occurred_at="2026-07-12T12:09:30Z",
         class_slug="unclassified_repeat_noise",
     )
 
-    assert result["status"] == "escalated_to_daniel"
-    assert "192.0.2.10:51514" in sent[-1][0]
-    assert "192.0.2.20:3389" in sent[-1][0]
-    assert "proto TCP" in sent[-1][0]
-    assert "ET SCAN RDP inbound" in sent[-1][0]
+    assert result["status"] == "awaiting_decision"
+    assert result["recurrence_target"] == "skippy"
+    assert result["payload"]["eve"]["src_ip"] == "192.0.2.10"
+    assert result["payload"]["eve"]["alert"]["signature"] == "ET SCAN RDP inbound"
+    assert sent == []
 
 
 # ---------------------------------------------------------------------------
