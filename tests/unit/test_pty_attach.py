@@ -10,6 +10,7 @@ conversation id its CLI cannot adopt.
 """
 
 import fcntl
+import json
 import os
 import pty
 import struct
@@ -445,3 +446,106 @@ class TestBilbyCodexThreads:
         client = TestClient(bilby.app)
         client.delete("/sessions/b5")
         assert "b5" not in bilby.THREADS
+
+
+class TestTuiFirstRunFlags:
+    """The interactive TUI's first-run gates, which ``claude -p`` skips.
+
+    A containerized mind authenticated by ``CLAUDE_CODE_OAUTH_TOKEN`` talks
+    fine over Telegram while its config dir has never completed onboarding or
+    trusted its workspace. Opening the same mind in the browser terminal used
+    to land on the theme-then-login wizard, which reads as "it's asking me to
+    log into my Anthropic account" — first-run state, not credentials.
+    """
+
+    def _read(self, cfg: Path) -> dict:
+        return json.loads((cfg / ".claude.json").read_text())
+
+    def test_seeds_onboarding_and_trust_for_the_workspace(self, tmp_path):
+        pty_attach.ensure_tui_first_run_flags(tmp_path, "/usr/src/app")
+
+        data = self._read(tmp_path)
+        assert data["hasCompletedOnboarding"] is True
+        entry = data["projects"]["/usr/src/app"]
+        assert entry["hasTrustDialogAccepted"] is True
+        assert entry["hasCompletedProjectOnboarding"] is True
+
+    def test_seeds_the_bypass_permissions_acceptance(self, tmp_path):
+        # Third gate: every mind spawns with bypassPermissions by design, and
+        # the TUI stops on an acceptance prompt for it that -p never shows.
+        pty_attach.ensure_tui_first_run_flags(tmp_path, "/usr/src/app")
+
+        settings = json.loads((tmp_path / "settings.json").read_text())
+        assert settings["skipDangerousModePermissionPrompt"] is True
+
+    def test_preserves_existing_settings(self, tmp_path):
+        (tmp_path / "settings.json").write_text(json.dumps({
+            "defaultMode": "bypassPermissions",
+            "hooks": {"Stop": [{"command": "auto_remember.sh"}]},
+        }))
+
+        pty_attach.ensure_tui_first_run_flags(tmp_path, "/usr/src/app")
+
+        settings = json.loads((tmp_path / "settings.json").read_text())
+        assert settings["defaultMode"] == "bypassPermissions"
+        assert settings["hooks"] == {"Stop": [{"command": "auto_remember.sh"}]}
+        assert settings["skipDangerousModePermissionPrompt"] is True
+
+    def test_preserves_everything_else_in_the_config(self, tmp_path):
+        # The file is the harness's own live config — seeding a flag must not
+        # cost the mind its oauth account, tips history or project entries.
+        (tmp_path / ".claude.json").write_text(json.dumps({
+            "oauthAccount": {"emailAddress": "daniel.stewart77@gmail.com"},
+            "projects": {"/other": {"allowedTools": ["Bash"]}},
+        }))
+
+        pty_attach.ensure_tui_first_run_flags(tmp_path, "/usr/src/app")
+
+        data = self._read(tmp_path)
+        assert data["oauthAccount"] == {"emailAddress": "daniel.stewart77@gmail.com"}
+        assert data["projects"]["/other"] == {"allowedTools": ["Bash"]}
+        assert data["projects"]["/usr/src/app"]["hasTrustDialogAccepted"] is True
+
+    def test_already_seeded_config_is_left_untouched(self, tmp_path):
+        seeded = {
+            "hasCompletedOnboarding": True,
+            "projects": {"/usr/src/app": {
+                "hasTrustDialogAccepted": True,
+                "hasCompletedProjectOnboarding": True,
+            }},
+        }
+        path = tmp_path / ".claude.json"
+        path.write_text(json.dumps(seeded))
+        before = path.stat().st_mtime_ns
+
+        pty_attach.ensure_tui_first_run_flags(tmp_path, "/usr/src/app")
+
+        assert path.stat().st_mtime_ns == before  # no rewrite at all
+
+    def test_a_corrupt_config_is_left_alone_rather_than_clobbered(self, tmp_path):
+        path = tmp_path / ".claude.json"
+        path.write_text("{not json")
+
+        pty_attach.ensure_tui_first_run_flags(tmp_path, "/usr/src/app")
+
+        assert path.read_text() == "{not json"
+
+    def test_open_pty_process_seeds_the_config_dir_it_is_given(self, tmp_path):
+        # Every mind's _spawn_pty routes through here, so seeding at this
+        # chokepoint is what makes the fix apply to all of them at once.
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        proc, master_fd = pty_attach.open_pty_process(
+            ["true"],
+            env={"CLAUDE_CONFIG_DIR": str(tmp_path)},
+            cwd=str(workspace),
+            cols=80,
+            rows=24,
+        )
+        try:
+            data = self._read(tmp_path)
+            assert data["hasCompletedOnboarding"] is True
+            assert data["projects"][str(workspace)]["hasTrustDialogAccepted"] is True
+        finally:
+            proc.wait()
+            os.close(master_fd)
