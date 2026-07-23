@@ -196,3 +196,4 @@ stories/
 # Personal reminders (local only)
 reminders/
 .hermes-skills.project/
+.tmp_sshprobe/
