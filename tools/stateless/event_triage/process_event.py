@@ -14,10 +14,13 @@ session forwards the alert content to this tool, which:
      been recurring. Rewriting a class's disposition is a deliberate act
      (see sentinel-decide) — POST a new/narrower rule, don't let a
      background counter overrule it.
-  4. Only when NO approved rule matches does the recurrence gate run: an
-     unclassified / undecided event that keeps repeating without anyone
-     ever writing a rule for it pages Skippy, then Daniel, so it does not
-     sit in awaiting_decision forever unnoticed.
+  4. Only when NO approved rule matches does the recurrence tracker run.
+     It never notifies anyone — it computes how hard the class is
+     recurring and returns an advisory `recurrence_target` ("skippy" /
+     "daniel" / null) in the JSON so Hex's sentinel-triage skill knows
+     the investigate + decide legs are mandatory this turn. The decision
+     — silence with a rule, or page with a verdict — belongs to
+     sentinel-decide, the only place a notification is ever sent.
   5. Executes the action (notify_daniel template substitution and a
      subprocess call into tools/stateless/notify/notify.py; record_only
      is a no-op; escalate_for_review pages via Telegram with the
@@ -25,6 +28,12 @@ session forwards the alert content to this tool, which:
   6. Updates the event row's status and response_rule_id.
 
 Prints a one-line JSON summary the session can forward as its broker reply.
+
+The tool also carries Hex's pen: `process_event.py add-rule` writes an
+approved auto-apply response_rule directly to the local events.db, so
+sentinel-decide can silence a class deterministically without any network
+dependency (the old flow pointed at an event-triage HTTP API that is not
+reachable from the Sentinel host).
 
 This is the merged alert-compose code from the Skippy repo
 (hive_mind_skippy, tools/stateless/event_triage/process_event.py). The
@@ -614,19 +623,21 @@ def _touch_rule(conn: sqlite3.Connection, rule_id: int) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Recurrence gate
+# Recurrence tracker (advisory only)
 # ---------------------------------------------------------------------------
 #
 # For a class with NO approved auto-apply rule, an event can otherwise sit in
 # awaiting_decision forever without anyone ever noticing it needs a decision.
-# The recurrence gate exists only for that gap: it pages Skippy, then Daniel,
-# when an undecided class keeps recurring, so it does not go unaddressed
-# indefinitely. It must never run for a class that already has an approved
-# rule — see process() below, which only reaches this gate when _find_rule
-# returned None. A record_only rule is a deliberate decision that a class is
-# routine; a background counter must not be able to override that decision
-# just because the class is old or fires often. Tightening or replacing that
-# decision is what sentinel-decide is for.
+# The tracker computes how hard such a class is recurring and surfaces an
+# advisory target ("skippy" / "daniel" / None) in the result JSON. It NEVER
+# sends a notification itself: paging from inside this deterministic tool is
+# what turned Hex into a dumb relay — the alert reached Daniel before Hex's
+# investigate/decide legs ever ran, and triage read the escalated status as
+# "already handled". The advisory instead makes those legs mandatory for the
+# session (see sentinel-triage), and sentinel-decide remains the only place a
+# notification is ever sent. It also never runs for a class that already has
+# an approved rule — see process() below, which only consults it when
+# _find_rule returned None.
 
 
 def _parse_utc(value: str) -> _dt.datetime:
@@ -697,28 +708,6 @@ def _recurrence_target(meta: dict[str, Any]) -> str | None:
     ):
         return "skippy"
     return None
-
-
-def _send_recurrence_alert(
-    target: str,
-    class_row: sqlite3.Row,
-    payload: dict[str, Any],
-    event_id: int,
-) -> tuple[str, str]:
-    meta = payload["recurrence"]
-    alert_line = _alert_line_from_payload(payload)
-    message = (
-        f"Sentinel recurrence gate routed event #{event_id} to {target}. "
-        f"Class {class_row['slug']} has {meta['window_count']} repeat(s) in "
-        f"{meta['window_minutes']} minutes, {meta['total_count']} total, first seen "
-        f"{meta['first_seen']}, last seen {meta['last_seen']}. "
-        f"Excerpt: {payload.get('excerpt', '')[:240]}"
-    )
-    if alert_line:
-        message = f"{alert_line}\n{message}"
-    ok, detail = _send_notify(message, ["telegram", "file"])
-    status = "escalated_to_daniel" if target == "daniel" else "escalated_to_skippy"
-    return status, f"recurrence_gate target={target} ok={ok} detail={detail}"
 
 
 # ---------------------------------------------------------------------------
@@ -876,10 +865,11 @@ def process(
             (json.dumps(payload), event_id),
         )
 
-        # An approved auto-apply rule always wins. The recurrence gate only
-        # ever runs for classes nobody has made a call on yet — see the
-        # module docstring and the comment above _parse_utc.
+        # An approved auto-apply rule always wins. The recurrence tracker is
+        # advisory data for classes nobody has made a call on yet — it never
+        # notifies (see the tracker comment block above _parse_utc).
         rule = _find_rule(conn, int(class_row["id"]), payload)
+        recurrence_target: str | None = None
         if rule is not None:
             status, log = execute_action(rule, payload, class_row, event_id)
             _mark_event(conn, event_id, status, int(rule["id"]), log)
@@ -887,16 +877,11 @@ def process(
             rule_id = int(rule["id"])
         else:
             recurrence_target = _recurrence_target(recurrence)
+            status, log = escalate_no_rule(class_row, payload, event_id)
             if recurrence_target is not None:
-                status, log = _send_recurrence_alert(
-                    recurrence_target, class_row, payload, event_id
-                )
-                _mark_event(conn, event_id, status, None, log)
-                rule_id = None
-            else:
-                status, log = escalate_no_rule(class_row, payload, event_id)
-                _mark_event(conn, event_id, status, None, log)
-                rule_id = None
+                log += f" recurrence_target={recurrence_target}"
+            _mark_event(conn, event_id, status, None, log)
+            rule_id = None
         conn.commit()
     finally:
         conn.close()
@@ -909,9 +894,155 @@ def process(
         "rule_id": rule_id,
         "status": status,
         "action_log": log,
+        "recurrence_target": recurrence_target,
         "payload": payload,
         "classify_meta": classify_meta,
     }
+
+
+# ---------------------------------------------------------------------------
+# add-rule — Hex's pen
+# ---------------------------------------------------------------------------
+#
+# sentinel-decide silences a class by writing an approved auto-apply rule.
+# The old skill text POSTed to the event-triage HTTP API, which is not
+# reachable from the Sentinel host — so Hex could decide but never act.
+# This subcommand writes the rule directly to the local events.db instead.
+
+_VALID_ACTION_KINDS = ("record_only", "notify_daniel", "escalate_for_review")
+
+
+def _condition_is_valid(condition_expr: str | None) -> bool:
+    """Mirror _condition_matches's grammar so a rule that can never match is
+    rejected at write time instead of failing closed forever at run time."""
+    if condition_expr is None:
+        return True
+    expr = condition_expr.strip()
+    if expr in ("", "always"):
+        return True
+    if expr.startswith("src_in:"):
+        chunks = [c.strip() for c in expr[len("src_in:"):].split(",") if c.strip()]
+        if not chunks:
+            return False
+        for chunk in chunks:
+            try:
+                ipaddress.ip_network(chunk, strict=False)
+            except ValueError:
+                return False
+        return True
+    if expr.startswith("excerpt_contains:"):
+        return bool(expr[len("excerpt_contains:"):].strip())
+    return False
+
+
+def add_rule(
+    class_slug: str,
+    name: str,
+    action_kind: str = "record_only",
+    condition_expr: str | None = None,
+    action_params: dict[str, Any] | None = None,
+    authorized_by: str = "hex",
+) -> dict[str, Any]:
+    if action_kind not in _VALID_ACTION_KINDS:
+        return {"ok": False, "error": f"action_kind must be one of {_VALID_ACTION_KINDS}"}
+    if not _condition_is_valid(condition_expr):
+        return {
+            "ok": False,
+            "error": "condition_expr must be empty/'always', 'src_in:<cidr>[,...]', "
+            "or 'excerpt_contains:<substr>' — anything else fails closed at match time",
+        }
+    conn = _connect()
+    try:
+        class_row = _get_class_by_slug(conn, class_slug)
+        if class_row is None:
+            return {"ok": False, "error": f"unknown class slug '{class_slug}'"}
+        existing = conn.execute(
+            """
+            SELECT id FROM response_rules
+             WHERE event_class_id = ? AND action_kind = ?
+               AND COALESCE(condition_expr, '') = COALESCE(?, '')
+               AND approval_state = 'approved' AND auto_apply = 1
+            """,
+            (int(class_row["id"]), action_kind, condition_expr),
+        ).fetchone()
+        if existing is not None:
+            return {
+                "ok": True,
+                "rule_id": int(existing["id"]),
+                "created": False,
+                "detail": "identical approved rule already exists",
+            }
+        # Older local stores lack the name/authorized_by columns the served
+        # API's schema has; include them only where they exist.
+        cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(response_rules)")
+        }
+        params_col = "action_params_json" if "action_params_json" in cols else "action_params"
+        fields = ["event_class_id", "approval_state", "auto_apply", "condition_expr", "action_kind", params_col]
+        values: list[Any] = [
+            int(class_row["id"]),
+            "approved",
+            1,
+            condition_expr,
+            action_kind,
+            json.dumps(action_params or {}),
+        ]
+        if "name" in cols:
+            fields.append("name")
+            values.append(name[:120])
+        if "authorized_by" in cols:
+            fields.append("authorized_by")
+            values.append(authorized_by)
+        placeholders = ", ".join("?" for _ in fields)
+        cur = conn.execute(
+            f"INSERT INTO response_rules ({', '.join(fields)}) VALUES ({placeholders})",
+            values,
+        )
+        conn.commit()
+        return {
+            "ok": True,
+            "rule_id": int(cur.lastrowid),
+            "created": True,
+            "class_slug": class_slug,
+            "action_kind": action_kind,
+            "condition_expr": condition_expr,
+        }
+    finally:
+        conn.close()
+
+
+def _add_rule_main(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(
+        prog="process_event.py add-rule",
+        description="Write an approved auto-apply response rule to the local events.db",
+    )
+    p.add_argument("--class-slug", required=True)
+    p.add_argument("--name", required=True, help="Short human-readable reason for the rule.")
+    p.add_argument("--action-kind", default="record_only", choices=_VALID_ACTION_KINDS)
+    p.add_argument(
+        "--condition",
+        default=None,
+        help="Optional scope: 'src_in:<cidr>[,...]' or 'excerpt_contains:<substr>'. "
+        "Omit for an unconditional rule.",
+    )
+    p.add_argument("--params-json", default="{}", help="action_params as a JSON object.")
+    p.add_argument("--authorized-by", default="hex")
+    args = p.parse_args(argv)
+    try:
+        params = json.loads(args.params_json)
+    except ValueError:
+        print(json.dumps({"ok": False, "error": "--params-json is not valid JSON"}))
+        return 1
+    result = add_rule(
+        class_slug=args.class_slug,
+        name=args.name,
+        action_kind=args.action_kind,
+        condition_expr=args.condition,
+        action_params=params,
+        authorized_by=args.authorized_by,
+    )
+    print(json.dumps(result, default=str))
+    return 0 if result.get("ok") else 1
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -935,6 +1066,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["add-rule"]:
+        return _add_rule_main(argv[1:])
     args = _parse_args(argv)
     content = args.content if args.content is not None else sys.stdin.read()
     if not content.strip():
