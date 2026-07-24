@@ -1,0 +1,203 @@
+"""The tile's page keys have to reach the program, not the viewport.
+
+Claude's TUI takes the alternate screen buffer on startup (it emits
+ESC[?1049h before its first paint) and turns on SGR mouse reporting. An
+alternate buffer has no scrollback: xterm's scrollLines moves nothing and
+the viewport has no overflow to drag, so PgUp/PgDn appeared to do nothing
+at all and the conversation history stayed unreachable on a phone. The
+history lives in the program's own scroll region, so the page keys and
+finger drags have to go down the wire.
+
+A real browser, because the thing under test is xterm's buffer state
+after a real escape sequence and the bytes a real click puts on the
+socket.
+"""
+
+import json
+import os
+import socket
+import sys
+import tempfile
+import threading
+import time
+
+import pytest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
+playwright_api = pytest.importorskip(
+    "playwright.sync_api", reason="playwright is not installed"
+)
+
+import auth  # noqa: E402
+import main as main_mod  # noqa: E402
+
+PHONE = {"width": 412, "height": 780}
+SESSIONS = [
+    {
+        "id": "sess-1",
+        "mind_id": "mind-uuid",
+        "mind_name": "skippy",
+        "status": "running",
+        "short_id": "sess-1",
+    }
+]
+# What the TUI actually sends first: alternate buffer, cleared, with SGR
+# mouse reporting on. Captured from a real `claude` under a pty.
+ENTER_ALT_SCREEN = "\x1b[?1049h\x1b[2J\x1b[H\x1b[?1000h\x1b[?1002h\x1b[?1006h"
+PGUP = "\x1b[5~"
+PGDN = "\x1b[6~"
+
+
+@pytest.fixture(scope="module")
+def live_app():
+    """The real app on a real port — the page has to load its own assets."""
+    tmp = tempfile.mkdtemp()
+    os.environ["HIVE_DB_PATH"] = os.path.join(tmp, "stb.db")
+    os.environ["HIVE_SECRET_KEY"] = "browser-test-secret"
+
+    import uvicorn
+
+    user = auth.create_user("browser-test", "browser-pass", is_admin=True, replace=True)
+    token = auth.create_session_token(user)
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+
+    server = uvicorn.Server(
+        uvicorn.Config(main_mod.app, host="127.0.0.1", port=port, log_level="error")
+    )
+    threading.Thread(target=server.run, daemon=True).start()
+    for _ in range(100):
+        try:
+            socket.create_connection(("127.0.0.1", port), 0.2).close()
+            break
+        except OSError:
+            time.sleep(0.1)
+    else:
+        pytest.skip("app did not come up")
+
+    yield f"http://127.0.0.1:{port}", token
+    server.should_exit = True
+
+
+def _open_tile(page, base, greeting):
+    """Mount one tile whose socket opens with `greeting`, recording sends."""
+    sent = []
+
+    page.route(
+        "**/api/terminal/sessions*",
+        lambda r: r.fulfill(
+            status=200, content_type="application/json", body=json.dumps(SESSIONS)
+        ),
+    )
+    page.route(
+        "**/api/terminal/labels*",
+        lambda r: r.fulfill(status=200, content_type="application/json", body="{}"),
+    )
+
+    def handle_ws(ws):
+        ws.on_message(
+            lambda m: sent.append(m if isinstance(m, str) else m.decode("utf8", "replace"))
+        )
+        ws.send(greeting)
+
+    page.route_web_socket("**/api/terminal/attach/**", handle_ws)
+    page.goto(base + "/terminal")
+    page.wait_for_selector(".term-card", timeout=15000)
+    page.click(".term-card")
+    page.wait_for_selector(".term-panel .xterm-viewport", timeout=15000)
+    page.wait_for_timeout(600)
+    return sent
+
+
+@pytest.fixture()
+def phone(live_app):
+    base, token = live_app
+    with playwright_api.sync_playwright() as p:
+        try:
+            browser = p.chromium.launch()
+        except Exception as exc:  # no browser binary installed
+            pytest.skip(f"chromium unavailable: {exc}")
+        ctx = browser.new_context(
+            viewport=PHONE, device_scale_factor=2.625, is_mobile=True, has_touch=True
+        )
+        ctx.add_cookies(
+            [
+                {
+                    "name": auth.SESSION_COOKIE_NAME,
+                    "value": token,
+                    "domain": "127.0.0.1",
+                    "path": "/",
+                }
+            ]
+        )
+        yield ctx.new_page(), base
+        browser.close()
+
+
+def test_a_program_on_the_alternate_screen_gets_the_page_keys(phone):
+    page, base = phone
+    sent = _open_tile(page, base, ENTER_ALT_SCREEN + "the tail of a long reply")
+    sent.clear()
+
+    page.click('#term-mobile-toolbar button[data-scroll="-1"]')
+    page.click('#term-mobile-toolbar button[data-scroll="1"]')
+    page.wait_for_timeout(300)
+
+    assert "".join(sent) == PGUP + PGDN
+
+
+def test_a_finger_drag_becomes_the_wheel_reports_the_tui_asked_for(phone):
+    page, base = phone
+    sent = _open_tile(page, base, ENTER_ALT_SCREEN + "the tail of a long reply")
+    sent.clear()
+
+    box = page.locator(".term-xterm").bounding_box()
+    x = box["x"] + box["width"] / 2
+    y = box["y"] + box["height"] / 2
+    page.touchscreen.tap(x, y)  # a tap is an ordinary click, never a scroll
+    page.wait_for_timeout(150)
+    tap = "".join(sent)
+    assert "\x1b[<64;" not in tap and "\x1b[<65;" not in tap
+    sent.clear()
+
+    page.evaluate(
+        """([x, y]) => {
+            const host = document.querySelector('.term-xterm');
+            const touch = (cx, cy) => new Touch({identifier: 1, target: host, clientX: cx, clientY: cy});
+            const fire = (type, cx, cy) => host.dispatchEvent(new TouchEvent(type, {
+                bubbles: true, cancelable: true,
+                touches: type === 'touchend' ? [] : [touch(cx, cy)],
+                changedTouches: [touch(cx, cy)],
+            }));
+            fire('touchstart', x, y);
+            fire('touchmove', x, y + 80);   // dragging down = back in history
+            fire('touchend', x, y + 80);
+        }""",
+        [x, y],
+    )
+    page.wait_for_timeout(200)
+
+    wheel = "".join(sent)
+    assert wheel.count("\x1b[<64;") == 3  # 80px at 24px a notch
+    assert "\x1b[<65;" not in wheel
+
+
+def test_a_tile_with_its_own_scrollback_still_scrolls_locally(phone):
+    # The normal buffer is the tile's to scroll, and pushing page keys at
+    # a program that never asked for them would be a regression.
+    page, base = phone
+    lines = "".join("line %03d\r\n" % i for i in range(200))
+    sent = _open_tile(page, base, lines)
+    sent.clear()
+
+    before = page.evaluate("() => document.querySelector('.xterm-viewport').scrollTop")
+    page.click('#term-mobile-toolbar button[data-scroll="-1"]')
+    page.wait_for_timeout(300)
+    after = page.evaluate("() => document.querySelector('.xterm-viewport').scrollTop")
+
+    assert after < before
+    assert sent == []

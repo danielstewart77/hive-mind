@@ -1,0 +1,1587 @@
+/* ============================================================
+   PALETTE ARCHIVE — Earthy Greens (restore Oct/Nov)
+   body background:  #ACE1AF (celadon)
+   nav/header:       #2E8B57 (sea green)
+   content boxes:    #2d2d2d (charcoal)
+   accent glow:      #4ee8fc / #21d4fd (warm cyan)
+   article links:    #4ee8fc
+   footer bg:        #0f3460
+   button:           #21d4fd
+   login container:  #39714c
+   login button bg:  #0f3460
+   thoughts-title:   #2d2d2d
+   back-link final:  #2d2d2d
+   ============================================================ */
+
+/* ============================================================
+   PALETTE — Summer Techy 2026
+   background:   #dce8f0  ice blue
+   hex pattern:  #b8cfe0  slightly darker ice blue
+   nav:          #162030  deep navy
+   content:      rgba(10, 14, 25, 0.90)  near-black, 10% transparent
+   accent:       #38bdf8  sky blue
+   accent glow:  #38bdf8 / #0ea5e9
+   ============================================================ */
+
+:root {
+    --nav-h: 56px;
+}
+
+/* Enhanced Global Styles */
+body, html {
+    height: 90%;
+    margin: 0;
+    font-family: 'Fira Code', 'Consolas', 'Courier New', monospace;
+    font-size: small;
+    background-color: #dce8f0;
+    background-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20width%3D%2756%27%20height%3D%27100%27%3E%0A%20%20%3Cpath%20d%3D%27M28%2066L0%2050L0%2016L28%200L56%2016L56%2050L28%2066L28%20100M56%20100L56%2050M0%20100L0%2050%27%0A%20%20%20%20%20%20%20%20stroke%3D%27%23b8cfe0%27%20stroke-width%3D%271%27%20fill%3D%27none%27%20opacity%3D%270.6%27%2F%3E%0A%20%20%3Cpath%20d%3D%27M0%2016L12%2016L12%2033L44%2033L44%2016L56%2016%27%0A%20%20%20%20%20%20%20%20stroke%3D%27%239ab8cc%27%20stroke-width%3D%270.8%27%20fill%3D%27none%27%2F%3E%0A%20%20%3Cpath%20d%3D%27M28%200L28%2012%27%0A%20%20%20%20%20%20%20%20stroke%3D%27%239ab8cc%27%20stroke-width%3D%270.8%27%20fill%3D%27none%27%2F%3E%0A%20%20%3Cpath%20d%3D%27M28%2033L28%2050L14%2050L14%2066L28%2066%27%0A%20%20%20%20%20%20%20%20stroke%3D%27%239ab8cc%27%20stroke-width%3D%270.8%27%20fill%3D%27none%27%2F%3E%0A%20%20%3Cpath%20d%3D%27M44%2033L44%2050L56%2050%27%0A%20%20%20%20%20%20%20%20stroke%3D%27%239ab8cc%27%20stroke-width%3D%270.8%27%20fill%3D%27none%27%2F%3E%0A%20%20%3Cpath%20d%3D%27M0%2050L12%2050L12%2066L28%20100%27%0A%20%20%20%20%20%20%20%20stroke%3D%27%239ab8cc%27%20stroke-width%3D%270.7%27%20fill%3D%27none%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%2728%27%20cy%3D%270%27%20%20r%3D%272.2%27%20fill%3D%27%239ab8cc%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%2756%27%20cy%3D%2716%27%20r%3D%272.2%27%20fill%3D%27%239ab8cc%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%2756%27%20cy%3D%2750%27%20r%3D%272.2%27%20fill%3D%27%239ab8cc%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%2728%27%20cy%3D%2766%27%20r%3D%272.2%27%20fill%3D%27%239ab8cc%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%270%27%20%20cy%3D%2750%27%20r%3D%272.2%27%20fill%3D%27%239ab8cc%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%270%27%20%20cy%3D%2716%27%20r%3D%272.2%27%20fill%3D%27%239ab8cc%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%2728%27%20cy%3D%27100%27%20r%3D%272.2%27%20fill%3D%27%239ab8cc%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%2712%27%20cy%3D%2716%27%20r%3D%271.4%27%20fill%3D%27%239ab8cc%27%20opacity%3D%270.8%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%2744%27%20cy%3D%2716%27%20r%3D%271.4%27%20fill%3D%27%239ab8cc%27%20opacity%3D%270.8%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%2728%27%20cy%3D%2712%27%20r%3D%271.4%27%20fill%3D%27%239ab8cc%27%20opacity%3D%270.8%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%2712%27%20cy%3D%2733%27%20r%3D%271.4%27%20fill%3D%27%239ab8cc%27%20opacity%3D%270.8%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%2744%27%20cy%3D%2733%27%20r%3D%271.4%27%20fill%3D%27%239ab8cc%27%20opacity%3D%270.8%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%2728%27%20cy%3D%2733%27%20r%3D%272%27%20%20%20fill%3D%27%239ab8cc%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%2728%27%20cy%3D%2750%27%20r%3D%271.4%27%20fill%3D%27%239ab8cc%27%20opacity%3D%270.8%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%2714%27%20cy%3D%2750%27%20r%3D%271.4%27%20fill%3D%27%239ab8cc%27%20opacity%3D%270.8%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%2744%27%20cy%3D%2750%27%20r%3D%271.4%27%20fill%3D%27%239ab8cc%27%20opacity%3D%270.8%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%2714%27%20cy%3D%2766%27%20r%3D%271.4%27%20fill%3D%27%239ab8cc%27%20opacity%3D%270.8%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%2712%27%20cy%3D%2750%27%20r%3D%271.4%27%20fill%3D%27%239ab8cc%27%20opacity%3D%270.8%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%2712%27%20cy%3D%2766%27%20r%3D%271.4%27%20fill%3D%27%239ab8cc%27%20opacity%3D%270.8%27%2F%3E%0A%3C%2Fsvg%3E");
+    color: #e7e7de;
+    line-height: 1.6;
+    margin-bottom: 15px;
+    padding-top: var(--nav-h);
+}
+
+/* Enhanced Glow Effect */
+.glow {
+    text-shadow: 0 0 5px #38bdf8, 0 0 10px #38bdf8, 0 0 15px #0ea5e9;
+    padding-top: 2px;
+    padding-bottom: 2px;
+}
+
+/* Site title in nav */
+nav ul li.site-title a {
+    font-size: 1.1rem;
+    font-weight: bold;
+    margin-right: 1rem;
+    letter-spacing: 0.03em;
+}
+
+/* Main Content Styling */
+/* Content wrapper — provides consistent 2rem gutters for all pages */
+.content-wrapper {
+    padding: 0 2rem;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+main {
+    display: block;
+    padding: 0;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+/* Footer Styling */
+footer {
+    text-align: center;
+    padding: 0px;
+    color: #e7e7de;
+    margin-bottom: 10px;
+}
+
+/* Button Styling */
+button {
+    padding: 10px 20px;
+    border: none;
+    border-radius: 5px;
+    background-color: #38bdf8;
+    color: white;
+    cursor: pointer;
+    transition: background-color 0.3s;
+}
+
+button:hover {
+    background-color: #60cbf8;
+}
+
+/* Grid Layout for Buttons */
+.grid-container {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 15px;
+    justify-content: center;
+    align-items: center;
+    margin: 20px auto;
+    width: 80%;
+}
+
+.grid-item-link {
+    text-decoration: none;
+    color: inherit;
+    display: block;
+}
+
+.linkedin-inline-link {
+    display: inline;
+    opacity: 0.85;
+    transition: opacity 0.2s;
+    text-decoration: none;
+}
+
+.linkedin-inline-link:hover {
+    opacity: 1;
+}
+
+.grid-item {
+    background-color: rgba(10, 14, 25, 0.90);
+    color: white;
+    padding: 20px;
+    height: 150px;
+    text-align: center;
+    border-radius: 10px;
+    cursor: pointer;
+    position: relative;
+    transition: transform 0.3s ease-in-out;
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.5);
+}
+
+.grid-item:hover {
+    transform: scale(1.05);
+}
+
+.hover-image {
+    opacity: 0;
+    transition: opacity 0.3s ease-in-out;
+    position: absolute;
+    top: -100px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 100px;
+    height: 100px;
+    border-radius: 8px;
+    pointer-events: none;
+}
+
+.grid-item:hover .hover-image {
+    opacity: 1;
+}
+
+/* Navigation Bar Styling */
+nav {
+    background-color: #162030;
+    padding: 0.5rem 2rem;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 100;
+    min-height: var(--nav-h);
+    box-sizing: border-box;
+}
+
+nav ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    justify-content: flex-start;
+    align-items: center;
+    font-size: medium;
+    gap: 20px;
+}
+
+nav ul li a {
+    color: #e7e7de;
+    text-decoration: none;
+    transition: color 0.3s;
+    font-family: 'Fira Code', monospace;
+}
+
+nav ul li a:hover {
+    color: #38bdf8;
+}
+
+/* Introduction Section Styling */
+#introduction {
+    text-align: center;
+    padding: 20px;
+    background-color: rgba(10, 14, 25, 0.90);
+    border-radius: 10px;
+    margin: 20px 0;
+}
+
+#introduction h2 {
+    color: #38bdf8;
+    margin-bottom: 15px;
+}
+
+.applications {
+    display: flex;
+    justify-content: space-around;
+    margin-top: 20px;
+}
+
+.app {
+    background-color: rgba(255, 255, 255, 0.1);
+    padding: 15px;
+    border-radius: 8px;
+    transition: transform 0.3s ease-in-out;
+}
+
+.app:hover {
+    transform: scale(1.1);
+}
+
+.app h3 {
+    color: #38bdf8;
+}
+
+.app p {
+    color: #e7e7de;
+}
+
+/* Blog style*/
+/* Terminal-Style Intro Box */
+.terminal-box {
+    background-color: rgba(10, 14, 25, 0.90);
+    color: #e7e7de;
+    padding: 20px;
+    border-radius: 10px;
+    font-family: 'Courier New', Courier, 'Lucida Console', monospace;
+    margin: 20px 0;
+    width: 100%;
+    box-sizing: border-box;
+    line-height: 1.5;
+}
+
+/* Thoughts Section */
+.thoughts-title {
+    font-size: 1.8rem;
+    text-align: center;
+    margin: 40px 0 20px;
+    color: #162030;
+}
+
+/* Article List */
+.article-list {
+    list-style: none;
+    padding: 0;
+    width: 100%;
+    margin: 0;
+}
+
+.article-list li {
+    margin: 10px 0;
+}
+
+.article-list a {
+    background-color: #f3e8a0;
+    color: #2d2d2d;
+    padding: 3px 6px;
+    border-radius: 3px;
+    text-decoration: none;
+    font-family: monospace;
+    transition: background-color 0.2s;
+}
+
+.article-list a:hover {
+    background-color: #f7eeae;
+}
+
+.new-tag {
+    font-size: 0.8rem;
+    color: #ccc;
+    font-style: italic;
+    margin-left: 6px;
+}
+
+/* Article Page */
+.article-container {
+    width: 100%;
+    margin: 5px 0;
+    padding: 15px;
+    background-color: rgba(10, 14, 25, 0.90);
+    border-radius: 10px;
+    box-sizing: border-box;
+}
+
+.article-container h1 {
+    color: #38bdf8;
+    margin-bottom: 10px;
+}
+
+.article-date {
+    font-size: 0.9rem;
+    color: #ccc;
+    margin-bottom: 5px;
+}
+
+.back-link {
+    display: block;
+    text-align: center;
+    font-size: medium;
+    font-weight: bold;
+    margin-top: 5px;
+    color: #38bdf8;
+    text-decoration: none;
+}
+
+.back-link:hover {
+    text-decoration: underline;
+}
+
+.markdown-style {
+    font-family: 'Courier New', monospace;
+    background-color: rgba(10, 14, 25, 0.90);
+    border: 1px solid #2a3a4a;
+    padding: 1rem;
+    border-radius: 8px;
+    white-space: pre-wrap;
+    overflow-x: auto;
+}
+
+.markdown-style code {
+    display: block;
+    background: rgba(10, 14, 25, 0.90);
+    padding: 0.5em;
+    border-radius: 4px;
+    margin: 1em 0;
+    font-family: inherit;
+}
+
+.login-container {
+    background-color: #162030;
+    padding: 2rem;
+    border-radius: 10px;
+    box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+    color: #fff;
+    width: 320px;
+}
+
+label {
+    display: block;
+    margin-bottom: 0.5rem;
+    font-weight: bold;
+}
+
+input[type="text"],
+input[type="password"] {
+    width: 100%;
+    padding: 0.5rem;
+    margin-bottom: 1rem;
+    border: none;
+    border-radius: 5px;
+}
+
+nav ul li.user-controls {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    padding-top: 2px;
+    position: relative;
+}
+
+.login-icon-link,
+.user-menu-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 38px;
+    height: 38px;
+    border-radius: 999px;
+    background: transparent;
+    border: 1px solid rgba(56, 189, 248, 0.28);
+    color: #e7e7de;
+    text-decoration: none;
+    padding: 0;
+    transition: border-color 0.2s ease, background-color 0.2s ease, transform 0.2s ease;
+}
+
+.login-icon-link:hover,
+.user-menu-button:hover,
+.user-menu.open .user-menu-button {
+    border-color: #38bdf8;
+    background: rgba(56, 189, 248, 0.12);
+    transform: translateY(-1px);
+}
+
+.user-menu {
+    position: relative;
+}
+
+.user-avatar {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    display: block;
+    object-fit: cover;
+    border: 1px solid rgba(56, 189, 248, 0.35);
+}
+
+.user-menu-button {
+    cursor: pointer;
+}
+
+.user-menu-panel {
+    position: absolute;
+    top: calc(100% + 0.55rem);
+    right: 0;
+    min-width: 170px;
+    background: rgba(10, 14, 25, 0.98);
+    border: 1px solid rgba(56, 189, 248, 0.18);
+    border-radius: 10px;
+    padding: 0.45rem;
+    box-shadow: 0 16px 30px rgba(7, 9, 15, 0.32);
+    display: none;
+    z-index: 40;
+}
+
+.user-menu.open .user-menu-panel {
+    display: block;
+}
+
+.user-menu-name {
+    color: #8fb9cf;
+    font-size: 0.72rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 0.45rem 0.55rem 0.55rem;
+}
+
+.user-menu-item {
+    width: 100%;
+    background: transparent;
+    color: #e7e7de;
+    text-align: left;
+    border-radius: 8px;
+    padding: 0.7rem 0.75rem;
+    font-family: 'Fira Code', monospace;
+    font-size: 0.9rem;
+}
+
+.user-menu-item:hover {
+    background: rgba(56, 189, 248, 0.12);
+}
+
+.article-container a {
+    color: #38bdf8;
+    text-shadow: 0 0 5px #38bdf8, 0 0 10px #0ea5e9;
+    text-decoration: underline;
+}
+
+.article-container a:hover {
+    color: #60cbf8;
+}
+
+.article-container img {
+    display: inline-block;
+    max-width: 360px;
+    width: 100%;
+    height: auto;
+    margin: 0.5rem 0.5rem 0.5rem 0;
+    vertical-align: top;
+}
+
+/* ============================================================
+   NAV — INNER LAYOUT (desktop & mobile shared structure)
+   ============================================================ */
+
+.nav-inner {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    width: 100%;
+}
+
+#nav-links {
+    flex: 1;
+}
+
+/* Brand — always visible */
+.nav-brand {
+    font-size: 1.1rem;
+    font-weight: bold;
+    letter-spacing: 0.03em;
+    color: #e7e7de;
+    text-decoration: none;
+    margin-right: 1rem;
+    font-family: 'Fira Code', monospace;
+    flex-shrink: 0;
+}
+
+.nav-brand:hover {
+    color: #38bdf8;
+}
+
+/* Hamburger button — hidden on desktop */
+.nav-toggle {
+    display: none;
+    background: none;
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    color: #e7e7de;
+    font-size: 1.2rem;
+    padding: 4px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    margin-left: auto;
+    line-height: 1;
+    transition: background-color 0.2s, color 0.2s, border-color 0.2s;
+}
+
+.nav-toggle:hover {
+    background-color: rgba(255, 255, 255, 0.1);
+    color: #38bdf8;
+    border-color: #38bdf8;
+}
+
+/* ============================================================
+   RESPONSIVE — TABLET (≤1024px)
+   ============================================================ */
+
+@media (max-width: 1024px) {
+    .grid-container {
+        grid-template-columns: repeat(2, 1fr);
+        width: 100%;
+    }
+}
+
+/* ============================================================
+   RESPONSIVE — MOBILE (≤768px)
+   ============================================================ */
+
+@media (max-width: 768px) {
+    /* Nav */
+    nav {
+        padding: 0.5rem 1rem;
+    }
+
+    .nav-toggle {
+        display: block;
+    }
+
+    /* Hide nav links by default — id selector beats nav ul's display:flex */
+    #nav-links {
+        display: none;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0;
+        width: 100%;
+        padding: 0.5rem 0 0;
+        border-top: 1px solid rgba(255, 255, 255, 0.12);
+        margin-top: 0.5rem;
+        font-size: medium;
+    }
+
+    #nav-links.open {
+        display: flex;
+    }
+
+    #nav-links li {
+        width: 100%;
+    }
+
+    #nav-links li a {
+        display: block;
+        padding: 0.65rem 0;
+        font-size: 1rem;
+    }
+
+    #nav-links li.user-controls {
+        margin-left: 0;
+        padding-top: 0.5rem;
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    .user-menu-panel {
+        position: static;
+        margin-top: 0.5rem;
+        width: 100%;
+        box-shadow: none;
+    }
+
+    /* Content */
+    .content-wrapper {
+        padding: 0 1rem;
+    }
+
+    .terminal-box {
+        padding: 12px;
+        font-size: 0.85rem;
+    }
+
+    /* Grid: 2 columns on mobile */
+    .grid-container {
+        grid-template-columns: repeat(2, 1fr);
+        width: 100%;
+    }
+
+    /* Applications: stack vertically */
+    .applications {
+        flex-direction: column;
+        gap: 12px;
+    }
+
+    /* Login container: full width */
+    .login-container {
+        width: 100%;
+        box-sizing: border-box;
+    }
+
+.article-container {
+    padding: 12px;
+}
+
+    .thoughts-title {
+        font-size: 1.4rem;
+    }
+}
+
+.logout-form {
+    margin: 0;
+}
+
+.auth-shell {
+    display: flex;
+    justify-content: center;
+    padding: 2rem 0 3rem;
+}
+
+.login-panel {
+    width: min(480px, 100%);
+    background: linear-gradient(180deg, rgba(10, 14, 25, 0.96), rgba(22, 32, 48, 0.94));
+    border: 1px solid rgba(56, 189, 248, 0.24);
+    border-radius: 14px;
+    padding: 2rem;
+    color: #dce8f0;
+    box-shadow: 0 18px 40px rgba(7, 9, 15, 0.28);
+}
+
+.login-kicker {
+    color: #38bdf8;
+    text-transform: uppercase;
+    letter-spacing: 0.22em;
+    font-size: 0.72rem;
+    margin: 0 0 0.75rem;
+}
+
+.login-panel h1 {
+    margin: 0 0 0.75rem;
+    color: #f8fbff;
+}
+
+.login-copy {
+    margin: 0 0 1.5rem;
+    color: #9db2c3;
+}
+
+.login-error {
+    margin-bottom: 1rem;
+    border: 1px solid rgba(245, 158, 11, 0.4);
+    background: rgba(245, 158, 11, 0.12);
+    color: #fde68a;
+    border-radius: 8px;
+    padding: 0.75rem 0.9rem;
+}
+
+.login-form label {
+    color: #dce8f0;
+}
+
+.login-form button {
+    width: 100%;
+    margin-top: 0.5rem;
+    font-family: 'Fira Code', monospace;
+    font-weight: bold;
+}
+
+@media (max-width: 768px) {
+    .auth-shell {
+        padding-top: 1rem;
+    }
+
+    .login-panel {
+        padding: 1.25rem;
+    }
+}
+
+/* ── Terminal page ─────────────────────────────────────── */
+/* A real interactive terminal: one xterm.js canvas over a WebSocket pty
+   attach, not the chat/panel-grid UI this replaced. See
+   src/backlog/web-terminal-interface.md. */
+
+html:has(.terminal-page) { padding-top: 0; }
+body:has(.terminal-page) {
+    overflow: hidden;
+    height: 100dvh;
+    margin-bottom: 0;
+}
+body:has(.terminal-page) .content-wrapper {
+    padding: 0;
+    height: calc(100dvh - var(--nav-h));
+    display: flex;
+    flex-direction: column;
+}
+body:has(.terminal-page) .content-wrapper > .terminal-box { display: none; }
+
+.terminal-page {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    background: #080f18;
+    padding: 1rem;
+}
+
+/* Mobile-first: one full-height app shell holding two swappable views. */
+.term-app {
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    display: flex;
+    background: #080f18;
+    border: 1px solid #1e2d3d;
+    border-radius: 10px;
+    overflow: hidden;
+}
+
+/* ── session list view (the "agents" rail) ────────────── */
+.term-list-view {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    min-width: 0;
+}
+
+.term-list-head {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.7rem 0.9rem;
+    background: #0b1724;
+    border-bottom: 1px solid #1e2d3d;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+}
+
+.term-list-title {
+    margin: 0;
+    flex: 1;
+    font-size: 1rem;
+    color: #dce8f0;
+    letter-spacing: 0.02em;
+}
+
+.term-seg {
+    display: inline-flex;
+    border: 1px solid #2a3f54;
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+.term-seg-btn {
+    background: transparent;
+    border: none;
+    color: #4a8fa8;
+    font-family: inherit;
+    font-size: 0.8rem;
+    padding: 0.4rem 0.85rem;
+    min-height: 40px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+}
+
+.term-seg-btn.is-active {
+    background: #14324a;
+    color: #cfe6f2;
+}
+
+.term-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0.6rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.term-mind-group {
+    color: #3d5a6e;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    padding: 0.45rem 0.4rem 0.1rem;
+}
+
+.term-card {
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    width: 100%;
+    text-align: left;
+    background: #0d1b28;
+    border: 1px solid #1e2d3d;
+    border-radius: 8px;
+    padding: 0.7rem 0.8rem;
+    color: #cfe0ec;
+    font-family: inherit;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+}
+
+.term-card:hover,
+.term-card:focus-visible {
+    border-color: #c9a84c;
+    background: #10202f;
+    outline: none;
+}
+
+.term-card.is-current { border-color: #4a8fa8; }
+
+/* a labeled session paints its whole card (background + border are inline
+   styles from JS; text flips to the contrast pole via inherited color) */
+.term-card.is-colored .term-card-title { color: inherit; }
+.term-card.is-colored .term-card-id,
+.term-card.is-colored .term-card-meta,
+.term-card.is-colored .term-card-summary { color: inherit; opacity: 0.72; }
+.term-card.is-colored:hover,
+.term-card.is-colored:focus-visible { filter: brightness(1.12); }
+/* inline border-color beats the .is-current rule, so ring it instead */
+.term-card.is-colored.is-current { box-shadow: 0 0 0 2px #080f18, 0 0 0 4px #4a8fa8; }
+/* keep the status dot legible on an arbitrary card color */
+.term-card.is-colored .term-card-dot { box-shadow: 0 0 0 2px rgba(8, 15, 24, 0.4); }
+
+.term-card-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: #3d5a6e;
+    flex-shrink: 0;
+}
+.term-card-dot.is-running { background: #4ee88a; box-shadow: 0 0 6px rgba(78, 232, 138, 0.6); }
+.term-card-dot.is-idle { background: #c9a84c; }
+.term-card-dot.is-closed { background: #4a3d3d; }
+
+.term-card-body { flex: 1; min-width: 0; }
+
+.term-card-title {
+    display: flex;
+    gap: 0.5rem;
+    align-items: baseline;
+    font-size: 0.9rem;
+    color: #dce8f0;
+}
+.term-card-name { font-weight: 600; }
+.term-card-id { color: #4a6a7e; font-size: 0.72rem; }
+
+.term-card-meta {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 0.15rem;
+    font-size: 0.72rem;
+    color: #4a6a7e;
+}
+
+.term-card-summary {
+    display: block;
+    margin-top: 0.2rem;
+    font-size: 0.78rem;
+    color: #6f8ea1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.term-list-empty {
+    color: #3d5a6e;
+    font-style: italic;
+    text-align: center;
+    padding: 2rem 1rem;
+}
+
+/* ── stage: the Brady-Bunch grid of attached terminals ── */
+.term-stage {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    min-width: 0;
+    min-height: 0;
+}
+
+.term-grid {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-auto-rows: 1fr;
+    gap: 1px;
+    background: #1e2d3d;
+}
+
+.term-grid-empty {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #3d5a6e;
+    font-style: italic;
+    pointer-events: none;
+    padding: 2rem;
+    text-align: center;
+}
+/* the class' display:flex would otherwise beat the [hidden] attribute, leaving
+   the placeholder on screen behind open tiles — hide it explicitly when set */
+.term-grid-empty[hidden] { display: none; }
+
+/* one live session tile */
+.term-panel {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    background: #080f18;
+    overflow: hidden;
+}
+
+.term-panel-head {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 0.7rem;
+    background: #0b1724;
+    border-bottom: 1px solid #1e2d3d;
+    flex-shrink: 0;
+    transition: background-color 0.15s ease;
+}
+.term-panel-head button { transition: color 0.15s ease; }
+
+.term-panel-info {
+    flex: 1;
+    min-width: 0;
+    color: #4a6a7e;
+    font-size: 0.75rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* A tile that has stopped trying: the state text is the way back in. */
+.term-panel-info.is-stopped {
+    color: #e0b050;
+    cursor: pointer;
+    text-decoration: underline;
+}
+
+.term-panel-close {
+    flex-shrink: 0;
+    font-size: 0.9rem;
+    line-height: 1;
+    padding: 0.3rem 0.55rem;
+}
+
+/* small color chip in the panel header, shown when the session is colored */
+.term-panel-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: #3d5a6e;
+}
+
+/* inline rename / recolor editor, sits between the header and the terminal;
+   the full color grid is always open — no pop-out, no "more" button */
+.term-rename-pop {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    padding: 0.55rem 0.7rem 0.7rem;
+    background: #0b1724;
+    border-bottom: 1px solid #1e2d3d;
+    flex-shrink: 0;
+}
+/* same display:flex-beats-[hidden] issue as .term-grid-empty above */
+.term-rename-pop[hidden] { display: none; }
+.term-rename-row { display: flex; align-items: center; gap: 0.5rem; }
+.term-rename-input {
+    flex: 1;
+    min-width: 120px;
+    background: #0d1b28;
+    border: 1px solid #2a3f54;
+    border-radius: 5px;
+    color: #dce8f0;
+    font-family: inherit;
+    font-size: 0.82rem;
+    padding: 0.4rem 0.55rem;
+}
+.term-rename-input:focus { outline: none; border-color: #4a8fa8; }
+.term-swatch {
+    width: 34px;
+    height: 34px;
+    border-radius: 6px;
+    border: 2px solid rgba(255, 255, 255, 0.12);
+    padding: 0;
+    cursor: pointer;
+}
+.term-swatch.is-selected { border-color: #dce8f0; box-shadow: 0 0 0 2px #0b1724; }
+.term-rename-actions { display: flex; gap: 0.4rem; }
+
+.term-color-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+.term-color-grid-row { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+.term-color-grid-custom {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding-top: 0.4rem;
+    border-top: 1px solid #1e2d3d;
+}
+.term-color-input {
+    width: 52px;
+    height: 34px;
+    padding: 0;
+    border: 1px solid #2a3f54;
+    border-radius: 6px;
+    background: transparent;
+    cursor: pointer;
+}
+.term-color-custom-label { color: #4a6a7e; font-size: 0.72rem; }
+
+.term-icon-btn {
+    background: transparent;
+    border: 1px solid #2a3f54;
+    border-radius: 5px;
+    color: #4a8fa8;
+    font-family: inherit;
+    font-size: 0.8rem;
+    padding: 0.35rem 0.7rem;
+    min-height: 40px;
+    flex-shrink: 0;
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+}
+.term-icon-btn:hover { color: #c9a84c; border-color: #c9a84c; }
+
+.term-action-btn {
+    background: transparent;
+    border: 1px solid #2a3f54;
+    border-radius: 5px;
+    color: #4a8fa8;
+    font-family: inherit;
+    font-size: 0.75rem;
+    padding: 0.3rem 0.7rem;
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+}
+.term-action-btn:hover { color: #c9a84c; border-color: #c9a84c; }
+
+.term-action-btn-danger { color: #e05c5c; border-color: #e05c5c44; }
+.term-action-btn-danger:hover { color: #061018; background: #e05c5c; border-color: #e05c5c; }
+
+.term-action-btn.term-speaker-on {
+    color: #061018;
+    background: #4ee8fc;
+    border-color: #4ee8fc;
+    font-weight: 600;
+    box-shadow: 0 0 8px rgba(78, 232, 252, 0.55);
+}
+
+/* the xterm canvas fills the tile under the header */
+.term-xterm {
+    flex: 1;
+    min-height: 0;
+    padding: 0.5rem;
+}
+.term-xterm .xterm { height: 100%; }
+
+/* A phone has no visible scrollbar and no PageUp key, so a reply taller
+   than the screen was simply cut off with no way to read the rest. The
+   toolbar carries the deliberate controls and the tile converts drags
+   into wheel reports (the TUI holds the history, not the viewport — see
+   TerminalRouting.pageScrollAction). This keeps whatever the browser does
+   handle from working against that: a vertical pan belongs to the
+   terminal rather than rubber-banding the page, and it stops at the end
+   of the buffer instead of chaining outward. */
+.term-panel .xterm .xterm-viewport {
+    touch-action: pan-y;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+}
+
+/* xterm's own composition-view (the floating IME preview bubble that mobile
+   soft keyboards and voice typing paint into) ships with white-space: nowrap
+   and no width cap, so on a narrow phone it runs off the right edge instead
+   of wrapping. Wrapping it needs a real width to wrap AT, and it has none by
+   default: the bubble lives in .xterm-helpers, which xterm leaves at zero
+   width because every child of it is absolutely positioned, and it is itself
+   absolutely positioned at the cursor's x offset. So a percentage cap
+   resolves against nothing and shrink-to-fit gets only the sliver of space
+   to the right of the cursor -- which is how voice typing came out as one
+   character per line running straight down the tile.
+
+   Stretch the helper layer to the terminal's width so percentages mean
+   something, and pin the bubble to its left edge (xterm writes `left` inline
+   on every composition update, hence !important) so it wraps at the tile
+   rather than at whatever room the cursor happened to leave. */
+.term-panel .xterm .xterm-helpers {
+    left: 0;
+    right: 0;
+}
+.term-panel .xterm .composition-view {
+    left: 0.5rem !important;
+    max-width: calc(100% - 1rem);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+/* The hidden textarea has to be pinned for the same reason, and it is the
+   wrap above that makes it urgent. While a composition is open xterm parks
+   the textarea just past the bubble and gives it the bubble's width, so a
+   bubble as wide as the tile puts a focused element a whole tile-width off
+   the right edge. Nothing clips it -- the tile only has overflow: hidden,
+   which is scrollable, so the browser scrolls the terminal sideways to keep
+   the thing it thinks you are editing in view, and the content marches left
+   as you dictate. Held at the origin at one pixel wide, composition can't
+   move it and there is no overflow to chase. It is invisible either way
+   (opacity 0, z-index -5); the only cost is that a desktop IME candidate
+   window opens at the tile's corner rather than at the cursor. */
+.term-panel .xterm .xterm-helper-textarea {
+    left: 0 !important;
+    width: 1px !important;
+    max-width: 1px !important;
+}
+
+/* ── new-session mind picker ──────────────────────────── */
+.term-new-menu {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    padding: 0.5rem 0.6rem;
+    background: #0b1724;
+    border-bottom: 1px solid #1e2d3d;
+}
+.term-new-menu[hidden] { display: none; }
+.term-new-menu-item {
+    text-align: left;
+    background: #0d1b28;
+    border: 1px solid #1e2d3d;
+    border-radius: 6px;
+    color: #cfe0ec;
+    font-family: inherit;
+    font-size: 0.82rem;
+    padding: 0.5rem 0.7rem;
+    cursor: pointer;
+}
+.term-new-menu-item:hover { border-color: #c9a84c; color: #dce8f0; }
+
+/* ── rail collapse (desktop) ──────────────────────────── */
+.term-rail-btn { display: none; }
+
+.term-rail-expand {
+    background: #0b1724;
+    border: 1px solid #2a3f54;
+    border-radius: 5px;
+    color: #4a8fa8;
+    font-family: inherit;
+    font-size: 0.75rem;
+    padding: 0.35rem 0.7rem;
+    cursor: pointer;
+}
+.term-rail-expand:hover { color: #c9a84c; border-color: #c9a84c; }
+
+/* Desktop: rail + stage side by side; rail is a collapsible left column. */
+@media (min-width: 860px) {
+    .term-list-view {
+        width: 340px;
+        flex-shrink: 0;
+        border-right: 1px solid #1e2d3d;
+    }
+    .term-stage { flex: 1; }
+    .term-panel-back { display: none; }
+    .term-rail-btn { display: block; }
+    /* collapsed rail: hide the list, offer a slim "agents »" tab on the stage */
+    .term-app[data-rail="collapsed"] .term-list-view { display: none; }
+    .term-rail-expand { display: none; }
+    .term-app[data-rail="collapsed"] .term-rail-expand {
+        display: block;
+        position: absolute;
+        top: 0.5rem;
+        left: 0.5rem;
+        z-index: 3;
+    }
+}
+
+/* ── mobile key toolbar ───────────────────────────────── */
+.term-mobile-toolbar {
+    display: none;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 0.4rem;
+    padding: 0.4rem 0.5rem;
+    background: #0b1724;
+    border-top: 1px solid #1e2d3d;
+    flex-shrink: 0;
+}
+.term-mobile-toolbar button {
+    background: #0d1b28;
+    border: 1px solid #2a3f54;
+    border-radius: 5px;
+    color: #cfe0ec;
+    font-family: inherit;
+    font-size: 0.8rem;
+    min-height: 44px;
+    cursor: pointer;
+}
+.term-mobile-toolbar button:hover { border-color: #c9a84c; color: #dce8f0; }
+
+/* Phones: full-bleed shell, one view at a time, single-panel grid. */
+@media (max-width: 859px) {
+    .terminal-page { padding: 0; }
+    .term-app[data-view="list"] .term-stage { display: none; }
+    .term-app[data-view="stage"] .term-list-view { display: none; }
+    .term-app {
+        max-width: 100%;
+        border: none;
+        border-radius: 0;
+    }
+    /* one tile fills the screen on a phone; back arrow replaces the ✕ */
+    .term-grid { grid-template-columns: 1fr !important; }
+    .term-panel-close { display: none; }
+    .term-mobile-toolbar { display: grid; }
+    /* only the keys toolbar shows while the list view is up — hide it there */
+    .term-app[data-view="list"] ~ .term-mobile-toolbar { display: none; }
+    .term-action-btn,
+    .term-icon-btn,
+    .term-seg-btn {
+        min-height: 44px;
+        min-width: 44px;
+    }
+}
+
+/* ── Memory page ──────────────────────────────────────── */
+
+.memory-page {
+    padding: 1.5rem 1rem 2rem;
+    display: flex;
+    justify-content: center;
+}
+
+.memory-shell {
+    width: 100%;
+    max-width: 1400px;
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 180px);
+    min-height: 500px;
+    background: #080f18;
+    border: 1px solid #1e2d3d;
+    border-radius: 10px;
+    overflow: hidden;
+}
+
+.memory-topbar {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.6rem 1rem;
+    background: #0b1724;
+    border-bottom: 1px solid #1e2d3d;
+    flex-shrink: 0;
+}
+
+.memory-title {
+    color: #94c7e0;
+    font-family: "Fira Code", monospace;
+    font-size: 0.85rem;
+}
+
+.memory-status {
+    color: #c9a84c;
+    font-size: 0.75rem;
+    flex: 1;
+}
+
+.memory-action-btn {
+    background: transparent;
+    border: 1px solid #2a3f54;
+    border-radius: 5px;
+    color: #4a8fa8;
+    font-family: inherit;
+    font-size: 0.78rem;
+    padding: 0.3rem 0.7rem;
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+}
+
+.memory-action-btn:hover {
+    color: #c9a84c;
+    border-color: #c9a84c;
+}
+
+.memory-body {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 220px 1fr 360px;
+    min-height: 0;
+}
+
+.memory-tables {
+    border-right: 1px solid #1e2d3d;
+    overflow-y: auto;
+    padding: 0.6rem 0;
+}
+
+.memory-tables ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.memory-table-item {
+    padding: 0.45rem 1rem;
+    color: #94c7e0;
+    font-family: "Fira Code", monospace;
+    font-size: 0.8rem;
+    cursor: pointer;
+    border-left: 3px solid transparent;
+}
+
+.memory-table-item:hover {
+    background: #0d1f30;
+    color: #c9a84c;
+}
+
+.memory-table-item.memory-table-active {
+    background: #0d1f30;
+    color: #4ee8fc;
+    border-left-color: #4ee8fc;
+}
+
+.memory-rows {
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid #1e2d3d;
+    min-width: 0;
+    min-height: 0;
+}
+
+.memory-rows-header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.5rem 0.9rem;
+    border-bottom: 1px solid #1e2d3d;
+    background: #0a1421;
+    font-family: "Fira Code", monospace;
+    font-size: 0.78rem;
+    color: #94c7e0;
+}
+
+.memory-rows-pager {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    color: #4a6a7e;
+}
+
+.memory-rows-scroll {
+    flex: 1;
+    overflow: auto;
+}
+
+.memory-rows-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: "Fira Code", monospace;
+    font-size: 0.75rem;
+}
+
+.memory-rows-table th {
+    background: #0d1f30;
+    color: #4a8fa8;
+    text-align: left;
+    padding: 0.4rem 0.6rem;
+    border-bottom: 1px solid #1e2d3d;
+    position: sticky;
+    top: 0;
+    z-index: 1;
+}
+
+.memory-rows-table td {
+    color: #94c7e0;
+    padding: 0.35rem 0.6rem;
+    border-bottom: 1px solid #131e2c;
+    max-width: 320px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.memory-rows-table tr:hover td {
+    background: #0c1828;
+}
+
+.memory-cell {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+}
+
+.memory-cell-header {
+    padding: 0.5rem 0.9rem;
+    border-bottom: 1px solid #1e2d3d;
+    background: #0a1421;
+    font-family: "Fira Code", monospace;
+    font-size: 0.78rem;
+    color: #c9a84c;
+}
+
+.memory-cell-content {
+    flex: 1;
+    margin: 0;
+    padding: 0.8rem 1rem;
+    overflow: auto;
+    font-family: "Fira Code", monospace;
+    font-size: 0.78rem;
+    color: #cfe7f5;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+@media (max-width: 900px) {
+    .memory-body {
+        grid-template-columns: 1fr;
+        grid-template-rows: auto 1fr 1fr;
+    }
+    .memory-tables {
+        max-height: 140px;
+        border-right: 0;
+        border-bottom: 1px solid #1e2d3d;
+    }
+    .memory-rows {
+        border-right: 0;
+        border-bottom: 1px solid #1e2d3d;
+    }
+    .memory-rows-table td {
+        max-width: 200px;
+    }
+}
+
+/* events + response_rules dashboard */
+.events-page, .rules-page {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+.events-error {
+    color: #ff6b6b;
+}
+.event-row, .rule-row {
+    border-left: 3px solid rgba(56, 189, 248, 0.25);
+}
+.event-status-escalated, .event-status-awaiting_decision { border-left-color: #ff6b6b; }
+.event-status-notified_daniel { border-left-color: #38bdf8; }
+.event-status-ignored, .event-status-auto_acted { border-left-color: #6b8c6b; }
+.rule-state-approved { border-left-color: #38bdf8; }
+.rule-state-proposed { border-left-color: #d4a857; }
+.rule-state-retired  { border-left-color: #6b6b6b; }
+.event-head {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    font-family: 'Fira Code', monospace;
+    font-size: 0.85em;
+    color: #9bb0c4;
+    margin-bottom: 6px;
+}
+.event-head .event-class { color: #38bdf8; font-weight: bold; }
+.event-head .event-bucket { color: #d4a857; }
+.event-head .event-status { text-transform: uppercase; letter-spacing: 0.05em; }
+.event-head .rule-auto { color: #6bd48b; }
+.event-summary { margin: 4px 0; }
+.event-reasoning { margin: 4px 0; color: #c5d4e3; }
+.event-action {
+    margin: 4px 0;
+    font-family: 'Fira Code', monospace;
+    font-size: 0.85em;
+    color: #9bb0c4;
+}
+.event-hints { font-size: 0.8em; color: #6b8c6b; margin: 4px 0; }
+.event-excerpt summary { cursor: pointer; color: #9bb0c4; }
+.event-excerpt pre {
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 0.8em;
+    background: rgba(0,0,0,0.25);
+    padding: 8px;
+    border-radius: 4px;
+}
+.event-repeat {
+    margin: 8px 0;
+    padding: 8px 10px;
+    background: rgba(255, 107, 107, 0.06);
+    border-left: 2px solid #ff6b6b;
+    border-radius: 4px;
+}
+.event-repeat ul { margin: 4px 0 4px 18px; }
+
+.rules-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+    margin-top: 8px;
+}
+.rules-filters label {
+    display: flex;
+    flex-direction: column;
+    font-size: 0.85em;
+    color: #9bb0c4;
+}
+.rules-filters select, .rules-filters button {
+    margin-top: 2px;
+    padding: 4px 8px;
+    background: rgba(0,0,0,0.25);
+    color: #e2eaf2;
+    border: 1px solid rgba(56, 189, 248, 0.35);
+    border-radius: 4px;
+    font-family: inherit;
+}
+.rules-create {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.rules-create label {
+    display: flex;
+    flex-direction: column;
+    font-size: 0.85em;
+    color: #9bb0c4;
+}
+.rules-create textarea,
+.rules-create input,
+.rules-create select,
+.rules-edit textarea,
+.rules-edit input {
+    margin-top: 2px;
+    padding: 6px 8px;
+    background: rgba(0,0,0,0.25);
+    color: #e2eaf2;
+    border: 1px solid rgba(56, 189, 248, 0.35);
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 0.95em;
+    width: 100%;
+    box-sizing: border-box;
+}
+.rules-create label,
+.rules-edit label { width: 100%; }
+.rules-edit textarea { min-height: 5rem; resize: vertical; }
+.rules-create button,
+.rules-edit button,
+.rules-actions button {
+    align-self: flex-start;
+    padding: 6px 12px;
+    background: rgba(56, 189, 248, 0.15);
+    color: #e2eaf2;
+    border: 1px solid rgba(56, 189, 248, 0.5);
+    border-radius: 4px;
+    cursor: pointer;
+}
+.rules-actions { display: flex; gap: 8px; margin-top: 6px; }
+.event-mind-raw { color: #6b8c6b; font-size: 0.78em; opacity: 0.8; }
+.rules-edit { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }

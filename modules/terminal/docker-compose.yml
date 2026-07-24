@@ -1,0 +1,28 @@
+services:
+  terminal:
+    build: .
+    container_name: terminal-site
+    restart: unless-stopped
+    ports:
+      - "8711:8711"
+    env_file: .env
+    environment:
+      - TERMINAL_HOST=0.0.0.0
+      - HIVE_DB_PATH=/data/hive.db
+      # Parent domain so the session cookie is shared with the hive site,
+      # which owns the same auth db and secret.
+      - HIVE_COOKIE_DOMAIN=sparktobloom.com
+      - GATEWAY_API_URL=http://hive-comms:8424
+      - VOICE_API_URL=${VOICE_API_URL:-http://hive-mind-voice:8422}
+    volumes:
+      - ./src:/app/src
+      # Auth db — the hive site's, mounted directly (not a copy) so a
+      # session issued by either site verifies on both.
+      - ${HIVE_DB_HOST_DIR:-/home/daniel/Storage/Dev/hive/data}:/data
+    networks:
+      - hivemind
+
+networks:
+  hivemind:
+    external: true
+    name: hivemind

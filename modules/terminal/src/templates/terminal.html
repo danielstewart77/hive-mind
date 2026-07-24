@@ -1,0 +1,1208 @@
+{% extends "layout.html" %}
+{% block content %}
+<link rel="stylesheet" href="{{ request.url_for('static', path='vendor/xterm/xterm.css') }}">
+<main class="terminal-page">
+    <div class="term-app" id="term-app" data-view="list" data-rail="expanded">
+        <!-- ── Sessions list (the "agents" rail) ────────────────────── -->
+        <section class="term-list-view" id="term-list-view">
+            <header class="term-list-head">
+                <button id="term-rail-collapse" class="term-icon-btn term-rail-btn" type="button"
+                        title="collapse agents sidebar" aria-label="collapse agents sidebar">«</button>
+                <h1 class="term-list-title">Agents</h1>
+                <div class="term-seg" role="tablist" aria-label="session filter">
+                    <button id="term-tab-active" class="term-seg-btn is-active" type="button"
+                            role="tab" aria-selected="true" data-filter="active">Active</button>
+                    <button id="term-tab-archived" class="term-seg-btn" type="button"
+                            role="tab" aria-selected="false" data-filter="archived">Archived</button>
+                </div>
+                <button id="term-new" class="term-action-btn" type="button" title="start a new session">+ new</button>
+                <button id="term-refresh" class="term-action-btn" type="button" title="refresh session list">↻</button>
+            </header>
+            <div id="term-new-menu" class="term-new-menu" hidden aria-label="pick a mind"></div>
+            <div id="term-list" class="term-list" aria-live="polite"></div>
+            <p id="term-list-empty" class="term-list-empty" hidden>No sessions.</p>
+        </section>
+
+        <!-- ── Stage: the Brady-Bunch grid of attached terminals ────── -->
+        <section class="term-stage" id="term-stage">
+            <button id="term-rail-expand" class="term-rail-expand" type="button" hidden
+                    title="show agents sidebar" aria-label="show agents sidebar">agents »</button>
+            <div id="term-grid" class="term-grid" data-count="0"></div>
+            <p id="term-grid-empty" class="term-grid-empty">Select a session from the list to open it here.</p>
+        </section>
+    </div>
+    <div class="term-mobile-toolbar" id="term-mobile-toolbar" aria-label="terminal keys">
+        <button type="button" data-seq="&#x1b;">Esc</button>
+        <button type="button" data-seq="&#x09;">Tab</button>
+        <button type="button" data-seq="&#x03;">Ctrl+C</button>
+        <button type="button" data-scroll="-1" aria-label="scroll back a page">PgUp</button>
+        <button type="button" data-scroll="1" aria-label="scroll forward a page">PgDn</button>
+        <button type="button" data-seq="&#x1b;[D">&larr;</button>
+        <button type="button" data-seq="&#x1b;[A">&uarr;</button>
+        <button type="button" data-seq="&#x1b;[B">&darr;</button>
+        <button type="button" data-seq="&#x1b;[C">&rarr;</button>
+        <button type="button" data-seq="&#x0d;">&crarr;</button>
+    </div>
+</main>
+
+<script src="{{ request.url_for('static', path='vendor/xterm/xterm.js') }}"></script>
+<script src="{{ request.url_for('static', path='vendor/xterm/addon-fit.js') }}"></script>
+<script src="{{ request.url_for('static', path='terminal-routing.js') }}?v={{ asset_versions['terminal-routing.js'] }}"></script>
+<script>
+(function () {
+    "use strict";
+
+    // Interactive pty terminals (raw bytes over WS into `claude --resume`,
+    // see src/backlog/web-terminal-interface.md) inside the session-manager
+    // shell: agents rail, tile grid, per-session labels, TTS speaker. The
+    // speaker rides the watch-only /api/console SSE stream — assistant text
+    // is not recoverable from raw pty bytes.
+    const termApp = document.getElementById("term-app");
+    const listEl = document.getElementById("term-list");
+    const listEmpty = document.getElementById("term-list-empty");
+    const gridEl = document.getElementById("term-grid");
+    const gridEmpty = document.getElementById("term-grid-empty");
+    const refreshBtn = document.getElementById("term-refresh");
+    const newBtn = document.getElementById("term-new");
+    const newMenu = document.getElementById("term-new-menu");
+    const tabActive = document.getElementById("term-tab-active");
+    const tabArchived = document.getElementById("term-tab-archived");
+    const railCollapseBtn = document.getElementById("term-rail-collapse");
+    const railExpandBtn = document.getElementById("term-rail-expand");
+    const toolbar = document.getElementById("term-mobile-toolbar");
+
+    const REATTACH_WINDOW_MS = 30000;
+    const isWide = () => window.matchMedia("(min-width: 860px)").matches;
+
+    let currentFilter = "active";
+    let lastRows = [];          // flat rows from /api/terminal/sessions
+    const openPanels = new Map(); // sessionId -> panel
+    let focusedPanel = null;
+
+    const contrastText = TerminalRouting.contrastText;
+    // only the focused tile paints its whole header bar; refresh both the
+    // outgoing and incoming panel so the color follows focus, not just labels
+    function setFocusedPanel(panel) {
+        if (focusedPanel === panel) return;
+        const prev = focusedPanel;
+        focusedPanel = panel;
+        if (prev && prev.refreshLabel) prev.refreshLabel();
+        if (panel && panel.refreshLabel) panel.refreshLabel();
+    }
+
+    // ── open-set persistence (restore the grid across reloads) ─────
+    // The URL fragment is the primary record — it survives a refresh in a
+    // per-tab, shareable way and rides through the proxy untouched (see
+    // TerminalRouting.parseOpenFragment). localStorage stays as a warm
+    // cache and the pre-fragment migration source.
+    function writeOpenFragment(ids) {
+        const frag = TerminalRouting.formatOpenFragment(ids);
+        const url = location.pathname + location.search + frag;
+        try { history.replaceState(null, "", url); } catch (e) {}
+    }
+    function saveOpenSet() {
+        const ids = Array.from(openPanels.keys());
+        try { localStorage.setItem("term-open", JSON.stringify(ids)); } catch (e) {}
+        writeOpenFragment(ids);
+    }
+    function recalledOpenSet() {
+        // Fragment wins; fall back to the localStorage cache for a tab that
+        // was opened before the fragment existed.
+        const fromUrl = TerminalRouting.parseOpenFragment(location.hash);
+        if (fromUrl.length) return fromUrl;
+        try { return JSON.parse(localStorage.getItem("term-open") || "[]") || []; } catch (e) { return []; }
+    }
+
+    // ── per-session labels (custom name + color), server-backed ──────
+    // Stored via /api/terminal/labels so names and colors follow the user
+    // across devices; localStorage is only a warm-start cache (and the
+    // migration source for labels created before the server store).
+    const LABEL_COLORS = ["#4ee8fc", "#4ee88a", "#c9a84c", "#e0724e", "#b06ee0", "#e05c8a", "#7e93a8"];
+    // further grid rows below the defaults: saturated / muted / grayscale
+    const EXTRA_COLOR_ROWS = [
+        ["#ff5c5c", "#ff8a3d", "#ffce42", "#c9e34e", "#5ce87a", "#3de0c0", "#3db6e8", "#5c8aff", "#9a5cff", "#e05cd0", "#ff5ca0"],
+        ["#e0a8a8", "#e0c2a8", "#e0d8a8", "#c2e0a8", "#a8e0b8", "#a8d8e0", "#a8b8e0", "#c2a8e0", "#e0a8d8", "#e0a8b8", "#c9a8e0"],
+        ["#ffffff", "#d8dee4", "#b0bcc6", "#8898a6", "#5c7284", "#3d5266", "#1e3448", "#0b1724"],
+    ];
+    let labelsCache = (function () {
+        try { return JSON.parse(localStorage.getItem("term-labels") || "{}") || {}; } catch (e) { return {}; }
+    })();
+    function cacheLabelsLocally() {
+        try { localStorage.setItem("term-labels", JSON.stringify(labelsCache)); } catch (e) {}
+    }
+    function pushLabel(id, label) {
+        fetch("/api/terminal/labels/" + encodeURIComponent(id), {
+            method: "PUT", credentials: "same-origin",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({name: label.name || "", color: label.color || ""}),
+        }).catch(function () {});
+    }
+    async function syncLabelsFromServer() {
+        let server = null;
+        try {
+            const resp = await fetch("/api/terminal/labels", {credentials: "same-origin"});
+            if (resp.ok) server = await resp.json();
+        } catch (e) {}
+        if (!server || typeof server !== "object") return;
+        // One-time migration: labels this browser has that the server lacks.
+        Object.keys(labelsCache).forEach(function (id) {
+            if (!server[id]) pushLabel(id, labelsCache[id]);
+        });
+        labelsCache = Object.assign({}, labelsCache, server);
+        cacheLabelsLocally();
+        renderCards(lastRows);
+        openPanels.forEach(function (p) { p.refreshLabel(); });
+    }
+    function getLabel(id) {
+        if (!id) return {};
+        const l = labelsCache[id];
+        return (l && typeof l === "object") ? l : {};
+    }
+    function setLabel(id, patch) {
+        if (!id) return;
+        const cur = (labelsCache[id] && typeof labelsCache[id] === "object") ? labelsCache[id] : {};
+        const next = Object.assign({}, cur, patch);
+        if (!next.name && !next.color) delete labelsCache[id]; else labelsCache[id] = next;
+        cacheLabelsLocally();
+        pushLabel(id, next);
+    }
+    function migrateLabel(oldId, newId) {
+        if (!oldId || !newId || oldId === newId) return;
+        const label = labelsCache[oldId];
+        if (!label) return;
+        labelsCache[newId] = label;
+        delete labelsCache[oldId];
+        cacheLabelsLocally();
+        pushLabel(newId, label);
+        pushLabel(oldId, {});
+    }
+
+    // ── shared content helpers (assistant text out of console SSE) ──
+    function flattenContent(v) {
+        if (v == null) return "";
+        if (typeof v === "string") return v;
+        if (Array.isArray(v)) return v.map(flattenContent).join("");
+        if (typeof v === "object") {
+            if (typeof v.text === "string") return v.text;
+            if (v.content != null) return flattenContent(v.content);
+            return "";
+        }
+        return String(v);
+    }
+    function extractText(event) {
+        const v = event.content || event.delta || event.text ||
+            (event.message && (event.message.content || event.message.text)) || "";
+        return flattenContent(v);
+    }
+
+    function wsUrl(sessionId, cols, rows) {
+        const proto = location.protocol === "https:" ? "wss:" : "ws:";
+        return proto + "//" + location.host + "/api/terminal/attach/" + encodeURIComponent(sessionId) +
+            "?cols=" + encodeURIComponent(cols || 80) + "&rows=" + encodeURIComponent(rows || 24);
+    }
+
+    // ── one live session, rendered as an xterm tile ────────────────
+    function createPanel(session) {
+        let sessionId = session.id;
+        let mindId = session.mind_id || null;
+        let mindName = session.mind_name || null;
+        let attachState = "connecting…";
+
+        const el = document.createElement("section");
+        el.className = "term-panel";
+        el.dataset.sessionId = sessionId;
+        el.innerHTML =
+            '<header class="term-panel-head">' +
+                '<button class="term-panel-back term-icon-btn" type="button" title="back to sessions" aria-label="back to sessions">‹</button>' +
+                '<span class="term-panel-dot" hidden aria-hidden="true"></span>' +
+                '<span class="term-panel-info">…</span>' +
+                '<button class="term-panel-rename term-action-btn" type="button" title="rename / recolor this session" aria-label="rename this session">✎</button>' +
+                '<button class="term-panel-speaker term-action-btn" type="button" title="toggle voice playback" aria-pressed="false">speaker off</button>' +
+                '<button class="term-panel-delete term-action-btn term-action-btn-danger" type="button" ' +
+                    'title="end this session\'s process (keeps the conversation branch)">end</button>' +
+                '<button class="term-panel-close term-action-btn" type="button" title="remove from grid" aria-label="remove from grid">✕</button>' +
+            '</header>' +
+            '<div class="term-rename-pop" hidden>' +
+                '<div class="term-rename-row">' +
+                    '<input type="text" class="term-rename-input" maxlength="40" placeholder="session name" aria-label="session name">' +
+                    '<div class="term-rename-actions">' +
+                        '<button type="button" class="term-action-btn term-rename-clear">clear</button>' +
+                        '<button type="button" class="term-action-btn term-rename-save">save</button>' +
+                    '</div>' +
+                '</div>' +
+                '<div class="term-color-grid" role="group" aria-label="session color">' +
+                    '<div class="term-color-grid-swatches"></div>' +
+                    '<div class="term-color-grid-custom">' +
+                        '<input type="color" class="term-color-input" aria-label="custom color">' +
+                        '<span class="term-color-custom-label">custom</span>' +
+                    '</div>' +
+                '</div>' +
+            '</div>' +
+            '<div class="term-xterm"></div>';
+
+        const panelHead = el.querySelector(".term-panel-head");
+        const headControls = Array.from(el.querySelectorAll(".term-panel-head button, .term-panel-head .term-panel-info"));
+        const info = el.querySelector(".term-panel-info");
+        const xtermEl = el.querySelector(".term-xterm");
+        const speakerBtn = el.querySelector(".term-panel-speaker");
+        const deleteBtn = el.querySelector(".term-panel-delete");
+        const closeBtn = el.querySelector(".term-panel-close");
+        const backBtn = el.querySelector(".term-panel-back");
+        const renameBtn = el.querySelector(".term-panel-rename");
+        const renamePop = el.querySelector(".term-rename-pop");
+        const renameInput = el.querySelector(".term-rename-input");
+        const renameSave = el.querySelector(".term-rename-save");
+        const renameClear = el.querySelector(".term-rename-clear");
+        const headDot = el.querySelector(".term-panel-dot");
+        const colorGridSwatches = el.querySelector(".term-color-grid-swatches");
+        const colorInput = el.querySelector(".term-color-input");
+
+        const term = new window.Terminal({
+            convertEol: true,
+            cursorBlink: true,
+            fontSize: 14,
+            scrollback: 5000,
+            theme: { background: "#080f18", foreground: "#dce8f0", cursor: "#c9a84c" },
+        });
+        const fitAddon = new window.FitAddon.FitAddon();
+        term.loadAddon(fitAddon);
+
+        // window's "resize" event alone misses layout changes that don't
+        // resize the window itself -- a foldable unfolding, an on-screen
+        // keyboard opening, or this tile's own container changing shape
+        // when the rail collapses. Watch the tile's actual box instead.
+        let fitRaf = null;
+        function scheduleFit() {
+            if (fitRaf) return;
+            fitRaf = requestAnimationFrame(function () { fitRaf = null; doFit(); });
+        }
+        const resizeObserver = new ResizeObserver(scheduleFit);
+        // The attach URL's cols/rows become the pty's spawn geometry, so the
+        // measurement has to happen before the socket opens. A tile mounted
+        // into a stage that hasn't been laid out yet — which on mobile is
+        // every tile, since the rail is showing when you tap a card — has a
+        // zero-sized box, FitAddon's proposeDimensions declines to guess,
+        // and xterm silently keeps its 80x24 default. The TUI then paints
+        // its first screen for a terminal nearly twice the width of the
+        // phone showing it. Wait for a real box, then measure, then attach.
+        function fitWhenSized(done, attempts) {
+            const n = attempts || 0;
+            if (xtermEl.clientWidth > 0 && xtermEl.clientHeight > 0) {
+                try { fitAddon.fit(); } catch (e) {}
+                done();
+            } else if (n >= 60) {
+                done();  // ~1s of frames; attach at the default rather than never
+            } else {
+                requestAnimationFrame(function () { fitWhenSized(done, n + 1); });
+            }
+        }
+        function doFit() {
+            const before = term.cols + "x" + term.rows;
+            try { fitAddon.fit(); } catch (e) {}
+            if (term.cols + "x" + term.rows !== before) sendResize();
+        }
+
+        let ws = null;
+        let destroyed = false;
+        let deliberateClose = false;
+        let reattachTimer = null;
+        let reattachStartedAt = 0;
+        let reattachAttempts = 0;   // consecutive failed attaches; reset on a live socket
+        let lastRecvAt = 0;         // ms of the last byte in; feeds the stale-socket watchdog
+        let socketOpenedAt = 0;     // ms the live socket opened; how long it held decides the backoff
+        let staleTimer = null;      // watchdog interval; catches a half-open (zombie) socket
+        let standingDown = false;   // stopped trying on purpose; the state text is a reconnect button
+        // The pty end sends a keepalive every 5s. Three missed beats is a
+        // zombie; a foreground return with even one missed beat reattaches
+        // eagerly, since that's the exact moment a rotation's socket died.
+        const STALE_MS = 15000;
+        const FOREGROUND_STALE_MS = 6000;
+        // A socket that held this long was a working attach; anything
+        // shorter keeps its place in the backoff.
+        const STABLE_SOCKET_MS = 10000;
+        // Roughly 25s of backed-off retries before the tile stops trying.
+        const MAX_ATTACH_ATTEMPTS = 6;
+
+        function setInfo() {
+            const label = getLabel(sessionId);
+            const base = mindName || (mindId || "").slice(0, 8);
+            const nm = (label.name || "").trim();
+            info.textContent = (nm || base) + " · " + attachState;
+            info.title = nm ? nm + " · " + base : base;
+        }
+        function setAttachState(state) {
+            attachState = state;
+            standingDown = false;
+            info.classList.remove("is-stopped");
+            setInfo();
+        }
+        // A tile that has stopped trying — evicted by another window, refused
+        // by the mind, or out of reattach window — must still have a way
+        // back, or the only cure is reloading the page. The state text
+        // becomes the button.
+        function stopWith(state) {
+            attachState = state + " — tap to reconnect";
+            standingDown = true;
+            info.classList.add("is-stopped");
+            setInfo();
+        }
+        info.addEventListener("click", function () {
+            if (standingDown) { reattachAttempts = 0; attach(); }
+        });
+
+        // ── custom name + color ───────────────────────────────────
+        let editSelectedColor = "";
+        function applyLabel() {
+            const label = getLabel(sessionId);
+            setInfo();
+            const color = label.color || "";
+            el.style.borderLeft = color ? "3px solid " + color : "";
+            // the focused tile paints its whole header bar so the selected
+            // terminal matches its painted card in the rail; unfocused
+            // tiles keep the thin left-edge indicator + header dot
+            const isFocused = focusedPanel === panel;
+            if (color && isFocused) {
+                const fg = contrastText(color);
+                panelHead.style.background = color;
+                headControls.forEach(function (node) { node.style.color = fg; });
+                headDot.hidden = true;
+            } else {
+                panelHead.style.background = "";
+                headControls.forEach(function (node) { node.style.color = ""; });
+                headDot.style.background = color;
+                headDot.hidden = !color;
+            }
+            renderCards(lastRows);
+        }
+        function buildSwatch(container, c) {
+            const sw = document.createElement("button");
+            sw.type = "button";
+            sw.className = "term-swatch";
+            sw.style.background = c;
+            sw.dataset.color = c;
+            sw.setAttribute("aria-label", "color " + c);
+            sw.addEventListener("click", function () {
+                editSelectedColor = (editSelectedColor === c) ? "" : c;
+                markSwatches();
+            });
+            container.appendChild(sw);
+        }
+        function buildSwatches() {
+            colorGridSwatches.innerHTML = "";
+            [LABEL_COLORS].concat(EXTRA_COLOR_ROWS).forEach(function (row) {
+                const rowEl = document.createElement("div");
+                rowEl.className = "term-color-grid-row";
+                row.forEach(function (c) { buildSwatch(rowEl, c); });
+                colorGridSwatches.appendChild(rowEl);
+            });
+        }
+        function markSwatches() {
+            el.querySelectorAll(".term-swatch[data-color]").forEach(function (sw) {
+                sw.classList.toggle("is-selected", sw.dataset.color === editSelectedColor);
+            });
+            colorInput.value = /^#[0-9a-f]{6}$/i.test(editSelectedColor) ? editSelectedColor : "#4ee8fc";
+        }
+        colorInput.addEventListener("input", function () {
+            editSelectedColor = colorInput.value;
+            markSwatches();
+        });
+        function openRename() {
+            const label = getLabel(sessionId);
+            renameInput.value = label.name || "";
+            editSelectedColor = label.color || "";
+            markSwatches();
+            renamePop.hidden = false;
+            renameInput.focus();
+            renameInput.select();
+        }
+        function closeRename() { renamePop.hidden = true; }
+        function commitRename() {
+            setLabel(sessionId, {name: renameInput.value.trim(), color: editSelectedColor});
+            closeRename();
+            applyLabel();
+        }
+        buildSwatches();
+        renameBtn.addEventListener("click", function () {
+            if (renamePop.hidden) openRename(); else closeRename();
+        });
+        renameSave.addEventListener("click", commitRename);
+        renameClear.addEventListener("click", function () {
+            setLabel(sessionId, {name: "", color: ""});
+            closeRename();
+            applyLabel();
+        });
+        renameInput.addEventListener("keydown", function (e) {
+            if (e.key === "Enter") { e.preventDefault(); commitRename(); }
+            else if (e.key === "Escape") { e.preventDefault(); closeRename(); }
+        });
+
+        // ── TTS speaker (assistant text via the console SSE stream) ──
+        const audioEl = new Audio();
+        audioEl.preload = "auto";
+        let speakerOn = false;
+        let ttsSource = null;
+        let ttsBuffer = "";
+        let ttsFlushTimer = null;
+        let ttsPlaying = false;
+        const ttsQueue = [];
+
+        function loadSpeakerPref() {
+            try { return localStorage.getItem("term-speaker:" + (mindName || "default")) === "on"; }
+            catch (e) { return false; }
+        }
+        function saveSpeakerPref(on) {
+            try { localStorage.setItem("term-speaker:" + (mindName || "default"), on ? "on" : "off"); } catch (e) {}
+        }
+        function setSpeakerLabel() {
+            speakerBtn.textContent = speakerOn ? "speaker on" : "speaker off";
+            speakerBtn.setAttribute("aria-pressed", speakerOn ? "true" : "false");
+            speakerBtn.classList.toggle("term-speaker-on", speakerOn);
+        }
+        function scheduleTtsFlush() {
+            if (ttsFlushTimer) clearTimeout(ttsFlushTimer);
+            ttsFlushTimer = setTimeout(flushTtsNow, 1500);
+        }
+        async function flushTtsNow() {
+            if (ttsFlushTimer) { clearTimeout(ttsFlushTimer); ttsFlushTimer = null; }
+            const text = ttsBuffer.trim();
+            ttsBuffer = "";
+            if (!speakerOn || !text) return;
+            try {
+                const resp = await fetch("/api/terminal/tts", {
+                    method: "POST", credentials: "same-origin",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({text: text, voice_id: mindName || "default"}),
+                });
+                if (!resp.ok) return;
+                const blob = await resp.blob();
+                ttsQueue.push(URL.createObjectURL(blob));
+                playNextTtsClip();
+            } catch (err) {}
+        }
+        function playNextTtsClip() {
+            if (ttsPlaying) return;
+            const url = ttsQueue.shift();
+            if (!url) return;
+            ttsPlaying = true;
+            audioEl.src = url;
+            audioEl.play().catch(function () { ttsPlaying = false; URL.revokeObjectURL(url); });
+            audioEl.onended = function () {
+                URL.revokeObjectURL(url);
+                ttsPlaying = false;
+                playNextTtsClip();
+            };
+        }
+        function openTtsStream() {
+            closeTtsStream();
+            ttsSource = new EventSource("/api/console/" + encodeURIComponent(sessionId) + "/stream");
+            ttsSource.onmessage = function (msg) {
+                let event;
+                try { event = JSON.parse(msg.data); } catch (e) { return; }
+                if (event.type === "assistant") {
+                    const chunk = extractText(event);
+                    if (chunk) { ttsBuffer += chunk; scheduleTtsFlush(); }
+                } else if (event.type === "user" || event.type === "result") {
+                    flushTtsNow();
+                }
+            };
+            // EventSource retries on its own; a dead session just stays silent.
+        }
+        function closeTtsStream() {
+            if (ttsSource) { ttsSource.close(); ttsSource = null; }
+        }
+        function stopTtsPlayback() {
+            ttsBuffer = "";
+            if (ttsFlushTimer) { clearTimeout(ttsFlushTimer); ttsFlushTimer = null; }
+            ttsQueue.forEach(function (u) { URL.revokeObjectURL(u); });
+            ttsQueue.length = 0;
+            try { audioEl.pause(); audioEl.src = ""; } catch (e) {}
+            ttsPlaying = false;
+        }
+        speakerOn = loadSpeakerPref();
+        setSpeakerLabel();
+        if (speakerOn) openTtsStream();
+        speakerBtn.addEventListener("click", function () {
+            speakerOn = !speakerOn;
+            saveSpeakerPref(speakerOn);
+            setSpeakerLabel();
+            if (speakerOn) openTtsStream();
+            else { closeTtsStream(); stopTtsPlayback(); }
+        });
+
+        // ── pty attach over WS ────────────────────────────────────
+        function closeSocket() {
+            if (ws) {
+                const dead = ws;
+                ws = null;
+                dead.onclose = null;
+                try { dead.close(); } catch (err) { /* already closing */ }
+            }
+        }
+        // TEXT frames are the control channel (the pty end parses them as
+        // JSON); terminal bytes always travel as BINARY frames.
+        function sendResize() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({type: "resize", cols: term.cols, rows: term.rows}));
+            }
+        }
+        function attach() {
+            closeSocket();
+            socketOpenedAt = 0;
+            term.reset();
+            setAttachState("connecting…");
+            const socket = new WebSocket(wsUrl(sessionId, term.cols, term.rows));
+            socket.binaryType = "arraybuffer";
+            socket.onopen = () => {
+                socketOpenedAt = Date.now();
+                lastRecvAt = socketOpenedAt;
+                setAttachState("attached");
+                sendResize();
+            };
+            socket.onmessage = (ev) => {
+                lastRecvAt = Date.now();
+                term.write(ev.data instanceof ArrayBuffer ? new Uint8Array(ev.data) : ev.data);
+            };
+            socket.onclose = (ev) => {
+                if (ws === socket) ws = null;
+                if (destroyed || deliberateClose) return;
+                // 4410 = the gateway closed the session on purpose
+                // (end-session, /kill). Don't hunt a successor — report
+                // the ending and let the rail refile it under Archived.
+                if (ev && ev.code === 4410) {
+                    setAttachState("session ended");
+                    refreshSessions();
+                    return;
+                }
+                // 1012 = another tab/tile attached to this same session and
+                // took the keyboard. Reconnecting would start a tug-of-war,
+                // so this tile stands down instead.
+                if (ev && ev.code === 1012) {
+                    stopWith("open in another window");
+                    return;
+                }
+                // 4415 = the mind is reachable but has no pty route (its
+                // image predates the terminal work). Retrying just spins,
+                // so say what's wrong and stop.
+                if (ev && ev.code === 4415) {
+                    stopWith("no terminal on this mind");
+                    return;
+                }
+                // 1008 = the mind took the attach and then refused it (no
+                // conversation to resume, a harness with no pty). That is a
+                // decision, not a blip: retrying just asks again forever.
+                if (ev && ev.code === 1008) {
+                    stopWith("mind refused the terminal");
+                    return;
+                }
+                // Rotation kills the pty out from under the tile; hunt for
+                // the successor session instead of sitting dead forever.
+                setAttachState("disconnected");
+                beginReattachLoop();
+            };
+            socket.onerror = () => setAttachState("connection error");
+            ws = socket;
+        }
+        function sendRaw(text) {
+            if (!text) return;
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(new TextEncoder().encode(text));
+            }
+        }
+        function isAltBuffer() {
+            const buf = term.buffer && term.buffer.active;
+            return !!buf && buf.type === "alternate";
+        }
+        term.onData(sendRaw);
+
+        // xterm's hidden composition textarea is its model of "the current
+        // line": every change is diffed against the box's prior value, and
+        // the difference is what goes to the pty. That works for a shell
+        // xterm draws itself, but here a TUI (claude) owns the line, and the
+        // box is never cleared between words. Left to accumulate, it holds
+        // the whole line, and a mobile keyboard's autocorrect, prediction, or
+        // multi-character backspace rewrites text the pty already has — the
+        // diff then re-emits that stale region and the pty echoes it twice,
+        // which is the "keys repeat, deleted characters come back" report.
+        // Emptying the box after every committed burst (never mid-word, where
+        // it still holds what's being typed) makes each burst diff from an
+        // empty base, so nothing already sent can be sent again.
+        function resetImeAccumulator() {
+            const helper = term._core && term._core._compositionHelper;
+            if (helper && !TerminalRouting.shouldResetImeAccumulator({composing: helper._isComposing})) {
+                return;
+            }
+            const ta = term.textarea;
+            if (ta && ta.value) ta.value = "";
+            if (helper) {
+                helper._dataAlreadySent = "";
+                const pos = helper._compositionPosition;
+                if (pos) { pos.start = 0; pos.end = 0; }
+            }
+        }
+        term.onData(resetImeAccumulator);
+
+        // Scrolling by finger. On the alternate buffer — which is where
+        // the TUI lives, and so the only buffer this tile ever really
+        // shows — the viewport has no overflow, so the browser has
+        // nothing to pan and a drag does nothing at all. Translate it
+        // into the wheel reports the program turned on for itself.
+        let dragY = null;
+        let dragCell = {col: 1, row: 1};
+        xtermEl.addEventListener("touchstart", function (e) {
+            if (e.touches.length !== 1 || !isAltBuffer()) { dragY = null; return; }
+            const t = e.touches[0];
+            const box = xtermEl.getBoundingClientRect();
+            dragCell = {
+                col: Math.floor((t.clientX - box.left) / (box.width / term.cols)) + 1,
+                row: Math.floor((t.clientY - box.top) / (box.height / term.rows)) + 1,
+            };
+            dragY = t.clientY;
+        }, {passive: true});
+        xtermEl.addEventListener("touchmove", function (e) {
+            if (dragY === null || e.touches.length !== 1) return;
+            const t = e.touches[0];
+            const move = TerminalRouting.dragWheelSteps(t.clientY - dragY, 24);
+            if (!move.steps) return;
+            e.preventDefault();
+            dragY += move.consumed;
+            for (let i = 0; i < move.steps; i++) {
+                sendRaw(TerminalRouting.wheelReport(move.dir, dragCell.col, dragCell.row));
+            }
+        }, {passive: false});
+        xtermEl.addEventListener("touchend", function () { dragY = null; });
+        xtermEl.addEventListener("touchcancel", function () { dragY = null; });
+        // Mobile virtual keyboards (Gboard, iOS predictive text) route typed
+        // words through an IME composition that isn't closed before Enter
+        // fires; xterm.js then discards the still-open composition instead
+        // of sending it (CompositionHelper.keydown -> finalizeComposition
+        // with commit=false), so the whole line silently vanishes and only
+        // a bare return reaches the pty.
+        //
+        // Only the open composition is owed, though. xterm never clears the
+        // helper textarea between words, so it holds the whole line, and
+        // every earlier word already went to the pty as its own composition
+        // ended. Forwarding the box wholesale sends the paragraph a second
+        // time -- which is what the pty then echoed, the typed text
+        // concatenated with a copy of itself.
+        function pendingImeText() {
+            const ta = term.textarea;
+            const helper = term._core && term._core._compositionHelper;
+            if (!ta || !helper) return "";
+            const pos = helper._compositionPosition || {};
+            return TerminalRouting.pendingImeText({
+                composing: helper._isComposing,
+                // A composition that has ended but whose flush is still on
+                // xterm's 0ms timer: Enter cancels that flush, so the text
+                // is ours to send.
+                flushPending: helper._isSendingComposition,
+                start: pos.start,
+                alreadySent: helper._dataAlreadySent,
+            }, ta.value);
+        }
+        // Emptying the box first leaves xterm's own finalize with nothing to
+        // re-send, so its Enter path runs untouched: composition state
+        // resets, the preview bubble closes, the carriage return goes out.
+        function flushPendingIme() {
+            const ta = term.textarea;
+            const pending = pendingImeText();
+            if (pending && ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(new TextEncoder().encode(pending));
+            }
+            if (ta) ta.value = "";
+        }
+        // Capture-phase on this ancestor runs before any listener on the
+        // textarea itself, composing or not, so this lands ahead of xterm's
+        // own handler.
+        xtermEl.addEventListener("keydown", function (e) {
+            if (e.key !== "Enter" && e.keyCode !== 13) return;
+            flushPendingIme();
+        }, true);
+        el.addEventListener("mousedown", function () { setFocusedPanel(panel); });
+
+        // ── rotation reattach ─────────────────────────────────────
+        function cancelReattachLoop() {
+            if (reattachTimer) { clearTimeout(reattachTimer); reattachTimer = null; }
+        }
+        // A half-open socket still reports OPEN, so onclose never fires and
+        // the normal reattach loop never starts. Tear the zombie down
+        // ourselves and reattach — the pty is almost certainly still live.
+        function forceReattach() {
+            if (destroyed || deliberateClose) return;
+            closeSocket();          // nulls onclose, so drive the loop directly
+            beginReattachLoop();
+        }
+        // Reattach if the connection has gone silent past a threshold. Called
+        // on a timer (a zombie left behind by a network blip) and eagerly on
+        // a foreground return (a mobile rotation, with a tighter threshold
+        // because that's when the socket most likely just died).
+        function reattachIfStale(thresholdMs) {
+            if (destroyed || deliberateClose) return;
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            if (TerminalRouting.socketIsStale(Date.now(), lastRecvAt, thresholdMs)) {
+                forceReattach();
+            }
+        }
+        function beginReattachLoop() {
+            cancelReattachLoop();
+            if (!mindId) return;
+            // Only a socket that stayed up clears the backoff. A socket
+            // that opens and dies straight back is a failing attach, and
+            // reconnecting at full speed is how a tile ends up flickering.
+            reattachAttempts = TerminalRouting.attemptsAfterSocket(
+                reattachAttempts,
+                socketOpenedAt ? Date.now() - socketOpenedAt : 0,
+                STABLE_SOCKET_MS,
+            );
+            reattachStartedAt = Date.now();
+            setAttachState("reattaching…");
+            pollForSuccessor();
+        }
+        async function pollForSuccessor() {
+            if (destroyed) return;
+            const deadId = sessionId || "";
+            try {
+                const resp = await fetch("/api/terminal/sessions", {credentials: "same-origin"});
+                if (resp.ok) {
+                    const rows = await resp.json();
+                    const target = TerminalRouting.pickReattachTarget(rows, {
+                        deadId: deadId,
+                        openIds: Array.from(openPanels.keys()),
+                    });
+                    if (target.action === "retry") {
+                        // Back off between tries. An attach that fails as
+                        // fast as it opens (a mind that refuses the
+                        // handshake) would otherwise loop several times a
+                        // second and hammer the gateway.
+                        cancelReattachLoop();
+                        reattachAttempts += 1;
+                        // The session still exists, so the successor hunt
+                        // never ends the loop on its own — without a cap a
+                        // tile whose attach is being refused retries for as
+                        // long as the tab is open. Stop and offer the tap.
+                        if (TerminalRouting.attachExhausted(reattachAttempts, MAX_ATTACH_ATTEMPTS)) {
+                            stopWith("can't attach");
+                            return;
+                        }
+                        const wait = TerminalRouting.retryDelayMs(reattachAttempts);
+                        setAttachState("reconnecting…");
+                        reattachTimer = setTimeout(attach, wait);
+                        return;
+                    }
+                    if (target.action === "successor") { attachSuccessor(target.session); return; }
+                }
+            } catch (err) {}
+            if (Date.now() - reattachStartedAt >= REATTACH_WINDOW_MS) {
+                stopWith("disconnected");
+                return;
+            }
+            reattachTimer = setTimeout(pollForSuccessor, 2000);
+        }
+        function attachSuccessor(succ) {
+            cancelReattachLoop();
+            const oldId = sessionId;
+            sessionId = succ.id;
+            mindId = succ.mind_id || mindId;
+            mindName = succ.mind_name || mindName;
+            el.dataset.sessionId = sessionId;
+            migrateLabel(oldId, sessionId);
+            applyLabel();
+            reKey(oldId, sessionId);
+            if (speakerOn) openTtsStream();
+            attach();
+            refreshSessions();
+        }
+
+        // ── end / close / back ────────────────────────────────────
+        deleteBtn.addEventListener("click", async function () {
+            if (!sessionId) return;
+            if (!confirm("End this session's process? The conversation branch is kept.")) return;
+            deleteBtn.disabled = true;
+            deleteBtn.textContent = "ending…";
+            try {
+                const resp = await fetch("/api/terminal/sessions/" + encodeURIComponent(sessionId), {
+                    method: "DELETE", credentials: "same-origin",
+                });
+                if (!resp.ok) {
+                    let msg = "HTTP " + resp.status;
+                    try { const d = await resp.json(); msg = d.detail || d.error || msg; } catch (e) {}
+                    setAttachState("end failed: " + msg);
+                    deleteBtn.disabled = false;
+                    deleteBtn.textContent = "end";
+                    return;
+                }
+                deliberateClose = true;
+                closePanel(panel);
+                await refreshSessions();
+            } catch (err) {
+                setAttachState("end error: " + err.message);
+                deleteBtn.disabled = false;
+                deleteBtn.textContent = "end";
+            }
+        });
+        closeBtn.addEventListener("click", function () { closePanel(panel); });
+        backBtn.addEventListener("click", function () { closePanel(panel); });
+
+        const panel = {
+            el: el,
+            get sessionId() { return sessionId; },
+            mindId: function () { return mindId; },
+            mount: function () {
+                term.open(xtermEl);
+                // term.textarea only exists once xterm has opened.
+                term.textarea.addEventListener("focus", function () { setFocusedPanel(panel); });
+                resizeObserver.observe(xtermEl);
+                applyLabel();
+                fitWhenSized(attach);
+                staleTimer = setInterval(function () { reattachIfStale(STALE_MS); }, 2000);
+            },
+            fit: doFit,
+            checkLiveness: function () { reattachIfStale(FOREGROUND_STALE_MS); },
+            focus: function () { setFocusedPanel(panel); term.focus(); },
+            refreshLabel: applyLabel,
+            scrollPage: function (dir) {
+                const action = TerminalRouting.pageScrollAction({
+                    altBuffer: isAltBuffer(), rows: term.rows, dir: dir,
+                });
+                if (action.kind === "bytes") sendRaw(action.data);
+                else term.scrollLines(action.lines);
+            },
+            sendBytes: function (text) {
+                // The toolbar's return key never reaches xterm's keydown
+                // path, so an open composition would sit in the helper
+                // textarea and arrive after the newline, on the next
+                // prompt. Same debt as the hardware Enter, paid the same
+                // way.
+                if (text === "\r") flushPendingIme();
+                sendRaw(text);
+            },
+            destroy: function () {
+                destroyed = true;
+                resizeObserver.disconnect();
+                if (fitRaf) { cancelAnimationFrame(fitRaf); fitRaf = null; }
+                if (staleTimer) { clearInterval(staleTimer); staleTimer = null; }
+                cancelReattachLoop();
+                closeSocket();
+                closeTtsStream();
+                stopTtsPlayback();
+                try { term.dispose(); } catch (e) {}
+                if (el.parentNode) el.parentNode.removeChild(el);
+            },
+        };
+        return panel;
+    }
+
+    // ── grid / stage management ───────────────────────────────────
+    function relayoutGrid() {
+        const n = openPanels.size;
+        gridEl.dataset.count = String(n);
+        gridEmpty.hidden = n > 0;
+        if (n > 0) {
+            const cols = Math.min(n, Math.ceil(Math.sqrt(n)));
+            gridEl.style.gridTemplateColumns = "repeat(" + cols + ", minmax(0, 1fr))";
+        } else {
+            gridEl.style.gridTemplateColumns = "";
+        }
+        // Tile geometry changed for everyone — refit every terminal.
+        requestAnimationFrame(function () {
+            openPanels.forEach(function (p) { p.fit(); });
+        });
+    }
+
+    function reKey(oldId, newId) {
+        if (oldId === newId) return;
+        const panel = openPanels.get(oldId);
+        if (!panel) return;
+        openPanels.delete(oldId);
+        openPanels.set(newId, panel);
+        saveOpenSet();
+        renderCards(lastRows);
+    }
+
+    function closePanel(panel) {
+        openPanels.delete(panel.sessionId);
+        panel.destroy();
+        if (focusedPanel === panel) focusedPanel = null;
+        relayoutGrid();
+        saveOpenSet();
+        renderCards(lastRows);
+        if (!isWide() && openPanels.size === 0) showView("list");
+    }
+
+    function addPanel(session) {
+        const existing = openPanels.get(session.id);
+        if (existing) {
+            existing.focus();
+            if (!isWide()) showView("stage");
+            return;
+        }
+        // mobile is single-panel: replace whatever's open
+        if (!isWide()) {
+            Array.from(openPanels.values()).forEach(function (p) { openPanels.delete(p.sessionId); p.destroy(); });
+        }
+        const panel = createPanel(session);
+        openPanels.set(session.id, panel);
+        gridEl.appendChild(panel.el);
+        relayoutGrid();
+        panel.mount();
+        panel.focus();
+        saveOpenSet();
+        renderCards(lastRows);
+        if (!isWide()) showView("stage");
+    }
+
+    function showView(name) { termApp.dataset.view = name; }
+
+    // Each panel's own ResizeObserver (see createPanel) is the primary
+    // refit trigger, but a foldable unfolding is reported (not reproduced
+    // here in a headless Chromium run) to sometimes not resize a tile's
+    // box at all on some mobile browsers even though the physical screen
+    // -- and therefore the CSS viewport -- changed shape. visualViewport
+    // and orientationchange are independent browser signals for exactly
+    // that: a shape change that isn't a plain window resize. Redundant
+    // with the observer in a well-behaved browser; the point is not
+    // depending on any single one of the three firing.
+    function refitAllPanels() {
+        openPanels.forEach(function (p) { p.fit(); });
+    }
+    if (window.visualViewport) {
+        window.visualViewport.addEventListener("resize", refitAllPanels);
+    }
+    window.addEventListener("orientationchange", refitAllPanels);
+    // Belt and suspenders: if none of the three signals above fire on a
+    // given browser, this puts a hard ceiling of a couple seconds on how
+    // long a tile can stay mis-sized rather than staying wrong forever.
+    // fit() is cheap (a character-metric measurement plus an int compare)
+    // and only sends a resize frame when the size actually changed.
+    setInterval(refitAllPanels, 2000);
+
+    // A rotation or an app-switch often kills the socket while the tab is
+    // hidden, where the watchdog interval is throttled and can't fire. The
+    // moment the tab comes back, check each tile eagerly so a returning
+    // user gets a reattach in a beat instead of a 30s black screen while
+    // the browser waits out its own dead-socket timeout.
+    function checkAllPanelsLive() {
+        openPanels.forEach(function (p) { p.checkLiveness(); });
+    }
+    document.addEventListener("visibilitychange", function () {
+        if (document.visibilityState === "visible") checkAllPanelsLive();
+    });
+    window.addEventListener("pageshow", checkAllPanelsLive);
+
+    // ── session list rendering (flat rows grouped by mind) ────────
+    function isActiveStatus(status) { return TerminalRouting.isActive({status: status}); }
+    function statusDotClass(status) {
+        const s = (status || "").toLowerCase();
+        if (s === "running") return "is-running";
+        if (s === "idle") return "is-idle";
+        return "is-closed";
+    }
+
+    function renderCards(rows) {
+        lastRows = rows || [];
+        listEl.innerHTML = "";
+        let count = 0;
+        const byMind = new Map();
+        lastRows.forEach(function (r) {
+            const key = r.mind_id || r.mind_name || "?";
+            if (!byMind.has(key)) byMind.set(key, {name: r.mind_name || key, rows: []});
+            byMind.get(key).rows.push(r);
+        });
+        byMind.forEach(function (mind) {
+            const sessions = mind.rows.filter(function (s) {
+                const active = isActiveStatus(s.status);
+                return currentFilter === "active" ? active : !active;
+            });
+            if (!sessions.length) return;
+            const group = document.createElement("div");
+            group.className = "term-mind-group";
+            group.textContent = mind.name;
+            listEl.appendChild(group);
+            sessions.forEach(function (s) {
+                const card = document.createElement("button");
+                card.type = "button";
+                card.className = "term-card" + (openPanels.has(s.id) ? " is-current" : "");
+
+                // the list is where color shouts: paint the whole card and
+                // flip the text to whichever pole stays readable on it
+                const label = getLabel(s.id);
+                if (label.color) {
+                    card.classList.add("is-colored");
+                    card.style.background = label.color;
+                    card.style.borderColor = label.color;
+                    card.style.color = contrastText(label.color);
+                }
+
+                const dot = document.createElement("span");
+                dot.className = "term-card-dot " + statusDotClass(s.status);
+
+                const body = document.createElement("span");
+                body.className = "term-card-body";
+                const title = document.createElement("span");
+                title.className = "term-card-title";
+                title.innerHTML = '<span class="term-card-name"></span> <span class="term-card-id"></span>';
+                title.querySelector(".term-card-name").textContent = (label.name || "").trim() || s.mind_name || mind.name;
+                title.querySelector(".term-card-id").textContent = s.short_id || (s.id || "").slice(0, 8);
+                const meta = document.createElement("span");
+                meta.className = "term-card-meta";
+                meta.textContent = (s.status || "") + (s.age ? " · " + s.age : "");
+                body.appendChild(title);
+                body.appendChild(meta);
+                if (s.summary) {
+                    const sum = document.createElement("span");
+                    sum.className = "term-card-summary";
+                    sum.textContent = s.summary;
+                    body.appendChild(sum);
+                }
+                card.appendChild(dot);
+                card.appendChild(body);
+                card.addEventListener("click", function () {
+                    addPanel({
+                        id: s.id,
+                        mind_id: s.mind_id,
+                        mind_name: s.mind_name,
+                        status: s.status || "running",
+                    });
+                });
+                listEl.appendChild(card);
+                count += 1;
+            });
+        });
+        listEmpty.hidden = count > 0;
+        listEmpty.textContent = currentFilter === "active" ? "No active sessions." : "No archived sessions.";
+    }
+
+    async function refreshSessions() {
+        try {
+            const resp = await fetch("/api/terminal/sessions", {credentials: "same-origin"});
+            if (!resp.ok) return [];
+            const rows = await resp.json();
+            renderCards(Array.isArray(rows) ? rows : []);
+            return lastRows;
+        } catch (err) {
+            return [];
+        }
+    }
+
+    // ── new session ───────────────────────────────────────────────
+    async function spawnSession(mind) {
+        newMenu.hidden = true;
+        try {
+            const resp = await fetch("/api/terminal/sessions", {
+                method: "POST", credentials: "same-origin",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({mind_id: mind.id}),
+            });
+            if (!resp.ok) return;
+            const sess = await resp.json();
+            addPanel({
+                id: sess.id,
+                mind_id: sess.mind_id || mind.id,
+                mind_name: mind.name,
+                status: sess.status || "running",
+            });
+            await refreshSessions();
+        } catch (err) {}
+    }
+    async function toggleNewMenu() {
+        if (!newMenu.hidden) { newMenu.hidden = true; return; }
+        newMenu.hidden = false;
+        newMenu.textContent = "loading minds…";
+        let minds = [];
+        try {
+            const resp = await fetch("/api/minds", {credentials: "same-origin"});
+            if (resp.ok) minds = await resp.json();
+        } catch (err) {}
+        minds = (Array.isArray(minds) ? minds : []).filter(function (m) { return m && m.id; });
+        newMenu.innerHTML = "";
+        if (!minds.length) { newMenu.textContent = "no minds registered"; return; }
+        if (minds.length === 1) { spawnSession(minds[0]); return; }
+        minds.forEach(function (m) {
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "term-new-menu-item";
+            btn.textContent = "new · " + (m.name || m.id);
+            btn.addEventListener("click", function () { spawnSession(m); });
+            newMenu.appendChild(btn);
+        });
+    }
+    newBtn.addEventListener("click", toggleNewMenu);
+    document.addEventListener("click", function (e) {
+        if (!newMenu.hidden && !newMenu.contains(e.target) && e.target !== newBtn) newMenu.hidden = true;
+    });
+
+    // ── filter tabs ───────────────────────────────────────────────
+    function setFilter(filter) {
+        currentFilter = filter;
+        const activeSel = filter === "active";
+        tabActive.classList.toggle("is-active", activeSel);
+        tabArchived.classList.toggle("is-active", !activeSel);
+        tabActive.setAttribute("aria-selected", activeSel ? "true" : "false");
+        tabArchived.setAttribute("aria-selected", activeSel ? "false" : "true");
+        renderCards(lastRows);
+    }
+    tabActive.addEventListener("click", function () { setFilter("active"); });
+    tabArchived.addEventListener("click", function () { setFilter("archived"); });
+    refreshBtn.addEventListener("click", function () { refreshSessions(); });
+
+    // ── rail collapse (desktop) ───────────────────────────────────
+    function setRail(collapsed) {
+        termApp.dataset.rail = collapsed ? "collapsed" : "expanded";
+        railExpandBtn.hidden = !collapsed;
+        try { localStorage.setItem("term-rail", collapsed ? "collapsed" : "expanded"); } catch (e) {}
+        openPanels.forEach(function (p) { p.fit(); });
+    }
+    railCollapseBtn.addEventListener("click", function () { setRail(true); });
+    railExpandBtn.addEventListener("click", function () { setRail(false); });
+
+    // ── mobile key toolbar (routes to the focused tile) ───────────
+    toolbar.addEventListener("click", function (ev) {
+        const btn = ev.target.closest("button[data-seq], button[data-scroll]");
+        if (!btn) return;
+        const target = focusedPanel || openPanels.values().next().value;
+        if (!target) return;
+        // A phone has no visible scrollbar and no PageUp key, so a reply
+        // taller than the screen had nothing to reach the rest of it with.
+        // Where that scrolling happens depends on which buffer is up —
+        // see TerminalRouting.pageScrollAction — so the panel decides.
+        if (btn.dataset.scroll) {
+            target.scrollPage(Number(btn.dataset.scroll));
+            return;
+        }
+        target.sendBytes(btn.dataset.seq);
+    });
+
+    // ── boot ──────────────────────────────────────────────────────
+    try {
+        if (localStorage.getItem("term-rail") === "collapsed" && isWide()) setRail(true);
+    } catch (e) {}
+
+    showView("list");
+    syncLabelsFromServer();
+    refreshSessions().then(function (rows) {
+        const active = (rows || []).filter(function (r) { return isActiveStatus(r.status); });
+        const byId = {};
+        active.forEach(function (r) { byId[r.id] = r; });
+        const wanted = recalledOpenSet().map(function (id) { return byId[id]; }).filter(Boolean);
+        // Mobile is single-panel: a refresh restores the one session the
+        // fragment names rather than dumping the user back on the list. No
+        // named session (or it went inactive) leaves the list showing.
+        if (!isWide()) {
+            if (wanted.length) {
+                const hit = wanted[0];
+                addPanel({id: hit.id, mind_id: hit.mind_id, mind_name: hit.mind_name, status: hit.status});
+            }
+            return;
+        }
+        // Desktop: reopen the whole recalled grid, or fall back to the most
+        // recent active session so the stage isn't empty on a first visit.
+        wanted.forEach(function (hit) {
+            addPanel({id: hit.id, mind_id: hit.mind_id, mind_name: hit.mind_name, status: hit.status});
+        });
+        if (wanted.length === 0 && active.length > 0) {
+            const first = active[0];
+            addPanel({id: first.id, mind_id: first.mind_id, mind_name: first.mind_name, status: first.status});
+        }
+    });
+})();
+</script>
+{% endblock %}
