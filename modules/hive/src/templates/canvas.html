@@ -1,0 +1,672 @@
+{% extends "layout.html" %}
+{% block content %}
+<style>
+  /* Full-bleed canvas page */
+  .content-wrapper { padding: 0 !important; }
+  .content-wrapper > .terminal-box,
+  .content-wrapper > footer { display: none; }
+
+  /* Full-screen whiteboard */
+  .draw-container {
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - var(--nav-h));
+    overflow: hidden;
+    background: #090912;
+    user-select: none;
+  }
+
+  /* Toolbar */
+  .draw-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0 0.85rem;
+    height: 40px;
+    border-bottom: 1px solid #c9a84c22;
+    background: #0a0a16;
+    flex-shrink: 0;
+  }
+
+  .draw-tool {
+    font-family: 'Fira Code', monospace;
+    font-size: 0.72rem;
+    padding: 0.18rem 0.55rem;
+    background: transparent;
+    border: 1px solid #c9a84c33;
+    color: #c9a84c77;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: color 0.12s, background 0.12s, border-color 0.12s;
+    line-height: 1.6;
+  }
+  .draw-tool:hover {
+    color: #c9a84c;
+    border-color: #c9a84c66;
+    background: #c9a84c0d;
+  }
+  .draw-tool.active {
+    color: #f1d78a;
+    border-color: #c9a84c;
+    background: #c9a84c1f;
+  }
+
+  .draw-tool-send {
+    color: #2dd4bf;
+    border-color: #2dd4bf55;
+  }
+  .draw-tool-send:hover {
+    color: #5eead4;
+    border-color: #2dd4bf;
+    background: #2dd4bf14;
+  }
+  .draw-tool-send:disabled { opacity: 0.5; cursor: default; }
+
+  .draw-spacer { flex: 1; }
+
+  .draw-btn-clear {
+    font-family: 'Fira Code', monospace;
+    font-size: 0.72rem;
+    padding: 0.18rem 0.55rem;
+    background: transparent;
+    border: 1px solid #7a1a1a44;
+    color: #c0404066;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: color 0.12s, background 0.12s, border-color 0.12s;
+    line-height: 1.6;
+  }
+  .draw-btn-clear:hover {
+    color: #c04040;
+    border-color: #7a1a1a;
+    background: #7a1a1a11;
+  }
+
+  .draw-conn-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #333;
+    margin-left: 0.2rem;
+    flex-shrink: 0;
+    transition: background 0.3s;
+  }
+  .draw-conn-dot.connected { background: #22c55e; }
+  .draw-conn-dot.readonly  { background: #38bdf8; }
+
+  /* Canvas surface */
+  .draw-surface {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+    cursor: crosshair;
+    touch-action: none;
+  }
+  .draw-surface.tool-select { cursor: default; }
+  .draw-surface.tool-text   { cursor: text; }
+
+  #draw-svg {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    display: block;
+  }
+
+  /* Floating text input when placing a text box */
+  .canvas-textbox-input {
+    position: absolute;
+    font-family: 'Fira Code', monospace;
+    font-size: 14px;
+    background: transparent;
+    border: none;
+    border-bottom: 1px dashed;
+    outline: none;
+    padding: 0 2px;
+    min-width: 100px;
+    white-space: pre;
+    z-index: 10;
+    line-height: 1.4;
+  }
+
+  /* Selection ring drawn as SVG rect */
+  #selection-rect {
+    fill: none;
+    stroke: #c9a84c;
+    stroke-width: 1;
+    stroke-dasharray: 4 3;
+    pointer-events: none;
+    display: none;
+  }
+</style>
+
+<div class="draw-container" id="draw-container">
+  <div class="draw-toolbar">
+    <button class="draw-tool active" data-tool="pen" title="Pen — freehand draw">&#9998; pen</button>
+    <button class="draw-tool" data-tool="text" title="Text — click to place">T text</button>
+    <button class="draw-tool" data-tool="select" title="Select — click to pick, Delete to remove, drag to move">&#8598; select</button>
+    <button class="draw-tool" data-tool="attach" title="Attach an image file">&#8853; attach</button>
+    <input type="file" id="file-input" style="display:none" accept="image/*">
+    <span class="draw-spacer"></span>
+    <button class="draw-tool draw-tool-send" id="draw-submit" title="Send the board to Skippy for review">&#9993; send to Skippy</button>
+    <button class="draw-btn-clear" id="draw-clear">clear</button>
+    <span class="draw-conn-dot" id="draw-conn" title="disconnected"></span>
+  </div>
+
+  <div class="draw-surface" id="draw-surface">
+    <svg id="draw-svg" xmlns="http://www.w3.org/2000/svg">
+      <g id="draw-elements"></g>
+      <rect id="selection-rect" x="0" y="0" width="0" height="0"/>
+      <g id="draw-live"></g>
+    </svg>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ── Identity ──────────────────────────────────────────────────────────────
+  const CAN_DRAW = {{ "true" if current_user else "false" }};
+  const MY_COLOR = CAN_DRAW ? '#c9a84c' : '#2dd4bf';
+
+  // ── DOM refs ──────────────────────────────────────────────────────────────
+  const surface    = document.getElementById('draw-surface');
+  const svg        = document.getElementById('draw-svg');
+  const elGroup    = document.getElementById('draw-elements');
+  const liveGroup  = document.getElementById('draw-live');
+  const selRect    = document.getElementById('selection-rect');
+  const connDot    = document.getElementById('draw-conn');
+  const fileInput  = document.getElementById('file-input');
+
+  // ── State ─────────────────────────────────────────────────────────────────
+  let tool       = 'pen';
+  let ws         = null;
+  let wsReady    = false;
+  let elementMap = new Map(); // id → { svgEl, data }
+  let selectedId = null;
+
+  // Pen state
+  let drawing    = false;
+  let livePath   = null;
+  let livePoints = [];
+  let livePid    = null;
+
+  // Drag-to-move state (select tool)
+  let dragId         = null;
+  let dragStartX     = 0, dragStartY = 0;
+  let dragElStartX   = 0, dragElStartY = 0;
+  let didDrag        = false;
+
+  // ── Utilities ─────────────────────────────────────────────────────────────
+  function uid() {
+    return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+  }
+
+  function svgPt(e) {
+    const r = svg.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+
+  function touchSvgPt(e) {
+    const t = e.touches[0] || e.changedTouches[0];
+    return svgPt(t);
+  }
+
+  function smoothD(pts) {
+    if (!pts.length) return '';
+    if (pts.length === 1) return `M${pts[0].x},${pts[0].y}`;
+    let d = `M${pts[0].x},${pts[0].y}`;
+    for (let i = 1; i < pts.length - 1; i++) {
+      const mx = (pts[i].x + pts[i + 1].x) / 2;
+      const my = (pts[i].y + pts[i + 1].y) / 2;
+      d += ` Q${pts[i].x},${pts[i].y} ${mx},${my}`;
+    }
+    const l = pts[pts.length - 1];
+    d += ` L${l.x},${l.y}`;
+    return d;
+  }
+
+  // ── Tool selection ────────────────────────────────────────────────────────
+  document.querySelectorAll('.draw-tool').forEach(btn => {
+    btn.addEventListener('click', function () {
+      const t = this.dataset.tool;
+      if (!CAN_DRAW && t !== 'select') return;
+      if (t === 'attach') {
+        fileInput.click();
+        return;
+      }
+      setTool(t);
+    });
+  });
+
+  function setTool(t) {
+    tool = t;
+    document.querySelectorAll('.draw-tool').forEach(b =>
+      b.classList.toggle('active', b.dataset.tool === t)
+    );
+    surface.className = 'draw-surface'
+      + (t === 'select' ? ' tool-select' : t === 'text' ? ' tool-text' : '');
+    clearSelection();
+  }
+
+  // ── WebSocket ─────────────────────────────────────────────────────────────
+  function connectWs() {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(`${proto}//${location.host}/ws/canvas`);
+
+    ws.onopen = () => {
+      wsReady = true;
+      connDot.className = 'draw-conn-dot ' + (CAN_DRAW ? 'connected' : 'readonly');
+      connDot.title = CAN_DRAW ? 'connected' : 'read-only';
+    };
+
+    ws.onclose = () => {
+      wsReady = false;
+      connDot.className = 'draw-conn-dot';
+      connDot.title = 'disconnected';
+      setTimeout(connectWs, 3000);
+    };
+
+    ws.onerror = () => ws.close();
+
+    ws.onmessage = e => handleServerMsg(JSON.parse(e.data));
+  }
+
+  function send(obj) {
+    if (wsReady && ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(obj));
+    }
+  }
+
+  // ── Apply server messages ─────────────────────────────────────────────────
+  function handleServerMsg(msg) {
+    switch (msg.type) {
+      case 'state':
+        elGroup.innerHTML = '';
+        elementMap.clear();
+        clearSelection();
+        (msg.elements || []).forEach(applyElement);
+        break;
+      case 'path':  applyElement(msg); break;
+      case 'text':  applyElement(msg); break;
+      case 'image': applyElement(msg); break;
+      case 'move':  applyMove(msg); break;
+      case 'delete': applyDelete(msg.id); break;
+      case 'clear':
+        elGroup.innerHTML = '';
+        elementMap.clear();
+        clearSelection();
+        break;
+    }
+  }
+
+  function applyElement(data) {
+    if (elementMap.has(data.id)) return;
+    switch (data.type) {
+      case 'path':  addPathEl(data); break;
+      case 'text':  addTextEl(data); break;
+      case 'image': addImageEl(data); break;
+    }
+  }
+
+  // ── SVG element builders ──────────────────────────────────────────────────
+  function addPathEl(data) {
+    const el = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    el.setAttribute('d', data.d || '');
+    el.setAttribute('stroke', data.color || '#c9a84c');
+    el.setAttribute('stroke-width', data.sw || 2);
+    el.setAttribute('fill', 'none');
+    el.setAttribute('stroke-linecap', 'round');
+    el.setAttribute('stroke-linejoin', 'round');
+    el.setAttribute('data-id', data.id);
+    el.style.pointerEvents = 'stroke';
+    elGroup.appendChild(el);
+    elementMap.set(data.id, { svgEl: el, data: Object.assign({}, data) });
+    if (CAN_DRAW) el.addEventListener('click', e => { e.stopPropagation(); onElemClick(data.id); });
+  }
+
+  function addTextEl(data) {
+    const el = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    el.setAttribute('x', data.x);
+    el.setAttribute('y', data.y);
+    el.setAttribute('fill', data.color || '#c9a84c');
+    el.setAttribute('font-family', "'Fira Code', monospace");
+    el.setAttribute('font-size', '14');
+    el.setAttribute('data-id', data.id);
+    el.style.cursor = CAN_DRAW ? 'default' : 'default';
+    el.textContent = data.content || '';
+    elGroup.appendChild(el);
+    const stored = Object.assign({}, data);
+    elementMap.set(data.id, { svgEl: el, data: stored });
+    if (CAN_DRAW) {
+      el.addEventListener('click', e => { e.stopPropagation(); onElemClick(data.id); });
+      el.addEventListener('mousedown', e => onElemMouseDown(e, data.id));
+    }
+  }
+
+  function addImageEl(data) {
+    const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    g.setAttribute('transform', `translate(${data.x},${data.y})`);
+    g.setAttribute('data-id', data.id);
+
+    const img = document.createElementNS('http://www.w3.org/2000/svg', 'image');
+    img.setAttribute('width', data.w || 200);
+    img.setAttribute('height', data.h || 150);
+    img.setAttribute('href', data.src || '');
+    img.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+    g.appendChild(img);
+    elGroup.appendChild(g);
+    const stored = Object.assign({}, data);
+    elementMap.set(data.id, { svgEl: g, data: stored });
+    if (CAN_DRAW) {
+      g.addEventListener('click', e => { e.stopPropagation(); onElemClick(data.id); });
+      g.addEventListener('mousedown', e => onElemMouseDown(e, data.id));
+    }
+  }
+
+  function applyMove(msg) {
+    const entry = elementMap.get(msg.id);
+    if (!entry) return;
+    const { svgEl, data } = entry;
+    data.x = msg.x; data.y = msg.y;
+    if (data.type === 'text') {
+      svgEl.setAttribute('x', msg.x);
+      svgEl.setAttribute('y', msg.y);
+    } else if (data.type === 'image') {
+      svgEl.setAttribute('transform', `translate(${msg.x},${msg.y})`);
+    }
+    if (selectedId === msg.id) updateSelectionRect(msg.id);
+  }
+
+  function applyDelete(id) {
+    const entry = elementMap.get(id);
+    if (!entry) return;
+    entry.svgEl.remove();
+    elementMap.delete(id);
+    if (selectedId === id) clearSelection();
+  }
+
+  // ── Selection ─────────────────────────────────────────────────────────────
+  function onElemClick(id) {
+    if (tool !== 'select') return;
+    selectElement(id);
+  }
+
+  function selectElement(id) {
+    clearSelection();
+    selectedId = id;
+    updateSelectionRect(id);
+  }
+
+  function updateSelectionRect(id) {
+    const entry = elementMap.get(id);
+    if (!entry) return;
+    try {
+      const bbox = entry.svgEl.getBBox();
+      const pad = 4;
+      selRect.setAttribute('x', bbox.x - pad);
+      selRect.setAttribute('y', bbox.y - pad);
+      selRect.setAttribute('width', bbox.width + pad * 2);
+      selRect.setAttribute('height', bbox.height + pad * 2);
+      selRect.style.display = '';
+    } catch (e) {
+      selRect.style.display = 'none';
+    }
+  }
+
+  function clearSelection() {
+    selectedId = null;
+    selRect.style.display = 'none';
+  }
+
+  // ── Drag to move (select tool) ────────────────────────────────────────────
+  function onElemMouseDown(e, id) {
+    if (tool !== 'select') return;
+    e.stopPropagation();
+    selectElement(id);
+    dragId       = id;
+    dragStartX   = e.clientX;
+    dragStartY   = e.clientY;
+    didDrag      = false;
+    const { data } = elementMap.get(id);
+    dragElStartX = data.x || 0;
+    dragElStartY = data.y || 0;
+  }
+
+  svg.addEventListener('mousemove', e => {
+    if (!dragId) return;
+    const dx = e.clientX - dragStartX;
+    const dy = e.clientY - dragStartY;
+    if (Math.abs(dx) > 2 || Math.abs(dy) > 2) didDrag = true;
+    const entry = elementMap.get(dragId);
+    if (!entry) { dragId = null; return; }
+    const nx = dragElStartX + dx;
+    const ny = dragElStartY + dy;
+    const { svgEl, data } = entry;
+    if (data.type === 'text') {
+      svgEl.setAttribute('x', nx);
+      svgEl.setAttribute('y', ny);
+    } else if (data.type === 'image') {
+      svgEl.setAttribute('transform', `translate(${nx},${ny})`);
+    }
+    updateSelectionRect(dragId);
+  });
+
+  window.addEventListener('mouseup', e => {
+    if (!dragId) return;
+    if (didDrag) {
+      const dx = e.clientX - dragStartX;
+      const dy = e.clientY - dragStartY;
+      const entry = elementMap.get(dragId);
+      if (entry) {
+        const nx = dragElStartX + dx;
+        const ny = dragElStartY + dy;
+        entry.data.x = nx; entry.data.y = ny;
+        send({ type: 'move', id: dragId, x: nx, y: ny });
+      }
+    }
+    dragId = null;
+    didDrag = false;
+  });
+
+  // ── Delete key ────────────────────────────────────────────────────────────
+  document.addEventListener('keydown', e => {
+    if (!CAN_DRAW || !selectedId) return;
+    if (document.activeElement && ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      e.preventDefault();
+      const id = selectedId;
+      applyDelete(id);
+      send({ type: 'delete', id });
+    }
+  });
+
+  // ── Pen tool ──────────────────────────────────────────────────────────────
+  function penDown(pt) {
+    if (!CAN_DRAW) return;
+    drawing = true;
+    livePid = uid();
+    livePoints = [pt];
+    livePath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    livePath.setAttribute('stroke', MY_COLOR);
+    livePath.setAttribute('stroke-width', '2');
+    livePath.setAttribute('fill', 'none');
+    livePath.setAttribute('stroke-linecap', 'round');
+    livePath.setAttribute('stroke-linejoin', 'round');
+    livePath.style.pointerEvents = 'none';
+    liveGroup.appendChild(livePath);
+  }
+
+  function penMove(pt) {
+    if (!drawing || !livePath) return;
+    livePoints.push(pt);
+    if (livePoints.length > 1) livePath.setAttribute('d', smoothD(livePoints));
+  }
+
+  function penUp() {
+    if (!drawing || !livePath) return;
+    drawing = false;
+    const d = smoothD(livePoints);
+    liveGroup.innerHTML = '';
+    if (d && livePoints.length >= 2) {
+      const data = { type: 'path', id: livePid, color: MY_COLOR, d, sw: 2 };
+      addPathEl(data);
+      send(data);
+    }
+    livePath = null; livePoints = []; livePid = null;
+  }
+
+  // ── Text tool ─────────────────────────────────────────────────────────────
+  function placeText(pt) {
+    if (!CAN_DRAW) return;
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'canvas-textbox-input';
+    input.style.left  = pt.x + 'px';
+    input.style.top   = (pt.y - 16) + 'px';
+    input.style.color = MY_COLOR;
+    input.style.borderColor = MY_COLOR;
+    surface.appendChild(input);
+    input.focus();
+
+    let committed = false;
+    function commit() {
+      if (committed) return;
+      committed = true;
+      const text = input.value.trim();
+      input.remove();
+      if (!text) return;
+      const id = uid();
+      const data = { type: 'text', id, x: pt.x, y: pt.y, content: text, color: MY_COLOR };
+      addTextEl(data);
+      send(data);
+    }
+
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter')  { e.preventDefault(); commit(); }
+      if (e.key === 'Escape') { committed = true; input.remove(); }
+    });
+    input.addEventListener('blur', commit);
+  }
+
+  // ── Surface pointer events ────────────────────────────────────────────────
+  surface.addEventListener('mousedown', e => {
+    if (!CAN_DRAW && tool !== 'select') return;
+    // Clicks on an element are handled by the element's own listener
+    if (e.target !== svg && e.target !== elGroup && e.target !== liveGroup && !e.target.id.startsWith('draw')) {
+      // probably on a child element — let it bubble up to onElemMouseDown / onElemClick
+      if (tool !== 'pen') return;
+    }
+    if (tool === 'pen')   { penDown(svgPt(e)); }
+    if (tool === 'text')  { placeText(svgPt(e)); }
+    if (tool === 'select') { clearSelection(); }
+  });
+
+  surface.addEventListener('mousemove', e => {
+    if (tool === 'pen') penMove(svgPt(e));
+  });
+
+  surface.addEventListener('mouseup', () => {
+    if (tool === 'pen') penUp();
+  });
+
+  surface.addEventListener('mouseleave', () => {
+    if (tool === 'pen' && drawing) penUp();
+  });
+
+  // ── Touch events ──────────────────────────────────────────────────────────
+  surface.addEventListener('touchstart', e => {
+    if (!CAN_DRAW) return;
+    if (tool === 'pen') {
+      e.preventDefault();
+      penDown(touchSvgPt(e));
+    } else if (tool === 'text') {
+      e.preventDefault();
+      placeText(touchSvgPt(e));
+    } else if (tool === 'select') {
+      // Tapping an element selects it via its own listener; an empty-surface
+      // tap clears the current selection.
+      if (e.target === svg || e.target === elGroup || e.target === liveGroup) {
+        clearSelection();
+      }
+    }
+  }, { passive: false });
+
+  surface.addEventListener('touchmove', e => {
+    if (tool !== 'pen') return;
+    e.preventDefault();
+    penMove(touchSvgPt(e));
+  }, { passive: false });
+
+  surface.addEventListener('touchend', e => {
+    if (tool !== 'pen') return;
+    e.preventDefault();
+    penUp();
+  }, { passive: false });
+
+  // ── File drop ─────────────────────────────────────────────────────────────
+  surface.addEventListener('dragover', e => e.preventDefault());
+
+  function handleImageFile(file, pt) {
+    if (!file || !file.type.startsWith('image/')) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const id = uid();
+      const data = { type: 'image', id, x: pt.x - 100, y: pt.y - 75, w: 200, h: 150, src: reader.result };
+      addImageEl(data);
+      send(data);
+    };
+    reader.readAsDataURL(file);
+  }
+
+  surface.addEventListener('drop', e => {
+    if (!CAN_DRAW) return;
+    e.preventDefault();
+    handleImageFile(e.dataTransfer.files[0], svgPt(e));
+  });
+
+  fileInput.addEventListener('change', () => {
+    if (!CAN_DRAW) { fileInput.value = ''; return; }
+    const file = fileInput.files[0];
+    const r = svg.getBoundingClientRect();
+    handleImageFile(file, { x: r.width / 2, y: r.height / 2 });
+    fileInput.value = '';
+  });
+
+  // ── Clear button ──────────────────────────────────────────────────────────
+  document.getElementById('draw-clear').addEventListener('click', () => {
+    if (!CAN_DRAW) return;
+    if (!confirm('Clear the canvas? This cannot be undone.')) return;
+    elGroup.innerHTML = '';
+    elementMap.clear();
+    clearSelection();
+    send({ type: 'clear' });
+  });
+
+  // ── Send to Skippy ────────────────────────────────────────────────────────
+  const submitBtn = document.getElementById('draw-submit');
+  if (submitBtn) {
+    submitBtn.addEventListener('click', async () => {
+      if (!CAN_DRAW) return;
+      const prev = submitBtn.innerHTML;
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'sending…';
+      try {
+        const r = await fetch('/canvas/submit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({})
+        });
+        submitBtn.textContent = r.ok ? 'sent to Skippy ✓' : 'send failed';
+      } catch (e) {
+        submitBtn.textContent = 'send failed';
+      }
+      setTimeout(() => { submitBtn.innerHTML = prev; submitBtn.disabled = false; }, 2500);
+    });
+  }
+
+  // ── Connect ───────────────────────────────────────────────────────────────
+  connectWs();
+})();
+</script>
+{% endblock %}
