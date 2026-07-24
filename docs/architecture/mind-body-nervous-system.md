@@ -20,7 +20,7 @@ Browser and playwright belong to the body, not the nervous system — they reach
 
 | Property | Value |
 |---|---|
-| Location | `/home/daniel/Storage/hive-tools` (outside `/Dev/` so minds cannot reach the source) |
+| Location | Its own repo, outside any tree mounted into mind containers (so minds cannot reach the source) |
 | Auth | Bearer token, hashed in `data/hivetools.db` |
 | Write protection | HITL approval gate via Telegram |
 | Network | Joined to `hivemind` Docker network + published port `9421` for bare-metal callers |
@@ -41,48 +41,24 @@ A compromised user can at worst spam HITL requests — annoying, recoverable. A 
 
 ---
 
-## The nervous system — Hive Mind organism
+## The nervous system
 
 | Property | Value |
 |---|---|
-| Location | `/home/daniel/Storage/Dev/hive_mind/nervous_system/` |
-| Auth | None — internal only |
-| Network | Bound to `hivemind` Docker network. No host port publication. |
-| Kill switch | Stop the services. They're invisible to anything off-network. |
-
-Two services in one folder:
-
-```
-nervous_system/
-├── lucent_api/        # graph + vector memory
-│   ├── server.py
-│   └── routers/{graph.py, memory.py}
-├── inter_mind_api/    # broker reads + sync delegate/forward
-│   ├── server.py
-│   └── routers/{messaging.py, state.py}
-└── docker-compose.yml entries (lucent-api, inter-mind-api)
-```
+| Location | [`nervous-system/`](../../nervous-system/) in this repo |
+| Services | `hive-lucent` (graph + vector memory) and `hive-comms` (gateway: sessions, broker, HITL routing) |
+| Auth | Bearer token per service (`LUCENT_BEARER_TOKEN`, `COMMS_BEARER_TOKEN`) on every route except `/health` |
+| Network | `hivemind` Docker network + host ports `8425` (lucent) and `8426` (comms) so bare-metal and LAN minds can reach it |
+| Kill switch | Stop the containers. |
 
 **Two services, not one combined:**
 
-1. Bounded contexts genuinely differ. Lucent = "what does this organism *know*". Inter-mind = "how do brains *talk*".
-2. Failure isolation: a broker bug shouldn't hang lucent queries.
-3. Different change cadences. Lucent's schema is load-bearing; the broker iterates faster.
+1. Bounded contexts genuinely differ. Lucent = "what does this organism *know*". Comms = "how do brains *talk*" and "who is speaking to whom".
+2. Failure isolation: a gateway bug shouldn't hang lucent queries.
+3. Different change cadences. Lucent's schema is load-bearing; comms iterates faster.
 4. They share the network anyway — calling between them is one HTTP hop.
 
----
-
-## The nervous system — Skippy organism
-
-| Property | Value |
-|---|---|
-| Location | `/home/daniel/Storage/hive_mind_skippy/nervous_system/` |
-| Auth | None — internal only |
-| Network | Bound to `127.0.0.1`. Not reachable off-host. |
-| Kill switch | `systemctl stop skippy` — process and nervous system go dark together. |
-| Body access | Via `HIVE_TOOLS_TOKEN` in his keyring. |
-
-Each organism has its own nervous system. The Hive Mind container minds share one (Hive Mind's `lucent.db` + broker). Skippy has his own. **They share the body** (one gmail account, one calendar) — that's hive-tools.
+**One nervous system, shared by every organism.** The container minds and the bare-metal super-minds (e.g. Skippy) all talk to the same lucent and the same comms — one database, many writers, provenance per write via `mind_id`. Super-minds joined the shared nervous system by design (2026-05-05 decision); per-organism nervous systems were retired.
 
 ---
 
@@ -91,15 +67,14 @@ Each organism has its own nervous system. The Hive Mind container minds share on
 | Component | Auth | Network |
 |---|---|---|
 | hive-tools (body) | Bearer token + HITL | `hivemind` net + host port 9421 |
-| Hive Mind nervous system | None | `hivemind` net only, no host publication |
-| Skippy nervous system | None | `127.0.0.1` only |
-| Skippy → hive-tools | Token in keyring (`hive-mind / HIVE_TOOLS_TOKEN`) | host port 9421 |
+| Nervous system (lucent, comms) | Bearer token per service | `hivemind` net + host ports 8425 / 8426 |
+| Bare-metal mind → hive-tools | `HIVE_TOOLS_TOKEN` in its env | host port 9421 |
 
 ---
 
 ## Key design decisions
 
-1. **API key for the body, no API key for the nervous system.** Body reaches outside, needs auth. Nervous system never leaves the network or host, so auth is theatre — kill switch is the network/process boundary.
-2. **One body, many nervous systems.** Body resources (gmail, calendar) are shared across all minds; brain state is per-organism.
+1. **Bearer tokens everywhere.** The body reaches outside; the nervous system is published on host ports so bare-metal and LAN minds can reach it — both carry auth, and the kill switch is still the network/process boundary.
+2. **One body, one nervous system, many minds.** Body resources (gmail, calendar) and brain state (lucent, sessions, broker) are shared; identity is carried per write by `mind_id`.
 3. **Browser belongs to body, not nervous system.** Even though browser sessions are stateful, the state is incidental — it's a body part, not a memory.
-4. **Privilege tiers separate body usage from body extension.** Minds use; Skippy maintains. Maintainer skills never flow downstream.
+4. **Privilege tiers separate body usage from body extension.** Minds use; an operator mind maintains. Maintainer skills never flow downstream.

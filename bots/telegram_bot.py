@@ -584,7 +584,7 @@ async def handle_hitl_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     await query.edit_message_text("\u23f3 Processing\u2026\n\n" + body, reply_markup=None)
 
-    hive_tools_url = os.environ.get("HIVE_TOOLS_URL", "http://192.168.4.64:9421")
+    hive_tools_url = os.environ.get("HIVE_TOOLS_URL", "http://127.0.0.1:9421")
     from core.secrets import get_credential
     hive_tools_token = get_credential("HIVE_TOOLS_TOKEN") or ""
 

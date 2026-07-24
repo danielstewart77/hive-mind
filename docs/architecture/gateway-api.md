@@ -37,7 +37,7 @@ Content-Type: application/json
 
 {
   "owner_type": "terminal",
-  "owner_ref": "daniel",
+  "owner_ref": "alice",
   "client_ref": "terminal-1",
   "model": "sonnet",
   "surface_prompt": "Optional context prepended to the session",

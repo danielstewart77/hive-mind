@@ -29,7 +29,7 @@ Use the Claude Code CLI harness with Ollama env vars injected per-subprocess. Th
 ```
 ANTHROPIC_AUTH_TOKEN=ollama
 ANTHROPIC_API_KEY=""
-ANTHROPIC_BASE_URL=http://192.168.4.64:11434
+ANTHROPIC_BASE_URL=http://<ollama-host>:11434
 ```
 
 These are already defined in `config.yaml` under `providers.ollama.env`. The `ollama launch claude` command sets these automatically, but since our gateway injects env vars per-subprocess, we set them directly and invoke `claude` normally.
