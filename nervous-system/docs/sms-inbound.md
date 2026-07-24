@@ -6,12 +6,12 @@ The nervous system terminates the inbound side of the SMS gateway: a `POST /sms/
 
 ```
 Phone receives SMS
-  → sms-gate.app POSTs webhook to https://sms.sparktobloom.com/sms/inbound
+  → sms-gate.app POSTs webhook to https://sms.<your-domain>/sms/inbound
     → Cloudflare → Caddy (path-routed) → hive-comms:8426
       → verify HMAC → extract fields → dispatch to Ada
 ```
 
-Caddy routes `/sms/*` on `sms.sparktobloom.com` to hive-comms. The hostname is shared with the outbound gateway, which sits at `/api/*` and `/health/*` (routed to the `sms-gateway` container instead).
+Caddy routes `/sms/*` on `sms.<your-domain>` to hive-comms. The hostname is shared with the outbound gateway, which sits at `/api/*` and `/health/*` (routed to the `sms-gateway` container instead).
 
 ## Code
 
@@ -30,7 +30,7 @@ The route module wiring those helpers into a FastAPI endpoint lives alongside th
 
 ## Env vars
 
-Set in `/home/USER/Storage/Dev/hive_mind/nervous-system/.env` (mode 600):
+Set in `nervous-system/.env` (mode 600):
 
 - `SMS_INBOUND_HMAC_SECRET` — 32-byte random, used by `verify_signature`.
 

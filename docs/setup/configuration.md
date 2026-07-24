@@ -15,8 +15,8 @@ providers:
   ollama:
     env:
       ANTHROPIC_AUTH_TOKEN: "ollama"
-      ANTHROPIC_BASE_URL: "http://203.0.113.10:11434"
-    api_base: "http://203.0.113.10:11434"
+      ANTHROPIC_BASE_URL: "http://<ollama-host>:11434"
+    api_base: "http://<ollama-host>:11434"
 
 models:
   sonnet: anthropic

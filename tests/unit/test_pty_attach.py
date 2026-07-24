@@ -82,11 +82,11 @@ class TestConversationFlags:
 
     def test_slug_folds_underscores_and_dots(self, tmp_path, monkeypatch):
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
-        slug = "-home-daniel-hive-mind-x"
+        slug = "-home-hivemind-hive-mind-x"
         (tmp_path / "projects" / slug).mkdir(parents=True)
         (tmp_path / "projects" / slug / "conv-3.jsonl").write_text("{}\n")
         assert pty_attach.claude_conversation_flags(
-            "conv-3", Path("/home/USER/hive_mind.x")
+            "conv-3", Path("/home/hivemind/hive_mind.x")
         ) == ["--resume", "conv-3"]
 
 
