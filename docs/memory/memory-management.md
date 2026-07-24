@@ -5,8 +5,8 @@
 For the current architecture, read in this order:
 
 1. **[architecture/nervous-system.md](../architecture/nervous-system.md)** — local consumer-side overview
-2. **[memory-system-design.md](https://github.com/danielstewart77/hive_nervous_system/blob/main/docs/memory-system-design.md)** — full mind-agnostic design
-3. **[memory-system-implementation.md](https://github.com/danielstewart77/hive_nervous_system/blob/main/docs/memory-system-implementation.md)** — adopter playbook (per-harness hook coverage, env, identity convention)
-4. **[memory-system-requirements.md](https://github.com/danielstewart77/hive_nervous_system/blob/main/docs/memory-system-requirements.md)** — 84 verifiable requirements
+2. **[memory-system-design.md](../../nervous-system/docs/memory-system-design.md)** — full mind-agnostic design
+3. **[memory-system-implementation.md](../../nervous-system/docs/memory-system-implementation.md)** — adopter playbook (per-harness hook coverage, env, identity convention)
+4. **[memory-system-requirements.md](../../nervous-system/docs/memory-system-requirements.md)** — 84 verifiable requirements
 
 The four data classes (`ephemeral`, `current-state`, `future-state`, `feedback`) are documented under [`specs/data-classes/`](../../specs/data-classes/) — `index.md` is the entry point.

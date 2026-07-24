@@ -6,7 +6,7 @@ This file provides guidance to Claude Code when working with this repository.
 
 **Hive Mind** is a self-improving personal assistant powered by Claude Code. The system uses a **centralized gateway server** that wraps the Claude CLI's bidirectional stream-json mode, giving every client (Discord, terminal, web) full CLI capabilities through one API.
 
-The vector store and knowledge graph (lucent) live in a separate, shared **`hive_nervous_system`** container at `~/Storage/Dev/hive_nervous_system/`. Hive_mind code reaches it over HTTP+bearer via `core/lucent_client.py`. The in-repo `lucent-api` service was retired in F13 of the memory-system migration.
+The nervous system — lucent (vector store + knowledge graph) and comms (the gateway: session manager, broker, HITL) — lives in-repo under [`nervous-system/`](nervous-system/), running as the `hive-lucent` and `hive-comms` containers (compose services `lucent` and `comms`). Everything reaches both over HTTP+bearer; minds hold no lucent or gateway code. The standalone `hive_nervous_system` repo is retired — its code was folded in here.
 
 ### Architecture
 
@@ -19,12 +19,12 @@ The vector store and knowledge graph (lucent) live in a separate, shared **`hive
        └────────────────┼────────────────┴─────────────────┘
                         │  HTTP / WebSocket
                  ┌──────▼──────┐
-                 │   FastAPI   │
-                 │   Gateway   │  ← server.py
+                 │  hive-comms │
+                 │   Gateway   │  ← nervous-system/comms/server.py
                  └──────┬──────┘
                         │
               ┌──────────▼──────────┐
-              │   Session Manager   │  ← core/sessions.py
+              │   Session Manager   │  ← nervous-system/comms/sessions.py
               │   (process pool +   │
               │    SQLite DB)       │
               └──────────┬──────────┘
@@ -70,31 +70,26 @@ docker compose up -d --build
 
 ```
 hive_mind/
-├── server.py                      # FastAPI gateway (HTTP + WebSocket endpoints)
+├── nervous-system/                # Lucent + comms (see nervous-system/README.md)
+│   ├── lucent_api/               # Vector store + KG (hive-lucent container)
+│   ├── comms/                    # Gateway: sessions, broker, bootstrap, HITL (hive-comms container)
+│   ├── tests/                    # Comms test suite (lucent's is lucent_api/tests/)
+│   └── data/                     # lucent.db, broker.db, sessions.db (gitignored)
 ├── config.py                      # Centralized config (loads config.yaml)
 ├── config.yaml                    # Non-secret settings (providers, models, server)
 │
 ├── core/                          # Internal libraries (not entry points)
-│   ├── sessions.py               # Session manager (process pool + SQLite)
-│   ├── broker.py                 # Message broker — async inter-mind messaging (SQLite + background wakeup)
 │   ├── secrets.py                # Shared get_credential() utility
-│   ├── models.py                 # Model registry (static aliases + Ollama)
-│   ├── gateway_client.py         # Shared HTTP client for bots
-│   ├── hitl.py                   # Human-in-the-loop approval
-│   ├── audit.py                  # Tool invocation audit logging (JSON + rotation)
-│   ├── dep_scan.py               # pip-audit wrapper for dependency vulnerability scanning
-│   ├── epilogue.py               # Session epilogue processor (post-session memory extraction)
-│   ├── lucent_client.py          # HTTP+bearer client for the shared hive_nervous_system container
-│   ├── memory_schema.py          # Memory data class registry and validation
+│   ├── keyring_backend.py        # Keyring backend for containerised minds
+│   ├── gateway_client.py         # Shared HTTP client for bots → hive-comms
 │   ├── notify_utils.py           # Shared Telegram notification utility
 │   ├── path_validation.py        # CWE-22 path traversal protection for skill agents
-│   └── story_pipeline.py         # Post-merge story pipeline (pull, health check, cleanup)
+│   ├── scheduled_skills.py       # Scheduler-driven skill runs
+│   ├── skill_telemetry_detect.py # Skill usage telemetry
+│   ├── story_pipeline.py         # Post-merge story pipeline (pull, health check, cleanup)
+│   └── training_capture*.py      # Per-harness training-turn capture (Claude, Codex)
 │
 ├── tools/
-│   ├── stateful/                  # In-process Python tools (legacy — most are dead code; minds reach lucent over HTTP and use stateless skills for everything else)
-│   │   ├── browser.py            # Async Playwright browser automation
-│   │   └── memory.py             # Vector memory store (legacy — talk to hive-lucent over HTTP instead)
-│   │
 │   └── stateless/                 # Standalone scripts (invoked via skills)
 │       ├── crypto/crypto.py      # CoinGecko crypto prices
 │       ├── weather/weather.py    # Open-Meteo weather
@@ -107,7 +102,7 @@ hive_mind/
 │       ├── current_time/current_time.py # Timezone-aware clock
 │       └── poll_broker/poll_broker.py # Polls broker for inter-mind task results (stdlib only)
 │
-├── clients/                       # Thin client entry points
+├── bots/                          # Thin client entry points
 │   ├── discord_bot.py            # Discord bot
 │   ├── telegram_bot.py           # Telegram bot (Ada + named minds)
 │   ├── hivemind_bot.py           # Group chat Telegram bot (multi-mind sessions)
@@ -229,4 +224,4 @@ If a tool genuinely needs a persistent connection (e.g., a long-lived browser se
 4. **Less code is better** — if Claude Code already does it, don't wrap it
 5. **Gateway is the single source of truth** — all clients go through server.py
 6. **Per-process isolation** — env vars set per subprocess, never globally
-7. **Always echo directory paths exactly** — whenever a directory path is mentioned (by either party), spell it out character-for-character as you understand it (e.g. `hive_nervous_system`, not "hive nervous system") so Daniel can catch hyphen/underscore/casing errors before any action is taken.
+7. **Always echo directory paths exactly** — whenever a directory path is mentioned (by either party), spell it out character-for-character as you understand it (e.g. `nervous-system`, not "nervous system") so Daniel can catch hyphen/underscore/casing errors before any action is taken.

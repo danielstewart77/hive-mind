@@ -21,7 +21,7 @@ Skippy is the canonical standalone mind. The repo branched from `hive_mind` and 
 
 ## Memory wiring
 
-A standalone mind talks to the shared `hive_nervous_system` container the same way a containerized mind does — over HTTP+bearer. The only difference is the URL: standalone minds can't use `http://hive-lucent:8424` (Docker DNS), so they use `http://127.0.0.1:8425` (the host-side bind on the shared container).
+A standalone mind talks to the shared `hive-lucent` container the same way a containerized mind does — over HTTP+bearer. The only difference is the URL: standalone minds can't use `http://hive-lucent:8424` (Docker DNS), so they use `http://127.0.0.1:8425` (the host-side bind on the shared container).
 
 ```
 LUCENT_URL=http://127.0.0.1:8425        # standalone (host)
