@@ -107,3 +107,160 @@ def test_api_settings_hive_comms_session_delete_proxies_to_gateway(tmp_path, mon
     assert response.status_code == 200
     assert response.json() == {"ok": True}
     assert "/sessions/sess-1" in _FakeAsyncClient.requested_url
+
+
+# ── hive-tools ─────────────────────────────────────────────────────────
+
+
+def test_api_settings_hive_tools_requires_auth(tmp_path, monkeypatch):
+    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
+    monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
+    client = TestClient(main_mod.app)
+
+    assert client.get("/api/settings/hive-tools").status_code == 401
+
+
+def test_api_settings_hive_tools_reports_presence_and_health(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
+    with patch.object(main_mod, "hive_tools_status", return_value={"present": True, "path": "/x"}), \
+         patch.object(main_mod, "_service_health", new=AsyncMock(return_value={"reachable": True, "detail": {}})):
+        response = client.get("/api/settings/hive-tools")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["present"] is True
+    assert body["container_health"]["reachable"] is True
+    assert body["remote_configured"] is False
+
+
+# ── voice ──────────────────────────────────────────────────────────────
+
+
+def test_api_settings_voice_requires_auth(tmp_path, monkeypatch):
+    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
+    monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
+    client = TestClient(main_mod.app)
+
+    assert client.get("/api/settings/voice").status_code == 401
+
+
+def test_api_settings_voice_merges_server_health_and_per_mind_refs(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
+    broker_minds = [{"name": "bob"}, {"name": "ada"}]
+    with patch.object(main_mod, "_broker_minds_safe", new=AsyncMock(return_value=broker_minds)), \
+         patch.object(main_mod, "_service_health", new=AsyncMock(return_value={"reachable": True, "detail": {}})), \
+         patch.object(main_mod, "voice_ref_status", side_effect=lambda n: {"size_bytes": 1} if n == "bob" else None):
+        response = client.get("/api/settings/voice")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body["servers"]) == {"chatterbox", "kokoro"}
+    by_name = {m["name"]: m for m in body["minds"]}
+    assert by_name["bob"]["voice_ref"]["size_bytes"] == 1
+    assert by_name["ada"]["voice_ref"] is None
+
+
+def test_api_settings_voice_upload_requires_auth(tmp_path, monkeypatch):
+    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
+    monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
+    client = TestClient(main_mod.app)
+
+    response = client.post(
+        "/api/settings/voice/bob/voice-ref",
+        files={"file": ("ref.wav", b"RIFF....WAVE", "audio/wav")},
+    )
+    assert response.status_code == 401
+
+
+def test_api_settings_voice_upload_saves_via_settings_data(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
+    target = tmp_path / "bob" / "voice_ref.wav"
+    with patch.object(main_mod, "save_voice_ref", return_value=target) as mock_save:
+        response = client.post(
+            "/api/settings/voice/bob/voice-ref",
+            files={"file": ("ref.wav", b"RIFF....WAVE", "audio/wav")},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    mock_save.assert_called_once()
+    assert mock_save.call_args[0][0] == "bob"
+
+
+def test_api_settings_voice_upload_rejects_invalid_wav(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
+    with patch.object(main_mod, "save_voice_ref", side_effect=ValueError("not a WAV file")):
+        response = client.post(
+            "/api/settings/voice/bob/voice-ref",
+            files={"file": ("ref.wav", b"not audio", "audio/wav")},
+        )
+
+    assert response.status_code == 400
+
+
+# ── downloads ──────────────────────────────────────────────────────────
+
+
+def test_api_settings_downloads_requires_auth(tmp_path, monkeypatch):
+    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
+    monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
+    client = TestClient(main_mod.app)
+
+    assert client.get("/api/settings/downloads").status_code == 401
+
+
+def test_api_settings_downloads_lists_from_settings_data(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
+    fake = [{"filename": "hive-init.py", "size_bytes": 271}]
+    with patch.object(main_mod, "list_downloads", return_value=fake):
+        response = client.get("/api/settings/downloads")
+
+    assert response.status_code == 200
+    assert response.json()["downloads"] == fake
+
+
+def test_download_asset_requires_auth(tmp_path, monkeypatch):
+    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
+    monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
+    client = TestClient(main_mod.app)
+
+    assert client.get("/downloads/hive-init.py").status_code == 401
+
+
+def test_download_asset_404s_for_unresolved_filename(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
+    with patch.object(main_mod, "resolve_download_path", return_value=None):
+        response = client.get("/downloads/hive-init.py")
+    assert response.status_code == 404
+
+
+def test_download_asset_serves_resolved_file(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
+    real_file = tmp_path / "hive-init.py"
+    real_file.write_text("print('hi')")
+    with patch.object(main_mod, "resolve_download_path", return_value=real_file):
+        response = client.get("/downloads/hive-init.py")
+
+    assert response.status_code == 200
+    assert response.text == "print('hi')"
+
+
+# ── new-mind name check ─────────────────────────────────────────────────
+
+
+def test_api_settings_check_mind_name_requires_auth(tmp_path, monkeypatch):
+    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
+    monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
+    client = TestClient(main_mod.app)
+
+    assert client.get("/api/settings/new-mind/check-name?name=bob").status_code == 401
+
+
+def test_api_settings_check_mind_name_flags_taken_name(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
+    with patch.object(main_mod, "_broker_minds_safe", new=AsyncMock(return_value=[{"name": "bob"}])):
+        taken = client.get("/api/settings/new-mind/check-name?name=Bob")
+        free = client.get("/api/settings/new-mind/check-name?name=newton")
+
+    assert taken.json() == {"name": "bob", "available": False}
+    assert free.json() == {"name": "newton", "available": True}

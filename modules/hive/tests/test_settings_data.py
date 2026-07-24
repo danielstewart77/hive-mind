@@ -75,3 +75,121 @@ def test_build_mind_registry_skips_malformed_entries(tmp_path, monkeypatch):
 
     assert len(rows) == 1
     assert rows[0]["name"] == "ok"
+
+
+# ── hive-tools status ─────────────────────────────────────────────────
+
+
+def test_hive_tools_status_present_when_dir_has_entries(tmp_path, monkeypatch):
+    repo = tmp_path / "hive-tools"
+    repo.mkdir()
+    (repo / "README.md").write_text("hi")
+    monkeypatch.setattr(settings_data, "HIVE_TOOLS_REPO_DIR", repo)
+
+    status = settings_data.hive_tools_status()
+
+    assert status["present"] is True
+    assert status["entry_count"] == 1
+
+
+def test_hive_tools_status_absent_when_dir_empty(tmp_path, monkeypatch):
+    repo = tmp_path / "hive-tools"
+    repo.mkdir()
+    monkeypatch.setattr(settings_data, "HIVE_TOOLS_REPO_DIR", repo)
+
+    assert settings_data.hive_tools_status()["present"] is False
+
+
+def test_hive_tools_status_absent_when_dir_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings_data, "HIVE_TOOLS_REPO_DIR", tmp_path / "nope")
+
+    assert settings_data.hive_tools_status()["present"] is False
+
+
+# ── voice ref ──────────────────────────────────────────────────────────
+
+_MINIMAL_WAV = b"RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00" + b"\x00" * 16 + b"data\x00\x00\x00\x00"
+
+
+def test_voice_ref_status_none_when_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_DIR", tmp_path)
+    assert settings_data.voice_ref_status("bob") is None
+
+
+def test_voice_ref_status_reports_size_when_present(tmp_path, monkeypatch):
+    mind_dir = tmp_path / "bob"
+    mind_dir.mkdir()
+    (mind_dir / "voice_ref.wav").write_bytes(_MINIMAL_WAV)
+    monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_DIR", tmp_path)
+
+    status = settings_data.voice_ref_status("bob")
+
+    assert status["size_bytes"] == len(_MINIMAL_WAV)
+
+
+def test_save_voice_ref_writes_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_VOICE_DIR", tmp_path)
+
+    target = settings_data.save_voice_ref("bob", _MINIMAL_WAV)
+
+    assert target.read_bytes() == _MINIMAL_WAV
+    assert target == tmp_path / "bob" / "voice_ref.wav"
+
+
+def test_save_voice_ref_rejects_non_wav(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_VOICE_DIR", tmp_path)
+
+    try:
+        settings_data.save_voice_ref("bob", b"not a wav file at all")
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "WAV" in str(e)
+
+
+def test_save_voice_ref_rejects_unsafe_name(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_VOICE_DIR", tmp_path)
+
+    try:
+        settings_data.save_voice_ref("../etc", _MINIMAL_WAV)
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "invalid mind name" in str(e)
+
+
+def test_save_voice_ref_rejects_oversized_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_VOICE_DIR", tmp_path)
+    monkeypatch.setattr(settings_data, "_WAV_MAX_BYTES", 10)
+
+    try:
+        settings_data.save_voice_ref("bob", _MINIMAL_WAV)
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "too large" in str(e)
+
+
+# ── downloads ──────────────────────────────────────────────────────────
+
+
+def test_list_downloads_only_lists_existing_allowed_files(tmp_path, monkeypatch):
+    (tmp_path / "hive-init.py").write_text("print('hi')")
+    monkeypatch.setattr(settings_data, "HIVE_INIT_DIR", tmp_path)
+
+    downloads = settings_data.list_downloads()
+
+    assert len(downloads) == 1
+    assert downloads[0]["filename"] == "hive-init.py"
+
+
+def test_resolve_download_path_rejects_unknown_filename(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings_data, "HIVE_INIT_DIR", tmp_path)
+    assert settings_data.resolve_download_path("../../etc/passwd") is None
+    assert settings_data.resolve_download_path("not-allowed.txt") is None
+
+
+def test_resolve_download_path_returns_path_for_existing_allowed_file(tmp_path, monkeypatch):
+    (tmp_path / "hive-init.sh").write_text("#!/bin/sh")
+    monkeypatch.setattr(settings_data, "HIVE_INIT_DIR", tmp_path)
+
+    resolved = settings_data.resolve_download_path("hive-init.sh")
+
+    assert resolved == (tmp_path / "hive-init.sh").resolve()

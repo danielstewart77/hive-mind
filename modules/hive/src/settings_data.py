@@ -18,6 +18,19 @@ import yaml
 
 HIVE_MIND_MINDS_DIR = Path("/minds_hive_mind")
 SKIPPY_MINDS_DIR = Path("/minds_skippy")
+HIVE_MIND_MINDS_VOICE_DIR = Path("/minds_hive_mind_voice")
+HIVE_TOOLS_REPO_DIR = Path("/hive_tools_repo")
+HIVE_INIT_DIR = Path("/hive_init")
+
+# hive-init's own allowlist, mirrored here rather than imported since the
+# two repos don't share a package — see spark_to_bloom's former
+# HIVE_INIT_ALLOWED_FILES for the pattern this was lifted from.
+DOWNLOAD_ALLOWED_FILES = {
+    "hive-init.py": "text/x-python",
+    "hive-init.sh": "text/x-shellscript",
+}
+
+_WAV_MAX_BYTES = 20 * 1024 * 1024  # ~10s of clean speech is a few hundred KB; 20MB is generous headroom
 
 _FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n?(.*)$", re.DOTALL)
 
@@ -80,3 +93,75 @@ def build_mind_registry(broker_minds: list[dict]) -> list[dict]:
         })
     rows.sort(key=lambda r: r["name"])
     return rows
+
+
+def hive_tools_status() -> dict[str, Any]:
+    """Whether the hive-tools repo is present on this host.
+
+    A missing host path is auto-created empty by compose's bind mount, so
+    "directory exists but has no entries" is treated the same as "not
+    cloned" — there is currently no git remote configured for hive-tools
+    to clone *from*, so that case is surfaced but not actionable yet.
+    """
+    if not HIVE_TOOLS_REPO_DIR.is_dir():
+        return {"present": False, "path": str(HIVE_TOOLS_REPO_DIR)}
+    entries = list(HIVE_TOOLS_REPO_DIR.iterdir())
+    return {"present": bool(entries), "path": str(HIVE_TOOLS_REPO_DIR), "entry_count": len(entries)}
+
+
+def voice_ref_status(short_name: str) -> dict[str, Any] | None:
+    """Whether a mind has a chatterbox voice_ref.wav, and its stats."""
+    path = HIVE_MIND_MINDS_DIR / short_name / "voice_ref.wav"
+    if not path.is_file():
+        return None
+    stat = path.stat()
+    return {"path": str(path), "size_bytes": stat.st_size, "modified_at": stat.st_mtime}
+
+
+def save_voice_ref(short_name: str, data: bytes) -> Path:
+    """Write a mind's voice_ref.wav to the read-write mind mount.
+
+    Validated only at the RIFF/WAVE header level — chatterbox is picky
+    about format but does its own real validation on synthesis; this is
+    just enough to reject an obviously-wrong upload (a PNG, an mp3) before
+    it lands on disk.
+    """
+    if not short_name or not re.match(r"^[A-Za-z0-9_-]+$", short_name):
+        raise ValueError(f"invalid mind name: {short_name!r}")
+    if len(data) > _WAV_MAX_BYTES:
+        raise ValueError(f"file too large: {len(data)} bytes (max {_WAV_MAX_BYTES})")
+    if data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+        raise ValueError("not a WAV file (missing RIFF/WAVE header)")
+
+    mind_dir = HIVE_MIND_MINDS_VOICE_DIR / short_name
+    mind_dir.mkdir(parents=True, exist_ok=True)
+    target = mind_dir / "voice_ref.wav"
+    target.write_bytes(data)
+    return target
+
+
+def list_downloads() -> list[dict[str, Any]]:
+    """Installer assets available from hive-init, for the downloads tab."""
+    downloads = []
+    for filename, content_type in DOWNLOAD_ALLOWED_FILES.items():
+        path = HIVE_INIT_DIR / filename
+        if not path.is_file():
+            continue
+        stat = path.stat()
+        downloads.append({
+            "filename": filename,
+            "content_type": content_type,
+            "size_bytes": stat.st_size,
+            "modified_at": stat.st_mtime,
+        })
+    return downloads
+
+
+def resolve_download_path(filename: str) -> Path | None:
+    """Resolve a requested download filename against the allowlist, safely."""
+    if filename not in DOWNLOAD_ALLOWED_FILES:
+        return None
+    path = (HIVE_INIT_DIR / filename).resolve()
+    if path.parent != HIVE_INIT_DIR.resolve() or not path.is_file():
+        return None
+    return path

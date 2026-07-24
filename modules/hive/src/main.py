@@ -17,8 +17,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
-from fastapi import Depends, FastAPI, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi import Depends, FastAPI, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -33,7 +33,14 @@ from auth import (
 )
 from config import BASE_DIR
 from graph_data import get_graph_data
-from settings_data import build_mind_registry
+from settings_data import (
+    build_mind_registry,
+    hive_tools_status,
+    list_downloads,
+    resolve_download_path,
+    save_voice_ref,
+    voice_ref_status,
+)
 
 
 _canvas_connections: set[WebSocket] = set()
@@ -810,6 +817,98 @@ async def api_settings_hive_comms_session_delete(
         if resp.status_code >= 400:
             raise HTTPException(status_code=resp.status_code, detail=resp.text)
         return resp.json() if resp.content else {"ok": True}
+
+
+def _hive_tools_base_url() -> str:
+    return os.getenv("HIVE_TOOLS_URL") or "http://hive-tools:9421"
+
+
+async def _service_health(url: str) -> dict:
+    """Best-effort health probe — used purely for status display, never gates a route."""
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            return {"reachable": True, "detail": resp.json() if resp.content else {}}
+    except Exception as exc:
+        return {"reachable": False, "detail": str(exc)}
+
+
+@app.get("/api/settings/hive-tools")
+async def api_settings_hive_tools(user: dict = Depends(require_auth)):
+    del user
+    status = hive_tools_status()
+    status["container_health"] = await _service_health(f"{_hive_tools_base_url()}/health")
+    status["remote_configured"] = False  # no git remote set up for hive-tools yet
+    return status
+
+
+def _voice_server_urls() -> dict[str, str]:
+    return {
+        "chatterbox": os.getenv("CHATTERBOX_VOICE_URL") or "http://hive-mind-voice:8422",
+        "kokoro": os.getenv("KOKORO_VOICE_URL") or "http://hive-mind-voice-kokoro:8422",
+    }
+
+
+@app.get("/api/settings/voice")
+async def api_settings_voice(user: dict = Depends(require_auth)):
+    del user
+    server_urls = _voice_server_urls()
+    servers = {
+        name: await _service_health(f"{url}/health") for name, url in server_urls.items()
+    }
+    broker_minds = await _broker_minds_safe()
+    minds = []
+    for m in broker_minds:
+        if not isinstance(m, dict):
+            continue
+        name = m.get("name") or ""
+        minds.append({"name": name, "voice_ref": voice_ref_status(name) if name else None})
+    minds.sort(key=lambda r: r["name"])
+    return {"servers": servers, "minds": minds}
+
+
+@app.post("/api/settings/voice/{name}/voice-ref")
+async def api_settings_voice_upload(
+    name: str, file: UploadFile, user: dict = Depends(require_auth)
+):
+    del user
+    data = await file.read()
+    try:
+        target = save_voice_ref(name, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "path": str(target), "size_bytes": len(data)}
+
+
+@app.get("/api/settings/downloads")
+async def api_settings_downloads(user: dict = Depends(require_auth)):
+    del user
+    return {"downloads": list_downloads()}
+
+
+@app.get("/downloads/{filename}")
+async def download_asset(filename: str, user: dict = Depends(require_auth)):
+    del user
+    path = resolve_download_path(filename)
+    if path is None:
+        raise HTTPException(status_code=404, detail="file not found")
+    return FileResponse(path, filename=filename)
+
+
+@app.get("/api/settings/new-mind/check-name")
+async def api_settings_check_mind_name(name: str, user: dict = Depends(require_auth)):
+    """The one safely-automatable piece of mind creation today: name
+    availability. Everything else (personality, soul, harness choice)
+    stays conversational — see the /settings new-mind tab."""
+    del user
+    normalized = name.strip().lower()
+    broker_minds = await _broker_minds_safe()
+    taken = any(
+        isinstance(m, dict) and (m.get("name") or "").lower() == normalized
+        for m in broker_minds
+    )
+    return {"name": normalized, "available": bool(normalized) and not taken}
 
 
 @app.get("/health")
