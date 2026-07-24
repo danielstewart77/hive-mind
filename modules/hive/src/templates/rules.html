@@ -1,0 +1,274 @@
+{% extends "layout.html" %}
+{% block content %}
+<main class="rules-page">
+    <div class="terminal-box">
+        <h2>standing &amp; remembered rules</h2>
+        <p>standing tier loads at every session bootstrap. contextual rules surface via similarity search per turn. filter by mind, edit or delete in place, or add a new one.</p>
+        <div class="rules-filters">
+            <label>mind:
+                <select id="filter-mind">
+                    <option value="all">all minds</option>
+                    <option value="shared">shared (universal)</option>
+                    {% for m in minds %}
+                    <option value="{{ m.id }}">{{ m.name }} ({{ m.id[:8] }})</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label>tier:
+                <select id="filter-tier">
+                    <option value="all">all</option>
+                    <option value="standing" selected>standing (always-remember)</option>
+                    <option value="contextual">contextual (remember)</option>
+                </select>
+            </label>
+            <button id="filter-refresh" type="button">refresh</button>
+        </div>
+        <div id="rules-error" class="events-error" style="display:none"></div>
+        <p id="rules-count" class="event-hints"></p>
+    </div>
+
+    <div class="terminal-box">
+        <h3>add new rule</h3>
+        <form id="create-form" class="rules-create">
+            <label>content:
+                <textarea name="content" rows="3" required placeholder="the rule, in plain prose"></textarea>
+            </label>
+            <label>mind:
+                <select name="mind_id" required>
+                    <option value="shared">shared (every mind)</option>
+                    {% for m in minds %}
+                    <option value="{{ m.id }}">{{ m.name }} ({{ m.id[:8] }})</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label>tier:
+                <select name="tier">
+                    <option value="standing" selected>standing</option>
+                    <option value="contextual">contextual</option>
+                </select>
+            </label>
+            <label>data_class:
+                <input type="text" name="data_class" value="feedback">
+            </label>
+            <label>tags (comma-separated, optional):
+                <input type="text" name="tags" value="">
+            </label>
+            <button type="submit">create rule</button>
+        </form>
+        <p id="create-status" class="event-hints"></p>
+    </div>
+
+    <div id="rules-list"></div>
+</main>
+
+<template id="rule-row-template">
+    <div class="terminal-box rule-row">
+        <div class="event-head">
+            <span class="event-class" data-field="tier"></span>
+            <span class="event-bucket" data-field="mind_display"></span>
+            <span class="event-mind-raw" data-field="mind_id" title="raw mind_id in lucent"></span>
+            <span class="event-status" data-field="source"></span>
+            <span class="event-id" data-field="id"></span>
+        </div>
+        <p class="event-summary" data-field="content"></p>
+        <p class="event-hints">
+            data_class: <span data-field="data_class"></span>
+            <span data-field="tags-block">&middot; tags: <span data-field="tags"></span></span>
+            &middot; created <span data-field="created_at"></span>
+        </p>
+        <div class="rules-actions">
+            <button type="button" data-action="edit">edit</button>
+            <button type="button" data-action="delete">delete</button>
+        </div>
+        <form class="rules-edit" style="display:none">
+            <label>content:
+                <textarea name="content" rows="3" required></textarea>
+            </label>
+            <label>applies to:
+                <select name="mind_id">
+                    <option value="shared">shared (every mind)</option>
+                    {% for m in minds %}
+                    <option value="{{ m.id }}">{{ m.name }} ({{ m.id[:8] }})</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label>tags:
+                <input type="text" name="tags">
+            </label>
+            <button type="submit">save</button>
+            <button type="button" data-action="cancel-edit">cancel</button>
+        </form>
+    </div>
+</template>
+
+<script>
+(function () {
+    const ALIAS_TO_CANONICAL = {{ alias_to_canonical_json | safe }};
+    const list = document.getElementById('rules-list');
+    const filterMind = document.getElementById('filter-mind');
+    const filterTier = document.getElementById('filter-tier');
+    const refreshBtn = document.getElementById('filter-refresh');
+    const errBox = document.getElementById('rules-error');
+    const countEl = document.getElementById('rules-count');
+    const createForm = document.getElementById('create-form');
+    const createStatus = document.getElementById('create-status');
+    const rowTpl = document.getElementById('rule-row-template');
+
+    function showError(msg) {
+        if (!msg) { errBox.style.display = 'none'; errBox.textContent = ''; return; }
+        errBox.style.display = 'block'; errBox.textContent = msg;
+    }
+
+    function autoGrow(ta) {
+        ta.style.height = 'auto';
+        ta.style.height = (ta.scrollHeight + 2) + 'px';
+    }
+
+    function bindAutoGrow(ta) {
+        if (!ta || ta.dataset.autogrowBound === '1') return;
+        ta.dataset.autogrowBound = '1';
+        ta.addEventListener('input', () => autoGrow(ta));
+    }
+
+    function fmtTimestamp(ts) {
+        if (!ts) return '';
+        const n = Number(ts);
+        if (!Number.isFinite(n)) return String(ts);
+        try { return new Date(n * 1000).toISOString().replace('T', ' ').slice(0, 19); }
+        catch (e) { return String(ts); }
+    }
+
+    function renderRow(rule) {
+        const node = rowTpl.content.firstElementChild.cloneNode(true);
+        node.dataset.id = rule.id;
+        node.querySelector('[data-field="tier"]').textContent = rule.tier;
+        const mindDisplayEl = node.querySelector('[data-field="mind_display"]');
+        mindDisplayEl.textContent = rule.mind_display || rule.mind_id;
+        const mindRawEl = node.querySelector('[data-field="mind_id"]');
+        if (rule.mind_id && rule.mind_id !== rule.mind_display) {
+            mindRawEl.textContent = '(' + rule.mind_id + ')';
+        } else {
+            mindRawEl.textContent = '';
+        }
+        node.querySelector('[data-field="source"]').textContent = rule.source;
+        node.querySelector('[data-field="id"]').textContent = '#' + rule.id;
+        node.querySelector('[data-field="content"]').textContent = rule.content;
+        node.querySelector('[data-field="data_class"]').textContent = rule.data_class;
+        node.querySelector('[data-field="tags"]').textContent = rule.tags;
+        const tagsBlock = node.querySelector('[data-field="tags-block"]');
+        if (!rule.tags) tagsBlock.style.display = 'none';
+        node.querySelector('[data-field="created_at"]').textContent = fmtTimestamp(rule.created_at);
+
+        const editForm = node.querySelector('.rules-edit');
+        const editBtn = node.querySelector('[data-action="edit"]');
+        const cancelBtn = node.querySelector('[data-action="cancel-edit"]');
+        const deleteBtn = node.querySelector('[data-action="delete"]');
+
+        editBtn.addEventListener('click', () => {
+            const ta = editForm.querySelector('[name="content"]');
+            ta.value = rule.content;
+            editForm.querySelector('[name="tags"]').value = rule.tags;
+            const mindSel = editForm.querySelector('[name="mind_id"]');
+            const canonical = ALIAS_TO_CANONICAL[rule.mind_id] || rule.mind_id;
+            const hasOption = Array.from(mindSel.options).some(o => o.value === canonical);
+            if (!hasOption) {
+                const o = document.createElement('option');
+                o.value = canonical;
+                o.textContent = (rule.mind_display || rule.mind_id) + ' (raw)';
+                mindSel.appendChild(o);
+            }
+            mindSel.value = canonical;
+            editForm.style.display = 'block';
+            bindAutoGrow(ta);
+            autoGrow(ta);
+        });
+        cancelBtn.addEventListener('click', () => { editForm.style.display = 'none'; });
+
+        editForm.addEventListener('submit', async (ev) => {
+            ev.preventDefault();
+            const payload = {
+                content: editForm.querySelector('[name="content"]').value,
+                tags: editForm.querySelector('[name="tags"]').value,
+                mind_id: editForm.querySelector('[name="mind_id"]').value,
+            };
+            try {
+                const r = await fetch('/api/rules/' + encodeURIComponent(rule.id), {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(payload),
+                });
+                if (!r.ok) throw new Error('update failed: ' + r.status + ' ' + (await r.text()));
+                await loadRules();
+            } catch (e) { showError(String(e)); }
+        });
+
+        deleteBtn.addEventListener('click', async () => {
+            if (!confirm('delete rule #' + rule.id + '?')) return;
+            try {
+                const r = await fetch('/api/rules/' + encodeURIComponent(rule.id), {method: 'DELETE'});
+                if (!r.ok) throw new Error('delete failed: ' + r.status + ' ' + (await r.text()));
+                await loadRules();
+            } catch (e) { showError(String(e)); }
+        });
+
+        return node;
+    }
+
+    async function loadRules() {
+        showError('');
+        list.innerHTML = '';
+        countEl.textContent = 'loading...';
+        const params = new URLSearchParams();
+        const mind = filterMind.value;
+        const tier = filterTier.value;
+        if (mind && mind !== 'all') params.set('mind_id', mind);
+        if (tier && tier !== 'all') params.set('tier', tier);
+        try {
+            const r = await fetch('/api/rules?' + params.toString());
+            if (!r.ok) throw new Error('list failed: ' + r.status);
+            const data = await r.json();
+            const rules = data.rules || [];
+            countEl.textContent = rules.length + ' rule(s)';
+            for (const rule of rules) list.appendChild(renderRow(rule));
+        } catch (e) {
+            showError(String(e));
+            countEl.textContent = '';
+        }
+    }
+
+    bindAutoGrow(createForm.querySelector('[name="content"]'));
+
+    createForm.addEventListener('submit', async (ev) => {
+        ev.preventDefault();
+        createStatus.textContent = '';
+        const fd = new FormData(createForm);
+        const payload = {
+            content: fd.get('content'),
+            mind_id: fd.get('mind_id'),
+            tier: fd.get('tier'),
+            data_class: fd.get('data_class'),
+            tags: fd.get('tags'),
+        };
+        try {
+            const r = await fetch('/api/rules', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload),
+            });
+            if (!r.ok) throw new Error('create failed: ' + r.status + ' ' + (await r.text()));
+            createStatus.textContent = 'created.';
+            const createTa = createForm.querySelector('[name="content"]');
+            createTa.value = '';
+            autoGrow(createTa);
+            await loadRules();
+        } catch (e) { createStatus.textContent = String(e); }
+    });
+
+    refreshBtn.addEventListener('click', loadRules);
+    filterMind.addEventListener('change', loadRules);
+    filterTier.addEventListener('change', loadRules);
+
+    loadRules();
+})();
+</script>
+{% endblock %}

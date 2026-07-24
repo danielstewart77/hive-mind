@@ -1,0 +1,28 @@
+services:
+  hive:
+    build: .
+    container_name: hive-site
+    restart: unless-stopped
+    ports:
+      - "8710:8710"
+    env_file: .env
+    environment:
+      - HIVE_HOST=0.0.0.0
+      - HIVE_DB_PATH=/data/hive.db
+      - LUCENT_DB_PATH=/lucent/lucent.db
+      # Parent domain so the session cookie is shared with the terminal
+      # site, which mounts the same auth db and secret.
+      - HIVE_COOKIE_DOMAIN=sparktobloom.com
+    volumes:
+      - ./src:/app/src
+      # Auth db — shared with the terminal site.
+      - ./data:/data
+      # Lucent sqlite, read-only, for the /memory browser.
+      - ${LUCENT_DB_HOST_DIR:-/home/daniel/Storage/Dev/hive_nervous_system/data}:/lucent:ro
+    networks:
+      - hivemind
+
+networks:
+  hivemind:
+    external: true
+    name: hivemind

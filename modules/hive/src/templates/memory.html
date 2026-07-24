@@ -1,0 +1,186 @@
+{% extends "layout.html" %}
+{% block content %}
+<main class="memory-page">
+    <div class="memory-shell">
+        <div class="memory-topbar">
+            <span class="memory-title">memory · lucent.db</span>
+            <span id="memory-status" class="memory-status"></span>
+            <button id="memory-refresh" class="memory-action-btn" type="button" title="refresh tables and current view">refresh</button>
+        </div>
+        <div class="memory-body">
+            <aside class="memory-tables" aria-label="tables">
+                <ul id="memory-table-list"></ul>
+            </aside>
+            <section class="memory-rows">
+                <div class="memory-rows-header">
+                    <span id="memory-rows-title">pick a table</span>
+                    <span id="memory-rows-pager" class="memory-rows-pager"></span>
+                </div>
+                <div id="memory-rows-scroll" class="memory-rows-scroll">
+                    <table id="memory-rows-table" class="memory-rows-table">
+                        <thead></thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </section>
+            <section class="memory-cell" aria-label="cell contents">
+                <div class="memory-cell-header">
+                    <span id="memory-cell-label">cell</span>
+                </div>
+                <pre id="memory-cell-content" class="memory-cell-content"></pre>
+            </section>
+        </div>
+    </div>
+</main>
+
+<script>
+(function () {
+    const tableList = document.getElementById("memory-table-list");
+    const rowsTitle = document.getElementById("memory-rows-title");
+    const rowsPager = document.getElementById("memory-rows-pager");
+    const rowsTable = document.getElementById("memory-rows-table");
+    const cellLabel = document.getElementById("memory-cell-label");
+    const cellContent = document.getElementById("memory-cell-content");
+    const refreshBtn = document.getElementById("memory-refresh");
+    const status = document.getElementById("memory-status");
+
+    let activeTable = null;
+    let activeOffset = 0;
+    const PAGE_SIZE = 200;
+
+    function setStatus(msg) { status.textContent = msg || ""; }
+
+    async function loadTables() {
+        setStatus("loading tables…");
+        try {
+            const resp = await fetch("/api/memory/tables", {credentials: "same-origin"});
+            if (!resp.ok) { setStatus("error " + resp.status); return; }
+            const data = await resp.json();
+            renderTableList(data.tables || []);
+            setStatus("");
+        } catch(err) {
+            setStatus("error loading tables");
+        }
+    }
+
+    function renderTableList(tables) {
+        tableList.innerHTML = "";
+        tables.forEach(function(t) {
+            const li = document.createElement("li");
+            li.className = "memory-table-item";
+            li.dataset.table = t.name;
+            li.textContent = t.name + " (" + t.row_count + ")";
+            if (t.name === activeTable) li.classList.add("memory-table-active");
+            li.addEventListener("click", function() { selectTable(t.name); });
+            tableList.appendChild(li);
+        });
+    }
+
+    async function selectTable(name, offset) {
+        activeTable = name;
+        activeOffset = Math.max(0, offset || 0);
+        Array.from(tableList.children).forEach(function(li) {
+            li.classList.toggle("memory-table-active", li.dataset.table === name);
+        });
+        setStatus("loading rows…");
+        try {
+            const resp = await fetch(
+                "/api/memory/rows?table=" + encodeURIComponent(name) +
+                "&limit=" + PAGE_SIZE + "&offset=" + activeOffset,
+                {credentials: "same-origin"}
+            );
+            if (!resp.ok) { setStatus("error " + resp.status); return; }
+            const data = await resp.json();
+            renderRows(data);
+            setStatus("");
+        } catch(err) {
+            setStatus("error loading rows");
+        }
+    }
+
+    function renderRows(data) {
+        rowsTitle.textContent = data.table;
+        const shown = data.rows.length;
+        const start = data.offset + (shown ? 1 : 0);
+        const end = data.offset + shown;
+        rowsPager.innerHTML = "";
+        const info = document.createElement("span");
+        info.textContent = start + "–" + end + " of " + data.total + " ";
+        rowsPager.appendChild(info);
+        if (data.offset > 0) {
+            const prev = document.createElement("button");
+            prev.type = "button";
+            prev.className = "memory-action-btn";
+            prev.textContent = "prev";
+            prev.addEventListener("click", function() {
+                selectTable(data.table, Math.max(0, data.offset - data.limit));
+            });
+            rowsPager.appendChild(prev);
+        }
+        if (data.offset + shown < data.total) {
+            const next = document.createElement("button");
+            next.type = "button";
+            next.className = "memory-action-btn";
+            next.textContent = "next";
+            next.addEventListener("click", function() {
+                selectTable(data.table, data.offset + data.limit);
+            });
+            rowsPager.appendChild(next);
+        }
+
+        const thead = rowsTable.querySelector("thead");
+        const tbody = rowsTable.querySelector("tbody");
+        thead.innerHTML = "";
+        tbody.innerHTML = "";
+        const headRow = document.createElement("tr");
+        data.columns.forEach(function(col) {
+            const th = document.createElement("th");
+            th.textContent = col;
+            headRow.appendChild(th);
+        });
+        thead.appendChild(headRow);
+
+        data.rows.forEach(function(row, rowIdx) {
+            const tr = document.createElement("tr");
+            data.columns.forEach(function(col) {
+                const td = document.createElement("td");
+                const val = row[col];
+                td.textContent = formatCellPreview(val);
+                td.addEventListener("click", function() {
+                    showCell(data.table, rowIdx, col, val);
+                });
+                tr.appendChild(td);
+            });
+            tbody.appendChild(tr);
+        });
+    }
+
+    function formatCellPreview(val) {
+        if (val === null || val === undefined) return "NULL";
+        const s = typeof val === "string" ? val : JSON.stringify(val);
+        return s.length > 120 ? s.slice(0, 120) + "…" : s;
+    }
+
+    function showCell(table, rowIdx, col, val) {
+        cellLabel.textContent = table + " · row " + (activeOffset + rowIdx + 1) + " · " + col;
+        if (val === null || val === undefined) {
+            cellContent.textContent = "NULL";
+            return;
+        }
+        if (typeof val === "string") {
+            cellContent.textContent = val;
+        } else {
+            try { cellContent.textContent = JSON.stringify(val, null, 2); }
+            catch(e) { cellContent.textContent = String(val); }
+        }
+    }
+
+    refreshBtn.addEventListener("click", function() {
+        loadTables();
+        if (activeTable) selectTable(activeTable, activeOffset);
+    });
+
+    loadTables();
+})();
+</script>
+{% endblock %}

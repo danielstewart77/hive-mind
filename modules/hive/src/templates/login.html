@@ -1,0 +1,21 @@
+{% extends "layout.html" %}
+{% block content %}
+<main class="auth-shell">
+    <section class="login-panel">
+        <p class="login-kicker">hive mind access gate</p>
+        <h1>Hive Login</h1>
+        <p class="login-copy">Standard username and password only. Provisioning happens through Hive Mind, not the website.</p>
+        {% if error %}
+        <div class="login-error">{{ error }}</div>
+        {% endif %}
+        <form action="/login" method="post" class="login-form">
+            <input type="hidden" name="next" value="{{ next_path or '/graph' }}">
+            <label for="username">Username</label>
+            <input id="username" name="username" type="text" autocomplete="username" required>
+            <label for="password">Password</label>
+            <input id="password" name="password" type="password" autocomplete="current-password" required>
+            <button type="submit">Enter Terminal</button>
+        </form>
+    </section>
+</main>
+{% endblock %}

@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hive</title>
+    <link rel="stylesheet" href="{{ request.url_for('static', path='style.css') }}?v={{ asset_versions['style.css'] }}">
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code&display=swap" rel="stylesheet">
+    <script>
+    (function () {
+        var nativeFetch = window.fetch.bind(window);
+        var redirecting = false;
+        window.fetch = function (input, init) {
+            return nativeFetch(input, init).then(function (resp) {
+                if (resp && resp.status === 401 && !redirecting) {
+                    var path = window.location.pathname + window.location.search;
+                    if (window.location.pathname !== "/login") {
+                        redirecting = true;
+                        window.location.assign("/login?next=" + encodeURIComponent(path));
+                    }
+                }
+                return resp;
+            });
+        };
+    })();
+    </script>
+</head>
+<body>
+    <nav>
+        <div class="nav-inner">
+            <a href="/" class="nav-brand glow">hive</a>
+            <button class="nav-toggle" aria-label="Toggle navigation" onclick="toggleNav()">&#9776;</button>
+            <ul id="nav-links">
+                {% if current_user %}
+                <li><a href="/graph">graph</a></li>
+                <li><a href="/memory">memory</a></li>
+                <li><a href="/rules">standing rules</a></li>
+                {% endif %}
+                <li class="user-controls">
+                    {% if current_user %}
+                    <div class="user-menu" data-user-menu>
+                        <button
+                            type="button"
+                            class="user-menu-button"
+                            aria-label="Open user menu"
+                            aria-expanded="false"
+                            aria-haspopup="true"
+                            onclick="toggleUserMenu(event)"
+                        >
+                            <span class="user-menu-name">{{ current_user.username }}</span>
+                        </button>
+                        <div class="user-menu-panel">
+                            <form action="/logout" method="post" class="logout-form">
+                                <button type="submit" class="user-menu-item">log out</button>
+                            </form>
+                        </div>
+                    </div>
+                    {% else %}
+                    <a href="/login" class="login-icon-link" aria-label="Log in">log in</a>
+                    {% endif %}
+                </li>
+            </ul>
+        </div>
+    </nav>
+    <div class="content-wrapper">
+        {% block content %}{% endblock %}
+    </div>
+    <script src="{{ request.url_for('static', path='scripts.js') }}?v={{ asset_versions['scripts.js'] }}"></script>
+</body>
+</html>
