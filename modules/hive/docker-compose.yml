@@ -19,6 +19,13 @@ services:
       - ./data:/data
       # Lucent sqlite, read-only, for the /memory browser.
       - ${LUCENT_DB_HOST_DIR:-/home/daniel/Storage/Dev/hive_nervous_system/data}:/lucent:ro
+      # Per-mind config files, read-only, for the /settings mind registry.
+      # Containerized minds (ada/bob/bilby/nagatha/hex-bot) keep
+      # runtime.yaml under hive_mind's minds/; bare-metal Skippy keeps
+      # MIND.md under his own repo's minds/. Remote minds (arnold, zach,
+      # hex, mordecai if off-host) have no local file here at all.
+      - ${HIVE_MIND_DIR:-/home/daniel/Storage/Dev/hive_mind}/minds:/minds_hive_mind:ro
+      - ${SKIPPY_DIR:-/home/daniel/Storage/hive_mind_skippy}/minds:/minds_skippy:ro
     networks:
       - hivemind
 

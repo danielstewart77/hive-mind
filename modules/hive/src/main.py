@@ -31,6 +31,7 @@ from auth import (
 )
 from config import BASE_DIR
 from graph_data import get_graph_data
+from settings_data import build_mind_registry
 
 
 @asynccontextmanager
@@ -498,6 +499,45 @@ async def api_rules_update(rule_id: str, request: Request, user: dict = Depends(
 async def api_rules_delete(rule_id: str, user: dict = Depends(require_auth)):
     del user
     return await _lucent_request("DELETE", f"/memory/{rule_id}")
+
+
+# ── Settings ───────────────────────────────────────────────────────────
+
+
+@app.get("/settings", response_class=HTMLResponse)
+async def settings_page(request: Request):
+    if not get_current_user_from_request(request):
+        return _login_redirect_for(request)
+    return _render_template(request, "settings.html")
+
+
+@app.get("/api/settings/minds")
+async def api_settings_minds(user: dict = Depends(require_auth)):
+    del user
+    broker_minds = await _broker_minds_safe()
+    return {"minds": build_mind_registry(broker_minds)}
+
+
+@app.get("/api/settings/hive-comms/sessions")
+async def api_settings_hive_comms_sessions(user: dict = Depends(require_auth)):
+    del user
+    sessions = await _gateway_json("/sessions")
+    if not isinstance(sessions, list):
+        sessions = []
+    return {"sessions": sessions}
+
+
+@app.delete("/api/settings/hive-comms/sessions/{session_id}")
+async def api_settings_hive_comms_session_delete(
+    session_id: str, user: dict = Depends(require_auth)
+):
+    del user
+    url = f"{_gateway_base_url().rstrip('/')}/sessions/{session_id}"
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.delete(url, headers=_gateway_headers())
+        if resp.status_code >= 400:
+            raise HTTPException(status_code=resp.status_code, detail=resp.text)
+        return resp.json() if resp.content else {"ok": True}
 
 
 @app.get("/health")

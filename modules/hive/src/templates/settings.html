@@ -1,0 +1,242 @@
+{% extends "layout.html" %}
+{% block content %}
+<main class="settings-page">
+    <style>
+        .settings-tabs { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1.25rem; }
+        .settings-tab {
+            background: transparent; border: 1px solid #1e2d3d; color: #4a6a7e;
+            padding: 0.45rem 0.9rem; border-radius: 6px; cursor: pointer;
+            font-family: inherit; font-size: 0.85rem;
+        }
+        .settings-tab.is-active { color: #c9a84c; border-color: #c9a84c; }
+        .settings-panel { display: none; }
+        .settings-panel.is-active { display: block; }
+        .settings-planned { opacity: 0.75; }
+        .settings-planned h3 { color: #c9a84c; }
+        .mind-card { margin-bottom: 1rem; }
+        .mind-card-head { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; }
+        .mind-card-head .mind-name { font-weight: 600; font-size: 1.05rem; }
+        .mind-card-head .mind-id { color: #4a6a7e; font-size: 0.72rem; }
+        .mind-source-badge {
+            display: inline-block; font-size: 0.68rem; padding: 0.1rem 0.5rem;
+            border-radius: 999px; border: 1px solid #1e2d3d; color: #4a6a7e;
+        }
+        .mind-source-badge.is-local { color: #4ee88a; border-color: #4ee88a44; }
+        .mind-source-badge.is-remote { color: #e0724e; border-color: #e0724e44; }
+        .mind-config-pre {
+            background: #080f18; border: 1px solid #1e2d3d; border-radius: 6px;
+            padding: 0.75rem; font-size: 0.8rem; overflow-x: auto; white-space: pre-wrap;
+        }
+        .session-row {
+            display: flex; align-items: center; gap: 0.75rem; padding: 0.5rem 0;
+            border-bottom: 1px solid #1e2d3d; font-size: 0.85rem;
+        }
+        .session-row .session-mind { min-width: 8rem; }
+        .session-row .session-id { color: #4a6a7e; font-size: 0.72rem; }
+        .session-row .session-summary { flex: 1; color: #dce8f0cc; }
+    </style>
+
+    <div class="terminal-box">
+        <h2>settings</h2>
+        <p>configuration for the hive itself — minds, hive-comms, voice, tooling, and cross-hive federation.</p>
+    </div>
+
+    <nav class="settings-tabs" id="settings-tabs">
+        <button type="button" class="settings-tab is-active" data-tab="minds">minds</button>
+        <button type="button" class="settings-tab" data-tab="hive-comms">hive-comms</button>
+        <button type="button" class="settings-tab" data-tab="hive-tools">hive-tools</button>
+        <button type="button" class="settings-tab" data-tab="voice">voice</button>
+        <button type="button" class="settings-tab" data-tab="new-mind">new mind</button>
+        <button type="button" class="settings-tab" data-tab="downloads">downloads</button>
+        <button type="button" class="settings-tab" data-tab="federation">federation</button>
+    </nav>
+
+    <section class="settings-panel is-active" id="panel-minds">
+        <div class="terminal-box">
+            <h3>mind registry</h3>
+            <p>every mind the broker knows about, merged with its local config file where one is reachable from this host. remote minds (arnold, zach, hex, and any off-host mind) show broker identity only — editing those needs the remote-admin SSH bridge, not this page yet.</p>
+            <button id="minds-refresh" type="button">refresh</button>
+            <p id="minds-error" class="events-error" style="display:none"></p>
+        </div>
+        <div id="minds-list"></div>
+    </section>
+
+    <section class="settings-panel" id="panel-hive-comms">
+        <div class="terminal-box">
+            <h3>hive-comms</h3>
+            <p>live session state straight from the gateway. the cutover of hive-comms itself to a new home is deferred until everything else here is built — this tab is the placeholder for that move.</p>
+            <button id="sessions-refresh" type="button">refresh</button>
+            <p id="sessions-error" class="events-error" style="display:none"></p>
+        </div>
+        <div class="terminal-box" id="sessions-list"></div>
+        <div class="terminal-box settings-planned">
+            <h3>planned: relocate hive-comms</h3>
+            <p>this card will carry the actual cutover steps once the rest of the settings page is built. holding the spot.</p>
+        </div>
+    </section>
+
+    <section class="settings-panel" id="panel-hive-tools">
+        <div class="terminal-box settings-planned">
+            <h3>planned: hive-tools</h3>
+            <p>repo lives at <code>/home/daniel/Storage/hive-tools</code>, runs as the <code>hive-tools</code> container on :9421. this card will show clone status, offer a clone action if it's missing on this host, and link to it if present.</p>
+        </div>
+    </section>
+
+    <section class="settings-panel" id="panel-voice">
+        <div class="terminal-box settings-planned">
+            <h3>planned: voice configuration</h3>
+            <p>two voice servers today (chatterbox and kokoro, both from the upstream hive_mind repo). needs a mind-to-server mapping, and an upload path for new chatterbox voice clips (currently filesystem-only, no upload API) so a clip can be paired with a mind.</p>
+        </div>
+    </section>
+
+    <section class="settings-panel" id="panel-new-mind">
+        <div class="terminal-box settings-planned">
+            <h3>planned: spin up a new mind</h3>
+            <p>wraps the existing create-mind / add-mind skill flow. personality and soul setup stays conversational — never assumed — so this will likely hand off to a chat step rather than a form field.</p>
+        </div>
+    </section>
+
+    <section class="settings-panel" id="panel-downloads">
+        <div class="terminal-box settings-planned">
+            <h3>planned: downloads</h3>
+            <p>client installers for connecting a remote mind to this hive, following the existing hive-init.py / hive-init.sh pattern.</p>
+        </div>
+    </section>
+
+    <section class="settings-panel" id="panel-federation">
+        <div class="terminal-box settings-planned">
+            <h3>planned: hive federation</h3>
+            <p>let one hive map another hive's minds. least defined of everything here — needs a real design pass on discovery and auth between hives before any code.</p>
+        </div>
+    </section>
+</main>
+
+<template id="mind-card-template">
+    <div class="terminal-box mind-card">
+        <div class="mind-card-head">
+            <span class="mind-name" data-field="name"></span>
+            <span class="mind-id" data-field="id"></span>
+            <span class="mind-source-badge" data-field="source-badge"></span>
+        </div>
+        <p class="event-hints">
+            harness: <span data-field="harness"></span>
+            &middot; model: <span data-field="model"></span>
+            &middot; gateway: <span data-field="gateway_url"></span>
+        </p>
+        <pre class="mind-config-pre" data-field="config" style="display:none"></pre>
+    </div>
+</template>
+
+<script>
+(function () {
+    const tabs = document.querySelectorAll('.settings-tab');
+    const panels = document.querySelectorAll('.settings-panel');
+    tabs.forEach(function (tab) {
+        tab.addEventListener('click', function () {
+            tabs.forEach(function (t) { t.classList.remove('is-active'); });
+            panels.forEach(function (p) { p.classList.remove('is-active'); });
+            tab.classList.add('is-active');
+            document.getElementById('panel-' + tab.dataset.tab).classList.add('is-active');
+        });
+    });
+
+    // ── minds ──────────────────────────────────────────────
+    const mindsList = document.getElementById('minds-list');
+    const mindsError = document.getElementById('minds-error');
+    const mindCardTpl = document.getElementById('mind-card-template');
+
+    function showMindsError(msg) {
+        if (!msg) { mindsError.style.display = 'none'; mindsError.textContent = ''; return; }
+        mindsError.style.display = 'block'; mindsError.textContent = msg;
+    }
+
+    function renderMindCard(mind) {
+        const node = mindCardTpl.content.firstElementChild.cloneNode(true);
+        node.querySelector('[data-field="name"]').textContent = mind.name;
+        node.querySelector('[data-field="id"]').textContent = mind.id;
+        node.querySelector('[data-field="harness"]').textContent = mind.harness || (mind.local_config && mind.local_config.config && mind.local_config.config.harness) || 'unknown';
+        node.querySelector('[data-field="model"]').textContent = mind.model || (mind.local_config && mind.local_config.config && mind.local_config.config.default_model) || 'unknown';
+        node.querySelector('[data-field="gateway_url"]').textContent = mind.gateway_url;
+        const badge = node.querySelector('[data-field="source-badge"]');
+        const pre = node.querySelector('[data-field="config"]');
+        if (mind.local_config) {
+            badge.textContent = mind.local_config.source;
+            badge.classList.add('is-local');
+            pre.style.display = 'block';
+            pre.textContent = JSON.stringify(mind.local_config.config || {}, null, 2)
+                + (mind.local_config.body ? '\n\n' + mind.local_config.body : '');
+        } else {
+            badge.textContent = 'remote — no local file';
+            badge.classList.add('is-remote');
+        }
+        return node;
+    }
+
+    async function loadMinds() {
+        showMindsError('');
+        mindsList.innerHTML = 'loading...';
+        try {
+            const r = await fetch('/api/settings/minds');
+            if (!r.ok) throw new Error('list failed: ' + r.status);
+            const data = await r.json();
+            mindsList.innerHTML = '';
+            (data.minds || []).forEach(function (m) { mindsList.appendChild(renderMindCard(m)); });
+        } catch (e) {
+            mindsList.innerHTML = '';
+            showMindsError(String(e));
+        }
+    }
+
+    document.getElementById('minds-refresh').addEventListener('click', loadMinds);
+    loadMinds();
+
+    // ── hive-comms sessions ───────────────────────────────
+    const sessionsList = document.getElementById('sessions-list');
+    const sessionsError = document.getElementById('sessions-error');
+
+    function showSessionsError(msg) {
+        if (!msg) { sessionsError.style.display = 'none'; sessionsError.textContent = ''; return; }
+        sessionsError.style.display = 'block'; sessionsError.textContent = msg;
+    }
+
+    function renderSessionRow(s) {
+        const row = document.createElement('div');
+        row.className = 'session-row';
+        row.innerHTML =
+            '<span class="session-mind">' + (s.mind_id || 'unknown') + '</span>' +
+            '<span class="session-id">' + (s.id || '').slice(0, 8) + '</span>' +
+            '<span>' + (s.status || '') + '</span>' +
+            '<span class="session-summary">' + (s.summary || '') + '</span>' +
+            '<button type="button" data-action="delete">delete</button>';
+        row.querySelector('[data-action="delete"]').addEventListener('click', async function () {
+            if (!confirm('delete session ' + s.id + '?')) return;
+            try {
+                const r = await fetch('/api/settings/hive-comms/sessions/' + encodeURIComponent(s.id), {method: 'DELETE'});
+                if (!r.ok) throw new Error('delete failed: ' + r.status);
+                await loadSessions();
+            } catch (e) { showSessionsError(String(e)); }
+        });
+        return row;
+    }
+
+    async function loadSessions() {
+        showSessionsError('');
+        sessionsList.innerHTML = 'loading...';
+        try {
+            const r = await fetch('/api/settings/hive-comms/sessions');
+            if (!r.ok) throw new Error('list failed: ' + r.status);
+            const data = await r.json();
+            sessionsList.innerHTML = '';
+            (data.sessions || []).forEach(function (s) { sessionsList.appendChild(renderSessionRow(s)); });
+            if (!(data.sessions || []).length) sessionsList.textContent = 'no sessions.';
+        } catch (e) {
+            sessionsList.innerHTML = '';
+            showSessionsError(String(e));
+        }
+    }
+
+    document.getElementById('sessions-refresh').addEventListener('click', loadSessions);
+    loadSessions();
+})();
+</script>
+{% endblock %}
