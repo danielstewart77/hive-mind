@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://localhost:8420")
 HITL_TTL = 180
 
-OLLAMA_BASE_URL = get_credential("OLLAMA_BASE_URL") or "http://192.168.4.64:11434"
+OLLAMA_BASE_URL = get_credential("OLLAMA_BASE_URL") or "http://127.0.0.1:11434"
 EMBEDDING_MODEL = "qwen3-embedding:8b"
 EMBEDDING_DIM = 4096
 

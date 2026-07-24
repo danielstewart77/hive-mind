@@ -159,8 +159,8 @@ providers:
   ollama:
     env:
       ANTHROPIC_AUTH_TOKEN: "ollama"
-      ANTHROPIC_BASE_URL: "http://192.168.4.64:11434"
-    api_base: "http://192.168.4.64:11434"
+      ANTHROPIC_BASE_URL: "http://<ollama-host>:11434"
+    api_base: "http://<ollama-host>:11434"
 
 models:
   sonnet: anthropic

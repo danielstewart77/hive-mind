@@ -134,12 +134,18 @@ def _codebase_ref_exists(codebase_ref: str) -> bool:
     - a symbol like ``Module.Class.method`` or ``func_name`` — at least
       one source file under the project root grep-matches it?
 
-    The token is resolved relative to ``/home/daniel/Storage/hive_mind_skippy``
-    (the mind's project root) when relative.
+    Relative tokens resolve against ``PRUNE_PROJECT_ROOT``. When that env
+    var is unset or names a directory this process can't see (the usual
+    case inside the lucent container, which has no source mount), the ref
+    is unverifiable — treat the entry as still valid rather than deleting
+    on missing evidence.
     """
     if not codebase_ref:
         return True  # nothing to verify
-    project_root = Path("/home/daniel/Storage/hive_mind_skippy")
+    root = os.environ.get("PRUNE_PROJECT_ROOT", "")
+    project_root = Path(root) if root else None
+    if project_root is None or not project_root.is_dir():
+        return True  # unverifiable — keep
     for raw in codebase_ref.split(","):
         token = raw.strip()
         if not token:

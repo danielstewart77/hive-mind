@@ -82,11 +82,11 @@ class TestConversationFlags:
 
     def test_slug_folds_underscores_and_dots(self, tmp_path, monkeypatch):
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
-        slug = "-home-daniel-hive-mind-x"
+        slug = "-home-hivemind-hive-mind-x"
         (tmp_path / "projects" / slug).mkdir(parents=True)
         (tmp_path / "projects" / slug / "conv-3.jsonl").write_text("{}\n")
         assert pty_attach.claude_conversation_flags(
-            "conv-3", Path("/home/daniel/hive_mind.x")
+            "conv-3", Path("/home/hivemind/hive_mind.x")
         ) == ["--resume", "conv-3"]
 
 
@@ -495,14 +495,14 @@ class TestTuiFirstRunFlags:
         # The file is the harness's own live config — seeding a flag must not
         # cost the mind its oauth account, tips history or project entries.
         (tmp_path / ".claude.json").write_text(json.dumps({
-            "oauthAccount": {"emailAddress": "daniel.stewart77@gmail.com"},
+            "oauthAccount": {"emailAddress": "mind@example.com"},
             "projects": {"/other": {"allowedTools": ["Bash"]}},
         }))
 
         pty_attach.ensure_tui_first_run_flags(tmp_path, "/usr/src/app")
 
         data = self._read(tmp_path)
-        assert data["oauthAccount"] == {"emailAddress": "daniel.stewart77@gmail.com"}
+        assert data["oauthAccount"] == {"emailAddress": "mind@example.com"}
         assert data["projects"]["/other"] == {"allowedTools": ["Bash"]}
         assert data["projects"]["/usr/src/app"]["hasTrustDialogAccepted"] is True
 
