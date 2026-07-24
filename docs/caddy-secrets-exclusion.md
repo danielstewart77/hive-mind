@@ -18,7 +18,7 @@ Add a `respond` block before the reverse_proxy to block `/secrets/*` from extern
   }
 
   handle /api/* {
-    reverse_proxy 203.0.113.10:8420
+    reverse_proxy <host-lan-ip>:8420
   }
 ```
 
