@@ -58,9 +58,9 @@ Human-readable guides, background, and reference material — organized by topic
 | [docs/ada/](docs/ada/) | Ada's identity, personality, voice, and visual design |
 | [docs/architecture/](docs/architecture/) | Gateway, API, hive-tools, mind/body/nervous-system tiers |
 | [docs/setup/](docs/setup/) | Configuration, providers, and secrets |
-| [docs/memory/](docs/memory/) | Memory architecture (lucent now lives in [hive_nervous_system](https://github.com/danielstewart77/hive_nervous_system)) |
+| [docs/memory/](docs/memory/) | Memory architecture (lucent lives in-repo at [nervous-system/](nervous-system/)) |
 | [docs/security/](docs/security/) | Security model, hardening, and open tradeoffs |
-| [docs/architecture/nervous-system.md](docs/architecture/nervous-system.md) | Lucent (vector store + KG) — consumer-side overview, links to the standalone [hive_nervous_system](https://github.com/danielstewart77/hive_nervous_system) repo |
+| [docs/architecture/nervous-system.md](docs/architecture/nervous-system.md) | Lucent (vector store + KG) — consumer-side overview; the service itself lives at [nervous-system/](nervous-system/) |
 | [docs/architecture/mind-folder-contract.md](docs/architecture/mind-folder-contract.md) | The "drop a folder, the hive picks it up" contract: layout, env, per-harness hook registration |
 | [docs/architecture/mind-body-nervous-system.md](docs/architecture/mind-body-nervous-system.md) | The mind / body / nervous system organism model — privilege tiers, auth boundaries, design decisions |
 | [docs/standalone-mind.md](docs/standalone-mind.md) | Bare-metal systemd deployment pattern (reference: [hive_mind_skippy](https://github.com/danielstewart77/hive_mind_skippy)) |
