@@ -59,7 +59,7 @@ def send_telegram(chat_id: str, text: str) -> str:
     ...
 ```
 
-Lucent reads/writes live on the shared `hive_nervous_system` container and
+Lucent reads/writes live on the shared `hive-lucent` container and
 are reached over HTTP+bearer at `LUCENT_URL` — no in-repo Python module
 fronts them.
 
@@ -166,9 +166,9 @@ logic or reasoning must include:
 | Security constraints | `specs/security.md` | Markdown |
 | Step-by-step job logic | `skills/<name>/SKILL.md` | Markdown |
 | Scheduled job triggers | `clients/scheduler.py` | Python (thin) |
-| Lucent read/write | `hive_nervous_system` HTTP API (`LUCENT_URL`) | External service |
+| Lucent read/write | `hive-lucent` HTTP API (`LUCENT_URL`) | External service |
 | Telegram send | `tools/stateless/notify/notify.py` | Python (CRUD only) |
-| Graph read/write | `hive_nervous_system` HTTP API (`LUCENT_URL`) | External service |
+| Graph read/write | `hive-lucent` HTTP API (`LUCENT_URL`) | External service |
 | Classification logic | ❌ NOT in Python | Skill reads spec |
 | Heuristics | ❌ NOT in Python | Skill reads spec |
 | Decision trees | ❌ NOT in Python | Skill reads spec |

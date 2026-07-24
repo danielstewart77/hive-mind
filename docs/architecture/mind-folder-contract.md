@@ -76,11 +76,11 @@ the broker's mind-resolution layer; it composes `system_prompt_blocks`
 (soul + standing + decay-weighted recent + session-memory
 carry-forward) and ships them to each mind in the dispatch payload.
 See [`per-mind-hooks.md`](per-mind-hooks.md) and the upstream NS
-[`session-prompt-composition.md`](https://github.com/danielstewart77/hive_nervous_system/blob/main/docs/session-prompt-composition.md)
+[`session-prompt-composition.md`](../../nervous-system/docs/session-prompt-composition.md)
 for the full contract.
 
 ## Identity-node guard
 
 The KG identity node for each mind must be `type='Mind'` (not `Person` or `Agent`). The guard in `lucent_graph.py` keys on `type='Mind'` to enforce that only the mind whose `mind_id` matches can edit its own identity row. Misclassifying the type silently disables the guard.
 
-See [Lucent design](nervous-system.md) and the full [implementation playbook](https://github.com/danielstewart77/hive_nervous_system/blob/main/docs/memory-system-implementation.md) for end-to-end adoption.
+See [Lucent design](nervous-system.md) and the full [implementation playbook](../../nervous-system/docs/memory-system-implementation.md) for end-to-end adoption.

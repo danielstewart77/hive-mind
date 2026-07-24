@@ -128,6 +128,14 @@ sessions.db
 data/*
 !data/.gitkeep
 
+# Nervous-system runtime data — lucent SQLite store + WAL/SHM, broker db,
+# prune logs, backups
+nervous-system/data/
+*.db-shm
+*.db-wal
+*.db.bak*
+*.db.corrupted*
+
 # Planning documents (local working files, not versioned)
 plans/
 
