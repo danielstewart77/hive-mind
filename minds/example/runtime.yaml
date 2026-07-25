@@ -1,0 +1,22 @@
+# Example mind — self-contained runtime configuration.
+# Copy this folder to minds/<your-mind>/ and edit; identity / soul prose
+# lives in the knowledge graph, not here.
+
+name: example
+mind_id: example
+gateway_url: http://example:8420
+remote: false
+description: "Example — starter mind, Claude CLI, Anthropic-backed."
+
+harness: claude_cli
+provider: anthropic
+default_model: sonnet
+runtime_config_dir: /usr/src/app/minds/example/.claude
+resume_policy: always
+
+startup:
+  skip_host_credentials: false
+  sync_repo_config: true
+
+transport:
+  type: cli_stream_json
