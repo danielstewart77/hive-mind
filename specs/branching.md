@@ -20,4 +20,3 @@ Before merging any PR, verify:
 - [ ] `.gitignore` updated if new generated/personal file types added
 - [ ] `config.yaml.example` updated if `config.yaml` schema changed
 - [ ] `docs/security/security-usability-tradeoffs.md` updated if new open security findings apply
-- [ ] `goals.md` updated if new autonomous capabilities were added

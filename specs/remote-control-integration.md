@@ -72,15 +72,15 @@ Remote Control requires claude.ai OAuth login, not API key. Our sessions already
 
 | File | Change |
 |------|--------|
-| `server.py` | New `POST /sessions/{id}/remote-control` endpoint |
-| `core/sessions.py` | `spawn_rc_process()` helper + RC process tracking |
+| `nervous-system/comms/server.py` | New `POST /sessions/{id}/remote-control` endpoint |
+| `nervous-system/comms/sessions.py` | `spawn_rc_process()` helper + RC process tracking |
 | `.claude/skills/rc/SKILL.md` | New skill to trigger RC from chat (Phase 3) |
 
 ## Implementation Order
 
 1. **Spike** — test `claude --remote-control --resume <claude_sid>` on the host machine, confirm flag compatibility and URL output format. **Status: manual verification required** -- run `claude --remote-control --resume <claude_sid>` on the host to confirm the flags compose cleanly and a session URL is output to stdout.
-2. **Endpoint** — `POST /sessions/{id}/remote-control` in `server.py` **[IMPLEMENTED]**
-3. **Delete endpoint** — `DELETE /sessions/{id}/remote-control` in `server.py` **[IMPLEMENTED]**
-4. **Process helper** — `spawn_rc_process()` + `kill_rc_process()` in `core/sessions.py`, parse URL from stdout **[IMPLEMENTED]**
+2. **Endpoint** — `POST /sessions/{id}/remote-control` in `nervous-system/comms/server.py` **[IMPLEMENTED]**
+3. **Delete endpoint** — `DELETE /sessions/{id}/remote-control` in `nervous-system/comms/server.py` **[IMPLEMENTED]**
+4. **Process helper** — `spawn_rc_process()` + `kill_rc_process()` in `nervous-system/comms/sessions.py`, parse URL from stdout **[IMPLEMENTED]**
 5. **Lifecycle** — kill RC subprocess when gateway session ends (integrated into `_kill_process()`, `shutdown()`) **[IMPLEMENTED]**
 6. **Skill** (optional) — `/rc` chat trigger that relays the URL back to Daniel

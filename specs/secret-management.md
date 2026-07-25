@@ -2,41 +2,39 @@
 
 ## Hierarchy
 
-Secrets follow a strict priority order:
+Secrets come from two real, live sources — not a keyring-with-third-party-.env-exception model:
 
-1. **System keyring** (primary) — `keyrings.alt.file.PlaintextKeyring`, data at `/home/hivemind/.claude/data/python_keyring/keyring_pass.cfg`, shared across containers via `.claude` bind mount
-2. **Environment variables** (fallback) — for cases where keyring is unavailable
-3. **`.env` file** (third-party only) — consumed exclusively by docker-compose interpolation for Planka (which cannot read from a keyring)
+1. **System keyring** (primary for skill/tool-level secrets) — `core.keyring_backend.HiveMindKeyring`, a `keyrings.alt.file.PlaintextKeyring` subclass whose storage path comes directly from the `KEY_RING` env var (e.g. `/usr/src/app/data/keyring`), not `XDG_DATA_HOME`.
+2. **`.env` files** (primary for service-to-service bearer tokens) — two separate files, both consumed via Docker Compose `env_file:` by real Python services: repo root `.env` (bot tokens, `COMMS_BEARER_TOKEN`) and `nervous-system/.env` (`LUCENT_BEARER_TOKEN`, `COMMS_BEARER_TOKEN` — must match the root value, plus the two admin tokens). `lucent` and `comms` both have `env_file: ./nervous-system/.env` in `docker-compose.yml` — this is not a third-party-only exception.
+3. **Environment variable fallback** — `get_credential()` falls back to `os.getenv()` when keyring lookup fails or returns nothing, which is how a plain `.env`-sourced value satisfies code that calls `get_credential()`.
 
 ## Reading Secrets
 
-Use `get_credential(key)` from `core/secrets.py`. It checks keyring first, env fallback, returns `None` if neither has the key. Never read secrets any other way.
+Use `get_credential(key)` from `core/secrets.py`. It checks keyring first, falls back to `os.getenv()`, returns `None` if neither has the key.
 
 ## Keyring Configuration
 
-All Python services set these env vars:
-- `PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring`
-- `XDG_DATA_HOME=/home/hivemind/.claude/data`
+Python services that use the keyring set:
+- `PYTHON_KEYRING_BACKEND=core.keyring_backend.HiveMindKeyring`
+- `KEY_RING=/usr/src/app/data/keyring` (or wherever the deployment mounts it)
 
 Service name for all keys: `hive-mind`.
 
-## Keyring-to-Env Bridge
+## Managed Keys — actually required for a basic deployment
 
-The gateway server (`server.py`) reads `HITL_INTERNAL_TOKEN` from keyring at startup and injects it into `os.environ` so Claude CLI subprocesses can resolve it.
+`COMMS_BEARER_TOKEN` (root `.env` **and** `nervous-system/.env` — must match), `LUCENT_BEARER_TOKEN` (`nervous-system/.env`), `TELEGRAM_BOT_TOKEN` / `DISCORD_BOT_TOKEN` (root `.env`, whichever surface you run).
 
-## Managed Keys
+## Managed Keys — feature-specific, only if you're using them
 
-DISCORD_BOT_TOKEN, TELEGRAM_BOT_TOKEN, HITL_INTERNAL_TOKEN, X_BEARER_TOKEN, PLANKA_EMAIL, PLANKA_PASSWORD, PLANKA_URL, LUCENT_BEARER_TOKEN, HIVE_TOOLS_TOKEN
+`HIVE_TOOLS_TOKEN`, `MCP_AUTH_TOKEN`, `X_BEARER_TOKEN`, `LINKEDIN_CLIENT_ID`/`LINKEDIN_CLIENT_SECRET`, `LUCENT_ADMIN_BEARER_TOKEN`/`COMMS_ADMIN_BEARER_TOKEN`, `SMS_INBOUND_HMAC_SECRET`.
 
-## Keys Still in .env
+## Keys that stay in `.env` regardless — third-party, genuinely can't use a keyring
 
-These must stay in `.env` for docker-compose interpolation (third-party containers):
-PLANKA_SECRET_KEY_BASE, PLANKA_BASE_URL, PLANKA_ADMIN_EMAIL, PLANKA_ADMIN_PASSWORD, PLANKA_ADMIN_NAME, PLANKA_ADMIN_USERNAME
+Planka's own admin/DB credentials: `PLANKA_SECRET_KEY_BASE`, `PLANKA_DB_PASSWORD`, `PLANKA_BASE_URL`, `PLANKA_ADMIN_EMAIL`, `PLANKA_ADMIN_PASSWORD`, `PLANKA_ADMIN_NAME`, `PLANKA_ADMIN_USERNAME`. Planka can't read a keyring — this is the one place the "third-party only" framing genuinely holds.
 
 ## Rules
 
 - Never hardcode secrets in source code
-- Never put secrets in `.env` for Python services
-- New secrets go in keyring via the `/secrets` skill
-- Use `get_credential()` to read — never `os.getenv()` directly for secrets
-- No `env_file: .env` on any Python service in docker-compose
+- New keyring-managed secrets go in via the `/secrets` skill
+- Use `get_credential()` to read a keyring-first secret — never `os.getenv()` directly when a value might legitimately live in the keyring
+- Bearer tokens that gate service-to-service auth (`COMMS_BEARER_TOKEN`, `LUCENT_BEARER_TOKEN`, and their admin variants) are `.env`-only by design, not keyring — they need to be readable by Docker Compose itself for `env_file:` interpolation

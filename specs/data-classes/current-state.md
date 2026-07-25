@@ -27,11 +27,15 @@ applies to the chunk:
 ## Pruning
 First match wins; fall through if absent:
 
-1. `codebase_ref` set → `verify_codebase_ref`. Verify file/symbol exists
-   and the stored fact matches current code; delete or re-embed.
+1. `codebase_ref` set → `verify_codebase_ref`. Verify every path/symbol
+   in the comma-separated ref still exists (file check or a repo-wide
+   grep for the symbol) — delete if any token no longer resolves. This
+   only checks existence, not whether the fact's content still matches
+   the code; no re-embedding happens.
 2. `expires_at` set → `verify_external`. Delete after the timestamp passes.
-3. `kg_entity` set → `verify_kg_entity`. Re-query the entity; drop entries
-   that contradict newer facts on the same entity.
+3. `kg_entity` — not implemented. There's no `kg_entity` column on
+   `memories` and no corresponding pruner branch; a chunk tagged this way
+   today just falls through to step 4.
 4. No anchor → `decay_only` with `half_life_days: 180`,
    `delete_below_score: 0.02`.
 

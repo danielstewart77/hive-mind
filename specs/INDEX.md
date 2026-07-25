@@ -20,8 +20,7 @@ Plans (forward-looking, not yet implemented) live in `plans/` — see `plans/` d
 |------|------|---------|
 | Secret Management | `specs/secret-management.md` | Keyring hierarchy, get_credential(), managed keys, keyring-to-env bridge |
 | Container Hardening | `specs/container-hardening.md` | Ring 3 runtime restrictions, compatibility exceptions, Ring 4 production volumes |
-| HITL Approval | `specs/hitl-approval.md` | Approval flow, token lifecycle, blocking vs non-blocking, session heartbeat |
-| HITL Telegram Buttons | `specs/hitl-telegram-inline-buttons.md` | Inline keyboard button implementation for HITL approvals |
+| HITL Approval | `specs/hitl-approval.md` | Approval flow (owned by hive-tools), Telegram inline-button callback handling |
 | OpenClaw CVE Analysis | `specs/openclaw-cve-analysis.md` | CVE pattern mapping to Hive Mind; hardening checklist |
 
 ## Multi-Mind Architecture
@@ -37,7 +36,6 @@ Plans (forward-looking, not yet implemented) live in `plans/` — see `plans/` d
 | Containers | `specs/containers.md` | All Docker services: names, ports, volumes, build context |
 | Remote Control | `specs/remote-control-integration.md` | Session observation endpoint; real-time stream access |
 | Logging | `specs/logging.md` | Structured logging levels, silence rules, rotation config |
-| Epilogue Exceptions | `specs/epilogue-exceptions.md` | Exception trigger conditions for session epilogue HITL (Phase 3) |
 
 ## Voice
 | Spec | File | Summary |
