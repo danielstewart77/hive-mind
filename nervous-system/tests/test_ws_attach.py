@@ -97,7 +97,10 @@ def app_client(monkeypatch, tmp_path):
         yield client, server_module
 
 
-async def _seed_session_and_mind(server_module, session_id="sess-attach", mind_id="ada", claude_sid="claude-abc"):
+async def _seed_session_and_mind(
+    server_module, session_id="sess-attach", mind_id="ada", claude_sid="claude-abc",
+    client_ref=None,
+):
     from comms import broker
 
     mgr = server_module.session_mgr
@@ -108,6 +111,12 @@ async def _seed_session_and_mind(server_module, session_id="sess-attach", mind_i
            VALUES (?, ?, 'web', 'u1', 'opus', ?, ?, 'running', ?, 'terminal attach')""",
         (session_id, claude_sid, now, now, mind_id),
     )
+    if client_ref:
+        await mgr._db.execute(
+            """INSERT INTO active_sessions (client_type, client_ref, session_id)
+               VALUES ('web', ?, ?)""",
+            (client_ref, session_id),
+        )
     await mgr._db.commit()
     await broker.register_mind(
         mgr.broker_db, mind_id=mind_id, name=mind_id, gateway_url="http://mind.test:8420",
@@ -164,6 +173,25 @@ class TestWsAttach:
         assert "ws://mind.test:8420/sessions/sess-attach/attach-pty" in _FakeHttpSession.requested_url
         assert "resume_sid=claude-abc" in _FakeHttpSession.requested_url
         assert "model=opus" in _FakeHttpSession.requested_url
+        assert "owner_type=web" in _FakeHttpSession.requested_url
+        assert "owner_ref=u1" in _FakeHttpSession.requested_url
+
+    def test_relays_client_ref_so_the_mind_can_arm_rotation(self, app_client, monkeypatch):
+        """Without client_ref in the pane env, the mind's Stop hook bails on
+        every fire and a terminal session never rotates — it just grows
+        until Claude's own native compaction is the only thing left."""
+        client, server_module = app_client
+        _run(_seed_session_and_mind(server_module, client_ref="terminal-abc"))
+
+        fake_ws = _FakeMindWS(incoming=[b"hi\r\n"])
+        _FakeHttpSession.ws_to_return = fake_ws
+        _FakeHttpSession.raise_on_connect = None
+        monkeypatch.setattr(server_module.aiohttp, "ClientSession", _FakeHttpSession)
+
+        with client.websocket_connect("/sessions/sess-attach/attach") as ws:
+            ws.receive_bytes()
+
+        assert "client_ref=terminal-abc" in _FakeHttpSession.requested_url
 
     def test_relays_browser_input_to_mind(self, app_client, monkeypatch):
         client, server_module = app_client
