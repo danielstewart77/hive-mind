@@ -264,7 +264,11 @@ async def api_terminal_sessions(user: dict = Depends(require_auth)):
     now = int(time.time())
     rows = []
     for s in sessions:
-        if not isinstance(s, dict) or s.get("owner_type") == "scheduler":
+        if (
+            not isinstance(s, dict)
+            or s.get("owner_type") == "scheduler"
+            or s.get("status") == "closed"
+        ):
             continue
         mind_id = s.get("mind_id") or ""
         rows.append({
@@ -542,22 +546,46 @@ async def api_console_send_message(
     return {"status": "sent"}
 
 
-@app.delete("/api/terminal/sessions/{session_id}")
-async def api_terminal_session_delete(session_id: str, user: dict = Depends(require_auth)):
-    del user
+async def _gateway_session_action(
+    session_id: str, action: str, body: dict | None = None
+) -> dict:
+    data = json.dumps(body).encode() if body is not None else None
 
-    def _do_delete():
-        url = f"{_gateway_base_url().rstrip('/')}/sessions/{session_id}"
-        req = urllib.request.Request(url, headers=_gateway_headers(), method="DELETE")
+    def _do_post():
+        url = f"{_gateway_base_url().rstrip('/')}/sessions/{session_id}/{action}"
+        headers = _gateway_headers()
+        if data is not None:
+            headers = {"Content-Type": "application/json", **headers}
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
         with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read().decode("utf-8"))
 
     try:
-        return await asyncio.to_thread(_do_delete)
+        return await asyncio.to_thread(_do_post)
     except urllib.error.HTTPError as exc:
-        raise HTTPException(status_code=exc.code, detail="Failed to delete session") from exc
+        raise HTTPException(status_code=exc.code, detail=f"Failed to {action} session") from exc
     except OSError as exc:
         raise HTTPException(status_code=502, detail=f"Gateway unavailable: {exc}") from exc
+
+
+@app.post("/api/terminal/sessions/{session_id}/suspend")
+async def api_terminal_session_suspend(
+    session_id: str, user: dict = Depends(require_auth)
+):
+    del user
+    return await _gateway_session_action(session_id, "suspend")
+
+
+@app.post("/api/terminal/sessions/{session_id}/resume")
+async def api_terminal_session_resume(
+    session_id: str, user: dict = Depends(require_auth)
+):
+    del user
+    return await _gateway_session_action(
+        session_id,
+        "resume",
+        {"client_type": "web", "client_ref": f"terminal-{uuid.uuid4()}"},
+    )
 
 
 @app.get("/health")
