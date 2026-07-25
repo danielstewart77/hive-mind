@@ -14,9 +14,18 @@ import json
 import tomllib
 from pathlib import Path
 
+import pytest
+
 _ROOT = Path(__file__).resolve().parents[2]
 _ADA = _ROOT / "minds" / "ada" / ".claude"
 _NAGATHA = _ROOT / "minds" / "nagatha" / ".codex"
+
+# Ada and Nagatha are per-deployment minds (minds/* is gitignored); on a
+# clone without them, there is nothing to wire-check.
+pytestmark = pytest.mark.skipif(
+    not (_ADA.exists() and _NAGATHA.exists()),
+    reason="ada/nagatha minds not present on this host",
+)
 
 
 def _stop_commands_json(settings: dict) -> list[str]:

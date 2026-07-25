@@ -137,22 +137,19 @@ The gateway scans `minds/` on startup. For each subdirectory containing a `runti
 
 ---
 
-## Harness Templates
+## Shared Harness Modules
 
-Templates in `mind_templates/`, named `{harness}_{implementation}_{model-family}.py`:
+The in-container service is shared, tracked code in `minds/harness/`:
 
-| Template | Tested? |
+| Module | Harness |
 |---|---|
-| `claude_cli_claude.py` | Yes |
-| `claude_cli_ollama.py` | Yes |
-| `claude_sdk_claude.py` | Yes |
-| `claude_sdk_ollama.py` | No |
-| `codex_cli_codex.py` | Yes |
-| `codex_cli_ollama.py` | No |
-| `codex_sdk_codex.py` | No |
-| `codex_sdk_ollama.py` | No |
+| `minds/harness/claude_cli.py` | Long-lived Claude CLI subprocess per session, stream-json. Anthropic- or Ollama-backed via `runtime.yaml` `env`. |
+| `minds/harness/codex_cli.py` | One Codex CLI subprocess per turn. OpenAI- or Ollama-backed via `runtime.yaml` `provider`. |
 
-Each mind's `implementation.py` is fully self-contained — no shared imports between minds.
+A mind folder holds configuration only; its fragment's `command` selects the
+harness module and `MIND_NAME` points it at `minds/<name>/runtime.yaml`.
+Because the deployed minds run these exact modules, the shipped harness never
+drifts from production.
 
 ---
 
@@ -161,18 +158,18 @@ Each mind's `implementation.py` is fully self-contained — no shared imports be
 ### Mind Containers
 
 A mind container is a sandboxed environment — not a cloned nervous system. It contains:
-- The mind's `implementation.py` — runs as PID 1 and IS the in-container service (FastAPI app + harness subprocess management)
-- The harness CLI (claude, codex) — spawned as a subprocess by `implementation.py`
+- The shared harness module (`minds/harness/claude_cli.py` or `codex_cli.py`) — runs as PID 1 and IS the in-container service (FastAPI app + harness subprocess management), configured by the mind's `runtime.yaml`
+- The harness CLI (claude, codex) — spawned as a subprocess by the harness module
 - Scoped filesystem mounts — only the directories this mind is allowed to access
 - Skill files — read from the project mount
 
 A mind container does NOT contain: `server.py`, the broker, SQLite databases, the mind registry, secret storage, HITL, or any nervous system component.
 
-There is no separate `mind_server.py` intermediary. Each mind's `implementation.py` is the complete in-container service: FastAPI routes, in-memory session table, soul fetch, prompt assembly, and harness lifecycle all live in one self-contained file per mind.
+There is no separate `mind_server.py` intermediary. The harness module is the complete in-container service: FastAPI routes, in-memory session table, and harness lifecycle in one module shared by every mind of that harness.
 
-### `implementation.py` — In-Container Service
+### The In-Container Service
 
-Each mind's `implementation.py` exposes the following routes:
+Each harness module exposes the following routes:
 
 | Method | Path | Purpose |
 |---|---|---|
