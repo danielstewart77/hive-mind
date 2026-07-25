@@ -1,8 +1,12 @@
 # Per-Mind Hooks
 
-Each mind installs three harness hooks that drive memory capture,
-contextual retrieval, and session rotation. The same three scripts run
-on every mind; only the harness's hook-config format differs.
+Every mind installs at least three harness hooks that drive memory
+capture, contextual retrieval, and session rotation — the baseline this
+repo establishes. A given deployment can layer additional hooks on top
+per mind (training-data capture, skill telemetry, a soul-load nudge,
+etc.) — those are deployment-specific additions, not part of the
+contract this doc describes. Only the harness's hook-config format
+differs between the three baseline hooks.
 
 ## Hooks by lifecycle event
 
