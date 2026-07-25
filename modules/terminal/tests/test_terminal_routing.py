@@ -58,7 +58,7 @@ def test_session_list_carries_lineage(tmp_path, monkeypatch):
 
     by_id = {r["id"]: r for r in rows}
     assert by_id["new"]["rotated_from"] == "old"
-    assert by_id["old"]["rotated_from"] == ""
+    assert "old" not in by_id
 
 
 def test_lineage_absent_is_empty_not_missing(tmp_path, monkeypatch):

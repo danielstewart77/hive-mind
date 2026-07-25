@@ -4,7 +4,6 @@ import asyncio
 import json
 import os
 import sys
-import urllib.error
 from unittest.mock import patch
 
 import httpx
@@ -247,7 +246,8 @@ def test_terminal_page_renders_session_manager_shell(tmp_path, monkeypatch):
     assert 'id="term-list-view"' in body
     assert 'id="term-list"' in body
     assert 'id="term-tab-active"' in body
-    assert 'id="term-tab-archived"' in body
+    assert 'id="term-tab-suspended"' in body
+    assert "term-panel-suspend" in body
     assert 'id="term-rail-collapse"' in body
     assert 'id="term-rail-expand"' in body
     # tile grid stage
@@ -323,6 +323,10 @@ def test_api_terminal_sessions_returns_flat_labeled_list(tmp_path, monkeypatch):
                  "last_active": now - 5, "summary": "newest"},
                 {"id": "sess-sched", "mind_id": "ada-id", "status": "running",
                  "owner_type": "scheduler", "last_active": now - 1, "summary": "cron"},
+                {"id": "sess-suspended", "mind_id": "ada-id", "status": "suspended",
+                 "last_active": now - 30, "summary": "parked"},
+                {"id": "sess-closed", "mind_id": "ada-id", "status": "closed",
+                 "last_active": now - 10, "summary": "history"},
             ]
         return []
 
@@ -333,7 +337,8 @@ def test_api_terminal_sessions_returns_flat_labeled_list(tmp_path, monkeypatch):
     rows = response.json()
     ids = [r["id"] for r in rows]
     assert "sess-sched" not in ids  # scheduler sessions excluded
-    assert ids == ["sess-new12345", "sess-old12345"]  # most-recent first
+    assert "sess-closed" not in ids  # historical sessions stay out of the terminal
+    assert ids == ["sess-new12345", "sess-suspended", "sess-old12345"]
     newest = rows[0]
     assert newest["mind_name"] == "skippy"
     assert newest["short_id"] == "sess-new"
@@ -355,7 +360,7 @@ def test_api_terminal_sessions_empty_on_gateway_error(tmp_path, monkeypatch):
     assert response.json() == []
 
 
-# --- POST/DELETE /api/terminal/sessions -------------------------------------
+# --- POST /api/terminal/sessions --------------------------------------------
 
 
 class _FakeUrlopen:
@@ -408,27 +413,36 @@ def test_terminal_session_create_requires_mind_id(tmp_path, monkeypatch):
     assert response.status_code == 400
 
 
-def test_terminal_session_delete_proxies_to_gateway(tmp_path, monkeypatch):
+@pytest.mark.parametrize("action", ["suspend", "resume"])
+def test_terminal_session_lifecycle_actions_proxy_to_gateway(tmp_path, monkeypatch, action):
     client = _authed_client(tmp_path, monkeypatch)
     captured = {}
 
     class _FakeResp:
         def __enter__(self): return self
         def __exit__(self, *a): return False
-        def read(self): return json.dumps({"session_id": "sess-1", "status": "closed"}).encode()
+        def read(self):
+            status = "suspended" if action == "suspend" else "idle"
+            return json.dumps({"id": "sess-1", "status": status}).encode()
 
     def _fake_urlopen(req, timeout=None):
         captured["url"] = req.full_url
         captured["method"] = req.get_method()
+        captured["body"] = json.loads(req.data) if req.data else None
         return _FakeResp()
 
     with patch("main.urllib.request.urlopen", side_effect=_fake_urlopen):
-        response = client.delete("/api/terminal/sessions/sess-1")
+        response = client.post(f"/api/terminal/sessions/sess-1/{action}")
 
     assert response.status_code == 200
-    assert response.json()["status"] == "closed"
-    assert captured["method"] == "DELETE"
-    assert "/sessions/sess-1" in captured["url"]
+    assert response.json()["status"] == ("suspended" if action == "suspend" else "idle")
+    assert captured["method"] == "POST"
+    assert f"/sessions/sess-1/{action}" in captured["url"]
+    if action == "resume":
+        assert captured["body"]["client_type"] == "web"
+        assert captured["body"]["client_ref"].startswith("terminal-")
+    else:
+        assert captured["body"] is None
 
 
 # --- WS /api/terminal/attach/{session_id} -----------------------------------

@@ -12,8 +12,8 @@
                 <div class="term-seg" role="tablist" aria-label="session filter">
                     <button id="term-tab-active" class="term-seg-btn is-active" type="button"
                             role="tab" aria-selected="true" data-filter="active">Active</button>
-                    <button id="term-tab-archived" class="term-seg-btn" type="button"
-                            role="tab" aria-selected="false" data-filter="archived">Archived</button>
+                    <button id="term-tab-suspended" class="term-seg-btn" type="button"
+                            role="tab" aria-selected="false" data-filter="suspended">Suspended</button>
                 </div>
                 <button id="term-new" class="term-action-btn" type="button" title="start a new session">+ new</button>
                 <button id="term-refresh" class="term-action-btn" type="button" title="refresh session list">↻</button>
@@ -66,7 +66,7 @@
     const newBtn = document.getElementById("term-new");
     const newMenu = document.getElementById("term-new-menu");
     const tabActive = document.getElementById("term-tab-active");
-    const tabArchived = document.getElementById("term-tab-archived");
+    const tabSuspended = document.getElementById("term-tab-suspended");
     const railCollapseBtn = document.getElementById("term-rail-collapse");
     const railExpandBtn = document.getElementById("term-rail-expand");
     const toolbar = document.getElementById("term-mobile-toolbar");
@@ -218,8 +218,8 @@
                 '<span class="term-panel-info">…</span>' +
                 '<button class="term-panel-rename term-action-btn" type="button" title="rename / recolor this session" aria-label="rename this session">✎</button>' +
                 '<button class="term-panel-speaker term-action-btn" type="button" title="toggle voice playback" aria-pressed="false">speaker off</button>' +
-                '<button class="term-panel-delete term-action-btn term-action-btn-danger" type="button" ' +
-                    'title="end this session\'s process (keeps the conversation branch)">end</button>' +
+                '<button class="term-panel-suspend term-action-btn term-action-btn-danger" type="button" ' +
+                    'title="suspend this session and keep its conversation">suspend</button>' +
                 '<button class="term-panel-close term-action-btn" type="button" title="remove from grid" aria-label="remove from grid">✕</button>' +
             '</header>' +
             '<div class="term-rename-pop" hidden>' +
@@ -245,7 +245,7 @@
         const info = el.querySelector(".term-panel-info");
         const xtermEl = el.querySelector(".term-xterm");
         const speakerBtn = el.querySelector(".term-panel-speaker");
-        const deleteBtn = el.querySelector(".term-panel-delete");
+        const suspendBtn = el.querySelector(".term-panel-suspend");
         const closeBtn = el.querySelector(".term-panel-close");
         const backBtn = el.querySelector(".term-panel-back");
         const renameBtn = el.querySelector(".term-panel-rename");
@@ -567,9 +567,14 @@
                 if (destroyed || deliberateClose) return;
                 // 4410 = the gateway closed the session on purpose
                 // (end-session, /kill). Don't hunt a successor — report
-                // the ending and let the rail refile it under Archived.
+                // the ending and remove it from the terminal session lists.
                 if (ev && ev.code === 4410) {
                     setAttachState("session ended");
+                    refreshSessions();
+                    return;
+                }
+                if (ev && ev.code === 4411) {
+                    setAttachState("session suspended");
                     refreshSessions();
                     return;
                 }
@@ -812,31 +817,31 @@
             refreshSessions();
         }
 
-        // ── end / close / back ────────────────────────────────────
-        deleteBtn.addEventListener("click", async function () {
+        // ── suspend / close / back ────────────────────────────────
+        suspendBtn.addEventListener("click", async function () {
             if (!sessionId) return;
-            if (!confirm("End this session's process? The conversation branch is kept.")) return;
-            deleteBtn.disabled = true;
-            deleteBtn.textContent = "ending…";
+            if (!confirm("Suspend this session? You can resume it later.")) return;
+            suspendBtn.disabled = true;
+            suspendBtn.textContent = "suspending…";
             try {
-                const resp = await fetch("/api/terminal/sessions/" + encodeURIComponent(sessionId), {
-                    method: "DELETE", credentials: "same-origin",
+                const resp = await fetch("/api/terminal/sessions/" + encodeURIComponent(sessionId) + "/suspend", {
+                    method: "POST", credentials: "same-origin",
                 });
                 if (!resp.ok) {
                     let msg = "HTTP " + resp.status;
                     try { const d = await resp.json(); msg = d.detail || d.error || msg; } catch (e) {}
-                    setAttachState("end failed: " + msg);
-                    deleteBtn.disabled = false;
-                    deleteBtn.textContent = "end";
+                    setAttachState("suspend failed: " + msg);
+                    suspendBtn.disabled = false;
+                    suspendBtn.textContent = "suspend";
                     return;
                 }
                 deliberateClose = true;
                 closePanel(panel);
                 await refreshSessions();
             } catch (err) {
-                setAttachState("end error: " + err.message);
-                deleteBtn.disabled = false;
-                deleteBtn.textContent = "end";
+                setAttachState("suspend error: " + err.message);
+                suspendBtn.disabled = false;
+                suspendBtn.textContent = "suspend";
             }
         });
         closeBtn.addEventListener("click", function () { closePanel(panel); });
@@ -1009,8 +1014,9 @@
         });
         byMind.forEach(function (mind) {
             const sessions = mind.rows.filter(function (s) {
-                const active = isActiveStatus(s.status);
-                return currentFilter === "active" ? active : !active;
+                return currentFilter === "active"
+                    ? isActiveStatus(s.status)
+                    : String(s.status || "").toLowerCase() === "suspended";
             });
             if (!sessions.length) return;
             const group = document.createElement("div");
@@ -1055,20 +1061,40 @@
                 }
                 card.appendChild(dot);
                 card.appendChild(body);
-                card.addEventListener("click", function () {
+                card.addEventListener("click", async function () {
+                    let status = s.status || "running";
+                    if (String(status).toLowerCase() === "suspended") {
+                        card.disabled = true;
+                        try {
+                            const resp = await fetch(
+                                "/api/terminal/sessions/" + encodeURIComponent(s.id) + "/resume",
+                                {method: "POST", credentials: "same-origin"}
+                            );
+                            if (!resp.ok) {
+                                card.disabled = false;
+                                return;
+                            }
+                            const resumed = await resp.json();
+                            status = resumed.status || "idle";
+                        } catch (err) {
+                            card.disabled = false;
+                            return;
+                        }
+                    }
                     addPanel({
                         id: s.id,
                         mind_id: s.mind_id,
                         mind_name: s.mind_name,
-                        status: s.status || "running",
+                        status: status,
                     });
+                    await refreshSessions();
                 });
                 listEl.appendChild(card);
                 count += 1;
             });
         });
         listEmpty.hidden = count > 0;
-        listEmpty.textContent = currentFilter === "active" ? "No active sessions." : "No archived sessions.";
+        listEmpty.textContent = currentFilter === "active" ? "No active sessions." : "No suspended sessions.";
     }
 
     async function refreshSessions() {
@@ -1135,13 +1161,13 @@
         currentFilter = filter;
         const activeSel = filter === "active";
         tabActive.classList.toggle("is-active", activeSel);
-        tabArchived.classList.toggle("is-active", !activeSel);
+        tabSuspended.classList.toggle("is-active", !activeSel);
         tabActive.setAttribute("aria-selected", activeSel ? "true" : "false");
-        tabArchived.setAttribute("aria-selected", activeSel ? "false" : "true");
+        tabSuspended.setAttribute("aria-selected", activeSel ? "false" : "true");
         renderCards(lastRows);
     }
     tabActive.addEventListener("click", function () { setFilter("active"); });
-    tabArchived.addEventListener("click", function () { setFilter("archived"); });
+    tabSuspended.addEventListener("click", function () { setFilter("suspended"); });
     refreshBtn.addEventListener("click", function () { refreshSessions(); });
 
     // ── rail collapse (desktop) ───────────────────────────────────

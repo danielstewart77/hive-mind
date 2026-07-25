@@ -30,6 +30,12 @@ const tests = {
         assert.equal(pickReattachTarget(rows, {deadId: "a", openIds: []}).action, "retry");
     },
 
+    "a suspended session is resumable but not live"() {
+        const rows = [{id: "a", status: "suspended"}];
+        assert.equal(isActive(rows[0]), false);
+        assert.equal(pickReattachTarget(rows, {deadId: "a", openIds: []}).action, "wait");
+    },
+
     "a rotation successor is adopted by lineage"() {
         const rows = [
             {id: "a", status: "closed"},
