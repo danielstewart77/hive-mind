@@ -1,6 +1,6 @@
 # Gateway API
 
-The FastAPI gateway (`server.py`, port 8420) is the single entry point for all clients. Discord, Telegram, the scheduler, and any REST consumer all talk to it — never directly to Claude.
+The FastAPI gateway (`hive-comms`, built from `nervous-system/comms/server.py`, host port 8426) is the single entry point for all clients. Discord, Telegram, the scheduler, and any REST consumer all talk to it — never directly to Claude.
 
 ## Endpoints
 
@@ -26,8 +26,11 @@ The FastAPI gateway (`server.py`, port 8420) is the single entry point for all c
 | `POST` | `/command` | Route slash commands (`/new`, `/clear`, `/model`, etc.) |
 | `GET` | `/linkedin/auth` | Initiate LinkedIn OAuth flow |
 | `GET` | `/linkedin/callback` | LinkedIn OAuth callback (exchanges code, stores token) |
-| `POST` | `/hitl/request` | Create a HITL approval request |
-| `GET` | `/hitl/status/{token}` | Poll HITL approval status |
+
+HITL approval is not a gateway endpoint — it's handled by `hive-tools`'
+own server (`GET /hitl/{request_id}`, `POST /hitl/{request_id}/respond`),
+called directly by the bot that needs approval (see
+[hive-tools.md](hive-tools.md)).
 
 ## Creating a Session
 
@@ -68,23 +71,20 @@ Response is an SSE stream. Each event is a JSON object with `type` and `content`
 |---|---|
 | `/new [dir...]` | Kill active session, create a new one |
 | `/clear [dir...]` | Alias for `/new` |
-| `/model <name>` | Switch model on active session |
+| `/model [name]` | Switch model on the active session, or list available models with no argument |
 | `/autopilot` | Toggle autopilot (no approval prompts) |
-| `/sessions` | List active sessions |
+| `/sessions` | List selectable sessions |
+| `/switch <id\|number>` | Activate a different session on this surface |
 | `/kill <id\|number>` | Kill a specific session |
+| `/prune` | Kill every session for this owner except the active one |
+| `/status` | Session counts (total / running) |
+| `/remember` | Points at the automatic memory pipeline — no direct action |
 
 ## Directory Access
 
 Claude Code sessions use a two-layer model to access directories outside `/usr/src/app`:
 
-**Layer 1 — Bind mount** (`docker-compose.yml`): The host path must be mounted into the container. Currently configured on the `server` service:
-
-| Env var | Default host path | Container path |
-|---------|-------------------|----------------|
-| `HOST_MCP_DIR` | `<external-project-path>` | same |
-| `HOST_SPARK_DIR` | `<spark-to-bloom-path>` | same |
-
-Paths are mounted at the same location on both sides so `--allowedDirectory` values match.
+**Layer 1 — Bind mount** (the mind's own `container/compose.yaml` fragment): the host path must be mounted into the mind's container at the same path on both sides, so `--allowedDirectory` values match on the host and inside the container. There's no fixed set of mount env vars — add whatever bind mount your use case needs to the fragment (see `minds/example/container/compose.yaml` for the pattern: `${HOST_PROJECT_DIR:-.}:/usr/src/app:rw` is the one every mind already gets).
 
 **Layer 2 — Per-session permission** (`--allowedDirectory`): Bind mounts alone do not grant Claude Code access. Each session must explicitly request permission at creation time via `allowed_directories`, or via the `/new` command:
 
@@ -96,7 +96,7 @@ Both layers are required. Neither works without the other.
 
 ## Session Model
 
-Each session is a Claude CLI subprocess (`claude -p --stream-json`) managed by `core/sessions.py`. Sessions are stored in SQLite (`data/sessions.db`). The session manager handles:
+Each session is a Claude CLI (or Codex CLI) subprocess managed by `nervous-system/comms/sessions.py`. Sessions are stored in SQLite (`nervous-system/data/sessions.db`). The session manager handles:
 
 - **Process pool**: one subprocess per active session
 - **Idle reaper**: kills sessions idle for longer than `idle_timeout_minutes` (default 30)

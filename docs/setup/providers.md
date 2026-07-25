@@ -2,64 +2,58 @@
 
 ## CLI-First Architecture
 
-Hive Mind does **not** use the Anthropic Python SDK or the Claude API directly. Instead, it wraps the **Claude CLI** (`claude -p --stream-json`) in subprocess mode. Each session spawns a Claude CLI process; the gateway communicates with it over stdin/stdout using NDJSON.
+Hive Mind does **not** use the Anthropic Python SDK or the Claude API directly. Instead, each mind wraps the **Claude CLI** or **Codex CLI** in subprocess mode, inside its own container, via a shared harness module (`minds/harness/claude_cli.py` or `codex_cli.py`). The gateway (`hive-comms`) never spawns a CLI subprocess itself — it dispatches HTTP requests to whichever mind's container owns the session, reading that mind's `gateway_url` from the mind registry.
 
 ### Why CLI over SDK?
 
 The Claude CLI provides capabilities the SDK does not expose:
 
 - **Full Claude Code toolset** — file editing, shell execution, web search, and the entire built-in Claude Code toolchain are available out of the box
-- **Session continuity** — the CLI manages its own session state, context window, and tool call loops; the gateway just relays messages
-- **Self-improvement** — Ada can create new tools and skills at runtime that become available in the same session, because the CLI re-reads its skill directory dynamically
+- **Session continuity** — the CLI manages its own session state, context window, and tool call loops; the harness module just relays messages
+- **Self-improvement** — a mind can create new skills at runtime that become available in the same session, because the CLI re-reads its skill directory dynamically
 
-The trade-off: the CLI is a subprocess, so the gateway communicates over pipes rather than in-process function calls. This is intentional — it provides process isolation and makes the Claude runtime replaceable.
+The trade-off: the CLI is a subprocess, so the harness communicates over pipes rather than in-process function calls. This is intentional — it provides process isolation and makes the model runtime replaceable.
 
-## Provider Configuration
+## Where provider selection actually lives
 
-Providers are configured in `config.yaml` under the `providers` key. Each model alias maps to a provider name, and each provider optionally specifies environment overrides injected into the Claude CLI subprocess.
+Two separate places, at two separate scopes:
+
+**Per-mind, in `runtime.yaml`.** This is what actually decides whether a given mind talks to Anthropic, OpenAI, or a local Ollama model — see [specs/ollama-backed-mind.md](../../specs/ollama-backed-mind.md) for the exact fields (`provider:` + `env:`). The harness module reads this file at startup and builds the subprocess env from it, per mind, in that mind's own container. Env overrides are injected **per subprocess, never globally** — a compromised or misbehaving subprocess can't poison another mind's environment, and switching a mind's provider is just editing its `runtime.yaml` and recreating its container.
+
+**The gateway's model registry, in `nervous-system/comms/config.yaml`.** This is a separate, repo-root-adjacent `providers`/`models` mapping (copy from `nervous-system/comms/config.yaml.example`) that only feeds `GET /models` and Ollama auto-discovery — it does not configure any mind's actual subprocess. (The repo root's own `config.yaml` has an identically-shaped `providers`/`models` block that looks like it should do this — it doesn't; nothing reads it. See [Configuration](configuration.md).)
 
 ```yaml
+# nervous-system/comms/config.yaml
 providers:
-  anthropic: {}          # no overrides needed — uses ANTHROPIC_API_KEY from keyring
+  anthropic: {}
   ollama:
-    env:
-      ANTHROPIC_AUTH_TOKEN: "ollama"
-      ANTHROPIC_BASE_URL: "http://<ollama-host>:11434"
-    api_base: "http://<ollama-host>:11434"
+    api_base: "http://host.docker.internal:11434"
 
 models:
-  sonnet: anthropic      # claude-sonnet-4-6 via Anthropic
-  opus: anthropic        # claude-opus-4-6 via Anthropic
-  haiku: anthropic       # claude-haiku-4-5 via Anthropic
+  sonnet: anthropic
+  opus: anthropic
+  haiku: anthropic
   # Ollama models are auto-discovered at startup and added here dynamically
 ```
 
-### Per-Process Env Isolation
-
-Environment overrides are injected **per subprocess** — never globally. The gateway reads the provider config for the requested model, builds an env dict, and passes it to `subprocess.Popen`. The parent process environment is never mutated. This means:
-
-- Anthropic and Ollama sessions can run concurrently without interfering
-- A compromised or misbehaving subprocess cannot poison the gateway's environment
-- Switching providers mid-session is safe (kill the old process, spawn a new one with the correct env)
+**Model discovery**: `nervous-system/comms/models.py` queries `{api_base}/api/tags` (cached 60s) and registers every available Ollama model by its tag name (e.g. `llama3.1:8b`, `qwen2.5:14b`) alongside the static aliases above — this feeds `GET /models`, not any particular mind's config.
 
 ## Anthropic (Default)
 
-Standard Claude Code via the Anthropic API. Requires `ANTHROPIC_API_KEY` in the keyring. Uses static model aliases (`sonnet`, `opus`, `haiku`) that map to the current best model in each tier.
+Standard Claude Code via the Anthropic API. Requires Claude Code credentials (mounted from the host's `~/.claude`, or `CLAUDE_CODE_OAUTH_TOKEN` per-mind) rather than a bare API key. Uses static model aliases (`sonnet`, `opus`, `haiku`).
 
 ## Ollama (Local / Private)
 
-Ollama support routes Claude CLI through an Ollama-hosted model by overriding two env vars:
+A mind routes its Claude CLI through an Ollama-hosted model by setting two env vars in its own `runtime.yaml`:
 
 ```yaml
-ollama:
-  env:
-    ANTHROPIC_AUTH_TOKEN: "ollama"         # dummy token (Ollama doesn't validate it)
-    ANTHROPIC_BASE_URL: "http://host:11434"  # points CLI at Ollama's API
+provider: ollama
+env:
+  ANTHROPIC_AUTH_TOKEN: ollama       # dummy token (Ollama doesn't validate it)
+  ANTHROPIC_BASE_URL: http://host.docker.internal:11434
 ```
 
-The Claude CLI sends requests in Anthropic API format; Ollama's OpenAI-compatible endpoint translates them. This works for text generation — tool calling support depends on the model's capability.
-
-**Model discovery**: at startup, the model registry queries `api_base/api/tags` and registers all available Ollama models by their tag name (e.g. `llama3.1:8b`, `qwen2.5:14b`). These are added to the model map alongside the static Anthropic aliases.
+The Claude CLI sends requests in Anthropic API format; Ollama's OpenAI-compatible endpoint translates them. This works for text generation — tool-calling support depends on the model's capability. The Codex CLI harness has the equivalent pattern with `OLLAMA_BASE_URL` — see [specs/ollama-backed-mind.md](../../specs/ollama-backed-mind.md).
 
 **Use cases**:
 - Private conversations (no data leaves the LAN)
@@ -76,30 +70,12 @@ POST /sessions/{id}/model
 {"model": "llama3.1:8b"}
 ```
 
-Or via slash command from any client:
-
-```
-/model opus
-/model llama3.1:8b
-```
-
-The session is killed and respawned with the new provider's env. Conversation history is preserved via `--resume`.
-
-## Ollama Plugin (Standalone)
-
-For Claude Code users who want Ollama access **without running Hive Mind**, the `ollama-claude-plugin` is a standalone Claude Code plugin. It provides a `/ask-ollama` skill that delegates prompts to a local Ollama instance via HTTP, with conversation history managed by a broker daemon.
-
-- **Repo:** `ollama-claude-plugin` (separate project)
-- **Transport:** HTTP to `POST /api/chat` on the Ollama server
-- **Multi-turn:** broker daemon accumulates messages per conversation ID
-- **Model selection:** per-request via skill argument
-
-Within Hive Mind, use **Bob** (the `cli_ollama` mind) for Ollama delegation rather than the standalone plugin.
+Or via slash command from any client: `/model opus`, `/model llama3.1:8b` (no argument lists available models). The session is killed and respawned with the new model. Conversation history is preserved via `--resume`.
 
 ## Adding a New Provider
 
-1. Add a `providers.<name>` entry in `config.yaml` with any needed `env` overrides
-2. Map model aliases to the provider name under `models`
-3. If the provider needs dynamic model discovery, implement a `discover_models()` method in `core/models.py` (see the Ollama implementation for the pattern)
+1. Add a `providers.<name>` entry to `nervous-system/comms/config.yaml` if you want it to show up in `GET /models`'s static list.
+2. For a mind to actually use it, set `provider: <name>` and the matching `env:` block in that mind's `runtime.yaml`.
+3. If the provider needs dynamic model discovery, implement a method in `nervous-system/comms/models.py` (see the Ollama implementation for the pattern).
 
-No code changes are required for providers that are API-compatible with the Anthropic format — env overrides alone are sufficient.
+No harness code changes are required for providers that are API-compatible with the Anthropic or OpenAI Responses format — env overrides alone are sufficient.

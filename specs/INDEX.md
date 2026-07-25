@@ -27,7 +27,7 @@ Plans (forward-looking, not yet implemented) live in `plans/` — see `plans/` d
 ## Multi-Mind Architecture
 | Spec | File | Summary |
 |------|------|---------|
-| Multi-Mind | `docs/multi-mind.md` | Named minds (Ada/Bob/Bilby/Nagatha), backends, soul isolation, inter-mind comms — reference doc, not operational spec |
+| Multi-Mind | `docs/multi-mind-architecture.md` | Named minds, backends, soul isolation, container isolation, inter-mind comms — reference doc, not operational spec |
 | Ollama-Backed Mind | `specs/ollama-backed-mind.md` | Pointing either harness at a local Ollama instance via `runtime.yaml` |
 | Group Sessions | `specs/group-sessions-gateway.md` | Gateway endpoints for group chat, moderator routing |
 
