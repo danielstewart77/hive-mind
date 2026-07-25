@@ -99,17 +99,17 @@ def app_client(monkeypatch, tmp_path):
 
 async def _seed_session_and_mind(
     server_module, session_id="sess-attach", mind_id="ada", claude_sid="claude-abc",
-    client_ref=None,
+    client_ref=None, harness_sid=None,
 ):
     from comms import broker
 
     mgr = server_module.session_mgr
     now = time.time()
     await mgr._db.execute(
-        """INSERT INTO sessions (id, claude_sid, owner_type, owner_ref, model, created_at,
+        """INSERT INTO sessions (id, claude_sid, harness_sid, owner_type, owner_ref, model, created_at,
                                   last_active, status, mind_id, summary)
-           VALUES (?, ?, 'web', 'u1', 'opus', ?, ?, 'running', ?, 'terminal attach')""",
-        (session_id, claude_sid, now, now, mind_id),
+           VALUES (?, ?, ?, 'web', 'u1', 'opus', ?, ?, 'running', ?, 'terminal attach')""",
+        (session_id, claude_sid, harness_sid, now, now, mind_id),
     )
     if client_ref:
         await mgr._db.execute(
@@ -125,6 +125,18 @@ async def _seed_session_and_mind(
 
 
 class TestWsAttach:
+    def test_mind_can_persist_provider_thread_id(self, app_client):
+        client, server_module = app_client
+        _run(_seed_session_and_mind(server_module))
+
+        response = client.post(
+            "/sessions/sess-attach/harness-state",
+            json={"harness_sid": "codex-thread-callback"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["harness_sid"] == "codex-thread-callback"
+
     def test_unknown_session_closes_4404(self, app_client):
         client, server_module = app_client
         with pytest.raises(Exception):
@@ -192,6 +204,20 @@ class TestWsAttach:
             ws.receive_bytes()
 
         assert "client_ref=terminal-abc" in _FakeHttpSession.requested_url
+
+    def test_relays_persisted_provider_thread_to_the_mind(self, app_client, monkeypatch):
+        client, server_module = app_client
+        _run(_seed_session_and_mind(server_module, harness_sid="codex-thread-7"))
+
+        fake_ws = _FakeMindWS(incoming=[b"resumed\r\n"])
+        _FakeHttpSession.ws_to_return = fake_ws
+        _FakeHttpSession.raise_on_connect = None
+        monkeypatch.setattr(server_module.aiohttp, "ClientSession", _FakeHttpSession)
+
+        with client.websocket_connect("/sessions/sess-attach/attach") as ws:
+            ws.receive_bytes()
+
+        assert "harness_sid=codex-thread-7" in _FakeHttpSession.requested_url
 
     def test_relays_browser_input_to_mind(self, app_client, monkeypatch):
         client, server_module = app_client

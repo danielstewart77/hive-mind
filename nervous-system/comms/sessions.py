@@ -97,6 +97,7 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
     id            TEXT PRIMARY KEY,
     claude_sid    TEXT,
+    harness_sid   TEXT,
     owner_type    TEXT NOT NULL,
     owner_ref     TEXT NOT NULL,
     summary       TEXT DEFAULT 'New session',
@@ -231,6 +232,15 @@ class SessionManager:
         # session and the two conversations cross.
         try:
             await self._db.execute("ALTER TABLE sessions ADD COLUMN rotated_from TEXT")
+            await self._db.commit()
+        except Exception:
+            pass  # Column already exists
+        # Provider-native conversation identity. Claude can use claude_sid
+        # directly, but Codex mints a separate thread UUID. Persisting that
+        # UUID here is what lets a different browser or a restarted mind
+        # resume the same Codex thread instead of opening a bare TUI.
+        try:
+            await self._db.execute("ALTER TABLE sessions ADD COLUMN harness_sid TEXT")
             await self._db.commit()
         except Exception:
             pass  # Column already exists
@@ -885,6 +895,7 @@ class SessionManager:
             retried = False
             _assistant_buf: list[str] = []
             _pinned_sid = session.get("claude_sid") or None
+            _harness_sid = session.get("harness_sid") or None
             _sid_warned = False
             while True:
                 try:
@@ -970,6 +981,19 @@ class SessionManager:
 
                                 observer_only = bool(event.pop("_observer_only", False))
 
+                                # Codex cannot adopt claude_sid. Its structured
+                                # observer event is the authoritative moment a
+                                # provider thread is minted; retain that second
+                                # identity before hiding the observer-only event
+                                # from chat surfaces.
+                                if event.get("type") == "codex_event":
+                                    raw_event = event.get("event") or {}
+                                    if raw_event.get("type") == "thread.started":
+                                        thread_id = (raw_event.get("thread_id") or "").strip()
+                                        if thread_id:
+                                            await self.set_harness_sid(session_id, thread_id)
+                                            _harness_sid = thread_id
+
                                 # Detect stale --resume
                                 if (
                                     not retried
@@ -1031,7 +1055,11 @@ class SessionManager:
                                 # authority: the row was written at session
                                 # creation. Log a divergence, never follow it.
                                 event_sid = event.get("session_id")
-                                if event_sid and event_sid != _pinned_sid and not _sid_warned:
+                                if (
+                                    event_sid
+                                    and event_sid not in (_pinned_sid, _harness_sid)
+                                    and not _sid_warned
+                                ):
                                     _sid_warned = True
                                     log.warning(
                                         "Mind %s reported conversation %s for session %s, "
@@ -1233,6 +1261,29 @@ class SessionManager:
         await self._db.commit()
         return await self._session_dict(session_id)
 
+    async def set_harness_sid(self, session_id: str, harness_sid: str) -> dict:
+        """Persist a provider-native thread id reported by the owning mind."""
+        session = await self._get_row(session_id)
+        if not session:
+            raise ValueError(f"Session not found: {session_id}")
+        value = (harness_sid or "").strip()
+        if not value:
+            await self._db.execute(
+                "UPDATE sessions SET harness_sid = NULL WHERE id = ?", (session_id,)
+            )
+            await self._db.commit()
+            return await self._session_dict(session_id)
+        current = (session.get("harness_sid") or "").strip()
+        if current and current != value:
+            raise ValueError(
+                f"Session {session_id} is already bound to harness thread {current}"
+            )
+        await self._db.execute(
+            "UPDATE sessions SET harness_sid = ? WHERE id = ?", (value, session_id)
+        )
+        await self._db.commit()
+        return await self._session_dict(session_id)
+
     async def kill_session(self, session_id: str) -> dict:
         """Kill a session: SIGTERM the subprocess, mark closed."""
         session = await self._get_row(session_id)
@@ -1296,6 +1347,7 @@ class SessionManager:
         owner_type: str | None = None,
         owner_ref: str | None = None,
         system_prompt_blocks: str = "",
+        harness_sid: str | None = None,
     ) -> Any:
         # Every spawn carries the session's conversation id. A mind handed
         # none would have to invent one, and an invented id is a conversation
@@ -1305,6 +1357,9 @@ class SessionManager:
                 f"refusing to spawn session {session_id} without a conversation id"
             )
         row = await self._get_mind_row(mind_id)
+        if harness_sid is None:
+            session_row = await self._get_row(session_id)
+            harness_sid = session_row.get("harness_sid") if session_row else None
         mind_url = row["gateway_url"]
         mind_name = row["name"]
         import aiohttp
@@ -1316,6 +1371,7 @@ class SessionManager:
                     "model": model,
                     "autopilot": autopilot,
                     "resume_sid": resume_sid,
+                    "harness_sid": harness_sid,
                     "surface_prompt": surface_prompt,
                     "allowed_directories": allowed_directories,
                     "mind_name": mind_name,
@@ -1727,6 +1783,7 @@ class SessionManager:
         return {
             "id": row["id"],
             "claude_sid": row["claude_sid"],
+            "harness_sid": row.get("harness_sid"),
             "owner_type": row["owner_type"],
             "owner_ref": row["owner_ref"],
             "summary": row["summary"],
