@@ -146,7 +146,7 @@ def _provider_args() -> list[str]:
     ).rstrip("/")
 
     provider_key = f"{NAME}_ollama"
-    return [
+    args = [
         "-c",
         f'model_provider="{provider_key}"',
         "-c",
@@ -154,6 +154,13 @@ def _provider_args() -> list[str]:
         "-c",
         f'model_providers.{provider_key}.base_url="{base_url}"',
     ]
+    if RUNTIME_ENV.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY"):
+        # The "ollama" endpoint may really be a metering proxy in front of
+        # Ollama, which authenticates by bearer key. Codex only sends one when
+        # the provider declares env_key; bare Ollama needs no auth, so the
+        # declaration is gated on a key actually being present.
+        args += ["-c", f'model_providers.{provider_key}.env_key="OPENAI_API_KEY"']
+    return args
 
 
 async def _reap_proc(proc: asyncio.subprocess.Process | None) -> None:
