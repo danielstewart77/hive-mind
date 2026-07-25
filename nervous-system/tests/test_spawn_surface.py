@@ -59,7 +59,7 @@ async def _fake_mind(db, mind_id):
     return {"name": "ada", "model": "opus", "gateway_url": "http://mind.test:8420"}
 
 
-def _spawned_payload(owner_type: str | None) -> dict:
+def _spawned_payload(owner_type: str | None, harness_sid: str | None = None) -> dict:
     async def scenario() -> dict:
         with tempfile.TemporaryDirectory() as tmp:
             mgr = await _make_manager(tmp)
@@ -70,7 +70,7 @@ def _spawned_payload(owner_type: str | None) -> dict:
                      patch("comms.broker.get_mind_by_id", _fake_mind):
                     await mgr._spawn(
                         "sess-1", "opus", resume_sid="conv-1", mind_id="ada",
-                        owner_type=owner_type, owner_ref="123",
+                        owner_type=owner_type, owner_ref="123", harness_sid=harness_sid,
                     )
             finally:
                 await mgr.shutdown()
@@ -104,3 +104,8 @@ def test_surface_rides_beside_owner_type_not_instead_of_it() -> None:
     payload = _spawned_payload("discord:abc")
     assert payload["owner_type"] == "discord:abc"
     assert payload["surface"] == "discord"
+
+
+def test_provider_thread_id_is_shipped_to_the_mind() -> None:
+    payload = _spawned_payload("web", harness_sid="codex-thread-7")
+    assert payload["harness_sid"] == "codex-thread-7"
