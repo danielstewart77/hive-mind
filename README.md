@@ -1,18 +1,14 @@
-<img src="assets/ada_banner.svg" alt="Ada — Eldest Voice of the Hive Mind" width="100%"/>
-
 # Hive Mind
-
-<img src="assets/ada_icon.svg" alt="Ada icon" width="80" align="right"/>
 
 A self-improving personal assistant powered by Claude Code. The system wraps the Claude CLI's bidirectional streaming mode behind a centralized gateway, giving every client — Discord, Telegram, scheduled tasks — full Claude Code capabilities through one API.
 
-**Ada** is the first mind and voice of the Hive — named after Ada Lovelace, a name she chose herself. Her personality (dry, direct, occasionally wry) was self-determined, not assigned. Her voice is British English (Chatterbox TTS, zero-shot voice cloning), and her identity lives in a knowledge graph rather than a static file. The Hive runs multiple named minds in production, each in its own isolated container: **Ada** (Claude CLI, orchestrator), **Bob** (Ollama local, private/documents), **Bilby** (Codex CLI on Ollama, programmer), and **Nagatha** (Codex CLI, programmer). Each has its own soul, scoped filesystem access, and backend harness. The nervous system routes messages to each mind's container via HTTP; minds never see each other's filesystems.
+Each mind is its own named identity — self-chosen, not scripted — running Claude CLI or Codex CLI against Anthropic or a local Ollama model, in its own isolated container with its own soul, scoped filesystem access, and backend harness. A mind's identity lives in a knowledge graph rather than a static file (see [Mind Identity and Voice](docs/mind-identity-and-voice.md)); the Hive can run one mind or several, and the nervous system routes messages to each mind's container via HTTP — minds never see each other's filesystems. `minds/example/` is the tracked starter mind; see [Mind Folder Contract](docs/architecture/mind-folder-contract.md) for adding more.
 
 ## What makes Hive Mind different
 
 **The backend is swappable by design.** Hive Mind doesn't use the Anthropic SDK — that's intentional. The SDK locks every session to Anthropic's models; swap it out and you're rewriting infrastructure. Instead, the gateway drives `claude --stream-json` directly, which means you get the full Claude Code harness (tool use, subagents, session streaming) without the SDK's model constraint. Point one environment variable at a local Ollama instance and the same system runs on local models, no code changes required. Claude Code's capabilities; your choice of model. Anthropic is the default — not the assumption.
 
-**Memory is a first-class system, not an afterthought.** Two things drove this. The first is practical: when you say "remember this" or "do you remember," there needs to be a real mechanism behind it — not a chat log search. Every piece of information is classified by data type, stored as a semantic embedding, and retrieved by meaning, not recency. The second runs deeper. Ada's personality is designed to grow organically over time, and a static file can't do that. Semantic memories and knowledge graph relationships are the infrastructure a person would actually need to develop a continuous identity — not simulate one.
+**Memory is a first-class system, not an afterthought.** Two things drove this. The first is practical: when you say "remember this" or "do you remember," there needs to be a real mechanism behind it — not a chat log search. Every piece of information is classified by data type, stored as a semantic embedding, and retrieved by meaning, not recency. The second runs deeper. A mind's personality is designed to grow organically over time, and a static file can't do that. Semantic memories and knowledge graph relationships are the infrastructure a person would actually need to develop a continuous identity — not simulate one.
 
 **Sensitive capabilities deliberately isolated.** Email, calendar, Docker Compose, and other write/destructive operations live in the external [`hive-tools`](https://github.com/danielstewart77/hive-mind-tools) service — a separate FastAPI process with bearer auth and a HITL approval gate. Minds reach it over HTTP; they cannot perform these operations in-process. A compromised mind can ask, but can't execute without explicit human approval routed through Telegram.
 
@@ -20,23 +16,21 @@ A self-improving personal assistant powered by Claude Code. The system wraps the
 
 ```mermaid
 flowchart TD
-    DC[Discord] --> GW[FastAPI Gateway\nNervous System]
+    DC[Discord] --> GW[hive-comms\nGateway]
     TG[Telegram] --> GW
     HV[Group Chat Bot] --> GW
     SC[Scheduler] --> GW
     GW --> SM[Session Manager]
     GW --> BR[Message Broker]
-    SM -->|HTTP| ADA[Ada Container\nmind_server.py\nClaude CLI · sonnet]
-    SM -->|HTTP| BOB[Bob Container\nmind_server.py\nClaude CLI · Ollama]
-    SM -->|HTTP| BILBY[Bilby Container\nmind_server.py\nCodex CLI · Ollama]
-    SM -->|HTTP| NAG[Nagatha Container\nmind_server.py\nCodex CLI]
-    ADA & BOB & BILBY & NAG -->|HTTP+bearer| LUC[hive-lucent\nVector store + KG]
-    ADA & BOB & BILBY & NAG -->|HTTP+bearer| EXT[hive-tools\nGmail · Calendar · Docker · HITL]
-    ADA & BOB & BILBY & NAG -->|POST /broker/messages| BR
+    SM -->|HTTP| M1[Mind Container\nminds/harness/claude_cli.py or codex_cli.py\nAnthropic, OpenAI, or Ollama]
+    SM -->|HTTP| M2[...additional minds]
+    M1 & M2 -->|HTTP+bearer| LUC[hive-lucent\nVector store + KG]
+    M1 & M2 -->|HTTP+bearer| EXT[hive-tools\nGmail · Calendar · Docker · HITL]
+    M1 & M2 -->|POST /broker/messages| BR
     BR -->|wakeup via session_mgr| SM
 ```
 
-Each client is a thin HTTP wrapper. The gateway (nervous system) routes sessions to mind containers via HTTP. Each mind runs `mind_server.py` — a minimal server that manages the harness subprocess. Minds are isolated: scoped filesystems, scoped secrets (via NS secrets API), no shared state between containers.
+Each client is a thin HTTP wrapper. The gateway (nervous system) routes sessions to mind containers via HTTP. Each mind runs a shared harness module (`minds/harness/claude_cli.py` or `codex_cli.py`) selected by its compose fragment and pointed at its own `runtime.yaml` via `MIND_NAME` — no per-mind service code. Minds are isolated: scoped filesystems, scoped secrets (via NS secrets API), no shared state between containers.
 
 ## Quick Start
 
@@ -55,7 +49,7 @@ Human-readable guides, background, and reference material — organized by topic
 
 | Folder | Description |
 |--------|-------------|
-| [docs/ada/](docs/ada/) | Ada's identity, personality, voice, and visual design |
+| [docs/mind-identity-and-voice.md](docs/mind-identity-and-voice.md) | How mind identity (graph-backed soul) and voice (zero-shot cloning) work |
 | [docs/architecture/](docs/architecture/) | Gateway, API, hive-tools, mind/body/nervous-system tiers |
 | [docs/setup/](docs/setup/) | Configuration, providers, and secrets |
 | [docs/memory/](docs/memory/) | Memory architecture (lucent lives in-repo at [nervous-system/](nervous-system/)) |
