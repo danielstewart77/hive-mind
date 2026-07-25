@@ -16,7 +16,7 @@ Covers:
 - terminal-born sessions appear in another surface's picker, flagged.
 - machine-driven surfaces (broker, scheduler) are never offered.
 - another mind's terminal sessions are not offered.
-- closed sessions are not offered.
+- closed sessions are not offered, whether another surface's or your own.
 - adopting releases the terminal, retargets the row, and leaves one binding.
 - a plain switch between your own sessions releases nothing.
 """
@@ -165,6 +165,35 @@ def test_closed_terminal_sessions_are_not_offered():
                 )
 
                 assert _selectable_ids(sessions) == {"live"}
+            finally:
+                await mgr.shutdown()
+
+    _run(scenario())
+
+
+def test_your_own_closed_sessions_are_not_offered():
+    """A surface accumulates closed rows forever — this chat had 138.
+
+    They have nothing to switch to (the memory is already harvested), and
+    listing them made the picker several times longer than Telegram will
+    accept, so the reply was rejected and /sessions looked dead.
+    """
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _make_manager(tmp)
+            try:
+                await _seed(mgr, "mine-live", owner_type=TELEGRAM, owner_ref=CHAT, status="idle")
+                for i in range(20):
+                    await _seed(
+                        mgr, f"mine-done-{i}",
+                        owner_type=TELEGRAM, owner_ref=CHAT, status="closed",
+                    )
+
+                sessions = await mgr.list_selectable_sessions(
+                    owner_ref=CHAT, client_type=TELEGRAM, client_ref=CHAT, mind_id="skippy-uuid"
+                )
+
+                assert [s["id"] for s in sessions] == ["mine-live"]
             finally:
                 await mgr.shutdown()
 

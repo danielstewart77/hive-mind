@@ -469,10 +469,20 @@ class SessionManager:
         whole gap — you had to be back at a browser to continue what you
         started at the desk. Adoptable rows carry ``adoptable: True`` so a
         picker can say where a session is currently living.
+
+        Closed sessions are left out of both halves. A closed session has
+        already had its memory harvested and has nothing to switch to, and
+        a surface accumulates them without bound — this chat had 138 of
+        them, which rendered a picker several times longer than Telegram
+        will accept, so the reply was rejected and the command looked dead.
         """
-        sessions = await self.list_sessions(
-            owner_ref=owner_ref, client_type=client_type, client_ref=client_ref
-        )
+        sessions = [
+            s
+            for s in await self.list_sessions(
+                owner_ref=owner_ref, client_type=client_type, client_ref=client_ref
+            )
+            if s.get("status") != "closed"
+        ]
         for session in sessions:
             session["surface"] = self._surface_label(session.get("owner_type", ""))
             session["adoptable"] = False
