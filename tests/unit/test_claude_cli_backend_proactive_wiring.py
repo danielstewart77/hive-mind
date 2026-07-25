@@ -128,6 +128,24 @@ async def test_kill_session_cancels_drain(backend):
         pass
 
 
+async def test_release_stream_stops_process_but_preserves_session(backend):
+    backend.SESSIONS["park-me"] = {
+        "proc": _FakeProc([]),
+        "model": "sonnet",
+        "drain_task": None,
+    }
+    with patch.object(backend, "_kill_proc", new=AsyncMock()) as kill:
+        result = await backend.release_session("park-me", "stream")
+
+    assert result == {
+        "session_id": "park-me",
+        "surface": "stream",
+        "released": True,
+    }
+    assert "park-me" not in backend.SESSIONS
+    kill.assert_awaited_once()
+
+
 class _JsonRequest:
     """Minimal stand-in for starlette Request exposing ``.json()``."""
 

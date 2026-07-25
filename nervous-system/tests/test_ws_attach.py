@@ -7,12 +7,12 @@ directions.
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 
 import aiohttp
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 
 def _run(coro):
@@ -313,31 +313,25 @@ class TestWsAttach:
 
         assert excinfo.value.code == 1000
 
-    def test_attach_to_archived_session_is_not_immediately_closed(self, app_client, monkeypatch):
-        """Opening an already-closed (archived) session is a deliberate
-        resurrection: the close-watcher must not arm, or it would fire the
-        instant the bridge opens."""
+    @pytest.mark.parametrize(
+        ("status", "code"),
+        [("closed", 4410), ("suspended", 4411)],
+    )
+    def test_attach_requires_live_session(self, app_client, status, code):
         client, server_module = app_client
-        _run(_seed_session_and_mind(server_module, session_id="sess-archived"))
+        _run(_seed_session_and_mind(server_module, session_id="sess-inactive"))
         mgr = server_module.session_mgr
         _run(mgr._db.execute(
-            "UPDATE sessions SET status = 'closed' WHERE id = 'sess-archived'"
+            "UPDATE sessions SET status = ? WHERE id = 'sess-inactive'", (status,)
         ))
         _run(mgr._db.commit())
 
-        fake_ws = _FakeMindWS(incoming=[b"resurrected\r\n"])
-        _FakeHttpSession.ws_to_return = fake_ws
-        _FakeHttpSession.raise_on_connect = None
-        monkeypatch.setattr(server_module.aiohttp, "ClientSession", _FakeHttpSession)
-
-        with client.websocket_connect("/sessions/sess-archived/attach") as ws:
-            assert ws.receive_bytes() == b"resurrected\r\n"
-            ws.send_bytes(b"hi\n")
-            for _ in range(20):
-                if fake_ws.sent:
-                    break
-                time.sleep(0.05)
-            assert fake_ws.sent == [b"hi\n"]
+        with (
+            pytest.raises(WebSocketDisconnect) as excinfo,
+            client.websocket_connect("/sessions/sess-inactive/attach") as ws,
+        ):
+            ws.receive_bytes()
+        assert excinfo.value.code == code
 
 
 class TestAttachRequiresAConversation:
