@@ -54,4 +54,4 @@ async def startup():
 - WAV format, mono or stereo
 - ~10 seconds of clear speech
 - No transcript needed (Chatterbox is WAV-only, zero-shot cloning)
-- Files stored in `voice_ref/` directory, named `{voice_id}.wav`
+- Files stored per mind, at `minds/{voice_id}/voice_ref.wav` (e.g. `minds/ada/voice_ref.wav`)

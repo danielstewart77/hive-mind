@@ -30,7 +30,7 @@ to change, you edit a markdown file — not Python code.
 
 ```
 specs/
-  memory-lifecycle.md     ← defines data classes, pruning rules, write procedure
+  data-classes/index.md   ← defines data classes, pruning rules, write procedure
   hive-mind-architecture.md  ← this file
   security.md             ← security constraints
 skills/
@@ -103,7 +103,7 @@ Classify all existing memory entries that lack a `data_class` field.
 
 ## Steps
 
-1. Read `specs/memory-lifecycle.md` — understand the 7 data classes,
+1. Read `specs/data-classes/index.md` — understand the 4 data classes,
    their definitions, and the Tier model.
 
 2. Call `memory_retrieve(query="unclassified", k=50, tag_filter="unclassified")`
@@ -161,8 +161,8 @@ logic or reasoning must include:
 
 | What | Where | Format |
 |------|-------|--------|
-| Data class definitions | `specs/memory-lifecycle.md` | Markdown |
-| Pruning rules | `specs/memory-lifecycle.md` | Markdown |
+| Data class definitions | `specs/data-classes/index.md` | Markdown |
+| Pruning rules | `specs/data-classes/index.md` | Markdown |
 | Security constraints | `specs/security.md` | Markdown |
 | Step-by-step job logic | `skills/<name>/SKILL.md` | Markdown |
 | Scheduled job triggers | `clients/scheduler.py` | Python (thin) |

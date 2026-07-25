@@ -1,4 +1,4 @@
-# Logging Spec — Hive Mind Gateway
+# Logging Spec — Hive Mind Gateway (hive-comms)
 
 ## User Requirements
 
@@ -15,13 +15,13 @@ I do not want to scroll through hundreds of lines of Telegram polling noise to f
 
 ## User Acceptance Criteria
 
-- [ ] `docker compose logs hive_mind` shows NO `httpx` INFO lines for Telegram polling
-- [ ] Every `POST /sessions/{id}/message` request produces at least one `[INFO]` line on entry
-- [ ] When a session subprocess is spawned or respawned, an `[INFO]` line appears with session ID, mind, and model
-- [ ] When a response takes >30 s, a `[WARNING]` line appears with elapsed time
-- [ ] When `forward_to_mind` times out, an `[ERROR]` line appears with mind ID and elapsed time
-- [ ] When a subprocess emits stderr, it appears in logs at `[WARNING]`
-- [ ] Log rotation is configured: logs cap at ~100 MB (`max-size: 20m`, `max-file: 5`)
+- [x] `docker compose logs hive-comms` shows NO `httpx` INFO lines for Telegram polling
+- [x] Every `POST /sessions/{id}/message` request produces at least one `[INFO]` line on entry
+- [x] When a session is dispatched or respawned to a mind container, an `[INFO]` line appears with session ID, mind, and model
+- [x] When a response takes >30 s, a `[WARNING]` line appears with elapsed time
+- [ ] When `forward_to_mind` times out, an `[ERROR]` line appears with mind ID and elapsed time — `forward_to_mind` doesn't exist in the current gateway (it lived in the deleted `server.py`); this criterion needs re-scoping to the current dispatch path if it's still wanted
+- [x] When a mind's subprocess emits stderr, it appears in that mind's own logs at `[WARNING]` (each mind's harness module drains its own subprocess stderr — the gateway itself has no subprocess to watch)
+- [ ] Log rotation is configured: logs cap at ~100 MB (`max-size: 20m`, `max-file: 5`) — still open; no `logging:` block exists on any service in `docker-compose.example.yml` today
 - [ ] Simulating the Bob timeout scenario produces the expected 6-line trace (see spec below)
 
 ---
@@ -55,98 +55,17 @@ Default runtime level: **INFO**. `DEBUG` is off by default; enable per-session o
 logging.getLogger("httpx").setLevel(logging.WARNING)
 ```
 
-Add this to `server.py` startup, alongside the existing `basicConfig` call.
+Already done — `nervous-system/comms/server.py` silences it alongside its `basicConfig` call.
 
 ---
 
-## Gateway — `server.py`
+## Gateway — `nervous-system/comms/server.py`
 
-### Message endpoint (`POST /sessions/{id}/message`)
+`POST /sessions/{session_id}/message` logs receipt (`message: session=... chars=...`) and completion with timing (`message: done session=... elapsed=...s`) around the SSE stream.
 
-Log request receipt and completion with timing:
+## Sessions — `nervous-system/comms/sessions.py`
 
-```python
-@app.post("/sessions/{session_id}/message")
-async def send_message(session_id: str, body: MessageRequest):
-    log.info("message: session=%s chars=%d", session_id, len(body.content))
-    t0 = time.monotonic()
-
-    async def event_stream():
-        async for event in session_mgr.send_message(session_id, body.content, images=images):
-            yield f"data: {json.dumps(event)}\n\n"
-        log.info("message: done session=%s elapsed=%.1fs", session_id, time.monotonic() - t0)
-
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
-```
-
----
-
-## Sessions — `core/sessions.py`
-
-### `send_message()`
-
-```python
-log.info("send_message: start session=%s mind=%s", session_id, mind_id)
-
-# Before spawn:
-if needs_respawn:
-    log.info("send_message: spawning session=%s mind=%s model=%s", session_id, mind_id, session["model"])
-
-# On result or timeout:
-log.info("send_message: result session=%s elapsed=%.1fs", session_id, elapsed)
-log.warning("send_message: slow response session=%s mind=%s elapsed=%.1fs", session_id, mind_id, elapsed)  # if > 30s
-```
-
-### `_spawn()`
-
-Add at entry and on process exit:
-
-```python
-log.info("spawn: session=%s mind=%s model=%s pid=%s", session_id, mind_id, model, proc.pid)
-log.warning("spawn: process exited unexpectedly session=%s returncode=%s", session_id, proc.returncode)
-```
-
-### CLI path — subprocess stdout/stderr
-
-Capture subprocess stderr at `WARNING`; stdout token events at `DEBUG`:
-
-```python
-log.debug("subprocess stdout: session=%s line=%s", session_id, line[:200])
-# stderr:
-log.warning("subprocess stderr: session=%s line=%s", session_id, err_line)
-```
-
----
-
-## Log Rotation
-
-Configure in `docker-compose.yml` for the `hivemind` service:
-
-```yaml
-logging:
-  driver: "json-file"
-  options:
-    max-size: "20m"
-    max-file: "5"
-```
-
-This caps log storage at ~100 MB total. Sufficient for months of normal operation.
-
----
-
-## What This Would Have Shown During the Bob Timeout
-
-```
-[INFO]  forward_to_mind: start mind=bob group=44b2bf73
-[INFO]  forward_to_mind: using session=618ddc0a mind=bob
-[INFO]  message: session=618ddc0a chars=312
-[INFO]  send_message: start session=618ddc0a mind=bob
-[INFO]  send_message: spawning session=618ddc0a mind=bob model=gpt-oss:20b-32k
-[WARNING] send_message: slow response session=618ddc0a mind=bob elapsed=90.0s
-[ERROR]  forward_to_mind: timeout mind=bob after 120.0s
-```
-
-Six lines. Immediately tells you the subprocess was spawned but never returned.
+This process dispatches to each mind's own container over HTTP — it does not spawn a Claude/Codex subprocess itself. It logs dispatch/respawn (`send_message: respawn session=... mind=... model=...`), the actual per-mind dispatch (`Spawned %s session %s via %s`), results with timing, and a `WARNING` when a response exceeds 30s. Each mind's own harness module (`minds/harness/claude_cli.py` / `codex_cli.py`) drains and logs its own subprocess stderr at `WARNING` — that's not visible in the gateway's own logs, only in that mind's container logs.
 
 ---
 
@@ -154,15 +73,12 @@ Six lines. Immediately tells you the subprocess was spawned but never returned.
 
 | File | Change |
 |------|--------|
-| `server.py` | Silence httpx; add request entry/exit logging to message endpoint |
-| `core/sessions.py` | Log spawn, respawn, send start, result, slow-response warning |
-| `docker-compose.yml` | Add log rotation config to hivemind service |
+| `nervous-system/comms/server.py` | Done — httpx silenced, request entry/exit logged |
+| `nervous-system/comms/sessions.py` | Done — dispatch, respawn, send start, result, slow-response warning all logged |
+| `docker-compose.example.yml` | Open — add log rotation config to each service |
 
 ---
 
-## Implementation Order
+## Remaining Work
 
-1. `server.py` — silence `httpx` at INFO; add entry/exit logs to `send_message` endpoint
-2. `core/sessions.py` — add `send_message` start log, spawn/respawn logs, slow-response warning
-3. `docker-compose.yml` — add `logging` block with `json-file` driver and rotation options
-4. Run existing tests to confirm no regressions; verify log output manually against acceptance criteria
+Only log rotation is still open: add a `logging:` block (`json-file` driver, `max-size: 20m`, `max-file: 5`) to each service in `docker-compose.example.yml`, then verify against the acceptance criteria above.
