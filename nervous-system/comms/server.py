@@ -280,6 +280,10 @@ class ArmRotationRequest(BaseModel):
     client_ref: str
 
 
+class HarnessStateRequest(BaseModel):
+    harness_sid: str
+
+
 @app.post("/sessions/arm-rotation")
 async def arm_rotation(body: ArmRotationRequest):
     """Arm the active session for pending rotation (finalize-on-user-turn).
@@ -298,6 +302,15 @@ async def get_session(session_id: str):
     if not session:
         return {"error": "Session not found"}, 404
     return session
+
+
+@app.post("/sessions/{session_id}/harness-state")
+async def set_session_harness_state(session_id: str, body: HarnessStateRequest):
+    """Record the provider-native thread id discovered by a mind terminal."""
+    try:
+        return await session_mgr.set_harness_sid(session_id, body.harness_sid)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
 
 
 @app.delete("/sessions/{session_id}")
@@ -596,6 +609,7 @@ async def ws_attach(ws: WebSocket, session_id: str):
     mind_ws_url = mind_row["gateway_url"].replace("http://", "ws://").replace("https://", "wss://")
     params = urlencode({
         "resume_sid": conversation_id,
+        "harness_sid": session.get("harness_sid") or "",
         "model": session.get("model") or "sonnet",
         # Initial pty geometry from the browser tile, so the TUI's first
         # paint matches; live changes arrive as resize control frames.
