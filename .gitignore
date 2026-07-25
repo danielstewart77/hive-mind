@@ -161,15 +161,17 @@ docker-compose.yml
 # Personal data — never publish to the remote
 docs/financial/
 
-# Host-local mind tests: these import gitignored minds/* code, so they would
-# break any fresh clone or CI. They live with their host-local mind, not here.
-tests/unit/test_bilby_empty_turn_diagnostic.py
-tests/unit/test_proactive_idle_drain.py
-tests/unit/test_ada_backend_proactive_wiring.py
-
-# Our minds are our own
+# Our minds are our own. The harness code they run is shared and tracked
+# (minds/harness/ + the minds/*.py support modules); each mind folder is
+# per-deployment configuration and stays out of the repo.
 minds/*
 !minds/.gitkeep
+!minds/__init__.py
+!minds/proactive.py
+!minds/pty_attach.py
+!minds/harness/
+!minds/harness/**
+minds/harness/__pycache__/
 !minds/example/
 !minds/example/**
 

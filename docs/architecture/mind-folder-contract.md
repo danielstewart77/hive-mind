@@ -7,7 +7,6 @@ Every mind is a self-contained folder under `minds/`. The hive picks up any fold
 ```
 minds/<any_name>/
 ├── runtime.yaml              # operational config (mind_id UUID, harness, model, env, prompts)
-├── implementation.py         # spawn / send / kill — typically self-contained, ~100–170 lines
 ├── prompts/                  # per-mind prompt fragments (common.md, harness.md, profile.md)
 ├── .claude/                  # for Claude CLI / SDK minds
 │   ├── settings.json         #   declares Stop / SessionStart / UserPromptSubmit hooks
@@ -22,7 +21,7 @@ minds/<any_name>/
 
 ## The four invariants
 
-1. **Mind containers are full mini-services scoped to one mind.** Not "dumb sandboxes." Each runs the mind's own `implementation.py` directly as its sole entry point — no separate "mind server" intermediary.
+1. **Mind containers are full mini-services scoped to one mind.** Not "dumb sandboxes." Each runs a shared harness module (`minds/harness/claude_cli.py` or `codex_cli.py`) as its sole entry point, selected by the fragment's `command` and pointed at this folder via `MIND_NAME` — no per-mind service code, no "mind server" intermediary.
 2. **The folder is the unit of configuration and deployment.** No central directory of minds; a folder is the registration.
 3. **Gateway is the hive's only public-facing surface.** Everything else is internal to a mind.
 4. **Identity is the canonical UUID, not the short name.** `runtime.yaml` carries `mind_id: <uuid>`. The container ships `MIND_ID=<uuid>` for everything that talks to shared infrastructure and `MIND_NAME=<short>` for display, log paths, and the capitalized entity name used in graph queries.

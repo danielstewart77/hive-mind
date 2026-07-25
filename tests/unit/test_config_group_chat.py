@@ -1,8 +1,15 @@
-"""Tests for group_chat config in config.py and config.yaml."""
+"""Tests for group_chat config in config.py and config.yaml.example.
+
+The structural contract is pinned against the tracked example config; a
+deployment's actual roster lives in its gitignored config.yaml and is not a
+repo concern.
+"""
 
 from pathlib import Path
 
 import yaml
+
+EXAMPLE = Path(__file__).resolve().parents[2] / "config.yaml.example"
 
 
 class TestGroupChatConfig:
@@ -13,27 +20,15 @@ class TestGroupChatConfig:
         cfg = HiveMindConfig()
         assert hasattr(cfg, "group_chat")
 
-    def test_config_yaml_has_group_chat_block(self):
-        config_path = Path(__file__).resolve().parents[2] / "config.yaml"
-        with open(config_path) as f:
-            data = yaml.safe_load(f)
+    def test_example_config_has_group_chat_block(self):
+        data = yaml.safe_load(EXAMPLE.read_text())
         assert "group_chat" in data
 
-    def test_group_chat_config_has_default_moderator(self):
-        config_path = Path(__file__).resolve().parents[2] / "config.yaml"
-        with open(config_path) as f:
-            data = yaml.safe_load(f)
-        assert data["group_chat"]["default_moderator"] == "ada"
+    def test_example_group_chat_declares_a_moderator(self):
+        data = yaml.safe_load(EXAMPLE.read_text())
+        assert data["group_chat"]["default_moderator"]
 
-    def test_group_chat_config_has_available_minds(self):
-        config_path = Path(__file__).resolve().parents[2] / "config.yaml"
-        with open(config_path) as f:
-            data = yaml.safe_load(f)
-        assert "nagatha" in data["group_chat"]["available_minds"]
-        assert "bilby" in data["group_chat"]["available_minds"]
-
-    def test_group_chat_config_has_bob_in_available_minds(self):
-        config_path = Path(__file__).resolve().parents[2] / "config.yaml"
-        with open(config_path) as f:
-            data = yaml.safe_load(f)
-        assert "bob" in data["group_chat"]["available_minds"]
+    def test_example_group_chat_declares_available_minds(self):
+        data = yaml.safe_load(EXAMPLE.read_text())
+        minds = data["group_chat"]["available_minds"]
+        assert isinstance(minds, list) and minds
