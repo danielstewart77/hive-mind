@@ -22,6 +22,19 @@ HIVE_MIND_MINDS_VOICE_DIR = Path("/minds_hive_mind_voice")
 HIVE_TOOLS_REPO_DIR = Path("/hive_tools_repo")
 HIVE_INIT_DIR = Path("/hive_init")
 
+_TOOL_CATALOG = {
+    "browser": ("Browser", "Web", "Browse and interact with web applications."),
+    "calendar": ("Calendar", "Productivity", "Read and manage calendar events."),
+    "docker_ops": ("Docker", "Host operations", "Inspect and manage approved services."),
+    "gmail": ("Gmail", "Communication", "Search, read, and prepare email."),
+    "linkedin": ("LinkedIn", "Communication", "Publish approved professional updates."),
+    "ollama": ("Local AI", "Local AI", "Run structured and conversational local models."),
+    "schema": ("Knowledge schema", "Knowledge", "Propose new knowledge graph types."),
+    "sms": ("SMS", "Communication", "Send approved text messages."),
+}
+
+_SECRET_KEY_MARKERS = ("API_KEY", "PASSWORD", "SECRET", "TOKEN", "AUTH")
+
 # hive-init's own allowlist, mirrored here rather than imported since the
 # two repos don't share a package — see spark_to_bloom's former
 # HIVE_INIT_ALLOWED_FILES for the pattern this was lifted from.
@@ -66,6 +79,27 @@ def _find_local_config(short_name: str) -> dict[str, Any] | None:
     return None
 
 
+def _redact_config(value: Any, key: str = "") -> Any:
+    """Return browser-safe config while preserving useful non-secret settings."""
+    normalized_key = key.upper()
+    if any(marker in normalized_key for marker in _SECRET_KEY_MARKERS):
+        return "[redacted]"
+    if isinstance(value, dict):
+        return {k: _redact_config(v, str(k)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_config(item) for item in value]
+    return value
+
+
+def _browser_safe_local_config(local: dict[str, Any] | None) -> dict[str, Any] | None:
+    if local is None:
+        return None
+    return {
+        **local,
+        "config": _redact_config(local.get("config") or {}),
+    }
+
+
 def build_mind_registry(broker_minds: list[dict]) -> list[dict]:
     """Merge broker-reported minds with whatever local config file exists.
 
@@ -80,7 +114,7 @@ def build_mind_registry(broker_minds: list[dict]) -> list[dict]:
         if not isinstance(m, dict):
             continue
         name = m.get("name") or ""
-        local = _find_local_config(name) if name else None
+        local = _browser_safe_local_config(_find_local_config(name)) if name else None
         rows.append({
             "name": name,
             "id": m.get("id", ""),
@@ -104,9 +138,33 @@ def hive_tools_status() -> dict[str, Any]:
     to clone *from*, so that case is surfaced but not actionable yet.
     """
     if not HIVE_TOOLS_REPO_DIR.is_dir():
-        return {"present": False, "path": str(HIVE_TOOLS_REPO_DIR)}
+        return {"present": False, "path": str(HIVE_TOOLS_REPO_DIR), "capabilities": []}
     entries = list(HIVE_TOOLS_REPO_DIR.iterdir())
-    return {"present": bool(entries), "path": str(HIVE_TOOLS_REPO_DIR), "entry_count": len(entries)}
+    tools_dir = HIVE_TOOLS_REPO_DIR / "tools"
+    capabilities = []
+    if tools_dir.is_dir():
+        for path in sorted(tools_dir.glob("*.py")):
+            if path.name == "__init__.py":
+                continue
+            tool_id = path.stem
+            name, category, description = _TOOL_CATALOG.get(
+                tool_id,
+                (tool_id.replace("_", " ").title(), "Other", "Hive capability."),
+            )
+            capabilities.append(
+                {
+                    "id": tool_id,
+                    "name": name,
+                    "category": category,
+                    "description": description,
+                }
+            )
+    return {
+        "present": bool(entries),
+        "path": str(HIVE_TOOLS_REPO_DIR),
+        "entry_count": len(entries),
+        "capabilities": capabilities,
+    }
 
 
 def voice_ref_status(short_name: str) -> dict[str, Any] | None:

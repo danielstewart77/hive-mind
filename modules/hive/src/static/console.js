@@ -1,0 +1,58 @@
+(function () {
+    function escapeHtml(value) {
+        return String(value == null ? "" : value).replace(/[&<>'"]/g, function (char) {
+            return {"&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;"}[char];
+        });
+    }
+
+    async function requestJson(url, options) {
+        const response = await fetch(url, options);
+        let body = {};
+        try { body = await response.json(); } catch (error) { body = {}; }
+        if (!response.ok) throw new Error(body.detail || ("Request failed with status " + response.status));
+        return body;
+    }
+
+    function formatTime(value) {
+        if (!value) return "No recent activity";
+        let date;
+        if (typeof value === "number") date = new Date(value < 1000000000000 ? value * 1000 : value);
+        else date = new Date(value);
+        if (Number.isNaN(date.getTime())) return String(value);
+        return new Intl.DateTimeFormat(undefined, {dateStyle: "medium", timeStyle: "short"}).format(date);
+    }
+
+    function statusPill(ok, goodText, badText) {
+        return '<span class="status-pill ' + (ok ? "is-good" : "is-bad") + '"><span></span>' +
+            escapeHtml(ok ? goodText : badText) + "</span>";
+    }
+
+    window.HiveConsole = {escapeHtml: escapeHtml, requestJson: requestJson, formatTime: formatTime, statusPill: statusPill};
+
+    const app = document.querySelector("[data-console-app]");
+    if (app) {
+        document.querySelectorAll("[data-sidebar-open]").forEach(function (button) {
+            button.addEventListener("click", function () { app.classList.add("sidebar-open"); });
+        });
+        document.querySelectorAll("[data-sidebar-close]").forEach(function (button) {
+            button.addEventListener("click", function () { app.classList.remove("sidebar-open"); });
+        });
+    }
+
+    document.addEventListener("click", async function (event) {
+        const button = event.target.closest("[data-copy]");
+        if (!button) return;
+        const target = document.querySelector(button.dataset.copy);
+        if (!target) return;
+        await navigator.clipboard.writeText(target.textContent);
+        const original = button.getAttribute("aria-label") || "Copy";
+        button.setAttribute("aria-label", "Copied");
+        button.classList.add("is-copied");
+        window.setTimeout(function () {
+            button.setAttribute("aria-label", original);
+            button.classList.remove("is-copied");
+        }, 1400);
+    });
+
+    if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}});
+})();

@@ -3,6 +3,8 @@
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import settings_data
@@ -77,6 +79,44 @@ def test_build_mind_registry_skips_malformed_entries(tmp_path, monkeypatch):
     assert rows[0]["name"] == "ok"
 
 
+def test_build_mind_registry_redacts_runtime_secrets(tmp_path, monkeypatch):
+    mind_dir = tmp_path / "hive_mind" / "bob"
+    mind_dir.mkdir(parents=True)
+    (mind_dir / "runtime.yaml").write_text(
+        "provider: ollama\n"
+        "env:\n"
+        "  OPENAI_API_KEY: super-secret\n"
+        "  ANTHROPIC_BASE_URL: http://proxy:8899\n"
+        "nested:\n"
+        "  bearer_token: another-secret\n"
+    )
+    monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_DIR", tmp_path / "hive_mind")
+    monkeypatch.setattr(settings_data, "SKIPPY_MINDS_DIR", tmp_path / "skippy")
+
+    rows = settings_data.build_mind_registry([{"name": "bob", "id": "b9f2"}])
+    config = rows[0]["local_config"]["config"]
+
+    assert config["env"]["OPENAI_API_KEY"] == "[redacted]"
+    assert config["env"]["ANTHROPIC_BASE_URL"] == "http://proxy:8899"
+    assert config["nested"]["bearer_token"] == "[redacted]"
+    assert "super-secret" not in str(rows)
+
+
+def test_hive_tools_status_discovers_supported_capabilities(tmp_path, monkeypatch):
+    repo = tmp_path / "hive-tools"
+    tools_dir = repo / "tools"
+    tools_dir.mkdir(parents=True)
+    (tools_dir / "gmail.py").write_text("router = object()")
+    (tools_dir / "calendar.py").write_text("router = object()")
+    (tools_dir / "__init__.py").write_text("")
+    monkeypatch.setattr(settings_data, "HIVE_TOOLS_REPO_DIR", repo)
+
+    status = settings_data.hive_tools_status()
+
+    assert [item["id"] for item in status["capabilities"]] == ["calendar", "gmail"]
+    assert status["capabilities"][1]["name"] == "Gmail"
+
+
 # ── hive-tools status ─────────────────────────────────────────────────
 
 
@@ -139,32 +179,23 @@ def test_save_voice_ref_writes_file(tmp_path, monkeypatch):
 def test_save_voice_ref_rejects_non_wav(tmp_path, monkeypatch):
     monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_VOICE_DIR", tmp_path)
 
-    try:
+    with pytest.raises(ValueError, match="WAV"):
         settings_data.save_voice_ref("bob", b"not a wav file at all")
-        assert False, "expected ValueError"
-    except ValueError as e:
-        assert "WAV" in str(e)
 
 
 def test_save_voice_ref_rejects_unsafe_name(tmp_path, monkeypatch):
     monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_VOICE_DIR", tmp_path)
 
-    try:
+    with pytest.raises(ValueError, match="invalid mind name"):
         settings_data.save_voice_ref("../etc", _MINIMAL_WAV)
-        assert False, "expected ValueError"
-    except ValueError as e:
-        assert "invalid mind name" in str(e)
 
 
 def test_save_voice_ref_rejects_oversized_file(tmp_path, monkeypatch):
     monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_VOICE_DIR", tmp_path)
     monkeypatch.setattr(settings_data, "_WAV_MAX_BYTES", 10)
 
-    try:
+    with pytest.raises(ValueError, match="too large"):
         settings_data.save_voice_ref("bob", _MINIMAL_WAV)
-        assert False, "expected ValueError"
-    except ValueError as e:
-        assert "too large" in str(e)
 
 
 # ── downloads ──────────────────────────────────────────────────────────

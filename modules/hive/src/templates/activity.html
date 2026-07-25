@@ -1,0 +1,24 @@
+{% extends "layout.html" %}
+{% block title %}Activity · Hive{% endblock %}
+{% block content %}
+<main class="page">
+    <header class="page-header"><div class="page-header-copy"><p class="page-eyebrow">Operational history</p><h1 class="page-title">Activity</h1><p class="page-description">Current sessions and recent work reported by Hive Comms.</p></div><div class="page-actions"><button class="button button-quiet" id="activity-refresh" type="button"><i data-lucide="refresh-cw"></i>Refresh</button></div></header>
+    <section class="surface"><div class="surface-header"><div><h2>Sessions</h2><p>Conversation state across every registered mind</p></div></div><ul class="activity-list" id="activity-list"><li class="loading-state">Loading sessions…</li></ul></section>
+</main>
+<script>
+window.addEventListener("DOMContentLoaded", function () {
+    const h = window.HiveConsole;
+    async function load() {
+        const list = document.getElementById("activity-list"); list.innerHTML = '<li class="loading-state">Loading sessions…</li>';
+        try {
+            const sessions = (await h.requestJson("/api/settings/hive-comms/sessions")).sessions || [];
+            list.innerHTML = sessions.length ? sessions.map(function (session) {
+                return '<li class="activity-row"><span class="activity-icon"><i data-lucide="message-circle"></i></span><span class="activity-copy"><strong>' + h.escapeHtml(session.mind_id || "Unknown mind") + '</strong><small>' + h.escapeHtml(session.summary || ("Session " + (session.id || "").slice(0, 8))) + '</small></span><span class="status-pill is-good"><span></span>' + h.escapeHtml(session.status || "Active") + '</span></li>';
+            }).join("") : '<li class="empty-state"><span class="empty-icon"><i data-lucide="inbox"></i></span><h3>No sessions</h3><p>Conversation activity will appear here.</p></li>';
+            if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}});
+        } catch (error) { list.innerHTML = '<li><div class="error-state">' + h.escapeHtml(error.message) + '</div></li>'; }
+    }
+    document.getElementById("activity-refresh").addEventListener("click", load); load();
+});
+</script>
+{% endblock %}

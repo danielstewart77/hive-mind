@@ -63,9 +63,11 @@ def test_api_rules_list_merges_tiers(tmp_path, monkeypatch):
         entries = standing if params.get("tier") == "standing" else contextual
         return {"entries": entries, "total": len(entries)}
 
-    with patch.object(main_mod, "_broker_minds_safe", new=AsyncMock(return_value=[])):
-        with patch.object(main_mod, "_lucent_request", new=fake_lucent):
-            response = client.get("/api/rules")
+    with (
+        patch.object(main_mod, "_broker_minds_safe", new=AsyncMock(return_value=[])),
+        patch.object(main_mod, "_lucent_request", new=fake_lucent),
+    ):
+        response = client.get("/api/rules")
 
     assert response.status_code == 200
     data = response.json()

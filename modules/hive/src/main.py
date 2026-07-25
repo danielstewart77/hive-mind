@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 import re
+import shlex
 import sqlite3
 import urllib.error
 import urllib.parse
@@ -17,7 +18,16 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
-from fastapi import Depends, FastAPI, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import (
+    Depends,
+    FastAPI,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -41,7 +51,6 @@ from settings_data import (
     save_voice_ref,
     voice_ref_status,
 )
-
 
 _canvas_connections: set[WebSocket] = set()
 _canvas_elements: list[dict] = []
@@ -207,7 +216,7 @@ def _render_template(request: Request, template_name: str, **context) -> HTMLRes
     return templates.TemplateResponse(request, template_name, context)
 
 
-def _safe_next_path(next_path: str | None, fallback: str = "/graph") -> str:
+def _safe_next_path(next_path: str | None, fallback: str = "/overview") -> str:
     if next_path and next_path.startswith("/") and not next_path.startswith("//"):
         return next_path
     return fallback
@@ -266,11 +275,11 @@ async def _lucent_request(
 async def home(request: Request):
     if not get_current_user_from_request(request):
         return _login_redirect_for(request)
-    return RedirectResponse(url="/graph", status_code=303)
+    return RedirectResponse(url="/overview", status_code=303)
 
 
 @app.get("/login", response_class=HTMLResponse)
-async def login_page(request: Request, next: str = "/graph"):
+async def login_page(request: Request, next: str = "/overview"):
     current_user = get_current_user_from_request(request)
     if current_user:
         return RedirectResponse(url=_safe_next_path(next), status_code=303)
@@ -303,6 +312,202 @@ async def logout():
     response = RedirectResponse(url="/login", status_code=303)
     clear_session_cookie(response)
     return response
+
+
+# ── Control center ─────────────────────────────────────────────────────
+
+
+def _console_page(request: Request, template_name: str, **context):
+    if not get_current_user_from_request(request):
+        return _login_redirect_for(request)
+    return _render_template(request, template_name, **context)
+
+
+@app.get("/overview", response_class=HTMLResponse)
+async def overview_page(request: Request):
+    return _console_page(request, "overview.html")
+
+
+@app.get("/setup", response_class=HTMLResponse)
+async def setup_page(request: Request):
+    return _console_page(request, "setup.html")
+
+
+@app.get("/minds", response_class=HTMLResponse)
+async def minds_page(request: Request):
+    return _console_page(request, "minds.html")
+
+
+@app.get("/minds/{mind_id}", response_class=HTMLResponse)
+async def mind_detail_page(request: Request, mind_id: str):
+    return _console_page(request, "mind_detail.html", mind_id=mind_id)
+
+
+@app.get("/outposts", response_class=HTMLResponse)
+async def outposts_page(request: Request):
+    return _console_page(request, "outposts.html")
+
+
+@app.get("/outposts/new", response_class=HTMLResponse)
+async def new_outpost_page(request: Request):
+    return _console_page(request, "outpost_new.html")
+
+
+@app.get("/tools", response_class=HTMLResponse)
+async def tools_page(request: Request):
+    return _console_page(request, "tools.html")
+
+
+@app.get("/activity", response_class=HTMLResponse)
+async def activity_page(request: Request):
+    return _console_page(request, "activity.html")
+
+
+@app.get("/api/overview")
+async def api_overview(user: dict = Depends(require_auth)):
+    del user
+    minds = await _broker_minds_safe()
+    try:
+        sessions_raw = await _gateway_json("/sessions")
+        sessions = sessions_raw if isinstance(sessions_raw, list) else []
+    except Exception:
+        sessions = []
+    comms_health, lucent_health = await asyncio.gather(
+        _service_health(f"{_gateway_base_url().rstrip('/')}/health"),
+        _service_health(f"{_lucent_base_url().rstrip('/')}/health"),
+    )
+    tools = hive_tools_status()
+    tools_health = (
+        await _service_health(f"{_hive_tools_base_url().rstrip('/')}/health")
+        if tools.get("present")
+        else {"reachable": False, "detail": "Not installed"}
+    )
+    return {
+        "counts": {"minds": len(minds), "sessions": len(sessions)},
+        "minds": build_mind_registry(minds),
+        "sessions": sessions,
+        "services": {
+            "comms": comms_health,
+            "lucent": lucent_health,
+            "tools": {"installed": bool(tools.get("present")), **tools_health},
+        },
+    }
+
+
+def _outpost_rows(registry: list[dict]) -> list[dict]:
+    rows = []
+    for mind in registry:
+        local = mind.get("local_config") or {}
+        config = local.get("config") or {}
+        is_remote = local == {} or bool(config.get("remote"))
+        is_outpost = is_remote or bool(config.get("role")) or bool(config.get("deployment"))
+        if not is_outpost:
+            continue
+        gateway_url = mind.get("gateway_url") or ""
+        parsed = urllib.parse.urlparse(gateway_url)
+        rows.append(
+            {
+                "name": mind.get("name") or "Unnamed",
+                "id": mind.get("id") or "",
+                "host": parsed.hostname or "Remote machine",
+                "gateway_url": gateway_url,
+                "role": config.get("role") or "Connected",
+                "deployment": config.get("deployment") or "Remote",
+                "harness": mind.get("harness") or config.get("harness") or "Unknown",
+                "model": mind.get("model") or config.get("default_model") or "Unknown",
+                "last_seen": mind.get("last_seen"),
+            }
+        )
+    return sorted(rows, key=lambda row: str(row["name"]).lower())
+
+
+@app.get("/api/outposts")
+async def api_outposts(user: dict = Depends(require_auth)):
+    del user
+    registry = build_mind_registry(await _broker_minds_safe())
+    return {"outposts": _outpost_rows(registry)}
+
+
+_OUTPOST_ROLES = {"operator", "satellite"}
+_OUTPOST_DEPLOYMENTS = {"systemd", "container", "windows-task"}
+_OUTPOST_HARNESSES = {
+    "claude_cli_claude",
+    "claude_cli_ollama",
+    "claude_sdk_claude",
+    "claude_sdk_ollama",
+    "codex_cli_codex",
+    "codex_cli_ollama",
+    "codex_sdk_codex",
+    "codex_sdk_ollama",
+}
+_OUTPOST_SURFACES = {"telegram", "discord"}
+
+
+def _build_outpost_bootstrap(body: dict) -> str:
+    name = str(body.get("name") or "").strip().lower()
+    role = str(body.get("role") or "")
+    deployment = str(body.get("deployment") or "")
+    harness = str(body.get("harness") or "")
+    surfaces = body.get("surfaces") or []
+    try:
+        port = int(body.get("port", 8421))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Port must be a number") from exc
+    if not re.fullmatch(r"[a-z][a-z0-9-]{1,31}", name):
+        raise ValueError("Name must be 2 to 32 lowercase letters, numbers, or hyphens")
+    if role not in _OUTPOST_ROLES:
+        raise ValueError("Unknown Outpost role")
+    if deployment not in _OUTPOST_DEPLOYMENTS:
+        raise ValueError("Unknown deployment type")
+    if harness not in _OUTPOST_HARNESSES:
+        raise ValueError("Unknown harness")
+    if not isinstance(surfaces, list) or any(item not in _OUTPOST_SURFACES for item in surfaces):
+        raise ValueError("Unknown conversation surface")
+    if port < 1024 or port > 65535:
+        raise ValueError("Port must be between 1024 and 65535")
+    args = [
+        "./setup.sh",
+        "--name",
+        name,
+        "--role",
+        role,
+        "--deployment",
+        deployment,
+        "--harness",
+        harness,
+        "--surfaces",
+        ",".join(surfaces),
+        "--port",
+        str(port),
+    ]
+    setup_command = " ".join(shlex.quote(part) for part in args)
+    return (
+        "git clone https://github.com/danielstewart77/hive-outpost.git && "
+        f"cd hive-outpost && {setup_command}"
+    )
+
+
+@app.post("/api/outposts/bootstrap")
+async def api_outpost_bootstrap(request: Request, user: dict = Depends(require_auth)):
+    del user
+    try:
+        body = await request.json()
+        command = _build_outpost_bootstrap(body if isinstance(body, dict) else {})
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"command": command}
+
+
+@app.get("/api/tools")
+async def api_tools(user: dict = Depends(require_auth)):
+    del user
+    status = hive_tools_status()
+    health = (
+        await _service_health(f"{_hive_tools_base_url().rstrip('/')}/health")
+        if status.get("present")
+        else {"reachable": False, "detail": "Not installed"}
+    )
+    return {**status, "health": health}
 
 
 # ── Graph ──────────────────────────────────────────────────────────────
@@ -486,7 +691,7 @@ def _build_alias_index(minds: list[dict]) -> dict:
 async def _fetch_rules_for_mind(
     tier: str, mind_id: str | None, alias_index: dict
 ) -> list[dict]:
-    aliases = [None]
+    aliases: list[str | None] = [None]
     if mind_id and mind_id != "all":
         entry = alias_index.get(mind_id)
         aliases = entry["aliases"] if entry else [mind_id]
@@ -676,7 +881,7 @@ def _canvas_push_token() -> str:
     COMMS_BEARER_TOKEN, which both this container and Skippy already hold,
     so drawing works without recreating the container.
     """
-    return os.getenv("CANVAS_PUSH_TOKEN") or os.getenv("COMMS_BEARER_TOKEN", "")
+    return os.getenv("CANVAS_PUSH_TOKEN") or os.getenv("COMMS_BEARER_TOKEN") or ""
 
 
 @app.post("/canvas/push")
@@ -787,7 +992,19 @@ async def ws_canvas(websocket: WebSocket):
 async def settings_page(request: Request):
     if not get_current_user_from_request(request):
         return _login_redirect_for(request)
-    return _render_template(request, "settings.html")
+    return RedirectResponse(url="/settings/general", status_code=303)
+
+
+_SETTINGS_SECTIONS = {"general", "access", "connections", "voice", "advanced"}
+
+
+@app.get("/settings/{section}", response_class=HTMLResponse)
+async def settings_section_page(request: Request, section: str):
+    if not get_current_user_from_request(request):
+        return _login_redirect_for(request)
+    if section not in _SETTINGS_SECTIONS:
+        raise HTTPException(status_code=404, detail="settings section not found")
+    return _render_template(request, "settings.html", settings_section=section)
 
 
 @app.get("/api/settings/minds")
@@ -864,7 +1081,7 @@ async def api_settings_voice(user: dict = Depends(require_auth)):
             continue
         name = m.get("name") or ""
         minds.append({"name": name, "voice_ref": voice_ref_status(name) if name else None})
-    minds.sort(key=lambda r: r["name"])
+    minds.sort(key=lambda r: str(r["name"]))
     return {"servers": servers, "minds": minds}
 
 

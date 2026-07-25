@@ -3,25 +3,24 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Hive</title>
+    <title>{% block title %}Hive{% endblock %}</title>
     <link rel="icon" type="image/svg+xml" href="{{ request.url_for('static', path='favicon.svg') }}?v={{ asset_versions['favicon.svg'] }}">
     <link rel="icon" type="image/png" sizes="32x32" href="{{ request.url_for('static', path='favicon-32.png') }}?v={{ asset_versions['favicon-32.png'] }}">
-    <link rel="icon" type="image/png" sizes="192x192" href="{{ request.url_for('static', path='favicon-192.png') }}?v={{ asset_versions['favicon-192.png'] }}">
     <link rel="apple-touch-icon" href="{{ request.url_for('static', path='apple-touch-icon.png') }}?v={{ asset_versions['apple-touch-icon.png'] }}">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="{{ request.url_for('static', path='style.css') }}?v={{ asset_versions['style.css'] }}">
-    <link href="https://fonts.googleapis.com/css2?family=Fira+Code&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ request.url_for('static', path='console.css') }}?v={{ asset_versions['console.css'] }}">
     <script>
     (function () {
         var nativeFetch = window.fetch.bind(window);
         var redirecting = false;
         window.fetch = function (input, init) {
             return nativeFetch(input, init).then(function (resp) {
-                if (resp && resp.status === 401 && !redirecting) {
-                    var path = window.location.pathname + window.location.search;
-                    if (window.location.pathname !== "/login") {
-                        redirecting = true;
-                        window.location.assign("/login?next=" + encodeURIComponent(path));
-                    }
+                if (resp && resp.status === 401 && !redirecting && window.location.pathname !== "/login") {
+                    redirecting = true;
+                    window.location.assign("/login?next=" + encodeURIComponent(window.location.pathname + window.location.search));
                 }
                 return resp;
             });
@@ -29,57 +28,63 @@
     })();
     </script>
 </head>
-<body>
-    <nav>
-        <div class="nav-inner">
-            <a href="/" class="nav-brand glow">
-                <img src="{{ request.url_for('static', path='favicon.svg') }}?v={{ asset_versions['favicon.svg'] }}" alt="" class="nav-brand-icon">
-                hive
+<body class="{% if current_user %}console-body{% else %}auth-body{% endif %}">
+{% if current_user %}
+{% set path = request.url.path %}
+<div class="console-app" data-console-app>
+    <aside class="console-sidebar" id="console-sidebar">
+        <div class="console-brand-row">
+            <a href="/overview" class="console-brand" aria-label="Hive overview">
+                <img src="{{ request.url_for('static', path='favicon.svg') }}?v={{ asset_versions['favicon.svg'] }}" alt="">
+                <span><strong>Hive</strong><small>Control center</small></span>
             </a>
-            <button class="nav-toggle" aria-label="Toggle navigation" onclick="toggleNav()">&#9776;</button>
-            <ul id="nav-links">
-                {% if current_user %}
-                <li><a href="/graph">graph</a></li>
-                <li><a href="/memory">memory</a></li>
-                <li><a href="/rules">standing rules</a></li>
-                <li><a href="/canvas">canvas</a></li>
-                <li><a href="/settings">settings</a></li>
-                <li><a href="https://terminal.sparktobloom.com" target="_blank" rel="noopener noreferrer">terminal</a></li>
-                {% endif %}
-                <li class="user-controls">
-                    {% if current_user %}
-                    <div class="user-menu" data-user-menu>
-                        <button
-                            type="button"
-                            class="user-menu-button"
-                            aria-label="Open user menu"
-                            aria-expanded="false"
-                            aria-haspopup="true"
-                            onclick="toggleUserMenu(event)"
-                        >
-                            <img
-                                src="{{ request.url_for('static', path='images/cyborg_me.png') }}"
-                                alt="{{ current_user.username }}"
-                                class="user-avatar"
-                            >
-                        </button>
-                        <div class="user-menu-panel">
-                            <div class="user-menu-name">{{ current_user.username }}</div>
-                            <form action="/logout" method="post" class="logout-form">
-                                <button type="submit" class="user-menu-item">log out</button>
-                            </form>
-                        </div>
-                    </div>
-                    {% else %}
-                    <a href="/login" class="login-icon-link" aria-label="Log in">log in</a>
-                    {% endif %}
-                </li>
-            </ul>
+            <button class="icon-button sidebar-close" type="button" data-sidebar-close aria-label="Close navigation"><i data-lucide="x"></i></button>
         </div>
-    </nav>
-    <div class="content-wrapper">
-        {% block content %}{% endblock %}
+
+        <div class="console-nav" role="navigation" aria-label="Main navigation">
+            <a href="/overview" class="console-nav-link {% if path == '/overview' %}is-active{% endif %}"><i data-lucide="layout-dashboard"></i><span>Overview</span></a>
+            <a href="/minds" class="console-nav-link {% if path.startswith('/minds') %}is-active{% endif %}"><i data-lucide="brain-circuit"></i><span>Minds</span></a>
+            <a href="/outposts" class="console-nav-link {% if path.startswith('/outposts') %}is-active{% endif %}"><i data-lucide="server-cog"></i><span>Outposts</span></a>
+            <a href="/tools" class="console-nav-link {% if path == '/tools' %}is-active{% endif %}"><i data-lucide="blocks"></i><span>Tools</span></a>
+            <a href="/activity" class="console-nav-link {% if path == '/activity' %}is-active{% endif %}"><i data-lucide="activity"></i><span>Activity</span></a>
+
+            <p class="console-nav-label">Knowledge</p>
+            <a href="/graph" class="console-nav-link {% if path == '/graph' %}is-active{% endif %}"><i data-lucide="share-2"></i><span>Graph</span></a>
+            <a href="/memory" class="console-nav-link {% if path == '/memory' %}is-active{% endif %}"><i data-lucide="database"></i><span>Memory</span></a>
+            <a href="/rules" class="console-nav-link {% if path == '/rules' %}is-active{% endif %}"><i data-lucide="list-checks"></i><span>Rules</span></a>
+
+            <p class="console-nav-label">Workspace</p>
+            <a href="/canvas" class="console-nav-link {% if path == '/canvas' %}is-active{% endif %}"><i data-lucide="pencil-ruler"></i><span>Canvas</span></a>
+            <a href="https://terminal.sparktobloom.com" target="_blank" rel="noopener noreferrer" class="console-nav-link"><i data-lucide="square-terminal"></i><span>Terminal</span><i class="nav-external" data-lucide="external-link"></i></a>
+        </div>
+
+        <div class="console-sidebar-footer">
+            <a href="/setup" class="setup-link {% if path == '/setup' %}is-active{% endif %}"><i data-lucide="circle-check-big"></i><span>Setup guide</span></a>
+            <a href="/settings/general" class="console-nav-link {% if path.startswith('/settings') %}is-active{% endif %}"><i data-lucide="settings"></i><span>Settings</span></a>
+            <div class="console-user">
+                <img src="{{ request.url_for('static', path='images/cyborg_me.png') }}" alt="">
+                <span><strong>{{ current_user.username }}</strong><small>Owner</small></span>
+                <form action="/logout" method="post"><button class="icon-button" type="submit" title="Log out" aria-label="Log out"><i data-lucide="log-out"></i></button></form>
+            </div>
+        </div>
+    </aside>
+    <div class="console-overlay" data-sidebar-close></div>
+    <div class="console-main">
+        <header class="console-mobile-header">
+            <button class="icon-button" type="button" data-sidebar-open aria-label="Open navigation"><i data-lucide="menu"></i></button>
+            <a href="/overview" class="mobile-brand"><img src="{{ request.url_for('static', path='favicon.svg') }}" alt="">Hive</a>
+            <a href="/settings/general" class="icon-button" aria-label="Settings"><i data-lucide="settings"></i></a>
+        </header>
+        <div class="console-content">
+            {% block content %}{% endblock %}
+        </div>
     </div>
-    <script src="{{ request.url_for('static', path='scripts.js') }}?v={{ asset_versions['scripts.js'] }}"></script>
+</div>
+{% else %}
+{% block auth_content %}{% block content_unauth %}{% endblock %}{% endblock %}
+{% endif %}
+<script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+<script src="{{ request.url_for('static', path='console.js') }}?v={{ asset_versions['console.js'] }}"></script>
+<script src="{{ request.url_for('static', path='scripts.js') }}?v={{ asset_versions['scripts.js'] }}"></script>
 </body>
 </html>

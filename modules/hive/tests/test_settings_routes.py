@@ -36,7 +36,8 @@ def test_settings_page_renders_for_authed_user(tmp_path, monkeypatch):
     client = _authed_client(tmp_path, monkeypatch)
     response = client.get("/settings")
     assert response.status_code == 200
-    assert "mind registry" in response.text
+    assert "System configuration" in response.text
+    assert 'data-settings-section="general"' in response.text
 
 
 def test_api_settings_minds_requires_auth(tmp_path, monkeypatch):

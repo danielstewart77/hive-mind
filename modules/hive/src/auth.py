@@ -20,19 +20,37 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException, Request
+from starlette.requests import HTTPConnection
 
 from config import BASE_DIR, SECRET_KEY
 
+_bcrypt: Any = None
 try:
-    import bcrypt as _bcrypt
-except ImportError:  # pragma: no cover - exercised through fallback path
-    _bcrypt = None
+    import bcrypt
 
-try:
-    from itsdangerous import BadSignature, BadTimeSignature, URLSafeTimedSerializer
+    _bcrypt = bcrypt
 except ImportError:  # pragma: no cover - exercised through fallback path
-    BadSignature = BadTimeSignature = Exception
-    URLSafeTimedSerializer = None
+    pass
+
+BadSignature: type[Exception] = Exception
+BadTimeSignature: type[Exception] = Exception
+URLSafeTimedSerializer: Any = None
+try:
+    from itsdangerous import (
+        BadSignature as _BadSignature,
+    )
+    from itsdangerous import (
+        BadTimeSignature as _BadTimeSignature,
+    )
+    from itsdangerous import (
+        URLSafeTimedSerializer as _URLSafeTimedSerializer,
+    )
+
+    BadSignature = _BadSignature
+    BadTimeSignature = _BadTimeSignature
+    URLSafeTimedSerializer = _URLSafeTimedSerializer
+except ImportError:  # pragma: no cover - exercised through fallback path
+    pass
 
 
 SESSION_COOKIE_NAME = "hive_session"
@@ -116,10 +134,9 @@ def hash_password(password: str) -> str:
 
     salt = secrets.token_bytes(16)
     digest = hashlib.pbkdf2_hmac("sha256", password_bytes, salt, 200_000)
-    return "pbkdf2$200000$%s$%s" % (
-        base64.urlsafe_b64encode(salt).decode("ascii"),
-        base64.urlsafe_b64encode(digest).decode("ascii"),
-    )
+    salt_encoded = base64.urlsafe_b64encode(salt).decode("ascii")
+    digest_encoded = base64.urlsafe_b64encode(digest).decode("ascii")
+    return f"pbkdf2$200000${salt_encoded}${digest_encoded}"
 
 
 def verify_password(password: str, password_hash: str) -> bool:
@@ -182,7 +199,10 @@ def create_user(
         conn.commit()
     finally:
         conn.close()
-    return get_user_by_username(normalized, db_path=db_path)
+    user = get_user_by_username(normalized, db_path=db_path)
+    if user is None:  # pragma: no cover - insert and lookup share one database
+        raise RuntimeError("created user could not be loaded")
+    return user
 
 
 def get_user_by_username(username: str, *, db_path: Path | None = None) -> dict[str, Any] | None:
@@ -269,7 +289,7 @@ def read_session_token(token: str) -> dict[str, Any] | None:
         return None
 
 
-def get_current_user_from_request(request: Request) -> dict[str, Any] | None:
+def get_current_user_from_request(request: HTTPConnection) -> dict[str, Any] | None:
     token = request.cookies.get(SESSION_COOKIE_NAME)
     if not token:
         return None

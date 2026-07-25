@@ -1,0 +1,59 @@
+{% extends "layout.html" %}
+{% block title %}Setup · Hive{% endblock %}
+{% block content %}
+<main class="page">
+    <header class="page-header"><div class="page-header-copy"><p class="page-eyebrow">First run</p><h1 class="page-title">Set up your Hive</h1><p class="page-description">Confirm the core services, register the first mind, then add optional capabilities and machines.</p></div></header>
+    <div class="setup-progress" aria-label="Setup progress"><span class="is-current" id="progress-core"></span><span id="progress-mind"></span><span id="progress-tools"></span><span id="progress-outpost"></span></div>
+    <div class="setup-grid">
+        <section class="surface">
+            <div class="surface-header"><div><h2>Readiness</h2><p>Live checks from this installation</p></div><button class="icon-button" type="button" id="setup-refresh" aria-label="Refresh readiness"><i data-lucide="refresh-cw"></i></button></div>
+            <ul class="check-list" id="setup-checks"><li class="loading-state">Running checks…</li></ul>
+        </section>
+        <aside class="overview-stack">
+            <section class="surface" id="first-mind">
+                <div class="surface-header"><div><h2>First mind</h2><p>Identity starts with a conversation</p></div></div>
+                <div class="surface-body overview-stack">
+                    <div class="field"><label for="setup-mind-name">Proposed name</label><input id="setup-mind-name" type="text" placeholder="atlas"><small id="setup-name-result">Check the name before starting identity setup.</small></div>
+                    <button class="button" id="setup-check-name" type="button"><i data-lucide="scan-search"></i>Check availability</button>
+                    <a class="button button-primary" href="https://terminal.sparktobloom.com" target="_blank" rel="noopener noreferrer"><i data-lucide="messages-square"></i>Open identity conversation</a>
+                </div>
+            </section>
+            <section class="surface">
+                <div class="surface-header"><div><h2>Expand your Hive</h2><p>Optional after the first mind</p></div></div>
+                <ul class="service-list"><li class="service-row"><span class="service-icon"><i data-lucide="blocks"></i></span><span class="service-copy"><strong>Hive Tools</strong><small>Add shared capabilities</small></span><a class="surface-link" href="/tools">Review</a></li><li class="service-row"><span class="service-icon"><i data-lucide="server-cog"></i></span><span class="service-copy"><strong>Outpost</strong><small>Add another machine</small></span><a class="surface-link" href="/outposts/new">Add</a></li></ul>
+            </section>
+        </aside>
+    </div>
+</main>
+<script>
+window.addEventListener("DOMContentLoaded", function () {
+    const h = window.HiveConsole;
+    async function load() {
+        const list = document.getElementById("setup-checks"); list.innerHTML = '<li class="loading-state">Running checks…</li>';
+        try {
+            const data = await h.requestJson("/api/overview");
+            const checks = [
+                ["Hive Comms", "Messages, sessions, and mind registration", data.services.comms.reachable, true],
+                ["Lucent", "Memory and knowledge graph", data.services.lucent.reachable, true],
+                ["Registered mind", data.counts.minds ? data.counts.minds + " available" : "No minds registered yet", data.counts.minds > 0, true],
+                ["Hive Tools", data.services.tools.installed ? "Capability service installed" : "Optional capability service", data.services.tools.reachable, false]
+            ];
+            list.innerHTML = checks.map(function (item) { return '<li class="check-row"><span class="check-icon"><i data-lucide="' + (item[2] ? "check" : item[3] ? "alert-circle" : "minus") + '"></i></span><span class="check-copy"><strong>' + item[0] + '</strong><small>' + item[1] + '</small></span>' + h.statusPill(item[2], "Ready", item[3] ? "Needs attention" : "Optional") + '</li>'; }).join("");
+            document.getElementById("progress-core").className = data.services.comms.reachable && data.services.lucent.reachable ? "is-complete" : "is-current";
+            document.getElementById("progress-mind").className = data.counts.minds ? "is-complete" : "is-current";
+            document.getElementById("progress-tools").className = data.services.tools.reachable ? "is-complete" : "";
+            if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}});
+        } catch (error) { list.innerHTML = '<li><div class="error-state">' + h.escapeHtml(error.message) + '</div></li>'; }
+    }
+    document.getElementById("setup-refresh").addEventListener("click", load);
+    document.getElementById("setup-check-name").addEventListener("click", async function () {
+        const name = document.getElementById("setup-mind-name").value.trim();
+        const result = document.getElementById("setup-name-result");
+        if (!name) { result.textContent = "Enter a name first."; return; }
+        try { const data = await h.requestJson("/api/settings/new-mind/check-name?name=" + encodeURIComponent(name)); result.textContent = data.available ? data.name + " is available." : data.name + " is already registered."; }
+        catch (error) { result.textContent = error.message; }
+    });
+    load();
+});
+</script>
+{% endblock %}

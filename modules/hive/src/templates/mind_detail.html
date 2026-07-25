@@ -1,0 +1,41 @@
+{% extends "layout.html" %}
+{% block title %}Mind · Hive{% endblock %}
+{% block content %}
+<main class="page" data-mind-id="{{ mind_id }}">
+    <header class="page-header">
+        <div class="page-header-copy"><p class="page-eyebrow">Mind details</p><h1 class="page-title" id="mind-title">Loading mind…</h1><p class="page-description" id="mind-description">Runtime identity and connection details.</p></div>
+        <div class="page-actions"><a class="button button-quiet" href="/minds"><i data-lucide="arrow-left"></i>All minds</a></div>
+    </header>
+    <div id="mind-error" class="error-state" hidden></div>
+    <div class="overview-stack" id="mind-content">
+        <section class="surface"><div class="surface-header"><h2>Overview</h2><span id="mind-status"></span></div><div class="surface-body"><dl class="detail-grid" id="mind-details"></dl></div></section>
+        <section class="surface"><div class="surface-header"><div><h2>Runtime configuration</h2><p>Secret values are removed before this reaches the browser.</p></div></div><div class="surface-body"><div class="code-wrap"><pre class="code-panel" id="mind-config">Loading…</pre><button class="icon-button" type="button" data-copy="#mind-config" aria-label="Copy configuration"><i data-lucide="copy"></i></button></div></div></section>
+    </div>
+</main>
+<script>
+window.addEventListener("DOMContentLoaded", async function () {
+    const h = window.HiveConsole;
+    const requested = document.querySelector("[data-mind-id]").dataset.mindId;
+    try {
+        const minds = (await h.requestJson("/api/settings/minds")).minds || [];
+        const mind = minds.find(function (item) { return item.id === requested || item.name === requested || (item.id || "").startsWith(requested); });
+        if (!mind) throw new Error("Mind not found");
+        const cfg = mind.local_config && mind.local_config.config || {};
+        document.getElementById("mind-title").textContent = mind.name;
+        document.getElementById("mind-description").textContent = cfg.description || "Registered Hive mind";
+        document.getElementById("mind-status").innerHTML = h.statusPill(Boolean(mind.last_seen), "Connected", "No heartbeat");
+        const details = [
+            ["Mind ID", mind.id || "Not reported"], ["Location", (!mind.local_config || cfg.remote) ? "Remote machine" : "Hive host"],
+            ["Harness", mind.harness || cfg.harness || "Unknown"], ["Provider", cfg.provider || "Not reported"],
+            ["Model", mind.model || cfg.default_model || "Unknown"], ["Gateway", mind.gateway_url || cfg.gateway_url || "Not reported"]
+        ];
+        document.getElementById("mind-details").innerHTML = details.map(function (item) { return '<div class="detail-item"><dt>' + h.escapeHtml(item[0]) + '</dt><dd>' + h.escapeHtml(item[1]) + '</dd></div>'; }).join("");
+        document.getElementById("mind-config").textContent = mind.local_config ? JSON.stringify(cfg, null, 2) : "This mind is remote. Runtime configuration is managed on its host.";
+        if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}});
+    } catch (error) {
+        document.getElementById("mind-content").hidden = true;
+        const box = document.getElementById("mind-error"); box.hidden = false; box.textContent = error.message;
+    }
+});
+</script>
+{% endblock %}

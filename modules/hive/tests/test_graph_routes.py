@@ -8,9 +8,10 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from starlette.testclient import TestClient
+
 import auth
 import main as main_mod
-from starlette.testclient import TestClient
 
 _SAMPLE = {
     "nodes": [
@@ -22,8 +23,8 @@ _SAMPLE = {
     ],
 }
 
-_EMPTY = {"nodes": [], "edges": []}
-_ERROR = {"nodes": [], "edges": [], "error": "connection refused"}
+_EMPTY: dict[str, object] = {"nodes": [], "edges": []}
+_ERROR: dict[str, object] = {"nodes": [], "edges": [], "error": "connection refused"}
 
 
 @pytest.fixture()

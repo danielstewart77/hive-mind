@@ -1,0 +1,82 @@
+{% extends "layout.html" %}
+{% block title %}Overview · Hive{% endblock %}
+{% block content %}
+<main class="page">
+    <header class="page-header">
+        <div class="page-header-copy">
+            <p class="page-eyebrow">Control center</p>
+            <h1 class="page-title">System overview</h1>
+            <p class="page-description">The current state of your minds, shared services, and active work.</p>
+        </div>
+        <div class="page-actions">
+            <a class="button button-quiet" href="/setup"><i data-lucide="list-checks"></i>Setup guide</a>
+            <a class="button button-primary" href="/outposts/new"><i data-lucide="plus"></i>Add Outpost</a>
+        </div>
+    </header>
+
+    <section class="metric-grid" aria-label="Hive metrics">
+        <article class="metric surface"><div class="metric-top"><span class="metric-label">Registered minds</span><span class="metric-icon"><i data-lucide="brain-circuit"></i></span></div><div class="metric-value" id="metric-minds">—</div><div class="metric-detail">Known by Hive Comms</div></article>
+        <article class="metric surface"><div class="metric-top"><span class="metric-label">Active sessions</span><span class="metric-icon"><i data-lucide="messages-square"></i></span></div><div class="metric-value" id="metric-sessions">—</div><div class="metric-detail">Open conversations</div></article>
+        <article class="metric surface"><div class="metric-top"><span class="metric-label">Core services</span><span class="metric-icon"><i data-lucide="server"></i></span></div><div class="metric-value" id="metric-services">—</div><div class="metric-detail">Comms and Lucent reachable</div></article>
+        <article class="metric surface"><div class="metric-top"><span class="metric-label">Hive Tools</span><span class="metric-icon"><i data-lucide="blocks"></i></span></div><div class="metric-value" id="metric-tools">—</div><div class="metric-detail">Optional capability service</div></article>
+    </section>
+
+    <div id="overview-error" class="error-state" hidden></div>
+    <div class="overview-grid">
+        <section class="surface">
+            <div class="surface-header"><div><h2>Minds</h2><p>Availability and current runtime</p></div><a class="surface-link" href="/minds">View all</a></div>
+            <div class="data-table-wrap"><table class="data-table"><thead><tr><th>Mind</th><th>Status</th><th>Runtime</th><th>Last seen</th></tr></thead><tbody id="overview-minds"><tr><td colspan="4" class="loading-state">Loading minds…</td></tr></tbody></table></div>
+        </section>
+        <div class="overview-stack">
+            <section class="surface">
+                <div class="surface-header"><div><h2>Services</h2><p>Shared Hive infrastructure</p></div></div>
+                <ul class="service-list" id="overview-services"><li class="loading-state">Checking services…</li></ul>
+            </section>
+            <section class="surface">
+                <div class="surface-header"><div><h2>Recent sessions</h2><p>Latest conversation state</p></div><a class="surface-link" href="/activity">Activity</a></div>
+                <ul class="activity-list" id="overview-sessions"><li class="loading-state">Loading activity…</li></ul>
+            </section>
+        </div>
+    </div>
+</main>
+<script>
+window.addEventListener("DOMContentLoaded", async function () {
+    const h = window.HiveConsole;
+    try {
+        const data = await h.requestJson("/api/overview");
+        document.getElementById("metric-minds").textContent = data.counts.minds;
+        document.getElementById("metric-sessions").textContent = data.counts.sessions;
+        const coreReady = [data.services.comms, data.services.lucent].filter(function (item) { return item.reachable; }).length;
+        document.getElementById("metric-services").textContent = coreReady + " of 2";
+        document.getElementById("metric-tools").textContent = data.services.tools.installed ? (data.services.tools.reachable ? "Ready" : "Offline") : "Optional";
+
+        const minds = data.minds || [];
+        document.getElementById("overview-minds").innerHTML = minds.length ? minds.slice(0, 8).map(function (mind) {
+            const cfg = mind.local_config && mind.local_config.config || {};
+            const model = mind.model || cfg.default_model || "Not reported";
+            const harness = mind.harness || cfg.harness || "Unknown runtime";
+            return '<tr><td><div class="entity-cell"><span class="entity-avatar">' + h.escapeHtml((mind.name || "?").slice(0, 2)) + '</span><span class="entity-copy"><a href="/minds/' + encodeURIComponent(mind.id || mind.name) + '">' + h.escapeHtml(mind.name) + '</a><small>' + h.escapeHtml((mind.id || "").slice(0, 8)) + '</small></span></div></td><td>' + h.statusPill(Boolean(mind.last_seen), "Connected", "No heartbeat") + '</td><td><span>' + h.escapeHtml(model) + '</span><br><small class="faint">' + h.escapeHtml(harness) + '</small></td><td class="muted">' + h.escapeHtml(h.formatTime(mind.last_seen)) + '</td></tr>';
+        }).join("") : '<tr><td colspan="4"><div class="empty-state"><h3>No minds registered</h3><p>Use the setup guide to connect the first mind.</p><a class="button button-primary" href="/setup">Open setup</a></div></td></tr>';
+
+        const services = [
+            ["Hive Comms", "Message broker and sessions", data.services.comms, "radio-tower"],
+            ["Lucent", "Memory and knowledge graph", data.services.lucent, "database"],
+            ["Hive Tools", data.services.tools.installed ? "Optional capabilities" : "Not installed", data.services.tools, "blocks"]
+        ];
+        document.getElementById("overview-services").innerHTML = services.map(function (item) {
+            return '<li class="service-row"><span class="service-icon"><i data-lucide="' + item[3] + '"></i></span><span class="service-copy"><strong>' + item[0] + '</strong><small>' + item[1] + '</small></span>' + h.statusPill(item[2].reachable, "Ready", item[2].installed === false ? "Optional" : "Unavailable") + '</li>';
+        }).join("");
+
+        const sessions = data.sessions || [];
+        document.getElementById("overview-sessions").innerHTML = sessions.length ? sessions.slice(0, 5).map(function (session) {
+            return '<li class="activity-row"><span class="activity-icon"><i data-lucide="message-circle"></i></span><span class="activity-copy"><strong>' + h.escapeHtml(session.mind_id || "Unknown mind") + '</strong><small>' + h.escapeHtml(session.summary || session.status || "Session") + '</small></span></li>';
+        }).join("") : '<li class="empty-state"><h3>No active sessions</h3><p>New conversations will appear here.</p></li>';
+        if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}});
+    } catch (error) {
+        const box = document.getElementById("overview-error");
+        box.hidden = false;
+        box.textContent = error.message;
+    }
+});
+</script>
+{% endblock %}
