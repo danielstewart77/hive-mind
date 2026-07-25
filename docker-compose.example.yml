@@ -20,12 +20,24 @@ services:
     restart: unless-stopped
     networks:
       - hivemind
+    # Embeddings come from Ollama on the host, not from inside this
+    # container — resolve the host gateway so OLLAMA_BASE_URL below has
+    # something to point at.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "0.0.0.0:8425:8424"
     environment:
       LUCENT_API_PORT: "8424"
       LUCENT_URL_SELF: "http://127.0.0.1:8424"
       LUCENT_DB_PATH: "/data/lucent.db"
+      # Every /memory/retrieve and /memory/store embeds through Ollama.
+      # The code default is loopback, which inside a container is the
+      # container itself — set it explicitly or retrieval fails closed
+      # with connection refused. Override in .env for a remote Ollama.
+      OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:-http://host.docker.internal:11434}"
+      # The nightly pruner classifies through hive-tools; same reasoning.
+      HIVE_TOOLS_URL: "http://hive-tools:9421"
       PRUNE_LOG_PATH: "/data/prune.log"
       PRUNE_CRON: "0 4 * * *"
       PRUNE_TIMEZONE: "America/Chicago"
