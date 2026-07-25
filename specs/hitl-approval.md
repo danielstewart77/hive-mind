@@ -4,41 +4,27 @@
 
 Any mutating, destructive, or high-blast-radius action requires explicit human approval before execution. The confirmation uses an out-of-band channel — the approval signal arrives via Telegram, which is unreachable from within the tool execution environment.
 
+## Where it lives
+
+HITL is entirely owned by the external `hive-tools` service, not this repo. `hive-tools` gates a tool call, persists the pending request (DB-backed, not in-memory — survives a restart), and sends its own Telegram notification with inline Approve/Deny buttons directly (it holds its own `TELEGRAM_BOT_TOKEN`). This repo's only role is the callback side: `bots/telegram_bot.py::handle_hitl_callback` receives the button tap and forwards it.
+
 ## Flow
 
 ```
-Tool requests action → Gateway generates one-time token (in-memory only)
-                     → Pushes notification to Telegram
-                     → Human approves or denies
-                     → Gateway validates token, proceeds or cancels
+A mind calls a HITL-gated hive-tools endpoint
+  → hive-tools persists the request, returns 202-style "pending"
+  → hive-tools sends its own Telegram message: inline Approve/Deny buttons
+  → Daniel taps a button
+  → Telegram delivers the callback to this repo's bot
+  → bots/telegram_bot.py::handle_hitl_callback POSTs
+    {hive_tools_url}/hitl/{token}/respond
+  → hive-tools resolves the request and the original tool call proceeds or is cancelled
 ```
 
-The tool subprocess never sees the confirmation token. It cannot forge approval because the token is generated after the request, held in gateway memory only, and the approval signal must arrive via an external channel.
+## Polling
 
-## Token Lifecycle
-
-- Tokens have a per-request TTL (default 180s, clamped to 30s–10min)
-- Long-running operations (Docker builds) use 600s TTL
-- Resolved tokens stay in memory until TTL expires (so polling clients can read the result)
-- Expired tokens are cleaned up every 30 seconds by a background task
-
-## Two Modes
-
-### Blocking (`wait=True`, default)
-The gateway holds the HTTP connection open until approved, denied, or timeout. The caller gets back `{"approved": true/false}`.
-
-### Non-blocking (`wait=False`)
-The gateway returns a token immediately: `{"token": "abc123", "state": "pending"}`. The caller polls `GET /hitl/status/{token}` until it gets `approved`, `denied`, or `expired`.
-
-## Session Heartbeat
-
-The session manager updates `last_active` on every event yielded during response processing. This prevents the idle reaper from killing sessions during HITL waits, Docker builds, or multi-tool chains.
-
-## Telegram Bot Integration
-
-The Telegram bot's HTTP session uses an unlimited timeout (`aiohttp.ClientTimeout(total=0, sock_read=0)`) so it never drops the SSE stream while waiting for HITL approval + operation completion.
-
-Approval requests are sent as Telegram messages with **inline keyboard buttons** (Approve / Deny). Tapping a button calls back to the gateway's `/hitl/respond` endpoint. The original message updates in-place to show the outcome (Approved / Denied / Expired). Double-taps on an already-resolved request are silently ignored.
+A caller (or this repo's own retry logic) can also check status directly:
+`GET {hive_tools_url}/hitl/{request_id}` on hive-tools.
 
 ## Actions Requiring HITL
 
@@ -50,7 +36,7 @@ Approval requests are sent as Telegram messages with **inline keyboard buttons**
 
 ## Implementation Files
 
-- `core/hitl.py` — in-memory token store with asyncio.Event-based waiting
-- `server.py` — `/hitl/request`, `/hitl/status/{token}`, `/hitl/respond` endpoints
-- `clients/telegram_bot.py` — inline keyboard callback handler (`button_callback`), expired-request cleanup loop
-- `specs/hitl-telegram-inline-buttons.md` — full design spec for the inline keyboard implementation
+- `bots/telegram_bot.py::handle_hitl_callback` — inline keyboard callback handler, POSTs to hive-tools' respond endpoint
+- hive-tools' own `hitl.py` and `server.py` (`GET /hitl/{id}`, `POST /hitl/{id}/respond`) — request persistence, expiry, and the outbound Telegram notification; see [docs/architecture/hive-tools.md](../docs/architecture/hive-tools.md)
+
+There is no gateway-side HITL endpoint — `hive-comms` has no `/hitl/*` routes at all.
