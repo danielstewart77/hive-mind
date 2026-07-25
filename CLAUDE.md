@@ -115,12 +115,12 @@ hive_mind/
 ├── jobs/                          # Data files (resumes, specs)
 ├── data/                          # SQLite databases (Docker volume)
 │
-├── minds/                         # Per-mind backend implementations
-│   ├── cli_harness.py            # Shared CLI harness (Ada + Bob)
-│   ├── ada/implementation.py     # Ada: cli_claude (Claude CLI)
-│   ├── bilby/implementation.py   # Bilby: codex_cli on Ollama
-│   ├── bob/implementation.py     # Bob: cli_ollama (Ollama via CLI harness)
-│   └── nagatha/implementation.py # Nagatha: codex_cli (Codex CLI, one subprocess per turn)
+├── minds/                         # Minds: shared harness code + per-deployment folders
+│   ├── harness/                  # Tracked in-container services: claude_cli.py, codex_cli.py
+│   ├── proactive.py              # Shared unsolicited-delivery plumbing
+│   ├── pty_attach.py             # Shared browser-terminal attach route
+│   ├── example/                  # Tracked starter mind (runtime.yaml + compose fragment)
+│   └── <name>/                   # Deployment minds (gitignored): runtime.yaml, prompts, .claude/.codex, container/
 │
 ├── souls/                         # Per-mind identity seed files (one-time use only)
 │   ├── ada.md                    # Ada's soul seed

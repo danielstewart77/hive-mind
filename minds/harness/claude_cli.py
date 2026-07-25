@@ -1,18 +1,16 @@
-"""Claude CLI harness template — in-container FastAPI service.
+"""Claude CLI harness — in-container FastAPI service for one mind.
 
-Runs as the sole process inside the mind's container. Reads
-``minds/MIND_NAME/runtime.yaml`` and owns the Claude CLI subprocesses for
-this mind's sessions. The provider is chosen in ``runtime.yaml``: a Claude
-model runs against Anthropic directly, while ``provider: ollama`` points
-the same CLI at a local model via the ``ANTHROPIC_BASE_URL`` /
-``ANTHROPIC_AUTH_TOKEN`` env vars in the runtime ``env`` block. The live
-minds Ada (Claude) and Bob (Ollama) both run this shape — one template,
-both paths.
+Runs as the sole process inside the mind's container. The mind is selected
+by the ``MIND_NAME`` env var (set in the mind's ``container/compose.yaml``);
+everything mind-specific comes from ``minds/<MIND_NAME>/runtime.yaml``.
+Owns the Claude CLI subprocesses for the mind's sessions. An Ollama-backed
+mind is the same harness with ``ANTHROPIC_BASE_URL`` / ``ANTHROPIC_AUTH_TOKEN``
+set in ``runtime.yaml``'s ``env`` block.
 
 The system prompt is composed by hive-comms (soul, standing rules,
 decay-weighted recent memory, session-memory carry-forward) and shipped as
-``system_prompt_blocks`` in the spawn payload — this module no longer
-composes anything locally.
+``system_prompt_blocks`` in the spawn payload — this module composes nothing
+locally.
 """
 
 from __future__ import annotations
@@ -32,16 +30,27 @@ import yaml
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from minds.proactive import idle_drain, make_proactive_router
+from minds.pty_attach import (
+    claude_conversation_flags,
+    install_pty_attach,
+    open_pty_process,
+)
+from minds.pty_attach import teardown as teardown_pty
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
-log = logging.getLogger("hive-mind.minds.MIND_NAME")
 
-HERE = Path(__file__).parent
+MIND_NAME = os.environ.get("MIND_NAME", "example")
+MINDS_ROOT = Path(__file__).resolve().parent.parent
+MIND_DIR = MINDS_ROOT / MIND_NAME
 PROJECT_DIR = Path("/usr/src/app")
 
-RUNTIME = yaml.safe_load((HERE / "runtime.yaml").read_text())
+log = logging.getLogger(f"hive-mind.minds.{MIND_NAME}")
+
+RUNTIME = yaml.safe_load((MIND_DIR / "runtime.yaml").read_text())
 NAME: str = RUNTIME["name"]
 MIND_ID: str = RUNTIME["mind_id"]
 DEFAULT_MODEL: str = RUNTIME["default_model"]
@@ -73,17 +82,23 @@ app = FastAPI(title=f"Mind: {NAME}")
 # session_id -> {"proc": Process, "model": str, "resume_sid": str | None}
 SESSIONS: dict[str, dict] = {}
 
+# Proactive (unsolicited) delivery. The idle drain appends {"chat_id", "text"}
+# items here while no request is in flight; this mind's Telegram bot polls
+# GET /proactive to drain and deliver them. See minds/proactive.py.
+PROACTIVE_BUFFER: list[dict] = []
+# Shared bearer for the /proactive endpoint — the same token the backend
+# already trusts on the internal docker network.
+PROACTIVE_TOKEN = os.environ.get("COMMS_BEARER_TOKEN") or None
+app.include_router(make_proactive_router(PROACTIVE_BUFFER, PROACTIVE_TOKEN))
+
 
 # ---------------------------------------------------------------------------
 # Setup — config dir + host credential sync
 # ---------------------------------------------------------------------------
 
 def _sync_mind_config_assets() -> None:
-    """Copy safe mind-local Claude config assets into CONFIG_DIR.
-
-    Verbatim port of mind_server._sync_mind_config_assets.
-    """
-    src = PROJECT_DIR / "minds" / NAME / ".claude"
+    """Copy safe mind-local Claude config assets into CONFIG_DIR."""
+    src = MIND_DIR / ".claude"
     if not src.exists():
         return
     try:
@@ -104,7 +119,14 @@ def _sync_mind_config_assets() -> None:
 
 
 def _setup_config_dir() -> None:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # Off-container (test collection on the host) the container-absolute
+        # path has no parent to create. The CLI would fail loudly on spawn; a
+        # missing directory at import time is not itself the failure.
+        log.warning("Could not create CLAUDE_CONFIG_DIR at %s", CONFIG_DIR)
+        return
     os.environ["CLAUDE_CONFIG_DIR"] = str(CONFIG_DIR)
     _sync_mind_config_assets()
     target_creds = CONFIG_DIR / ".credentials.json"
@@ -209,7 +231,7 @@ async def _spawn_proc(
     for d in allowed_directories or []:
         cmd.extend(["--allowedDirectory", d])
     if resume_sid:
-        cmd.extend(["--resume", resume_sid])
+        cmd.extend(claude_conversation_flags(resume_sid, PROJECT_DIR))
 
     env = os.environ.copy()
     env.update({k: str(v) for k, v in RUNTIME_ENV.items()})
@@ -238,10 +260,45 @@ async def _spawn_proc(
     )
     asyncio.create_task(_drain_stderr(proc, session_id))
     log.info(
-        "Spawned %s session=%s pid=%d model=%s resume=%s",
+        "Spawned %s session=%s pid=%d model=%s resume=%s base_url=%s",
         NAME, session_id, proc.pid, model, resume_sid or "new",
+        env.get("ANTHROPIC_BASE_URL", "anthropic"),
     )
     return proc
+
+
+def _spawn_pty(
+    *, session_id: str, model: str, conversation_id: str, cols: int, rows: int
+) -> tuple[Any, int]:
+    """Put an interactive `claude` TUI under a pty for the web terminal.
+
+    Distinct from `_spawn_proc`: no `-p`, no stream-json — those are
+    print-mode flags and disable the TUI (slash commands, tab completion,
+    Ctrl+C). Resuming needs no `--append-system-prompt`; that was set on the
+    conversation's first turn. Both processes append to the same conversation
+    file; only one writes at a time.
+    """
+    cmd = [
+        "claude",
+        "--permission-mode", "bypassPermissions",
+        "--dangerously-skip-permissions",
+        "--model", model,
+    ]
+    if MCP_CONFIG:
+        cmd.extend(["--mcp-config", MCP_CONFIG])
+    cmd.extend(claude_conversation_flags(conversation_id, PROJECT_DIR))
+
+    env = os.environ.copy()
+    env.update({k: str(v) for k, v in RUNTIME_ENV.items()})
+    proc, master_fd = open_pty_process(
+        cmd, env=env, cwd=str(PROJECT_DIR), cols=cols, rows=rows
+    )
+    log.info("Spawned %s pty session=%s pid=%d model=%s conversation=%s",
+             NAME, session_id, proc.pid, model, conversation_id)
+    return proc, master_fd
+
+
+install_pty_attach(app, mind_name=NAME, spawn=_spawn_pty)
 
 
 async def _drain_stderr(proc: asyncio.subprocess.Process, session_id: str) -> None:
@@ -318,7 +375,26 @@ async def create_session(req: Request) -> Any:
             client_ref=client_ref,
             owner_ref=owner_ref,
         )
-        SESSIONS[sid] = {"proc": proc, "model": model, "resume_sid": resume_sid}
+        session = {
+            "proc": proc,
+            "model": model,
+            "resume_sid": resume_sid,
+            # client_ref is the surface's chat id (Telegram chat_id). Persist it
+            # so unsolicited (proactive) turns can be routed back to the user.
+            "chat_id": client_ref,
+            # Serialises stdout access between the live request reader
+            # (send_message) and the background idle drain.
+            "stdout_lock": asyncio.Lock(),
+            "in_flight": False,
+        }
+        SESSIONS[sid] = session
+        # Start the per-session idle drain so unsolicited assistant output is
+        # buffered for proactive Telegram delivery instead of stranded in the
+        # subprocess stdout buffer.
+        if getattr(proc, "stdout", None) is not None:
+            session["drain_task"] = asyncio.ensure_future(
+                idle_drain(session, PROACTIVE_BUFFER)
+            )
         log.info("%s session %s initialised (model=%s resume=%s prompt_source=%s)",
                  NAME, sid, model, resume_sid or "new",
                  "comms" if system_prompt_blocks else "local")
@@ -352,16 +428,32 @@ async def send_message(sid: str, req: Request) -> Any:
     if not proc or not proc.stdin or proc.returncode is not None:
         return JSONResponse({"error": "Process not running"}, status_code=500)
 
+    images = body.get("images") or []
+    content_blocks: list[dict] = [{"type": "text", "text": content}]
+    for img in images:
+        content_blocks.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": img.get("media_type", "image/jpeg"),
+                "data": img["data"],
+            },
+        })
     msg = json.dumps({
         "type": "user",
-        "message": {"role": "user", "content": [{"type": "text", "text": content}]},
+        "message": {"role": "user", "content": content_blocks},
     })
     sess["in_flight"] = True
     proc.stdin.write(msg.encode() + b"\n")
     await proc.stdin.drain()
 
     async def stream() -> Any:
+        stdout_lock = sess.get("stdout_lock")
         try:
+            # Hold the stdout lock for the whole read so the idle drain can
+            # never consume this turn's output concurrently.
+            if stdout_lock is not None:
+                await stdout_lock.acquire()
             async for line in proc.stdout:
                 decoded = line.decode().strip()
                 if not decoded:
@@ -377,6 +469,8 @@ async def send_message(sid: str, req: Request) -> Any:
                 except json.JSONDecodeError:
                     continue
         finally:
+            if stdout_lock is not None and stdout_lock.locked():
+                stdout_lock.release()
             # Clear in_flight on every exit path: normal completion, generator
             # cancellation (client disconnect), or exception. Without this, an
             # abandoned stream would lock the session out of all future turns.
@@ -404,14 +498,25 @@ async def interrupt_session(sid: str) -> Any:
 @app.delete("/sessions/{sid}")
 async def kill_session(sid: str) -> dict:
     sess = SESSIONS.pop(sid, None)
+    # The terminal is a separate process from the tracked subprocess, so a
+    # kill has to reach both or the TUI outlives its own conversation.
+    teardown_pty(sid)
     if not sess:
         return {"session_id": sid, "status": "closed"}
+    # Cancel the per-session idle drain so no orphan task keeps reading stdout.
+    drain_task = sess.get("drain_task")
+    if drain_task is not None and not drain_task.done():
+        drain_task.cancel()
     await _kill_proc(sess.get("proc"))
     log.info("Killed %s session %s", NAME, sid)
     return {"session_id": sid, "status": "closed"}
 
 
-if __name__ == "__main__":
+def main() -> None:
     import uvicorn
     port = int(os.environ.get("MIND_SERVER_PORT", "8420"))
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+
+
+if __name__ == "__main__":
+    main()

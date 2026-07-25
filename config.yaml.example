@@ -59,3 +59,9 @@ telegram_owner_chat_id: 0000000000  # DM chat ID for HITL approval notifications
 # The scheduler container walks minds/*/.claude/skills/*/SKILL.md at startup
 # and registers a job per discovered (mind, skill) pair. Each fire creates a
 # fresh session, runs the skill, kills the session, and delivers the result.
+
+# Group chat: multi-mind sessions moderated by one mind.
+group_chat:
+  default_moderator: example
+  available_minds:
+    - example
