@@ -6,7 +6,7 @@ Outstanding security findings that require an explicit decision before remediati
 
 ## Error Channel Architecture
 
-**Findings:** MEDIUM-2 (skill wrappers leak stderr), MEDIUM-3 (`fetch_articles` leaks Neo4j exception details)
+**Findings:** MEDIUM-2 (skill wrappers leak stderr)
 
 **The tension:** Raw error details — stderr output, exception messages, internal paths — are essential for Ada's self-correction loop. If a skill fails, she needs to know why. Suppressing that information makes the agent less capable. But piping it back to the end user (e.g., Discord) exposes internal file paths, API key validation failures, and database schema details.
 
@@ -18,21 +18,17 @@ Outstanding security findings that require an explicit decision before remediati
 
 ## Docker Hardening
 
-**Findings:** HIGH-1 (container runs as root), HIGH-2 (broad volume mounts), MEDIUM-1 (non-pinned base image)
+**Resolved:** HIGH-1 (container runs as root) — `Dockerfile` pins a non-root `USER hivemind`. MEDIUM-1 (non-pinned base image) — every Dockerfile pins a specific tag (`ubuntu:24.04`, `python:3.12-slim`, `python:3.11-slim`); no `latest` anywhere.
 
-**The tension:** The current bind-mount approach (`.:/usr/src/app`) is what makes live development practical — edit a file, it's immediately reflected in the container. A restrictive volume policy would break that workflow. Running as root is similarly a developer-convenience default.
+**Open:** HIGH-2 (broad volume mounts) — `${HOST_PROJECT_DIR:-.}:/usr/src/app` bind-mounts the whole project root into most containers, and mind containers, `lucent`, and `comms` carry none of `no-new-privileges` / `cap_drop: ALL` / `read_only: true` (the surface bots and voice servers do — see [security.md](security.md#whats-actually-built)).
 
-**What needs to be decided:** Whether to harden for production now (non-root user, named volumes, pinned image) or treat this as a dev-only deployment until a hardening sprint is scoped.
+**The tension:** The bind-mount approach is what makes live development practical — edit a file, it's immediately reflected in the container. A restrictive volume policy or read-only root would break that workflow for the mind/lucent/comms containers specifically (they're edited live far more often than the bots).
 
-**Remediation (when decided):**
-- Pin base image: `FROM ubuntu:24.04` (trivial, no tradeoff)
-- Add non-root user: `RUN useradd -m hivemind && USER hivemind` (breaks host-path permissions; needs volume ownership alignment)
-- Restrict mounts: mount only `./agents`, `./data`, `./docs` rather than the whole project root
+**What needs to be decided:** Whether to harden mind/lucent/comms uniformly with the bots now, or treat the current split as intentional (dev-convenience for the frequently-edited services, hardened for the rarely-touched ones) until a hardening pass is scoped.
 
 ---
 
 ## Long-term (no urgency decision needed)
 
-- Sandboxed execution for dynamically created tools (`create_tool` writes and loads code in-process)
-- Expanded audit logging to all tool invocations (currently only `create_tool` and `install_dependency`)
-- `pip-audit` or `safety` in development workflow
+- Expanded audit logging to all tool invocations
+- `pip-audit` in development workflow — `scripts/pre-commit-pip-audit.sh` exists and `scripts/install-hooks.sh` will install it as a git pre-commit hook, but it's opt-in per clone, not installed by default or run in CI

@@ -40,5 +40,5 @@ Full schema at `http://hive-tools:9421/openapi.json`.
 
 ## Anti-patterns
 
-- Do not use `secrets.py get` to retrieve the token — it has no `get` subcommand; use `python3 -m keyring get` directly
+- Retrieve the token via `python3 -m keyring get`, not a hardcoded value anywhere in a skill or script
 - Do not hardcode the token value anywhere
