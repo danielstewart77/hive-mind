@@ -35,8 +35,8 @@ Each client is a thin HTTP wrapper. The gateway (nervous system) routes sessions
 ## Quick Start
 
 ```bash
-git clone https://github.com/danielstewart77/hive_mind.git
-cd hive_mind
+git clone https://github.com/danielstewart77/hive-mind.git
+cd hive-mind
 cp config.yaml.example config.yaml
 docker compose up -d --build
 ```

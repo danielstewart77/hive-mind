@@ -3,7 +3,7 @@
 
 Tracks per-skill usage metadata in a sidecar JSON file at
 ``<config_dir>/skills/.usage.json``, keyed by skill name. Ported from
-Hermes' ``tools/skill_usage.py`` and re-parametrized for hive_mind's
+Hermes' ``tools/skill_usage.py`` and re-parametrized for hive-mind's
 multi-mind, copy-don't-share model: there is **no** global home and **no**
 shared file. Every public function takes an explicit ``config_dir`` (a mind's
 ``.claude`` / ``.codex`` directory) so each mind owns its own sidecar.

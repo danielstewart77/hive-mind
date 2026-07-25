@@ -26,7 +26,7 @@ Browser and playwright belong to the body, not the nervous system — they reach
 | Network | Joined to `hivemind` Docker network + published port `9421` for bare-metal callers |
 | Caller list | All Docker minds + bare-metal Skippy (token in his keyring) |
 
-**Sandbox:** minds in `/Dev/hive_mind/` have `HOST_DEV_DIR` mounted into their containers. Hive-tools lives outside `/Dev/`, so a compromised mind can't read or modify the source — only call the API. The API is the only contract.
+**Sandbox:** minds in `/Dev/hive-mind/` have `HOST_DEV_DIR` mounted into their containers. Hive-tools lives outside `/Dev/`, so a compromised mind can't read or modify the source — only call the API. The API is the only contract.
 
 ### Privilege tiers — minds are *users*, Skippy is the *maintainer*
 

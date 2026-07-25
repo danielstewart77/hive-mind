@@ -69,7 +69,7 @@ docker compose up -d --build
 ## File Structure
 
 ```
-hive_mind/
+hive-mind/
 ├── nervous-system/                # Lucent + comms (see nervous-system/README.md)
 │   ├── lucent_api/               # Vector store + KG (hive-lucent container)
 │   ├── comms/                    # Gateway: sessions, broker, bootstrap, HITL (hive-comms container)

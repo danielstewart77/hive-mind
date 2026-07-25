@@ -5,14 +5,14 @@ Two public surfaces, both deterministic and pure stdlib + PyYAML (no model,
 no import-time side effects):
 
   - ``build_learn_prompt(user_request)`` — a port of Hermes'
-    ``agent/learn_prompt.py::build_learn_prompt``, re-framed for hive_mind. It
+    ``agent/learn_prompt.py::build_learn_prompt``, re-framed for hive-mind. It
     instructs the live agent to gather the described sources with the tools it
     already has (Read / Grep / web) and author ONE SKILL.md, saving it via the
     ``skill-manage`` skill (``skill_manage`` ``action="create"``). The embedded
     standards are the testable core of Hermes' ``_AUTHORING_STANDARDS``: kebab
     name, one-sentence description, the ordered body sections, exact-commands,
     and the ~100-200 line bound. Hermes-only frontmatter rules that conflict
-    with hive_mind's ``skill_manage`` schema (``author: Hermes``, ``version``)
+    with hive-mind's ``skill_manage`` schema (``author: Hermes``, ``version``)
     are dropped — ``skill_manage`` renders the dialect itself.
 
   - ``validate_skill_md(content, *, harness)`` — a deterministic check of an
@@ -75,7 +75,7 @@ LINE_ERROR_LOW = 5
 
 
 _AUTHORING_STANDARDS = """\
-Follow the hive_mind skill-authoring standards exactly. These are the same
+Follow the hive-mind skill-authoring standards exactly. These are the same
 rules the deterministic validator enforces before the skill is saved:
 
 Frontmatter:
@@ -108,7 +108,7 @@ Quality bar:
 def build_learn_prompt(user_request: str) -> str:
     """Build the agent prompt for an open-ended ``/learn`` request.
 
-    Port of Hermes ``build_learn_prompt``, re-framed for hive_mind: the agent
+    Port of Hermes ``build_learn_prompt``, re-framed for hive-mind: the agent
     gathers material with Read / Grep / web tools and saves via the
     ``skill-manage`` skill (``skill_manage`` ``action="create"``). An empty
     request falls back to the "workflow we just went through" default.
