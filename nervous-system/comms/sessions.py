@@ -1,8 +1,9 @@
 """
 Hive Mind — Session manager.
 
-Owns all Claude CLI subprocesses and the session database.
-Each session maps to one claude -p subprocess in stream-json mode.
+Owns the session database and dispatches over HTTP to each mind's own
+container (its `gateway_url`), which spawns and owns the actual Claude/Codex
+CLI subprocess via its harness module — this process never spawns one itself.
 """
 
 import asyncio

@@ -1,0 +1,21 @@
+# hive-comms' provider/model registry. This is the file that actually
+# drives which provider a model name resolves to for GET /models and the
+# /model slash command — NOT the repo root's config.yaml (its own
+# providers/models keys are parsed but unused by anything).
+#
+# Copy to nervous-system/comms/config.yaml. Missing file = empty
+# providers/models (comms still runs; GET /models just returns nothing).
+#
+# Per-mind provider selection (which of these a given mind actually uses)
+# is set in that mind's own runtime.yaml (`provider:` + `env:`), not here —
+# see specs/ollama-backed-mind.md.
+
+providers:
+  anthropic: {}
+  ollama:
+    api_base: "http://host.docker.internal:11434"
+
+models:
+  sonnet: anthropic
+  opus: anthropic
+  haiku: anthropic
