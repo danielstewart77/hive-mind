@@ -17,15 +17,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN ln -sf /usr/bin/python3 /usr/bin/python
 
-# Claude Code CLI + Codex CLI
-RUN npm install -g @anthropic-ai/claude-code @openai/codex
-
 # Non-root user — UID 1000 matches typical host user for bind-mount perms
 # Ubuntu 24.04 ships with uid 1000 as 'ubuntu', so rename it
 RUN usermod -l hivemind -d /home/hivemind -m ubuntu \
     && groupmod -n hivemind ubuntu \
     && mkdir -p /home/hivemind/.cache \
     && chown -R hivemind:hivemind /home/hivemind
+
+# Claude Code CLI — baked into the image's default (root-owned) global npm
+# dir; rebuild the image to update.
+RUN npm install -g @anthropic-ai/claude-code
+
+# Codex CLI — installs to a hivemind-owned prefix instead of npm's default
+# root-owned global dir, so `npm install -g @openai/codex` also works at
+# runtime as the non-root hivemind user. A docker-compose volume mounted at
+# this exact path (see minds/nagatha and minds/bilby's container/compose.yaml)
+# shares one codex install across every codex-harness container on a host —
+# Docker seeds a fresh named volume from whatever's already here in the
+# image, so this RUN doubles as the fallback baseline if that volume is
+# ever stale or missing.
+ENV NPM_CONFIG_PREFIX=/home/hivemind/.npm-global
+ENV PATH="/home/hivemind/.npm-global/bin:${PATH}"
+RUN npm install -g @openai/codex \
+    && chown -R hivemind:hivemind /home/hivemind/.npm-global
 
 # Python venv + deps — installed to /opt/venv so bind mounts don't clobber it
 RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --upgrade pip "setuptools<81" wheel
