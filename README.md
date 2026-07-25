@@ -38,10 +38,14 @@ Each client is a thin HTTP wrapper. The gateway (nervous system) routes sessions
 git clone https://github.com/danielstewart77/hive-mind.git
 cd hive-mind
 cp config.yaml.example config.yaml
+cp docker-compose.example.yml docker-compose.yml
+cp .env.example .env
+cp nervous-system/.env.example nervous-system/.env
+# fill in .env and nervous-system/.env — COMMS_BEARER_TOKEN must match in both
 docker compose up -d --build
 ```
 
-All services run on a shared Docker network (`hivemind`). The gateway is at `http://localhost:8420`.
+All services run on a shared Docker network (`hivemind`). The gateway (`hive-comms`, built from `nervous-system/`) is at `http://localhost:8426`; the vector store + knowledge graph (`hive-lucent`) is at `http://localhost:8425`.
 
 ## Documentation (`docs/`)
 
