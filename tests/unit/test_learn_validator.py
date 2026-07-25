@@ -1,7 +1,7 @@
 """Step 1 — /learn authoring-standards validator + build_learn_prompt port.
 
 Tests the deterministic validator of an authored SKILL.md against the Hermes
-authoring standards (ported, re-framed for hive_mind), plus the prompt builder.
+authoring standards (ported, re-framed for hive-mind), plus the prompt builder.
 Assert observable behavior only — return values / dict shapes.
 """
 
@@ -56,7 +56,7 @@ def test_build_learn_prompt_includes_request_and_standards():
     assert "description" in prompt.lower()
     assert "When to Use" in prompt
     assert "Procedure" in prompt
-    # Re-framed to hive_mind: save via skill-manage / skill_manage create.
+    # Re-framed to hive-mind: save via skill-manage / skill_manage create.
     assert "skill_manage" in prompt or "skill-manage" in prompt
 
 

@@ -10,7 +10,7 @@ A mind that runs as a single bare-metal systemd service on its own host instead 
 
 **👉 [github.com/danielstewart77/hive_mind_skippy](https://github.com/danielstewart77/hive_mind_skippy)** *(private)*
 
-Skippy is the canonical standalone mind. The repo branched from `hive_mind` and runs as one systemd unit hosting:
+Skippy is the canonical standalone mind. The repo branched from `hive-mind` and runs as one systemd unit hosting:
 
 - the mind backend (`mind_server.app`)
 - the gateway (`server.app`)

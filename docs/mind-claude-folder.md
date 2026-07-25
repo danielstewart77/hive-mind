@@ -35,7 +35,7 @@ Everything needed to run a mind's Claude harness belongs in its `.claude` folder
 
 ## What Does NOT Go Here
 
-- **No `.claude/` at the repo root** — Claude should never read `hive_mind/.claude/`
+- **No `.claude/` at the repo root** — Claude should never read `hive-mind/.claude/`
 - **No `.claude/` at `/home/hivemind/.claude`** — mind containers do not use the host user's Claude dir
 - **No shared skills directory** — skills are per-mind; copy explicitly if another mind needs one
 

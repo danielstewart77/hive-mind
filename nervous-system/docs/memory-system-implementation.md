@@ -54,7 +54,7 @@ What it provides. Adopters consume; they don't rebuild.
 ### Repo
 
 ```
-~/Storage/Dev/hive_mind/nervous-system/
+~/Storage/Dev/hive-mind/nervous-system/
 ├── lucent_api/                # FastAPI app + routers + lucent_graph + lucent_memory
 │                              # + memory_schema, prune_memory, secrets, notify_utils
 ├── comms/                     # gateway — sessions, broker, bootstrap, HITL

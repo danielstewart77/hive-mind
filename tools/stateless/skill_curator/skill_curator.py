@@ -2,7 +2,7 @@
 """Deterministic skill-lifecycle Curator (stateless, per-mind).
 
 Ported from Hermes' ``agent/curator.py::apply_automatic_transitions`` and
-re-shaped for hive_mind's stateless, multi-mind, copy-don't-share model. Where
+re-shaped for hive-mind's stateless, multi-mind, copy-don't-share model. Where
 Hermes resolves a single ``~/.hermes/skills`` root from global config and splits
 provenance via bundled/hub manifest files, this tool takes the mind's config dir
 as an explicit ``--config-dir`` (its ``.claude`` / ``.codex`` directory) and uses
@@ -34,7 +34,7 @@ The Curator does two things:
 
 Config (per-mind, optional) lives at ``<config-dir>/skills/curator.yaml``; an
 absent file means all defaults. The ``min_idle_hours`` gate is parsed for parity
-but is a **no-op** in the hive_mind scheduled-subprocess model — there is no
+but is a **no-op** in the hive-mind scheduled-subprocess model — there is no
 "agent actively running" signal reachable from a stateless CLI, so the cadence
 gate is the cron schedule itself.
 
@@ -87,7 +87,7 @@ STATE_ACTIVE = telemetry.STATE_ACTIVE
 STATE_STALE = telemetry.STATE_STALE
 STATE_ARCHIVED = telemetry.STATE_ARCHIVED
 
-# hive_mind's analogue of Hermes' PROTECTED_BUILTIN_SKILLS = {"plan"}: the five
+# hive-mind's analogue of Hermes' PROTECTED_BUILTIN_SKILLS = {"plan"}: the five
 # verified router skills (each SKILL.md frontmatter reads "Route all …"). These
 # are hard-exempt regardless of any flag or sidecar state — verified present on
 # disk under minds/ada/.claude/skills/. No names are invented; this is the
@@ -197,7 +197,7 @@ def load_curator_config(config_dir: Path) -> Dict[str, Any]:
     discarding the whole file.
 
     ``min_idle_hours`` is parsed for parity with Hermes but is a **no-op** in the
-    hive_mind scheduled-subprocess model — there is no "agent actively running"
+    hive-mind scheduled-subprocess model — there is no "agent actively running"
     signal reachable from a stateless CLI, so the cadence gate is the cron
     schedule itself, not this value.
     """
@@ -425,7 +425,7 @@ ABSORBED_ARCHIVE_COMMAND = "skill_manage delete --absorbed-into <umbrella>"
 
 
 # Ported verbatim from Hermes' agent/curator.py CURATOR_REVIEW_PROMPT, with two
-# adaptations: rule 3b names hive_mind's five router skills (not Hermes' "plan"),
+# adaptations: rule 3b names hive-mind's five router skills (not Hermes' "plan"),
 # and every ``~/.hermes/skills/`` path is rewritten to ``<config-dir>/skills/``.
 CURATOR_REVIEW_PROMPT = (
     "You are running as the background skill CURATOR. This is an "
