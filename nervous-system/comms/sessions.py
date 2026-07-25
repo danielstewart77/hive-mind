@@ -1257,6 +1257,12 @@ class SessionManager:
                     "client_ref": client_ref,
                     "owner_type": owner_type,
                     "owner_ref": owner_ref,
+                    # The surface this process will serve (telegram, terminal,
+                    # discord, ...). owner_type carries a mind-uuid suffix and
+                    # a web/terminal split that are routing concerns; minds get
+                    # the clean human label so they can shape behavior per
+                    # surface without knowing gateway naming conventions.
+                    "surface": self._surface_label(owner_type or ""),
                     "system_prompt_blocks": system_prompt_blocks,
                 },
                 timeout=aiohttp.ClientTimeout(total=10),
