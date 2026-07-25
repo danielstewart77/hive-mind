@@ -564,6 +564,11 @@ async def ws_attach(ws: WebSocket, session_id: str):
         await ws.close(code=4409, reason="session has no conversation to attach to")
         return
 
+    # Same (owner_type, owner_ref, client_ref) resolution the stream-json
+    # respawn paths use — without it the mind's Stop hook finds no CLIENT_REF
+    # in the tmux pane's env and the session never rotates.
+    routing = await session_mgr._routing_for(session)
+
     mind_ws_url = mind_row["gateway_url"].replace("http://", "ws://").replace("https://", "wss://")
     params = urlencode({
         "resume_sid": conversation_id,
@@ -572,6 +577,9 @@ async def ws_attach(ws: WebSocket, session_id: str):
         # paint matches; live changes arrive as resize control frames.
         "cols": ws.query_params.get("cols") or "80",
         "rows": ws.query_params.get("rows") or "24",
+        "client_ref": routing["client_ref"],
+        "owner_type": routing["owner_type"],
+        "owner_ref": routing["owner_ref"],
     })
     attach_url = f"{mind_ws_url}/sessions/{session_id}/attach-pty?{params}"
 
