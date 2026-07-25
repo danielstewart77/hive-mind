@@ -2,7 +2,7 @@
 """Agent-authoring tool: create / edit / patch / delete skills (stateless).
 
 Ported faithfully from Hermes ``tools/skill_manager_tool.py`` and re-shaped for
-hive_mind's stateless, multi-mind, copy-don't-share model. Where Hermes resolves
+hive-mind's stateless, multi-mind, copy-don't-share model. Where Hermes resolves
 a single ``~/.hermes/skills`` root from global config, this tool takes the mind's
 config dir as an explicit ``--config-dir`` argument (its ``.claude`` / ``.codex``
 directory) plus a ``--harness {claude_cli,codex_cli}`` flag. Skills root is
