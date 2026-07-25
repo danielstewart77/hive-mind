@@ -4,6 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hive</title>
+    <link rel="icon" type="image/svg+xml" href="{{ request.url_for('static', path='favicon.svg') }}?v={{ asset_versions['favicon.svg'] }}">
+    <link rel="icon" type="image/png" sizes="32x32" href="{{ request.url_for('static', path='favicon-32.png') }}?v={{ asset_versions['favicon-32.png'] }}">
+    <link rel="icon" type="image/png" sizes="192x192" href="{{ request.url_for('static', path='favicon-192.png') }}?v={{ asset_versions['favicon-192.png'] }}">
+    <link rel="apple-touch-icon" href="{{ request.url_for('static', path='apple-touch-icon.png') }}?v={{ asset_versions['apple-touch-icon.png'] }}">
     <link rel="stylesheet" href="{{ request.url_for('static', path='style.css') }}?v={{ asset_versions['style.css'] }}">
     <link href="https://fonts.googleapis.com/css2?family=Fira+Code&display=swap" rel="stylesheet">
     <script>
@@ -28,7 +32,10 @@
 <body>
     <nav>
         <div class="nav-inner">
-            <a href="/" class="nav-brand glow">hive</a>
+            <a href="/" class="nav-brand glow">
+                <img src="{{ request.url_for('static', path='favicon.svg') }}?v={{ asset_versions['favicon.svg'] }}" alt="" class="nav-brand-icon">
+                hive
+            </a>
             <button class="nav-toggle" aria-label="Toggle navigation" onclick="toggleNav()">&#9776;</button>
             <ul id="nav-links">
                 {% if current_user %}
@@ -37,7 +44,7 @@
                 <li><a href="/rules">standing rules</a></li>
                 <li><a href="/canvas">canvas</a></li>
                 <li><a href="/settings">settings</a></li>
-                <li><a href="https://terminal.sparktobloom.com">terminal</a></li>
+                <li><a href="https://terminal.sparktobloom.com" target="_blank" rel="noopener noreferrer">terminal</a></li>
                 {% endif %}
                 <li class="user-controls">
                     {% if current_user %}
@@ -50,9 +57,14 @@
                             aria-haspopup="true"
                             onclick="toggleUserMenu(event)"
                         >
-                            <span class="user-menu-name">{{ current_user.username }}</span>
+                            <img
+                                src="{{ request.url_for('static', path='images/cyborg_me.png') }}"
+                                alt="{{ current_user.username }}"
+                                class="user-avatar"
+                            >
                         </button>
                         <div class="user-menu-panel">
+                            <div class="user-menu-name">{{ current_user.username }}</div>
                             <form action="/logout" method="post" class="logout-form">
                                 <button type="submit" class="user-menu-item">log out</button>
                             </form>
