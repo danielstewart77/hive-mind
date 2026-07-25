@@ -338,6 +338,26 @@ class TestCodexCliThreads:
         })
         assert codex.SESSIONS["n2"]["thread_id"] == "codex-thread-7"
 
+    @pytest.mark.asyncio
+    async def test_release_stream_preserves_thread_for_resume(self, codex, monkeypatch):
+        codex.SESSIONS.clear()
+        codex.THREADS.clear()
+        codex.SESSIONS["n-release"] = {"proc": object()}
+        codex.THREADS["n-release"] = "codex-thread-release"
+
+        reaped = []
+
+        async def _reap(proc):
+            reaped.append(proc)
+
+        monkeypatch.setattr(codex, "_reap_proc", _reap)
+        result = await codex.release_session("n-release", "stream")
+
+        assert result["released"] is True
+        assert "n-release" not in codex.SESSIONS
+        assert codex.THREADS["n-release"] == "codex-thread-release"
+        assert len(reaped) == 1
+
     def test_attach_before_the_first_turn_is_refused_not_forked(self, codex):
         codex.THREADS.clear()
         with pytest.raises(pty_attach.PtyUnavailable):

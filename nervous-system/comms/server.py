@@ -305,6 +305,24 @@ async def delete_session(session_id: str):
     return await session_mgr.kill_session(session_id)
 
 
+@app.post("/sessions/{session_id}/suspend")
+async def suspend_session(session_id: str):
+    try:
+        return await session_mgr.suspend_session(session_id)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+
+
+@app.post("/sessions/{session_id}/resume")
+async def resume_session(session_id: str, body: ActivateRequest):
+    try:
+        return await session_mgr.resume_session(
+            session_id, body.client_type, body.client_ref
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+
+
 # ---------------------------------------------------------------------------
 # Message endpoint (SSE streaming)
 # ---------------------------------------------------------------------------
@@ -549,6 +567,12 @@ async def ws_attach(ws: WebSocket, session_id: str):
     if not session:
         await ws.close(code=4404, reason=f"session {session_id} not found")
         return
+    if session.get("status") == "closed":
+        await ws.close(code=4410, reason="session closed")
+        return
+    if session.get("status") == "suspended":
+        await ws.close(code=4411, reason="session suspended; resume first")
+        return
     try:
         mind_row = await session_mgr._get_mind_row(session["mind_id"])
     except ValueError as exc:
@@ -585,41 +609,40 @@ async def ws_attach(ws: WebSocket, session_id: str):
 
     await ws.accept()
 
-    async def _watch_for_close() -> None:
+    async def _watch_for_close() -> str:
         # The attach pty is a separate process from the session's tracked
         # subprocess — kill_session never reaches it. Watching the session
         # event stream lets a kill (end-session, /kill, rotation) tear the
         # bridge down, which cascades: mind_ws closes → mind_server's
         # attach loop exits → the pty process is terminated.
         async for event in session_mgr.stream_session_events(session_id):
-            if event.get("type") == "session_closed":
-                return
-
-    # Attaching to an already-closed (archived) session is a deliberate
-    # resurrection — no close-watcher, or it would fire instantly. The
-    # watcher only guards sessions that were live at attach time.
-    was_live = session.get("status") != "closed"
+            if event.get("type") in ("session_closed", "session_suspended"):
+                return event["type"]
+        return "session_closed"
 
     try:
-        async with aiohttp.ClientSession() as http:
-            async with http.ws_connect(attach_url) as mind_ws:
-                pump = asyncio.ensure_future(_pump_attach_ws(ws, mind_ws))
-                tasks = {pump}
-                closed = None
-                if was_live:
-                    closed = asyncio.ensure_future(_watch_for_close())
-                    tasks.add(closed)
-                try:
-                    done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-                finally:
-                    for task in tasks:
-                        task.cancel()
-                if closed is not None and closed in done:
+        async with (
+            aiohttp.ClientSession() as http,
+            http.ws_connect(attach_url) as mind_ws,
+        ):
+            pump = asyncio.ensure_future(_pump_attach_ws(ws, mind_ws))
+            closed = asyncio.ensure_future(_watch_for_close())
+            tasks = {pump, closed}
+            try:
+                done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for task in tasks:
+                    task.cancel()
+            if closed in done:
+                event_type = closed.result()
+                if event_type == "session_suspended":
+                    await ws.close(code=4411, reason="session suspended")
+                else:
                     await ws.close(code=4410, reason="session closed")
-                elif pump in done:
-                    upstream = pump.result()
-                    if upstream is not None:
-                        await ws.close(code=upstream)
+            elif pump in done:
+                upstream = pump.result()
+                if upstream is not None:
+                    await ws.close(code=upstream)
     except aiohttp.WSServerHandshakeError as exc:
         # The mind answered, and said no. Starlette replies 403 to a
         # websocket path it has no route for, so this is how a mind whose
