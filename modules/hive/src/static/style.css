@@ -33,8 +33,7 @@ body, html {
     margin: 0;
     font-family: 'Fira Code', 'Consolas', 'Courier New', monospace;
     font-size: small;
-    background-color: #dce8f0;
-    background-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20width%3D%2756%27%20height%3D%27100%27%3E%0A%20%20%3Cpath%20d%3D%27M28%2066L0%2050L0%2016L28%200L56%2016L56%2050L28%2066L28%20100M56%20100L56%2050M0%20100L0%2050%27%0A%20%20%20%20%20%20%20%20stroke%3D%27%23b8cfe0%27%20stroke-width%3D%271%27%20fill%3D%27none%27%20opacity%3D%270.6%27%2F%3E%0A%20%20%3Cpath%20d%3D%27M0%2016L12%2016L12%2033L44%2033L44%2016L56%2016%27%0A%20%20%20%20%20%20%20%20stroke%3D%27%239ab8cc%27%20stroke-width%3D%270.8%27%20fill%3D%27none%27%2F%3E%0A%20%20%3Cpath%20d%3D%27M28%200L28%2012%27%0A%20%20%20%20%20%20%20%20stroke%3D%27%239ab8cc%27%20stroke-width%3D%270.8%27%20fill%3D%27none%27%2F%3E%0A%20%20%3Cpath%20d%3D%27M28%2033L28%2050L14%2050L14%2066L28%2066%27%0A%20%20%20%20%20%20%20%20stroke%3D%27%239ab8cc%27%20stroke-width%3D%270.8%27%20fill%3D%27none%27%2F%3E%0A%20%20%3Cpath%20d%3D%27M44%2033L44%2050L56%2050%27%0A%20%20%20%20%20%20%20%20stroke%3D%27%239ab8cc%27%20stroke-width%3D%270.8%27%20fill%3D%27none%27%2F%3E%0A%20%20%3Cpath%20d%3D%27M0%2050L12%2050L12%2066L28%20100%27%0A%20%20%20%20%20%20%20%20stroke%3D%27%239ab8cc%27%20stroke-width%3D%270.7%27%20fill%3D%27none%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%2728%27%20cy%3D%270%27%20%20r%3D%272.2%27%20fill%3D%27%239ab8cc%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%2756%27%20cy%3D%2716%27%20r%3D%272.2%27%20fill%3D%27%239ab8cc%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%2756%27%20cy%3D%2750%27%20r%3D%272.2%27%20fill%3D%27%239ab8cc%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%2728%27%20cy%3D%2766%27%20r%3D%272.2%27%20fill%3D%27%239ab8cc%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%270%27%20%20cy%3D%2750%27%20r%3D%272.2%27%20fill%3D%27%239ab8cc%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%270%27%20%20cy%3D%2716%27%20r%3D%272.2%27%20fill%3D%27%239ab8cc%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%2728%27%20cy%3D%27100%27%20r%3D%272.2%27%20fill%3D%27%239ab8cc%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%2712%27%20cy%3D%2716%27%20r%3D%271.4%27%20fill%3D%27%239ab8cc%27%20opacity%3D%270.8%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%2744%27%20cy%3D%2716%27%20r%3D%271.4%27%20fill%3D%27%239ab8cc%27%20opacity%3D%270.8%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%2728%27%20cy%3D%2712%27%20r%3D%271.4%27%20fill%3D%27%239ab8cc%27%20opacity%3D%270.8%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%2712%27%20cy%3D%2733%27%20r%3D%271.4%27%20fill%3D%27%239ab8cc%27%20opacity%3D%270.8%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%2744%27%20cy%3D%2733%27%20r%3D%271.4%27%20fill%3D%27%239ab8cc%27%20opacity%3D%270.8%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%2728%27%20cy%3D%2733%27%20r%3D%272%27%20%20%20fill%3D%27%239ab8cc%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%2728%27%20cy%3D%2750%27%20r%3D%271.4%27%20fill%3D%27%239ab8cc%27%20opacity%3D%270.8%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%2714%27%20cy%3D%2750%27%20r%3D%271.4%27%20fill%3D%27%239ab8cc%27%20opacity%3D%270.8%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%2744%27%20cy%3D%2750%27%20r%3D%271.4%27%20fill%3D%27%239ab8cc%27%20opacity%3D%270.8%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%2714%27%20cy%3D%2766%27%20r%3D%271.4%27%20fill%3D%27%239ab8cc%27%20opacity%3D%270.8%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%2712%27%20cy%3D%2750%27%20r%3D%271.4%27%20fill%3D%27%239ab8cc%27%20opacity%3D%270.8%27%2F%3E%0A%20%20%3Ccircle%20cx%3D%2712%27%20cy%3D%2766%27%20r%3D%271.4%27%20fill%3D%27%239ab8cc%27%20opacity%3D%270.8%27%2F%3E%0A%3C%2Fsvg%3E");
+    background-color: #080f18;
     color: #e7e7de;
     line-height: 1.6;
     margin-bottom: 15px;
@@ -489,6 +488,9 @@ nav ul li.user-controls {
 
 /* Brand — always visible */
 .nav-brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
     font-size: 1.1rem;
     font-weight: bold;
     letter-spacing: 0.03em;
@@ -499,8 +501,20 @@ nav ul li.user-controls {
     flex-shrink: 0;
 }
 
+.nav-brand-icon {
+    width: 1.3em;
+    height: 1.3em;
+    flex-shrink: 0;
+    filter: drop-shadow(0 0 4px #38bdf8) drop-shadow(0 0 8px #0ea5e9);
+    transition: filter 0.2s ease;
+}
+
 .nav-brand:hover {
     color: #38bdf8;
+}
+
+.nav-brand:hover .nav-brand-icon {
+    filter: drop-shadow(0 0 6px #38bdf8) drop-shadow(0 0 12px #0ea5e9);
 }
 
 /* Hamburger button — hidden on desktop */
