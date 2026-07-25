@@ -4,11 +4,11 @@ Nothing else ever closes an abandoned session: rotation and explicit kills
 close their own, but a session whose surface walked away stays 'idle'
 forever and reads as active everywhere downstream (the web terminal filed
 56-day-old ghosts under Active). The reaper sweeps idle sessions past
-REAP_IDLE_AFTER_SECONDS to 'closed' and drops their active_sessions
+REAP_IDLE_AFTER_SECONDS to 'suspended' and drops their active_sessions
 bindings.
 
 Covers:
-- stale idle sessions are closed and unbound; fresh idle ones untouched.
+- stale idle sessions are suspended and unbound; fresh idle ones untouched.
 - a live tracked subprocess vetoes the timestamp, no matter how old.
 - closed sessions are ignored (sweep is idempotent).
 - start() launches the periodic reaper task; shutdown() cancels it.
@@ -83,7 +83,7 @@ async def _binding_count(mgr: SessionManager, session_id: str) -> int:
     return rows[0]["n"]
 
 
-def test_reap_closes_stale_idle_and_drops_binding():
+def test_reap_suspends_stale_idle_and_drops_binding():
     async def scenario():
         with tempfile.TemporaryDirectory() as tmp:
             mgr = await _make_manager(tmp)
@@ -95,7 +95,7 @@ def test_reap_closes_stale_idle_and_drops_binding():
                 reaped = await mgr.reap_stale_sessions()
 
                 assert reaped == ["sess-stale"]
-                assert await _status(mgr, "sess-stale") == "closed"
+                assert await _status(mgr, "sess-stale") == "suspended"
                 assert await _binding_count(mgr, "sess-stale") == 0
                 assert await _status(mgr, "sess-fresh") == "idle"
             finally:
@@ -173,11 +173,11 @@ def test_reap_loop_first_sweep_runs_immediately():
                 # sweep must clear the backlog without waiting an interval.
                 mgr._reaper_task = asyncio.create_task(mgr._reap_loop())
                 for _ in range(50):
-                    if await _status(mgr, "sess-backlog") == "closed":
+                    if await _status(mgr, "sess-backlog") == "suspended":
                         break
                     await asyncio.sleep(0.02)
 
-                assert await _status(mgr, "sess-backlog") == "closed"
+                assert await _status(mgr, "sess-backlog") == "suspended"
             finally:
                 await mgr.shutdown()
 

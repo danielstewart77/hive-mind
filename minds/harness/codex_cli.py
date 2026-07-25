@@ -506,6 +506,21 @@ async def interrupt_session(sid: str) -> Any:
     return {"ok": True, "session_id": sid, "message": "codex_per_turn"}
 
 
+@app.post("/sessions/{sid}/release")
+async def release_session(sid: str, surface: str) -> Any:
+    """Stop one live surface while retaining Codex's resumable thread id."""
+    if surface == "terminal":
+        released = teardown_pty(sid)
+    elif surface == "stream":
+        sess = SESSIONS.pop(sid, None)
+        released = sess is not None
+        if sess is not None:
+            await _reap_proc(sess.get("proc"))
+    else:
+        return JSONResponse({"error": "surface must be terminal or stream"}, status_code=400)
+    return {"session_id": sid, "surface": surface, "released": released}
+
+
 @app.delete("/sessions/{sid}")
 async def kill_session(sid: str) -> dict:
     sess = SESSIONS.pop(sid, None)

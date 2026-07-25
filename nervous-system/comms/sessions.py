@@ -155,10 +155,8 @@ class SessionManager:
     # Idle interval after which the observer event stream emits a ping.
     # Must stay under intermediary idle timeouts (Cloudflare ~100s).
     EVENT_HEARTBEAT_SECONDS = 20.0
-    # Sessions idle longer than this are reaped to 'closed'. Nothing else
-    # ever closes an abandoned session — rotation and explicit kills close
-    # their own, but a session whose surface simply walked away stays
-    # 'idle' forever and reads as active everywhere downstream.
+    # Sessions idle longer than this are suspended. Rotation and explicit
+    # kills close their own sessions, while inactivity remains resumable.
     REAP_IDLE_AFTER_SECONDS = 7 * 86400
     REAP_INTERVAL_SECONDS = 3600.0
 
@@ -271,7 +269,7 @@ class SessionManager:
         log.info("Session manager shut down")
 
     async def _reap_loop(self):
-        """Periodically sweep abandoned sessions to 'closed'.
+        """Periodically sweep abandoned sessions to 'suspended'.
 
         First sweep runs immediately so a restart clears any backlog of
         ghosts without waiting an interval.
@@ -286,11 +284,10 @@ class SessionManager:
             await asyncio.sleep(self.REAP_INTERVAL_SECONDS)
 
     async def reap_stale_sessions(self) -> list[str]:
-        """Close idle sessions untouched for REAP_IDLE_AFTER_SECONDS.
+        """Suspend idle sessions untouched for REAP_IDLE_AFTER_SECONDS.
 
         A session with a live tracked subprocess is skipped no matter how
-        old its last_active is — liveness beats the timestamp. Rows are
-        closed, not deleted: 'closed' is what Archived means downstream.
+        old its last_active is — liveness beats the timestamp.
         """
         cutoff = time.time() - self.REAP_IDLE_AFTER_SECONDS
         rows = await self._db.execute_fetchall(
@@ -300,7 +297,7 @@ class SessionManager:
         stale = [r["id"] for r in rows if r["id"] not in self._procs]
         for session_id in stale:
             await self._db.execute(
-                "UPDATE sessions SET status = 'closed' WHERE id = ?", (session_id,)
+                "UPDATE sessions SET status = 'suspended' WHERE id = ?", (session_id,)
             )
             await self._db.execute(
                 "DELETE FROM active_sessions WHERE session_id = ?", (session_id,)
@@ -422,8 +419,8 @@ class SessionManager:
         sessions = [dict(r) for r in await rows.fetchall()]
 
         # If client filtering requested, also check active_sessions.
-        # A session that is the current active binding but has status='closed'
-        # is treated as INACTIVE — without this guard the bot will keep
+        # A session that is the current active binding but is not live is
+        # treated as INACTIVE — without this guard the bot will keep
         # picking it (e.g. after a rotation that didn't successfully retire
         # the binding) and the conversation can't transition to a new
         # session. Caller should fall through to ensure_session → create.
@@ -437,7 +434,7 @@ class SessionManager:
             for s in sessions:
                 s["is_active"] = (
                     s["id"] == active_id
-                    and s.get("status") != "closed"
+                    and s.get("status") not in ("closed", "suspended")
                 )
 
         return sessions
@@ -557,7 +554,7 @@ class SessionManager:
             FROM active_sessions a
             JOIN sessions s ON s.id = a.session_id
             WHERE a.client_type = ? AND a.client_ref = ?
-              AND s.status != 'closed'
+              AND s.status NOT IN ('closed', 'suspended')
             """,
             (client_type, client_ref),
         )
@@ -655,6 +652,9 @@ class SessionManager:
         if session.get("status") == "closed":
             yield {"type": "session_closed", "session_id": session_id}
             return
+        if session.get("status") == "suspended":
+            yield {"type": "session_suspended", "session_id": session_id}
+            return
 
         queue: asyncio.Queue = asyncio.Queue(maxsize=200)
         self._observer_queues.setdefault(session_id, set()).add(queue)
@@ -669,7 +669,7 @@ class SessionManager:
                     yield {"type": "ping", "session_id": session_id}
                     continue
                 yield event
-                if event.get("type") == "session_closed":
+                if event.get("type") in ("session_closed", "session_suspended"):
                     return
         finally:
             watchers = self._observer_queues.get(session_id)
@@ -711,6 +711,16 @@ class SessionManager:
         session = await self._get_row(session_id)
         if not session:
             raise ValueError(f"Session not found: {session_id}")
+        if session["status"] == "closed":
+            raise ValueError(f"Session {session_id} is closed")
+        if session["status"] == "suspended":
+            await self._db.execute(
+                "UPDATE sessions SET status = 'idle' WHERE id = ?", (session_id,)
+            )
+            await self._db.commit()
+            session = await self._get_row(session_id)
+            if session is None:  # pragma: no cover - row cannot vanish in this transaction
+                raise ValueError(f"Session not found: {session_id}")
 
         adopting = bool(owner_ref) and (
             session["owner_ref"] != owner_ref or session["owner_type"] != owner_type
@@ -728,6 +738,8 @@ class SessionManager:
             log.info("Session %s adopted by %s/%s (was %s/%s)", session_id,
                      owner_type, owner_ref, session["owner_type"], session["owner_ref"])
             session = await self._get_row(session_id)
+            if session is None:  # pragma: no cover - row cannot vanish in this transaction
+                raise ValueError(f"Session not found: {session_id}")
 
         await self._db.execute(
             """INSERT OR REPLACE INTO active_sessions (client_type, client_ref, session_id)
@@ -768,9 +780,10 @@ class SessionManager:
             # guard, the respawn path below would resurrect the session
             # (with its old claude_sid as --resume) and the rotation cycle
             # never actually transitions the conversation to a fresh one.
-            if session.get("status") == "closed":
-                log.info("send_message: refusing closed session=%s — caller must pick up new active session", session_id)
-                raise ValueError(f"Session {session_id} is closed")
+            if session.get("status") in ("closed", "suspended"):
+                status = session["status"]
+                log.info("send_message: refusing %s session=%s", status, session_id)
+                raise ValueError(f"Session {session_id} is {status}")
 
             # Pending rotation finalizes HERE, on the user's turn. The Stop
             # hook armed this session after writing the carry-forward; swap to
@@ -1166,8 +1179,60 @@ class SessionManager:
         return result
 
     # ------------------------------------------------------------------
-    # Kill / close
+    # Suspend / resume / close
     # ------------------------------------------------------------------
+    async def suspend_session(self, session_id: str) -> dict:
+        """Stop all processes while preserving a resumable conversation."""
+        session = await self._get_row(session_id)
+        if not session:
+            raise ValueError(f"Session not found: {session_id}")
+        if session["status"] == "closed":
+            raise ValueError(f"Session {session_id} is closed")
+
+        if session["status"] != "suspended":
+            await self.kill_rc_process(session_id)
+            await self.release_on_mind(session_id, "terminal")
+            await self.release_on_mind(session_id, "stream")
+        await self._db.execute(
+            "UPDATE sessions SET status = 'suspended', rotation_armed = 0 WHERE id = ?",
+            (session_id,),
+        )
+        await self._db.execute(
+            "DELETE FROM active_sessions WHERE session_id = ?", (session_id,)
+        )
+        await self._db.commit()
+        await self._publish_session_event(
+            session_id,
+            {"type": "session_suspended", "session_id": session_id},
+        )
+        return await self._session_dict(session_id)
+
+    async def resume_session(
+        self, session_id: str, client_type: str, client_ref: str
+    ) -> dict:
+        """Return a suspended conversation to the active working set."""
+        session = await self._get_row(session_id)
+        if not session:
+            raise ValueError(f"Session not found: {session_id}")
+        if session["status"] == "closed":
+            raise ValueError(f"Session {session_id} is closed")
+        if session["status"] != "suspended":
+            raise ValueError(f"Session {session_id} is not suspended")
+
+        await self._db.execute(
+            "DELETE FROM active_sessions WHERE session_id = ?", (session_id,)
+        )
+        await self._db.execute(
+            """INSERT OR REPLACE INTO active_sessions (client_type, client_ref, session_id)
+               VALUES (?, ?, ?)""",
+            (client_type, client_ref, session_id),
+        )
+        await self._db.execute(
+            "UPDATE sessions SET status = 'idle' WHERE id = ?", (session_id,)
+        )
+        await self._db.commit()
+        return await self._session_dict(session_id)
+
     async def kill_session(self, session_id: str) -> dict:
         """Kill a session: SIGTERM the subprocess, mark closed."""
         session = await self._get_row(session_id)
