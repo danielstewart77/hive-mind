@@ -17,8 +17,9 @@ services:
       - ./src:/app/src
       # Auth db — shared with the terminal site.
       - ./data:/data
-      # Lucent sqlite, read-only, for the /memory browser.
-      - ${LUCENT_DB_HOST_DIR:-/home/daniel/Storage/Dev/hive_nervous_system/data}:/lucent:ro
+      # Lucent sqlite, read-only, for the /memory browser. hive_nervous_system
+      # retired 2026-07-24 — lucent now lives in hive_mind's own nervous-system/.
+      - ${LUCENT_DB_HOST_DIR:-/home/daniel/Storage/Dev/hive_mind/nervous-system/data}:/lucent:ro
       # Per-mind config files, read-only, for the /settings mind registry.
       # Containerized minds (ada/bob/bilby/nagatha/hex-bot) keep
       # runtime.yaml under hive_mind's minds/; bare-metal Skippy keeps

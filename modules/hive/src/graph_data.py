@@ -1,4 +1,4 @@
-"""Graph data fetching from the hive_nervous_system lucent HTTP API.
+"""Graph data fetching from the lucent HTTP API (hive_mind/nervous-system/).
 
 Calls the /graph/data endpoint on the lucent service and returns nodes
 and edges in a format suitable for Cytoscape.js visualization.
