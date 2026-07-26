@@ -21,7 +21,10 @@ import asyncio
 import json
 import logging
 import os
+import re
 import signal
+import threading
+import time
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -33,7 +36,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from minds.harness.empty_turn_diagnostic import compose_empty_turn_diagnostic
 from minds.proactive import make_proactive_router
-from minds.pty_attach import PtyUnavailable, install_pty_attach, open_pty_process
+from minds.pty_attach import install_pty_attach, open_pty_process
 from minds.pty_attach import teardown as teardown_pty
 
 logging.basicConfig(
@@ -244,35 +247,108 @@ async def create_session(req: Request) -> Any:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+_ROLLOUT_UUID_RE = re.compile(
+    r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$",
+    re.IGNORECASE,
+)
+
+
+def _existing_rollout_paths() -> set[Path]:
+    sessions_dir = CODEX_HOME / "sessions"
+    if not sessions_dir.exists():
+        return set()
+    return set(sessions_dir.rglob("*.jsonl"))
+
+
+def _rollout_exists(thread_id: str) -> bool:
+    """A thread id is only resumable if its rollout is on *this* CODEX_HOME.
+
+    A thread can outlive the container that minted it — a redeploy onto a
+    fresh volume, a migration to a new host — while THREADS still points at
+    it. `codex resume` on a missing rollout dies within a second of the pty
+    starting it, which reads identically to a hung terminal.
+    """
+    for path in _existing_rollout_paths():
+        match = _ROLLOUT_UUID_RE.search(path.name)
+        if match and match.group(1).lower() == thread_id.lower():
+            return True
+    return False
+
+
+def _watch_for_new_thread_in_background(session_id: str, proc, before: set[Path]) -> None:
+    """Report the thread id codex mints for a bare (thread-less) terminal.
+
+    A fresh terminal launches without `resume` — there is no thread yet, so
+    there is nothing to pass. codex writes a new rollout file under
+    CODEX_HOME/sessions on the user's first real turn; this watches for that
+    file (``proc.poll()`` is the only other thing to watch — there is no JSON
+    event stream on an interactive TUI, unlike `_run_codex_turn`'s
+    `thread.started`) and, once it appears, extracts the thread id from its
+    name and stores it in THREADS so the next reattach can resume it.
+    """
+    def _watch() -> None:
+        while proc.poll() is None:
+            for path in _existing_rollout_paths() - before:
+                match = _ROLLOUT_UUID_RE.search(path.name)
+                if match:
+                    thread_id = match.group(1)
+                    THREADS[session_id] = thread_id
+                    log.info(
+                        "%s session %s: discovered thread %s from new rollout %s",
+                        NAME, session_id, thread_id, path,
+                    )
+                    return
+            time.sleep(1.0)
+
+    threading.Thread(
+        target=_watch, daemon=True, name=f"codex-thread-watch-{session_id}"
+    ).start()
+
+
 def _spawn_pty(
     *, session_id: str, model: str, conversation_id: str, cols: int, rows: int
 ) -> tuple[Any, int]:
     """Put an interactive `codex` TUI on this session's thread under a pty.
 
     ``conversation_id`` is the gateway's and means nothing to codex, so the
-    thread comes from THREADS. A session that has never taken a turn has no
-    thread; starting one here would fork a second conversation the gateway
-    knows nothing about, so the attach is refused instead.
+    thread comes from THREADS. A session with no thread yet, or whose
+    thread's rollout no longer exists under this CODEX_HOME (a migration or a
+    redeploy onto a fresh volume), launches bare `codex` instead of resuming
+    — starting a real `resume <stale-id>` dies within a second and reads as a
+    hung terminal. A background watcher reports the thread id codex mints on
+    the first real turn (see `_watch_for_new_thread_in_background`).
     """
     del conversation_id  # codex mints its own ids; see THREADS
     thread_id = THREADS.get(session_id)
-    if not thread_id:
-        raise PtyUnavailable("this conversation has not started yet — send a message first")
+    if thread_id and not _rollout_exists(thread_id):
+        log.warning(
+            "Discarding stale thread %s for session %s — no matching rollout "
+            "under %s", thread_id, session_id, CODEX_HOME,
+        )
+        THREADS.pop(session_id, None)
+        thread_id = None
 
     cmd = [
         "codex",
         "--dangerously-bypass-approvals-and-sandbox",
         "--model", model,
         *_provider_args(),
-        "resume", thread_id,
     ]
+    before = None
+    if thread_id:
+        cmd += ["resume", thread_id]
+    else:
+        before = _existing_rollout_paths()
+
     env = os.environ.copy()
     env.update({k: str(v) for k, v in RUNTIME_ENV.items()})
     proc, master_fd = open_pty_process(
         cmd, env=env, cwd=str(PROJECT_DIR), cols=cols, rows=rows
     )
     log.info("Spawned %s pty session=%s pid=%d model=%s thread=%s",
-             NAME, session_id, proc.pid, model, thread_id)
+             NAME, session_id, proc.pid, model, thread_id or "new")
+    if before is not None:
+        _watch_for_new_thread_in_background(session_id, proc, before)
     return proc, master_fd
 
 
