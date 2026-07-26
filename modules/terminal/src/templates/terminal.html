@@ -599,6 +599,15 @@
                     stopWith("mind refused the terminal");
                     return;
                 }
+                // 4412 = rotation retired this session for a successor and
+                // the gateway already knows its id (carried in the close
+                // reason) — reattach straight to it instead of polling
+                // /api/terminal/sessions to rediscover what the close event
+                // already told us.
+                if (ev && ev.code === 4412 && ev.reason) {
+                    attachSuccessor({id: ev.reason, mind_id: mindId, mind_name: mindName});
+                    return;
+                }
                 // Rotation kills the pty out from under the tile; hunt for
                 // the successor session instead of sitting dead forever.
                 setAttachState("disconnected");
