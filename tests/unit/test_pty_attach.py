@@ -358,13 +358,72 @@ class TestCodexCliThreads:
         assert codex.THREADS["n-release"] == "codex-thread-release"
         assert len(reaped) == 1
 
-    def test_attach_before_the_first_turn_is_refused_not_forked(self, codex):
+    def test_attach_before_the_first_turn_launches_bare_codex(self, codex, monkeypatch):
+        """No thread yet: launch bare `codex` (no `resume`) instead of
+        refusing — starting one here no longer forks a second conversation,
+        since the thread the gateway sees is whatever THREADS is later told
+        by the background watcher, not something minted up front."""
         codex.THREADS.clear()
-        with pytest.raises(pty_attach.PtyUnavailable):
-            codex._spawn_pty(
-                session_id="n3", model="gpt-5", conversation_id="gateway-uuid",
-                cols=80, rows=24,
-            )
+        captured = {}
+        watched = {}
+
+        def _fake_open(cmd, **kwargs):
+            captured["cmd"] = cmd
+            return (types_SimpleNamespace(pid=1, poll=lambda: 0), -1)
+
+        def _fake_watch(session_id, proc, before):
+            watched["session_id"] = session_id
+
+        monkeypatch.setattr(codex, "open_pty_process", _fake_open)
+        monkeypatch.setattr(codex, "_watch_for_new_thread_in_background", _fake_watch)
+
+        codex._spawn_pty(
+            session_id="n3", model="gpt-5", conversation_id="gateway-uuid",
+            cols=80, rows=24,
+        )
+
+        assert "resume" not in captured["cmd"]
+        assert watched["session_id"] == "n3"
+
+    def test_spawn_pty_discards_a_stale_thread_and_launches_bare_codex(
+        self, codex, monkeypatch, tmp_path
+    ):
+        """A thread id can outlive the container that minted it — a
+        migration or a redeploy onto a fresh volume. `codex resume` on a
+        missing rollout dies within a second of the pty starting it, which
+        reads identically to a hung terminal; noticing the rollout is gone
+        and falling back to a fresh launch is the fix."""
+        monkeypatch.setattr(codex, "CODEX_HOME", tmp_path)  # no rollouts at all
+        codex.THREADS.clear()
+        codex.THREADS["n5"] = "stale-thread-id"
+        captured = {}
+
+        def _fake_open(cmd, **kwargs):
+            captured["cmd"] = cmd
+            return (types_SimpleNamespace(pid=1, poll=lambda: 0), -1)
+
+        monkeypatch.setattr(codex, "open_pty_process", _fake_open)
+        monkeypatch.setattr(codex, "_watch_for_new_thread_in_background", lambda *a, **k: None)
+
+        codex._spawn_pty(
+            session_id="n5", model="gpt-5", conversation_id="gateway-uuid",
+            cols=80, rows=24,
+        )
+
+        assert "resume" not in captured["cmd"]
+        assert "n5" not in codex.THREADS
+
+    def test_rollout_exists_checks_this_codex_homes_sessions_dir(
+        self, codex, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(codex, "CODEX_HOME", tmp_path)
+        sessions_dir = tmp_path / "sessions" / "2026" / "07" / "26"
+        sessions_dir.mkdir(parents=True)
+        rollout = sessions_dir / "rollout-2026-07-26T00-00-00-deadbeef-dead-beef-dead-beefdeadbeef.jsonl"
+        rollout.write_text("{}")
+
+        assert codex._rollout_exists("deadbeef-dead-beef-dead-beefdeadbeef") is True
+        assert codex._rollout_exists("00000000-0000-0000-0000-000000000000") is False
 
     def test_the_terminal_carries_the_same_provider_override_as_a_turn(
         self, codex, monkeypatch
@@ -378,6 +437,7 @@ class TestCodexCliThreads:
             return (types_SimpleNamespace(pid=1, poll=lambda: None), -1)
 
         monkeypatch.setattr(codex, "open_pty_process", _fake_open)
+        monkeypatch.setattr(codex, "_rollout_exists", lambda thread_id: True)
         monkeypatch.setattr(codex, "PROVIDER", "ollama")
         monkeypatch.setitem(codex.RUNTIME_ENV, "OLLAMA_BASE_URL", "http://ollama:11434/v1")
         codex.THREADS["b4"] = "codex-thread-4"
