@@ -1,0 +1,33 @@
+{% extends "layout.html" %}
+{% block title %}Minds · Hive{% endblock %}
+{% block content %}
+<main class="page">
+    <header class="page-header">
+        <div class="page-header-copy"><p class="page-eyebrow">Hive roster</p><h1 class="page-title">Minds</h1><p class="page-description">Every mind registered with this Hive, whether it runs here or on another machine.</p></div>
+        <div class="page-actions"><a class="button button-primary" href="/setup#first-mind"><i data-lucide="plus"></i>Create mind</a></div>
+    </header>
+    <div class="filter-bar"><label class="search-field"><i data-lucide="search"></i><input id="mind-search" type="search" placeholder="Search minds" aria-label="Search minds"></label></div>
+    <section class="surface">
+        <div class="data-table-wrap"><table class="data-table"><thead><tr><th>Mind</th><th>Status</th><th>Model</th><th>Harness</th><th>Location</th><th>Last activity</th></tr></thead><tbody id="minds-table"><tr><td colspan="6" class="loading-state">Loading minds…</td></tr></tbody></table></div>
+    </section>
+</main>
+<script>
+window.addEventListener("DOMContentLoaded", async function () {
+    const h = window.HiveConsole;
+    const tbody = document.getElementById("minds-table");
+    let minds = [];
+    function render() {
+        const query = document.getElementById("mind-search").value.trim().toLowerCase();
+        const rows = minds.filter(function (mind) { return !query || JSON.stringify(mind).toLowerCase().includes(query); });
+        tbody.innerHTML = rows.length ? rows.map(function (mind) {
+            const cfg = mind.local_config && mind.local_config.config || {};
+            const remote = !mind.local_config || cfg.remote;
+            return '<tr><td><div class="entity-cell"><span class="entity-avatar">' + h.escapeHtml((mind.name || "?").slice(0, 2)) + '</span><span class="entity-copy"><a href="/minds/' + encodeURIComponent(mind.id || mind.name) + '">' + h.escapeHtml(mind.name) + '</a><small>' + h.escapeHtml((mind.id || "").slice(0, 8)) + '</small></span></div></td><td>' + h.statusPill(mind.activity_status === "active", "Active session", "Registered") + '</td><td>' + h.escapeHtml(mind.model || cfg.default_model || "Unknown") + '</td><td>' + h.escapeHtml(mind.harness || cfg.harness || "Unknown") + '</td><td>' + (remote ? "Remote" : "Hive host") + '</td><td class="muted">' + h.escapeHtml(h.formatTime(mind.last_activity)) + '</td></tr>';
+        }).join("") : '<tr><td colspan="6"><div class="empty-state"><h3>No matching minds</h3><p>Try a different search or create a new mind.</p></div></td></tr>';
+    }
+    try { minds = (await h.requestJson("/api/settings/minds")).minds || []; render(); }
+    catch (error) { tbody.innerHTML = '<tr><td colspan="6"><div class="error-state">' + h.escapeHtml(error.message) + '</div></td></tr>'; }
+    document.getElementById("mind-search").addEventListener("input", render);
+});
+</script>
+{% endblock %}

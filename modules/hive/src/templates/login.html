@@ -1,20 +1,21 @@
 {% extends "layout.html" %}
-{% block content %}
+{% block auth_content %}
 <main class="auth-shell">
     <section class="login-panel">
-        <p class="login-kicker">hive mind access gate</p>
-        <h1>Hive Login</h1>
-        <p class="login-copy">Standard username and password only. Provisioning happens through Hive Mind, not the website.</p>
+        <img class="login-mark" src="{{ request.url_for('static', path='favicon.svg') }}" alt="">
+        <p class="login-kicker">Hive control center</p>
+        <h1>Welcome back</h1>
+        <p class="login-copy">Sign in to manage minds, Outposts, tools, and knowledge.</p>
         {% if error %}
         <div class="login-error">{{ error }}</div>
         {% endif %}
         <form action="/login" method="post" class="login-form">
-            <input type="hidden" name="next" value="{{ next_path or '/graph' }}">
+            <input type="hidden" name="next" value="{{ next_path or '/overview' }}">
             <label for="username">Username</label>
             <input id="username" name="username" type="text" autocomplete="username" required>
             <label for="password">Password</label>
             <input id="password" name="password" type="password" autocomplete="current-password" required>
-            <button type="submit">Enter Hive</button>
+            <button type="submit" class="button button-primary">Sign in</button>
         </form>
     </section>
 </main>

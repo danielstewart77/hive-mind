@@ -1,0 +1,8 @@
+[tool.mypy]
+check_untyped_defs = true
+exclude = ["tests/"]
+ignore_missing_imports = true
+
+[tool.ruff.lint]
+select = ["F", "I", "UP", "B", "SIM"]
+ignore = ["B008"]

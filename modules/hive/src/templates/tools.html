@@ -1,0 +1,35 @@
+{% extends "layout.html" %}
+{% block title %}Hive Tools · Hive{% endblock %}
+{% block content %}
+<main class="page">
+    <header class="page-header">
+        <div class="page-header-copy"><p class="page-eyebrow">Optional capabilities</p><h1 class="page-title">Hive Tools</h1><p class="page-description">Capabilities minds can use through the shared, approval-aware tool service.</p></div>
+        <div class="page-actions"><button class="button button-quiet" id="tools-refresh" type="button"><i data-lucide="refresh-cw"></i>Refresh</button></div>
+    </header>
+    <section class="surface" style="margin-bottom:18px"><div class="surface-header"><div><h2>Service status</h2><p id="tools-service-copy">Checking installation…</p></div><span id="tools-service-status" class="status-pill"><span></span>Checking</span></div></section>
+    <div id="tools-error" class="error-state" hidden></div>
+    <section class="tool-grid" id="tools-grid"><div class="loading-state">Loading capabilities…</div></section>
+</main>
+<script>
+window.addEventListener("DOMContentLoaded", function () {
+    const h = window.HiveConsole;
+    const icons = {browser: "globe", calendar: "calendar-days", docker_ops: "container", gmail: "mail", linkedin: "briefcase-business", ollama: "cpu", schema: "network", sms: "message-square-text"};
+    async function load() {
+        const errorBox = document.getElementById("tools-error"); errorBox.hidden = true;
+        try {
+            const data = await h.requestJson("/api/tools");
+            document.getElementById("tools-service-copy").textContent = data.present ? "Installed on this Hive host" : "Not installed on this Hive host";
+            const status = document.getElementById("tools-service-status");
+            status.className = "status-pill " + (data.health.reachable ? "is-good" : "is-bad");
+            status.innerHTML = "<span></span>" + h.escapeHtml(data.health.reachable ? "Ready" : data.present ? "Unavailable" : "Not installed");
+            const tools = data.capabilities || [];
+            document.getElementById("tools-grid").innerHTML = tools.length ? tools.map(function (tool) {
+                return '<article class="tool-card surface"><div class="tool-card-top"><span class="tool-symbol"><i data-lucide="' + (icons[tool.id] || "wrench") + '"></i></span>' + h.statusPill(data.health.reachable, "Available", "Unavailable") + '</div><h3>' + h.escapeHtml(tool.name) + '</h3><p class="tool-category">' + h.escapeHtml(tool.category) + '</p><p>' + h.escapeHtml(tool.description) + '</p></article>';
+            }).join("") : '<div class="surface" style="grid-column:1/-1"><div class="empty-state"><span class="empty-icon"><i data-lucide="blocks"></i></span><h3>Hive Tools is optional</h3><p>Clone the Hive Tools project on the Hive host to add shared capabilities. Installation becomes actionable after the project has a configured remote.</p></div></div>';
+            if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}});
+        } catch (error) { errorBox.hidden = false; errorBox.textContent = error.message; }
+    }
+    document.getElementById("tools-refresh").addEventListener("click", load); load();
+});
+</script>
+{% endblock %}

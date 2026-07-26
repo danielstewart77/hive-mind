@@ -1,0 +1,25 @@
+{% extends "layout.html" %}
+{% block title %}Outposts · Hive{% endblock %}
+{% block content %}
+<main class="page">
+    <header class="page-header">
+        <div class="page-header-copy"><p class="page-eyebrow">Connected machines</p><h1 class="page-title">Outposts</h1><p class="page-description">Machines outside the Hive host that run one connected mind.</p></div>
+        <div class="page-actions"><a class="button button-primary" href="/outposts/new"><i data-lucide="plus"></i>Add Outpost</a></div>
+    </header>
+    <section class="surface">
+        <div class="data-table-wrap"><table class="data-table"><thead><tr><th>Outpost</th><th>Status</th><th>Machine</th><th>Role</th><th>Deployment</th><th>Runtime</th></tr></thead><tbody id="outposts-table"><tr><td colspan="6" class="loading-state">Loading Outposts…</td></tr></tbody></table></div>
+    </section>
+</main>
+<script>
+window.addEventListener("DOMContentLoaded", async function () {
+    const h = window.HiveConsole, tbody = document.getElementById("outposts-table");
+    try {
+        const rows = (await h.requestJson("/api/outposts")).outposts || [];
+        tbody.innerHTML = rows.length ? rows.map(function (item) {
+            return '<tr><td><div class="entity-cell"><span class="entity-avatar">' + h.escapeHtml(item.name.slice(0, 2)) + '</span><span class="entity-copy"><a href="/minds/' + encodeURIComponent(item.id || item.name) + '">' + h.escapeHtml(item.name) + '</a><small>' + h.escapeHtml((item.id || "").slice(0, 8)) + '</small></span></div></td><td>' + h.statusPill(item.activity_status === "active", "Active session", "Registered") + '</td><td>' + h.escapeHtml(item.host) + '</td><td>' + h.escapeHtml(item.role) + '</td><td>' + h.escapeHtml(item.deployment) + '</td><td>' + h.escapeHtml(item.model) + '<br><small class="faint">' + h.escapeHtml(item.harness) + '</small></td></tr>';
+        }).join("") : '<tr><td colspan="6"><div class="empty-state"><span class="empty-icon"><i data-lucide="server-cog"></i></span><h3>No Outposts connected</h3><p>Add another machine to run a connected mind with its own role and runtime.</p><a class="button button-primary" href="/outposts/new">Add Outpost</a></div></td></tr>';
+        if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}});
+    } catch (error) { tbody.innerHTML = '<tr><td colspan="6"><div class="error-state">' + h.escapeHtml(error.message) + '</div></td></tr>'; }
+});
+</script>
+{% endblock %}

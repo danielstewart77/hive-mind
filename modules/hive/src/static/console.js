@@ -1,0 +1,71 @@
+(function () {
+    function escapeHtml(value) {
+        return String(value == null ? "" : value).replace(/[&<>'"]/g, function (char) {
+            return {"&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;"}[char];
+        });
+    }
+
+    async function requestJson(url, options) {
+        const response = await fetch(url, options);
+        let body = {};
+        try { body = await response.json(); } catch (error) { body = {}; }
+        if (!response.ok) throw new Error(body.detail || ("Request failed with status " + response.status));
+        return body;
+    }
+
+    function formatTime(value) {
+        if (!value) return "No recent activity";
+        let date;
+        if (typeof value === "number") date = new Date(value < 1000000000000 ? value * 1000 : value);
+        else date = new Date(value);
+        if (Number.isNaN(date.getTime())) return String(value);
+        return new Intl.DateTimeFormat(undefined, {dateStyle: "medium", timeStyle: "short"}).format(date);
+    }
+
+    function statusPill(ok, goodText, badText) {
+        return '<span class="status-pill ' + (ok ? "is-good" : "is-bad") + '"><span></span>' +
+            escapeHtml(ok ? goodText : badText) + "</span>";
+    }
+
+    function serviceCheckRow(name, description, service, icon, options) {
+        options = options || {};
+        service = service || {};
+        const optional = options.optional === true;
+        const goodText = options.goodText || "Ready";
+        const badText = optional ? "Optional" : (options.badText || "Needs attention");
+        const state = service.reachable ? goodText : badText;
+        const message = service.message || (service.reachable ? "The health check passed." : String(service.detail || "The health check failed."));
+        const action = service.action || (service.reachable ? "No action is required." : "Check the service configuration and retry.");
+        const retry = options.retry ? '<button class="button button-quiet" type="button" data-health-retry><i data-lucide="refresh-cw"></i>Retry check</button>' : "";
+        return '<li class="service-item"><details class="service-disclosure"><summary class="service-row"><span class="service-icon"><i data-lucide="' + escapeHtml(icon) + '"></i></span><span class="service-copy"><strong>' + escapeHtml(name) + '</strong><small>' + escapeHtml(description) + '</small></span>' + statusPill(Boolean(service.reachable), goodText, badText) + '<i class="service-chevron" data-lucide="chevron-down"></i></summary><div class="service-diagnostic"><dl><div><dt>State</dt><dd>' + escapeHtml(state) + '</dd></div><div><dt>Health check</dt><dd>' + escapeHtml(message) + '</dd></div><div><dt>Next step</dt><dd>' + escapeHtml(action) + '</dd></div></dl>' + retry + '</div></details></li>';
+    }
+
+    window.HiveConsole = {escapeHtml: escapeHtml, requestJson: requestJson, formatTime: formatTime, statusPill: statusPill, serviceCheckRow: serviceCheckRow};
+
+    const app = document.querySelector("[data-console-app]");
+    if (app) {
+        document.querySelectorAll("[data-sidebar-open]").forEach(function (button) {
+            button.addEventListener("click", function () { app.classList.add("sidebar-open"); });
+        });
+        document.querySelectorAll("[data-sidebar-close]").forEach(function (button) {
+            button.addEventListener("click", function () { app.classList.remove("sidebar-open"); });
+        });
+    }
+
+    document.addEventListener("click", async function (event) {
+        const button = event.target.closest("[data-copy]");
+        if (!button) return;
+        const target = document.querySelector(button.dataset.copy);
+        if (!target) return;
+        await navigator.clipboard.writeText(target.textContent);
+        const original = button.getAttribute("aria-label") || "Copy";
+        button.setAttribute("aria-label", "Copied");
+        button.classList.add("is-copied");
+        window.setTimeout(function () {
+            button.setAttribute("aria-label", original);
+            button.classList.remove("is-copied");
+        }, 1400);
+    });
+
+    if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}});
+})();

@@ -1,398 +1,72 @@
 {% extends "layout.html" %}
+{% block title %}Settings · Hive{% endblock %}
 {% block content %}
-<main class="settings-page">
-    <style>
-        .settings-tabs { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1.25rem; }
-        .settings-tab {
-            background: transparent; border: 1px solid #1e2d3d; color: #4a6a7e;
-            padding: 0.45rem 0.9rem; border-radius: 6px; cursor: pointer;
-            font-family: inherit; font-size: 0.85rem;
-        }
-        .settings-tab.is-active { color: #c9a84c; border-color: #c9a84c; }
-        .settings-panel { display: none; }
-        .settings-panel.is-active { display: block; }
-        .settings-planned { opacity: 0.75; }
-        .settings-planned h3 { color: #c9a84c; }
-        .mind-card { margin-bottom: 1rem; }
-        .mind-card-head { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; }
-        .mind-card-head .mind-name { font-weight: 600; font-size: 1.05rem; }
-        .mind-card-head .mind-id { color: #4a6a7e; font-size: 0.72rem; }
-        .mind-source-badge {
-            display: inline-block; font-size: 0.68rem; padding: 0.1rem 0.5rem;
-            border-radius: 999px; border: 1px solid #1e2d3d; color: #4a6a7e;
-        }
-        .mind-source-badge.is-local { color: #4ee88a; border-color: #4ee88a44; }
-        .mind-source-badge.is-remote { color: #e0724e; border-color: #e0724e44; }
-        .mind-config-pre {
-            background: #080f18; border: 1px solid #1e2d3d; border-radius: 6px;
-            padding: 0.75rem; font-size: 0.8rem; overflow-x: auto; white-space: pre-wrap;
-        }
-        .session-row {
-            display: flex; align-items: center; gap: 0.75rem; padding: 0.5rem 0;
-            border-bottom: 1px solid #1e2d3d; font-size: 0.85rem;
-        }
-        .session-row .session-mind { min-width: 8rem; }
-        .session-row .session-id { color: #4a6a7e; font-size: 0.72rem; }
-        .session-row .session-summary { flex: 1; color: #dce8f0cc; }
-    </style>
-
-    <div class="terminal-box">
-        <h2>settings</h2>
-        <p>configuration for the hive itself — minds, hive-comms, voice, tooling, and cross-hive federation.</p>
+<main class="page" data-settings-section="{{ settings_section }}">
+    <header class="page-header"><div class="page-header-copy"><p class="page-eyebrow">System configuration</p><h1 class="page-title">Settings</h1><p class="page-description">Durable owner, connection, voice, and installation configuration.</p></div></header>
+    <div class="settings-layout">
+        <div class="settings-nav" role="navigation" aria-label="Settings sections">
+            <a href="/settings/general" class="{% if settings_section == 'general' %}is-active{% endif %}">General</a>
+            <a href="/settings/access" class="{% if settings_section == 'access' %}is-active{% endif %}">Owner and access</a>
+            <a href="/settings/connections" class="{% if settings_section == 'connections' %}is-active{% endif %}">Connections</a>
+            <a href="/settings/voice" class="{% if settings_section == 'voice' %}is-active{% endif %}">Voice</a>
+            <a href="/settings/advanced" class="{% if settings_section == 'advanced' %}is-active{% endif %}">Advanced</a>
+        </div>
+        <div class="settings-content">
+        {% if settings_section == 'general' %}
+            <section class="surface"><div class="settings-section-copy"><h2>Installation</h2><p>Identity and first-run state for this Hive.</p></div><div class="surface-body"><dl class="detail-grid"><div class="detail-item"><dt>Product</dt><dd>Hive control center</dd></div><div class="detail-item"><dt>Owner</dt><dd>{{ current_user.username }}</dd></div><div class="detail-item"><dt>Default view</dt><dd>System overview</dd></div></dl></div></section>
+            <section class="surface"><div class="settings-section-copy"><h2>Setup guide</h2><p>Re-run readiness checks or continue an incomplete installation.</p></div><div class="surface-body"><a class="button" href="/setup"><i data-lucide="list-checks"></i>Open setup guide</a></div></section>
+        {% elif settings_section == 'access' %}
+            <section class="surface"><div class="settings-section-copy"><h2>Owner account</h2><p>The account currently authorized to administer this Hive.</p></div><div class="surface-body"><dl class="detail-grid"><div class="detail-item"><dt>Username</dt><dd>{{ current_user.username }}</dd></div><div class="detail-item"><dt>Role</dt><dd>Owner</dd></div><div class="detail-item"><dt>Authentication</dt><dd>Hive session</dd></div></dl></div></section>
+            <section class="surface"><div class="surface-header"><div><h2>Mind sessions</h2><p>Delete abandoned conversation sessions.</p></div><button id="sessions-refresh" class="icon-button" type="button" aria-label="Refresh sessions"><i data-lucide="refresh-cw"></i></button></div><ul class="activity-list" id="settings-sessions"><li class="loading-state">Loading sessions…</li></ul></section>
+        {% elif settings_section == 'connections' %}
+            <section class="surface"><div class="surface-header"><div><h2>Shared services</h2><p>Connectivity from the Hive application.</p></div><button id="connections-refresh" class="icon-button" type="button" aria-label="Refresh connections"><i data-lucide="refresh-cw"></i></button></div><ul class="service-list" id="settings-connections"><li class="loading-state">Checking connections…</li></ul></section>
+        {% elif settings_section == 'voice' %}
+            <section class="surface"><div class="settings-section-copy"><h2>Voice services</h2><p>Server health and reference clips used for voice cloning.</p></div><ul class="service-list" id="voice-servers"><li class="loading-state">Checking voice servers…</li></ul></section>
+            <section class="surface"><div class="surface-header"><div><h2>Mind voices</h2><p>Upload a clean WAV reference clip for a registered mind.</p></div></div><div class="surface-body overview-stack" id="voice-minds"><div class="loading-state">Loading minds…</div></div></section>
+        {% elif settings_section == 'advanced' %}
+            <section class="surface"><div class="settings-section-copy"><h2>Installer downloads</h2><p>Approved bootstrap assets published by Hive Init.</p></div><ul class="service-list" id="settings-downloads"><li class="loading-state">Loading downloads…</li></ul></section>
+            <section class="surface"><div class="settings-section-copy"><h2>Diagnostics</h2><p>Detailed runtime configuration is available on each Mind page with secrets removed.</p></div><div class="surface-body"><a class="button" href="/minds"><i data-lucide="brain-circuit"></i>Open mind diagnostics</a></div></section>
+        {% endif %}
+        </div>
     </div>
-
-    <nav class="settings-tabs" id="settings-tabs">
-        <button type="button" class="settings-tab is-active" data-tab="minds">minds</button>
-        <button type="button" class="settings-tab" data-tab="hive-comms">hive-comms</button>
-        <button type="button" class="settings-tab" data-tab="hive-tools">hive-tools</button>
-        <button type="button" class="settings-tab" data-tab="voice">voice</button>
-        <button type="button" class="settings-tab" data-tab="new-mind">new mind</button>
-        <button type="button" class="settings-tab" data-tab="downloads">downloads</button>
-        <button type="button" class="settings-tab" data-tab="federation">federation</button>
-    </nav>
-
-    <section class="settings-panel is-active" id="panel-minds">
-        <div class="terminal-box">
-            <h3>mind registry</h3>
-            <p>every mind the broker knows about, merged with its local config file where one is reachable from this host. remote minds (arnold, zach, hex, and any off-host mind) show broker identity only — editing those needs the remote-admin SSH bridge, not this page yet.</p>
-            <button id="minds-refresh" type="button">refresh</button>
-            <p id="minds-error" class="events-error" style="display:none"></p>
-        </div>
-        <div id="minds-list"></div>
-    </section>
-
-    <section class="settings-panel" id="panel-hive-comms">
-        <div class="terminal-box">
-            <h3>hive-comms</h3>
-            <p>live session state straight from the gateway. the cutover of hive-comms itself to a new home is deferred until everything else here is built — this tab is the placeholder for that move.</p>
-            <button id="sessions-refresh" type="button">refresh</button>
-            <p id="sessions-error" class="events-error" style="display:none"></p>
-        </div>
-        <div class="terminal-box" id="sessions-list"></div>
-        <div class="terminal-box settings-planned">
-            <h3>planned: relocate hive-comms</h3>
-            <p>this card will carry the actual cutover steps once the rest of the settings page is built. holding the spot.</p>
-        </div>
-    </section>
-
-    <section class="settings-panel" id="panel-hive-tools">
-        <div class="terminal-box">
-            <h3>hive-tools</h3>
-            <p>repo status and container health on this host. no git remote is configured for hive-tools yet, so cloning it onto a fresh host isn't wired up — the button below is a placeholder for that.</p>
-            <button id="hive-tools-refresh" type="button">refresh</button>
-            <p id="hive-tools-error" class="events-error" style="display:none"></p>
-        </div>
-        <div class="terminal-box" id="hive-tools-status"></div>
-    </section>
-
-    <section class="settings-panel" id="panel-voice">
-        <div class="terminal-box">
-            <h3>voice</h3>
-            <p>both voice servers are global today — there's no per-mind server assignment yet, only per-mind reference clips. upload a WAV (roughly ten seconds, clean speech, no transcript needed) to pair chatterbox's zero-shot cloning with a mind; it takes effect on that mind's next TTS call.</p>
-            <button id="voice-refresh" type="button">refresh</button>
-            <p id="voice-error" class="events-error" style="display:none"></p>
-        </div>
-        <div class="terminal-box" id="voice-servers"></div>
-        <div id="voice-minds"></div>
-    </section>
-
-    <section class="settings-panel" id="panel-new-mind">
-        <div class="terminal-box">
-            <h3>spin up a new mind</h3>
-            <p>personality, soul, and backstory are never assumed — spinning up a mind stays a conversation with Skippy, not a form submit. what's real here today is a name-availability check against the broker, so you know before that conversation starts.</p>
-            <form id="new-mind-name-form">
-                <label>proposed name:
-                    <input type="text" id="new-mind-name" placeholder="e.g. hermes" required>
-                </label>
-                <button type="submit">check availability</button>
-            </form>
-            <p id="new-mind-name-result" class="event-hints"></p>
-        </div>
-        <div class="terminal-box settings-planned">
-            <h3>planned: the rest of it</h3>
-            <p>wraps the existing create-mind / add-mind skill flow and generate-compose once a name and a conversation have settled the personality.</p>
-        </div>
-    </section>
-
-    <section class="settings-panel" id="panel-downloads">
-        <div class="terminal-box">
-            <h3>downloads</h3>
-            <p>client installers for connecting a remote mind to this hive.</p>
-            <p id="downloads-error" class="events-error" style="display:none"></p>
-        </div>
-        <div class="terminal-box" id="downloads-list"></div>
-    </section>
-
-    <section class="settings-panel" id="panel-federation">
-        <div class="terminal-box settings-planned">
-            <h3>planned: hive federation</h3>
-            <p>let one hive map another hive's minds. least defined of everything here — needs a real design pass on discovery and auth between hives before any code.</p>
-        </div>
-    </section>
 </main>
-
-<template id="mind-card-template">
-    <div class="terminal-box mind-card">
-        <div class="mind-card-head">
-            <span class="mind-name" data-field="name"></span>
-            <span class="mind-id" data-field="id"></span>
-            <span class="mind-source-badge" data-field="source-badge"></span>
-        </div>
-        <p class="event-hints">
-            harness: <span data-field="harness"></span>
-            &middot; model: <span data-field="model"></span>
-            &middot; gateway: <span data-field="gateway_url"></span>
-        </p>
-        <pre class="mind-config-pre" data-field="config" style="display:none"></pre>
-    </div>
-</template>
-
 <script>
-(function () {
-    const tabs = document.querySelectorAll('.settings-tab');
-    const panels = document.querySelectorAll('.settings-panel');
-    tabs.forEach(function (tab) {
-        tab.addEventListener('click', function () {
-            tabs.forEach(function (t) { t.classList.remove('is-active'); });
-            panels.forEach(function (p) { p.classList.remove('is-active'); });
-            tab.classList.add('is-active');
-            document.getElementById('panel-' + tab.dataset.tab).classList.add('is-active');
-        });
-    });
-
-    // ── minds ──────────────────────────────────────────────
-    const mindsList = document.getElementById('minds-list');
-    const mindsError = document.getElementById('minds-error');
-    const mindCardTpl = document.getElementById('mind-card-template');
-
-    function showMindsError(msg) {
-        if (!msg) { mindsError.style.display = 'none'; mindsError.textContent = ''; return; }
-        mindsError.style.display = 'block'; mindsError.textContent = msg;
-    }
-
-    function renderMindCard(mind) {
-        const node = mindCardTpl.content.firstElementChild.cloneNode(true);
-        node.querySelector('[data-field="name"]').textContent = mind.name;
-        node.querySelector('[data-field="id"]').textContent = mind.id;
-        node.querySelector('[data-field="harness"]').textContent = mind.harness || (mind.local_config && mind.local_config.config && mind.local_config.config.harness) || 'unknown';
-        node.querySelector('[data-field="model"]').textContent = mind.model || (mind.local_config && mind.local_config.config && mind.local_config.config.default_model) || 'unknown';
-        node.querySelector('[data-field="gateway_url"]').textContent = mind.gateway_url;
-        const badge = node.querySelector('[data-field="source-badge"]');
-        const pre = node.querySelector('[data-field="config"]');
-        if (mind.local_config) {
-            badge.textContent = mind.local_config.source;
-            badge.classList.add('is-local');
-            pre.style.display = 'block';
-            pre.textContent = JSON.stringify(mind.local_config.config || {}, null, 2)
-                + (mind.local_config.body ? '\n\n' + mind.local_config.body : '');
-        } else {
-            badge.textContent = 'remote — no local file';
-            badge.classList.add('is-remote');
-        }
-        return node;
-    }
-
-    async function loadMinds() {
-        showMindsError('');
-        mindsList.innerHTML = 'loading...';
-        try {
-            const r = await fetch('/api/settings/minds');
-            if (!r.ok) throw new Error('list failed: ' + r.status);
-            const data = await r.json();
-            mindsList.innerHTML = '';
-            (data.minds || []).forEach(function (m) { mindsList.appendChild(renderMindCard(m)); });
-        } catch (e) {
-            mindsList.innerHTML = '';
-            showMindsError(String(e));
-        }
-    }
-
-    document.getElementById('minds-refresh').addEventListener('click', loadMinds);
-    loadMinds();
-
-    // ── hive-comms sessions ───────────────────────────────
-    const sessionsList = document.getElementById('sessions-list');
-    const sessionsError = document.getElementById('sessions-error');
-
-    function showSessionsError(msg) {
-        if (!msg) { sessionsError.style.display = 'none'; sessionsError.textContent = ''; return; }
-        sessionsError.style.display = 'block'; sessionsError.textContent = msg;
-    }
-
-    function renderSessionRow(s) {
-        const row = document.createElement('div');
-        row.className = 'session-row';
-        row.innerHTML =
-            '<span class="session-mind">' + (s.mind_id || 'unknown') + '</span>' +
-            '<span class="session-id">' + (s.id || '').slice(0, 8) + '</span>' +
-            '<span>' + (s.status || '') + '</span>' +
-            '<span class="session-summary">' + (s.summary || '') + '</span>' +
-            '<button type="button" data-action="delete">delete</button>';
-        row.querySelector('[data-action="delete"]').addEventListener('click', async function () {
-            if (!confirm('delete session ' + s.id + '?')) return;
-            try {
-                const r = await fetch('/api/settings/hive-comms/sessions/' + encodeURIComponent(s.id), {method: 'DELETE'});
-                if (!r.ok) throw new Error('delete failed: ' + r.status);
-                await loadSessions();
-            } catch (e) { showSessionsError(String(e)); }
-        });
-        return row;
-    }
-
+window.addEventListener("DOMContentLoaded", function () {
+    const h = window.HiveConsole;
+    const section = document.querySelector("[data-settings-section]").dataset.settingsSection;
+    function refreshIcons() { if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}}); }
     async function loadSessions() {
-        showSessionsError('');
-        sessionsList.innerHTML = 'loading...';
+        const list = document.getElementById("settings-sessions");
         try {
-            const r = await fetch('/api/settings/hive-comms/sessions');
-            if (!r.ok) throw new Error('list failed: ' + r.status);
-            const data = await r.json();
-            sessionsList.innerHTML = '';
-            (data.sessions || []).forEach(function (s) { sessionsList.appendChild(renderSessionRow(s)); });
-            if (!(data.sessions || []).length) sessionsList.textContent = 'no sessions.';
-        } catch (e) {
-            sessionsList.innerHTML = '';
-            showSessionsError(String(e));
-        }
+            const sessions = (await h.requestJson("/api/settings/hive-comms/sessions")).sessions || [];
+            list.innerHTML = sessions.length ? sessions.map(function (item) { return '<li class="activity-row"><span class="activity-icon"><i data-lucide="message-circle"></i></span><span class="activity-copy"><strong>' + h.escapeHtml(item.mind_id || "Unknown mind") + '</strong><small>' + h.escapeHtml(item.summary || (item.id || "").slice(0, 8)) + '</small></span><button class="button button-danger" type="button" data-delete-session="' + h.escapeHtml(item.id) + '">Delete</button></li>'; }).join("") : '<li class="empty-state"><h3>No sessions</h3><p>There are no sessions to manage.</p></li>';
+            refreshIcons();
+        } catch (error) { list.innerHTML = '<li><div class="error-state">' + h.escapeHtml(error.message) + '</div></li>'; }
     }
-
-    document.getElementById('sessions-refresh').addEventListener('click', loadSessions);
-    loadSessions();
-
-    // ── hive-tools ─────────────────────────────────────────
-    const hiveToolsStatus = document.getElementById('hive-tools-status');
-    const hiveToolsError = document.getElementById('hive-tools-error');
-
-    function fmtBytes(n) {
-        if (!n && n !== 0) return '';
-        if (n < 1024) return n + ' B';
-        if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
-        return (n / (1024 * 1024)).toFixed(1) + ' MB';
-    }
-
-    async function loadHiveTools() {
-        hiveToolsError.style.display = 'none';
-        hiveToolsStatus.innerHTML = 'loading...';
+    async function loadConnections() {
+        const list = document.getElementById("settings-connections");
         try {
-            const r = await fetch('/api/settings/hive-tools');
-            if (!r.ok) throw new Error('failed: ' + r.status);
-            const data = await r.json();
-            const health = data.container_health || {};
-            hiveToolsStatus.innerHTML =
-                '<p><strong>present on host:</strong> ' + (data.present ? 'yes' : 'no') + ' (' + data.path + ')</p>' +
-                '<p><strong>container health:</strong> ' + (health.reachable ? 'reachable' : 'unreachable — ' + (health.detail || '')) + '</p>' +
-                '<p><strong>clone from remote:</strong> not available — no git remote configured yet</p>' +
-                (data.present ? '<p><a href="http://hive-tools:9421/health" target="_blank" rel="noopener">open hive-tools</a></p>' : '');
-        } catch (e) {
-            hiveToolsStatus.innerHTML = '';
-            hiveToolsError.style.display = 'block';
-            hiveToolsError.textContent = String(e);
-        }
+            const data = await h.requestJson("/api/overview");
+            const rows = [["Hive Comms", "Message broker and sessions", data.services.comms, "radio-tower"], ["Lucent", "Memory and knowledge graph", data.services.lucent, "database"], ["Hive Tools", data.services.tools.installed ? "Optional capabilities" : "Not installed", data.services.tools, "blocks"]];
+            list.innerHTML = rows.map(function (item) { return h.serviceCheckRow(item[0], item[1], item[2], item[3], {optional: item[2].installed === false, badText: "Unavailable"}); }).join(""); refreshIcons();
+        } catch (error) { list.innerHTML = '<li><div class="error-state">' + h.escapeHtml(error.message) + '</div></li>'; }
     }
-
-    document.getElementById('hive-tools-refresh').addEventListener('click', loadHiveTools);
-    loadHiveTools();
-
-    // ── voice ──────────────────────────────────────────────
-    const voiceServers = document.getElementById('voice-servers');
-    const voiceMinds = document.getElementById('voice-minds');
-    const voiceError = document.getElementById('voice-error');
-
-    function renderVoiceMind(m) {
-        const box = document.createElement('div');
-        box.className = 'terminal-box mind-card';
-        const ref = m.voice_ref;
-        box.innerHTML =
-            '<div class="mind-card-head"><span class="mind-name">' + m.name + '</span>' +
-            '<span class="mind-source-badge ' + (ref ? 'is-local' : 'is-remote') + '">' +
-            (ref ? fmtBytes(ref.size_bytes) + ' voice_ref.wav' : 'no voice_ref.wav yet') + '</span></div>' +
-            '<form class="voice-upload-form">' +
-            '<input type="file" name="file" accept="audio/wav,.wav" required>' +
-            '<button type="submit">upload</button></form>' +
-            '<p class="event-hints" data-role="status"></p>';
-        const form = box.querySelector('.voice-upload-form');
-        const statusEl = box.querySelector('[data-role="status"]');
-        form.addEventListener('submit', async (ev) => {
-            ev.preventDefault();
-            const file = form.querySelector('input[type=file]').files[0];
-            if (!file) return;
-            const fd = new FormData();
-            fd.append('file', file);
-            statusEl.textContent = 'uploading...';
-            try {
-                const r = await fetch('/api/settings/voice/' + encodeURIComponent(m.name) + '/voice-ref', {
-                    method: 'POST', body: fd,
-                });
-                if (!r.ok) throw new Error((await r.json()).detail || ('failed: ' + r.status));
-                statusEl.textContent = 'uploaded.';
-                await loadVoice();
-            } catch (e) { statusEl.textContent = String(e); }
-        });
-        return box;
-    }
-
     async function loadVoice() {
-        voiceError.style.display = 'none';
-        voiceServers.innerHTML = 'loading...';
-        voiceMinds.innerHTML = '';
         try {
-            const r = await fetch('/api/settings/voice');
-            if (!r.ok) throw new Error('failed: ' + r.status);
-            const data = await r.json();
-            voiceServers.innerHTML = Object.entries(data.servers || {}).map(function ([name, h]) {
-                return '<p><strong>' + name + ':</strong> ' + (h.reachable ? 'reachable' : 'unreachable') + '</p>';
-            }).join('');
-            (data.minds || []).forEach(function (m) { voiceMinds.appendChild(renderVoiceMind(m)); });
-        } catch (e) {
-            voiceServers.innerHTML = '';
-            voiceError.style.display = 'block';
-            voiceError.textContent = String(e);
-        }
+            const data = await h.requestJson("/api/settings/voice");
+            document.getElementById("voice-servers").innerHTML = Object.entries(data.servers || {}).map(function (entry) { return '<li class="service-row"><span class="service-icon"><i data-lucide="audio-lines"></i></span><span class="service-copy"><strong>' + h.escapeHtml(entry[0]) + '</strong><small>Text to speech service</small></span>' + h.statusPill(entry[1].reachable, "Ready", "Unavailable") + '</li>'; }).join("");
+            document.getElementById("voice-minds").innerHTML = (data.minds || []).map(function (mind) { return '<form class="voice-form detail-item" data-mind="' + h.escapeHtml(mind.name) + '"><div style="display:flex;align-items:center;gap:12px"><span class="entity-avatar">' + h.escapeHtml(mind.name.slice(0,2)) + '</span><span class="entity-copy"><strong>' + h.escapeHtml(mind.name) + '</strong><small>' + (mind.voice_ref ? "Reference clip configured" : "No reference clip") + '</small></span><input type="file" name="file" accept="audio/wav,.wav" required style="margin-left:auto;max-width:240px"><button class="button" type="submit">Upload</button></div><small data-status></small></form>'; }).join(""); refreshIcons();
+        } catch (error) { document.getElementById("voice-minds").innerHTML = '<div class="error-state">' + h.escapeHtml(error.message) + '</div>'; }
     }
-
-    document.getElementById('voice-refresh').addEventListener('click', loadVoice);
-    loadVoice();
-
-    // ── new-mind name check ──────────────────────────────────
-    const newMindForm = document.getElementById('new-mind-name-form');
-    const newMindResult = document.getElementById('new-mind-name-result');
-    newMindForm.addEventListener('submit', async (ev) => {
-        ev.preventDefault();
-        const name = document.getElementById('new-mind-name').value.trim();
-        if (!name) return;
-        newMindResult.textContent = 'checking...';
-        try {
-            const r = await fetch('/api/settings/new-mind/check-name?name=' + encodeURIComponent(name));
-            if (!r.ok) throw new Error('failed: ' + r.status);
-            const data = await r.json();
-            newMindResult.textContent = data.available
-                ? '"' + data.name + '" is available.'
-                : '"' + data.name + '" is already registered.';
-        } catch (e) { newMindResult.textContent = String(e); }
-    });
-
-    // ── downloads ──────────────────────────────────────────
-    const downloadsList = document.getElementById('downloads-list');
-    const downloadsError = document.getElementById('downloads-error');
-
     async function loadDownloads() {
-        downloadsError.style.display = 'none';
-        downloadsList.innerHTML = 'loading...';
-        try {
-            const r = await fetch('/api/settings/downloads');
-            if (!r.ok) throw new Error('failed: ' + r.status);
-            const data = await r.json();
-            const items = data.downloads || [];
-            downloadsList.innerHTML = items.length ? items.map(function (d) {
-                return '<p><a href="/downloads/' + encodeURIComponent(d.filename) + '">' + d.filename + '</a> — ' + fmtBytes(d.size_bytes) + '</p>';
-            }).join('') : 'no installer assets found on this host.';
-        } catch (e) {
-            downloadsList.innerHTML = '';
-            downloadsError.style.display = 'block';
-            downloadsError.textContent = String(e);
-        }
+        const list = document.getElementById("settings-downloads");
+        try { const rows = (await h.requestJson("/api/settings/downloads")).downloads || []; list.innerHTML = rows.length ? rows.map(function (item) { return '<li class="service-row"><span class="service-icon"><i data-lucide="download"></i></span><span class="service-copy"><strong>' + h.escapeHtml(item.filename) + '</strong><small>' + h.escapeHtml(item.size_bytes) + ' bytes</small></span><a class="button" href="/downloads/' + encodeURIComponent(item.filename) + '">Download</a></li>'; }).join("") : '<li class="empty-state"><h3>No installer assets</h3><p>Hive Init has not published downloads on this host.</p></li>'; refreshIcons(); }
+        catch (error) { list.innerHTML = '<li><div class="error-state">' + h.escapeHtml(error.message) + '</div></li>'; }
     }
-
-    loadDownloads();
-})();
+    if (section === "access") { document.getElementById("sessions-refresh").addEventListener("click", loadSessions); document.getElementById("settings-sessions").addEventListener("click", async function (event) { const button = event.target.closest("[data-delete-session]"); if (!button || !window.confirm("Delete this session?")) return; try { await h.requestJson("/api/settings/hive-comms/sessions/" + encodeURIComponent(button.dataset.deleteSession), {method: "DELETE"}); loadSessions(); } catch (error) { window.alert(error.message); } }); loadSessions(); }
+    if (section === "connections") { document.getElementById("connections-refresh").addEventListener("click", loadConnections); loadConnections(); }
+    if (section === "voice") { document.getElementById("voice-minds").addEventListener("submit", async function (event) { const form = event.target.closest(".voice-form"); if (!form) return; event.preventDefault(); const status = form.querySelector("[data-status]"); status.textContent = "Uploading…"; try { await h.requestJson("/api/settings/voice/" + encodeURIComponent(form.dataset.mind) + "/voice-ref", {method: "POST", body: new FormData(form)}); status.textContent = "Uploaded"; loadVoice(); } catch (error) { status.textContent = error.message; } }); loadVoice(); }
+    if (section === "advanced") loadDownloads();
+});
 </script>
 {% endblock %}
