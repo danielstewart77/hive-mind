@@ -1,0 +1,39 @@
+{% extends "layout.html" %}
+{% block title %}Edge Minds · Hive{% endblock %}
+{% block content %}
+<main class="page">
+    <header class="page-header">
+        <div class="page-header-copy"><p class="page-eyebrow">Distributed cognition</p><h1 class="page-title">Edge Minds</h1><p class="page-description">Minds that belong to this Hive while running outside its core installation.</p></div>
+        <div class="page-actions"><a class="button button-primary" href="/edge-minds/new"><i data-lucide="plus"></i>Add Edge Mind</a></div>
+    </header>
+    <section class="metric-grid edge-metric-grid" aria-label="Edge Mind summary">
+        <article class="metric surface"><div class="metric-top"><span class="metric-label">Edge Minds</span><span class="metric-icon"><i data-lucide="orbit"></i></span></div><div class="metric-value" id="edge-total">—</div><div class="metric-detail">Connected beyond the core</div></article>
+        <article class="metric surface"><div class="metric-top"><span class="metric-label">Active</span><span class="metric-icon"><i data-lucide="radio"></i></span></div><div class="metric-value" id="edge-active">—</div><div class="metric-detail">Running sessions now</div></article>
+        <article class="metric surface"><div class="metric-top"><span class="metric-label">Sentinel profile</span><span class="metric-icon"><i data-lucide="shield-check"></i></span></div><div class="metric-value" id="edge-sentinel">—</div><div class="metric-detail">Specialized security bundles</div></article>
+    </section>
+    <section class="surface">
+        <div class="surface-header"><div><h2>Connected Edge Minds</h2><p>Runtime, deployment profile, and machine placement</p></div><button class="icon-button" type="button" id="edge-refresh" aria-label="Refresh Edge Minds"><i data-lucide="refresh-cw"></i></button></div>
+        <div class="data-table-wrap"><table class="data-table"><thead><tr><th>Mind</th><th>Status</th><th>Node</th><th>Profile</th><th>Role</th><th>Deployment</th><th>Runtime</th></tr></thead><tbody id="edge-table"><tr><td colspan="7" class="loading-state">Loading Edge Minds…</td></tr></tbody></table></div>
+    </section>
+</main>
+<script>
+window.addEventListener("DOMContentLoaded", function () {
+    const h = window.HiveConsole, tbody = document.getElementById("edge-table");
+    async function load() {
+        try {
+            const rows = (await h.requestJson("/api/edge-minds")).edge_minds || [];
+            document.getElementById("edge-total").textContent = rows.length;
+            document.getElementById("edge-active").textContent = rows.filter(function (item) { return item.activity_status === "active"; }).length;
+            document.getElementById("edge-sentinel").textContent = rows.filter(function (item) { return item.profile === "sentinel"; }).length;
+            tbody.innerHTML = rows.length ? rows.map(function (item) {
+                const profileClass = item.profile === "sentinel" ? "node-badge is-sentinel" : "node-badge";
+                return '<tr><td><div class="entity-cell"><span class="entity-avatar">' + h.escapeHtml(item.name.slice(0, 2)) + '</span><span class="entity-copy"><a href="/minds/' + encodeURIComponent(item.id || item.name) + '">' + h.escapeHtml(item.name) + '</a><small>' + h.escapeHtml((item.id || "").slice(0, 8)) + '</small></span></div></td><td>' + h.statusPill(item.activity_status === "active", "Active session", "Registered") + '</td><td>' + h.escapeHtml(item.host) + '</td><td><span class="' + profileClass + '">' + h.escapeHtml(item.profile) + '</span></td><td>' + h.escapeHtml(item.role) + '</td><td>' + h.escapeHtml(item.deployment) + '</td><td>' + h.escapeHtml(item.model) + '<br><small class="faint">' + h.escapeHtml(item.harness) + '</small></td></tr>';
+            }).join("") : '<tr><td colspan="7"><div class="empty-state"><span class="empty-icon"><i data-lucide="orbit"></i></span><h3>No Edge Minds connected</h3><p>Add a mind on another runtime or machine while keeping identity and shared memory in this Hive.</p><a class="button button-primary" href="/edge-minds/new">Add Edge Mind</a></div></td></tr>';
+            if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}});
+        } catch (error) { tbody.innerHTML = '<tr><td colspan="7"><div class="error-state">' + h.escapeHtml(error.message) + '</div></td></tr>'; }
+    }
+    document.getElementById("edge-refresh").addEventListener("click", load);
+    load();
+});
+</script>
+{% endblock %}

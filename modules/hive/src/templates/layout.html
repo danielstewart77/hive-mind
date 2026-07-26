@@ -44,9 +44,11 @@
         <div class="console-nav" role="navigation" aria-label="Main navigation">
             <a href="/overview" class="console-nav-link {% if path == '/overview' %}is-active{% endif %}"><i data-lucide="layout-dashboard"></i><span>Overview</span></a>
             <a href="/minds" class="console-nav-link {% if path.startswith('/minds') %}is-active{% endif %}"><i data-lucide="brain-circuit"></i><span>Minds</span></a>
-            <a href="/outposts" class="console-nav-link {% if path.startswith('/outposts') %}is-active{% endif %}"><i data-lucide="server-cog"></i><span>Outposts</span></a>
-            <a href="/tools" class="console-nav-link {% if path == '/tools' %}is-active{% endif %}"><i data-lucide="blocks"></i><span>Tools</span></a>
             <a href="/activity" class="console-nav-link {% if path == '/activity' %}is-active{% endif %}"><i data-lucide="activity"></i><span>Activity</span></a>
+
+            <p class="console-nav-label">Topology</p>
+            <a href="/edge-minds" class="console-nav-link {% if path.startswith('/edge-minds') %}is-active{% endif %}"><i data-lucide="orbit"></i><span>Edge Minds</span></a>
+            <a href="/capability-nodes" class="console-nav-link {% if path == '/capability-nodes' %}is-active{% endif %}"><i data-lucide="network"></i><span>Capability Nodes</span></a>
 
             <p class="console-nav-label">Knowledge</p>
             <a href="/graph" class="console-nav-link {% if path == '/graph' %}is-active{% endif %}"><i data-lucide="share-2"></i><span>Graph</span></a>

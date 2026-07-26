@@ -343,19 +343,35 @@ async def mind_detail_page(request: Request, mind_id: str):
     return _console_page(request, "mind_detail.html", mind_id=mind_id)
 
 
-@app.get("/outposts", response_class=HTMLResponse)
-async def outposts_page(request: Request):
-    return _console_page(request, "outposts.html")
+@app.get("/edge-minds", response_class=HTMLResponse)
+async def edge_minds_page(request: Request):
+    return _console_page(request, "edge_minds.html")
 
 
-@app.get("/outposts/new", response_class=HTMLResponse)
-async def new_outpost_page(request: Request):
-    return _console_page(request, "outpost_new.html")
+@app.get("/edge-minds/new", response_class=HTMLResponse)
+async def new_edge_mind_page(request: Request):
+    return _console_page(request, "edge_mind_new.html")
 
 
-@app.get("/tools", response_class=HTMLResponse)
-async def tools_page(request: Request):
-    return _console_page(request, "tools.html")
+@app.get("/capability-nodes", response_class=HTMLResponse)
+async def capability_nodes_page(request: Request):
+    return _console_page(request, "capability_nodes.html")
+
+
+@app.get("/outposts", include_in_schema=False)
+@app.get("/outposts/new", include_in_schema=False)
+async def legacy_outpost_page(request: Request):
+    if not get_current_user_from_request(request):
+        return _login_redirect_for(request)
+    target = "/edge-minds/new" if request.url.path.endswith("/new") else "/edge-minds"
+    return RedirectResponse(target, status_code=308)
+
+
+@app.get("/tools", include_in_schema=False)
+async def legacy_tools_page(request: Request):
+    if not get_current_user_from_request(request):
+        return _login_redirect_for(request)
+    return RedirectResponse("/capability-nodes", status_code=308)
 
 
 @app.get("/activity", response_class=HTMLResponse)
@@ -388,45 +404,45 @@ async def api_overview(user: dict = Depends(require_auth)):
             repair_action="Verify LUCENT_BEARER_TOKEN and the Lucent endpoint, then retry.",
         ),
     )
-    tools = hive_tools_status()
-    tools_health = (
-        await _service_health(
-            f"{_hive_tools_base_url().rstrip('/')}/health",
-            service_name="Hive Tools",
-            repair_action="Start the Hive Tools service, then retry.",
-        )
-        if tools.get("present")
-        else {
-            "reachable": False,
-            "detail": "Not installed",
-            "message": "Hive Tools is optional and is not installed on this host.",
-            "action": "Install Hive Tools only if this Hive needs shared capabilities.",
-        }
-    )
     registry = _add_session_activity(build_mind_registry(minds), sessions)
+    capability_data = await _capability_node_data()
+    tools_node = next(
+        node for node in capability_data["nodes"] if node["id"] == "hive-tools"
+    )
+    edge_minds = _edge_mind_rows(registry)
     active_sessions = [
         session for session in sessions if session.get("status") in {"active", "running"}
     ]
     return {
-        "counts": {"minds": len(minds), "sessions": len(active_sessions)},
+        "counts": {
+            "minds": len(minds),
+            "edge_minds": len(edge_minds),
+            "capability_nodes": capability_data["summary"]["configured"],
+            "sessions": len(active_sessions),
+        },
         "minds": registry,
+        "edge_minds": edge_minds,
+        "capability_nodes": capability_data["nodes"],
         "sessions": sessions,
         "services": {
             "comms": comms_health,
             "lucent": lucent_health,
-            "tools": {"installed": bool(tools.get("present")), **tools_health},
+            "tools": {
+                "installed": tools_node["installed"],
+                **tools_node["health"],
+            },
         },
     }
 
 
-def _outpost_rows(registry: list[dict]) -> list[dict]:
+def _edge_mind_rows(registry: list[dict]) -> list[dict]:
     rows = []
     for mind in registry:
         local = mind.get("local_config") or {}
         config = local.get("config") or {}
         is_remote = local == {} or bool(config.get("remote"))
-        is_outpost = is_remote or bool(config.get("role")) or bool(config.get("deployment"))
-        if not is_outpost:
+        is_edge_mind = is_remote or bool(config.get("role")) or bool(config.get("deployment"))
+        if not is_edge_mind:
             continue
         gateway_url = mind.get("gateway_url") or ""
         parsed = urllib.parse.urlparse(gateway_url)
@@ -436,6 +452,7 @@ def _outpost_rows(registry: list[dict]) -> list[dict]:
                 "id": mind.get("id") or "",
                 "host": parsed.hostname or "Remote machine",
                 "gateway_url": gateway_url,
+                "profile": config.get("profile") or "standard",
                 "role": config.get("role") or "Connected",
                 "deployment": config.get("deployment") or "Remote",
                 "harness": mind.get("harness") or config.get("harness") or "Unknown",
@@ -449,7 +466,13 @@ def _outpost_rows(registry: list[dict]) -> list[dict]:
 
 
 @app.get("/api/outposts")
-async def api_outposts(user: dict = Depends(require_auth)):
+async def legacy_api_outposts(user: dict = Depends(require_auth)):
+    del user
+    return RedirectResponse("/api/edge-minds", status_code=307)
+
+
+@app.get("/api/edge-minds")
+async def api_edge_minds(user: dict = Depends(require_auth)):
     del user
     registry = build_mind_registry(await _broker_minds_safe())
     try:
@@ -458,12 +481,13 @@ async def api_outposts(user: dict = Depends(require_auth)):
     except Exception:
         sessions = []
     registry = _add_session_activity(registry, sessions)
-    return {"outposts": _outpost_rows(registry)}
+    return {"edge_minds": _edge_mind_rows(registry)}
 
 
-_OUTPOST_ROLES = {"operator", "satellite"}
-_OUTPOST_DEPLOYMENTS = {"systemd", "container", "windows-task"}
-_OUTPOST_HARNESSES = {
+_EDGE_MIND_PROFILES = {"standard", "sentinel"}
+_EDGE_MIND_ROLES = {"operator", "satellite"}
+_EDGE_MIND_DEPLOYMENTS = {"systemd", "container", "windows-task"}
+_EDGE_MIND_HARNESSES = {
     "claude_cli_claude",
     "claude_cli_ollama",
     "claude_sdk_claude",
@@ -473,11 +497,49 @@ _OUTPOST_HARNESSES = {
     "codex_sdk_codex",
     "codex_sdk_ollama",
 }
-_OUTPOST_SURFACES = {"telegram", "discord"}
+_EDGE_MIND_SURFACES = {"telegram", "discord"}
+
+_EDGE_MIND_BUNDLES = {
+    "standard": [
+        {
+            "name": "Edge Mind runtime",
+            "kind": "runtime",
+            "description": "One mind runtime, its harness, and selected conversation surfaces.",
+        }
+    ],
+    "sentinel": [
+        {
+            "name": "Edge Mind runtime",
+            "kind": "runtime",
+            "description": "The Sentinel mind and its selected harness and surfaces.",
+        },
+        {
+            "name": "Hive Sentinel",
+            "kind": "specialization",
+            "description": "Security triage, investigation, decision, and response-rule logic.",
+        },
+        {
+            "name": "Telemetry collectors",
+            "kind": "sensors",
+            "description": "NetSage, Suricata, Zeek, journald, or Windows event collection.",
+        },
+        {
+            "name": "Loki and Grafana",
+            "kind": "observability",
+            "description": "Central log storage, investigation queries, and operator dashboards.",
+        },
+        {
+            "name": "Sentinel dashboard",
+            "kind": "surface",
+            "description": "A dedicated security surface for events, response rules, and analysis.",
+        },
+    ],
+}
 
 
-def _build_outpost_bootstrap(body: dict) -> str:
+def _build_edge_mind_bootstrap(body: dict) -> dict:
     name = str(body.get("name") or "").strip().lower()
+    profile = str(body.get("profile") or "standard")
     role = str(body.get("role") or "")
     deployment = str(body.get("deployment") or "")
     harness = str(body.get("harness") or "")
@@ -488,13 +550,17 @@ def _build_outpost_bootstrap(body: dict) -> str:
         raise ValueError("Port must be a number") from exc
     if not re.fullmatch(r"[a-z][a-z0-9-]{1,31}", name):
         raise ValueError("Name must be 2 to 32 lowercase letters, numbers, or hyphens")
-    if role not in _OUTPOST_ROLES:
-        raise ValueError("Unknown Outpost role")
-    if deployment not in _OUTPOST_DEPLOYMENTS:
+    if profile not in _EDGE_MIND_PROFILES:
+        raise ValueError("Unknown Edge Mind profile")
+    if role not in _EDGE_MIND_ROLES:
+        raise ValueError("Unknown Edge Mind role")
+    if deployment not in _EDGE_MIND_DEPLOYMENTS:
         raise ValueError("Unknown deployment type")
-    if harness not in _OUTPOST_HARNESSES:
+    if harness not in _EDGE_MIND_HARNESSES:
         raise ValueError("Unknown harness")
-    if not isinstance(surfaces, list) or any(item not in _OUTPOST_SURFACES for item in surfaces):
+    if not isinstance(surfaces, list) or any(
+        item not in _EDGE_MIND_SURFACES for item in surfaces
+    ):
         raise ValueError("Unknown conversation surface")
     if port < 1024 or port > 65535:
         raise ValueError("Port must be between 1024 and 65535")
@@ -502,6 +568,8 @@ def _build_outpost_bootstrap(body: dict) -> str:
         "./setup.sh",
         "--name",
         name,
+        "--profile",
+        profile,
         "--role",
         role,
         "--deployment",
@@ -514,33 +582,66 @@ def _build_outpost_bootstrap(body: dict) -> str:
         str(port),
     ]
     setup_command = " ".join(shlex.quote(part) for part in args)
-    return (
-        "git clone https://github.com/danielstewart77/hive-outpost.git && "
-        f"cd hive-outpost && {setup_command}"
-    )
+    commands = [
+        {
+            "name": "Install Edge Mind runtime",
+            "command": (
+                "git clone https://github.com/danielstewart77/hive-edge-minds.git && "
+                f"cd hive-edge-minds && {setup_command}"
+            ),
+        }
+    ]
+    if profile == "sentinel":
+        commands.append(
+            {
+                "name": "Install Sentinel specialization",
+                "command": "git clone https://github.com/danielstewart77/hive-sentinel.git",
+            }
+        )
+    return {
+        "profile": profile,
+        "command": commands[0]["command"],
+        "commands": commands,
+        "components": _EDGE_MIND_BUNDLES[profile],
+    }
 
 
 @app.post("/api/outposts/bootstrap")
-async def api_outpost_bootstrap(request: Request, user: dict = Depends(require_auth)):
+async def legacy_api_outpost_bootstrap(
+    request: Request, user: dict = Depends(require_auth)
+):
+    del request, user
+    return RedirectResponse("/api/edge-minds/bootstrap", status_code=307)
+
+
+@app.post("/api/edge-minds/bootstrap")
+async def api_edge_mind_bootstrap(request: Request, user: dict = Depends(require_auth)):
     del user
     try:
         body = await request.json()
-        command = _build_outpost_bootstrap(body if isinstance(body, dict) else {})
+        result = _build_edge_mind_bootstrap(body if isinstance(body, dict) else {})
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"command": command}
+    return result
 
 
 @app.get("/api/tools")
 async def api_tools(user: dict = Depends(require_auth)):
     del user
-    status = hive_tools_status()
-    health = (
-        await _service_health(f"{_hive_tools_base_url().rstrip('/')}/health")
-        if status.get("present")
-        else {"reachable": False, "detail": "Not installed"}
-    )
-    return {**status, "health": health}
+    data = await _capability_node_data()
+    node = next(item for item in data["nodes"] if item["id"] == "hive-tools")
+    return {
+        "present": node["installed"],
+        "path": node.get("path"),
+        "capabilities": node.get("capabilities", []),
+        "health": node["health"],
+    }
+
+
+@app.get("/api/capability-nodes")
+async def api_capability_nodes(user: dict = Depends(require_auth)):
+    del user
+    return await _capability_node_data()
 
 
 # ── Graph ──────────────────────────────────────────────────────────────
@@ -1078,6 +1179,128 @@ def _hive_tools_base_url() -> str:
     return os.getenv("HIVE_TOOLS_URL") or "http://hive-tools:9421"
 
 
+def _capability_node_specs() -> list[dict]:
+    voice_urls = _voice_server_urls()
+    return [
+        {
+            "id": "hive-tools",
+            "name": "Hive Tools",
+            "kind": "Action gateway",
+            "description": "Approval-aware access to privileged actions and external systems.",
+            "endpoint": _hive_tools_base_url(),
+            "health_path": "/health",
+            "access": "Operator policy and approval gates",
+            "consumers": "Authorized operator minds",
+            "icon": "shield-check",
+        },
+        {
+            "id": "ollama",
+            "name": "Ollama",
+            "kind": "Inference",
+            "description": "Local model inference supplied without embedding model infrastructure in a mind.",
+            "endpoint": os.getenv("OLLAMA_URL") or os.getenv("OLLAMA_BASE_URL") or "",
+            "health_path": "/api/tags",
+            "access": "Network-restricted model API",
+            "consumers": "Minds configured for local inference",
+            "icon": "cpu",
+        },
+        {
+            "id": "voice-chatterbox",
+            "name": "Chatterbox",
+            "kind": "Voice",
+            "description": "Reference-voice synthesis for minds assigned to Chatterbox.",
+            "endpoint": voice_urls["chatterbox"],
+            "health_path": "/health",
+            "access": "Hive network",
+            "consumers": "Minds with Chatterbox voice assignment",
+            "icon": "audio-lines",
+        },
+        {
+            "id": "voice-kokoro",
+            "name": "Kokoro",
+            "kind": "Voice",
+            "description": "Lightweight speech synthesis for minds assigned to Kokoro.",
+            "endpoint": voice_urls["kokoro"],
+            "health_path": "/health",
+            "access": "Hive network",
+            "consumers": "Minds with Kokoro voice assignment",
+            "icon": "audio-waveform",
+        },
+        {
+            "id": "pihole",
+            "name": "Pi-hole",
+            "kind": "Network service",
+            "description": "Network-level DNS filtering and operational visibility.",
+            "endpoint": os.getenv("PIHOLE_URL") or "",
+            "health_path": "",
+            "access": "Administrative network service",
+            "consumers": "Operators and approved automations",
+            "icon": "shield",
+        },
+    ]
+
+
+async def _capability_node_data() -> dict:
+    tools = hive_tools_status()
+    nodes: list[dict] = []
+    probes = []
+    for spec in _capability_node_specs():
+        node = dict(spec)
+        endpoint = str(node.pop("endpoint") or "").rstrip("/")
+        health_path = str(node.pop("health_path") or "")
+        installed = bool(tools.get("present")) if node["id"] == "hive-tools" else None
+        configured = bool(endpoint) and installed is not False
+        if configured:
+            probes.append(
+                (
+                    len(nodes),
+                    _service_health(
+                        f"{endpoint}{health_path}",
+                        service_name=node["name"],
+                        repair_action=(
+                            f"Check the {node['name']} endpoint and service, then retry."
+                        ),
+                    ),
+                )
+            )
+            health = None
+        else:
+            health = {
+                "reachable": False,
+                "detail": "Not configured",
+                "message": f"{node['name']} is not configured for this Hive.",
+                "action": f"Configure the {node['name']} endpoint to manage it here.",
+            }
+        node.update(
+            {
+                "configured": configured,
+                "installed": installed,
+                "endpoint": endpoint or None,
+                "health": health,
+            }
+        )
+        if node["id"] == "hive-tools":
+            node["path"] = tools.get("path")
+            node["capabilities"] = tools.get("capabilities", [])
+        nodes.append(node)
+    if probes:
+        results = await asyncio.gather(*(probe for _, probe in probes))
+        for (node_index, _), health in zip(probes, results, strict=True):
+            nodes[node_index]["health"] = health
+    return {
+        "summary": {
+            "total": len(nodes),
+            "configured": sum(bool(node["configured"]) for node in nodes),
+            "healthy": sum(bool(node["health"]["reachable"]) for node in nodes),
+            "attention": sum(
+                bool(node["configured"] and not node["health"]["reachable"])
+                for node in nodes
+            ),
+        },
+        "nodes": nodes,
+    }
+
+
 def _add_session_activity(registry: list[dict], sessions: list[dict]) -> list[dict]:
     """Add real conversation activity without treating registration as a heartbeat."""
     session_activity: dict[str, dict] = {}
@@ -1129,9 +1352,16 @@ async def _service_health(
         async with httpx.AsyncClient(timeout=3.0) as client:
             resp = await client.get(url, headers=headers or {})
             resp.raise_for_status()
-            detail = resp.json() if resp.content else {}
+            try:
+                detail = resp.json() if resp.content else {}
+            except ValueError:
+                detail = {
+                    "content_type": resp.headers.get("content-type", ""),
+                    "response": resp.text[:300],
+                }
             return {
                 "reachable": True,
+                "endpoint": url,
                 "status_code": resp.status_code,
                 "detail": detail,
                 "message": f"{service_name} responded normally.",
@@ -1145,6 +1375,7 @@ async def _service_health(
             detail = response.text[:300]
         return {
             "reachable": False,
+            "endpoint": url,
             "status_code": response.status_code,
             "detail": detail,
             "message": f"{service_name} returned HTTP {response.status_code}.",
@@ -1153,6 +1384,7 @@ async def _service_health(
     except Exception as exc:
         return {
             "reachable": False,
+            "endpoint": url,
             "detail": str(exc),
             "message": f"{service_name} could not be reached: {exc}",
             "action": repair_action,
