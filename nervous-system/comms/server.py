@@ -280,6 +280,13 @@ class ArmRotationRequest(BaseModel):
     client_ref: str
 
 
+class RecordTurnRequest(BaseModel):
+    client_type: str
+    client_ref: str
+    role: str
+    content: str
+
+
 class HarnessStateRequest(BaseModel):
     harness_sid: str
 
@@ -289,11 +296,30 @@ async def arm_rotation(body: ArmRotationRequest):
     """Arm the active session for pending rotation (finalize-on-user-turn).
 
     Called by the ``rotation_check`` Stop hook after it writes the
-    carry-forward, in place of an inline ``/clear``. The actual session swap
-    happens on the next user turn in ``send_message``. Declared before
-    ``/sessions/{session_id}`` so the literal path wins the match.
+    carry-forward, in place of an inline ``/clear``. For chat surfaces the
+    actual session swap happens on the next user turn in ``send_message``;
+    for the browser terminal (no later turn to defer to) this finalizes
+    immediately. Declared before ``/sessions/{session_id}`` so the literal
+    path wins the match.
     """
     return await session_mgr.arm_rotation(body.client_type, body.client_ref)
+
+
+@app.post("/sessions/record-turn")
+async def record_turn(body: RecordTurnRequest):
+    """Append one turn to the active session's late-turn ledger.
+
+    Only the chat/SSE path writes ``session_turns`` on its own
+    (``send_message``); the browser terminal's keystrokes are a raw pty byte
+    bridge that never calls it, so its ``rotation_check`` Stop hook posts
+    here once per turn instead — the source ``get_late_turns``/
+    ``<pending-continuation>`` needs to see terminal activity during a
+    rotation's background window. Declared before ``/sessions/{session_id}``
+    so the literal path wins the match.
+    """
+    return await session_mgr.record_turn(
+        body.client_type, body.client_ref, body.role, body.content
+    )
 
 
 @app.get("/sessions/{session_id}")
@@ -623,7 +649,7 @@ async def ws_attach(ws: WebSocket, session_id: str):
 
     await ws.accept()
 
-    async def _watch_for_close() -> str:
+    async def _watch_for_close() -> dict:
         # The attach pty is a separate process from the session's tracked
         # subprocess — kill_session never reaches it. Watching the session
         # event stream lets a kill (end-session, /kill, rotation) tear the
@@ -631,8 +657,8 @@ async def ws_attach(ws: WebSocket, session_id: str):
         # attach loop exits → the pty process is terminated.
         async for event in session_mgr.stream_session_events(session_id):
             if event.get("type") in ("session_closed", "session_suspended"):
-                return event["type"]
-        return "session_closed"
+                return event
+        return {"type": "session_closed"}
 
     try:
         async with (
@@ -648,9 +674,17 @@ async def ws_attach(ws: WebSocket, session_id: str):
                 for task in tasks:
                     task.cancel()
             if closed in done:
-                event_type = closed.result()
-                if event_type == "session_suspended":
+                close_event = closed.result()
+                rotated_to = close_event.get("rotated_to")
+                if close_event.get("type") == "session_suspended":
                     await ws.close(code=4411, reason="session suspended")
+                elif rotated_to:
+                    # Rotation retired this session in favor of a fresh one —
+                    # hand the successor id straight to the tile so it can
+                    # reattach without hunting for it (terminal-routing.js's
+                    # poll/rotated_from path stays as the fallback for any
+                    # other close-without-successor case).
+                    await ws.close(code=4412, reason=rotated_to)
                 else:
                     await ws.close(code=4410, reason="session closed")
             elif pump in done:

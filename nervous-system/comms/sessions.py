@@ -573,24 +573,58 @@ class SessionManager:
             return None
         return await self._session_dict(result["session_id"])
 
+    async def record_turn(
+        self, client_type: str, client_ref: str, role: str, content: str
+    ) -> dict:
+        """Append one turn to the active session's ``session_turns`` ledger.
+
+        The chat/SSE path (``send_message``) writes both roles as they
+        happen; the browser terminal never calls ``send_message`` (its
+        keystrokes are a raw pty byte bridge), so the per-mind
+        ``rotation_check`` Stop hook calls this once per turn instead —
+        gated on ``HIVE_SURFACE == "terminal"`` so chat surfaces don't get
+        double-written. This is what makes terminal turns visible to
+        ``get_late_turns``/the ``<pending-continuation>`` handoff.
+        """
+        active = await self.get_active_session(client_type, client_ref)
+        if not active:
+            return {"ok": False, "error": "no active session"}
+        await self._db.execute(
+            "INSERT INTO session_turns (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+            (active["id"], role, content, time.time()),
+        )
+        await self._db.commit()
+        return {"ok": True, "session_id": active["id"]}
+
     # ------------------------------------------------------------------
     # Rotation arming (finalize-on-user-turn)
     # ------------------------------------------------------------------
     async def arm_rotation(self, client_type: str, client_ref: str) -> dict:
         """Mark the active session for (client_type, client_ref) as pending
-        rotation.
+        rotation, or finalize it right away for surfaces with no turn-based
+        delivery to defer to.
 
         Called by the per-mind ``rotation_check`` Stop hook once it has
         written the carry-forward, INSTEAD of clearing the session inline.
-        The Stop hook fires on an assistant turn, so clearing there can kill
-        the old session mid-reply to a message that arrived during the
-        rotation window. Arming defers the actual swap to ``send_message``,
-        which finalizes it on the next user turn — the rollover always lands
-        on the user's turn and never destroys an assistant turn.
+        For chat surfaces (Telegram/Discord) the Stop hook fires on an
+        assistant turn, so clearing there can kill the old session mid-reply
+        to a message that arrived during the rotation window — arming
+        defers the actual swap to ``send_message``, which finalizes it on
+        the next user turn. The browser terminal never calls
+        ``send_message`` (see ``record_turn``), so there is no later turn to
+        defer to; by the time this is called the hook's multi-minute
+        background work has already finished, so finalizing here is still
+        the *last* step of an already-backgrounded rotation, not a
+        synchronous one.
         """
         active = await self.get_active_session(client_type, client_ref)
         if not active:
             return {"ok": False, "error": "no active session"}
+        if active.get("owner_ref") == "terminal":
+            new_id = await self._finalize_rotation(active)
+            if new_id is None:
+                return {"ok": False, "error": "could not finalize (no client_ref)"}
+            return {"ok": True, "session_id": active["id"], "rotated_to": new_id}
         await self._db.execute(
             "UPDATE sessions SET rotation_armed = 1 WHERE id = ?", (active["id"],)
         )
@@ -600,15 +634,17 @@ class SessionManager:
         )
         return {"ok": True, "session_id": active["id"]}
 
-    async def _finalize_armed_rotation(self, session: dict) -> str | None:
-        """Consume a session's armed flag by swapping to a fresh session.
+    async def _finalize_rotation(self, session: dict) -> str | None:
+        """Swap a session to a fresh one, carrying the rotation forward.
 
-        Kills the armed session (quiescent — its assistant turn already
-        Stopped, which is what armed it) and creates its replacement, which
-        boots with the carry-forward via ``create_session`` →
-        ``bootstrap_loader``. Returns the new session id, or ``None`` when the
-        swap can't proceed (no ``client_ref`` to rebind the surface) — in
-        which case the caller falls through and delivers on the old session.
+        Creates the replacement *before* killing the old session — so the
+        new id exists in time to be published on the kill event
+        (``rotated_to``), letting an attached browser terminal reconnect
+        straight to it — then kills the old one. The new session boots with
+        the carry-forward via ``create_session`` → ``bootstrap_loader``.
+        Returns the new session id, or ``None`` when the swap can't proceed
+        (no ``client_ref`` to rebind the surface) — in which case the caller
+        falls through and delivers on the old session.
         """
         routing = await self._routing_for(session)
         client_ref = routing["client_ref"]
@@ -622,12 +658,11 @@ class SessionManager:
             )
             await self._db.commit()
             log.warning(
-                "armed rotation: no client_ref for session=%s; disarming, delivering on old session",
+                "rotation: no client_ref for session=%s; disarming, delivering on old session",
                 old_id,
             )
             return None
-        log.info("armed rotation: finalizing on user turn, retiring session=%s", old_id)
-        await self.kill_session(old_id)
+        log.info("rotation: finalizing, retiring session=%s", old_id)
         new = await self.create_session(
             owner_type=routing["owner_type"],
             owner_ref=routing["owner_ref"],
@@ -635,6 +670,7 @@ class SessionManager:
             mind_id=session["mind_id"],
             rotated_from=old_id,
         )
+        await self.kill_session(old_id, rotated_to=new["id"])
         return new["id"]
 
     async def _forward_to_session(self, session_id: str, content: str, images: list[dict] | None):
@@ -801,7 +837,7 @@ class SessionManager:
             # message is the new session's first turn. Never fires for
             # un-armed sessions, so normal delivery is unchanged.
             if session.get("rotation_armed"):
-                new_id = await self._finalize_armed_rotation(session)
+                new_id = await self._finalize_rotation(session)
                 if new_id and new_id != session_id:
                     async for event in self._forward_to_session(new_id, content, images):
                         yield event
@@ -1284,8 +1320,15 @@ class SessionManager:
         await self._db.commit()
         return await self._session_dict(session_id)
 
-    async def kill_session(self, session_id: str) -> dict:
-        """Kill a session: SIGTERM the subprocess, mark closed."""
+    async def kill_session(self, session_id: str, rotated_to: str | None = None) -> dict:
+        """Kill a session: SIGTERM the subprocess, mark closed.
+
+        ``rotated_to`` carries the successor session's id, when this kill is
+        the retiring half of a rotation swap — it rides on the published
+        ``session_closed`` event so an attached browser terminal
+        (``ws_attach``'s close-code mapping) can reconnect straight to the
+        new session instead of just reporting the old one as ended.
+        """
         session = await self._get_row(session_id)
         if not session:
             raise ValueError(f"Session not found: {session_id}")
@@ -1303,9 +1346,12 @@ class SessionManager:
                 "DELETE FROM active_sessions WHERE session_id = ?", (session_id,)
             )
         await self._db.commit()
+        event: dict[str, Any] = {"type": "session_closed", "session_id": session_id}
+        if rotated_to:
+            event["rotated_to"] = rotated_to
         await self._publish_session_event(
             session_id,
-            {"type": "session_closed", "session_id": session_id},
+            event,
         )
 
         uptime = time.time() - session["created_at"]
