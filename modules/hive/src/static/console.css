@@ -194,6 +194,18 @@ a { color: inherit; }
 .faint { color: var(--console-faint); }
 
 .service-list, .activity-list, .check-list { list-style: none; margin: 0; padding: 0; }
+.service-item { border-bottom: 1px solid #252c31; }
+.service-item:last-child { border-bottom: 0; }
+.service-disclosure summary { list-style: none; cursor: pointer; }
+.service-disclosure summary::-webkit-details-marker { display: none; }
+.service-disclosure .service-row { border-bottom: 0; }
+.service-chevron { width: 15px; height: 15px; color: var(--console-faint); transition: transform .15s ease; }
+.service-disclosure[open] .service-chevron { transform: rotate(180deg); }
+.service-diagnostic { padding: 0 16px 14px 60px; }
+.service-diagnostic dl { display: grid; gap: 8px; margin: 0 0 12px; }
+.service-diagnostic dl > div { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 10px; }
+.service-diagnostic dt { color: var(--console-faint); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
+.service-diagnostic dd { margin: 0; color: var(--console-muted); font-size: 12px; overflow-wrap: anywhere; }
 .service-row, .activity-row, .check-row { display: flex; align-items: center; gap: 12px; padding: 13px 16px; border-bottom: 1px solid #252c31; }
 .service-row:last-child, .activity-row:last-child, .check-row:last-child { border-bottom: 0; }
 .service-icon, .activity-icon, .check-icon { width: 32px; height: 32px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 6px; background: #20262a; color: var(--console-muted); }

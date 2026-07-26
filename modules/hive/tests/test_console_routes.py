@@ -90,16 +90,23 @@ def test_unknown_settings_section_is_not_found(tmp_path, monkeypatch):
 def test_overview_api_combines_minds_sessions_and_service_health(tmp_path, monkeypatch):
     client = _authed_client(tmp_path, monkeypatch)
     minds = [{"name": "ada", "id": "mind-1", "last_seen": 123}]
-    sessions = [{"id": "session-1", "mind_id": "mind-1", "status": "active"}]
+    sessions = [
+        {
+            "id": "session-1",
+            "mind_id": "mind-1",
+            "status": "active",
+            "last_active": 456,
+        },
+        {"id": "session-2", "mind_id": "mind-1", "status": "closed", "last_active": 400},
+    ]
+    health = AsyncMock(return_value={"reachable": True, "detail": {"status": "ok"}})
+    monkeypatch.setenv("COMMS_BEARER_TOKEN", "comms-test-token")
+    monkeypatch.setenv("LUCENT_BEARER_TOKEN", "lucent-test-token")
 
     with (
         patch.object(main_mod, "_broker_minds_safe", new=AsyncMock(return_value=minds)),
         patch.object(main_mod, "_gateway_json", new=AsyncMock(return_value=sessions)),
-        patch.object(
-            main_mod,
-            "_service_health",
-            new=AsyncMock(return_value={"reachable": True, "detail": {"status": "ok"}}),
-        ),
+        patch.object(main_mod, "_service_health", new=health),
         patch.object(main_mod, "hive_tools_status", return_value={"present": True, "path": "/tools"}),
     ):
         response = client.get("/api/overview")
@@ -110,6 +117,34 @@ def test_overview_api_combines_minds_sessions_and_service_health(tmp_path, monke
     assert body["services"]["comms"]["reachable"] is True
     assert body["services"]["lucent"]["reachable"] is True
     assert body["services"]["tools"]["installed"] is True
+    assert body["minds"][0]["last_activity"] == 456
+    assert body["minds"][0]["activity_status"] == "active"
+    assert health.await_args_list[0].kwargs["headers"] == {
+        "Authorization": "Bearer comms-test-token"
+    }
+    assert health.await_args_list[1].kwargs["headers"] == {
+        "Authorization": "Bearer lucent-test-token"
+    }
+
+
+def test_session_activity_does_not_treat_registration_as_a_heartbeat():
+    registry = [
+        {"name": "nagatha", "id": "mind-1", "last_seen": 100},
+        {"name": "bob", "id": "mind-2", "last_seen": 200},
+    ]
+    sessions = [
+        {"mind_id": "mind-1", "status": "closed", "last_active": 300},
+        {"mind_id": "mind-1", "status": "running", "last_active": 400},
+    ]
+
+    rows = main_mod._add_session_activity(registry, sessions)
+
+    by_name = {row["name"]: row for row in rows}
+    assert by_name["nagatha"]["last_activity"] == 400
+    assert by_name["nagatha"]["active_session_count"] == 1
+    assert by_name["nagatha"]["activity_status"] == "active"
+    assert by_name["bob"]["last_activity"] is None
+    assert by_name["bob"]["activity_status"] == "registered"
 
 
 def test_outposts_api_returns_remote_minds_as_managed_installations(tmp_path, monkeypatch):
@@ -132,6 +167,7 @@ def test_outposts_api_returns_remote_minds_as_managed_installations(tmp_path, mo
     ]
     with (
         patch.object(main_mod, "_broker_minds_safe", new=AsyncMock(return_value=[])),
+        patch.object(main_mod, "_gateway_json", new=AsyncMock(return_value=[])),
         patch.object(main_mod, "build_mind_registry", return_value=registry),
     ):
         response = client.get("/api/outposts")

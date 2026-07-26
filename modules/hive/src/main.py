@@ -14,7 +14,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 import httpx
@@ -373,18 +373,43 @@ async def api_overview(user: dict = Depends(require_auth)):
     except Exception:
         sessions = []
     comms_health, lucent_health = await asyncio.gather(
-        _service_health(f"{_gateway_base_url().rstrip('/')}/health"),
-        _service_health(f"{_lucent_base_url().rstrip('/')}/health"),
+        _service_health(
+            f"{_gateway_base_url().rstrip('/')}/health",
+            headers=_gateway_headers(),
+            service_name="Hive Comms",
+            repair_action="Verify COMMS_BEARER_TOKEN and the Hive Comms endpoint, then retry.",
+        ),
+        _service_health(
+            f"{_lucent_base_url().rstrip('/')}/health",
+            headers={"Authorization": f"Bearer {_lucent_bearer_token()}"}
+            if _lucent_bearer_token()
+            else {},
+            service_name="Lucent",
+            repair_action="Verify LUCENT_BEARER_TOKEN and the Lucent endpoint, then retry.",
+        ),
     )
     tools = hive_tools_status()
     tools_health = (
-        await _service_health(f"{_hive_tools_base_url().rstrip('/')}/health")
+        await _service_health(
+            f"{_hive_tools_base_url().rstrip('/')}/health",
+            service_name="Hive Tools",
+            repair_action="Start the Hive Tools service, then retry.",
+        )
         if tools.get("present")
-        else {"reachable": False, "detail": "Not installed"}
+        else {
+            "reachable": False,
+            "detail": "Not installed",
+            "message": "Hive Tools is optional and is not installed on this host.",
+            "action": "Install Hive Tools only if this Hive needs shared capabilities.",
+        }
     )
+    registry = _add_session_activity(build_mind_registry(minds), sessions)
+    active_sessions = [
+        session for session in sessions if session.get("status") in {"active", "running"}
+    ]
     return {
-        "counts": {"minds": len(minds), "sessions": len(sessions)},
-        "minds": build_mind_registry(minds),
+        "counts": {"minds": len(minds), "sessions": len(active_sessions)},
+        "minds": registry,
         "sessions": sessions,
         "services": {
             "comms": comms_health,
@@ -416,6 +441,8 @@ def _outpost_rows(registry: list[dict]) -> list[dict]:
                 "harness": mind.get("harness") or config.get("harness") or "Unknown",
                 "model": mind.get("model") or config.get("default_model") or "Unknown",
                 "last_seen": mind.get("last_seen"),
+                "last_activity": mind.get("last_activity"),
+                "activity_status": mind.get("activity_status") or "registered",
             }
         )
     return sorted(rows, key=lambda row: str(row["name"]).lower())
@@ -425,6 +452,12 @@ def _outpost_rows(registry: list[dict]) -> list[dict]:
 async def api_outposts(user: dict = Depends(require_auth)):
     del user
     registry = build_mind_registry(await _broker_minds_safe())
+    try:
+        sessions_raw = await _gateway_json("/sessions")
+        sessions = sessions_raw if isinstance(sessions_raw, list) else []
+    except Exception:
+        sessions = []
+    registry = _add_session_activity(registry, sessions)
     return {"outposts": _outpost_rows(registry)}
 
 
@@ -1011,7 +1044,12 @@ async def settings_section_page(request: Request, section: str):
 async def api_settings_minds(user: dict = Depends(require_auth)):
     del user
     broker_minds = await _broker_minds_safe()
-    return {"minds": build_mind_registry(broker_minds)}
+    try:
+        sessions_raw = await _gateway_json("/sessions")
+        sessions = sessions_raw if isinstance(sessions_raw, list) else []
+    except Exception:
+        sessions = []
+    return {"minds": _add_session_activity(build_mind_registry(broker_minds), sessions)}
 
 
 @app.get("/api/settings/hive-comms/sessions")
@@ -1040,22 +1078,96 @@ def _hive_tools_base_url() -> str:
     return os.getenv("HIVE_TOOLS_URL") or "http://hive-tools:9421"
 
 
-async def _service_health(url: str) -> dict:
+def _add_session_activity(registry: list[dict], sessions: list[dict]) -> list[dict]:
+    """Add real conversation activity without treating registration as a heartbeat."""
+    session_activity: dict[str, dict] = {}
+    for session in sessions:
+        if not isinstance(session, dict):
+            continue
+        mind_id = str(session.get("mind_id") or "")
+        if not mind_id:
+            continue
+        raw_timestamp = session.get("last_active") or session.get("created_at")
+        timestamp: float | None = None
+        if isinstance(raw_timestamp, (int, float, str)):
+            with suppress(ValueError):
+                timestamp = float(raw_timestamp)
+        activity = session_activity.setdefault(
+            mind_id, {"last_activity": None, "active_session_count": 0}
+        )
+        if timestamp is not None and (
+            activity["last_activity"] is None or timestamp > activity["last_activity"]
+        ):
+            activity["last_activity"] = timestamp
+        if session.get("status") in {"active", "running"}:
+            activity["active_session_count"] += 1
+
+    enriched = []
+    for mind in registry:
+        row = dict(mind)
+        mind_activity = session_activity.get(
+            str(row.get("id") or "")
+        ) or session_activity.get(str(row.get("name") or ""))
+        row["last_activity"] = mind_activity["last_activity"] if mind_activity else None
+        row["active_session_count"] = (
+            mind_activity["active_session_count"] if mind_activity else 0
+        )
+        row["activity_status"] = "active" if row["active_session_count"] else "registered"
+        enriched.append(row)
+    return enriched
+
+
+async def _service_health(
+    url: str,
+    *,
+    headers: dict | None = None,
+    service_name: str = "Service",
+    repair_action: str = "Check the service configuration and retry.",
+) -> dict:
     """Best-effort health probe — used purely for status display, never gates a route."""
     try:
         async with httpx.AsyncClient(timeout=3.0) as client:
-            resp = await client.get(url)
+            resp = await client.get(url, headers=headers or {})
             resp.raise_for_status()
-            return {"reachable": True, "detail": resp.json() if resp.content else {}}
+            detail = resp.json() if resp.content else {}
+            return {
+                "reachable": True,
+                "status_code": resp.status_code,
+                "detail": detail,
+                "message": f"{service_name} responded normally.",
+                "action": "No action is required.",
+            }
+    except httpx.HTTPStatusError as exc:
+        response = exc.response
+        try:
+            detail = response.json()
+        except ValueError:
+            detail = response.text[:300]
+        return {
+            "reachable": False,
+            "status_code": response.status_code,
+            "detail": detail,
+            "message": f"{service_name} returned HTTP {response.status_code}.",
+            "action": repair_action,
+        }
     except Exception as exc:
-        return {"reachable": False, "detail": str(exc)}
+        return {
+            "reachable": False,
+            "detail": str(exc),
+            "message": f"{service_name} could not be reached: {exc}",
+            "action": repair_action,
+        }
 
 
 @app.get("/api/settings/hive-tools")
 async def api_settings_hive_tools(user: dict = Depends(require_auth)):
     del user
     status = hive_tools_status()
-    status["container_health"] = await _service_health(f"{_hive_tools_base_url()}/health")
+    status["container_health"] = await _service_health(
+        f"{_hive_tools_base_url()}/health",
+        service_name="Hive Tools",
+        repair_action="Start the Hive Tools service, then retry.",
+    )
     status["remote_configured"] = False  # no git remote set up for hive-tools yet
     return status
 

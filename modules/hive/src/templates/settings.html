@@ -48,7 +48,7 @@ window.addEventListener("DOMContentLoaded", function () {
         try {
             const data = await h.requestJson("/api/overview");
             const rows = [["Hive Comms", "Message broker and sessions", data.services.comms, "radio-tower"], ["Lucent", "Memory and knowledge graph", data.services.lucent, "database"], ["Hive Tools", data.services.tools.installed ? "Optional capabilities" : "Not installed", data.services.tools, "blocks"]];
-            list.innerHTML = rows.map(function (item) { return '<li class="service-row"><span class="service-icon"><i data-lucide="' + item[3] + '"></i></span><span class="service-copy"><strong>' + item[0] + '</strong><small>' + item[1] + '</small></span>' + h.statusPill(item[2].reachable, "Ready", item[2].installed === false ? "Optional" : "Unavailable") + '</li>'; }).join(""); refreshIcons();
+            list.innerHTML = rows.map(function (item) { return h.serviceCheckRow(item[0], item[1], item[2], item[3], {optional: item[2].installed === false, badText: "Unavailable"}); }).join(""); refreshIcons();
         } catch (error) { list.innerHTML = '<li><div class="error-state">' + h.escapeHtml(error.message) + '</div></li>'; }
     }
     async function loadVoice() {

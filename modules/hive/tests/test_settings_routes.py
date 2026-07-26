@@ -51,12 +51,18 @@ def test_api_settings_minds_requires_auth(tmp_path, monkeypatch):
 def test_api_settings_minds_merges_broker_and_local_config(tmp_path, monkeypatch):
     client = _authed_client(tmp_path, monkeypatch)
     broker_minds = [{"name": "bob", "id": "b9f2", "gateway_url": "http://bob:8420", "model": "qwen3"}]
-    with patch.object(main_mod, "_broker_minds_safe", new=AsyncMock(return_value=broker_minds)):
+    sessions = [{"mind_id": "b9f2", "status": "running", "last_active": 456}]
+    with (
+        patch.object(main_mod, "_broker_minds_safe", new=AsyncMock(return_value=broker_minds)),
+        patch.object(main_mod, "_gateway_json", new=AsyncMock(return_value=sessions)),
+    ):
         response = client.get("/api/settings/minds")
 
     assert response.status_code == 200
     minds = response.json()["minds"]
     assert minds[0]["name"] == "bob"
+    assert minds[0]["last_activity"] == 456
+    assert minds[0]["activity_status"] == "active"
 
 
 def test_api_settings_hive_comms_sessions_requires_auth(tmp_path, monkeypatch):

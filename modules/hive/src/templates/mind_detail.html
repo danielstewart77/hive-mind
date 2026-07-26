@@ -23,11 +23,12 @@ window.addEventListener("DOMContentLoaded", async function () {
         const cfg = mind.local_config && mind.local_config.config || {};
         document.getElementById("mind-title").textContent = mind.name;
         document.getElementById("mind-description").textContent = cfg.description || "Registered Hive mind";
-        document.getElementById("mind-status").innerHTML = h.statusPill(Boolean(mind.last_seen), "Connected", "No heartbeat");
+        document.getElementById("mind-status").innerHTML = h.statusPill(mind.activity_status === "active", "Active session", "Registered");
         const details = [
             ["Mind ID", mind.id || "Not reported"], ["Location", (!mind.local_config || cfg.remote) ? "Remote machine" : "Hive host"],
             ["Harness", mind.harness || cfg.harness || "Unknown"], ["Provider", cfg.provider || "Not reported"],
-            ["Model", mind.model || cfg.default_model || "Unknown"], ["Gateway", mind.gateway_url || cfg.gateway_url || "Not reported"]
+            ["Model", mind.model || cfg.default_model || "Unknown"], ["Gateway", mind.gateway_url || cfg.gateway_url || "Not reported"],
+            ["Last activity", h.formatTime(mind.last_activity)], ["Registry updated", h.formatTime(mind.last_seen)]
         ];
         document.getElementById("mind-details").innerHTML = details.map(function (item) { return '<div class="detail-item"><dt>' + h.escapeHtml(item[0]) + '</dt><dd>' + h.escapeHtml(item[1]) + '</dd></div>'; }).join("");
         document.getElementById("mind-config").textContent = mind.local_config ? JSON.stringify(cfg, null, 2) : "This mind is remote. Runtime configuration is managed on its host.";

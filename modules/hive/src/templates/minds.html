@@ -8,7 +8,7 @@
     </header>
     <div class="filter-bar"><label class="search-field"><i data-lucide="search"></i><input id="mind-search" type="search" placeholder="Search minds" aria-label="Search minds"></label></div>
     <section class="surface">
-        <div class="data-table-wrap"><table class="data-table"><thead><tr><th>Mind</th><th>Status</th><th>Model</th><th>Harness</th><th>Location</th><th>Last seen</th></tr></thead><tbody id="minds-table"><tr><td colspan="6" class="loading-state">Loading minds…</td></tr></tbody></table></div>
+        <div class="data-table-wrap"><table class="data-table"><thead><tr><th>Mind</th><th>Status</th><th>Model</th><th>Harness</th><th>Location</th><th>Last activity</th></tr></thead><tbody id="minds-table"><tr><td colspan="6" class="loading-state">Loading minds…</td></tr></tbody></table></div>
     </section>
 </main>
 <script>
@@ -22,7 +22,7 @@ window.addEventListener("DOMContentLoaded", async function () {
         tbody.innerHTML = rows.length ? rows.map(function (mind) {
             const cfg = mind.local_config && mind.local_config.config || {};
             const remote = !mind.local_config || cfg.remote;
-            return '<tr><td><div class="entity-cell"><span class="entity-avatar">' + h.escapeHtml((mind.name || "?").slice(0, 2)) + '</span><span class="entity-copy"><a href="/minds/' + encodeURIComponent(mind.id || mind.name) + '">' + h.escapeHtml(mind.name) + '</a><small>' + h.escapeHtml((mind.id || "").slice(0, 8)) + '</small></span></div></td><td>' + h.statusPill(Boolean(mind.last_seen), "Connected", "No heartbeat") + '</td><td>' + h.escapeHtml(mind.model || cfg.default_model || "Unknown") + '</td><td>' + h.escapeHtml(mind.harness || cfg.harness || "Unknown") + '</td><td>' + (remote ? "Remote" : "Hive host") + '</td><td class="muted">' + h.escapeHtml(h.formatTime(mind.last_seen)) + '</td></tr>';
+            return '<tr><td><div class="entity-cell"><span class="entity-avatar">' + h.escapeHtml((mind.name || "?").slice(0, 2)) + '</span><span class="entity-copy"><a href="/minds/' + encodeURIComponent(mind.id || mind.name) + '">' + h.escapeHtml(mind.name) + '</a><small>' + h.escapeHtml((mind.id || "").slice(0, 8)) + '</small></span></div></td><td>' + h.statusPill(mind.activity_status === "active", "Active session", "Registered") + '</td><td>' + h.escapeHtml(mind.model || cfg.default_model || "Unknown") + '</td><td>' + h.escapeHtml(mind.harness || cfg.harness || "Unknown") + '</td><td>' + (remote ? "Remote" : "Hive host") + '</td><td class="muted">' + h.escapeHtml(h.formatTime(mind.last_activity)) + '</td></tr>';
         }).join("") : '<tr><td colspan="6"><div class="empty-state"><h3>No matching minds</h3><p>Try a different search or create a new mind.</p></div></td></tr>';
     }
     try { minds = (await h.requestJson("/api/settings/minds")).minds || []; render(); }

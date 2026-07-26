@@ -27,7 +27,20 @@
             escapeHtml(ok ? goodText : badText) + "</span>";
     }
 
-    window.HiveConsole = {escapeHtml: escapeHtml, requestJson: requestJson, formatTime: formatTime, statusPill: statusPill};
+    function serviceCheckRow(name, description, service, icon, options) {
+        options = options || {};
+        service = service || {};
+        const optional = options.optional === true;
+        const goodText = options.goodText || "Ready";
+        const badText = optional ? "Optional" : (options.badText || "Needs attention");
+        const state = service.reachable ? goodText : badText;
+        const message = service.message || (service.reachable ? "The health check passed." : String(service.detail || "The health check failed."));
+        const action = service.action || (service.reachable ? "No action is required." : "Check the service configuration and retry.");
+        const retry = options.retry ? '<button class="button button-quiet" type="button" data-health-retry><i data-lucide="refresh-cw"></i>Retry check</button>' : "";
+        return '<li class="service-item"><details class="service-disclosure"><summary class="service-row"><span class="service-icon"><i data-lucide="' + escapeHtml(icon) + '"></i></span><span class="service-copy"><strong>' + escapeHtml(name) + '</strong><small>' + escapeHtml(description) + '</small></span>' + statusPill(Boolean(service.reachable), goodText, badText) + '<i class="service-chevron" data-lucide="chevron-down"></i></summary><div class="service-diagnostic"><dl><div><dt>State</dt><dd>' + escapeHtml(state) + '</dd></div><div><dt>Health check</dt><dd>' + escapeHtml(message) + '</dd></div><div><dt>Next step</dt><dd>' + escapeHtml(action) + '</dd></div></dl>' + retry + '</div></details></li>';
+    }
+
+    window.HiveConsole = {escapeHtml: escapeHtml, requestJson: requestJson, formatTime: formatTime, statusPill: statusPill, serviceCheckRow: serviceCheckRow};
 
     const app = document.querySelector("[data-console-app]");
     if (app) {

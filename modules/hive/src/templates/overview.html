@@ -25,7 +25,7 @@
     <div class="overview-grid">
         <section class="surface">
             <div class="surface-header"><div><h2>Minds</h2><p>Availability and current runtime</p></div><a class="surface-link" href="/minds">View all</a></div>
-            <div class="data-table-wrap"><table class="data-table"><thead><tr><th>Mind</th><th>Status</th><th>Runtime</th><th>Last seen</th></tr></thead><tbody id="overview-minds"><tr><td colspan="4" class="loading-state">Loading minds…</td></tr></tbody></table></div>
+            <div class="data-table-wrap"><table class="data-table"><thead><tr><th>Mind</th><th>Status</th><th>Runtime</th><th>Last activity</th></tr></thead><tbody id="overview-minds"><tr><td colspan="4" class="loading-state">Loading minds…</td></tr></tbody></table></div>
         </section>
         <div class="overview-stack">
             <section class="surface">
@@ -55,7 +55,7 @@ window.addEventListener("DOMContentLoaded", async function () {
             const cfg = mind.local_config && mind.local_config.config || {};
             const model = mind.model || cfg.default_model || "Not reported";
             const harness = mind.harness || cfg.harness || "Unknown runtime";
-            return '<tr><td><div class="entity-cell"><span class="entity-avatar">' + h.escapeHtml((mind.name || "?").slice(0, 2)) + '</span><span class="entity-copy"><a href="/minds/' + encodeURIComponent(mind.id || mind.name) + '">' + h.escapeHtml(mind.name) + '</a><small>' + h.escapeHtml((mind.id || "").slice(0, 8)) + '</small></span></div></td><td>' + h.statusPill(Boolean(mind.last_seen), "Connected", "No heartbeat") + '</td><td><span>' + h.escapeHtml(model) + '</span><br><small class="faint">' + h.escapeHtml(harness) + '</small></td><td class="muted">' + h.escapeHtml(h.formatTime(mind.last_seen)) + '</td></tr>';
+            return '<tr><td><div class="entity-cell"><span class="entity-avatar">' + h.escapeHtml((mind.name || "?").slice(0, 2)) + '</span><span class="entity-copy"><a href="/minds/' + encodeURIComponent(mind.id || mind.name) + '">' + h.escapeHtml(mind.name) + '</a><small>' + h.escapeHtml((mind.id || "").slice(0, 8)) + '</small></span></div></td><td>' + h.statusPill(mind.activity_status === "active", "Active session", "Registered") + '</td><td><span>' + h.escapeHtml(model) + '</span><br><small class="faint">' + h.escapeHtml(harness) + '</small></td><td class="muted">' + h.escapeHtml(h.formatTime(mind.last_activity)) + '</td></tr>';
         }).join("") : '<tr><td colspan="4"><div class="empty-state"><h3>No minds registered</h3><p>Use the setup guide to connect the first mind.</p><a class="button button-primary" href="/setup">Open setup</a></div></td></tr>';
 
         const services = [
@@ -63,9 +63,7 @@ window.addEventListener("DOMContentLoaded", async function () {
             ["Lucent", "Memory and knowledge graph", data.services.lucent, "database"],
             ["Hive Tools", data.services.tools.installed ? "Optional capabilities" : "Not installed", data.services.tools, "blocks"]
         ];
-        document.getElementById("overview-services").innerHTML = services.map(function (item) {
-            return '<li class="service-row"><span class="service-icon"><i data-lucide="' + item[3] + '"></i></span><span class="service-copy"><strong>' + item[0] + '</strong><small>' + item[1] + '</small></span>' + h.statusPill(item[2].reachable, "Ready", item[2].installed === false ? "Optional" : "Unavailable") + '</li>';
-        }).join("");
+        document.getElementById("overview-services").innerHTML = services.map(function (item) { return h.serviceCheckRow(item[0], item[1], item[2], item[3], {optional: item[2].installed === false, badText: "Unavailable"}); }).join("");
 
         const sessions = data.sessions || [];
         document.getElementById("overview-sessions").innerHTML = sessions.length ? sessions.slice(0, 5).map(function (session) {

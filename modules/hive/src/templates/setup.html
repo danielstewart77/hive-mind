@@ -33,12 +33,12 @@ window.addEventListener("DOMContentLoaded", function () {
         try {
             const data = await h.requestJson("/api/overview");
             const checks = [
-                ["Hive Comms", "Messages, sessions, and mind registration", data.services.comms.reachable, true],
-                ["Lucent", "Memory and knowledge graph", data.services.lucent.reachable, true],
-                ["Registered mind", data.counts.minds ? data.counts.minds + " available" : "No minds registered yet", data.counts.minds > 0, true],
-                ["Hive Tools", data.services.tools.installed ? "Capability service installed" : "Optional capability service", data.services.tools.reachable, false]
+                ["Hive Comms", "Messages, sessions, and mind registration", data.services.comms, "radio-tower", false],
+                ["Lucent", "Memory and knowledge graph", data.services.lucent, "database", false],
+                ["Registered mind", data.counts.minds ? data.counts.minds + " available" : "No minds registered yet", {reachable: data.counts.minds > 0, message: data.counts.minds ? "Hive Comms reports " + data.counts.minds + " registered minds." : "Hive Comms does not report any registered minds.", action: data.counts.minds ? "No action is required." : "Open an identity conversation to register the first mind."}, "brain-circuit", false],
+                ["Hive Tools", data.services.tools.installed ? "Capability service installed" : "Optional capability service", data.services.tools, "blocks", true]
             ];
-            list.innerHTML = checks.map(function (item) { return '<li class="check-row"><span class="check-icon"><i data-lucide="' + (item[2] ? "check" : item[3] ? "alert-circle" : "minus") + '"></i></span><span class="check-copy"><strong>' + item[0] + '</strong><small>' + item[1] + '</small></span>' + h.statusPill(item[2], "Ready", item[3] ? "Needs attention" : "Optional") + '</li>'; }).join("");
+            list.innerHTML = checks.map(function (item) { return h.serviceCheckRow(item[0], item[1], item[2], item[3], {optional: item[4], retry: true}); }).join("");
             document.getElementById("progress-core").className = data.services.comms.reachable && data.services.lucent.reachable ? "is-complete" : "is-current";
             document.getElementById("progress-mind").className = data.counts.minds ? "is-complete" : "is-current";
             document.getElementById("progress-tools").className = data.services.tools.reachable ? "is-complete" : "";
@@ -46,6 +46,7 @@ window.addEventListener("DOMContentLoaded", function () {
         } catch (error) { list.innerHTML = '<li><div class="error-state">' + h.escapeHtml(error.message) + '</div></li>'; }
     }
     document.getElementById("setup-refresh").addEventListener("click", load);
+    document.getElementById("setup-checks").addEventListener("click", function (event) { if (event.target.closest("[data-health-retry]")) load(); });
     document.getElementById("setup-check-name").addEventListener("click", async function () {
         const name = document.getElementById("setup-mind-name").value.trim();
         const result = document.getElementById("setup-name-result");
