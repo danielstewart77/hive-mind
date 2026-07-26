@@ -25,9 +25,12 @@ and static edits deploy live; route changes need a container restart.
 `.env` keys: `HIVE_SECRET_KEY` (session signing — share with the terminal
 site), `LUCENT_BEARER_TOKEN`, and `COMMS_BEARER_TOKEN`. Capability Node
 endpoints can be supplied with `OLLAMA_URL` and `PIHOLE_URL`; Hive Tools and
-the voice servers use their existing service URLs. On first launch against
-an empty db, `HIVE_SEED_USERNAME` and `HIVE_SEED_PASSWORD` create the one
-account; inert afterward.
+the voice servers discover their existing service URLs. Use
+`EDGE_MIND_NAMES` for comma-separated remote minds that cannot be identified
+from local config or an IP endpoint, and `EDGE_MIND_PROFILES` for profile
+overrides such as `hex:sentinel`. On first launch against an empty db,
+`HIVE_SEED_USERNAME` and `HIVE_SEED_PASSWORD` create the one account; inert
+afterward.
 
 ## Test
 

@@ -75,7 +75,14 @@
             data.edge_minds = data.minds.filter(function (mind) {
                 const local = mind.local_config;
                 const config = local && local.config || {};
-                return !local || Boolean(config.remote || config.role || config.deployment);
+                let externalAddress = false;
+                if (!local && mind.gateway_url) {
+                    try {
+                        const host = new URL(mind.gateway_url).hostname.replace(/^\[|\]$/g, "");
+                        externalAddress = /^(?:\d{1,3}\.){3}\d{1,3}$/.test(host) || host.includes(":");
+                    } catch (error) { externalAddress = false; }
+                }
+                return Boolean(config.remote || config.role || config.deployment || externalAddress);
             });
         }
         if (!Array.isArray(data.capability_nodes)) data.capability_nodes = [];

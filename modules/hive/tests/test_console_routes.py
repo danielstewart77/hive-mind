@@ -32,6 +32,16 @@ def test_home_redirects_authenticated_owner_to_overview(tmp_path, monkeypatch):
     assert response.headers["location"] == "/overview"
 
 
+def test_login_uses_edge_mind_taxonomy(tmp_path, monkeypatch):
+    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
+    monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
+    response = TestClient(main_mod.app).get("/login")
+
+    assert response.status_code == 200
+    assert "Edge Minds" in response.text
+    assert "Edge Nodes" not in response.text
+
+
 def test_console_pages_require_authentication(tmp_path, monkeypatch):
     monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
@@ -95,6 +105,7 @@ def test_console_javascript_exports_overview_normalization():
     assert "function normalizeOverview(data)" in source
     assert "last_activity" in source
     assert "Hive Comms returned live registry and session data." in source
+    assert "new URL(mind.gateway_url)" in source
     assert "normalizeOverview: normalizeOverview" in source
     assert "Diagnostic" in source
 
@@ -130,7 +141,14 @@ def test_unknown_settings_section_is_not_found(tmp_path, monkeypatch):
 
 def test_overview_api_combines_minds_sessions_and_service_health(tmp_path, monkeypatch):
     client = _authed_client(tmp_path, monkeypatch)
-    minds = [{"name": "ada", "id": "mind-1", "last_seen": 123}]
+    minds = [
+        {
+            "name": "ada",
+            "id": "mind-1",
+            "gateway_url": "http://192.168.4.20:8421",
+            "last_seen": 123,
+        }
+    ]
     sessions = [
         {
             "id": "session-1",
@@ -222,6 +240,31 @@ def test_edge_minds_api_returns_external_minds_as_managed_nodes(tmp_path, monkey
     assert [row["name"] for row in response.json()["edge_minds"]] == ["arnold"]
     assert response.json()["edge_minds"][0]["host"] == "deadpool"
     assert response.json()["edge_minds"][0]["profile"] == "standard"
+
+
+def test_edge_mind_rows_require_topology_evidence_and_apply_profile_overrides(
+    monkeypatch,
+):
+    monkeypatch.setenv("EDGE_MIND_PROFILES", "hex:sentinel")
+    registry = [
+        {
+            "name": "ada",
+            "id": "local-1",
+            "gateway_url": "http://ada:8420",
+            "local_config": None,
+        },
+        {
+            "name": "hex",
+            "id": "edge-1",
+            "gateway_url": "http://192.168.4.16:8421",
+            "local_config": None,
+        },
+    ]
+
+    rows = main_mod._edge_mind_rows(registry)
+
+    assert [row["name"] for row in rows] == ["hex"]
+    assert rows[0]["profile"] == "sentinel"
 
 
 def test_edge_mind_bootstrap_validates_input_and_never_includes_credentials(
@@ -360,15 +403,17 @@ def test_capability_nodes_api_groups_external_services_by_function(tmp_path, mon
 
 def test_capability_nodes_leave_optional_unconfigured_services_idle(tmp_path, monkeypatch):
     client = _authed_client(tmp_path, monkeypatch)
-    for name in ("OLLAMA_URL", "OLLAMA_BASE_URL", "PIHOLE_URL"):
+    for name in ("HIVE_TOOLS_URL", "OLLAMA_URL", "OLLAMA_BASE_URL", "PIHOLE_URL"):
         monkeypatch.delenv(name, raising=False)
-    health = AsyncMock(
-        return_value={
-            "reachable": True,
-            "message": "Ready",
-            "action": "No action is required.",
+    async def probe(url, **kwargs):
+        reachable = "hive-tools" not in url
+        return {
+            "reachable": reachable,
+            "message": "Ready" if reachable else "Unavailable",
+            "action": "No action is required." if reachable else "Check the service.",
         }
-    )
+
+    health = AsyncMock(side_effect=probe)
     with (
         patch.object(
             main_mod,
@@ -391,7 +436,7 @@ def test_capability_nodes_leave_optional_unconfigured_services_idle(tmp_path, mo
     assert by_id["hive-tools"]["health"]["detail"] == "Not configured"
     assert by_id["ollama"]["configured"] is False
     assert by_id["pihole"]["configured"] is False
-    assert health.await_count == 2
+    assert health.await_count == 3
 
 
 def test_capability_node_health_probes_run_concurrently(monkeypatch):

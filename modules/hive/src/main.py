@@ -5,6 +5,7 @@ self-contained; the auth db and secret are shared with the terminal site.
 """
 
 import asyncio
+import ipaddress
 import json
 import os
 import re
@@ -437,22 +438,39 @@ async def api_overview(user: dict = Depends(require_auth)):
 
 def _edge_mind_rows(registry: list[dict]) -> list[dict]:
     rows = []
+    profile_overrides = _edge_mind_profile_overrides()
+    name_overrides = _edge_mind_name_overrides() | set(profile_overrides)
     for mind in registry:
-        local = mind.get("local_config") or {}
+        local_value = mind.get("local_config")
+        local = local_value if isinstance(local_value, dict) else {}
         config = local.get("config") or {}
-        is_remote = local == {} or bool(config.get("remote"))
-        is_edge_mind = is_remote or bool(config.get("role")) or bool(config.get("deployment"))
+        name = str(mind.get("name") or "")
+        gateway_url = str(mind.get("gateway_url") or "")
+        parsed = urllib.parse.urlparse(gateway_url)
+        external_address = False
+        if not local and parsed.hostname:
+            with suppress(ValueError):
+                address = ipaddress.ip_address(parsed.hostname)
+                external_address = not address.is_loopback and not address.is_unspecified
+        is_edge_mind = (
+            bool(config.get("remote"))
+            or bool(config.get("role"))
+            or bool(config.get("deployment"))
+            or name.lower() in name_overrides
+            or external_address
+        )
         if not is_edge_mind:
             continue
-        gateway_url = mind.get("gateway_url") or ""
-        parsed = urllib.parse.urlparse(gateway_url)
+        profile = str(config.get("profile") or profile_overrides.get(name.lower()) or "standard")
+        if profile not in _EDGE_MIND_PROFILES:
+            profile = "standard"
         rows.append(
             {
-                "name": mind.get("name") or "Unnamed",
+                "name": name or "Unnamed",
                 "id": mind.get("id") or "",
                 "host": parsed.hostname or "Remote machine",
                 "gateway_url": gateway_url,
-                "profile": config.get("profile") or "standard",
+                "profile": profile,
                 "role": config.get("role") or "Connected",
                 "deployment": config.get("deployment") or "Remote",
                 "harness": mind.get("harness") or config.get("harness") or "Unknown",
@@ -498,6 +516,26 @@ _EDGE_MIND_HARNESSES = {
     "codex_sdk_ollama",
 }
 _EDGE_MIND_SURFACES = {"telegram", "discord"}
+
+
+def _edge_mind_name_overrides() -> set[str]:
+    return {
+        name.strip().lower()
+        for name in os.getenv("EDGE_MIND_NAMES", "").split(",")
+        if name.strip()
+    }
+
+
+def _edge_mind_profile_overrides() -> dict[str, str]:
+    overrides = {}
+    for item in os.getenv("EDGE_MIND_PROFILES", "").split(","):
+        name, separator, profile = item.strip().partition(":")
+        if not separator:
+            name, separator, profile = item.strip().partition("=")
+        normalized_profile = profile.strip().lower()
+        if separator and name.strip() and normalized_profile in _EDGE_MIND_PROFILES:
+            overrides[name.strip().lower()] = normalized_profile
+    return overrides
 
 _EDGE_MIND_BUNDLES = {
     "standard": [
@@ -1189,6 +1227,8 @@ def _capability_node_specs() -> list[dict]:
             "description": "Approval-aware access to privileged actions and external systems.",
             "endpoint": _hive_tools_base_url(),
             "health_path": "/health",
+            "auto_discover": True,
+            "configured": bool(os.getenv("HIVE_TOOLS_URL")),
             "access": "Operator policy and approval gates",
             "consumers": "Authorized operator minds",
             "icon": "shield-check",
@@ -1211,6 +1251,8 @@ def _capability_node_specs() -> list[dict]:
             "description": "Reference-voice synthesis for minds assigned to Chatterbox.",
             "endpoint": voice_urls["chatterbox"],
             "health_path": "/health",
+            "auto_discover": True,
+            "configured": bool(os.getenv("CHATTERBOX_VOICE_URL")),
             "access": "Hive network",
             "consumers": "Minds with Chatterbox voice assignment",
             "icon": "audio-lines",
@@ -1222,6 +1264,8 @@ def _capability_node_specs() -> list[dict]:
             "description": "Lightweight speech synthesis for minds assigned to Kokoro.",
             "endpoint": voice_urls["kokoro"],
             "health_path": "/health",
+            "auto_discover": True,
+            "configured": bool(os.getenv("KOKORO_VOICE_URL")),
             "access": "Hive network",
             "consumers": "Minds with Kokoro voice assignment",
             "icon": "audio-waveform",
@@ -1248,9 +1292,11 @@ async def _capability_node_data() -> dict:
         node = dict(spec)
         endpoint = str(node.pop("endpoint") or "").rstrip("/")
         health_path = str(node.pop("health_path") or "")
+        auto_discover = bool(node.pop("auto_discover", False))
+        explicitly_configured = bool(node.pop("configured", bool(endpoint)))
         installed = bool(tools.get("present")) if node["id"] == "hive-tools" else None
-        configured = bool(endpoint) and installed is not False
-        if configured:
+        configured = bool(endpoint) and (explicitly_configured or installed is True)
+        if endpoint and (configured or auto_discover):
             probes.append(
                 (
                     len(nodes),
@@ -1286,7 +1332,19 @@ async def _capability_node_data() -> dict:
     if probes:
         results = await asyncio.gather(*(probe for _, probe in probes))
         for (node_index, _), health in zip(probes, results, strict=True):
-            nodes[node_index]["health"] = health
+            node = nodes[node_index]
+            if health["reachable"]:
+                node["configured"] = True
+                node["health"] = health
+            elif node["configured"]:
+                node["health"] = health
+            else:
+                node["health"] = {
+                    "reachable": False,
+                    "detail": "Not configured",
+                    "message": f"{node['name']} is not configured for this Hive.",
+                    "action": f"Configure the {node['name']} endpoint to manage it here.",
+                }
     return {
         "summary": {
             "total": len(nodes),
