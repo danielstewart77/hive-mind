@@ -58,6 +58,24 @@ def test_console_pages_render_the_new_application_shell(tmp_path, monkeypatch):
         assert "console-sidebar" in response.text, path
 
 
+def test_overview_consumers_normalize_live_data_before_rendering(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
+
+    for path in ("/overview", "/setup", "/settings/connections"):
+        response = client.get(path)
+        assert response.status_code == 200
+        assert "normalizeOverview(await h.requestJson" in response.text
+
+
+def test_console_javascript_exports_overview_normalization():
+    source = (main_mod.BASE_DIR / "static" / "console.js").read_text()
+
+    assert "function normalizeOverview(data)" in source
+    assert "last_activity" in source
+    assert "Hive Comms returned live registry and session data." in source
+    assert "normalizeOverview: normalizeOverview" in source
+
+
 def test_mind_detail_renders_for_authenticated_owner(tmp_path, monkeypatch):
     client = _authed_client(tmp_path, monkeypatch)
 

@@ -43,7 +43,7 @@
 window.addEventListener("DOMContentLoaded", async function () {
     const h = window.HiveConsole;
     try {
-        const data = await h.requestJson("/api/overview");
+        const data = h.normalizeOverview(await h.requestJson("/api/overview"));
         document.getElementById("metric-minds").textContent = data.counts.minds;
         document.getElementById("metric-sessions").textContent = data.counts.sessions;
         const coreReady = [data.services.comms, data.services.lucent].filter(function (item) { return item.reachable; }).length;
