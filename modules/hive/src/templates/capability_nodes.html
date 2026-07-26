@@ -1,0 +1,46 @@
+{% extends "layout.html" %}
+{% block title %}Capability Nodes · Hive{% endblock %}
+{% block content %}
+<main class="page">
+    <header class="page-header">
+        <div class="page-header-copy"><p class="page-eyebrow">External capabilities</p><h1 class="page-title">Capability Nodes</h1><p class="page-description">Services that provide models, actions, voice, or infrastructure without placing privileged access inside a mind.</p></div>
+        <div class="page-actions"><button class="button button-quiet" id="capability-refresh" type="button"><i data-lucide="refresh-cw"></i>Refresh</button></div>
+    </header>
+    <section class="metric-grid" aria-label="Capability Node summary">
+        <article class="metric surface"><div class="metric-top"><span class="metric-label">Known nodes</span><span class="metric-icon"><i data-lucide="network"></i></span></div><div class="metric-value" id="cap-total">—</div><div class="metric-detail">Available integration points</div></article>
+        <article class="metric surface"><div class="metric-top"><span class="metric-label">Configured</span><span class="metric-icon"><i data-lucide="plug-zap"></i></span></div><div class="metric-value" id="cap-configured">—</div><div class="metric-detail">Wired into this Hive</div></article>
+        <article class="metric surface"><div class="metric-top"><span class="metric-label">Healthy</span><span class="metric-icon"><i data-lucide="circle-check-big"></i></span></div><div class="metric-value" id="cap-healthy">—</div><div class="metric-detail">Responding now</div></article>
+        <article class="metric surface"><div class="metric-top"><span class="metric-label">Needs attention</span><span class="metric-icon"><i data-lucide="triangle-alert"></i></span></div><div class="metric-value" id="cap-attention">—</div><div class="metric-detail">Configured but unavailable</div></article>
+    </section>
+    <div id="capability-error" class="error-state" hidden></div>
+    <section class="capability-grid" id="capability-grid"><div class="loading-state">Checking Capability Nodes…</div></section>
+</main>
+<script>
+window.addEventListener("DOMContentLoaded", function () {
+    const h = window.HiveConsole;
+    function statusMarkup(node) {
+        if (node.health.reachable) return h.statusPill(true, "Ready", "Unavailable");
+        if (!node.configured) return '<span class="status-pill is-warn"><span></span>Not configured</span>';
+        return h.statusPill(false, "Ready", "Needs attention");
+    }
+    async function load() {
+        const errorBox = document.getElementById("capability-error"); errorBox.hidden = true;
+        try {
+            const data = await h.requestJson("/api/capability-nodes");
+            document.getElementById("cap-total").textContent = data.summary.total;
+            document.getElementById("cap-configured").textContent = data.summary.configured;
+            document.getElementById("cap-healthy").textContent = data.summary.healthy;
+            document.getElementById("cap-attention").textContent = data.summary.attention;
+            document.getElementById("capability-grid").innerHTML = data.nodes.map(function (node) {
+                const capabilityCount = node.capabilities ? '<div><dt>Capabilities</dt><dd>' + node.capabilities.length + ' published</dd></div>' : '';
+                return '<details class="capability-card surface"><summary><span class="tool-symbol"><i data-lucide="' + h.escapeHtml(node.icon) + '"></i></span><span class="capability-title"><small>' + h.escapeHtml(node.kind) + '</small><strong>' + h.escapeHtml(node.name) + '</strong></span>' + statusMarkup(node) + '<i class="service-chevron" data-lucide="chevron-down"></i></summary><div class="capability-body"><p>' + h.escapeHtml(node.description) + '</p><dl><div><dt>Access</dt><dd>' + h.escapeHtml(node.access) + '</dd></div><div><dt>Consumers</dt><dd>' + h.escapeHtml(node.consumers) + '</dd></div><div><dt>Endpoint</dt><dd class="mono">' + h.escapeHtml(node.endpoint || "Not configured") + '</dd></div>' + capabilityCount + '<div><dt>Health</dt><dd>' + h.escapeHtml(node.health.message) + '</dd></div><div><dt>Next step</dt><dd>' + h.escapeHtml(node.health.action) + '</dd></div></dl></div></details>';
+            }).join("");
+            if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}});
+        } catch (error) { errorBox.hidden = false; errorBox.textContent = error.message; }
+    }
+    document.getElementById("capability-refresh").addEventListener("click", load);
+    load();
+    window.setInterval(load, 30000);
+});
+</script>
+{% endblock %}

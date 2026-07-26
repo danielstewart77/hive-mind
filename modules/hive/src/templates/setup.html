@@ -2,8 +2,8 @@
 {% block title %}Setup · Hive{% endblock %}
 {% block content %}
 <main class="page">
-    <header class="page-header"><div class="page-header-copy"><p class="page-eyebrow">First run</p><h1 class="page-title">Set up your Hive</h1><p class="page-description">Confirm the core services, register the first mind, then add optional capabilities and machines.</p></div></header>
-    <div class="setup-progress" aria-label="Setup progress"><span class="is-current" id="progress-core"></span><span id="progress-mind"></span><span id="progress-tools"></span><span id="progress-outpost"></span></div>
+    <header class="page-header"><div class="page-header-copy"><p class="page-eyebrow">First run</p><h1 class="page-title">Set up your Hive</h1><p class="page-description">Confirm the core, register the first mind, then connect Edge Minds and Capability Nodes.</p></div></header>
+    <div class="setup-progress" aria-label="Setup progress"><span class="is-current" id="progress-core"></span><span id="progress-mind"></span><span id="progress-capabilities"></span><span id="progress-edge"></span></div>
     <div class="setup-grid">
         <section class="surface">
             <div class="surface-header"><div><h2>Readiness</h2><p>Live checks from this installation</p></div><button class="icon-button" type="button" id="setup-refresh" aria-label="Refresh readiness"><i data-lucide="refresh-cw"></i></button></div>
@@ -20,7 +20,7 @@
             </section>
             <section class="surface">
                 <div class="surface-header"><div><h2>Expand your Hive</h2><p>Optional after the first mind</p></div></div>
-                <ul class="service-list"><li class="service-row"><span class="service-icon"><i data-lucide="blocks"></i></span><span class="service-copy"><strong>Hive Tools</strong><small>Add shared capabilities</small></span><a class="surface-link" href="/tools">Review</a></li><li class="service-row"><span class="service-icon"><i data-lucide="server-cog"></i></span><span class="service-copy"><strong>Outpost</strong><small>Add another machine</small></span><a class="surface-link" href="/outposts/new">Add</a></li></ul>
+                <ul class="service-list"><li class="service-row"><span class="service-icon"><i data-lucide="network"></i></span><span class="service-copy"><strong>Capability Nodes</strong><small>Connect models, actions, voice, and infrastructure</small></span><a class="surface-link" href="/capability-nodes">Review</a></li><li class="service-row"><span class="service-icon"><i data-lucide="orbit"></i></span><span class="service-copy"><strong>Edge Mind</strong><small>Add cognition beyond the Hive core</small></span><a class="surface-link" href="/edge-minds/new">Add</a></li></ul>
             </section>
         </aside>
     </div>
@@ -32,16 +32,24 @@ window.addEventListener("DOMContentLoaded", function () {
         const list = document.getElementById("setup-checks"); list.innerHTML = '<li class="loading-state">Running checks…</li>';
         try {
             const data = h.normalizeOverview(await h.requestJson("/api/overview"));
+            const capabilityNodes = data.capability_nodes || [];
+            const configuredCapabilities = capabilityNodes.filter(function (node) { return node.configured; });
+            const capabilityHealth = {
+                reachable: configuredCapabilities.length > 0 && configuredCapabilities.every(function (node) { return node.health.reachable; }),
+                message: configuredCapabilities.length ? configuredCapabilities.filter(function (node) { return node.health.reachable; }).length + " of " + configuredCapabilities.length + " configured Capability Nodes are healthy." : "No Capability Nodes are configured yet.",
+                action: configuredCapabilities.length ? "Open Capability Nodes to inspect any unavailable service." : "Connect a Capability Node when the Hive needs external models, actions, voice, or infrastructure."
+            };
             const checks = [
                 ["Hive Comms", "Messages, sessions, and mind registration", data.services.comms, "radio-tower", false],
                 ["Lucent", "Memory and knowledge graph", data.services.lucent, "database", false],
                 ["Registered mind", data.counts.minds ? data.counts.minds + " available" : "No minds registered yet", {reachable: data.counts.minds > 0, message: data.counts.minds ? "Hive Comms reports " + data.counts.minds + " registered minds." : "Hive Comms does not report any registered minds.", action: data.counts.minds ? "No action is required." : "Open an identity conversation to register the first mind."}, "brain-circuit", false],
-                ["Hive Tools", data.services.tools.installed ? "Capability service installed" : "Optional capability service", data.services.tools, "blocks", true]
+                ["Capability Nodes", configuredCapabilities.length ? configuredCapabilities.length + " configured" : "Optional external services", capabilityHealth, "network", configuredCapabilities.length === 0]
             ];
             list.innerHTML = checks.map(function (item) { return h.serviceCheckRow(item[0], item[1], item[2], item[3], {optional: item[4], retry: true}); }).join("");
             document.getElementById("progress-core").className = data.services.comms.reachable && data.services.lucent.reachable ? "is-complete" : "is-current";
             document.getElementById("progress-mind").className = data.counts.minds ? "is-complete" : "is-current";
-            document.getElementById("progress-tools").className = data.services.tools.reachable ? "is-complete" : "";
+            document.getElementById("progress-capabilities").className = data.counts.capability_nodes ? "is-complete" : "";
+            document.getElementById("progress-edge").className = data.counts.edge_minds ? "is-complete" : "";
             if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}});
         } catch (error) { list.innerHTML = '<li><div class="error-state">' + h.escapeHtml(error.message) + '</div></li>'; }
     }

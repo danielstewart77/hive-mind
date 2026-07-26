@@ -1,0 +1,80 @@
+{% extends "layout.html" %}
+{% block title %}Add Edge Mind · Hive{% endblock %}
+{% block content %}
+<main class="page">
+    <header class="page-header">
+        <div class="page-header-copy"><p class="page-eyebrow">Distributed cognition</p><h1 class="page-title">Add an Edge Mind</h1><p class="page-description">Choose the deployment profile first, then configure the runtime that will connect to this Hive.</p></div>
+        <div class="page-actions"><a class="button button-quiet" href="/edge-minds"><i data-lucide="arrow-left"></i>Cancel</a></div>
+    </header>
+    <div class="setup-grid edge-setup-grid">
+        <section class="surface">
+            <div class="settings-section-copy"><h2>Deployment profile</h2><p>A profile defines the software bundle around the mind. It does not define identity, personality, voice, or backstory.</p></div>
+            <form class="surface-body overview-stack" id="edge-form">
+                <div class="choice-grid edge-profile-grid">
+                    <label class="choice"><input type="radio" name="profile" value="standard" checked><span class="choice-copy"><strong>Standard Edge Mind</strong><small>One connected mind runtime with the chosen harness and surfaces.</small></span></label>
+                    <label class="choice"><input type="radio" name="profile" value="sentinel"><span class="choice-copy"><strong>Sentinel Edge Mind</strong><small>A security mind plus telemetry, observability, and Sentinel-specific logic.</small></span></label>
+                </div>
+                <div class="form-grid">
+                    <div class="field"><label for="edge-name">Mind name</label><input id="edge-name" name="name" type="text" pattern="[a-z](?:[a-z0-9]|-){1,31}" placeholder="atlas" required><small>Lowercase letters, numbers, and hyphens.</small></div>
+                    <div class="field"><label for="edge-port">Local port</label><input id="edge-port" name="port" type="number" min="1024" max="65535" value="8421" required></div>
+                </div>
+                <div class="field is-full"><label>Machine role</label><div class="choice-grid"><label class="choice"><input type="radio" name="role" value="operator" checked><span class="choice-copy"><strong>Operator</strong><small>Full host access for a machine you control.</small></span></label><label class="choice"><input type="radio" name="role" value="satellite"><span class="choice-copy"><strong>Satellite</strong><small>Conversation and memory without host control.</small></span></label></div></div>
+                <div class="form-grid">
+                    <div class="field"><label for="edge-deployment">Deployment</label><select id="edge-deployment" name="deployment"><option value="systemd">Linux service</option><option value="container">Container</option><option value="windows-task">Windows task</option></select></div>
+                    <div class="field"><label for="edge-harness">Harness and provider</label><select id="edge-harness" name="harness"><option value="claude_cli_claude">Claude CLI with Anthropic</option><option value="claude_cli_ollama">Claude CLI with Ollama</option><option value="codex_cli_codex">Codex CLI with OpenAI</option><option value="codex_cli_ollama">Codex CLI with Ollama</option><option value="claude_sdk_claude">Claude SDK with Anthropic</option><option value="codex_sdk_codex">Codex SDK with OpenAI</option></select></div>
+                </div>
+                <div class="field is-full"><label>Conversation surfaces</label><div class="choice-grid"><label class="choice"><input type="checkbox" name="surface" value="telegram" checked><span class="choice-copy"><strong>Telegram</strong><small>Primary conversational interface.</small></span></label><label class="choice"><input type="checkbox" name="surface" value="discord"><span class="choice-copy"><strong>Discord</strong><small>Optional second chat interface.</small></span></label></div></div>
+                <div id="edge-error" class="error-state" hidden></div>
+                <div class="form-actions"><button class="button button-primary" type="submit"><i data-lucide="wand-sparkles"></i>Build deployment plan</button></div>
+            </form>
+        </section>
+        <aside class="overview-stack">
+            <section class="surface">
+                <div class="surface-header"><div><h2>Bundle preview</h2><p id="bundle-profile-copy">Standard profile</p></div></div>
+                <ul class="service-list" id="bundle-preview"></ul>
+            </section>
+            <div class="notice"><i data-lucide="shield-check"></i><span>Generated commands contain no Hive credentials. Connection secrets are entered on the target node.</span></div>
+            <section class="surface" id="bootstrap-result" hidden>
+                <div class="surface-header"><div><h2>Deployment plan</h2><p>Run each step on the target node.</p></div></div>
+                <div class="surface-body overview-stack" id="bootstrap-commands"></div>
+            </section>
+        </aside>
+    </div>
+</main>
+<script>
+window.addEventListener("DOMContentLoaded", function () {
+    const h = window.HiveConsole, form = document.getElementById("edge-form");
+    const previews = {
+        standard: [["Edge Mind runtime", "Harness, surfaces, and deployment service", "orbit"]],
+        sentinel: [["Edge Mind runtime", "Sentinel mind runtime", "orbit"], ["Hive Sentinel", "Triage, investigation, and response logic", "shield-check"], ["Telemetry collectors", "NetSage, Suricata, Zeek, or Windows events", "scan-line"], ["Loki and Grafana", "Logs, queries, and dashboards", "chart-no-axes-combined"], ["Sentinel dashboard", "Dedicated security management surface", "monitor-dot"]]
+    };
+    function renderPreview() {
+        const profile = form.querySelector('[name="profile"]:checked').value;
+        document.getElementById("bundle-profile-copy").textContent = profile === "sentinel" ? "Sentinel profile" : "Standard profile";
+        document.getElementById("bundle-preview").innerHTML = previews[profile].map(function (item) { return '<li class="service-row"><span class="service-icon"><i data-lucide="' + item[2] + '"></i></span><span class="service-copy"><strong>' + item[0] + '</strong><small>' + item[1] + '</small></span></li>'; }).join("");
+        if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}});
+    }
+    form.addEventListener("change", function (event) { if (event.target.name === "profile") renderPreview(); });
+    form.addEventListener("submit", async function (event) {
+        event.preventDefault();
+        const errorBox = document.getElementById("edge-error"); errorBox.hidden = true;
+        const body = {
+            name: form.elements.name.value,
+            profile: form.querySelector('[name="profile"]:checked').value,
+            role: form.querySelector('[name="role"]:checked').value,
+            deployment: form.elements.deployment.value,
+            harness: form.elements.harness.value,
+            surfaces: Array.from(form.querySelectorAll('[name="surface"]:checked')).map(function (input) { return input.value; }),
+            port: Number(form.elements.port.value)
+        };
+        try {
+            const data = await h.requestJson("/api/edge-minds/bootstrap", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+            document.getElementById("bootstrap-commands").innerHTML = (data.commands || []).map(function (step, index) { const id = "bootstrap-command-" + index; return '<div><p class="command-label">' + h.escapeHtml(step.name) + '</p><div class="code-wrap"><pre class="code-panel" id="' + id + '">' + h.escapeHtml(step.command) + '</pre><button class="icon-button" type="button" data-copy="#' + id + '" aria-label="Copy command"><i data-lucide="copy"></i></button></div></div>'; }).join("");
+            document.getElementById("bootstrap-result").hidden = false;
+            if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}});
+        } catch (error) { errorBox.hidden = false; errorBox.textContent = error.message; }
+    });
+    renderPreview();
+});
+</script>
+{% endblock %}

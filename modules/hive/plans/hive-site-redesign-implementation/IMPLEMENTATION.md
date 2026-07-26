@@ -8,3 +8,7 @@
 6. Replace the settings tab strip with scoped settings navigation and working controls only.
 7. Preserve existing graph, memory, rules, canvas, login, and terminal access through the new shell.
 8. Run the full test, type, and lint suites, then rebuild and health-check the deployed container.
+> Historical terminology note (2026-07-26): this implementation plan predates
+> the current taxonomy. "Outposts" are now **Edge Minds**, and external tools
+> are organized as **Capability Nodes**. Legacy route names remain only as
+> compatibility redirects.

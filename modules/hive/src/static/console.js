@@ -36,8 +36,15 @@
         const state = service.reachable ? goodText : badText;
         const message = service.message || (service.reachable ? "The health check passed." : String(service.detail || "The health check failed."));
         const action = service.action || (service.reachable ? "No action is required." : "Check the service configuration and retry.");
+        let diagnostic = service.detail;
+        if (diagnostic && typeof diagnostic === "object") {
+            try { diagnostic = JSON.stringify(diagnostic); } catch (error) { diagnostic = String(diagnostic); }
+        }
+        diagnostic = String(diagnostic || (service.status_code ? "HTTP " + service.status_code : "No diagnostic detail was returned."));
+        if (diagnostic.length > 300) diagnostic = diagnostic.slice(0, 297) + "…";
+        const endpoint = service.endpoint ? '<div><dt>Endpoint</dt><dd class="mono">' + escapeHtml(service.endpoint) + '</dd></div>' : "";
         const retry = options.retry ? '<button class="button button-quiet" type="button" data-health-retry><i data-lucide="refresh-cw"></i>Retry check</button>' : "";
-        return '<li class="service-item"><details class="service-disclosure"><summary class="service-row"><span class="service-icon"><i data-lucide="' + escapeHtml(icon) + '"></i></span><span class="service-copy"><strong>' + escapeHtml(name) + '</strong><small>' + escapeHtml(description) + '</small></span>' + statusPill(Boolean(service.reachable), goodText, badText) + '<i class="service-chevron" data-lucide="chevron-down"></i></summary><div class="service-diagnostic"><dl><div><dt>State</dt><dd>' + escapeHtml(state) + '</dd></div><div><dt>Health check</dt><dd>' + escapeHtml(message) + '</dd></div><div><dt>Next step</dt><dd>' + escapeHtml(action) + '</dd></div></dl>' + retry + '</div></details></li>';
+        return '<li class="service-item"><details class="service-disclosure"><summary class="service-row"><span class="service-icon"><i data-lucide="' + escapeHtml(icon) + '"></i></span><span class="service-copy"><strong>' + escapeHtml(name) + '</strong><small>' + escapeHtml(description) + '</small></span>' + statusPill(Boolean(service.reachable), goodText, badText) + '<i class="service-chevron" data-lucide="chevron-down"></i></summary><div class="service-diagnostic"><dl><div><dt>State</dt><dd>' + escapeHtml(state) + '</dd></div>' + endpoint + '<div><dt>Health check</dt><dd>' + escapeHtml(message) + '</dd></div><div><dt>Diagnostic</dt><dd class="mono">' + escapeHtml(diagnostic) + '</dd></div><div><dt>Next step</dt><dd>' + escapeHtml(action) + '</dd></div></dl>' + retry + '</div></details></li>';
     }
 
     function normalizeOverview(data) {
@@ -64,6 +71,18 @@
                 activity_status: current && current.activeCount ? "active" : "registered"
             });
         });
+        if (!Array.isArray(data.edge_minds)) {
+            data.edge_minds = data.minds.filter(function (mind) {
+                const local = mind.local_config;
+                const config = local && local.config || {};
+                return !local || Boolean(config.remote || config.role || config.deployment);
+            });
+        }
+        if (!Array.isArray(data.capability_nodes)) data.capability_nodes = [];
+        if (data.counts.edge_minds == null) data.counts.edge_minds = data.edge_minds.length;
+        if (data.counts.capability_nodes == null) {
+            data.counts.capability_nodes = data.services && data.services.tools && data.services.tools.installed ? 1 : 0;
+        }
         const comms = data.services && data.services.comms;
         if (comms && !comms.reachable && ((data.minds || []).length || sessions.length)) {
             data.services.comms = Object.assign({}, comms, {

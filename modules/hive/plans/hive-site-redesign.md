@@ -335,3 +335,7 @@ Place Graph, Memory, Rules, Canvas, and Terminal inside the new shell while reta
 ## Success Criteria
 
 A person unfamiliar with the repositories can clone Hive and reach a working first conversation without reading source code. They can tell what is healthy, understand the difference between a mind and an Outpost, add another machine through a guided bootstrap, install Hive Tools as an optional capability service, control which minds may use each tool, and find durable configuration in Settings without encountering implementation placeholders.
+> Historical terminology note (2026-07-26): this design predates the current
+> taxonomy. Its "Outpost" concept is now called an **Edge Mind**, and its
+> external tool integrations are now grouped as **Capability Nodes**. The
+> original wording remains below as a record of the earlier design.
