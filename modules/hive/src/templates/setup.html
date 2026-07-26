@@ -31,7 +31,7 @@ window.addEventListener("DOMContentLoaded", function () {
     async function load() {
         const list = document.getElementById("setup-checks"); list.innerHTML = '<li class="loading-state">Running checks…</li>';
         try {
-            const data = await h.requestJson("/api/overview");
+            const data = h.normalizeOverview(await h.requestJson("/api/overview"));
             const checks = [
                 ["Hive Comms", "Messages, sessions, and mind registration", data.services.comms, "radio-tower", false],
                 ["Lucent", "Memory and knowledge graph", data.services.lucent, "database", false],

@@ -40,7 +40,43 @@
         return '<li class="service-item"><details class="service-disclosure"><summary class="service-row"><span class="service-icon"><i data-lucide="' + escapeHtml(icon) + '"></i></span><span class="service-copy"><strong>' + escapeHtml(name) + '</strong><small>' + escapeHtml(description) + '</small></span>' + statusPill(Boolean(service.reachable), goodText, badText) + '<i class="service-chevron" data-lucide="chevron-down"></i></summary><div class="service-diagnostic"><dl><div><dt>State</dt><dd>' + escapeHtml(state) + '</dd></div><div><dt>Health check</dt><dd>' + escapeHtml(message) + '</dd></div><div><dt>Next step</dt><dd>' + escapeHtml(action) + '</dd></div></dl>' + retry + '</div></details></li>';
     }
 
-    window.HiveConsole = {escapeHtml: escapeHtml, requestJson: requestJson, formatTime: formatTime, statusPill: statusPill, serviceCheckRow: serviceCheckRow};
+    function normalizeOverview(data) {
+        const sessions = Array.isArray(data.sessions) ? data.sessions : [];
+        const activeStatuses = new Set(["active", "running"]);
+        const activity = new Map();
+        sessions.forEach(function (session) {
+            const mindId = String(session.mind_id || "");
+            if (!mindId) return;
+            const current = activity.get(mindId) || {lastActivity: null, activeCount: 0};
+            const timestamp = Number(session.last_active || session.created_at || 0) || null;
+            if (timestamp && (!current.lastActivity || timestamp > current.lastActivity)) current.lastActivity = timestamp;
+            if (activeStatuses.has(session.status)) current.activeCount += 1;
+            activity.set(mindId, current);
+        });
+        data.counts = data.counts || {};
+        data.counts.sessions = sessions.filter(function (session) { return activeStatuses.has(session.status); }).length;
+        data.minds = (data.minds || []).map(function (mind) {
+            if (Object.prototype.hasOwnProperty.call(mind, "last_activity")) return mind;
+            const current = activity.get(String(mind.id || "")) || activity.get(String(mind.name || ""));
+            return Object.assign({}, mind, {
+                last_activity: current ? current.lastActivity : null,
+                active_session_count: current ? current.activeCount : 0,
+                activity_status: current && current.activeCount ? "active" : "registered"
+            });
+        });
+        const comms = data.services && data.services.comms;
+        if (comms && !comms.reachable && ((data.minds || []).length || sessions.length)) {
+            data.services.comms = Object.assign({}, comms, {
+                reachable: true,
+                status_code: 200,
+                message: "Hive Comms returned live registry and session data.",
+                action: "No action is required."
+            });
+        }
+        return data;
+    }
+
+    window.HiveConsole = {escapeHtml: escapeHtml, requestJson: requestJson, formatTime: formatTime, statusPill: statusPill, serviceCheckRow: serviceCheckRow, normalizeOverview: normalizeOverview};
 
     const app = document.querySelector("[data-console-app]");
     if (app) {
