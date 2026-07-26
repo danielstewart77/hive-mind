@@ -298,6 +298,32 @@ class TestWsAttach:
 
         assert excinfo.value.code == 4410
 
+    def test_kill_session_with_rotated_to_closes_4412_with_successor(self, app_client, monkeypatch):
+        """A rotation swap kills the old session with a successor id already
+        known. The tile should reconnect straight to it instead of being
+        told the session simply ended (4410) and having to poll to find
+        out what replaced it."""
+        from starlette.websockets import WebSocketDisconnect
+
+        client, server_module = app_client
+        _run(_seed_session_and_mind(server_module, session_id="sess-rotating"))
+
+        fake_ws = _FakeMindWS(incoming=[b"tui up\r\n"])
+        _FakeHttpSession.ws_to_return = fake_ws
+        _FakeHttpSession.raise_on_connect = None
+        monkeypatch.setattr(server_module.aiohttp, "ClientSession", _FakeHttpSession)
+
+        with pytest.raises(WebSocketDisconnect) as excinfo:
+            with client.websocket_connect("/sessions/sess-rotating/attach") as ws:
+                assert ws.receive_bytes() == b"tui up\r\n"
+                client.portal.call(
+                    server_module.session_mgr.kill_session, "sess-rotating", "sess-successor"
+                )
+                ws.receive_bytes()  # blocks until the watcher closes the bridge
+
+        assert excinfo.value.code == 4412
+        assert excinfo.value.reason == "sess-successor"
+
     def test_mind_close_code_reaches_the_browser(self, app_client, monkeypatch):
         """A mind evicting a stale attach closes 1012, which is the tile's
         only signal to stand down rather than reconnect. Swallowing it into
