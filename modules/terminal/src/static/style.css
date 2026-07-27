@@ -1078,11 +1078,21 @@ body:has(.terminal-page) .content-wrapper > .terminal-box { display: none; }
     box-shadow: 0 0 8px rgba(78, 232, 252, 0.55);
 }
 
-/* the xterm canvas fills the tile under the header */
+/* the xterm canvas fills the tile under the header.
+
+   The grid is narrower than this box by whatever the tile's width leaves
+   over after a whole number of character cells, and the strips of stale
+   text that show up either side of the terminal live in exactly that
+   slack: no row element covers them, so no repaint xterm ever performs
+   can clear them. Paint containment gives this box its own paint area
+   that the browser must clip to, which is what keeps a dropped
+   invalidation from leaking outside the grid in the first place. */
 .term-xterm {
     flex: 1;
     min-height: 0;
     padding: 0.5rem;
+    overflow: hidden;
+    contain: paint;
 }
 .term-xterm .xterm { height: 100%; }
 

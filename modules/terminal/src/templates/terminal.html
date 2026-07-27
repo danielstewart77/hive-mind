@@ -296,10 +296,24 @@
                 requestAnimationFrame(function () { fitWhenSized(done, n + 1); });
             }
         }
+        // xterm paints only the rows it has marked dirty, so a repaint the
+        // browser never performed is never retried: the buffer behind the
+        // stale glyphs is already correct, and no later write touches those
+        // rows again. That is the shape of the artifacts on this terminal —
+        // garbage that survives indefinitely, and comes back correct the
+        // moment a selection forces those rows to re-render. Every moment
+        // where an invalidation is known to get dropped (a grid change, a
+        // return from a backgrounded tab whose rAF was throttled, a tile
+        // being clicked into) ends with the whole viewport repainted from
+        // the buffer. refresh() walks the visible rows only, so it costs a
+        // fraction of the fit that usually precedes it.
+        function repaint() {
+            try { term.refresh(0, term.rows - 1); } catch (e) {}
+        }
         function doFit() {
             const before = term.cols + "x" + term.rows;
             try { fitAddon.fit(); } catch (e) {}
-            if (term.cols + "x" + term.rows !== before) sendResize();
+            if (term.cols + "x" + term.rows !== before) { sendResize(); repaint(); }
         }
 
         let ws = null;
@@ -740,7 +754,12 @@
             if (e.key !== "Enter" && e.keyCode !== 13) return;
             flushPendingIme();
         }, true);
-        el.addEventListener("mousedown", function () { setFocusedPanel(panel); });
+        // Clicking into a tile is the moment a user who is looking at
+        // garbage acts on it, so it is the cheapest place to hang the cure:
+        // one click repaints instead of the select-the-text-to-read-it
+        // workaround. It runs before the drag that would start a selection,
+        // so a click that turns into a selection has already repainted.
+        el.addEventListener("mousedown", function () { setFocusedPanel(panel); repaint(); });
 
         // ── rotation reattach ─────────────────────────────────────
         function cancelReattachLoop() {
@@ -879,6 +898,7 @@
                 staleTimer = setInterval(function () { reattachIfStale(STALE_MS); }, 2000);
             },
             fit: doFit,
+            repaint: repaint,
             checkLiveness: function () { reattachIfStale(FOREGROUND_STALE_MS); },
             focus: function () { setFocusedPanel(panel); term.focus(); },
             refreshLabel: applyLabel,
@@ -1003,8 +1023,13 @@
     // moment the tab comes back, check each tile eagerly so a returning
     // user gets a reattach in a beat instead of a 30s black screen while
     // the browser waits out its own dead-socket timeout.
+    // A backgrounded tab has its requestAnimationFrame throttled to a
+    // trickle or stopped outright, and xterm's render debouncer is built on
+    // rAF: rows written while the tab was away can be marked dirty and
+    // never painted, and nothing marks them dirty a second time. Repaint
+    // every tile on the way back in, alongside the liveness check.
     function checkAllPanelsLive() {
-        openPanels.forEach(function (p) { p.checkLiveness(); });
+        openPanels.forEach(function (p) { p.checkLiveness(); p.repaint(); });
     }
     document.addEventListener("visibilitychange", function () {
         if (document.visibilityState === "visible") checkAllPanelsLive();
