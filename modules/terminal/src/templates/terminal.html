@@ -560,7 +560,19 @@
             };
             socket.onmessage = (ev) => {
                 lastRecvAt = Date.now();
-                term.write(ev.data instanceof ArrayBuffer ? new Uint8Array(ev.data) : ev.data);
+                if (ev.data instanceof ArrayBuffer) {
+                    term.write(new Uint8Array(ev.data));
+                    return;
+                }
+                // Terminal bytes always arrive as BINARY frames, so a TEXT
+                // frame is the gateway's control channel, never output. The
+                // only message on it today is a rotation that swapped the
+                // conversation under a pane that stayed put.
+                let control;
+                try { control = JSON.parse(ev.data); } catch (err) { return; }
+                if (control && control.type === "session_rotated" && control.session_id) {
+                    adoptRotation(control.session_id);
+                }
             };
             socket.onclose = (ev) => {
                 if (ws === socket) ws = null;
@@ -810,6 +822,23 @@
                 return;
             }
             reattachTimer = setTimeout(pollForSuccessor, 2000);
+        }
+        // A rotation that kept the pane. The conversation was replaced, the
+        // terminal was not: same tile, same socket, same pty, new session id.
+        // So this is attachSuccessor's bookkeeping with the reattach removed
+        // — touching the socket here is exactly the flicker-and-blank-screen
+        // the in-place rotation exists to avoid.
+        function adoptRotation(newId) {
+            if (!newId || newId === sessionId) return;
+            const oldId = sessionId;
+            sessionId = newId;
+            el.dataset.sessionId = sessionId;
+            migrateLabel(oldId, sessionId);
+            applyLabel();
+            reKey(oldId, sessionId);
+            // The TTS stream is per-session and the old one just closed.
+            if (speakerOn) { closeTtsStream(); openTtsStream(); }
+            refreshSessions();
         }
         function attachSuccessor(succ) {
             cancelReattachLoop();

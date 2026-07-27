@@ -102,7 +102,9 @@ def _open_tile(page, base, greeting):
         ws.on_message(
             lambda m: sent.append(m if isinstance(m, str) else m.decode("utf8", "replace"))
         )
-        ws.send(greeting)
+        # Terminal output is BINARY on the wire; TEXT is the
+        # gateway's control channel and the tile never prints it.
+        ws.send(greeting.encode())
 
     page.route_web_socket("**/api/terminal/attach/**", handle_ws)
     page.goto(base + "/terminal")
