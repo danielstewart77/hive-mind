@@ -22,10 +22,14 @@ Runs as container `hive-site` on :8710, on the `hivemind` docker network
 read-only for the memory browser. `src/` is bind-mounted, so template
 and static edits deploy live; route changes need a container restart.
 
-`.env` keys: `HIVE_SECRET_KEY` (session signing — share with the terminal
-site), `LUCENT_BEARER_TOKEN`, and `COMMS_BEARER_TOKEN`. Capability Node
-endpoints can be supplied with `OLLAMA_URL` and `PIHOLE_URL`; Hive Tools and
-the voice servers discover their existing service URLs. Use
+Copy `.env.example` to `.env`. `HIVE_SECRET_KEY` signs sessions and must be
+shared with the terminal site. `LUCENT_BEARER_TOKEN` and
+`COMMS_BEARER_TOKEN` authorize the core services. `HIVE_TOOLS_TOKEN` enables
+approval-gated Mind restarts from the configuration page. Capability Node
+endpoints can be supplied with `OLLAMA_URL` and `PIHOLE_URL`, then changed
+without a restart from the Capability Nodes page. `EDGE_COMMS_URL`,
+`EDGE_LUCENT_URL`, and `EDGE_HIVE_TOOLS_URL` are the LAN-reachable addresses
+stamped into generated Edge Mind plans. Use
 `EDGE_MIND_NAMES` for comma-separated remote minds that cannot be identified
 from local config or an IP endpoint, and `EDGE_MIND_PROFILES` for profile
 overrides such as `hex:sentinel`. On first launch against an empty db,

@@ -299,6 +299,15 @@ a { color: inherit; }
 .capability-body dl > div { display: grid; grid-template-columns: 95px minmax(0, 1fr); gap: 10px; }
 .capability-body dt { color: var(--console-faint); font-size: 10px; font-weight: 700; text-transform: uppercase; }
 .capability-body dd { margin: 0; color: #cbd2d6; font-size: 12px; overflow-wrap: anywhere; }
+.capability-config { display: grid; gap: 10px; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--console-line); }
+.capability-config .form-actions { justify-content: flex-start; }
+.capability-config > small { min-height: 16px; color: var(--console-muted); }
+.capability-manager { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--console-line); }
+.capability-manager .surface-header { padding: 0 0 10px; border: 0; }
+.capability-manager h3 { margin: 0; font-size: 14px; }
+.capability-manager p { margin: 4px 0 0; color: var(--console-muted); font-size: 11px; }
+.capability-model { display: flex; align-items: center; gap: 10px; }
+.capability-model .entity-copy { min-width: 0; flex: 1; }
 
 .setup-progress { display: flex; align-items: center; gap: 8px; margin-bottom: 18px; }
 .setup-progress span { height: 4px; flex: 1; border-radius: 2px; background: var(--console-line); }
