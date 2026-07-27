@@ -1,17 +1,14 @@
-"""A rotation that keeps the pane.
+"""The attach socket's two channels.
 
-When a session's context fills, the gateway retires it and starts a
-successor. For a browser tile that is a swap under the user's hands: the
-terminal, the pty and the socket all survive, only the session id changes.
-The gateway says so with a TEXT frame on the same socket — terminal output
-is always BINARY, so the two can never be confused — and the tile has to
-relabel itself in place. Tearing the socket down and reattaching is the
-failure this exists to prevent: it reads to the user as being thrown out
-of the conversation mid-sentence.
+Terminal output is always BINARY. TEXT frames are the gateway's control
+channel — never output, so the tile must not print them. A rotation is not
+on this channel: it replaces the conversation behind a session, not the
+session, so the tile keeps its id and its socket and is told nothing.
 
-A real browser, because the thing under test is what the page does to a
+A real browser, because the thing under test is what the page does with a
 live WebSocket it is already holding.
 """
+
 
 import json
 import os
@@ -128,39 +125,24 @@ def _screen(page) -> str:
     )
 
 
-def test_a_rotation_frame_moves_the_tile_to_the_successor(page):
+def test_a_text_frame_is_never_printed_into_the_pane(page):
+    """Terminal output is BINARY; TEXT is the gateway's control channel.
+    Anything arriving on it is a control message, and echoing one into the
+    pane corrupts the screen."""
     page, base = page
     sockets = _open_tile(page, base)
 
-    sockets[0].send(json.dumps({"type": "session_rotated", "session_id": "sess-new"}))
+    sockets[0].send("not terminal output")
     page.wait_for_timeout(400)
 
-    assert page.evaluate(
-        "() => document.querySelector('.term-panel').dataset.sessionId"
-    ) == "sess-new"
-    # One socket for the whole rotation: the tile must not have reattached.
-    assert len(sockets) == 1
+    assert "not terminal output" not in _screen(page)
 
 
-def test_the_same_socket_goes_on_carrying_the_conversation(page):
+def test_binary_output_still_reaches_the_screen(page):
     page, base = page
     sockets = _open_tile(page, base)
 
-    sockets[0].send(json.dumps({"type": "session_rotated", "session_id": "sess-new"}))
-    page.wait_for_timeout(300)
-    sockets[0].send(b"after the rotation\r\n")
+    sockets[0].send(b"live output\r\n")
     page.wait_for_timeout(400)
 
-    assert "after the rotation" in _screen(page)
-
-
-def test_a_text_frame_that_is_not_a_control_message_is_not_printed(page):
-    """The control channel is JSON only. Anything else on it is a bug
-    upstream, and echoing it into the pane corrupts the screen."""
-    page, base = page
-    sockets = _open_tile(page, base)
-
-    sockets[0].send("not json at all")
-    page.wait_for_timeout(400)
-
-    assert "not json at all" not in _screen(page)
+    assert "live output" in _screen(page)
