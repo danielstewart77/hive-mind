@@ -10,6 +10,7 @@
     <div class="overview-stack" id="mind-content">
         <section class="surface"><div class="surface-header"><h2>Overview</h2><span id="mind-status"></span></div><div class="surface-body"><dl class="detail-grid" id="mind-details"></dl></div></section>
         <section class="surface"><div class="surface-header"><div><h2>Runtime configuration</h2><p>Secret values are removed before this reaches the browser.</p></div></div><div class="surface-body"><div class="code-wrap"><pre class="code-panel" id="mind-config">Loading…</pre><button class="icon-button" type="button" data-copy="#mind-config" aria-label="Copy configuration"><i data-lucide="copy"></i></button></div></div></section>
+        <section class="surface" id="mind-editor" hidden><div class="surface-header"><div><h2>Default model</h2><p>Changes apply to new sessions after the Mind runtime restarts.</p></div></div><form class="surface-body overview-stack" id="mind-model-form"><div class="field"><label for="mind-default-model">Model name</label><input id="mind-default-model" name="default_model" list="mind-model-options" required><datalist id="mind-model-options"></datalist><small>Use a model supported by this Mind's configured provider.</small></div><div class="form-actions"><button class="button" type="submit">Save model</button><button class="button button-primary" id="mind-restart" type="button" hidden>Request restart</button></div><small id="mind-model-status"></small></form></section>
     </div>
 </main>
 <script>
@@ -32,11 +33,42 @@ window.addEventListener("DOMContentLoaded", async function () {
         ];
         document.getElementById("mind-details").innerHTML = details.map(function (item) { return '<div class="detail-item"><dt>' + h.escapeHtml(item[0]) + '</dt><dd>' + h.escapeHtml(item[1]) + '</dd></div>'; }).join("");
         document.getElementById("mind-config").textContent = mind.local_config ? JSON.stringify(cfg, null, 2) : "This mind is remote. Runtime configuration is managed on its host.";
+        if (mind.local_config && !cfg.remote && mind.local_config.source === "runtime.yaml") {
+            const editor = document.getElementById("mind-editor"); editor.hidden = false; editor.dataset.mindName = mind.name;
+            const configuration = await h.requestJson("/api/minds/" + encodeURIComponent(mind.name) + "/configuration");
+            document.getElementById("mind-default-model").value = configuration.configuration.default_model || cfg.default_model || mind.model || "";
+            document.getElementById("mind-model-options").innerHTML = (configuration.models || []).map(function (model) { return '<option value="' + h.escapeHtml(model) + '"></option>'; }).join("");
+        }
         if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}});
     } catch (error) {
         document.getElementById("mind-content").hidden = true;
         const box = document.getElementById("mind-error"); box.hidden = false; box.textContent = error.message;
     }
+    document.getElementById("mind-model-form").addEventListener("submit", async function (event) {
+        event.preventDefault();
+        const editor = document.getElementById("mind-editor"), status = document.getElementById("mind-model-status"), restart = document.getElementById("mind-restart");
+        status.textContent = "Saving…";
+        try {
+            const data = await h.requestJson("/api/minds/" + encodeURIComponent(editor.dataset.mindName) + "/configuration", {method: "PATCH", headers: {"Content-Type": "application/json"}, body: JSON.stringify({default_model: event.target.elements.default_model.value})});
+            status.textContent = "Saved. Restart this Mind to activate the new default model."; restart.hidden = !data.restart_required;
+        } catch (error) { status.textContent = error.message; }
+    });
+    document.getElementById("mind-restart").addEventListener("click", async function () {
+        const editor = document.getElementById("mind-editor"), status = document.getElementById("mind-model-status"), button = this;
+        button.disabled = true; status.textContent = "Requesting restart approval…";
+        try {
+            const operation = await h.requestJson("/api/minds/" + encodeURIComponent(editor.dataset.mindName) + "/restart", {method: "POST"});
+            const requestId = operation.hitl_request_id;
+            status.textContent = requestId ? "Restart approval sent. Waiting for a decision…" : "Restart requested.";
+            for (let attempt = 0; requestId && attempt < 90; attempt += 1) {
+                await new Promise(function (resolve) { window.setTimeout(resolve, 2000); });
+                const result = await h.requestJson("/api/operations/" + encodeURIComponent(requestId));
+                if (result.status !== "pending") { status.textContent = result.status === "approved" ? "Restart approved and applied." : "Restart " + result.status + "."; button.hidden = result.status === "approved"; return; }
+            }
+            if (requestId) status.textContent = "Restart approval is still pending.";
+        } catch (error) { status.textContent = error.message; }
+        finally { button.disabled = false; }
+    });
 });
 </script>
 {% endblock %}

@@ -32,6 +32,7 @@ services:
       # mount rather than loosening the read-only one above, so the
       # blast radius of "settings can write files" stays legible in code.
       - ${HIVE_MIND_DIR:-/home/daniel/Storage/Dev/hive_mind}/minds:/minds_hive_mind_voice:rw
+      - ${HIVE_MIND_DIR:-/home/daniel/Storage/Dev/hive_mind}/minds:/minds_hive_mind_config:rw
       # Hive-tools repo, read-only, existence/status check only for the
       # /settings hive-tools card. A missing host path is auto-created
       # empty by compose, which doubles as the "not cloned yet" signal.

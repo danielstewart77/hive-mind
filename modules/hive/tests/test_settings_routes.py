@@ -8,6 +8,8 @@ from starlette.testclient import TestClient
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from fastapi import HTTPException
+
 import auth
 import main as main_mod
 
@@ -63,6 +65,126 @@ def test_api_settings_minds_merges_broker_and_local_config(tmp_path, monkeypatch
     assert minds[0]["name"] == "bob"
     assert minds[0]["last_activity"] == 456
     assert minds[0]["activity_status"] == "active"
+
+
+def test_mind_configuration_route_updates_model_and_broker(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
+    updated = {
+        "name": "bob",
+        "remote": False,
+        "provider": "ollama",
+        "default_model": "qwen3:8b",
+    }
+    gateway = AsyncMock(return_value={"status": "updated"})
+    with (
+        patch.object(
+            main_mod,
+            "local_runtime_configuration",
+            return_value={"name": "bob", "default_model": "old-model"},
+        ),
+        patch.object(main_mod, "update_local_runtime_model", return_value=updated),
+        patch.object(main_mod, "_gateway_request", new=gateway),
+    ):
+        response = client.patch(
+            "/api/minds/bob/configuration",
+            json={"default_model": "qwen3:8b"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["configuration"]["default_model"] == "qwen3:8b"
+    assert gateway.await_args.args[:2] == ("PUT", "/broker/minds/bob")
+    assert gateway.await_args.kwargs["json_body"] == {"model": "qwen3:8b"}
+
+
+def test_mind_configuration_lists_models_for_current_provider(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
+    models = [
+        {"name": "sonnet", "provider": "anthropic"},
+        {"name": "qwen3:8b", "provider": "ollama"},
+    ]
+    with (
+        patch.object(
+            main_mod,
+            "local_runtime_configuration",
+            return_value={
+                "name": "bob",
+                "harness": "claude_cli",
+                "provider": "ollama",
+                "default_model": "qwen3:8b",
+            },
+        ),
+        patch.object(main_mod, "_gateway_json", new=AsyncMock(return_value=models)),
+    ):
+        response = client.get("/api/minds/bob/configuration")
+
+    assert response.status_code == 200
+    assert response.json()["models"] == ["qwen3:8b"]
+
+
+def test_mind_configuration_rolls_back_file_when_broker_update_fails(
+    tmp_path, monkeypatch
+):
+    client = _authed_client(tmp_path, monkeypatch)
+    update = patch.object(
+        main_mod,
+        "update_local_runtime_model",
+        side_effect=[
+            {"name": "bob", "default_model": "qwen3:8b"},
+            {"name": "bob", "default_model": "old-model"},
+        ],
+    )
+    with (
+        patch.object(
+            main_mod,
+            "local_runtime_configuration",
+            return_value={"name": "bob", "default_model": "old-model"},
+        ),
+        patch.object(
+            main_mod,
+            "_gateway_request",
+            new=AsyncMock(side_effect=HTTPException(status_code=502, detail="down")),
+        ),
+        update as update_mock,
+    ):
+        response = client.patch(
+            "/api/minds/bob/configuration",
+            json={"default_model": "qwen3:8b"},
+        )
+
+    assert response.status_code == 502
+    assert update_mock.call_args_list[1].args == ("bob", "old-model")
+
+
+def test_mind_restart_submits_hive_tools_approval(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
+    monkeypatch.setenv("HIVE_TOOLS_TOKEN", "tools-token")
+    with (
+        patch.object(main_mod, "local_runtime_configuration", return_value={"name": "bob"}),
+        patch.object(
+            main_mod,
+            "_hive_tools_request",
+            new=AsyncMock(return_value={"hitl_request_id": "request-1", "status": "pending"}),
+        ) as request,
+    ):
+        response = client.post("/api/minds/bob/restart")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "pending"
+    assert request.await_args.args == ("POST", "/docker/restart")
+    assert request.await_args.kwargs["params"]["service"] == "bob"
+
+
+def test_operation_status_proxies_hive_tools(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
+    with patch.object(
+        main_mod,
+        "_hive_tools_request",
+        new=AsyncMock(return_value={"status": "approved"}),
+    ):
+        response = client.get("/api/operations/request-1")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "approved"
 
 
 def test_api_settings_hive_comms_sessions_requires_auth(tmp_path, monkeypatch):

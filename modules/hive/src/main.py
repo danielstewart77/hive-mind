@@ -43,6 +43,16 @@ from auth import (
     verify_user_credentials,
 )
 from config import BASE_DIR
+from configuration_data import (
+    clear_capability_endpoint,
+    get_capability_endpoint,
+    get_edge_mind_metadata,
+    local_runtime_configuration,
+    normalize_endpoint,
+    set_capability_endpoint,
+    set_edge_mind_metadata,
+    update_local_runtime_model,
+)
 from graph_data import get_graph_data
 from settings_data import (
     build_mind_registry,
@@ -246,6 +256,30 @@ async def _gateway_json(path: str, params: dict | None = None) -> dict | list:
         raise HTTPException(status_code=502, detail=f"Gateway unavailable: {exc}") from exc
 
 
+async def _gateway_request(
+    method: str,
+    path: str,
+    *,
+    params: dict | None = None,
+    json_body: dict | None = None,
+) -> dict | list:
+    url = f"{_gateway_base_url().rstrip('/')}{path}"
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.request(
+            method,
+            url,
+            params=params,
+            json=json_body,
+            headers=_gateway_headers(),
+        )
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=response.text)
+    if not response.content:
+        return {}
+    data = response.json()
+    return data if isinstance(data, (dict, list)) else {}
+
+
 def _lucent_headers() -> dict:
     token = _lucent_bearer_token()
     if not token:
@@ -351,7 +385,15 @@ async def edge_minds_page(request: Request):
 
 @app.get("/edge-minds/new", response_class=HTMLResponse)
 async def new_edge_mind_page(request: Request):
-    return _console_page(request, "edge_mind_new.html")
+    return _console_page(
+        request,
+        "edge_mind_new.html",
+        edge_comms_url=os.getenv("EDGE_COMMS_URL", ""),
+        edge_lucent_url=os.getenv("EDGE_LUCENT_URL", ""),
+        edge_hive_tools_url=os.getenv("EDGE_HIVE_TOOLS_URL", ""),
+        edge_ollama_url=get_capability_endpoint("ollama")
+        or os.getenv("OLLAMA_URL", ""),
+    )
 
 
 @app.get("/capability-nodes", response_class=HTMLResponse)
@@ -445,6 +487,7 @@ def _edge_mind_rows(registry: list[dict]) -> list[dict]:
         local = local_value if isinstance(local_value, dict) else {}
         config = local.get("config") or {}
         name = str(mind.get("name") or "")
+        stored = get_edge_mind_metadata(name) or {}
         gateway_url = str(mind.get("gateway_url") or "")
         parsed = urllib.parse.urlparse(gateway_url)
         external_address = False
@@ -461,7 +504,12 @@ def _edge_mind_rows(registry: list[dict]) -> list[dict]:
         )
         if not is_edge_mind:
             continue
-        profile = str(config.get("profile") or profile_overrides.get(name.lower()) or "standard")
+        profile = str(
+            config.get("profile")
+            or stored.get("profile")
+            or profile_overrides.get(name.lower())
+            or "standard"
+        )
         if profile not in _EDGE_MIND_PROFILES:
             profile = "standard"
         rows.append(
@@ -471,8 +519,10 @@ def _edge_mind_rows(registry: list[dict]) -> list[dict]:
                 "host": parsed.hostname or "Remote machine",
                 "gateway_url": gateway_url,
                 "profile": profile,
-                "role": config.get("role") or "Connected",
-                "deployment": config.get("deployment") or "Remote",
+                "role": config.get("role") or stored.get("role") or "Connected",
+                "deployment": config.get("deployment")
+                or stored.get("deployment")
+                or "Remote",
                 "harness": mind.get("harness") or config.get("harness") or "Unknown",
                 "model": mind.get("model") or config.get("default_model") or "Unknown",
                 "last_seen": mind.get("last_seen"),
@@ -509,11 +559,7 @@ _EDGE_MIND_HARNESSES = {
     "claude_cli_claude",
     "claude_cli_ollama",
     "claude_sdk_claude",
-    "claude_sdk_ollama",
     "codex_cli_codex",
-    "codex_cli_ollama",
-    "codex_sdk_codex",
-    "codex_sdk_ollama",
 }
 _EDGE_MIND_SURFACES = {"telegram", "discord"}
 
@@ -582,6 +628,7 @@ def _build_edge_mind_bootstrap(body: dict) -> dict:
     deployment = str(body.get("deployment") or "")
     harness = str(body.get("harness") or "")
     surfaces = body.get("surfaces") or []
+    raw_mind_id = str(body.get("mind_id") or uuid.uuid4())
     try:
         port = int(body.get("port", 8421))
     except (TypeError, ValueError) as exc:
@@ -596,12 +643,45 @@ def _build_edge_mind_bootstrap(body: dict) -> dict:
         raise ValueError("Unknown deployment type")
     if harness not in _EDGE_MIND_HARNESSES:
         raise ValueError("Unknown harness")
+    default_model = str(
+        body.get("default_model")
+        or ("sonnet" if harness.startswith("claude") else "gpt-5.4")
+    ).strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}", default_model):
+        raise ValueError("Invalid default model")
     if not isinstance(surfaces, list) or any(
         item not in _EDGE_MIND_SURFACES for item in surfaces
     ):
         raise ValueError("Unknown conversation surface")
     if port < 1024 or port > 65535:
         raise ValueError("Port must be between 1024 and 65535")
+    try:
+        mind_id = str(uuid.UUID(raw_mind_id))
+    except ValueError as exc:
+        raise ValueError("Mind ID must be a UUID") from exc
+    endpoint_settings = {
+        "COMMS_URL": str(body.get("comms_url") or os.getenv("EDGE_COMMS_URL") or ""),
+        "LUCENT_URL_SELF": str(
+            body.get("lucent_url") or os.getenv("EDGE_LUCENT_URL") or ""
+        ),
+        "HIVE_TOOLS_URL": str(
+            body.get("hive_tools_url") or os.getenv("EDGE_HIVE_TOOLS_URL") or ""
+        ),
+    }
+    for key, value in endpoint_settings.items():
+        if value:
+            endpoint_settings[key] = normalize_endpoint(value)
+    ollama_url = ""
+    if harness == "claude_cli_ollama":
+        ollama_url = str(
+            body.get("ollama_url")
+            or os.getenv("OLLAMA_URL")
+            or get_capability_endpoint("ollama")
+            or ""
+        )
+        if not ollama_url:
+            raise ValueError("Ollama URL is required for the Ollama harness")
+        ollama_url = normalize_endpoint(ollama_url)
     args = [
         "./setup.sh",
         "--name",
@@ -620,12 +700,58 @@ def _build_edge_mind_bootstrap(body: dict) -> dict:
         str(port),
     ]
     setup_command = " ".join(shlex.quote(part) for part in args)
+    environment_commands = [
+        "cp .env.example .env",
+        f"sed -i {shlex.quote(f's|^MIND_ID=.*|MIND_ID={mind_id}|')} .env",
+    ]
+    for key, value in endpoint_settings.items():
+        if value:
+            environment_commands.append(
+                f"sed -i {shlex.quote(f's|^{key}=.*|{key}={value}|')} .env"
+            )
+    if endpoint_settings["COMMS_URL"]:
+        environment_commands.append(
+            "printf '%s\\n' "
+            + shlex.quote(
+                f"HIVE_MIND_SERVER_URL={endpoint_settings['COMMS_URL']}"
+            )
+            + " >> .env"
+        )
+    prepare_environment = " && ".join(environment_commands)
+    provider = (
+        "ollama"
+        if harness.endswith("_ollama")
+        else "anthropic"
+        if harness.startswith("claude")
+        else "openai"
+    )
+    runtime_commands = [
+        setup_command,
+        "sed -i "
+        + shlex.quote(f"s|^default_model:.*|default_model: {default_model}|")
+        + f" minds/{shlex.quote(name)}/runtime.yaml",
+        "sed -i "
+        + shlex.quote(f"s|^provider:.*|provider: {provider}|")
+        + f" minds/{shlex.quote(name)}/runtime.yaml",
+        "sed -i "
+        + shlex.quote(f"s|^default_model:.*|default_model: {default_model}|")
+        + " config.yaml",
+    ]
+    if ollama_url:
+        runtime_commands.append(
+            "sed -i "
+            + shlex.quote(
+                f"s|http://your-ollama-host:11434|{ollama_url}|g"
+            )
+            + " config.yaml"
+        )
+    configure_runtime = " && ".join(runtime_commands)
     commands = [
         {
             "name": "Install Edge Mind runtime",
             "command": (
                 "git clone https://github.com/danielstewart77/hive-edge-minds.git && "
-                f"cd hive-edge-minds && {setup_command}"
+                f"cd hive-edge-minds && {prepare_environment} && {configure_runtime}"
             ),
         }
     ]
@@ -637,10 +763,23 @@ def _build_edge_mind_bootstrap(body: dict) -> dict:
             }
         )
     return {
+        "mind_id": mind_id,
         "profile": profile,
         "command": commands[0]["command"],
         "commands": commands,
         "components": _EDGE_MIND_BUNDLES[profile],
+        "required_settings": {
+            key: value or None for key, value in endpoint_settings.items()
+        },
+        "registration": {
+            "name": name,
+            "mind_id": mind_id,
+            "model": default_model,
+            "harness": harness,
+            "profile": profile,
+            "role": role,
+            "deployment": deployment,
+        },
     }
 
 
@@ -663,6 +802,86 @@ async def api_edge_mind_bootstrap(request: Request, user: dict = Depends(require
     return result
 
 
+async def _probe_edge_mind(gateway_url: str) -> dict:
+    endpoint = normalize_endpoint(gateway_url)
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            response = await client.get(f"{endpoint}/health")
+        response.raise_for_status()
+        data = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=f"Edge Mind health check failed: {exc}") from exc
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=502, detail="Edge Mind returned invalid health data")
+    return data
+
+
+@app.post("/api/edge-minds/verify")
+async def api_edge_mind_verify(request: Request, user: dict = Depends(require_auth)):
+    del user
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be an object")
+    name = str(body.get("name") or "").strip().lower()
+    mind_id = str(body.get("mind_id") or "")
+    gateway_url = str(body.get("gateway_url") or "")
+    model = str(body.get("model") or "")
+    harness = str(body.get("harness") or "")
+    profile = str(body.get("profile") or "")
+    role = str(body.get("role") or "")
+    deployment = str(body.get("deployment") or "")
+    if not re.fullmatch(r"[a-z][a-z0-9-]{1,31}", name):
+        raise HTTPException(status_code=400, detail="Invalid Mind name")
+    try:
+        mind_id = str(uuid.UUID(mind_id))
+        gateway_url = normalize_endpoint(gateway_url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}", model):
+        raise HTTPException(status_code=400, detail="Invalid model name")
+    if harness not in _EDGE_MIND_HARNESSES:
+        raise HTTPException(status_code=400, detail="Unknown harness")
+    if profile not in _EDGE_MIND_PROFILES:
+        raise HTTPException(status_code=400, detail="Unknown profile")
+    if role not in _EDGE_MIND_ROLES or deployment not in _EDGE_MIND_DEPLOYMENTS:
+        raise HTTPException(status_code=400, detail="Invalid deployment metadata")
+    health = await _probe_edge_mind(gateway_url)
+    if str(health.get("mind_id") or "") != mind_id:
+        raise HTTPException(
+            status_code=400,
+            detail="The responding Edge Mind identity does not match this deployment plan",
+        )
+    existing = next(
+        (
+            mind
+            for mind in await _broker_minds_safe()
+            if str(mind.get("name") or "").lower() == name
+        ),
+        None,
+    )
+    if existing and str(existing.get("id") or "") != mind_id:
+        raise HTTPException(status_code=409, detail="That Mind name is already registered")
+    broker_harness = "codex_cli" if harness.startswith("codex") else "claude_cli"
+    broker_result = await _gateway_request(
+        "POST",
+        "/broker/minds",
+        json_body={
+            "mind_id": mind_id,
+            "name": name,
+            "gateway_url": gateway_url,
+            "model": model,
+            "harness": broker_harness,
+        },
+    )
+    set_edge_mind_metadata(
+        name,
+        profile=profile,
+        role=role,
+        deployment=deployment,
+    )
+    return {"registered": True, "health": health, "broker": broker_result}
+
+
 @app.get("/api/tools")
 async def api_tools(user: dict = Depends(require_auth)):
     del user
@@ -680,6 +899,115 @@ async def api_tools(user: dict = Depends(require_auth)):
 async def api_capability_nodes(user: dict = Depends(require_auth)):
     del user
     return await _capability_node_data()
+
+
+def _find_capability_node(data: dict, node_id: str) -> dict:
+    node = next((item for item in data["nodes"] if item["id"] == node_id), None)
+    if node is None:
+        raise HTTPException(status_code=404, detail="Unknown Capability Node")
+    return node
+
+
+@app.put("/api/capability-nodes/{node_id}/configuration")
+async def api_capability_node_configure(
+    node_id: str, request: Request, user: dict = Depends(require_auth)
+):
+    del user
+    body = await request.json()
+    try:
+        endpoint = set_capability_endpoint(
+            node_id, str(body.get("endpoint") if isinstance(body, dict) else "")
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    data = await _capability_node_data()
+    return {"endpoint": endpoint, "node": _find_capability_node(data, node_id)}
+
+
+@app.delete("/api/capability-nodes/{node_id}/configuration")
+async def api_capability_node_configuration_delete(
+    node_id: str, user: dict = Depends(require_auth)
+):
+    del user
+    try:
+        removed = clear_capability_endpoint(node_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"removed": removed}
+
+
+def _ollama_endpoint() -> str:
+    endpoint = get_capability_endpoint("ollama") or os.getenv("OLLAMA_URL") or os.getenv(
+        "OLLAMA_BASE_URL"
+    )
+    if not endpoint:
+        raise HTTPException(status_code=409, detail="Configure the Ollama endpoint first")
+    try:
+        return normalize_endpoint(endpoint)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+async def _ollama_request(
+    method: str, path: str, *, json_body: dict | None = None
+) -> dict:
+    timeout = 1800.0 if path == "/api/pull" else 30.0
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.request(
+                method,
+                f"{_ollama_endpoint()}{path}",
+                json=json_body,
+            )
+        response.raise_for_status()
+        data = response.json() if response.content else {}
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=f"Ollama request failed: {exc}") from exc
+    return data if isinstance(data, dict) else {}
+
+
+def _validated_model_name(body: object) -> str:
+    model = str(body.get("model") if isinstance(body, dict) else "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}", model):
+        raise HTTPException(status_code=400, detail="Invalid model name")
+    return model
+
+
+@app.get("/api/capability-nodes/ollama/models")
+async def api_ollama_models(user: dict = Depends(require_auth)):
+    del user
+    version, installed, running = await asyncio.gather(
+        _ollama_request("GET", "/api/version"),
+        _ollama_request("GET", "/api/tags"),
+        _ollama_request("GET", "/api/ps"),
+    )
+    return {
+        "version": version.get("version"),
+        "models": installed.get("models", []),
+        "running": running.get("models", []),
+    }
+
+
+@app.post("/api/capability-nodes/ollama/models/pull")
+async def api_ollama_model_pull(
+    request: Request, user: dict = Depends(require_auth)
+):
+    del user
+    model = _validated_model_name(await request.json())
+    result = await _ollama_request(
+        "POST", "/api/pull", json_body={"model": model, "stream": False}
+    )
+    return {"model": model, "result": result}
+
+
+@app.delete("/api/capability-nodes/ollama/models")
+async def api_ollama_model_delete(
+    request: Request, user: dict = Depends(require_auth)
+):
+    del user
+    model = _validated_model_name(await request.json())
+    result = await _ollama_request("DELETE", "/api/delete", json_body={"model": model})
+    return {"model": model, "result": result}
 
 
 # ── Graph ──────────────────────────────────────────────────────────────
@@ -1191,6 +1519,81 @@ async def api_settings_minds(user: dict = Depends(require_auth)):
     return {"minds": _add_session_activity(build_mind_registry(broker_minds), sessions)}
 
 
+@app.get("/api/minds/{name}/configuration")
+async def api_mind_configuration(name: str, user: dict = Depends(require_auth)):
+    del user
+    try:
+        configuration = local_runtime_configuration(name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        model_rows = await _gateway_json("/models")
+    except HTTPException:
+        model_rows = []
+    provider = str(configuration.get("provider") or "")
+    harness = str(configuration.get("harness") or "")
+    model_provider = (
+        "ollama"
+        if provider == "ollama"
+        else "anthropic"
+        if harness.startswith("claude")
+        else ""
+    )
+    models = [
+        str(row.get("name"))
+        for row in model_rows
+        if isinstance(row, dict)
+        and row.get("name")
+        and row.get("provider") == model_provider
+    ]
+    return {
+        "configuration": {
+            "name": configuration.get("name") or name,
+            "harness": configuration.get("harness"),
+            "provider": configuration.get("provider"),
+            "default_model": configuration.get("default_model"),
+        },
+        "models": models,
+    }
+
+
+@app.patch("/api/minds/{name}/configuration")
+async def api_mind_configuration_update(
+    name: str, request: Request, user: dict = Depends(require_auth)
+):
+    del user
+    body = await request.json()
+    default_model = str(
+        body.get("default_model") if isinstance(body, dict) else ""
+    ).strip()
+    try:
+        previous_configuration = local_runtime_configuration(name)
+        configuration = update_local_runtime_model(name, default_model)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        await _gateway_request(
+            "PUT",
+            f"/broker/minds/{urllib.parse.quote(name)}",
+            json_body={"model": default_model},
+        )
+    except HTTPException:
+        previous_model = str(previous_configuration.get("default_model") or "")
+        if previous_model:
+            update_local_runtime_model(name, previous_model)
+        raise
+    return {
+        "saved": True,
+        "restart_required": True,
+        "configuration": {
+            "name": configuration.get("name") or name,
+            "harness": configuration.get("harness"),
+            "provider": configuration.get("provider"),
+            "default_model": configuration.get("default_model"),
+        },
+    }
+
+
 @app.get("/api/settings/hive-comms/sessions")
 async def api_settings_hive_comms_sessions(user: dict = Depends(require_auth)):
     del user
@@ -1217,6 +1620,62 @@ def _hive_tools_base_url() -> str:
     return os.getenv("HIVE_TOOLS_URL") or "http://hive-tools:9421"
 
 
+def _hive_tools_headers() -> dict[str, str]:
+    token = os.getenv("HIVE_TOOLS_TOKEN", "")
+    if not token:
+        raise HTTPException(status_code=503, detail="Hive Tools authorization is not configured")
+    return {"Authorization": f"Bearer {token}"}
+
+
+async def _hive_tools_request(
+    method: str, path: str, *, params: dict | None = None
+) -> dict:
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.request(
+                method,
+                f"{_hive_tools_base_url().rstrip('/')}{path}",
+                params=params,
+                headers=_hive_tools_headers(),
+            )
+        response.raise_for_status()
+        data = response.json() if response.content else {}
+    except HTTPException:
+        raise
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=f"Hive Tools request failed: {exc}") from exc
+    return data if isinstance(data, dict) else {}
+
+
+@app.post("/api/minds/{name}/restart")
+async def api_mind_restart(name: str, user: dict = Depends(require_auth)):
+    del user
+    try:
+        local_runtime_configuration(name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await _hive_tools_request(
+        "POST",
+        "/docker/restart",
+        params={
+            "path": os.getenv(
+                "HIVE_MIND_PROJECT_PATH", "/home/daniel/Storage/Dev/hive_mind"
+            ),
+            "service": name,
+        },
+    )
+
+
+@app.get("/api/operations/{request_id}")
+async def api_operation_status(
+    request_id: str, user: dict = Depends(require_auth)
+):
+    del user
+    if not re.fullmatch(r"[A-Za-z0-9-]{1,100}", request_id):
+        raise HTTPException(status_code=400, detail="Invalid operation ID")
+    return await _hive_tools_request("GET", f"/hitl/{request_id}")
+
+
 def _capability_node_specs() -> list[dict]:
     voice_urls = _voice_server_urls()
     return [
@@ -1238,8 +1697,12 @@ def _capability_node_specs() -> list[dict]:
             "name": "Ollama",
             "kind": "Inference",
             "description": "Local model inference supplied without embedding model infrastructure in a mind.",
-            "endpoint": os.getenv("OLLAMA_URL") or os.getenv("OLLAMA_BASE_URL") or "",
+            "endpoint": get_capability_endpoint("ollama")
+            or os.getenv("OLLAMA_URL")
+            or os.getenv("OLLAMA_BASE_URL")
+            or "",
             "health_path": "/api/tags",
+            "configurable": True,
             "access": "Network-restricted model API",
             "consumers": "Minds configured for local inference",
             "icon": "cpu",
@@ -1275,8 +1738,13 @@ def _capability_node_specs() -> list[dict]:
             "name": "Pi-hole",
             "kind": "Network service",
             "description": "Network-level DNS filtering and operational visibility.",
-            "endpoint": os.getenv("PIHOLE_URL") or "",
-            "health_path": "",
+            "endpoint": get_capability_endpoint("pihole")
+            or os.getenv("PIHOLE_URL")
+            or "",
+            "health_path": "/api/auth",
+            "configurable": True,
+            "accepted_statuses": {401},
+            "authentication_required_statuses": {401},
             "access": "Administrative network service",
             "consumers": "Operators and approved automations",
             "icon": "shield",
@@ -1293,6 +1761,10 @@ async def _capability_node_data() -> dict:
         endpoint = str(node.pop("endpoint") or "").rstrip("/")
         health_path = str(node.pop("health_path") or "")
         auto_discover = bool(node.pop("auto_discover", False))
+        accepted_statuses = set(node.pop("accepted_statuses", set()))
+        authentication_required_statuses = set(
+            node.pop("authentication_required_statuses", set())
+        )
         explicitly_configured = bool(node.pop("configured", bool(endpoint)))
         installed = bool(tools.get("present")) if node["id"] == "hive-tools" else None
         configured = bool(endpoint) and (explicitly_configured or installed is True)
@@ -1306,6 +1778,8 @@ async def _capability_node_data() -> dict:
                         repair_action=(
                             f"Check the {node['name']} endpoint and service, then retry."
                         ),
+                        accepted_statuses=accepted_statuses,
+                        authentication_required_statuses=authentication_required_statuses,
                     ),
                 )
             )
@@ -1313,6 +1787,7 @@ async def _capability_node_data() -> dict:
         else:
             health = {
                 "reachable": False,
+                "ready": False,
                 "detail": "Not configured",
                 "message": f"{node['name']} is not configured for this Hive.",
                 "action": f"Configure the {node['name']} endpoint to manage it here.",
@@ -1341,6 +1816,7 @@ async def _capability_node_data() -> dict:
             else:
                 node["health"] = {
                     "reachable": False,
+                    "ready": False,
                     "detail": "Not configured",
                     "message": f"{node['name']} is not configured for this Hive.",
                     "action": f"Configure the {node['name']} endpoint to manage it here.",
@@ -1349,9 +1825,17 @@ async def _capability_node_data() -> dict:
         "summary": {
             "total": len(nodes),
             "configured": sum(bool(node["configured"]) for node in nodes),
-            "healthy": sum(bool(node["health"]["reachable"]) for node in nodes),
+            "healthy": sum(
+                bool(node["health"].get("ready", node["health"]["reachable"]))
+                for node in nodes
+            ),
             "attention": sum(
-                bool(node["configured"] and not node["health"]["reachable"])
+                bool(
+                    node["configured"]
+                    and not node["health"].get(
+                        "ready", node["health"]["reachable"]
+                    )
+                )
                 for node in nodes
             ),
         },
@@ -1404,12 +1888,17 @@ async def _service_health(
     headers: dict | None = None,
     service_name: str = "Service",
     repair_action: str = "Check the service configuration and retry.",
+    accepted_statuses: set[int] | None = None,
+    authentication_required_statuses: set[int] | None = None,
 ) -> dict:
     """Best-effort health probe — used purely for status display, never gates a route."""
     try:
         async with httpx.AsyncClient(timeout=3.0) as client:
             resp = await client.get(url, headers=headers or {})
-            resp.raise_for_status()
+            accepted = accepted_statuses or set()
+            authentication_required = authentication_required_statuses or set()
+            if resp.status_code not in accepted:
+                resp.raise_for_status()
             try:
                 detail = resp.json() if resp.content else {}
             except ValueError:
@@ -1417,13 +1906,24 @@ async def _service_health(
                     "content_type": resp.headers.get("content-type", ""),
                     "response": resp.text[:300],
                 }
+            needs_authentication = resp.status_code in authentication_required
             return {
                 "reachable": True,
+                "ready": not needs_authentication,
+                "authentication_required": needs_authentication,
                 "endpoint": url,
                 "status_code": resp.status_code,
                 "detail": detail,
-                "message": f"{service_name} responded normally.",
-                "action": "No action is required.",
+                "message": (
+                    f"{service_name} responded, but administrative authentication is required."
+                    if needs_authentication
+                    else f"{service_name} responded normally."
+                ),
+                "action": (
+                    f"Authenticate with {service_name} to enable administrative controls."
+                    if needs_authentication
+                    else "No action is required."
+                ),
             }
     except httpx.HTTPStatusError as exc:
         response = exc.response
@@ -1433,6 +1933,7 @@ async def _service_health(
             detail = response.text[:300]
         return {
             "reachable": False,
+            "ready": False,
             "endpoint": url,
             "status_code": response.status_code,
             "detail": detail,
@@ -1442,6 +1943,7 @@ async def _service_health(
     except Exception as exc:
         return {
             "reachable": False,
+            "ready": False,
             "endpoint": url,
             "detail": str(exc),
             "message": f"{service_name} could not be reached: {exc}",

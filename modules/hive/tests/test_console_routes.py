@@ -77,6 +77,38 @@ def test_console_pages_render_the_new_application_shell(tmp_path, monkeypatch):
         assert "console-sidebar" in response.text, path
 
 
+def test_configuration_surfaces_render_actionable_controls(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
+
+    assert "Save and test" in client.get("/capability-nodes").text
+    assert "Verify and register Mind" in client.get("/edge-minds/new").text
+    assert "Request restart" in client.get("/minds/ada").text
+
+
+def test_new_configuration_mutations_require_authentication(tmp_path, monkeypatch):
+    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
+    monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
+    client = TestClient(main_mod.app)
+
+    requests = (
+        client.put(
+            "/api/capability-nodes/ollama/configuration",
+            json={"endpoint": "http://ollama:11434"},
+        ),
+        client.post(
+            "/api/capability-nodes/ollama/models/pull",
+            json={"model": "qwen3:8b"},
+        ),
+        client.patch(
+            "/api/minds/bob/configuration", json={"default_model": "qwen3:8b"}
+        ),
+        client.post("/api/minds/bob/restart"),
+        client.post("/api/edge-minds/verify", json={}),
+    )
+
+    assert all(response.status_code == 401 for response in requests)
+
+
 def test_legacy_topology_pages_redirect_to_new_names(tmp_path, monkeypatch):
     client = _authed_client(tmp_path, monkeypatch)
 
@@ -271,6 +303,8 @@ def test_edge_mind_bootstrap_validates_input_and_never_includes_credentials(
     tmp_path, monkeypatch
 ):
     client = _authed_client(tmp_path, monkeypatch)
+    monkeypatch.setenv("EDGE_COMMS_URL", "http://192.168.4.64:8426")
+    monkeypatch.setenv("EDGE_LUCENT_URL", "http://192.168.4.64:8425")
 
     response = client.post(
         "/api/edge-minds/bootstrap",
@@ -291,6 +325,9 @@ def test_edge_mind_bootstrap_validates_input_and_never_includes_credentials(
     assert "hive-edge-minds" in command
     assert "atlas" in command
     assert "--profile standard" in command
+    assert body["mind_id"] in command
+    assert "COMMS_URL=http://192.168.4.64:8426" in command
+    assert body["registration"]["name"] == "atlas"
     assert body["components"][0]["name"] == "Edge Mind runtime"
     assert "token" not in command.lower()
     assert "password" not in command.lower()
@@ -337,6 +374,116 @@ def test_sentinel_edge_mind_bootstrap_includes_companion_bundle(tmp_path, monkey
         "observability",
         "surface",
     }
+
+
+def test_edge_mind_bootstrap_wires_supported_ollama_harness(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/api/edge-minds/bootstrap",
+        json={
+            "name": "local-one",
+            "profile": "standard",
+            "role": "operator",
+            "deployment": "container",
+            "harness": "claude_cli_ollama",
+            "surfaces": ["telegram"],
+            "port": 8421,
+            "default_model": "qwen3:8b",
+            "ollama_url": "http://192.168.4.64:11434",
+        },
+    )
+
+    assert response.status_code == 200
+    command = response.json()["command"]
+    assert "http://192.168.4.64:11434" in command
+    assert "config.yaml" in command
+    assert response.json()["registration"]["model"] == "qwen3:8b"
+
+
+def test_edge_mind_bootstrap_rejects_unimplemented_harness(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/api/edge-minds/bootstrap",
+        json={
+            "name": "future-one",
+            "profile": "standard",
+            "role": "satellite",
+            "deployment": "container",
+            "harness": "codex_sdk_codex",
+            "surfaces": [],
+            "port": 8421,
+        },
+    )
+
+    assert response.status_code == 400
+    assert "harness" in response.json()["detail"].lower()
+
+
+def test_edge_mind_verify_checks_health_and_registers_with_comms(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
+    mind_id = "6f12a60a-b5fd-4ba4-b2f1-07065a49145d"
+    gateway_request = AsyncMock(return_value={"status": "registered"})
+    metadata = patch.object(main_mod, "set_edge_mind_metadata")
+    with (
+        patch.object(
+            main_mod,
+            "_probe_edge_mind",
+            new=AsyncMock(return_value={"mind_id": mind_id, "status": "ok"}),
+        ),
+        patch.object(main_mod, "_gateway_request", new=gateway_request),
+        metadata as metadata_mock,
+    ):
+        response = client.post(
+            "/api/edge-minds/verify",
+            json={
+                "name": "sentinel-one",
+                "mind_id": mind_id,
+                "gateway_url": "http://192.168.4.16:8421",
+                "model": "gpt-5.5",
+                "harness": "codex_cli_codex",
+                "profile": "sentinel",
+                "role": "operator",
+                "deployment": "container",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["registered"] is True
+    assert gateway_request.await_args.args[:2] == ("POST", "/broker/minds")
+    assert gateway_request.await_args.kwargs["json_body"]["mind_id"] == mind_id
+    metadata_mock.assert_called_once_with(
+        "sentinel-one",
+        profile="sentinel",
+        role="operator",
+        deployment="container",
+    )
+
+
+def test_edge_mind_verify_rejects_mismatched_identity(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
+    with patch.object(
+        main_mod,
+        "_probe_edge_mind",
+        new=AsyncMock(return_value={"mind_id": "different", "status": "ok"}),
+    ):
+        response = client.post(
+            "/api/edge-minds/verify",
+            json={
+                "name": "atlas",
+                "mind_id": "6f12a60a-b5fd-4ba4-b2f1-07065a49145d",
+                "gateway_url": "http://192.168.4.20:8421",
+                "model": "sonnet",
+                "harness": "claude_cli_claude",
+                "profile": "standard",
+                "role": "satellite",
+                "deployment": "systemd",
+            },
+        )
+
+    assert response.status_code == 400
+    assert "identity" in response.json()["detail"].lower()
 
 
 def test_tools_api_returns_capability_catalog(tmp_path, monkeypatch):
@@ -399,6 +546,111 @@ def test_capability_nodes_api_groups_external_services_by_function(tmp_path, mon
     assert by_id["ollama"]["kind"] == "Inference"
     assert by_id["pihole"]["kind"] == "Network service"
     assert by_id["hive-tools"]["capabilities"][0]["name"] == "Gmail"
+
+
+def test_capability_node_configuration_route_saves_endpoint(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
+    configured = {
+        "summary": {"total": 1, "configured": 1, "healthy": 1, "attention": 0},
+        "nodes": [{"id": "ollama", "configured": True, "endpoint": "http://ollama:11434"}],
+    }
+    with (
+        patch.object(
+            main_mod,
+            "set_capability_endpoint",
+            return_value="http://ollama:11434",
+        ) as save,
+        patch.object(
+            main_mod,
+            "_capability_node_data",
+            new=AsyncMock(return_value=configured),
+        ),
+    ):
+        response = client.put(
+            "/api/capability-nodes/ollama/configuration",
+            json={"endpoint": "http://ollama:11434"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["node"]["configured"] is True
+    save.assert_called_once_with("ollama", "http://ollama:11434")
+
+
+def test_ollama_models_api_lists_installed_and_running_models(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
+    responses = {
+        "/api/version": {"version": "0.30.8"},
+        "/api/tags": {"models": [{"name": "qwen3:8b"}]},
+        "/api/ps": {"models": [{"name": "qwen3-embedding:8b"}]},
+    }
+
+    async def request(method, path, **kwargs):
+        assert method == "GET"
+        return responses[path]
+
+    with patch.object(main_mod, "_ollama_request", new=request):
+        response = client.get("/api/capability-nodes/ollama/models")
+
+    assert response.status_code == 200
+    assert response.json()["version"] == "0.30.8"
+    assert response.json()["models"][0]["name"] == "qwen3:8b"
+    assert response.json()["running"][0]["name"] == "qwen3-embedding:8b"
+
+
+def test_ollama_model_pull_and_delete_proxy_validated_requests(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
+    request = AsyncMock(return_value={"status": "success"})
+    with patch.object(main_mod, "_ollama_request", new=request):
+        pull = client.post(
+            "/api/capability-nodes/ollama/models/pull",
+            json={"model": "qwen3:8b"},
+        )
+        delete = client.request(
+            "DELETE",
+            "/api/capability-nodes/ollama/models",
+            json={"model": "qwen3:8b"},
+        )
+
+    assert pull.status_code == 200
+    assert delete.status_code == 200
+    assert request.await_args_list[0].args == ("POST", "/api/pull")
+    assert request.await_args_list[0].kwargs["json_body"] == {
+        "model": "qwen3:8b",
+        "stream": False,
+    }
+    assert request.await_args_list[1].args == ("DELETE", "/api/delete")
+
+
+def test_pihole_unauthorized_probe_is_reachable_but_not_ready():
+    response = httpx.Response(
+        401,
+        json={"error": {"key": "unauthorized"}},
+        request=httpx.Request("GET", "http://pihole:8080/api/auth"),
+    )
+
+    class StubClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def get(self, url, headers):
+            return response
+
+    with patch.object(main_mod.httpx, "AsyncClient", return_value=StubClient()):
+        health = asyncio.run(
+            main_mod._service_health(
+                "http://pihole:8080/api/auth",
+                service_name="Pi-hole",
+                accepted_statuses={401},
+                authentication_required_statuses={401},
+            )
+        )
+
+    assert health["reachable"] is True
+    assert health["ready"] is False
+    assert health["authentication_required"] is True
 
 
 def test_capability_nodes_leave_optional_unconfigured_services_idle(tmp_path, monkeypatch):
