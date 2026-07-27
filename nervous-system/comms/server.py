@@ -649,13 +649,13 @@ async def ws_attach(ws: WebSocket, session_id: str):
 
     await ws.accept()
 
-    async def _watch_for_close() -> dict:
+    async def _watch_for_close(watched_id: str) -> dict:
         # The attach pty is a separate process from the session's tracked
         # subprocess — kill_session never reaches it. Watching the session
         # event stream lets a kill (end-session, /kill, rotation) tear the
         # bridge down, which cascades: mind_ws closes → mind_server's
         # attach loop exits → the pty process is terminated.
-        async for event in session_mgr.stream_session_events(session_id):
+        async for event in session_mgr.stream_session_events(watched_id):
             if event.get("type") in ("session_closed", "session_suspended"):
                 return event
         return {"type": "session_closed"}
@@ -666,31 +666,49 @@ async def ws_attach(ws: WebSocket, session_id: str):
             http.ws_connect(attach_url) as mind_ws,
         ):
             pump = asyncio.ensure_future(_pump_attach_ws(ws, mind_ws))
-            closed = asyncio.ensure_future(_watch_for_close())
-            tasks = {pump, closed}
-            try:
-                done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-            finally:
-                for task in tasks:
-                    task.cancel()
-            if closed in done:
-                close_event = closed.result()
-                rotated_to = close_event.get("rotated_to")
-                if close_event.get("type") == "session_suspended":
-                    await ws.close(code=4411, reason="session suspended")
-                elif rotated_to:
-                    # Rotation retired this session in favor of a fresh one —
-                    # hand the successor id straight to the tile so it can
-                    # reattach without hunting for it (terminal-routing.js's
-                    # poll/rotated_from path stays as the fallback for any
-                    # other close-without-successor case).
-                    await ws.close(code=4412, reason=rotated_to)
-                else:
-                    await ws.close(code=4410, reason="session closed")
-            elif pump in done:
-                upstream = pump.result()
-                if upstream is not None:
-                    await ws.close(code=upstream)
+            watched_id = session_id
+            while True:
+                closed = asyncio.ensure_future(_watch_for_close(watched_id))
+                done, _ = await asyncio.wait(
+                    {pump, closed}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if closed not in done:
+                    closed.cancel()
+                if closed in done:
+                    close_event = closed.result()
+                    rotated_to = close_event.get("rotated_to")
+                    if (
+                        close_event.get("type") == "session_closed"
+                        and rotated_to
+                        and close_event.get("rotated_in_place")
+                    ):
+                        # The mind moved the live terminal onto the successor
+                        # without disturbing the pane, so this socket is still
+                        # bridging the same pty — nothing to close. Tell the
+                        # tile which session it is now holding (a TEXT frame,
+                        # the one thing the mind never sends) and keep going.
+                        watched_id = rotated_to
+                        await ws.send_text(json.dumps(
+                            {"type": "session_rotated", "session_id": rotated_to}
+                        ))
+                        log.info("attach: session %s rotated in place to %s",
+                                 session_id, rotated_to)
+                        continue
+                    if close_event.get("type") == "session_suspended":
+                        await ws.close(code=4411, reason="session suspended")
+                    elif rotated_to:
+                        # Rotation with no live terminal under it (the pty was
+                        # already reaped). The tile has to reattach, and the
+                        # successor id in the close reason spares it a poll.
+                        await ws.close(code=4412, reason=rotated_to)
+                    else:
+                        await ws.close(code=4410, reason="session closed")
+                elif pump in done:
+                    upstream = pump.result()
+                    if upstream is not None:
+                        await ws.close(code=upstream)
+                pump.cancel()
+                break
     except aiohttp.WSServerHandshakeError as exc:
         # The mind answered, and said no. Starlette replies 403 to a
         # websocket path it has no route for, so this is how a mind whose

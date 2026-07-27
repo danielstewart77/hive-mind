@@ -27,9 +27,11 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import tempfile
 import time
+from unittest.mock import patch
 
 from comms.models import ModelRegistry, Provider
 from comms.sessions import SessionManager
@@ -88,6 +90,34 @@ async def _armed_flag(mgr: SessionManager, session_id: str) -> int:
     )
     row = await cur.fetchone()
     return row["rotation_armed"] if row else -1
+
+
+@contextlib.contextmanager
+def _real_create_session():
+    """Let a test drive the real ``create_session``.
+
+    Its two outside dependencies — the broker's mind row (for the model) and
+    the prompt composer — need a registered mind and a populated KG, neither
+    of which a temp sessions DB has. Everything else in the call is real,
+    including the branch that decides between a pane rotation and a spawn.
+    """
+    async def mind_row(_db, mind_id):
+        return {"name": mind_id, "model": "opus"}
+
+    async def blocks(**_kw):
+        return "<soul>seed</soul>"
+
+    with patch("comms.broker.get_mind_by_id", mind_row), \
+            patch("comms.bootstrap_loader.compose_prompt_blocks", blocks):
+        yield
+
+
+def _noop_kill(mgr: SessionManager):
+    """Skip the HTTP kill to the mind — these tests own no container."""
+    async def _kill(session_id: str) -> None:
+        mgr._procs.pop(session_id, None)
+        mgr._mind_ids.pop(session_id, None)
+    return _kill
 
 
 async def _active_binding(mgr: SessionManager, client_type: str, client_ref: str) -> str | None:
@@ -327,6 +357,117 @@ def test_arm_rotation_terminal_finalizes_immediately() -> None:
                 cur = await mgr._db.execute("SELECT status FROM sessions WHERE id = ?", (old,))
                 assert (await cur.fetchone())["status"] == "closed"
                 assert await _active_binding(mgr, "web", "terminal-abc") == "sess-new"
+            finally:
+                await mgr.shutdown()
+
+    _run(scenario())
+
+
+def test_terminal_rotation_moves_the_live_pane_instead_of_replacing_it() -> None:
+    """The tile stays. A rotation swaps the conversation under a pane the
+    user is typing into, so the successor takes over that terminal in place
+    and the kill event says so — a tile told only "closed" tears itself down
+    and reattaches, which reads as being thrown out of the conversation."""
+    async def scenario() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _make_manager(tmp)
+            try:
+                old = await _seed_session(
+                    mgr, owner_type="web", owner_ref="terminal", client_ref="terminal-abc"
+                )
+                queue: asyncio.Queue = asyncio.Queue(maxsize=10)
+                mgr._observer_queues[old] = {queue}
+                calls: list[dict] = []
+
+                async def fake_rotate(**kwargs):
+                    calls.append(kwargs)
+                    return True
+
+                async def fail_spawn(*a, **k):
+                    raise AssertionError(
+                        "a rotated terminal must not also get a stream-json process"
+                    )
+
+                mgr._rotate_pty_on_mind = fake_rotate  # type: ignore[assignment]
+                mgr._spawn = fail_spawn  # type: ignore[assignment]
+                mgr._kill_process = _noop_kill(mgr)  # type: ignore[assignment]
+
+                with _real_create_session():
+                    result = await mgr.arm_rotation("web", "terminal-abc")
+                new_id = result["rotated_to"]
+
+                assert calls[0]["old_session_id"] == old
+                assert calls[0]["new_session_id"] == new_id
+                # The successor's conversation id, not the session id — the
+                # pane is pinned to a conversation, and reusing the old one
+                # would resume the transcript the rotation just retired.
+                assert calls[0]["new_claude_sid"] not in (old, new_id)
+                event = queue.get_nowait()
+                assert event["rotated_to"] == new_id
+                assert event["rotated_in_place"] is True
+            finally:
+                await mgr.shutdown()
+
+    _run(scenario())
+
+
+def test_terminal_rotation_falls_back_when_no_pane_is_live() -> None:
+    """No terminal under the session (the pty was reaped) — the successor
+    spawns normally and the tile is told to reattach, not to stay put."""
+    async def scenario() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _make_manager(tmp)
+            try:
+                old = await _seed_session(
+                    mgr, owner_type="web", owner_ref="terminal", client_ref="terminal-xyz"
+                )
+                queue: asyncio.Queue = asyncio.Queue(maxsize=10)
+                mgr._observer_queues[old] = {queue}
+                spawned: list[str] = []
+
+                async def declines(**kwargs):
+                    return False
+
+                async def fake_spawn(session_id, *a, **k):
+                    spawned.append(session_id)
+
+                mgr._rotate_pty_on_mind = declines  # type: ignore[assignment]
+                mgr._spawn = fake_spawn  # type: ignore[assignment]
+                mgr._kill_process = _noop_kill(mgr)  # type: ignore[assignment]
+
+                with _real_create_session():
+                    result = await mgr.arm_rotation("web", "terminal-xyz")
+
+                assert spawned == [result["rotated_to"]]
+                event = queue.get_nowait()
+                assert event["rotated_to"] == result["rotated_to"]
+                assert "rotated_in_place" not in event
+            finally:
+                await mgr.shutdown()
+
+    _run(scenario())
+
+
+def test_chat_rotation_never_asks_a_mind_to_move_a_pane() -> None:
+    async def scenario() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _make_manager(tmp)
+            try:
+                await _seed_session(mgr, owner_type="telegram", client_ref="789")
+
+                async def fail_rotate(**kwargs):
+                    raise AssertionError("rotate-pty called for a chat surface")
+
+                async def fake_spawn(session_id, *a, **k):
+                    pass
+
+                mgr._rotate_pty_on_mind = fail_rotate  # type: ignore[assignment]
+                mgr._spawn = fake_spawn  # type: ignore[assignment]
+                mgr._kill_process = _noop_kill(mgr)  # type: ignore[assignment]
+
+                session = await mgr._get_row("sess-789")
+                with _real_create_session():
+                    await mgr._finalize_rotation(dict(session))
             finally:
                 await mgr.shutdown()
 
