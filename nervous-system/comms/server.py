@@ -666,49 +666,32 @@ async def ws_attach(ws: WebSocket, session_id: str):
             http.ws_connect(attach_url) as mind_ws,
         ):
             pump = asyncio.ensure_future(_pump_attach_ws(ws, mind_ws))
-            watched_id = session_id
-            while True:
-                closed = asyncio.ensure_future(_watch_for_close(watched_id))
-                done, _ = await asyncio.wait(
-                    {pump, closed}, return_when=asyncio.FIRST_COMPLETED
-                )
-                if closed not in done:
-                    closed.cancel()
-                if closed in done:
-                    close_event = closed.result()
-                    rotated_to = close_event.get("rotated_to")
-                    if (
-                        close_event.get("type") == "session_closed"
-                        and rotated_to
-                        and close_event.get("rotated_in_place")
-                    ):
-                        # The mind moved the live terminal onto the successor
-                        # without disturbing the pane, so this socket is still
-                        # bridging the same pty — nothing to close. Tell the
-                        # tile which session it is now holding (a TEXT frame,
-                        # the one thing the mind never sends) and keep going.
-                        watched_id = rotated_to
-                        await ws.send_text(json.dumps(
-                            {"type": "session_rotated", "session_id": rotated_to}
-                        ))
-                        log.info("attach: session %s rotated in place to %s",
-                                 session_id, rotated_to)
-                        continue
-                    if close_event.get("type") == "session_suspended":
-                        await ws.close(code=4411, reason="session suspended")
-                    elif rotated_to:
-                        # Rotation with no live terminal under it (the pty was
-                        # already reaped). The tile has to reattach, and the
-                        # successor id in the close reason spares it a poll.
-                        await ws.close(code=4412, reason=rotated_to)
-                    else:
-                        await ws.close(code=4410, reason="session closed")
-                elif pump in done:
-                    upstream = pump.result()
-                    if upstream is not None:
-                        await ws.close(code=upstream)
-                pump.cancel()
-                break
+            # A rotation is invisible here on purpose: it replaces the
+            # conversation under this session, not the session, so no event
+            # reaches the bridge and the tile has nothing to follow.
+            closed = asyncio.ensure_future(_watch_for_close(session_id))
+            done, _ = await asyncio.wait(
+                {pump, closed}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if closed not in done:
+                closed.cancel()
+            if closed in done:
+                close_event = closed.result()
+                rotated_to = close_event.get("rotated_to")
+                if close_event.get("type") == "session_suspended":
+                    await ws.close(code=4411, reason="session suspended")
+                elif rotated_to:
+                    # A chat-surface rotation retired this session for a
+                    # successor. The tile has to reattach, and the successor
+                    # id in the close reason spares it a poll.
+                    await ws.close(code=4412, reason=rotated_to)
+                else:
+                    await ws.close(code=4410, reason="session closed")
+            elif pump in done:
+                upstream = pump.result()
+                if upstream is not None:
+                    await ws.close(code=upstream)
+            pump.cancel()
     except aiohttp.WSServerHandshakeError as exc:
         # The mind answered, and said no. Starlette replies 403 to a
         # websocket path it has no route for, so this is how a mind whose

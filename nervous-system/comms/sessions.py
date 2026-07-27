@@ -332,20 +332,8 @@ class SessionManager:
         *,
         mind_id: str,
         rotated_from: str | None = None,
-        rotate_pty_from: str | None = None,
     ) -> dict:
-        """Create a new session, spawn process, return session info.
-
-        ``rotate_pty_from`` names a predecessor whose browser terminal is
-        live. The successor then takes over that terminal *in place* — the
-        mind renames the tmux session and respawns the pane's process onto
-        the new conversation — instead of getting a stream-json process of
-        its own. A terminal has no stream-json process to begin with, and
-        spawning one here would claim the successor's conversation id before
-        the pane could, so the two dispatch paths are exclusive. Falls back
-        to a normal spawn when the mind reports no live terminal; the
-        returned dict carries ``pty_rotated`` saying which happened.
-        """
+        """Create a new session, spawn process, return session info."""
         # The mind's preferred model lives in broker.minds (set at registration
         # from each mind's own config). The caller can override per-session,
         # but absent that, the mind picks. No comms-wide silent fallback —
@@ -394,39 +382,23 @@ class SessionManager:
             db=self._db,
         )
 
-        pty_rotated = False
-        if rotate_pty_from:
-            pty_rotated = await self._rotate_pty_on_mind(
-                old_session_id=rotate_pty_from,
-                new_session_id=session_id,
-                new_claude_sid=claude_sid,
-                model=model,
-                mind_id=mind_id,
-                system_prompt=system_prompt_blocks,
-                client_ref=client_ref,
-                owner_type=owner_type,
-                owner_ref=owner_ref,
-            )
-        if not pty_rotated:
-            await self._spawn(
-                session_id,
-                model,
-                autopilot=False,
-                resume_sid=claude_sid,
-                surface_prompt=surface_prompt,
-                allowed_directories=allowed_directories,
-                soul_file=soul_file,
-                mind_id=mind_id,
-                is_group_session=(owner_type == "group"),
-                client_ref=client_ref,
-                owner_type=owner_type,
-                owner_ref=owner_ref,
-                system_prompt_blocks=system_prompt_blocks,
-            )
+        await self._spawn(
+            session_id,
+            model,
+            autopilot=False,
+            resume_sid=claude_sid,
+            surface_prompt=surface_prompt,
+            allowed_directories=allowed_directories,
+            soul_file=soul_file,
+            mind_id=mind_id,
+            is_group_session=(owner_type == "group"),
+            client_ref=client_ref,
+            owner_type=owner_type,
+            owner_ref=owner_ref,
+            system_prompt_blocks=system_prompt_blocks,
+        )
         log.info("Created session %s (model=%s, mind=%s, owner=%s)", session_id, model, mind_id, owner_ref)
-        info = await self._session_dict(session_id)
-        info["pty_rotated"] = pty_rotated
-        return info
+        return await self._session_dict(session_id)
 
     async def get_session(self, session_id: str) -> dict | None:
         """Get session details."""
@@ -641,18 +613,15 @@ class SessionManager:
         the next user turn. The browser terminal never calls
         ``send_message`` (see ``record_turn``), so there is no later turn to
         defer to; by the time this is called the hook's multi-minute
-        background work has already finished, so finalizing here is still
-        the *last* step of an already-backgrounded rotation, not a
-        synchronous one.
+        background work has already finished, so rotating here is still the
+        *last* step of an already-backgrounded rotation, not a synchronous
+        one.
         """
         active = await self.get_active_session(client_type, client_ref)
         if not active:
             return {"ok": False, "error": "no active session"}
         if active.get("owner_ref") == "terminal":
-            new_id = await self._finalize_rotation(active)
-            if new_id is None:
-                return {"ok": False, "error": "could not finalize (no client_ref)"}
-            return {"ok": True, "session_id": active["id"], "rotated_to": new_id}
+            return await self._rotate_conversation_in_place(active, client_ref)
         await self._db.execute(
             "UPDATE sessions SET rotation_armed = 1 WHERE id = ?", (active["id"],)
         )
@@ -662,13 +631,75 @@ class SessionManager:
         )
         return {"ok": True, "session_id": active["id"]}
 
+    async def _rotate_conversation_in_place(self, session: dict, client_ref: str) -> dict:
+        """Turn a terminal session's conversation over, keeping the session.
+
+        The session row is the conversation's permanent identity — the tile,
+        its label, the turn ledger and every active_sessions binding are
+        keyed to it. What fills up and has to be replaced is the *harness*
+        conversation underneath: a new ``claude_sid``, a pane respawned onto
+        it carrying the carry-forward, and that id written back onto the same
+        row. Nothing above this level moves, so the user sees a terminal that
+        keeps its id and its pane while the context behind it resets.
+
+        The old harness transcript is left on disk untouched; it is simply no
+        longer the one this session resumes.
+        """
+        session_id = session["id"]
+        from comms import bootstrap_loader  # noqa: PLC0415
+        from comms import broker  # noqa: PLC0415
+
+        mind_id = session["mind_id"]
+        mind_row = await broker.get_mind_by_id(self.broker_db, mind_id)
+        mind_name = (mind_row or {}).get("name") or mind_id
+        system_prompt_blocks = await bootstrap_loader.compose_prompt_blocks(
+            mind_id=mind_id,
+            mind_name=mind_name,
+            client_ref=client_ref,
+            db=self._db,
+        )
+
+        new_claude_sid = str(uuid.uuid4())
+        rotated = await self._rotate_pty_on_mind(
+            session_id=session_id,
+            new_claude_sid=new_claude_sid,
+            model=session["model"],
+            mind_id=mind_id,
+            system_prompt=system_prompt_blocks,
+            client_ref=client_ref,
+            owner_type=session.get("owner_type"),
+            owner_ref=session.get("owner_ref"),
+        )
+        if not rotated:
+            # No live pane to respawn — there is nothing burning context, and
+            # rewriting claude_sid here would strand the session on a
+            # conversation that was never started and never seeded.
+            log.warning(
+                "rotation: session %s has no live terminal; leaving it as it is",
+                session_id,
+            )
+            return {"ok": False, "error": "no live terminal", "session_id": session_id}
+
+        await self._db.execute(
+            "UPDATE sessions SET claude_sid = ?, harness_sid = NULL, "
+            "rotation_armed = 0, last_active = ? WHERE id = ?",
+            (new_claude_sid, time.time(), session_id),
+        )
+        await self._db.commit()
+        log.info("rotation: session %s now on conversation %s", session_id, new_claude_sid)
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "rotated": True,
+            "claude_sid": new_claude_sid,
+        }
+
     async def _finalize_rotation(self, session: dict) -> str | None:
-        """Swap a session to a fresh one, carrying the rotation forward.
+        """Swap a chat session to a fresh one, carrying the rotation forward.
 
         Creates the replacement *before* killing the old session — so the
         new id exists in time to be published on the kill event
-        (``rotated_to``), letting an attached browser terminal reconnect
-        straight to it — then kills the old one. The new session boots with
+        (``rotated_to``) — then kills the old one. The new session boots with
         the carry-forward via ``create_session`` → ``bootstrap_loader``.
         Returns the new session id, or ``None`` when the swap can't proceed
         (no ``client_ref`` to rebind the surface) — in which case the caller
@@ -697,14 +728,8 @@ class SessionManager:
             client_ref=client_ref,
             mind_id=session["mind_id"],
             rotated_from=old_id,
-            # A terminal-owned session is being typed into right now. Its
-            # successor takes over that same pane rather than asking the tile
-            # to go find a new one.
-            rotate_pty_from=old_id if session.get("owner_ref") == "terminal" else None,
         )
-        await self.kill_session(
-            old_id, rotated_to=new["id"], rotated_in_place=bool(new.get("pty_rotated"))
-        )
+        await self.kill_session(old_id, rotated_to=new["id"])
         return new["id"]
 
     async def _forward_to_session(self, session_id: str, content: str, images: list[dict] | None):
@@ -1358,21 +1383,15 @@ class SessionManager:
         self,
         session_id: str,
         rotated_to: str | None = None,
-        rotated_in_place: bool = False,
     ) -> dict:
         """Kill a session: SIGTERM the subprocess, mark closed.
 
         ``rotated_to`` carries the successor session's id, when this kill is
-        the retiring half of a rotation swap — it rides on the published
-        ``session_closed`` event so an attached browser terminal can follow
-        the conversation to its successor.
-
-        ``rotated_in_place`` says the mind already moved the live terminal
-        onto that successor: the pane, the pty and the proxied socket all
-        survived, so ``ws_attach`` relabels the tile and keeps bridging
-        instead of closing. Without it the tile has to reattach (close code
-        4412), which is the fallback for a rotation with no live terminal
-        under it.
+        the retiring half of a chat-surface rotation swap — it rides on the
+        published ``session_closed`` event so an attached observer can follow
+        the conversation to its successor. A terminal session is never killed
+        by a rotation: its conversation turns over underneath it and the row
+        stays (see ``_rotate_conversation_in_place``).
         """
         session = await self._get_row(session_id)
         if not session:
@@ -1394,8 +1413,6 @@ class SessionManager:
         event: dict[str, Any] = {"type": "session_closed", "session_id": session_id}
         if rotated_to:
             event["rotated_to"] = rotated_to
-            if rotated_in_place:
-                event["rotated_in_place"] = True
         await self._publish_session_event(
             session_id,
             event,
@@ -1493,8 +1510,7 @@ class SessionManager:
     async def _rotate_pty_on_mind(
         self,
         *,
-        old_session_id: str,
-        new_session_id: str,
+        session_id: str,
         new_claude_sid: str,
         model: str,
         mind_id: str,
@@ -1503,25 +1519,23 @@ class SessionManager:
         owner_type: str | None = None,
         owner_ref: str | None = None,
     ) -> bool:
-        """Ask a mind to move a live terminal onto a rotation's successor.
+        """Ask a mind to start a fresh conversation in a live terminal.
 
-        The mind renames the tmux session and respawns the pane's process on
-        the new conversation, seeded with the carry-forward. The attached
-        client — and so the pty, the proxied socket, and the browser tile —
-        never notices. Returns False when the mind holds no live terminal for
-        the predecessor (or is too old to have the route), which is the
-        caller's signal to spawn the successor normally.
+        The mind respawns the pane's process on the new conversation, seeded
+        with the carry-forward, leaving the tmux session, the pty, the
+        proxied socket and the browser tile untouched. Returns False when the
+        mind holds no live terminal for this session (or is too old to have
+        the route).
         """
-        mind_url = await self._mind_url_for_session(old_session_id, mind_id)
+        mind_url = await self._mind_url_for_session(session_id, mind_id)
         if not mind_url:
             return False
         import aiohttp
         try:
             async with aiohttp.ClientSession() as http:
                 resp = await http.post(
-                    f"{mind_url}/sessions/{old_session_id}/rotate-pty",
+                    f"{mind_url}/sessions/{session_id}/rotate-pty",
                     json={
-                        "new_session_id": new_session_id,
                         "new_claude_sid": new_claude_sid,
                         "model": model,
                         "system_prompt": system_prompt,
@@ -1535,24 +1549,14 @@ class SessionManager:
                 if resp.status != 200:
                     log.warning(
                         "rotate-pty on %s for session %s returned %s",
-                        mind_url, old_session_id, resp.status,
+                        mind_url, session_id, resp.status,
                     )
                     return False
                 data = await resp.json()
         except Exception:
-            log.exception("rotate-pty on %s for session %s failed", mind_url, old_session_id)
+            log.exception("rotate-pty on %s for session %s failed", mind_url, session_id)
             return False
-        rotated = bool(data.get("rotated"))
-        if rotated:
-            # The terminal now answers to the successor, so route its kill
-            # there too — nothing else on the new session has a process.
-            self._procs[new_session_id] = {"_mind_url": mind_url}
-            self._mind_ids[new_session_id] = mind_id
-            log.info(
-                "rotate-pty: terminal moved from session %s to %s in place",
-                old_session_id, new_session_id,
-            )
-        return rotated
+        return bool(data.get("rotated"))
 
     async def _mind_url_for_session(self, session_id: str, mind_id: str | None = None) -> str | None:
         """Resolve a session's mind base URL from the database.
