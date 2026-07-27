@@ -85,6 +85,19 @@ def test_configuration_surfaces_render_actionable_controls(tmp_path, monkeypatch
     assert "Request restart" in client.get("/minds/ada").text
 
 
+def test_core_mind_installation_is_not_presented_as_automated(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
+
+    setup = client.get("/setup").text
+    minds = client.get("/minds").text
+
+    assert "Core Mind provisioning is not automated yet" in setup
+    assert "A name check does not reserve the name or install a runtime" in setup
+    assert "Add an Edge Mind" in setup
+    assert "Add Edge Mind" in minds
+    assert ">Create mind<" not in minds
+
+
 def test_new_configuration_mutations_require_authentication(tmp_path, monkeypatch):
     monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")

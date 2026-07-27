@@ -38,6 +38,7 @@ Reference material:
 | Ollama | Health badge only | The owner can see the server version, installed models, running models, pull a model, and delete a model |
 | Pi-hole | Unconfigured card with no explanation | The owner can connect the live API; a 401 response is correctly reported as reachable but awaiting administrative authentication rather than as offline |
 | Local Mind model | Raw configuration was read-only | The owner can change `default_model`; Hive preserves the rest of `runtime.yaml`, updates broker metadata, and exposes an approval-gated runtime restart |
+| Core Mind setup affordance | “Create mind” led to a name check and terminal link that did not install anything | The UI now states that Core provisioning is not automated, explains that name checks reserve nothing, and keeps the working Edge Mind path primary |
 | Edge Mind identity | The deployment command minted an unknown ID on the target | The Hive now mints the Mind ID first and stamps it into the target environment, so installation and registration refer to one identity |
 | Edge Mind network wiring | The generated plan omitted reachable Hive endpoints | The generated environment includes the configured LAN endpoints for Hive Comms, Lucent, and Hive Tools |
 | Edge Mind container deployment | Generated containers used core-only hostnames, required a pre-existing `hivemind` Docker network, and did not publish the Mind API | The companion Edge installer now consumes the generated environment, publishes the selected port, and runs on an ordinary remote Docker host |

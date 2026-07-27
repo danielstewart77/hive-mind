@@ -2,7 +2,7 @@
 {% block title %}Setup · Hive{% endblock %}
 {% block content %}
 <main class="page">
-    <header class="page-header"><div class="page-header-copy"><p class="page-eyebrow">First run</p><h1 class="page-title">Set up your Hive</h1><p class="page-description">Confirm the core, register the first mind, then connect Edge Minds and Capability Nodes.</p></div></header>
+    <header class="page-header"><div class="page-header-copy"><p class="page-eyebrow">First run</p><h1 class="page-title">Set up your Hive</h1><p class="page-description">Confirm the core, connect a Mind runtime, then add Capability Nodes.</p></div></header>
     <div class="setup-progress" aria-label="Setup progress"><span class="is-current" id="progress-core"></span><span id="progress-mind"></span><span id="progress-capabilities"></span><span id="progress-edge"></span></div>
     <div class="setup-grid">
         <section class="surface">
@@ -11,11 +11,13 @@
         </section>
         <aside class="overview-stack">
             <section class="surface" id="first-mind">
-                <div class="surface-header"><div><h2>First mind</h2><p>Identity starts with a conversation</p></div></div>
+                <div class="surface-header"><div><h2>Core Mind creation</h2><p>Identity starts with a conversation</p></div></div>
                 <div class="surface-body overview-stack">
+                    <div class="notice"><i data-lucide="construction"></i><span>Core Mind provisioning is not automated yet. The identity conversation can define the Mind, but installing its runtime still requires a host-side runtime manifest and installer.</span></div>
                     <div class="field"><label for="setup-mind-name">Proposed name</label><input id="setup-mind-name" type="text" placeholder="atlas"><small id="setup-name-result">Check the name before starting identity setup.</small></div>
                     <button class="button" id="setup-check-name" type="button"><i data-lucide="scan-search"></i>Check availability</button>
-                    <a class="button button-primary" href="https://terminal.sparktobloom.com" target="_blank" rel="noopener noreferrer"><i data-lucide="messages-square"></i>Open identity conversation</a>
+                    <small>A name check does not reserve the name or install a runtime.</small>
+                    <div class="form-actions"><a class="button" href="https://terminal.sparktobloom.com" target="_blank" rel="noopener noreferrer"><i data-lucide="messages-square"></i>Open identity workshop</a><a class="button button-primary" href="/edge-minds/new"><i data-lucide="orbit"></i>Add an Edge Mind</a></div>
                 </div>
             </section>
             <section class="surface">
