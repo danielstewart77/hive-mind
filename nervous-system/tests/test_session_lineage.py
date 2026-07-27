@@ -84,14 +84,14 @@ def test_finalize_stamps_the_replaced_session_id() -> None:
                     captured["rotated_from"] = rotated_from
                     return {"id": "sess-new"}
 
-                async def fake_kill(session_id):
+                async def fake_kill(session_id, **kw):
                     return {"id": session_id}
 
                 mgr.create_session = fake_create_session
                 mgr.kill_session = fake_kill
 
                 session = await mgr.get_session(old)
-                new_id = await mgr._finalize_armed_rotation(session)
+                new_id = await mgr._finalize_rotation(session)
 
                 assert new_id == "sess-new"
                 assert captured["rotated_from"] == old
