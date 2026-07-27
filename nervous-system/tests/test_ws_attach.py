@@ -7,6 +7,8 @@ directions.
 from __future__ import annotations
 
 import asyncio
+import functools
+import json
 import time
 
 import aiohttp
@@ -32,7 +34,6 @@ class _FakeMindWS:
     def __init__(self, incoming: list[bytes] | None = None, close_with: int | None = None):
         self._incoming = list(incoming or [])
         self._close_with = close_with
-        self._block = asyncio.Event()
         self.sent: list[bytes] = []
         self.close_code: int | None = None
 
@@ -40,15 +41,17 @@ class _FakeMindWS:
         return self
 
     async def __anext__(self):
-        if self._incoming:
-            data = self._incoming.pop(0)
-            return type("Msg", (), {"type": aiohttp.WSMsgType.BINARY, "data": data})()
-        if self._close_with is not None:
-            self.close_code = self._close_with
-            self._close_with = None
-            raise StopAsyncIteration
-        await self._block.wait()  # never set — blocks until the pump is cancelled
-        raise StopAsyncIteration
+        while not self._incoming:
+            if self._close_with is not None:
+                self.close_code = self._close_with
+                self._close_with = None
+                raise StopAsyncIteration
+            # Polled rather than event-driven: a test may push more output
+            # from its own thread mid-bridge. Blocks forever if nothing does,
+            # which is what the pump-cancellation cases want.
+            await asyncio.sleep(0.01)
+        data = self._incoming.pop(0)
+        return type("Msg", (), {"type": aiohttp.WSMsgType.BINARY, "data": data})()
 
     async def send_bytes(self, data: bytes) -> None:
         self.sent.append(data)
@@ -323,6 +326,43 @@ class TestWsAttach:
 
         assert excinfo.value.code == 4412
         assert excinfo.value.reason == "sess-successor"
+
+    def test_rotated_in_place_keeps_the_socket_and_announces_the_successor(
+        self, app_client, monkeypatch
+    ):
+        """The pane rotation case: the mind moved the terminal to the
+        successor, so the browser must not be dropped. Closing here would
+        tear down a tile the user is typing into and reattach it to a
+        conversation it is already holding."""
+        client, server_module = app_client
+        _run(_seed_session_and_mind(server_module, session_id="sess-inplace"))
+        # The successor exists before the predecessor is killed — that
+        # ordering is what makes handing its id out on the kill event safe.
+        _run(_seed_session_and_mind(server_module, session_id="sess-heir"))
+
+        fake_ws = _FakeMindWS(incoming=[b"tui up\r\n"])
+        _FakeHttpSession.ws_to_return = fake_ws
+        _FakeHttpSession.raise_on_connect = None
+        monkeypatch.setattr(server_module.aiohttp, "ClientSession", _FakeHttpSession)
+
+        with client.websocket_connect("/sessions/sess-inplace/attach") as ws:
+            assert ws.receive_bytes() == b"tui up\r\n"
+            client.portal.call(
+                functools.partial(
+                    server_module.session_mgr.kill_session,
+                    "sess-inplace",
+                    rotated_to="sess-heir",
+                    rotated_in_place=True,
+                )
+            )
+            # A TEXT frame, not a close: the one frame type the mind never
+            # sends up the bridge, so the tile can tell it apart from output.
+            assert json.loads(ws.receive_text()) == {
+                "type": "session_rotated", "session_id": "sess-heir",
+            }
+            # ...and the bridge is still pumping under the new id.
+            fake_ws._incoming.append(b"still here\r\n")
+            assert ws.receive_bytes() == b"still here\r\n"
 
     def test_mind_close_code_reaches_the_browser(self, app_client, monkeypatch):
         """A mind evicting a stale attach closes 1012, which is the tile's

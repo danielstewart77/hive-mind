@@ -332,8 +332,20 @@ class SessionManager:
         *,
         mind_id: str,
         rotated_from: str | None = None,
+        rotate_pty_from: str | None = None,
     ) -> dict:
-        """Create a new session, spawn process, return session info."""
+        """Create a new session, spawn process, return session info.
+
+        ``rotate_pty_from`` names a predecessor whose browser terminal is
+        live. The successor then takes over that terminal *in place* — the
+        mind renames the tmux session and respawns the pane's process onto
+        the new conversation — instead of getting a stream-json process of
+        its own. A terminal has no stream-json process to begin with, and
+        spawning one here would claim the successor's conversation id before
+        the pane could, so the two dispatch paths are exclusive. Falls back
+        to a normal spawn when the mind reports no live terminal; the
+        returned dict carries ``pty_rotated`` saying which happened.
+        """
         # The mind's preferred model lives in broker.minds (set at registration
         # from each mind's own config). The caller can override per-session,
         # but absent that, the mind picks. No comms-wide silent fallback —
@@ -382,23 +394,39 @@ class SessionManager:
             db=self._db,
         )
 
-        await self._spawn(
-            session_id,
-            model,
-            autopilot=False,
-            resume_sid=claude_sid,
-            surface_prompt=surface_prompt,
-            allowed_directories=allowed_directories,
-            soul_file=soul_file,
-            mind_id=mind_id,
-            is_group_session=(owner_type == "group"),
-            client_ref=client_ref,
-            owner_type=owner_type,
-            owner_ref=owner_ref,
-            system_prompt_blocks=system_prompt_blocks,
-        )
+        pty_rotated = False
+        if rotate_pty_from:
+            pty_rotated = await self._rotate_pty_on_mind(
+                old_session_id=rotate_pty_from,
+                new_session_id=session_id,
+                new_claude_sid=claude_sid,
+                model=model,
+                mind_id=mind_id,
+                system_prompt=system_prompt_blocks,
+                client_ref=client_ref,
+                owner_type=owner_type,
+                owner_ref=owner_ref,
+            )
+        if not pty_rotated:
+            await self._spawn(
+                session_id,
+                model,
+                autopilot=False,
+                resume_sid=claude_sid,
+                surface_prompt=surface_prompt,
+                allowed_directories=allowed_directories,
+                soul_file=soul_file,
+                mind_id=mind_id,
+                is_group_session=(owner_type == "group"),
+                client_ref=client_ref,
+                owner_type=owner_type,
+                owner_ref=owner_ref,
+                system_prompt_blocks=system_prompt_blocks,
+            )
         log.info("Created session %s (model=%s, mind=%s, owner=%s)", session_id, model, mind_id, owner_ref)
-        return await self._session_dict(session_id)
+        info = await self._session_dict(session_id)
+        info["pty_rotated"] = pty_rotated
+        return info
 
     async def get_session(self, session_id: str) -> dict | None:
         """Get session details."""
@@ -669,8 +697,14 @@ class SessionManager:
             client_ref=client_ref,
             mind_id=session["mind_id"],
             rotated_from=old_id,
+            # A terminal-owned session is being typed into right now. Its
+            # successor takes over that same pane rather than asking the tile
+            # to go find a new one.
+            rotate_pty_from=old_id if session.get("owner_ref") == "terminal" else None,
         )
-        await self.kill_session(old_id, rotated_to=new["id"])
+        await self.kill_session(
+            old_id, rotated_to=new["id"], rotated_in_place=bool(new.get("pty_rotated"))
+        )
         return new["id"]
 
     async def _forward_to_session(self, session_id: str, content: str, images: list[dict] | None):
@@ -1320,14 +1354,25 @@ class SessionManager:
         await self._db.commit()
         return await self._session_dict(session_id)
 
-    async def kill_session(self, session_id: str, rotated_to: str | None = None) -> dict:
+    async def kill_session(
+        self,
+        session_id: str,
+        rotated_to: str | None = None,
+        rotated_in_place: bool = False,
+    ) -> dict:
         """Kill a session: SIGTERM the subprocess, mark closed.
 
         ``rotated_to`` carries the successor session's id, when this kill is
         the retiring half of a rotation swap — it rides on the published
-        ``session_closed`` event so an attached browser terminal
-        (``ws_attach``'s close-code mapping) can reconnect straight to the
-        new session instead of just reporting the old one as ended.
+        ``session_closed`` event so an attached browser terminal can follow
+        the conversation to its successor.
+
+        ``rotated_in_place`` says the mind already moved the live terminal
+        onto that successor: the pane, the pty and the proxied socket all
+        survived, so ``ws_attach`` relabels the tile and keeps bridging
+        instead of closing. Without it the tile has to reattach (close code
+        4412), which is the fallback for a rotation with no live terminal
+        under it.
         """
         session = await self._get_row(session_id)
         if not session:
@@ -1349,6 +1394,8 @@ class SessionManager:
         event: dict[str, Any] = {"type": "session_closed", "session_id": session_id}
         if rotated_to:
             event["rotated_to"] = rotated_to
+            if rotated_in_place:
+                event["rotated_in_place"] = True
         await self._publish_session_event(
             session_id,
             event,
@@ -1442,6 +1489,70 @@ class SessionManager:
         self._mind_ids[session_id] = mind_id
         log.info("Spawned %s session %s via %s", mind_id, session_id, mind_url)
         return self._procs[session_id]
+
+    async def _rotate_pty_on_mind(
+        self,
+        *,
+        old_session_id: str,
+        new_session_id: str,
+        new_claude_sid: str,
+        model: str,
+        mind_id: str,
+        system_prompt: str = "",
+        client_ref: str | None = None,
+        owner_type: str | None = None,
+        owner_ref: str | None = None,
+    ) -> bool:
+        """Ask a mind to move a live terminal onto a rotation's successor.
+
+        The mind renames the tmux session and respawns the pane's process on
+        the new conversation, seeded with the carry-forward. The attached
+        client — and so the pty, the proxied socket, and the browser tile —
+        never notices. Returns False when the mind holds no live terminal for
+        the predecessor (or is too old to have the route), which is the
+        caller's signal to spawn the successor normally.
+        """
+        mind_url = await self._mind_url_for_session(old_session_id, mind_id)
+        if not mind_url:
+            return False
+        import aiohttp
+        try:
+            async with aiohttp.ClientSession() as http:
+                resp = await http.post(
+                    f"{mind_url}/sessions/{old_session_id}/rotate-pty",
+                    json={
+                        "new_session_id": new_session_id,
+                        "new_claude_sid": new_claude_sid,
+                        "model": model,
+                        "system_prompt": system_prompt,
+                        "client_ref": client_ref,
+                        "owner_type": owner_type,
+                        "owner_ref": owner_ref,
+                        "surface": self._surface_label(owner_type or ""),
+                    },
+                    timeout=aiohttp.ClientTimeout(total=20),
+                )
+                if resp.status != 200:
+                    log.warning(
+                        "rotate-pty on %s for session %s returned %s",
+                        mind_url, old_session_id, resp.status,
+                    )
+                    return False
+                data = await resp.json()
+        except Exception:
+            log.exception("rotate-pty on %s for session %s failed", mind_url, old_session_id)
+            return False
+        rotated = bool(data.get("rotated"))
+        if rotated:
+            # The terminal now answers to the successor, so route its kill
+            # there too — nothing else on the new session has a process.
+            self._procs[new_session_id] = {"_mind_url": mind_url}
+            self._mind_ids[new_session_id] = mind_id
+            log.info(
+                "rotate-pty: terminal moved from session %s to %s in place",
+                old_session_id, new_session_id,
+            )
+        return rotated
 
     async def _mind_url_for_session(self, session_id: str, mind_id: str | None = None) -> str | None:
         """Resolve a session's mind base URL from the database.
