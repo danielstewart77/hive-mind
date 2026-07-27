@@ -7,7 +7,6 @@ directions.
 from __future__ import annotations
 
 import asyncio
-import functools
 import json
 import time
 
@@ -302,10 +301,10 @@ class TestWsAttach:
         assert excinfo.value.code == 4410
 
     def test_kill_session_with_rotated_to_closes_4412_with_successor(self, app_client, monkeypatch):
-        """A rotation swap kills the old session with a successor id already
-        known. The tile should reconnect straight to it instead of being
-        told the session simply ended (4410) and having to poll to find
-        out what replaced it."""
+        """A chat-surface rotation retires the session for a successor whose
+        id is already known. An observer should reconnect straight to it
+        instead of being told the session simply ended (4410) and having to
+        poll to find out what replaced it."""
         from starlette.websockets import WebSocketDisconnect
 
         client, server_module = app_client
@@ -326,43 +325,6 @@ class TestWsAttach:
 
         assert excinfo.value.code == 4412
         assert excinfo.value.reason == "sess-successor"
-
-    def test_rotated_in_place_keeps_the_socket_and_announces_the_successor(
-        self, app_client, monkeypatch
-    ):
-        """The pane rotation case: the mind moved the terminal to the
-        successor, so the browser must not be dropped. Closing here would
-        tear down a tile the user is typing into and reattach it to a
-        conversation it is already holding."""
-        client, server_module = app_client
-        _run(_seed_session_and_mind(server_module, session_id="sess-inplace"))
-        # The successor exists before the predecessor is killed — that
-        # ordering is what makes handing its id out on the kill event safe.
-        _run(_seed_session_and_mind(server_module, session_id="sess-heir"))
-
-        fake_ws = _FakeMindWS(incoming=[b"tui up\r\n"])
-        _FakeHttpSession.ws_to_return = fake_ws
-        _FakeHttpSession.raise_on_connect = None
-        monkeypatch.setattr(server_module.aiohttp, "ClientSession", _FakeHttpSession)
-
-        with client.websocket_connect("/sessions/sess-inplace/attach") as ws:
-            assert ws.receive_bytes() == b"tui up\r\n"
-            client.portal.call(
-                functools.partial(
-                    server_module.session_mgr.kill_session,
-                    "sess-inplace",
-                    rotated_to="sess-heir",
-                    rotated_in_place=True,
-                )
-            )
-            # A TEXT frame, not a close: the one frame type the mind never
-            # sends up the bridge, so the tile can tell it apart from output.
-            assert json.loads(ws.receive_text()) == {
-                "type": "session_rotated", "session_id": "sess-heir",
-            }
-            # ...and the bridge is still pumping under the new id.
-            fake_ws._incoming.append(b"still here\r\n")
-            assert ws.receive_bytes() == b"still here\r\n"
 
     def test_mind_close_code_reaches_the_browser(self, app_client, monkeypatch):
         """A mind evicting a stale attach closes 1012, which is the tile's
