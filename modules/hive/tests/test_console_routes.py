@@ -360,7 +360,9 @@ def test_edge_mind_bootstrap_validates_input_and_never_includes_credentials(
     assert invalid.status_code == 400
 
 
-def test_sentinel_edge_mind_bootstrap_includes_companion_bundle(tmp_path, monkeypatch):
+def test_sentinel_edge_mind_bootstrap_is_rejected_until_bundle_exists(
+    tmp_path, monkeypatch
+):
     client = _authed_client(tmp_path, monkeypatch)
 
     response = client.post(
@@ -376,17 +378,11 @@ def test_sentinel_edge_mind_bootstrap_includes_companion_bundle(tmp_path, monkey
         },
     )
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["profile"] == "sentinel"
-    assert any("hive-sentinel" in step["command"] for step in body["commands"])
-    assert {component["kind"] for component in body["components"]} == {
-        "runtime",
-        "specialization",
-        "sensors",
-        "observability",
-        "surface",
-    }
+    assert response.status_code == 400
+    assert "not automated" in response.json()["detail"]
+    page = client.get("/edge-minds/new").text
+    assert 'name="profile" value="sentinel"' not in page
+    assert "installing the full Sentinel" in page
 
 
 def test_edge_mind_bootstrap_wires_supported_ollama_harness(tmp_path, monkeypatch):
@@ -412,6 +408,28 @@ def test_edge_mind_bootstrap_wires_supported_ollama_harness(tmp_path, monkeypatc
     assert "http://192.168.4.64:11434" in command
     assert "config.yaml" in command
     assert response.json()["registration"]["model"] == "qwen3:8b"
+
+
+def test_edge_mind_bootstrap_preserves_an_empty_surface_selection(
+    tmp_path, monkeypatch
+):
+    client = _authed_client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/api/edge-minds/bootstrap",
+        json={
+            "name": "headless-one",
+            "profile": "standard",
+            "role": "satellite",
+            "deployment": "container",
+            "harness": "codex_cli_codex",
+            "surfaces": [],
+            "port": 8421,
+        },
+    )
+
+    assert response.status_code == 200
+    assert "--surfaces none" in response.json()["command"]
 
 
 def test_edge_mind_bootstrap_rejects_unimplemented_harness(tmp_path, monkeypatch):
@@ -497,6 +515,32 @@ def test_edge_mind_verify_rejects_mismatched_identity(tmp_path, monkeypatch):
 
     assert response.status_code == 400
     assert "identity" in response.json()["detail"].lower()
+
+
+def test_edge_mind_verify_rejects_an_unready_runtime(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
+    mind_id = "6f12a60a-b5fd-4ba4-b2f1-07065a49145d"
+    with patch.object(
+        main_mod,
+        "_probe_edge_mind",
+        new=AsyncMock(return_value={"mind_id": mind_id, "status": "degraded"}),
+    ):
+        response = client.post(
+            "/api/edge-minds/verify",
+            json={
+                "name": "atlas",
+                "mind_id": mind_id,
+                "gateway_url": "http://192.168.4.20:8421",
+                "model": "sonnet",
+                "harness": "claude_cli_claude",
+                "profile": "standard",
+                "role": "satellite",
+                "deployment": "systemd",
+            },
+        )
+
+    assert response.status_code == 502
+    assert "not ready" in response.json()["detail"].lower()
 
 
 def test_tools_api_returns_capability_catalog(tmp_path, monkeypatch):

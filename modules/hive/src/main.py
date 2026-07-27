@@ -553,6 +553,7 @@ async def api_edge_minds(user: dict = Depends(require_auth)):
 
 
 _EDGE_MIND_PROFILES = {"standard", "sentinel"}
+_EDGE_MIND_BOOTSTRAP_PROFILES = {"standard"}
 _EDGE_MIND_ROLES = {"operator", "satellite"}
 _EDGE_MIND_DEPLOYMENTS = {"systemd", "container", "windows-task"}
 _EDGE_MIND_HARNESSES = {
@@ -591,33 +592,6 @@ _EDGE_MIND_BUNDLES = {
             "description": "One mind runtime, its harness, and selected conversation surfaces.",
         }
     ],
-    "sentinel": [
-        {
-            "name": "Edge Mind runtime",
-            "kind": "runtime",
-            "description": "The Sentinel mind and its selected harness and surfaces.",
-        },
-        {
-            "name": "Hive Sentinel",
-            "kind": "specialization",
-            "description": "Security triage, investigation, decision, and response-rule logic.",
-        },
-        {
-            "name": "Telemetry collectors",
-            "kind": "sensors",
-            "description": "NetSage, Suricata, Zeek, journald, or Windows event collection.",
-        },
-        {
-            "name": "Loki and Grafana",
-            "kind": "observability",
-            "description": "Central log storage, investigation queries, and operator dashboards.",
-        },
-        {
-            "name": "Sentinel dashboard",
-            "kind": "surface",
-            "description": "A dedicated security surface for events, response rules, and analysis.",
-        },
-    ],
 }
 
 
@@ -635,8 +609,8 @@ def _build_edge_mind_bootstrap(body: dict) -> dict:
         raise ValueError("Port must be a number") from exc
     if not re.fullmatch(r"[a-z][a-z0-9-]{1,31}", name):
         raise ValueError("Name must be 2 to 32 lowercase letters, numbers, or hyphens")
-    if profile not in _EDGE_MIND_PROFILES:
-        raise ValueError("Unknown Edge Mind profile")
+    if profile not in _EDGE_MIND_BOOTSTRAP_PROFILES:
+        raise ValueError("Sentinel profile installation is not automated yet")
     if role not in _EDGE_MIND_ROLES:
         raise ValueError("Unknown Edge Mind role")
     if deployment not in _EDGE_MIND_DEPLOYMENTS:
@@ -695,7 +669,7 @@ def _build_edge_mind_bootstrap(body: dict) -> dict:
         "--harness",
         harness,
         "--surfaces",
-        ",".join(surfaces),
+        ",".join(surfaces) or "none",
         "--port",
         str(port),
     ]
@@ -755,13 +729,6 @@ def _build_edge_mind_bootstrap(body: dict) -> dict:
             ),
         }
     ]
-    if profile == "sentinel":
-        commands.append(
-            {
-                "name": "Install Sentinel specialization",
-                "command": "git clone https://github.com/danielstewart77/hive-sentinel.git",
-            }
-        )
     return {
         "mind_id": mind_id,
         "profile": profile,
@@ -850,6 +817,11 @@ async def api_edge_mind_verify(request: Request, user: dict = Depends(require_au
         raise HTTPException(
             status_code=400,
             detail="The responding Edge Mind identity does not match this deployment plan",
+        )
+    if health.get("status") != "ok":
+        raise HTTPException(
+            status_code=502,
+            detail="The responding Edge Mind is not ready for registration",
         )
     existing = next(
         (
