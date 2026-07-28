@@ -24,6 +24,8 @@ import re
 import signal
 import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -35,7 +37,12 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from minds.harness.empty_turn_diagnostic import compose_empty_turn_diagnostic
 from minds.proactive import make_proactive_router
-from minds.pty_attach import install_pty_attach, open_pty_process
+from minds.pty_attach import (
+    TmuxTerminals,
+    install_pty_attach,
+    mirror_turn,
+    seeded_pane_command,
+)
 from minds.pty_attach import teardown as teardown_pty
 from core.hive_logging import configure_logging, install_fastapi_logging, log_event
 
@@ -274,19 +281,54 @@ def _rollout_exists(thread_id: str) -> bool:
     return False
 
 
-def _watch_for_new_thread_in_background(session_id: str, proc, before: set[Path]) -> None:
+TERMINALS = TmuxTerminals(NAME, PROJECT_DIR)
+
+
+def _report_thread(session_id: str, thread_id: str) -> None:
+    """Tell hive-comms which provider-native thread belongs to this session.
+
+    The gateway is the durable home for the mapping: THREADS lives in this
+    process and dies with the container, while a browser tile reattaching
+    after a redeploy is handed ``harness_sid`` from the session row.
+    """
+    base_url = (NS_URL or "").rstrip("/")
+    if not base_url:
+        return
+    token = os.environ.get("COMMS_BEARER_TOKEN", "")
+    request = urllib.request.Request(
+        f"{base_url}/sessions/{session_id}/harness-state",
+        data=json.dumps({"harness_sid": thread_id}).encode(),
+        headers={
+            "Content-Type": "application/json",
+            **({"Authorization": f"Bearer {token}"} if token else {}),
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            if response.status != 200:
+                raise RuntimeError(f"gateway returned HTTP {response.status}")
+    except (OSError, urllib.error.URLError, RuntimeError) as exc:
+        log.warning("Failed to report codex thread %s for session %s: %s",
+                    thread_id, session_id, exc)
+
+
+def _watch_for_new_thread_in_background(session_id: str, before: set[Path]) -> None:
     """Report the thread id codex mints for a bare (thread-less) terminal.
 
     A fresh terminal launches without `resume` — there is no thread yet, so
-    there is nothing to pass. codex writes a new rollout file under
-    CODEX_HOME/sessions on the user's first real turn; this watches for that
-    file (``proc.poll()`` is the only other thing to watch — there is no JSON
-    event stream on an interactive TUI, unlike `_run_codex_turn`'s
-    `thread.started`) and, once it appears, extracts the thread id from its
-    name and stores it in THREADS so the next reattach can resume it.
+    there is nothing to pass, and `app-server`'s `thread/start` mints an id
+    without ever writing the rollout `codex resume` needs. codex writes that
+    file under CODEX_HOME/sessions on the user's first real turn; this polls
+    for it (there is no JSON event stream on an interactive TUI, unlike
+    `_run_codex_turn`'s `thread.started`) and, once it appears, extracts the
+    thread id from its name, stores it in THREADS and reports it to the
+    gateway so a later reattach resumes the real conversation instead of
+    starting a second one. Gives up once the tmux session ends with nothing
+    ever typed.
     """
     def _watch() -> None:
-        while proc.poll() is None:
+        while TERMINALS.alive(session_id):
             for path in _existing_rollout_paths() - before:
                 match = _ROLLOUT_UUID_RE.search(path.name)
                 if match:
@@ -296,6 +338,7 @@ def _watch_for_new_thread_in_background(session_id: str, proc, before: set[Path]
                         "%s session %s: discovered thread %s from new rollout %s",
                         NAME, session_id, thread_id, path,
                     )
+                    _report_thread(session_id, thread_id)
                     return
             time.sleep(1.0)
 
@@ -304,20 +347,65 @@ def _watch_for_new_thread_in_background(session_id: str, proc, before: set[Path]
     ).start()
 
 
-def _spawn_pty(
-    *, session_id: str, model: str, conversation_id: str, cols: int, rows: int
-) -> tuple[Any, int]:
-    """Put an interactive `codex` TUI on this session's thread under a pty.
+def _terminal_argv(model: str, thread_id: str | None) -> list[str]:
+    """The interactive `codex` that runs inside the tmux pane.
 
-    ``conversation_id`` is the gateway's and means nothing to codex, so the
-    thread comes from THREADS. A session with no thread yet, or whose
-    thread's rollout no longer exists under this CODEX_HOME (a migration or a
-    redeploy onto a fresh volume), launches bare `codex` instead of resuming
-    — starting a real `resume <stale-id>` dies within a second and reads as a
-    hung terminal. A background watcher reports the thread id codex mints on
-    the first real turn (see `_watch_for_new_thread_in_background`).
+    Resumes a known thread (`codex resume <id>`) when one exists and has a
+    rollout on disk; a fresh terminal launches bare `codex` instead (see
+    `_watch_for_new_thread_in_background`). A rotation's carry-forward rides
+    in as codex's positional opening turn — this harness has no
+    ``--append-system-prompt`` — but not from here; see
+    ``seeded_pane_command``.
     """
-    del conversation_id  # codex mints its own ids; see THREADS
+    cmd = [
+        "codex",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--model", model,
+        *_provider_args(),
+    ]
+    if thread_id:
+        cmd += ["resume", thread_id]
+    return cmd
+
+
+def _pane_env(
+    client_ref: str | None, owner_type: str | None, owner_ref: str | None
+) -> dict[str, str]:
+    """Environment the pane needs that the tmux server can't have inherited.
+
+    The tmux server was started before this conversation existed, so the
+    per-session values ride on `-e` per pane. Without CLIENT_REF the Stop
+    hook's rotation check bails on every fire and a terminal conversation
+    never rotates at all — it just grows until the harness's own compaction
+    is the only thing left.
+    """
+    env = {k: str(v) for k, v in RUNTIME_ENV.items()}
+    env["CODEX_HOME"] = str(CODEX_HOME)
+    # A pty spawn is the web terminal by definition — no gateway derivation
+    # needed. Per-turn hooks read this to tell the model which surface a turn
+    # arrived on.
+    env["HIVE_SURFACE"] = "terminal"
+    if client_ref:
+        env["CLIENT_REF"] = client_ref
+    if owner_type:
+        env["OWNER_TYPE"] = owner_type
+    if owner_ref:
+        env["OWNER_REF"] = owner_ref
+    return env
+
+
+def _resumable_thread(session_id: str, harness_sid: str | None) -> str | None:
+    """This session's codex thread, if one exists and is resumable here.
+
+    ``harness_sid`` is the gateway's copy and wins over the in-process map,
+    which a container restart empties. Either can outlive its rollout — a
+    redeploy onto a fresh volume, a migration to a new host — and `codex
+    resume` on a missing rollout dies within a second of tmux starting it,
+    which reads identically to a hung terminal. So check the disk before
+    trusting either source.
+    """
+    if harness_sid:
+        THREADS[session_id] = harness_sid
     thread_id = THREADS.get(session_id)
     if thread_id and not _rollout_exists(thread_id):
         log.warning(
@@ -325,36 +413,97 @@ def _spawn_pty(
             "under %s", thread_id, session_id, CODEX_HOME,
         )
         THREADS.pop(session_id, None)
-        thread_id = None
+        return None
+    return thread_id
 
-    cmd = [
-        "codex",
-        "--dangerously-bypass-approvals-and-sandbox",
-        "--model", model,
-        *_provider_args(),
-    ]
-    before = None
-    if thread_id:
-        cmd += ["resume", thread_id]
-    else:
-        before = _existing_rollout_paths()
 
-    env = os.environ.copy()
-    env.update({k: str(v) for k, v in RUNTIME_ENV.items()})
-    proc, master_fd = open_pty_process(
-        cmd, env=env, cwd=str(PROJECT_DIR), cols=cols, rows=rows
+def _spawn_pty(
+    *, session_id: str, model: str, conversation_id: str, cols: int, rows: int,
+    harness_sid: str | None = None, client_ref: str | None = None,
+    owner_type: str | None = None, owner_ref: str | None = None,
+) -> tuple[Any, int]:
+    """Attach a pty to this session's interactive `codex`, starting it if needed.
+
+    The TUI lives in a tmux session named for the hive session and outlives
+    every viewer; what this returns is a tmux *client* running in a pty of
+    the caller's geometry. Calling it again for a session that already has a
+    terminal attaches a second client to the same `codex` rather than
+    starting a rival one.
+
+    ``conversation_id`` is the gateway's and means nothing to codex, which
+    mints its own ids — the thread comes from ``harness_sid`` or THREADS.
+    """
+    del conversation_id  # codex mints its own ids; see THREADS
+    thread_id = _resumable_thread(session_id, harness_sid)
+    pane_env = _pane_env(client_ref, owner_type, owner_ref)
+
+    fresh = not TERMINALS.alive(session_id) and not thread_id
+    before = _existing_rollout_paths() if fresh else set()
+    TERMINALS.start(
+        session_id, _terminal_argv(model, thread_id),
+        env_overrides=pane_env, cols=cols, rows=rows,
     )
-    log.info("Spawned %s pty session=%s pid=%d model=%s thread=%s",
+    if fresh:
+        _watch_for_new_thread_in_background(session_id, before)
+
+    proc, master_fd = TERMINALS.attach(
+        session_id, env_overrides=pane_env, cols=cols, rows=rows,
+    )
+    log.info("Attached %s terminal session=%s pid=%d model=%s thread=%s",
              NAME, session_id, proc.pid, model, thread_id or "new")
     log_event(log, "session.pty.spawned", mind_id=MIND_ID, mind_name=NAME,
               session_id=session_id, process_id=proc.pid, model=model,
               harness_thread_id=thread_id or None)
-    if before is not None:
-        _watch_for_new_thread_in_background(session_id, proc, before)
     return proc, master_fd
 
 
-install_pty_attach(app, mind_name=NAME, spawn=_spawn_pty)
+def _rotate_pty(
+    *, session_id: str, new_claude_sid: str, model: str = "", system_prompt: str = "",
+    client_ref: str | None = None, owner_type: str | None = None,
+    owner_ref: str | None = None,
+) -> bool:
+    """Start a fresh codex thread in a live terminal, in place.
+
+    A rotation replaces the *conversation*, not the session and not the
+    terminal: the hive session id is permanent, so nothing is renamed and the
+    attached client — and therefore the pty, the websocket and the browser
+    tile above it — is never disturbed.
+
+    Codex cannot be handed a thread id, so the new thread starts bare and the
+    same watcher a fresh terminal uses reports the id codex writes on the
+    first turn. The carry-forward rides in as codex's opening prompt, which
+    is the only channel this harness has for it.
+    """
+    del new_claude_sid  # symmetry with the claude harness; codex mints its own
+    if not TERMINALS.alive(session_id):
+        log.info("No live terminal for session %s — nothing to rotate in place",
+                 session_id)
+        return False
+
+    # The old thread id must go: it belongs to the conversation being
+    # replaced, and a later reattach that resumed it would undo the rotation.
+    THREADS.pop(session_id, None)
+    before = _existing_rollout_paths()
+
+    argv = seeded_pane_command(
+        _terminal_argv(model or DEFAULT_MODEL, None),
+        system_prompt,
+        CODEX_HOME / "rotation-seeds" / f"{session_id}.txt",
+    )
+    TERMINALS.respawn(
+        session_id, argv,
+        env_overrides=_pane_env(client_ref, owner_type, owner_ref),
+    )
+    _watch_for_new_thread_in_background(session_id, before)
+    log.info("Rotated the conversation in terminal %s (seed=%d chars)",
+             TERMINALS.session_name(session_id), len(system_prompt))
+    log_event(log, "session.pty.rotated", mind_id=MIND_ID, mind_name=NAME,
+              session_id=session_id)
+    return True
+
+
+install_pty_attach(app, mind_name=NAME, terminals=TERMINALS,
+                   spawn=_spawn_pty, rotate=_rotate_pty)
 
 
 async def _run_codex_turn(sid: str, content: str, images: list[dict] | None) -> Any:
@@ -481,6 +630,10 @@ async def _run_codex_turn(sid: str, content: str, images: list[dict] | None) -> 
                 text = item.get("text", "")
                 if text:
                     saw_agent_message = True
+                    # A tile open on this session showed none of this — its
+                    # own codex process wasn't involved in the turn at all.
+                    mirror_turn(sid, mind_name=NAME, assistant_texts=[text],
+                                user_text=content, surface="chat")
                     yield {
                         "type": "assistant",
                         "message": {
