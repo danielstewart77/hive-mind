@@ -10,7 +10,8 @@ COPY comms/requirements.txt /app/comms/requirements.txt
 RUN pip install --no-cache-dir -r /app/comms/requirements.txt
 
 COPY comms/ /app/comms/
+COPY hive_logging.py /app/hive_logging.py
 
 EXPOSE 8424
 
-CMD ["uvicorn", "comms.server:app", "--host", "0.0.0.0", "--port", "8424"]
+CMD ["python", "-m", "comms.server"]

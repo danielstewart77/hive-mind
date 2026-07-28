@@ -6,6 +6,12 @@
 include:
   - path: minds/example/container/compose.yaml
 
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
 services:
   # ─────────────────────────────────────────────────────────────
   # Nervous system — lucent (vector store + KG) and comms (gateway:
@@ -14,6 +20,7 @@ services:
   # hivemind network; host ports 8425 / 8426 serve bare-metal callers.
   # ─────────────────────────────────────────────────────────────
   lucent:
+    logging: *default-logging
     build:
       context: ./nervous-system
     container_name: hive-lucent
@@ -53,6 +60,7 @@ services:
       - ./nervous-system/lucent_api:/app/lucent_api
 
   comms:
+    logging: *default-logging
     build:
       context: ./nervous-system
       dockerfile: comms/Dockerfile

@@ -9,7 +9,6 @@ All Claude Code interaction flows through the gateway — no SDK dependency.
 import asyncio
 import io
 import json
-import logging
 import os
 import sys
 import time
@@ -28,12 +27,9 @@ from telegram.ext import (
 
 from config import config
 from core.gateway_client import GatewayClient, get_lock, get_queue, get_skills, time_ago
+from core.hive_logging import configure_logging, log_event
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-log = logging.getLogger("hive-mind-telegram")
+log = configure_logging("hive-mind-telegram")
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -262,6 +258,8 @@ SERVER_COMMANDS = {"/clear", "/model", "/autopilot", "/kill", "/status", "/sessi
 async def _handle_server_command(content: str, user_id: int, chat_id: int) -> str:
     parts = content.split()
     cmd = parts[0]
+    log_event(log, "surface.command.received", surface="telegram", command=cmd,
+              user_id=user_id, client_ref=chat_id)
     result = await gateway.server_command(user_id, chat_id, content)
 
     if "error" in result:
@@ -637,7 +635,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Couldn't transcribe your audio.")
         return
 
-    log.info("STT: %r", text[:80])
+    log.info("STT complete transcript_chars=%d", len(text))
     if not text.strip():
         await update.message.reply_text("Couldn't transcribe audio.")
         return
