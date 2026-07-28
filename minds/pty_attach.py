@@ -84,6 +84,16 @@ _TMUX_OPTIONS = [
     ["set", "-g", "prefix", "None"],
     ["set", "-g", "escape-time", "0"],
     ["set", "-g", "history-limit", "50000"],
+    # `mouse on` is the only thing that makes the scrollback reachable. A
+    # phone has no wheel, so the browser tile synthesises SGR wheel reports
+    # from a finger drag -- and with mouse off tmux discards them and the
+    # pane's app never asked for mouse, so a drag scrolled precisely nothing
+    # and the history behind a session was unreadable from a phone. On, the
+    # same reports put tmux into copy-mode and pan its history. Taps are
+    # unaffected: the tile only ever synthesises wheel buttons, never a
+    # press, so tmux is never handed a click to turn into a selection. An
+    # app that enables mouse reporting for itself still gets the events.
+    ["set", "-g", "mouse", "on"],
     ["set", "-g", "window-size", "latest"],
     ["set", "-g", "destroy-unattached", "off"],
     ["set", "-g", "default-terminal", "tmux-256color"],
