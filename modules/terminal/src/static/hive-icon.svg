@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="cell" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#38bdf8"/>
+      <stop offset="1" stop-color="#0ea5e9"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="1.6" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect width="64" height="64" rx="14" fill="#162030"/>
+
+  <g filter="url(#glow)" stroke="#38bdf8" stroke-width="1.4" fill="none" opacity="0.55">
+    <polygon points="32,6 45,13.5 45,28.5 32,36 19,28.5 19,13.5"/>
+    <polygon points="10,20 23,27.5 23,42.5 10,50 -3,42.5 -3,27.5"/>
+    <polygon points="54,20 67,27.5 67,42.5 54,50 41,42.5 41,27.5"/>
+    <polygon points="32,32 45,39.5 45,54.5 32,62 19,54.5 19,39.5"/>
+  </g>
+
+  <polygon points="32,14 42,20 42,32 32,38 22,32 22,20"
+           fill="url(#cell)" filter="url(#glow)"/>
+  <polygon points="32,14 42,20 42,32 32,38 22,32 22,20"
+           fill="none" stroke="#e7e7de" stroke-width="0.75" opacity="0.5"/>
+</svg>

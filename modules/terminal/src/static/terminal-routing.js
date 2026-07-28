@@ -222,25 +222,27 @@
     }
 
     /**
-     * Where a page of scrolling has to be done: here, or by the program.
+     * Where a page of scrolling has to be done: here, or by the pane.
      *
-     * Claude's TUI takes the alternate screen buffer the moment it starts
-     * (ESC[?1049h) and turns on SGR mouse reporting. An alternate buffer
-     * has no scrollback by definition — xterm's own scrollLines has
-     * nothing to move and the viewport has no overflow to drag — so the
-     * conversation history the reader wants is inside the program's own
-     * scroll region, and only the program can move it. Sending the page
-     * keys down the wire is the fix, not the hazard: acting on them is
-     * precisely what is wanted. On the normal buffer the tile owns the
-     * scrollback and scrolls it locally, without disturbing the program.
+     * The pane is tmux, and tmux is where the scrollback lives — 50,000
+     * lines of it. The alternate screen the tile sees is tmux's own, so
+     * xterm has no scrollback to move and the page keys are no use
+     * either: tmux forwards them to the program, which has nothing behind
+     * it to show. Only a wheel report reaches tmux's history, so a page
+     * press is a burst of wheel notches, the same channel a finger drag
+     * uses. tmux moves about five lines per notch and leaves copy-mode on
+     * its own once the burst reaches the bottom again. On the normal
+     * buffer the tile owns the scrollback and scrolls it locally.
      *
      * @param {Object} state  {altBuffer: boolean, rows: number, dir: -1|1}
-     * @returns {{kind: "bytes", data: string}|{kind: "lines", lines: number}}
+     * @returns {{kind: "wheel", notches: number, dir: -1|1}
+     *          |{kind: "lines", lines: number}}
      */
     function pageScrollAction(state) {
         var dir = Number(state && state.dir) < 0 ? -1 : 1;
         if (state && state.altBuffer) {
-            return {kind: "bytes", data: dir < 0 ? "\x1b[5~" : "\x1b[6~"};
+            var rows = Math.floor(Number(state.rows)) || 0;
+            return {kind: "wheel", notches: Math.max(1, Math.round(rows / 5)), dir: dir};
         }
         return {kind: "lines", lines: dir * pageScrollLines(state && state.rows)};
     }

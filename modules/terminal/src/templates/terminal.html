@@ -932,8 +932,13 @@
                 const action = TerminalRouting.pageScrollAction({
                     altBuffer: isAltBuffer(), rows: term.rows, dir: dir,
                 });
-                if (action.kind === "bytes") sendRaw(action.data);
-                else term.scrollLines(action.lines);
+                if (action.kind === "wheel") {
+                    const mid = {col: Math.max(1, Math.round(term.cols / 2)),
+                                 row: Math.max(1, Math.round(term.rows / 2))};
+                    for (let i = 0; i < action.notches; i++) {
+                        sendRaw(TerminalRouting.wheelReport(action.dir, mid.col, mid.row));
+                    }
+                } else term.scrollLines(action.lines);
             },
             sendBytes: function (text) {
                 // The toolbar's return key never reaches xterm's keydown
@@ -1035,8 +1040,35 @@
     function refitAllPanels() {
         openPanels.forEach(function (p) { p.fit(); });
     }
+
+    // The shell is exactly as tall as the part of the page you can see.
+    //
+    // A soft keyboard is drawn over the page. Where it is honoured,
+    // `interactive-widget=resizes-content` makes it shorten the layout
+    // viewport instead and 100dvh alone would be enough; iOS Safari
+    // ignores the key entirely and shrinks only the visual viewport, so
+    // the shell stayed full height with the keyboard parked over its
+    // bottom third — over the prompt, the cursor, and the line being
+    // typed. The only way to see what you were typing was to drag the
+    // page up by hand. visualViewport.height is the one measurement that
+    // is right on both, so it drives the height and 100dvh is the
+    // fallback for browsers without it.
+    //
+    // iOS also *scrolls* the visual viewport rather than resizing the
+    // layout one, which leaves the fixed nav pushed off the top; pinning
+    // the window back to zero each time undoes that.
+    function syncAppHeight() {
+        const vv = window.visualViewport;
+        if (!vv) return;
+        document.documentElement.style.setProperty(
+            "--app-h", Math.round(vv.height) + "px");
+        if (window.scrollY !== 0) window.scrollTo(0, 0);
+        refitAllPanels();
+    }
     if (window.visualViewport) {
-        window.visualViewport.addEventListener("resize", refitAllPanels);
+        window.visualViewport.addEventListener("resize", syncAppHeight);
+        window.visualViewport.addEventListener("scroll", syncAppHeight);
+        syncAppHeight();
     }
     window.addEventListener("orientationchange", refitAllPanels);
     // Belt and suspenders: if none of the three signals above fire on a

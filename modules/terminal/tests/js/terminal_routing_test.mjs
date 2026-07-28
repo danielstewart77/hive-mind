@@ -202,17 +202,23 @@ const tests = {
         assert.equal(shouldResetImeAccumulator(undefined), false);
     },
 
-    "on the alternate buffer a page of scrolling is the program's to do"() {
-        // The whole bug: xterm's scrollback does not exist on the alt
-        // buffer, so scrolling it locally moved nothing at all.
+    "on the alternate buffer a page is a burst of wheel notches"() {
+        // xterm has no scrollback on the alt buffer, and the page keys are
+        // no better: tmux hands them to the program, which has nothing
+        // behind it. Only a wheel report reaches tmux's own history.
         assert.deepEqual(
             pageScrollAction({altBuffer: true, rows: 27, dir: -1}),
-            {kind: "bytes", data: "\x1b[5~"},
+            {kind: "wheel", notches: 5, dir: -1},
         );
         assert.deepEqual(
             pageScrollAction({altBuffer: true, rows: 27, dir: 1}),
-            {kind: "bytes", data: "\x1b[6~"},
+            {kind: "wheel", notches: 5, dir: 1},
         );
+    },
+
+    "a very short tile still gets a whole notch"() {
+        assert.equal(pageScrollAction({altBuffer: true, rows: 2, dir: -1}).notches, 1);
+        assert.equal(pageScrollAction({altBuffer: true, rows: 0, dir: -1}).notches, 1);
     },
 
     "on the normal buffer the tile scrolls its own scrollback"() {
