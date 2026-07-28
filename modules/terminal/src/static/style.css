@@ -699,9 +699,26 @@ nav ul li.user-controls {
    attach, not the chat/panel-grid UI this replaced. See
    src/backlog/web-terminal-interface.md. */
 
-html:has(.terminal-page) { padding-top: 0; }
+html:has(.terminal-page) {
+    padding-top: 0;
+    height: 100dvh;
+    /* `body, html` gives both elements a 15px bottom margin; on the root
+       that margin is 15 more pixels of document than there is screen. */
+    margin-bottom: 0;
+    overflow: hidden;
+    overscroll-behavior: none;
+}
+/* border-box, because the body still carries padding-top for the fixed nav:
+   with the default content-box that padding lands *outside* the 100dvh and
+   the document ends up one nav height taller than the screen. Desktop can't
+   move a page that overflows under overflow: hidden, but a phone can — the
+   URL bar retracting re-resolves dvh and leaves the document parked 56px up,
+   with the nav over the session controls and the site's hex background
+   showing under the shell. See tests/test_terminal_mobile_viewport.py. */
 body:has(.terminal-page) {
     overflow: hidden;
+    overscroll-behavior: none;
+    box-sizing: border-box;
     height: 100dvh;
     margin-bottom: 0;
 }
