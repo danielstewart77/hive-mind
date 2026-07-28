@@ -1,6 +1,7 @@
 services:
   example:
-    build: .
+    build:
+      context: ../../..
     container_name: hive-mind-example
     working_dir: /usr/src/app
     environment:
