@@ -995,6 +995,7 @@
         saveOpenSet();
         renderCards(lastRows);
         if (!isWide() && openPanels.size === 0) showView("list");
+        if (openPanels.size === 0) releaseWakeLock();
     }
 
     function addPanel(session) {
@@ -1017,6 +1018,7 @@
         saveOpenSet();
         renderCards(lastRows);
         if (!isWide()) showView("stage");
+        acquireWakeLock();
     }
 
     function showView(name) { termApp.dataset.view = name; }
@@ -1097,6 +1099,36 @@
         if (document.visibilityState === "visible") checkAllPanelsLive();
     });
     window.addEventListener("pageshow", checkAllPanelsLive);
+
+    // ── screen wake lock ──────────────────────────────────────
+    // The reattach machinery above exists to recover from a socket the OS
+    // already killed. A mobile browser is far more likely to suspend the
+    // tab -- and with it the socket -- while the screen is on but the tab
+    // merely unfocused or the device about to auto-lock, than while the
+    // page is actually asking to stay awake. Holding a wake lock while a
+    // tile is open trades a bit of battery for fewer dead sockets to
+    // recover from in the first place; it does nothing for a tab that's
+    // genuinely backgrounded (the lock itself is released the moment
+    // visibility is lost, same as the browser would anyway) or for a
+    // desktop browser, where the API is absent and this is a no-op.
+    let wakeLock = null;
+    async function acquireWakeLock() {
+        if (!("wakeLock" in navigator) || document.visibilityState !== "visible") return;
+        if (openPanels.size === 0 || wakeLock) return;
+        try {
+            wakeLock = await navigator.wakeLock.request("screen");
+            wakeLock.addEventListener("release", function () { wakeLock = null; });
+        } catch (err) {
+            // Denied (e.g. low battery mode) or unsupported at runtime --
+            // the reattach loop is still there as the fallback.
+        }
+    }
+    function releaseWakeLock() {
+        if (wakeLock) wakeLock.release().catch(function () {});
+    }
+    document.addEventListener("visibilitychange", function () {
+        if (document.visibilityState === "visible") acquireWakeLock();
+    });
 
     // ── session list rendering (flat rows grouped by mind) ────────
     function isActiveStatus(status) { return TerminalRouting.isActive({status: status}); }
