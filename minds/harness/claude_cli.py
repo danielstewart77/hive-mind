@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import os
 import shutil
 import signal
@@ -37,18 +36,14 @@ from minds.pty_attach import (
     open_pty_process,
 )
 from minds.pty_attach import teardown as teardown_pty
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+from core.hive_logging import configure_logging, install_fastapi_logging, log_event
 
 MIND_NAME = os.environ.get("MIND_NAME", "example")
 MINDS_ROOT = Path(__file__).resolve().parent.parent
 MIND_DIR = MINDS_ROOT / MIND_NAME
 PROJECT_DIR = Path("/usr/src/app")
 
-log = logging.getLogger(f"hive-mind.minds.{MIND_NAME}")
+log = configure_logging(f"hive-mind.minds.{MIND_NAME}")
 
 RUNTIME = yaml.safe_load((MIND_DIR / "runtime.yaml").read_text())
 NAME: str = RUNTIME["name"]
@@ -78,6 +73,7 @@ else:
     MCP_CONFIG = ""
 
 app = FastAPI(title=f"Mind: {NAME}")
+install_fastapi_logging(app, log, f"mind:{NAME}")
 
 # session_id -> {"proc": Process, "model": str, "resume_sid": str | None}
 SESSIONS: dict[str, dict] = {}
@@ -295,6 +291,9 @@ def _spawn_pty(
     )
     log.info("Spawned %s pty session=%s pid=%d model=%s conversation=%s",
              NAME, session_id, proc.pid, model, conversation_id)
+    log_event(log, "session.pty.spawned", mind_id=MIND_ID, mind_name=NAME,
+              session_id=session_id, process_id=proc.pid, model=model,
+              conversation_id=conversation_id)
     return proc, master_fd
 
 
@@ -398,6 +397,9 @@ async def create_session(req: Request) -> Any:
         log.info("%s session %s initialised (model=%s resume=%s prompt_source=%s)",
                  NAME, sid, model, resume_sid or "new",
                  "comms" if system_prompt_blocks else "local")
+        log_event(log, "session.created", mind_id=MIND_ID, mind_name=NAME,
+                  session_id=sid, model=model, conversation_id=resume_sid or None,
+                  prompt_source="comms" if system_prompt_blocks else "local")
         return {"session_id": sid, "mind_id": MIND_ID, "name": NAME, "status": "running", "model": model}
     except Exception as exc:
         log.exception("Failed to create session for %s", NAME)
@@ -527,13 +529,14 @@ async def kill_session(sid: str) -> dict:
         drain_task.cancel()
     await _kill_proc(sess.get("proc"))
     log.info("Killed %s session %s", NAME, sid)
+    log_event(log, "session.closed", mind_id=MIND_ID, mind_name=NAME, session_id=sid)
     return {"session_id": sid, "status": "closed"}
 
 
 def main() -> None:
     import uvicorn
     port = int(os.environ.get("MIND_SERVER_PORT", "8420"))
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info", log_config=None, access_log=False)
 
 
 if __name__ == "__main__":

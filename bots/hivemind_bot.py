@@ -9,7 +9,6 @@ Supports voice (STT/TTS per mind), photos, HITL, and message queuing.
 import base64
 import io
 import json
-import logging
 import os
 import re
 import time
@@ -28,12 +27,9 @@ from telegram.ext import (
 
 from config import config
 from core.gateway_client import get_lock, get_queue
+from core.hive_logging import configure_logging, log_event
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-log = logging.getLogger("hive-mind-hivemind-bot")
+log = configure_logging("hive-mind-hivemind-bot")
 
 TELEGRAM_MSG_LIMIT = 4096
 SERVER_URL = os.environ.get("HIVE_MIND_SERVER_URL", f"http://localhost:{config.server_port}")
@@ -132,6 +128,8 @@ async def _get_or_create_group_session(chat_id: int) -> str:
         group_session_id = data["id"]
         _active_group_sessions[chat_id] = group_session_id
         log.info("Created group session %s for chat %d", group_session_id, chat_id)
+        log_event(log, "group_session.created", group_session_id=group_session_id,
+                  surface="telegram-group", client_ref=chat_id)
         return group_session_id
 
 
@@ -492,7 +490,7 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Couldn't transcribe audio.")
         return
 
-    log.info("STT: %r", text[:80])
+    log.info("STT complete transcript_chars=%d", len(text))
     chat_id = update.effective_chat.id
     lock = get_lock(chat_id)
     queue = get_queue(chat_id)

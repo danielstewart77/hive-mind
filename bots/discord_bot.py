@@ -7,7 +7,6 @@ All Claude Code interaction flows through the gateway — no SDK dependency.
 
 import asyncio
 import contextlib
-import logging
 import os
 import sys
 import tempfile
@@ -19,12 +18,9 @@ from discord import app_commands
 
 from config import config
 from core.gateway_client import GatewayClient, get_lock, get_skills, time_ago
+from core.hive_logging import configure_logging, log_event
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-log = logging.getLogger("hive-mind-discord")
+log = configure_logging("hive-mind-discord")
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -270,6 +266,8 @@ SERVER_COMMANDS = {"/clear", "/model", "/autopilot", "/kill", "/status", "/sessi
 async def _handle_server_command(content: str, user_id: int, channel_id: int) -> str:
     parts = content.split()
     cmd = parts[0]
+    log_event(log, "surface.command.received", surface="discord", command=cmd,
+              user_id=user_id, client_ref=channel_id)
 
     result = await gateway.server_command(user_id, channel_id, content)
 
