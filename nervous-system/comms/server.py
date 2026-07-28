@@ -7,7 +7,6 @@ All Claude CLI interaction flows through here.
 
 import asyncio
 import json
-import logging
 import os
 import secrets as _secrets
 import time
@@ -29,13 +28,9 @@ from comms.models import ModelRegistry, Provider
 from comms.network_identity import resolve_container_name
 from comms.secrets import get_credential
 from comms.sessions import SessionManager
+from hive_logging import configure_logging, install_fastapi_logging, log_event
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-logging.getLogger("httpx").setLevel(logging.WARNING)
-log = logging.getLogger("hive-mind.server")
+log = configure_logging("hive-mind.server")
 
 # ---------------------------------------------------------------------------
 # Keyring → env bridge: expose keyring secrets as env vars so non-Python
@@ -100,10 +95,13 @@ async def lifespan(app: FastAPI):
             metadata=json.loads(msg["metadata"]) if msg.get("metadata") else None,
         ))
 
-    log.info("Gateway started on port %d", config.server_port)
-    yield
-    await app.state.broker_db.close()
-    await session_mgr.shutdown()
+    log_event(log, "service.started", component="hive-comms", port=config.server_port)
+    try:
+        yield
+    finally:
+        await app.state.broker_db.close()
+        await session_mgr.shutdown()
+        log_event(log, "service.stopped", component="hive-comms")
 
 
 app = FastAPI(
@@ -130,6 +128,9 @@ async def _bearer_gate(request: Request, call_next):
     except HTTPException as exc:
         return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
     return await call_next(request)
+
+
+install_fastapi_logging(app, log, "hive-comms")
 
 
 @app.get("/health")
@@ -735,7 +736,7 @@ async def route_command(body: CommandRequest):
     except ValueError as e:
         return {"error": str(e)}
     except Exception:
-        log.exception("Error handling command: %s", content)
+        log.exception("Error handling command %s", cmd)
         return {"error": "Internal server error"}
 
 
@@ -1240,11 +1241,10 @@ async def sms_inbound(request: Request):
         log.warning("sms/inbound: invalid JSON body: %s", e)
         return JSONResponse({"error": "invalid json"}, status_code=400)
 
-    log.info("sms/inbound: payload %s", payload)
     fields = extract_message_fields(payload)
     log.info(
-        "sms/inbound: event=%s sender=%s text=%r message_id=%s",
-        fields.get("event"), fields.get("sender"), fields.get("text"), fields.get("message_id"),
+        "sms/inbound: event=%s sender=%s text_chars=%d message_id=%s",
+        fields.get("event"), fields.get("sender"), len(fields.get("text") or ""), fields.get("message_id"),
     )
 
     ada = await broker.get_mind(app.state.broker_db, "ada")
@@ -1300,4 +1300,4 @@ async def sms_inbound(request: Request):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=config.server_port)
+    uvicorn.run(app, host="0.0.0.0", port=config.server_port, log_config=None, access_log=False)

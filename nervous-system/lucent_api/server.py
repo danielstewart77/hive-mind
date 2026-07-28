@@ -10,20 +10,20 @@ Run: python -m lucent_api.server
 
 from __future__ import annotations
 
-import logging
 import os
 
 import uvicorn
 from fastapi import Depends, FastAPI
 
 from lucent_api.auth import require_bearer
+from hive_logging import configure_logging, install_fastapi_logging, log_event
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-log = logging.getLogger("lucent-api")
+log = configure_logging("lucent-api")
 
 
 def create_app() -> FastAPI:
     app = FastAPI(title="lucent-api", version="0.1.0")
+    install_fastapi_logging(app, log, "lucent-api")
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -37,7 +37,7 @@ def create_app() -> FastAPI:
     app.include_router(graph_router, dependencies=auth_dep)
     app.include_router(memory_router, dependencies=auth_dep)
 
-    log.info("lucent-api routes registered")
+    log_event(log, "service.routes.registered", component="lucent-api")
     return app
 
 
@@ -46,7 +46,7 @@ app = create_app()
 
 def main() -> None:
     port = int(os.environ.get("LUCENT_API_PORT", "8424"))
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info", log_config=None, access_log=False)
 
 
 if __name__ == "__main__":

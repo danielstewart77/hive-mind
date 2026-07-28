@@ -13,6 +13,7 @@ import uuid
 from pathlib import Path
 
 import aiosqlite
+from hive_logging import log_event
 
 log = logging.getLogger("hive-mind.broker")
 
@@ -162,6 +163,12 @@ async def insert_message(
     fetched = await row.fetchone()
     result = dict(fetched) if fetched else {"id": message_id}
     result["existing"] = not inserted
+    log_event(
+        log, "broker.message.accepted", message_id=message_id,
+        conversation_id=conversation_id, from_mind=from_mind, to_mind=to_mind,
+        message_number=message_number, content_chars=len(content), status=status,
+        existing=not inserted, request_type=(metadata or {}).get("request_type"),
+    )
     return result
 
 
@@ -388,6 +395,9 @@ async def wakeup_and_collect(
         # 5. Mark original as completed
         await update_message_status(db, message_id, "completed")
         log.info("broker: wakeup complete conversation=%s from=%s to=%s", conversation_id, from_mind, to_mind)
+        log_event(log, "broker.wakeup.completed", conversation_id=conversation_id,
+                  message_id=message_id, from_mind=from_mind, to_mind=to_mind,
+                  session_id=session_id)
 
     except asyncio.TimeoutError:
         await update_message_status(
@@ -395,6 +405,9 @@ async def wakeup_and_collect(
             response_error=f"backstop exceeded ({backstop}s)",
         )
         log.warning("broker: backstop timeout conversation=%s message=%s backstop=%ds", conversation_id, message_id, backstop)
+        log_event(log, "broker.wakeup.timed_out", level=logging.ERROR,
+                  conversation_id=conversation_id, message_id=message_id,
+                  from_mind=from_mind, to_mind=to_mind, timeout_seconds=backstop)
 
     except Exception as e:
         await update_message_status(
@@ -402,6 +415,10 @@ async def wakeup_and_collect(
             response_error=str(e),
         )
         log.error("broker: wakeup failed conversation=%s message=%s error=%s", conversation_id, message_id, e)
+        log_event(log, "broker.wakeup.failed", level=logging.ERROR,
+                  conversation_id=conversation_id, message_id=message_id,
+                  from_mind=from_mind, to_mind=to_mind,
+                  error_type=type(e).__name__, exc_info=True)
 
     finally:
         # 6. Kill callee session
@@ -448,6 +465,9 @@ async def register_mind(
             (mind_id, name, gateway_url, model, harness, now, now),
         )
     await db.commit()
+    log_event(log, "mind.registered" if not existing else "mind.updated",
+              mind_id=mind_id, mind_name=name, gateway_url=gateway_url,
+              model=model, harness=harness)
 
 
 async def get_registered_minds(db: aiosqlite.Connection) -> list[dict]:
@@ -511,14 +531,18 @@ async def update_mind(db: aiosqlite.Connection, name: str, **fields) -> dict | N
         params,
     )
     await db.commit()
-    return await get_mind(db, name)
+    updated = await get_mind(db, name)
+    log_event(log, "mind.updated", mind_name=name, changed_fields=sorted(updates))
+    return updated
 
 
 async def delete_mind(db: aiosqlite.Connection, name: str) -> bool:
     """Delete a mind by name. Returns True if deleted, False if not found."""
     cursor = await db.execute("DELETE FROM minds WHERE name = ?", (name,))
     await db.commit()
-    return cursor.rowcount > 0
+    deleted = cursor.rowcount > 0
+    log_event(log, "mind.deleted", mind_name=name, deleted=deleted)
+    return deleted
 
 
 # ---------------------------------------------------------------------------

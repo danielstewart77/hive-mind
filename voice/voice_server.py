@@ -24,6 +24,10 @@ import re
 import subprocess
 import tempfile
 
+from core.hive_logging import configure_logging, install_fastapi_logging, log_event
+
+log = configure_logging("hive-mind.voice")
+
 # Check GPU compatibility BEFORE importing torch -- once torch initializes
 # CUDA, it's too late to hide the device from downstream libraries.
 def _check_gpu_early() -> bool:
@@ -59,9 +63,8 @@ from fastapi import FastAPI, HTTPException, UploadFile  # noqa: E402
 from fastapi.responses import Response  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
-log = logging.getLogger("hive-mind.voice")
-
 app = FastAPI(title="Hive Mind Voice Server")
+install_fastapi_logging(app, log, "voice-server")
 
 _DEVICE = "cuda" if _GPU_OK and torch.cuda.is_available() else "cpu"
 _WHISPER_MODEL = os.getenv("WHISPER_MODEL", "medium")
@@ -447,7 +450,8 @@ async def stt(file: UploadFile):
     finally:
         os.unlink(tmp_path)
 
-    log.info("STT: %r", text[:80])
+    log_event(log, "voice.stt.completed", audio_bytes=len(audio_bytes),
+              transcript_chars=len(text), device=_DEVICE)
     return {"text": text}
 
 
@@ -498,7 +502,9 @@ async def tts(req: TTSRequest):
         torchaudio.save(wav_buf, wav, sample_rate, format="WAV")
     ogg_bytes = _wav_to_ogg(wav_buf.getvalue(), speed=req.speed)
 
-    log.info("TTS (%s): %d chars -> %d bytes OGG", engine_label, len(req.text), len(ogg_bytes))
+    log_event(log, "voice.tts.completed", engine=engine_label,
+              text_chars=len(req.text), audio_bytes=len(ogg_bytes),
+              voice_id=req.voice_id, device=_DEVICE)
     return Response(content=ogg_bytes, media_type="audio/ogg")
 
 
@@ -518,5 +524,4 @@ async def health():
 
 if __name__ == "__main__":
     import uvicorn
-    logging.basicConfig(level=logging.INFO)
-    uvicorn.run(app, host="0.0.0.0", port=8422)
+    uvicorn.run(app, host="0.0.0.0", port=8422, log_config=None, access_log=False)

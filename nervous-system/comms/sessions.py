@@ -25,6 +25,7 @@ import aiosqlite
 
 from comms.config import PROJECT_DIR, config
 from comms.models import ModelRegistry
+from hive_logging import log_event
 
 _TRANSCRIPT_DIR = Path.home() / ".claude" / "projects" / "-usr-src-app"
 
@@ -398,6 +399,11 @@ class SessionManager:
             system_prompt_blocks=system_prompt_blocks,
         )
         log.info("Created session %s (model=%s, mind=%s, owner=%s)", session_id, model, mind_id, owner_ref)
+        log_event(
+            log, "session.created", session_id=session_id, conversation_id=claude_sid,
+            mind_id=mind_id, model=model, owner_type=owner_type, owner_ref=owner_ref,
+            client_ref=client_ref,
+        )
         return await self._session_dict(session_id)
 
     async def get_session(self, session_id: str) -> dict | None:
@@ -842,6 +848,11 @@ class SessionManager:
             await self._db.commit()
             log.info("Session %s adopted by %s/%s (was %s/%s)", session_id,
                      owner_type, owner_ref, session["owner_type"], session["owner_ref"])
+            log_event(
+                log, "session.adopted", session_id=session_id,
+                owner_type=owner_type, owner_ref=owner_ref,
+                previous_owner_type=session["owner_type"], previous_owner_ref=session["owner_ref"],
+            )
             session = await self._get_row(session_id)
             if session is None:  # pragma: no cover - row cannot vanish in this transaction
                 raise ValueError(f"Session not found: {session_id}")
@@ -906,6 +917,10 @@ class SessionManager:
 
             mind_id = session["mind_id"]
             log.info("send_message: start session=%s mind=%s", session_id, mind_id)
+            log_event(
+                log, "turn.started", session_id=session_id, mind_id=mind_id,
+                content_chars=len(content), image_count=len(images or []),
+            )
             t0 = time.monotonic()
 
             # Respawn if needed
@@ -918,6 +933,8 @@ class SessionManager:
 
             if needs_respawn:
                 log.info("send_message: respawn session=%s mind=%s model=%s", session_id, mind_id, session["model"])
+                log_event(log, "session.respawn.started", session_id=session_id,
+                          mind_id=mind_id, model=session["model"])
                 routing = await self._routing_for(session)
                 await self._spawn(
                     session_id,
@@ -1171,6 +1188,10 @@ class SessionManager:
                                     await self._db.commit()
                                     elapsed = time.monotonic() - t0
                                     log.info("send_message: result session=%s elapsed=%.1fs", session_id, elapsed)
+                                    log_event(
+                                        log, "turn.completed", session_id=session_id,
+                                        mind_id=mind_id, elapsed_ms=round(elapsed * 1000, 1),
+                                    )
                                     if elapsed > 30:
                                         log.warning("send_message: slow response session=%s mind=%s elapsed=%.1fs", session_id, mind_id, elapsed)
                                     return
@@ -1505,6 +1526,8 @@ class SessionManager:
         self._procs[session_id] = {"_mind_url": mind_url}
         self._mind_ids[session_id] = mind_id
         log.info("Spawned %s session %s via %s", mind_id, session_id, mind_url)
+        log_event(log, "session.spawned", session_id=session_id, mind_id=mind_id,
+                  model=model, mind_url=mind_url)
         return self._procs[session_id]
 
     async def _rotate_pty_on_mind(
@@ -1606,6 +1629,8 @@ class SessionManager:
         except Exception:
             log.exception("Failed to kill session %s on %s", session_id, mind_url)
         log.info("Killed session %s (mind=%s, url=%s)", session_id, mind_id, mind_url)
+        log_event(log, "session.closed", session_id=session_id, mind_id=mind_id,
+                  mind_url=mind_url)
 
     # ------------------------------------------------------------------
     # Remote Control subprocess management
@@ -1749,6 +1774,8 @@ class SessionManager:
         )
         await self._db.commit()
         log.info("Created group session %s (moderator=%s)", group_id, moderator_mind_id)
+        log_event(log, "group_session.created", group_session_id=group_id,
+                  moderator_mind_id=moderator_mind_id)
         return {
             "id": group_id,
             "moderator_mind_id": moderator_mind_id,
