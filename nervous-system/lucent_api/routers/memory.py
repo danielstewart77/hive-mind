@@ -12,6 +12,7 @@ from typing import Any
 
 from fastapi import APIRouter, Query
 from pydantic import BaseModel
+from hive_logging import log_event
 
 log = logging.getLogger(__name__)
 
@@ -154,7 +155,7 @@ def memory_store(body: StoreBody) -> Any:
     """Store a memory with semantic embedding."""
     from lucent_api.lucent_memory import memory_store as _memory_store
 
-    return _decode(
+    result = _decode(
         _memory_store(
             content=body.content,
             data_class=body.data_class,
@@ -168,6 +169,12 @@ def memory_store(body: StoreBody) -> Any:
             codebase_ref=body.codebase_ref,
         )
     )
+    log_event(
+        log, "memory.stored", memory_id=result.get("id") if isinstance(result, dict) else None,
+        mind_id=body.mind_id, data_class=body.data_class, tier=body.tier,
+        source=body.source, content_chars=len(body.content),
+    )
+    return result
 
 
 @router.put("/{memory_id}")
@@ -175,7 +182,7 @@ def memory_update(memory_id: str, body: UpdateBody) -> Any:
     """Update an existing memory's content, data_class, or tags."""
     from lucent_api.lucent_memory import memory_update as _memory_update
 
-    return _decode(
+    result = _decode(
         _memory_update(
             memory_id=memory_id,
             content=body.content,
@@ -184,6 +191,9 @@ def memory_update(memory_id: str, body: UpdateBody) -> Any:
             mind_id=body.mind_id,
         )
     )
+    log_event(log, "memory.updated", memory_id=memory_id, mind_id=body.mind_id or None,
+              data_class=body.data_class or None, content_chars=len(body.content))
+    return result
 
 
 @router.delete("/{memory_id}")
@@ -191,4 +201,6 @@ def memory_delete(memory_id: str) -> Any:
     """Delete a memory by ID."""
     from lucent_api.lucent_memory import memory_delete as _memory_delete
 
-    return _decode(_memory_delete(memory_id=memory_id))
+    result = _decode(_memory_delete(memory_id=memory_id))
+    log_event(log, "memory.deleted", memory_id=memory_id)
+    return result

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import os
 import time
 from pathlib import Path
@@ -20,12 +19,9 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from lucent_api.server import app as lucent_app
+from hive_logging import configure_logging
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-log = logging.getLogger("nervous-system")
+log = configure_logging("nervous-system")
 
 
 # ============================================================================
@@ -95,7 +91,8 @@ async def main() -> None:
 
     # Lucent FastAPI
     lucent_cfg = uvicorn.Config(
-        lucent_app, host="0.0.0.0", port=port, log_level="info"
+        lucent_app, host="0.0.0.0", port=port, log_level="info",
+        log_config=None, access_log=False,
     )
     lucent_server = uvicorn.Server(lucent_cfg)
     await lucent_server.serve()

@@ -13,7 +13,6 @@ cross-day continuity comes from the mind's persistent memory layer
 
 import asyncio
 import json
-import logging
 import os
 import uuid
 from pathlib import Path
@@ -23,6 +22,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from config import config
+from core.hive_logging import configure_logging, log_event
 from core.scheduled_skills import (
     ScheduledSkill,
     discover_scheduled_skills,
@@ -45,11 +45,7 @@ try:
 except Exception:
     pass
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-log = logging.getLogger("hive-mind-scheduler")
+log = configure_logging("hive-mind-scheduler")
 
 SERVER_URL = os.environ.get("HIVE_MIND_SERVER_URL", f"http://localhost:{config.server_port}")
 VOICE_SERVER_URL = os.environ.get("VOICE_SERVER_URL", "http://localhost:8422")
@@ -217,7 +213,7 @@ async def _fire_command(skill: ScheduledSkill) -> None:
     if not cmd:
         log.error("Command task %s has empty command list", label)
         return
-    log.info("Firing %s as command: %s", label, cmd)
+    log.info("Firing %s as command (argv_count=%d)", label, len(cmd))
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -227,9 +223,9 @@ async def _fire_command(skill: ScheduledSkill) -> None:
         stdout_bytes, _ = await proc.communicate()
         stdout_text = (stdout_bytes or b"").decode(errors="replace").strip()
         if proc.returncode == 0:
-            log.info("%s exit=0 output=%r", label, stdout_text[:2000])
+            log.info("%s exit=0 output_chars=%d", label, len(stdout_text))
         else:
-            log.error("%s exit=%s output=%r", label, proc.returncode, stdout_text[:2000])
+            log.error("%s exit=%s output_chars=%d", label, proc.returncode, len(stdout_text))
     except Exception:
         log.exception("Command task %s failed", label)
 
@@ -240,6 +236,9 @@ async def fire_skill(skill: ScheduledSkill) -> None:
         await _fire_command(skill)
         return
     label = f"{skill.mind_name}/{skill.skill_name}"
+    log_event(log, "scheduled_skill.started", mind_id=skill.mind_id,
+              mind_name=skill.mind_name, skill_name=skill.skill_name,
+              notify=skill.notify, voice=skill.voice)
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     chat_id = config.telegram_owner_chat_id
 
@@ -292,7 +291,10 @@ async def fire_skill(skill: ScheduledSkill) -> None:
 
     if not skill.notify:
         log.info("%s complete (notify=false, no delivery)", label)
-        log.info("%s response (first 4000 chars): %s", label, (response or "")[:4000])
+        log.info("%s response_chars=%d", label, len(response or ""))
+        log_event(log, "scheduled_skill.completed", mind_id=skill.mind_id,
+                  mind_name=skill.mind_name, skill_name=skill.skill_name,
+                  response_chars=len(response or ""), notified=False)
         return
 
     await _send_text(bot_token, chat_id, response)
