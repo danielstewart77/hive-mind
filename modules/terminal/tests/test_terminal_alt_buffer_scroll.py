@@ -1,12 +1,12 @@
-"""The tile's page keys have to reach the program, not the viewport.
+"""The tile's scroll controls have to reach tmux's history.
 
-Claude's TUI takes the alternate screen buffer on startup (it emits
-ESC[?1049h before its first paint) and turns on SGR mouse reporting. An
-alternate buffer has no scrollback: xterm's scrollLines moves nothing and
-the viewport has no overflow to drag, so PgUp/PgDn appeared to do nothing
-at all and the conversation history stayed unreachable on a phone. The
-history lives in the program's own scroll region, so the page keys and
-finger drags have to go down the wire.
+The pane is tmux, and the alternate screen the tile sees is tmux's own.
+xterm has no scrollback there -- scrollLines moves nothing and the
+viewport has no overflow to drag -- and the page keys are no better: tmux
+hands them straight to the program, which has nothing behind it to show.
+The 50,000 lines of history are tmux's, and a wheel report is the only
+thing that reaches them. So both controls, the PgUp/PgDn buttons and a
+finger drag, put wheel reports on the wire.
 
 A real browser, because the thing under test is xterm's buffer state
 after a real escape sequence and the bytes a real click puts on the
@@ -15,6 +15,7 @@ socket.
 
 import json
 import os
+import re
 import socket
 import sys
 import tempfile
@@ -45,8 +46,8 @@ SESSIONS = [
 # What the TUI actually sends first: alternate buffer, cleared, with SGR
 # mouse reporting on. Captured from a real `claude` under a pty.
 ENTER_ALT_SCREEN = "\x1b[?1049h\x1b[2J\x1b[H\x1b[?1000h\x1b[?1002h\x1b[?1006h"
-PGUP = "\x1b[5~"
-PGDN = "\x1b[6~"
+WHEEL_UP = re.compile(r"\x1b\[<64;\d+;\d+M")
+WHEEL_DOWN = re.compile(r"\x1b\[<65;\d+;\d+M")
 
 
 @pytest.fixture(scope="module")
@@ -140,16 +141,25 @@ def phone(live_app):
         browser.close()
 
 
-def test_a_program_on_the_alternate_screen_gets_the_page_keys(phone):
+def test_the_page_buttons_scroll_tmux_history(phone):
     page, base = phone
     sent = _open_tile(page, base, ENTER_ALT_SCREEN + "the tail of a long reply")
     sent.clear()
 
     page.click('#term-mobile-toolbar button[data-scroll="-1"]')
+    page.wait_for_timeout(200)
+    up = "".join(sent)
+    sent.clear()
     page.click('#term-mobile-toolbar button[data-scroll="1"]')
-    page.wait_for_timeout(300)
+    page.wait_for_timeout(200)
+    down = "".join(sent)
 
-    assert "".join(sent) == PGUP + PGDN
+    # A page is a burst of notches, not one: tmux moves a handful of lines
+    # per notch, so a single one would be a nudge rather than a page.
+    assert len(WHEEL_UP.findall(up)) > 1
+    assert WHEEL_UP.sub("", up) == ""
+    assert len(WHEEL_DOWN.findall(down)) == len(WHEEL_UP.findall(up))
+    assert WHEEL_DOWN.sub("", down) == ""
 
 
 def test_a_finger_drag_becomes_the_wheel_reports_the_tui_asked_for(phone):

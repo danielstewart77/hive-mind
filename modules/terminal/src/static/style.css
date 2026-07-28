@@ -488,19 +488,62 @@ nav ul li.user-controls {
 }
 
 /* Brand — always visible */
+.nav-brand-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-right: 1rem;
+    flex-shrink: 0;
+}
+
 .nav-brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
     font-size: 1.1rem;
     font-weight: bold;
     letter-spacing: 0.03em;
     color: #e7e7de;
     text-decoration: none;
-    margin-right: 1rem;
     font-family: 'Fira Code', monospace;
     flex-shrink: 0;
 }
 
+.nav-brand-icon {
+    width: 1.3em;
+    height: 1.3em;
+    flex-shrink: 0;
+    filter: drop-shadow(0 0 4px #38bdf8) drop-shadow(0 0 8px #0ea5e9);
+    transition: filter 0.2s ease;
+}
+
 .nav-brand:hover {
     color: #38bdf8;
+}
+
+.nav-brand:hover .nav-brand-icon {
+    filter: drop-shadow(0 0 6px #38bdf8) drop-shadow(0 0 12px #0ea5e9);
+}
+
+.nav-brand-terminal {
+    font-size: 1.1rem;
+    font-weight: bold;
+    letter-spacing: 0.03em;
+    color: #e7e7de;
+    font-family: 'Fira Code', monospace;
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+
+.cursor-blink {
+    display: inline-block;
+    color: #38bdf8;
+    animation: cursor-blink 1s step-end infinite;
+}
+
+@keyframes cursor-blink {
+    0%, 50% { opacity: 1; }
+    50.01%, 100% { opacity: 0; }
 }
 
 /* Hamburger button — hidden on desktop */
@@ -701,7 +744,10 @@ nav ul li.user-controls {
 
 html:has(.terminal-page) {
     padding-top: 0;
-    height: 100dvh;
+    /* --app-h is the visual viewport's height, set by the terminal page's
+       script: the one measurement a soft keyboard shrinks on every mobile
+       browser. 100dvh is the fallback where visualViewport is missing. */
+    height: var(--app-h, 100dvh);
     /* `body, html` gives both elements a 15px bottom margin; on the root
        that margin is 15 more pixels of document than there is screen. */
     margin-bottom: 0;
@@ -719,12 +765,12 @@ body:has(.terminal-page) {
     overflow: hidden;
     overscroll-behavior: none;
     box-sizing: border-box;
-    height: 100dvh;
+    height: var(--app-h, 100dvh);
     margin-bottom: 0;
 }
 body:has(.terminal-page) .content-wrapper {
     padding: 0;
-    height: calc(100dvh - var(--nav-h));
+    height: calc(var(--app-h, 100dvh) - var(--nav-h));
     display: flex;
     flex-direction: column;
 }
