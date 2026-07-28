@@ -246,3 +246,14 @@ def test_paintcheck_mode_puts_the_count_in_the_tile_header(tile):
     tile.wait_for_selector(".term-panel .xterm-viewport", timeout=15000)
     tile.wait_for_timeout(2600)
     assert "dom-drift" in tile.eval_on_selector(".term-panel-info", "e => e.innerText")
+
+
+def test_the_sweep_runs_without_the_debug_flag(tile):
+    # The sweep is what keeps the tile readable while text scrolls, so it
+    # has to run on a plain page load — not only when someone thinks to
+    # ask for it. A row that drifts heals on its own within a sweep.
+    _go_stale(tile)
+    assert GARBAGE in _painted(tile)
+    tile.wait_for_timeout(2600)
+    painted = _painted(tile)
+    assert PTY_TEXT in painted and GARBAGE not in painted

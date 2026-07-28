@@ -1056,17 +1056,29 @@
         openPanels.forEach(function (p) { report[p.sessionId] = p.paintCheck(); });
         return report;
     };
-    if (new URLSearchParams(location.search).has("paintcheck")) {
-        setInterval(function () {
-            openPanels.forEach(function (p) {
-                const r = p.paintCheck();
-                if (!r) return;
+    // Running the sweep is what keeps the tile readable, which is why it is
+    // not behind the debug flag. It walks every painted row and reads the
+    // text back out, and that read is the point: it forces the browser to
+    // resolve the rows it has been treating as unchanged, which is exactly
+    // the invalidation that was going missing while text scrolled. A tile
+    // left alone would otherwise accumulate stale strips indefinitely,
+    // since the buffer behind them is already correct and nothing marks
+    // them dirty a second time.
+    //
+    // If a row genuinely disagrees with its buffer the sweep repaints it,
+    // but that is the rarer half. The flag only adds the readout.
+    const SHOW_PAINT_CHECK = new URLSearchParams(location.search).has("paintcheck");
+    setInterval(function () {
+        openPanels.forEach(function (p) {
+            const r = p.paintCheck();
+            if (!r) return;
+            if (r.drift) { p.repaint(); console.warn("paintcheck drift", r.samples); }
+            if (SHOW_PAINT_CHECK) {
                 const head = p.el.querySelector(".term-panel-info");
                 if (head) head.textContent = "dom-drift " + r.drift + "/" + r.rows;
-                if (r.drift) console.warn("paintcheck drift", r.samples);
-            });
-        }, 2000);
-    }
+            }
+        });
+    }, 2000);
 
     // A rotation or an app-switch often kills the socket while the tab is
     // hidden, where the watchdog interval is throttled and can't fire. The
