@@ -215,3 +215,34 @@ def test_the_terminal_still_fills_the_tile_it_is_clipped_to(tile):
     # of characters of dead strip either side. It is slack, not a shortfall.
     assert box["screenWidth"] <= box["contentWidth"]
     assert box["screenWidth"] > box["contentWidth"] * 0.95
+
+
+def test_paint_check_reports_a_clean_tile_as_clean(tile):
+    report = tile.evaluate("() => window.paintCheck()")
+    (only,) = report.values()
+    assert only["drift"] == 0
+    assert only["rows"] > 0
+
+
+def test_paint_check_catches_a_row_the_dom_has_lost(tile):
+    # The whole point: tell "xterm painted the wrong thing" apart from "the
+    # DOM is right and the pixels are stale", without selecting the text —
+    # selecting forces a repaint and destroys the evidence.
+    _go_stale(tile)
+    report = tile.evaluate("() => window.paintCheck()")
+    (only,) = report.values()
+    assert only["drift"] >= 1
+    sample = only["samples"][0]
+    assert GARBAGE in sample["dom"]
+    assert GARBAGE not in sample["buffer"]
+
+
+def test_paintcheck_mode_puts_the_count_in_the_tile_header(tile):
+    # Reading a number off the header is the whole interface: no devtools,
+    # no typing into a terminal that cannot be copied out of.
+    tile.goto(tile.url.split("#")[0] + "?paintcheck=1")
+    tile.wait_for_selector(".term-card", timeout=15000)
+    tile.click(".term-card")
+    tile.wait_for_selector(".term-panel .xterm-viewport", timeout=15000)
+    tile.wait_for_timeout(2600)
+    assert "dom-drift" in tile.eval_on_selector(".term-panel-info", "e => e.innerText")

@@ -310,6 +310,31 @@
         function repaint() {
             try { term.refresh(0, term.rows - 1); } catch (e) {}
         }
+        // Garbage on screen has exactly two possible homes, and they need
+        // opposite fixes. Either xterm painted the wrong thing into the DOM,
+        // or the DOM is right and the pixels under it are stale — a
+        // compositor that dropped an invalidation, a remoting layer that
+        // lost a tile. Reading the screen can't tell them apart, and
+        // selecting the text destroys the evidence by forcing a repaint.
+        // Comparing each painted row against the buffer it was rendered
+        // from can: a row that disagrees is xterm's fault, and a screen full
+        // of garbage over rows that all agree is not.
+        function paintCheck() {
+            const rows = xtermEl.querySelector(".xterm-rows");
+            if (!rows) return null;
+            const buf = term.buffer.active;
+            const out = {rows: term.rows, drift: 0, samples: []};
+            for (let y = 0; y < term.rows && y < rows.children.length; y++) {
+                const line = buf.getLine(buf.viewportY + y);
+                const want = (line ? line.translateToString(true) : "").replace(/\s+$/, "");
+                const got = (rows.children[y].textContent || "").replace(/\s+$/, "");
+                if (want !== got) {
+                    out.drift++;
+                    if (out.samples.length < 3) out.samples.push({row: y, buffer: want, dom: got});
+                }
+            }
+            return out;
+        }
         function doFit() {
             const before = term.cols + "x" + term.rows;
             try { fitAddon.fit(); } catch (e) {}
@@ -899,6 +924,7 @@
             },
             fit: doFit,
             repaint: repaint,
+            paintCheck: paintCheck,
             checkLiveness: function () { reattachIfStale(FOREGROUND_STALE_MS); },
             focus: function () { setFocusedPanel(panel); term.focus(); },
             refreshLabel: applyLabel,
@@ -1017,6 +1043,30 @@
     // fit() is cheap (a character-metric measurement plus an int compare)
     // and only sends a resize frame when the size actually changed.
     setInterval(refitAllPanels, 2000);
+
+    // ── paint self-check ──────────────────────────────────────
+    // window.paintCheck() reports, per open tile, how many painted rows
+    // disagree with the buffer they came from. Loading the page with
+    // ?paintcheck=1 runs it on a timer and writes the count into each
+    // tile's header, so diagnosing a screen full of garbage needs no
+    // devtools and no selecting — selecting is itself a repaint, and it
+    // destroys the thing being measured.
+    window.paintCheck = function () {
+        const report = {};
+        openPanels.forEach(function (p) { report[p.sessionId] = p.paintCheck(); });
+        return report;
+    };
+    if (new URLSearchParams(location.search).has("paintcheck")) {
+        setInterval(function () {
+            openPanels.forEach(function (p) {
+                const r = p.paintCheck();
+                if (!r) return;
+                const head = p.el.querySelector(".term-panel-info");
+                if (head) head.textContent = "dom-drift " + r.drift + "/" + r.rows;
+                if (r.drift) console.warn("paintcheck drift", r.samples);
+            });
+        }, 2000);
+    }
 
     // A rotation or an app-switch often kills the socket while the tab is
     // hidden, where the watchdog interval is throttled and can't fire. The
