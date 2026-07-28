@@ -4,10 +4,12 @@ WORKDIR /usr/src/app
 
 # System deps + Node.js (for Claude Code CLI) + GitHub CLI
 # jq required by the per-mind bash hooks under minds/<name>/.claude/hooks/ and .codex/hooks/.
+# tmux hosts the browser terminal — a session's harness CLI runs inside it
+# (minds/pty_attach.py), so a tile is a client rather than the conversation.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip python3-venv python3-dev gcc libpq-dev curl jq \
     nodejs npm \
-    ffmpeg git \
+    ffmpeg git tmux \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
        | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \

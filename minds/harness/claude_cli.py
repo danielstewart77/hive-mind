@@ -31,9 +31,12 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from minds.proactive import idle_drain, make_proactive_router
 from minds.pty_attach import (
+    TmuxTerminals,
     claude_conversation_flags,
+    ensure_tui_first_run_flags,
     install_pty_attach,
-    open_pty_process,
+    mirror_turn,
+    seeded_pane_command,
 )
 from minds.pty_attach import teardown as teardown_pty
 from core.hive_logging import configure_logging, install_fastapi_logging, log_event
@@ -263,12 +266,13 @@ async def _spawn_proc(
     return proc
 
 
-def _spawn_pty(
-    *, session_id: str, model: str, conversation_id: str, cols: int, rows: int
-) -> tuple[Any, int]:
-    """Put an interactive `claude` TUI under a pty for the web terminal.
+TERMINALS = TmuxTerminals(NAME, PROJECT_DIR)
 
-    Distinct from `_spawn_proc`: no `-p`, no stream-json — those are
+
+def _terminal_argv(model: str, conversation_id: str) -> list[str]:
+    """The interactive `claude` that runs inside the tmux pane.
+
+    Distinct from `_spawn_proc`'s argv: no `-p`, no stream-json — those are
     print-mode flags and disable the TUI (slash commands, tab completion,
     Ctrl+C). Resuming needs no `--append-system-prompt`; that was set on the
     conversation's first turn. Both processes append to the same conversation
@@ -283,13 +287,87 @@ def _spawn_pty(
     if MCP_CONFIG:
         cmd.extend(["--mcp-config", MCP_CONFIG])
     cmd.extend(claude_conversation_flags(conversation_id, PROJECT_DIR))
+    return cmd
 
-    env = os.environ.copy()
-    env.update({k: str(v) for k, v in RUNTIME_ENV.items()})
-    proc, master_fd = open_pty_process(
-        cmd, env=env, cwd=str(PROJECT_DIR), cols=cols, rows=rows
+
+def _rotation_argv(model: str, new_claude_sid: str) -> list[str]:
+    """The interactive `claude` a rotation respawns the pane onto.
+
+    Always `--session-id`, never `--resume`: rotation starts a fresh harness
+    conversation under the same hive session, and it opens holding a summary
+    of the one it replaced. The summary itself rides in via
+    ``seeded_pane_command``.
+    """
+    cmd = [
+        "claude",
+        "--permission-mode", "bypassPermissions",
+        "--dangerously-skip-permissions",
+        "--model", model,
+    ]
+    if MCP_CONFIG:
+        cmd.extend(["--mcp-config", MCP_CONFIG])
+    cmd.extend(["--session-id", new_claude_sid])
+    return cmd
+
+
+def _pane_env(
+    client_ref: str | None, owner_type: str | None, owner_ref: str | None
+) -> dict[str, str]:
+    """Environment the pane needs that the tmux server can't have inherited.
+
+    The tmux server was started before this conversation existed, so the
+    per-session values ride on `-e` per pane. Without them the Stop hook's
+    rotation check finds no client ref and bails on every fire, so a terminal
+    conversation never rotates and just grows until Claude's own native
+    compaction is the only thing left to intervene.
+    """
+    env = {k: str(v) for k, v in RUNTIME_ENV.items()}
+    # A tile is one session on one conversation; the harness's agent view is
+    # a second, conflicting session picker inside it, re-hosting the
+    # conversation in a nested pty at a geometry nobody asked for.
+    env["CLAUDE_CODE_DISABLE_AGENT_VIEW"] = "1"
+    # A pty spawn is the web terminal by definition — no gateway derivation
+    # needed. Per-turn hooks read this to tell the model which surface a turn
+    # arrived on.
+    env["HIVE_SURFACE"] = "terminal"
+    if client_ref:
+        env["HIVEMIND_CLIENT_REF"] = client_ref
+    if owner_type:
+        env["HIVEMIND_OWNER_TYPE"] = owner_type
+    if owner_ref:
+        env["HIVEMIND_OWNER_REF"] = owner_ref
+    return env
+
+
+def _spawn_pty(
+    *, session_id: str, model: str, conversation_id: str, cols: int, rows: int,
+    harness_sid: str | None = None, client_ref: str | None = None,
+    owner_type: str | None = None, owner_ref: str | None = None,
+) -> tuple[Any, int]:
+    """Attach a pty to this session's interactive `claude`, starting it if needed.
+
+    The TUI itself lives in a tmux session named for the hive session and
+    outlives every viewer; what this returns is a tmux *client* running in a
+    pty of the caller's geometry. Calling it again for a session that already
+    has a terminal attaches a second client to the same `claude` rather than
+    starting a rival one.
+
+    ``conversation_id`` is the gateway's, never the harness's — the mind does
+    not mint conversation ids, so a terminal attach is never "new": it either
+    resumes a transcript that exists or pins the harness to the id this
+    conversation will have from its first word.
+    """
+    del harness_sid  # claude adopts the gateway's id; nothing else to track
+    ensure_tui_first_run_flags(CONFIG_DIR, str(PROJECT_DIR))
+    pane_env = _pane_env(client_ref, owner_type, owner_ref)
+    TERMINALS.start(
+        session_id, _terminal_argv(model, conversation_id),
+        env_overrides=pane_env, cols=cols, rows=rows,
     )
-    log.info("Spawned %s pty session=%s pid=%d model=%s conversation=%s",
+    proc, master_fd = TERMINALS.attach(
+        session_id, env_overrides=pane_env, cols=cols, rows=rows,
+    )
+    log.info("Attached %s terminal session=%s pid=%d model=%s conversation=%s",
              NAME, session_id, proc.pid, model, conversation_id)
     log_event(log, "session.pty.spawned", mind_id=MIND_ID, mind_name=NAME,
               session_id=session_id, process_id=proc.pid, model=model,
@@ -297,7 +375,44 @@ def _spawn_pty(
     return proc, master_fd
 
 
-install_pty_attach(app, mind_name=NAME, spawn=_spawn_pty)
+def _rotate_pty(
+    *, session_id: str, new_claude_sid: str, model: str = "", system_prompt: str = "",
+    client_ref: str | None = None, owner_type: str | None = None,
+    owner_ref: str | None = None,
+) -> bool:
+    """Start a fresh harness conversation in a live terminal, in place.
+
+    A rotation replaces the *conversation*, not the session and not the
+    terminal. The hive session id is permanent — it is what every surface,
+    label and ledger row is keyed to — so nothing here renames anything. The
+    pane's process is respawned onto a new conversation seeded with the
+    carry-forward, and the attached tmux client (and therefore the pty, the
+    websocket and the browser tile above it) is never disturbed.
+    """
+    if not TERMINALS.alive(session_id):
+        log.info("No live terminal for session %s — nothing to rotate in place",
+                 session_id)
+        return False
+
+    argv = seeded_pane_command(
+        _rotation_argv(model or DEFAULT_MODEL, new_claude_sid),
+        system_prompt,
+        CONFIG_DIR / "rotation-seeds" / f"{new_claude_sid}.txt",
+        seed_flag="--append-system-prompt",
+    )
+    TERMINALS.respawn(
+        session_id, argv,
+        env_overrides=_pane_env(client_ref, owner_type, owner_ref),
+    )
+    log.info("Rotated the conversation in terminal %s onto %s (seed=%d chars)",
+             TERMINALS.session_name(session_id), new_claude_sid, len(system_prompt))
+    log_event(log, "session.pty.rotated", mind_id=MIND_ID, mind_name=NAME,
+              session_id=session_id, conversation_id=new_claude_sid)
+    return True
+
+
+install_pty_attach(app, mind_name=NAME, terminals=TERMINALS,
+                   spawn=_spawn_pty, rotate=_rotate_pty)
 
 
 async def _drain_stderr(proc: asyncio.subprocess.Process, session_id: str) -> None:
@@ -406,6 +521,23 @@ async def create_session(req: Request) -> Any:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+def _assistant_texts(event: dict) -> list[str]:
+    """The text of every ``text`` content block in an assistant event.
+
+    Deterministically ignores non-assistant events (system, result,
+    stream_event deltas) and non-text blocks (tool_use, tool_result).
+    """
+    if event.get("type") != "assistant":
+        return []
+    content = (event.get("message") or {}).get("content")
+    if not isinstance(content, list):
+        return []
+    return [
+        block["text"] for block in content
+        if isinstance(block, dict) and block.get("type") == "text" and block.get("text")
+    ]
+
+
 @app.post("/sessions/{sid}/message")
 async def send_message(sid: str, req: Request) -> Any:
     body = await req.json()
@@ -451,6 +583,7 @@ async def send_message(sid: str, req: Request) -> Any:
 
     async def stream() -> Any:
         stdout_lock = sess.get("stdout_lock")
+        spoken: list[str] = []
         try:
             # Hold the stdout lock for the whole read so the idle drain can
             # never consume this turn's output concurrently.
@@ -463,6 +596,7 @@ async def send_message(sid: str, req: Request) -> Any:
                 yield f"data: {decoded}\n\n"
                 try:
                     event = json.loads(decoded)
+                    spoken.extend(_assistant_texts(event))
                     if event.get("type") == "result":
                         cs = event.get("session_id")
                         if cs:
@@ -471,6 +605,10 @@ async def send_message(sid: str, req: Request) -> Any:
                 except json.JSONDecodeError:
                     continue
         finally:
+            # A tile open on this session showed none of the above — its
+            # harness process wasn't involved in the turn at all.
+            mirror_turn(sid, mind_name=NAME, assistant_texts=spoken,
+                        user_text=content, surface="chat")
             if stdout_lock is not None and stdout_lock.locked():
                 stdout_lock.release()
             # Clear in_flight on every exit path: normal completion, generator

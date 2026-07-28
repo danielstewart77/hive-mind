@@ -118,7 +118,7 @@ hive-mind/
 ├── minds/                         # Minds: shared harness code + per-deployment folders
 │   ├── harness/                  # Tracked in-container services: claude_cli.py, codex_cli.py
 │   ├── proactive.py              # Shared unsolicited-delivery plumbing
-│   ├── pty_attach.py             # Shared browser-terminal attach route
+│   ├── pty_attach.py             # Shared tmux-backed browser terminal (docs/architecture/browser-terminal.md)
 │   ├── example/                  # Tracked starter mind (runtime.yaml + compose fragment)
 │   └── <name>/                   # Deployment minds (gitignored): runtime.yaml, prompts, .claude/.codex, container/
 │
