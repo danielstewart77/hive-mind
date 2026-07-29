@@ -39,6 +39,8 @@ services:
       - ${HIVE_TOOLS_DIR:-/home/daniel/Storage/hive-tools}:/hive_tools_repo:ro
       # Hive-init installer assets, read-only, served from the downloads tab.
       - ${HIVE_INIT_DIR:-/home/daniel/Storage/Dev/hive-init}:/hive_init:ro
+      # Fixed destination used by the Capability Nodes one-click clone action.
+      - ${INFERENCE_PROXY_DIR:-/home/daniel/Storage/Dev/inference-proxy}:/inference_proxy_repo:rw
     networks:
       - hivemind
 

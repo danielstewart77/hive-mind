@@ -33,6 +33,11 @@ window.addEventListener("DOMContentLoaded", function () {
         if (node.id !== "ollama" || !node.configured) return "";
         return '<section class="capability-manager"><div class="surface-header"><div><h3>Models</h3><p>Install and remove models through the configured Ollama API.</p></div><button class="button button-quiet" type="button" data-ollama-refresh>Refresh models</button></div><form class="capability-config" data-ollama-pull><div class="field"><label>Model to install</label><input name="model" placeholder="qwen3:8b" required></div><button class="button" type="submit">Pull model</button><small data-ollama-status></small></form><div class="overview-stack" data-ollama-models><div class="loading-state">Loading models…</div></div></section>';
     }
+    function installationControls(node) {
+        if (!node.installable) return "";
+        if (node.installed) return '<div class="capability-install"><a class="button button-quiet" href="' + h.escapeHtml(node.repository) + '" target="_blank" rel="noopener">View source</a><small>Cloned at ' + h.escapeHtml(node.path) + '</small></div>';
+        return '<div class="capability-install"><button class="button" type="button" data-capability-install="' + h.escapeHtml(node.id) + '">Clone source</button><small data-capability-install-status>Clone the audited public repository into this Hive host.</small></div>';
+    }
     async function loadOllama() {
         const target = document.querySelector("[data-ollama-models]");
         if (!target) return;
@@ -54,7 +59,7 @@ window.addEventListener("DOMContentLoaded", function () {
             document.getElementById("cap-attention").textContent = data.summary.attention;
             document.getElementById("capability-grid").innerHTML = data.nodes.map(function (node) {
                 const capabilityCount = node.capabilities ? '<div><dt>Capabilities</dt><dd>' + node.capabilities.length + ' published</dd></div>' : '';
-                return '<details class="capability-card surface"><summary><span class="tool-symbol"><i data-lucide="' + h.escapeHtml(node.icon) + '"></i></span><span class="capability-title"><small>' + h.escapeHtml(node.kind) + '</small><strong>' + h.escapeHtml(node.name) + '</strong></span>' + statusMarkup(node) + '<i class="service-chevron" data-lucide="chevron-down"></i></summary><div class="capability-body"><p>' + h.escapeHtml(node.description) + '</p><dl><div><dt>Access</dt><dd>' + h.escapeHtml(node.access) + '</dd></div><div><dt>Consumers</dt><dd>' + h.escapeHtml(node.consumers) + '</dd></div><div><dt>Endpoint</dt><dd class="mono">' + h.escapeHtml(node.endpoint || "Not configured") + '</dd></div>' + capabilityCount + '<div><dt>Health</dt><dd>' + h.escapeHtml(node.health.message) + '</dd></div><div><dt>Next step</dt><dd>' + h.escapeHtml(node.health.action) + '</dd></div></dl>' + configurationControls(node) + ollamaControls(node) + '</div></details>';
+                return '<details class="capability-card surface"><summary><span class="tool-symbol"><i data-lucide="' + h.escapeHtml(node.icon) + '"></i></span><span class="capability-title"><small>' + h.escapeHtml(node.kind) + '</small><strong>' + h.escapeHtml(node.name) + '</strong></span>' + statusMarkup(node) + '<i class="service-chevron" data-lucide="chevron-down"></i></summary><div class="capability-body"><p>' + h.escapeHtml(node.description) + '</p><dl><div><dt>Access</dt><dd>' + h.escapeHtml(node.access) + '</dd></div><div><dt>Consumers</dt><dd>' + h.escapeHtml(node.consumers) + '</dd></div><div><dt>Endpoint</dt><dd class="mono">' + h.escapeHtml(node.endpoint || "Not configured") + '</dd></div>' + capabilityCount + '<div><dt>Health</dt><dd>' + h.escapeHtml(node.health.message) + '</dd></div><div><dt>Next step</dt><dd>' + h.escapeHtml(node.health.action) + '</dd></div></dl>' + installationControls(node) + configurationControls(node) + ollamaControls(node) + '</div></details>';
             }).join("");
             if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}});
             loadOllama();
@@ -80,7 +85,9 @@ window.addEventListener("DOMContentLoaded", function () {
     document.getElementById("capability-grid").addEventListener("click", async function (event) {
         const reset = event.target.closest("[data-capability-reset]");
         const remove = event.target.closest("[data-ollama-delete]");
+        const install = event.target.closest("[data-capability-install]");
         if (event.target.closest("[data-ollama-refresh]")) { loadOllama(); return; }
+        if (install) { const status = install.parentElement.querySelector("[data-capability-install-status]"); install.disabled = true; status.textContent = "Cloning source…"; try { await h.requestJson("/api/capability-nodes/" + encodeURIComponent(install.dataset.capabilityInstall) + "/install", {method: "POST"}); await load(); } catch (error) { install.disabled = false; status.textContent = error.message; } return; }
         if (reset) { try { await h.requestJson("/api/capability-nodes/" + encodeURIComponent(reset.dataset.capabilityReset) + "/configuration", {method: "DELETE"}); await load(); } catch (error) { window.alert(error.message); } }
         if (remove && window.confirm("Delete " + remove.dataset.ollamaDelete + " from Ollama?")) { try { await h.requestJson("/api/capability-nodes/ollama/models", {method: "DELETE", headers: {"Content-Type": "application/json"}, body: JSON.stringify({model: remove.dataset.ollamaDelete})}); await loadOllama(); } catch (error) { window.alert(error.message); } }
     });
