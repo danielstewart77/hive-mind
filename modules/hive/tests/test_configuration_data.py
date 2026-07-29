@@ -21,6 +21,16 @@ def test_capability_endpoint_round_trip_normalizes_url(tmp_path, monkeypatch):
     assert configuration_data.get_capability_endpoint("ollama") == saved
 
 
+def test_inference_proxy_endpoint_is_configurable(tmp_path, monkeypatch):
+    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
+
+    saved = configuration_data.set_capability_endpoint(
+        "inference-proxy", "http://inference-proxy:8888"
+    )
+
+    assert configuration_data.get_capability_endpoint("inference-proxy") == saved
+
+
 @pytest.mark.parametrize(
     "node_id,endpoint",
     [

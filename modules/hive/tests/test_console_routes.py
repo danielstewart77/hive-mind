@@ -220,7 +220,7 @@ def test_overview_api_combines_minds_sessions_and_service_health(tmp_path, monke
     assert body["counts"] == {
         "minds": 1,
         "edge_minds": 1,
-        "capability_nodes": 3,
+        "capability_nodes": 4,
         "sessions": 1,
     }
     assert body["services"]["comms"]["reachable"] is True
@@ -593,14 +593,15 @@ def test_capability_nodes_api_groups_external_services_by_function(tmp_path, mon
     assert response.status_code == 200
     body = response.json()
     assert body["summary"] == {
-        "total": 5,
-        "configured": 5,
-        "healthy": 5,
+        "total": 6,
+        "configured": 6,
+        "healthy": 6,
         "attention": 0,
     }
     by_id = {node["id"]: node for node in body["nodes"]}
     assert by_id["hive-tools"]["kind"] == "Action gateway"
     assert by_id["ollama"]["kind"] == "Inference"
+    assert by_id["inference-proxy"]["repository"] == "https://github.com/danielstewart77/inference-proxy.git"
     assert by_id["pihole"]["kind"] == "Network service"
     assert by_id["hive-tools"]["capabilities"][0]["name"] == "Gmail"
 
@@ -631,6 +632,21 @@ def test_capability_node_configuration_route_saves_endpoint(tmp_path, monkeypatc
     assert response.status_code == 200
     assert response.json()["node"]["configured"] is True
     save.assert_called_once_with("ollama", "http://ollama:11434")
+
+
+def test_inference_proxy_install_route_clones_fixed_repository(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
+    result = {
+        "installed": True,
+        "path": "/inference_proxy_repo",
+        "repository": "https://github.com/danielstewart77/inference-proxy.git",
+    }
+    with patch.object(main_mod, "clone_inference_proxy", return_value=result) as clone:
+        response = client.post("/api/capability-nodes/inference-proxy/install")
+
+    assert response.status_code == 200
+    assert response.json() == result
+    clone.assert_called_once_with()
 
 
 def test_ollama_models_api_lists_installed_and_running_models(tmp_path, monkeypatch):
@@ -715,7 +731,9 @@ def test_capability_nodes_leave_optional_unconfigured_services_idle(tmp_path, mo
     for name in ("HIVE_TOOLS_URL", "OLLAMA_URL", "OLLAMA_BASE_URL", "PIHOLE_URL"):
         monkeypatch.delenv(name, raising=False)
     async def probe(url, **kwargs):
-        reachable = "hive-tools" not in url
+        reachable = all(
+            service not in url for service in ("hive-tools", "inference-proxy")
+        )
         return {
             "reachable": reachable,
             "message": "Ready" if reachable else "Unavailable",
@@ -736,7 +754,7 @@ def test_capability_nodes_leave_optional_unconfigured_services_idle(tmp_path, mo
     assert response.status_code == 200
     body = response.json()
     assert body["summary"] == {
-        "total": 5,
+        "total": 6,
         "configured": 2,
         "healthy": 2,
         "attention": 0,
@@ -745,7 +763,7 @@ def test_capability_nodes_leave_optional_unconfigured_services_idle(tmp_path, mo
     assert by_id["hive-tools"]["health"]["detail"] == "Not configured"
     assert by_id["ollama"]["configured"] is False
     assert by_id["pihole"]["configured"] is False
-    assert health.await_count == 3
+    assert health.await_count == 4
 
 
 def test_capability_node_health_probes_run_concurrently(monkeypatch):
@@ -759,7 +777,7 @@ def test_capability_node_health_probes_run_concurrently(monkeypatch):
         async def probe(url, **kwargs):
             nonlocal started
             started += 1
-            if started == 5:
+            if started == 6:
                 all_started.set()
             await asyncio.wait_for(all_started.wait(), timeout=1.0)
             return {
@@ -779,7 +797,7 @@ def test_capability_node_health_probes_run_concurrently(monkeypatch):
         ):
             return await main_mod._capability_node_data()
 
-    assert asyncio.run(scenario())["summary"]["healthy"] == 5
+    assert asyncio.run(scenario())["summary"]["healthy"] == 6
 
 
 def test_service_health_accepts_successful_non_json_response():

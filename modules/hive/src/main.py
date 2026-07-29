@@ -42,6 +42,7 @@ from auth import (
     set_session_cookie,
     verify_user_credentials,
 )
+from capability_install import clone_inference_proxy, inference_proxy_status
 from config import BASE_DIR
 from configuration_data import (
     clear_capability_endpoint,
@@ -908,6 +909,18 @@ async def api_capability_node_configuration_delete(
     return {"removed": removed}
 
 
+@app.post("/api/capability-nodes/inference-proxy/install")
+async def api_inference_proxy_install(user: dict = Depends(require_auth)):
+    del user
+    try:
+        result = await asyncio.to_thread(clone_inference_proxy)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return result
+
+
 def _ollama_endpoint() -> str:
     endpoint = get_capability_endpoint("ollama") or os.getenv("OLLAMA_URL") or os.getenv(
         "OLLAMA_BASE_URL"
@@ -1650,6 +1663,7 @@ async def api_operation_status(
 
 def _capability_node_specs() -> list[dict]:
     voice_urls = _voice_server_urls()
+    proxy_installation = inference_proxy_status()
     return [
         {
             "id": "hive-tools",
@@ -1663,6 +1677,29 @@ def _capability_node_specs() -> list[dict]:
             "access": "Operator policy and approval gates",
             "consumers": "Authorized operator minds",
             "icon": "shield-check",
+        },
+        {
+            "id": "inference-proxy",
+            "name": "Inference Proxy",
+            "kind": "Inference gateway",
+            "description": "One private endpoint for upstream models, issued client keys, routing, and usage accounting.",
+            "endpoint": get_capability_endpoint("inference-proxy")
+            or os.getenv("INFERENCE_PROXY_URL")
+            or "http://inference-proxy:8888",
+            "health_path": "/health",
+            "auto_discover": True,
+            "configured": bool(
+                get_capability_endpoint("inference-proxy")
+                or os.getenv("INFERENCE_PROXY_URL")
+            ),
+            "configurable": True,
+            "installable": True,
+            "installed": proxy_installation["installed"],
+            "repository": proxy_installation["repository"],
+            "path": proxy_installation["path"],
+            "access": "Proxy-issued client keys",
+            "consumers": "Minds and applications using hosted models",
+            "icon": "waypoints",
         },
         {
             "id": "ollama",
@@ -1738,7 +1775,11 @@ async def _capability_node_data() -> dict:
             node.pop("authentication_required_statuses", set())
         )
         explicitly_configured = bool(node.pop("configured", bool(endpoint)))
-        installed = bool(tools.get("present")) if node["id"] == "hive-tools" else None
+        installed = (
+            bool(tools.get("present"))
+            if node["id"] == "hive-tools"
+            else node.get("installed")
+        )
         configured = bool(endpoint) and (explicitly_configured or installed is True)
         if endpoint and (configured or auto_discover):
             probes.append(

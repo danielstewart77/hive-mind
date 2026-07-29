@@ -20,7 +20,7 @@ from config import BASE_DIR
 HIVE_MIND_MINDS_DIR = Path("/minds_hive_mind")
 HIVE_MIND_MINDS_CONFIG_DIR = Path("/minds_hive_mind_config")
 
-_CONFIGURABLE_CAPABILITY_IDS = {"ollama", "pihole"}
+_CONFIGURABLE_CAPABILITY_IDS = {"inference-proxy", "ollama", "pihole"}
 _MIND_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$")
 

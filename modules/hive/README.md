@@ -36,6 +36,11 @@ overrides such as `hex:sentinel`. On first launch against an empty db,
 `HIVE_SEED_USERNAME` and `HIVE_SEED_PASSWORD` create the one account; inert
 afterward.
 
+The Inference Proxy Capability Node can clone its fixed public repository from
+the control center. `INFERENCE_PROXY_DIR` selects the host destination mounted
+for that action, and `INFERENCE_PROXY_URL` supplies a deployed endpoint when it
+is not reachable as `http://inference-proxy:8888` on the Hive network.
+
 ## Test
 
 ```
