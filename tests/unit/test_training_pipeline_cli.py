@@ -166,12 +166,34 @@ def test_export_reasoning_mode_carries_thoughts(capsys, corpus, ledger, tmp_path
     assert "look at the listing" in body
 
 
-def test_export_keeps_credentials_by_default(capsys, corpus, ledger, tmp_path):
+def test_export_randomizes_credentials_by_default(capsys, corpus, ledger, tmp_path):
+    _run(capsys, _base(corpus, ledger) + ["curate"])
+    out = tmp_path / "default"
+    _run(
+        capsys,
+        _base(corpus, ledger) + ["export", "--out-dir", str(out), "--eval-fraction", "0"],
+    )
+    body = (out / "train.jsonl").read_text()
+    assert "ghp_INVENTEDfixture000000000000" not in body
+    assert "REDACTED" not in body
+    assert "ghp_" in body
+
+
+def test_export_keeps_credentials_only_when_asked(capsys, corpus, ledger, tmp_path):
     _run(capsys, _base(corpus, ledger) + ["curate"])
     raw = tmp_path / "raw"
     _run(
         capsys,
-        _base(corpus, ledger) + ["export", "--out-dir", str(raw), "--eval-fraction", "0"],
+        _base(corpus, ledger)
+        + [
+            "export",
+            "--out-dir",
+            str(raw),
+            "--eval-fraction",
+            "0",
+            "--secrets",
+            "keep",
+        ],
     )
     body = (raw / "train.jsonl").read_text()
     assert "ghp_INVENTEDfixture000000000000" in body

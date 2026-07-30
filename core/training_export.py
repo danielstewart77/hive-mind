@@ -15,19 +15,27 @@ drops them entirely and leaves no placeholder behind, which is the correct
 input for a non-reasoning base model. There is no mode that emits an empty
 thought.
 
-**Credential handling is a three-way choice and defaults to keeping them.**
-The corpus trains a locally-hosted model that runs on this hardware and
-needs real credentials to do the job it is being taught. Substituting
-placeholders does not make that model safer; it teaches it that a redaction
-slug belongs in the credential slot, so it emits ``<REDACTED_SECRET>`` at
-the moment it needs a live token. ``SECRETS_KEEP`` is therefore the default.
+**Credential handling is a three-way choice and defaults to randomizing.**
+``SECRETS_RANDOMIZE`` replaces each credential with a different string of
+the same length and character class, deterministically, so one secret maps
+to one surrogate everywhere it appears. The model still learns the only
+transferable fact — that a forty-character opaque token follows ``ghp_`` —
+and never sees a real one. This is the default because it is the one policy
+that survives both failure modes at once. It is also the mainstream practice
+outside this repo: clinical de-identification calls it *hiding in plain
+sight*, and it exists precisely because sentinel-token redaction taught
+models to emit the sentinel.
 
-``SECRETS_RANDOMIZE`` is the option worth reaching for when a dataset leaves
-this machine: each credential becomes a different string of the same length
-and character class, deterministically, so the model still learns that a
-forty-character opaque token follows ``ghp_`` — the transferable fact — and
-never sees a real one. ``SECRETS_REDACT`` replaces them with placeholders
-and is the bluntest of the three.
+``SECRETS_REDACT`` replaces credentials with placeholders. It teaches the
+model that a redaction slug belongs in the credential slot, so it emits
+``<REDACTED_SECRET>`` at the moment it needs a live token; reach for it only
+when a dataset must provably contain no credential-shaped string.
+
+``SECRETS_KEEP`` writes the real values. The corpus trains a model that runs
+on this hardware, so this is not absurd — but extraction risk scales with
+duplication and with epochs, and a small LoRA over a few thousand turns is
+exactly the shape that memorizes verbatim. Choose it deliberately, never by
+default.
 
 **The split is by session, never by turn.** Turns from one session share a
 system prompt, a working directory and often a literal file being edited.
@@ -83,7 +91,7 @@ class ExportOptions:
     eval_fraction: float = 0.05
     include_system_prompt: bool = True
     max_tool_result_chars: int = 8_000
-    secrets: str = SECRETS_KEEP
+    secrets: str = SECRETS_RANDOMIZE
 
     def __post_init__(self) -> None:
         if self.mode not in VALID_MODES:

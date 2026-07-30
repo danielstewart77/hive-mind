@@ -22,6 +22,7 @@ from core.training_curation import CurationPolicy, curate
 from core.training_export import (
     MODE_REASONING,
     MODE_STRIPPED,
+    SECRETS_KEEP,
     SECRETS_RANDOMIZE,
     SECRETS_REDACT,
     ExportOptions,
@@ -146,14 +147,31 @@ def _credential_blocks():
     ]
 
 
-def test_credentials_survive_by_default():
-    """The corpus trains a local model that needs the real values.
+def test_credentials_are_randomized_by_default():
+    """A surrogate of the same shape — never the real value, never a slug.
 
-    Substituting placeholders teaches it that a redaction slug is what goes
-    in the credential slot, so it emits one when it needs a live token.
+    Keeping the value risks a small LoRA memorizing it verbatim; a slug
+    teaches the model that a slug is what goes in the credential slot.
     """
     serialized = json.dumps(
         render_turn("here is sk-ant-api03-ZZZZyyyyXXXXvvvv9999", _credential_blocks(), ExportOptions())
+    )
+    assert "ghp_AAAAbbbbCCCCddddEEEEffff" not in serialized
+    assert "sk-ant-api03-QQQQwwwwEEEErrrr1234" not in serialized
+    assert "sk-ant-api03-ZZZZyyyyXXXXvvvv9999" not in serialized
+    assert "REDACTED" not in serialized
+    assert "ghp_" in serialized
+    assert "sk-ant-api03-" in serialized
+
+
+def test_credentials_are_kept_only_when_asked():
+    """The real values, on deliberate request."""
+    serialized = json.dumps(
+        render_turn(
+            "here is sk-ant-api03-ZZZZyyyyXXXXvvvv9999",
+            _credential_blocks(),
+            ExportOptions(secrets=SECRETS_KEEP),
+        )
     )
     assert "ghp_AAAAbbbbCCCCddddEEEEffff" in serialized
     assert "sk-ant-api03-QQQQwwwwEEEErrrr1234" in serialized
@@ -272,12 +290,17 @@ def test_export_can_filter_by_harness_and_reasoning(db_path, tmp_path):
     )
 
 
-def test_system_prompt_is_redacted_only_when_redaction_is_on(db_path, tmp_path):
+def test_the_system_prompt_follows_the_same_policy_as_the_turn(db_path, tmp_path):
     _add(db_path, "s1", system_prompt="your token is ghp_SYSTEMbbbbCCCCddddEEEE")
     curate(db_path)
 
-    export_dataset(db_path, tmp_path / "raw", ExportOptions(eval_fraction=0.0))
+    export_dataset(db_path, tmp_path / "raw", ExportOptions(eval_fraction=0.0, secrets=SECRETS_KEEP))
     assert "ghp_SYSTEMbbbbCCCCddddEEEE" in (tmp_path / "raw" / "train.jsonl").read_text()
+
+    export_dataset(db_path, tmp_path / "default", ExportOptions(eval_fraction=0.0))
+    default_body = (tmp_path / "default" / "train.jsonl").read_text()
+    assert "ghp_SYSTEMbbbbCCCCddddEEEE" not in default_body
+    assert "ghp_" in default_body
 
     export_dataset(
         db_path, tmp_path / "clean", ExportOptions(eval_fraction=0.0, secrets=SECRETS_REDACT)
