@@ -46,11 +46,14 @@ from auth import (
 from capability_install import clone_inference_proxy, inference_proxy_status
 from config import BASE_DIR
 from configuration_data import (
+    DEFAULT_OLLAMA_BASE_URL,
     clear_capability_endpoint,
     get_capability_endpoint,
     get_edge_mind_metadata,
+    internal_mind_exists,
     local_runtime_configuration,
     normalize_endpoint,
+    scaffold_internal_mind,
     set_capability_endpoint,
     set_edge_mind_metadata,
     update_local_runtime_model,
@@ -395,6 +398,20 @@ async def minds_page(request: Request):
     return _console_page(request, "minds.html")
 
 
+# Registered before /minds/{mind_id}: FastAPI matches in declaration order,
+# so the parameterised route would otherwise swallow this literal one.
+@app.get("/minds/new", response_class=HTMLResponse)
+async def new_mind_page(request: Request):
+    return _console_page(
+        request,
+        "mind_new.html",
+        install_options=_mind_install_options(),
+        default_ollama_url=get_capability_endpoint("ollama")
+        or os.getenv("OLLAMA_URL", "")
+        or DEFAULT_OLLAMA_BASE_URL,
+    )
+
+
 @app.get("/minds/{mind_id}", response_class=HTMLResponse)
 async def mind_detail_page(request: Request, mind_id: str):
     return _console_page(request, "mind_detail.html", mind_id=mind_id)
@@ -425,6 +442,135 @@ async def api_mind_install_options(user: dict = Depends(require_auth)):
     forms. One source of truth, so the console cannot drift from setup.sh."""
     del user
     return _mind_install_options()
+
+
+@app.post("/api/minds")
+async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
+    """Scaffold a containerised Mind in this Hive's own stack.
+
+    Writes runtime.yaml and container/compose.yaml, then returns the commands
+    that build and register it. Personality and soul stay conversational —
+    this creates a runtime, not an identity.
+    """
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be an object")
+
+    name = str(body.get("name") or "").strip().lower()
+    harness = str(body.get("harness") or "")
+    provider = str(body.get("provider") or "")
+    if not re.fullmatch(r"[a-z][a-z0-9-]{1,31}", name):
+        raise HTTPException(
+            status_code=400,
+            detail="Name must be 2 to 32 lowercase letters, numbers, or hyphens",
+        )
+    try:
+        _validate_harness_provider(harness, provider)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    default_model = str(
+        body.get("default_model") or _PROVIDER_DEFAULT_MODELS[provider]
+    ).strip()
+    mind_id = str(body.get("mind_id") or uuid.uuid4())
+    try:
+        mind_id = str(uuid.UUID(mind_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Mind ID must be a UUID") from exc
+
+    if await _mind_name_is_taken(name):
+        raise HTTPException(status_code=409, detail="That Mind name is already taken")
+
+    ollama_base_url = ""
+    if provider == "ollama":
+        ollama_base_url = str(
+            body.get("ollama_url")
+            or get_capability_endpoint("ollama")
+            or os.getenv("OLLAMA_URL")
+            or DEFAULT_OLLAMA_BASE_URL
+        )
+        ollama_base_url = normalize_endpoint(ollama_base_url)
+
+    try:
+        written = scaffold_internal_mind(
+            name,
+            mind_id=mind_id,
+            harness=harness,
+            provider=provider,
+            default_model=default_model,
+            description=str(body.get("description") or ""),
+            ollama_base_url=ollama_base_url,
+            ollama_api_key=str(body.get("ollama_api_key") or ""),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500, detail=f"Could not write the Mind scaffold: {exc}"
+        ) from exc
+
+    log_event(
+        log, "mind.scaffolded", **_actor_fields(user), mind_name=name,
+        mind_id=mind_id, harness=harness, provider=provider,
+    )
+    return {
+        "mind_id": mind_id,
+        "written": written,
+        "registration": {
+            "name": name,
+            "mind_id": mind_id,
+            "model": default_model,
+            "harness": harness,
+            "provider": provider,
+        },
+        "commands": [
+            {
+                "name": "Build and start the Mind",
+                "command": (
+                    "cd $HIVE_MIND_DIR && /generate-compose && "
+                    f"docker compose up -d --build {shlex.quote(name)}"
+                ),
+            }
+        ],
+        # The soul is authored in conversation, not here — see setup-personality.
+        "next_step": (
+            f"Give {name} a soul: run /hivemind:setup-personality, then talk to it."
+        ),
+    }
+
+
+@app.post("/api/minds/{name}/register")
+async def api_register_mind(
+    name: str, request: Request, user: dict = Depends(require_auth)
+):
+    """Register a scaffolded Mind with the broker once its container is up."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be an object")
+    normalized = name.strip().lower()
+    if not re.fullmatch(r"[a-z][a-z0-9-]{1,31}", normalized):
+        raise HTTPException(status_code=400, detail="Invalid Mind name")
+    try:
+        configuration = local_runtime_configuration(normalized)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    broker_result = await _gateway_request(
+        "POST",
+        "/broker/minds",
+        json_body={
+            "mind_id": str(configuration.get("mind_id") or ""),
+            "name": normalized,
+            "gateway_url": str(configuration.get("gateway_url") or ""),
+            "model": str(configuration.get("default_model") or ""),
+            "harness": str(configuration.get("harness") or ""),
+        },
+    )
+    log_event(
+        log, "mind.registered", **_actor_fields(user), mind_name=normalized,
+        mind_id=str(configuration.get("mind_id") or ""),
+    )
+    return {"registered": True, "broker": broker_result}
 
 
 @app.get("/capability-nodes", response_class=HTMLResponse)
@@ -2145,18 +2291,27 @@ async def download_asset(filename: str, user: dict = Depends(require_auth)):
     return FileResponse(path, filename=filename)
 
 
+async def _mind_name_is_taken(name: str) -> bool:
+    """A name is taken if the broker knows it or the scaffold already exists.
+    Checking only the broker would happily overwrite an unregistered mind."""
+    broker_minds = await _broker_minds_safe()
+    if any(
+        isinstance(m, dict) and (m.get("name") or "").lower() == name
+        for m in broker_minds
+    ):
+        return True
+    try:
+        return internal_mind_exists(name)
+    except ValueError:
+        return False
+
+
 @app.get("/api/settings/new-mind/check-name")
 async def api_settings_check_mind_name(name: str, user: dict = Depends(require_auth)):
-    """The one safely-automatable piece of mind creation today: name
-    availability. Everything else (personality, soul, harness choice)
-    stays conversational — see the /settings new-mind tab."""
+    """Name availability, checked against the broker and the minds/ tree."""
     del user
     normalized = name.strip().lower()
-    broker_minds = await _broker_minds_safe()
-    taken = any(
-        isinstance(m, dict) and (m.get("name") or "").lower() == normalized
-        for m in broker_minds
-    )
+    taken = await _mind_name_is_taken(normalized)
     return {"name": normalized, "available": bool(normalized) and not taken}
 
 
