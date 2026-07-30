@@ -15,10 +15,19 @@ drops them entirely and leaves no placeholder behind, which is the correct
 input for a non-reasoning base model. There is no mode that emits an empty
 thought.
 
-**Redaction is mandatory and not configurable.** Every string that leaves
-this module has been through :mod:`core.training_redaction`. A caller cannot
-opt out, because the only reason to opt out is to leak a credential into
-model weights.
+**Credential handling is a three-way choice and defaults to keeping them.**
+The corpus trains a locally-hosted model that runs on this hardware and
+needs real credentials to do the job it is being taught. Substituting
+placeholders does not make that model safer; it teaches it that a redaction
+slug belongs in the credential slot, so it emits ``<REDACTED_SECRET>`` at
+the moment it needs a live token. ``SECRETS_KEEP`` is therefore the default.
+
+``SECRETS_RANDOMIZE`` is the option worth reaching for when a dataset leaves
+this machine: each credential becomes a different string of the same length
+and character class, deterministically, so the model still learns that a
+forty-character opaque token follows ``ghp_`` — the transferable fact — and
+never sees a real one. ``SECRETS_REDACT`` replaces them with placeholders
+and is the bluntest of the three.
 
 **The split is by session, never by turn.** Turns from one session share a
 system prompt, a working directory and often a literal file being edited.
@@ -36,11 +45,32 @@ from pathlib import Path
 
 from core.training_capture import connect
 from core.training_curation import FLAG_KEEP, ensure_curation_schema
-from core.training_redaction import redact_blocks, redact_text
+from core.training_redaction import (
+    randomize_blocks,
+    randomize_text,
+    redact_blocks,
+    redact_text,
+)
 
 MODE_REASONING = "reasoning"
 MODE_STRIPPED = "stripped"
 VALID_MODES = frozenset({MODE_REASONING, MODE_STRIPPED})
+
+SECRETS_KEEP = "keep"
+SECRETS_RANDOMIZE = "randomize"
+SECRETS_REDACT = "redact"
+VALID_SECRET_POLICIES = frozenset({SECRETS_KEEP, SECRETS_RANDOMIZE, SECRETS_REDACT})
+
+_TEXT_TRANSFORMS = {
+    SECRETS_KEEP: lambda text: text,
+    SECRETS_RANDOMIZE: randomize_text,
+    SECRETS_REDACT: redact_text,
+}
+_BLOCK_TRANSFORMS = {
+    SECRETS_KEEP: lambda blocks: blocks,
+    SECRETS_RANDOMIZE: randomize_blocks,
+    SECRETS_REDACT: redact_blocks,
+}
 
 
 @dataclass
@@ -53,10 +83,15 @@ class ExportOptions:
     eval_fraction: float = 0.05
     include_system_prompt: bool = True
     max_tool_result_chars: int = 8_000
+    secrets: str = SECRETS_KEEP
 
     def __post_init__(self) -> None:
         if self.mode not in VALID_MODES:
             raise ValueError(f"mode must be one of {sorted(VALID_MODES)}")
+        if self.secrets not in VALID_SECRET_POLICIES:
+            raise ValueError(
+                f"secrets must be one of {sorted(VALID_SECRET_POLICIES)}"
+            )
         if not 0.0 <= self.eval_fraction < 1.0:
             raise ValueError("eval_fraction must be in [0.0, 1.0)")
 
@@ -101,8 +136,9 @@ def render_turn(
     actually issues parallel calls — flattening them into separate messages
     would teach the model to serialize work it is allowed to batch.
     """
-    blocks = redact_blocks(blocks)
-    messages: list[dict] = [{"role": "user", "content": redact_text(user_content or "")}]
+    blocks = _BLOCK_TRANSFORMS[options.secrets](blocks)
+    scrub = _TEXT_TRANSFORMS[options.secrets]
+    messages: list[dict] = [{"role": "user", "content": scrub(user_content or "")}]
 
     pending_text: list[str] = []
     pending_reasoning: list[str] = []
@@ -226,7 +262,9 @@ def export_dataset(
                     0,
                     {
                         "role": "system",
-                        "content": redact_text(row["system_prompt"]),
+                        "content": _TEXT_TRANSFORMS[options.secrets](
+                            row["system_prompt"]
+                        ),
                     },
                 )
             example = {

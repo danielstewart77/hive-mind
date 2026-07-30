@@ -88,27 +88,53 @@ identical alert runs drown out every hand-written debugging session.
 
 The corpus is captured from real tool output, so it contains real
 credentials: `cat .env` results, bearer headers, tokens in git remote URLs.
-A fine-tuned model memorizes and re-emits high-entropy strings it saw during
-training, and unlike a file, weights cannot be edited afterwards.
 
-`core/training_redaction.py` is the boundary. It never touches the raw
-store. It runs in two modes:
+**The corpus stays raw.** Capture never sanitizes, and curation never
+rewrites content. What credentials do on the way *out* is an export
+decision, controlled by `ExportOptions.secrets` — `--secrets` on the CLI, a
+dropdown in the console — with three values.
+
+`keep` **(default)**. This dataset trains a model that runs on this
+hardware, for this hive, and that model needs real credentials to do the
+work it is being taught.
+
+`randomize` **(the right choice when a dataset leaves this machine)**. Each
+credential becomes a *different* string of the same length and character
+class, with the vendor prefix preserved: `ghp_` stays `ghp_`, and the
+thirty-six characters after it become something else. The model learns the
+transferable fact — what a GitHub token looks like — and never sees a real
+one. The mapping is a salted HMAC of the secret, so one credential appearing
+in two hundred turns becomes the *same* surrogate in all of them (the model
+sees a consistent world, not noise) and a re-export with the same salt
+reproduces the dataset byte for byte. Private keys are the exception: a key
+block has no shape worth preserving, so it is dropped wholesale.
+
+`redact` **(bluntest)**. Placeholders. This teaches the model that
+`<REDACTED_SECRET>` is what belongs in the credential slot, so it emits one
+at the moment it needs a live token — a silent failure, and usually worse
+than the leak it was meant to prevent. Use it only when the dataset must
+provably contain no credential-shaped strings at all.
+
+`core/training_redaction.py` never touches the raw store under any policy.
+It runs in two modes:
 
 - **detection**, during curation, which counts contaminated rows and records
   which rule fired in `curation_meta` — so the console can show how much of
   the corpus is affected without displaying any secret.
-- **replacement**, during export, applied to every string that leaves the
-  module. This is **not configurable**. The only reason to disable it is to
-  leak a credential into model weights.
+- **replacement**, during export, under `randomize` or `redact`.
 
-Contaminated rows are kept by default, because the underlying turn is
-usually a perfectly good demonstration of tool use and redaction handles the
-payload. `--exclude-secret-rows` drops them instead.
+Contaminated rows are kept during curation, because the underlying turn is
+usually a good demonstration of tool use. `--exclude-secret-rows` drops them
+instead.
 
-Detection is deliberately over-eager. A false positive costs one redacted
-token; a false negative is permanent. Auth *schemes* (`Bearer`, `Basic`),
-type annotations (`password: str`), and env indirection (`TOKEN=$OTHER`) are
-allowlisted so ordinary code survives intact.
+Detection is deliberately over-eager, since it costs nothing under `keep`
+and a missed credential is permanent under the other two. Auth *schemes*
+(`Bearer`, `Basic`), type annotations (`password: str`), and env indirection
+(`TOKEN=$OTHER`) are allowlisted so ordinary code survives intact.
+
+**Never paste a value out of this corpus into a tracked file.** Test
+fixtures need invented credentials, not real ones — the corpus is
+gitignored, but a test file is not.
 
 ## Export
 

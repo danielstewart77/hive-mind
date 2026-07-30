@@ -14,6 +14,8 @@ import pytest
 from core.training_redaction import (
     count_secrets_in_row,
     find_secrets,
+    randomize_blocks,
+    randomize_text,
     redact_blocks,
     redact_text,
 )
@@ -128,3 +130,92 @@ def test_empty_input_is_safe():
     assert redact_text("") == ""
     assert find_secrets("") == []
     assert redact_blocks([]) == []
+
+
+# --- randomization -------------------------------------------------------
+#
+# The middle option: neither the real credential nor a placeholder slug, but
+# a different string of the same shape, so the model learns what a token
+# looks like without learning any actual one.
+
+
+def test_surrogate_keeps_length_and_character_class():
+    original = "ghp_AbCd1234efGH5678ijKL9012mnOP3456"
+    out = randomize_text(f"GITHUB_TOKEN={original}")
+    surrogate = out.split("=", 1)[1]
+
+    assert surrogate != original
+    assert len(surrogate) == len(original)
+    assert surrogate.startswith("ghp_")
+    for a, b in zip(original, surrogate):
+        assert a.isdigit() == b.isdigit()
+        assert a.isalpha() == b.isalpha()
+        assert a.isupper() == b.isupper()
+
+
+def test_the_real_credential_is_gone():
+    original = "sk-ant-api03-QQQQwwwwEEEErrrrTTTTyyyy1234"
+    assert original not in randomize_text(f"key is {original}")
+
+
+def test_no_redaction_slug_is_emitted():
+    """The whole point: the model must not learn a placeholder token."""
+    out = randomize_text("GITHUB_TOKEN=ghp_AbCd1234efGH5678ijKL9012mnOP3456")
+    assert "REDACTED" not in out
+
+
+def test_the_same_secret_maps_to_the_same_surrogate_everywhere():
+    """A token in two hundred turns must not become two hundred tokens."""
+    text = "GITHUB_TOKEN=ghp_AbCd1234efGH5678ijKL9012mnOP3456"
+    assert randomize_text(text) == randomize_text(text)
+
+    pair = randomize_text(f"{text}\nand again {text}")
+    first, second = pair.split("\nand again ")
+    assert first.split("=", 1)[1] == second.split("=", 1)[1]
+
+
+def test_different_salts_give_different_surrogates():
+    text = "GITHUB_TOKEN=ghp_AbCd1234efGH5678ijKL9012mnOP3456"
+    assert randomize_text(text, salt="a") != randomize_text(text, salt="b")
+
+
+def test_bearer_scheme_survives_randomization():
+    out = randomize_text("Authorization: Bearer abcdefghijklmnopqrstuvwx")
+    assert out.startswith("Authorization: Bearer ")
+    assert "abcdefghijklmnopqrstuvwx" not in out
+    assert len(out) == len("Authorization: Bearer abcdefghijklmnopqrstuvwx")
+
+
+def test_private_keys_are_dropped_rather_than_surrogated():
+    text = (
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+        "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAAB\n"
+        "-----END OPENSSH PRIVATE KEY-----"
+    )
+    assert randomize_text(text) == "<REDACTED_PRIVATE_KEY>"
+
+
+def test_randomize_leaves_ordinary_code_alone():
+    for text in ("def login(user: str, password: str) -> bool:", "api_key = None"):
+        assert randomize_text(text) == text
+
+
+def test_randomize_blocks_covers_nested_tool_input_without_mutating():
+    blocks = [
+        {"type": "text", "text": "token is ghp_AbCd1234efGH5678ijKL9012mnOP3456"},
+        {
+            "type": "tool_use",
+            "name": "Bash",
+            "id": "t1",
+            "input": {"command": "curl -H 'Authorization: Bearer abcdefghijklmnop1234'"},
+        },
+    ]
+    original = json.dumps(blocks)
+    out = randomize_blocks(blocks)
+
+    assert json.dumps(blocks) == original, "input must not be mutated"
+    serialized = json.dumps(out)
+    assert "ghp_AbCd1234efGH5678ijKL9012mnOP3456" not in serialized
+    assert "abcdefghijklmnop1234" not in serialized
+    assert "REDACTED" not in serialized
+    assert out[1]["name"] == "Bash"
