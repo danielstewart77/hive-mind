@@ -7,6 +7,7 @@ self-contained; the auth db and secret are shared with the terminal site.
 import asyncio
 import ipaddress
 import json
+import logging
 import os
 import re
 import shlex
@@ -55,6 +56,7 @@ from configuration_data import (
     update_local_runtime_model,
 )
 from graph_data import get_graph_data
+from hive_logging import configure_logging, install_fastapi_logging, log_event
 from settings_data import (
     build_mind_registry,
     hive_tools_status,
@@ -66,6 +68,7 @@ from settings_data import (
 
 _canvas_connections: set[WebSocket] = set()
 _canvas_elements: list[dict] = []
+log = configure_logging("hive-control-plane")
 
 
 @asynccontextmanager
@@ -75,7 +78,11 @@ async def lifespan(app: FastAPI):
     seed_first_user()
     global _canvas_elements
     _canvas_elements = _load_canvas_state()
-    yield
+    log_event(log, "service.started", component="hive-control-plane")
+    try:
+        yield
+    finally:
+        log_event(log, "service.stopped", component="hive-control-plane")
 
 
 app = FastAPI(
@@ -84,6 +91,7 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+install_fastapi_logging(app, log, "hive-control-plane")
 
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
@@ -234,6 +242,15 @@ def _safe_next_path(next_path: str | None, fallback: str = "/overview") -> str:
     return fallback
 
 
+def _actor_fields(user: dict | None) -> dict:
+    """Stable, non-secret actor identity for mutation audit records."""
+    return {
+        "actor_id": user.get("id") if user else None,
+        "actor_username": user.get("username") if user else None,
+        "actor_type": "user" if user else "anonymous",
+    }
+
+
 def _login_redirect_for(request: Request) -> RedirectResponse:
     next_path = urllib.parse.quote(request.url.path, safe="/")
     return RedirectResponse(url=f"/login?next={next_path}", status_code=303)
@@ -331,6 +348,7 @@ async def login_submit(
 ):
     user = verify_user_credentials(username, password)
     if not user:
+        log_event(log, "auth.login.rejected", level=logging.WARNING, actor_username=username)
         return _render_template(
             request,
             "login.html",
@@ -340,13 +358,16 @@ async def login_submit(
 
     response = RedirectResponse(url=_safe_next_path(next), status_code=303)
     set_session_cookie(response, user)
+    log_event(log, "auth.login.succeeded", **_actor_fields(user))
     return response
 
 
 @app.post("/logout")
-async def logout():
+async def logout(request: Request):
+    user = get_current_user_from_request(request)
     response = RedirectResponse(url="/login", status_code=303)
     clear_session_cookie(response)
+    log_event(log, "auth.logout", **_actor_fields(user))
     return response
 
 
@@ -761,12 +782,16 @@ async def legacy_api_outpost_bootstrap(
 
 @app.post("/api/edge-minds/bootstrap")
 async def api_edge_mind_bootstrap(request: Request, user: dict = Depends(require_auth)):
-    del user
     try:
         body = await request.json()
         result = _build_edge_mind_bootstrap(body if isinstance(body, dict) else {})
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_event(
+        log, "edge_mind.bootstrap.created", **_actor_fields(user),
+        mind_name=result["registration"]["name"], mind_id=result["registration"]["mind_id"],
+        deployment=result["registration"]["deployment"],
+    )
     return result
 
 
@@ -786,7 +811,6 @@ async def _probe_edge_mind(gateway_url: str) -> dict:
 
 @app.post("/api/edge-minds/verify")
 async def api_edge_mind_verify(request: Request, user: dict = Depends(require_auth)):
-    del user
     body = await request.json()
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Request body must be an object")
@@ -852,6 +876,10 @@ async def api_edge_mind_verify(request: Request, user: dict = Depends(require_au
         role=role,
         deployment=deployment,
     )
+    log_event(
+        log, "edge_mind.registered", **_actor_fields(user), mind_name=name,
+        mind_id=mind_id, deployment=deployment, profile=profile, role=role,
+    )
     return {"registered": True, "health": health, "broker": broker_result}
 
 
@@ -885,7 +913,6 @@ def _find_capability_node(data: dict, node_id: str) -> dict:
 async def api_capability_node_configure(
     node_id: str, request: Request, user: dict = Depends(require_auth)
 ):
-    del user
     body = await request.json()
     try:
         endpoint = set_capability_endpoint(
@@ -894,6 +921,10 @@ async def api_capability_node_configure(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     data = await _capability_node_data()
+    log_event(
+        log, "capability_node.configured", **_actor_fields(user),
+        node_id=node_id, endpoint=endpoint,
+    )
     return {"endpoint": endpoint, "node": _find_capability_node(data, node_id)}
 
 
@@ -901,11 +932,14 @@ async def api_capability_node_configure(
 async def api_capability_node_configuration_delete(
     node_id: str, user: dict = Depends(require_auth)
 ):
-    del user
     try:
         removed = clear_capability_endpoint(node_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_event(
+        log, "capability_node.configuration.cleared", **_actor_fields(user),
+        node_id=node_id, removed=removed,
+    )
     return {"removed": removed}
 
 
@@ -977,11 +1011,11 @@ async def api_ollama_models(user: dict = Depends(require_auth)):
 async def api_ollama_model_pull(
     request: Request, user: dict = Depends(require_auth)
 ):
-    del user
     model = _validated_model_name(await request.json())
     result = await _ollama_request(
         "POST", "/api/pull", json_body={"model": model, "stream": False}
     )
+    log_event(log, "ollama.model.pulled", **_actor_fields(user), model=model)
     return {"model": model, "result": result}
 
 
@@ -989,9 +1023,9 @@ async def api_ollama_model_pull(
 async def api_ollama_model_delete(
     request: Request, user: dict = Depends(require_auth)
 ):
-    del user
     model = _validated_model_name(await request.json())
     result = await _ollama_request("DELETE", "/api/delete", json_body={"model": model})
+    log_event(log, "ollama.model.deleted", **_actor_fields(user), model=model)
     return {"model": model, "result": result}
 
 
@@ -1254,7 +1288,6 @@ async def api_rules_list(
 
 @app.post("/api/rules")
 async def api_rules_create(request: Request, user: dict = Depends(require_auth)):
-    del user
     body = await request.json()
     content = (body.get("content") or "").strip()
     mind_id = (body.get("mind_id") or "").strip()
@@ -1276,12 +1309,16 @@ async def api_rules_create(request: Request, user: dict = Depends(require_auth))
         "data_class": data_class,
         "tags": tags,
     }
-    return await _lucent_request("POST", "/memory/store", json_body=payload)
+    result = await _lucent_request("POST", "/memory/store", json_body=payload)
+    log_event(
+        log, "rule.created", **_actor_fields(user), rule_id=result.get("id"),
+        mind_id=mind_id, tier=tier, data_class=data_class, content_chars=len(content),
+    )
+    return result
 
 
 @app.put("/api/rules/{rule_id}")
 async def api_rules_update(rule_id: str, request: Request, user: dict = Depends(require_auth)):
-    del user
     body = await request.json()
     content = (body.get("content") or "").strip()
     tags = (body.get("tags") or "").strip()
@@ -1301,13 +1338,19 @@ async def api_rules_update(rule_id: str, request: Request, user: dict = Depends(
             payload["mind_id"] = "shared"
         else:
             raise HTTPException(status_code=400, detail=f"unknown mind: {new_mind}")
-    return await _lucent_request("PUT", f"/memory/{rule_id}", json_body=payload)
+    result = await _lucent_request("PUT", f"/memory/{rule_id}", json_body=payload)
+    log_event(
+        log, "rule.updated", **_actor_fields(user), rule_id=rule_id,
+        mind_id=payload.get("mind_id"), content_chars=len(content),
+    )
+    return result
 
 
 @app.delete("/api/rules/{rule_id}")
 async def api_rules_delete(rule_id: str, user: dict = Depends(require_auth)):
-    del user
-    return await _lucent_request("DELETE", f"/memory/{rule_id}")
+    result = await _lucent_request("DELETE", f"/memory/{rule_id}")
+    log_event(log, "rule.deleted", **_actor_fields(user), rule_id=rule_id)
+    return result
 
 
 # ── Canvas ─────────────────────────────────────────────────────────────
@@ -1380,6 +1423,10 @@ async def canvas_push(request: Request):
     if not isinstance(data, dict) or not _apply_canvas_message(data):
         raise HTTPException(status_code=400, detail="unknown or malformed canvas message")
     await _broadcast_canvas(data)
+    log_event(
+        log, "canvas.changed", actor_type="mind", actor_username="canvas-push",
+        operation=data.get("type"), element_id=data.get("id"),
+    )
     return {"ok": True, "id": data.get("id"), "type": data.get("type")}
 
 
@@ -1392,7 +1439,8 @@ async def canvas_render_svg():
 @app.post("/canvas/submit")
 async def canvas_submit(request: Request):
     """Daniel's 'I'm done drawing' poke. Fires a Skippy turn via the broker."""
-    if not get_current_user_from_request(request):
+    user = get_current_user_from_request(request)
+    if not user:
         raise HTTPException(status_code=401, detail="unauthorized")
     try:
         body = await request.json()
@@ -1440,6 +1488,10 @@ async def canvas_submit(request: Request):
             resp.raise_for_status()
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"could not reach Skippy: {exc}") from exc
+    log_event(
+        log, "canvas.review.dispatched", **_actor_fields(user),
+        mind_name=target_name, element_count=element_count, note_chars=len(note),
+    )
     return {"ok": True, "dispatched_to": target_name, "element_count": element_count}
 
 
@@ -1546,7 +1598,6 @@ async def api_mind_configuration(name: str, user: dict = Depends(require_auth)):
 async def api_mind_configuration_update(
     name: str, request: Request, user: dict = Depends(require_auth)
 ):
-    del user
     body = await request.json()
     default_model = str(
         body.get("default_model") if isinstance(body, dict) else ""
@@ -1567,6 +1618,11 @@ async def api_mind_configuration_update(
         if previous_model:
             update_local_runtime_model(name, previous_model)
         raise
+    log_event(
+        log, "mind.configuration.updated", **_actor_fields(user), mind_name=name,
+        previous_model=previous_configuration.get("default_model"), default_model=default_model,
+        restart_required=True,
+    )
     return {
         "saved": True,
         "restart_required": True,
@@ -1592,13 +1648,14 @@ async def api_settings_hive_comms_sessions(user: dict = Depends(require_auth)):
 async def api_settings_hive_comms_session_delete(
     session_id: str, user: dict = Depends(require_auth)
 ):
-    del user
     url = f"{_gateway_base_url().rstrip('/')}/sessions/{session_id}"
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.delete(url, headers=_gateway_headers())
         if resp.status_code >= 400:
             raise HTTPException(status_code=resp.status_code, detail=resp.text)
-        return resp.json() if resp.content else {"ok": True}
+        result = resp.json() if resp.content else {"ok": True}
+    log_event(log, "session.deleted", **_actor_fields(user), session_id=session_id)
+    return result
 
 
 def _hive_tools_base_url() -> str:
@@ -1634,12 +1691,11 @@ async def _hive_tools_request(
 
 @app.post("/api/minds/{name}/restart")
 async def api_mind_restart(name: str, user: dict = Depends(require_auth)):
-    del user
     try:
         local_runtime_configuration(name)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return await _hive_tools_request(
+    result = await _hive_tools_request(
         "POST",
         "/docker/restart",
         params={
@@ -1649,6 +1705,8 @@ async def api_mind_restart(name: str, user: dict = Depends(require_auth)):
             "service": name,
         },
     )
+    log_event(log, "mind.restart.requested", **_actor_fields(user), mind_name=name)
+    return result
 
 
 @app.get("/api/operations/{request_id}")
@@ -2006,12 +2064,15 @@ async def api_settings_voice(user: dict = Depends(require_auth)):
 async def api_settings_voice_upload(
     name: str, file: UploadFile, user: dict = Depends(require_auth)
 ):
-    del user
     data = await file.read()
     try:
         target = save_voice_ref(name, data)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_event(
+        log, "mind.voice_ref.updated", **_actor_fields(user), mind_name=name,
+        size_bytes=len(data), path=str(target),
+    )
     return {"ok": True, "path": str(target), "size_bytes": len(data)}
 
 
@@ -2055,4 +2116,4 @@ if __name__ == "__main__":
 
     import config
 
-    uvicorn.run(app, host=config.HOST, port=config.PORT)
+    uvicorn.run(app, host=config.HOST, port=config.PORT, log_config=None, access_log=False)
