@@ -310,9 +310,13 @@ async def _create_gateway_session(mind_id: str) -> dict:
 
     def _do_post():
         url = f"{_gateway_base_url().rstrip('/')}/sessions"
+        # No model: the mind's own default is registered in the broker, and
+        # the gateway falls back to it when the caller names none. A model
+        # here overrode every mind's configured default with one hardcoded
+        # alias, so the browser terminal ran a different model than the same
+        # mind's Telegram surface.
         data = json.dumps({
             "mind_id": mind_id,
-            "model": "sonnet",
             "owner_type": "web",
             "owner_ref": "terminal",
             "client_ref": client_ref,
