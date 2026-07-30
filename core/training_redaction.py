@@ -134,7 +134,40 @@ _ASSIGNMENT_ALLOWED_VALUES = frozenset(
     }
 )
 
-_PLACEHOLDER_RE = re.compile(r"^<REDACTED_[A-Z_]+>$|^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$")
+_PLACEHOLDER_RE = re.compile(
+    r"^<REDACTED_[A-Z_]+>$"
+    r"|^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$"
+    # ``DISCORD_BOT_TOKEN=your-discord-bot-token`` is what a .env.example is
+    # made of, and it is the exact string a reader is told to replace.
+    r"|^(your|my|the)[-_]"
+    r"|[-_]here$"
+    r"|^<[^>]+>$"
+)
+
+# ``_LINKEDIN_TOKEN_URL = "https://…/accessToken"`` names an endpoint. A URL
+# that carries credentials is caught by the dedicated ``url_credentials``
+# rule, which looks for the userinfo ``@``.
+_PLAIN_URL_RE = re.compile(r"^https?://[^@\s]+$")
+
+# ``token = os.environ["GITHUB_TOKEN"]`` is the safe form, and it is also the
+# most common line in the corpus that the assignment rule would otherwise
+# flag. No credential contains a bracket, brace or parenthesis, so their
+# presence in the value means the line fetches a secret rather than states
+# one.
+_EXPRESSION_RE = re.compile(r"[()\[\]{}]")
+
+# ``REASON_SECRET = "contains_secret"`` is a constant, not a credential.
+# Every real token carries a digit, an uppercase letter or a separator; a
+# value that is nothing but lowercase letters and underscores is a word.
+_WORDS_RE = re.compile(r"^[a-z_]+$")
+
+# ``bearer_token=args.bearer_token`` passes a secret around; it does not
+# state one. A dotted identifier path is code either way.
+_ATTRIBUTE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+$")
+
+# Below this a match is a fragment, not a credential — and source code is
+# full of short assignments to keyword-ish names.
+_MIN_SECRET_LENGTH = 12
 
 
 @dataclass(frozen=True)
@@ -154,14 +187,28 @@ class SecretHit:
 
 def _assignment_value_is_secret(value: str) -> bool:
     """False for type annotations, placeholders, and env-var indirection."""
-    cleaned = value.strip().strip("\"'")
-    if not cleaned or len(cleaned) < 6:
+    # Backticks matter: these rules run over prose and docstrings as often
+    # as over shell output, and ``TOKEN=$VAR`` in markdown arrives wrapped.
+    cleaned = value.strip().strip("\"'`").rstrip(",;\"'`")
+    if not cleaned or len(cleaned) < _MIN_SECRET_LENGTH:
         return False
     if cleaned.lower() in _ASSIGNMENT_ALLOWED_VALUES:
+        return False
+    # ``length_tokens=length_chars // 4`` is arithmetic that happens to be
+    # assigned to a keyword-ish name. No credential contains a space.
+    if any(char.isspace() for char in cleaned):
+        return False
+    if _WORDS_RE.match(cleaned):
+        return False
+    if _ATTRIBUTE_RE.match(cleaned):
+        return False
+    if _PLAIN_URL_RE.match(cleaned):
         return False
     # ``TOKEN=$COMMS_BEARER_TOKEN`` and ``TOKEN=<REDACTED_SECRET>`` are the
     # safe forms we want the model to imitate, not values to scrub.
     if _PLACEHOLDER_RE.match(cleaned):
+        return False
+    if _EXPRESSION_RE.search(cleaned):
         return False
     return True
 
