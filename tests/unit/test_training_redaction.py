@@ -51,6 +51,21 @@ def test_detects_and_replaces_credentials(text):
         "SECRET_KEY=${SECRET_KEY}",
         "GITHUB_TOKEN=<REDACTED_SECRET>",
         "raise ValueError('password prompt suppressed')",
+        # Fetching a secret is the form we want the model to imitate. No
+        # credential contains a bracket or a parenthesis, so a value that
+        # does is code, not a value.
+        "token = os.environ['GITHUB_TOKEN']",
+        'api_key = os.getenv("ANTHROPIC_API_KEY")',
+        "const key = process.env.OPENAI_API_KEY.trim()",
+        "password = keyring.get_password('planka', 'admin')",
+        # What a .env.example is made of.
+        "DISCORD_BOT_TOKEN=your-discord-bot-token",
+        "SMTP_PASSWORD=your-app-password",
+        "API_KEY=replace_me_here",
+        # An endpoint, not a credential.
+        '_LINKEDIN_TOKEN_URL = "https://www.linkedin.com/oauth/v2/accessToken"',
+        # Passing a secret is not stating one.
+        "bearer_token=args.bearer_token",
     ],
 )
 def test_leaves_ordinary_code_and_prose_alone(text):
