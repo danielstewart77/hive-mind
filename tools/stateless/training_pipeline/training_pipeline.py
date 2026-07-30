@@ -216,15 +216,15 @@ def build_parser() -> argparse.ArgumentParser:
     export_p.add_argument(
         "--secrets",
         choices=["keep", "randomize", "redact"],
-        default="keep",
+        default="randomize",
         help=(
-            "How credentials leave the corpus. keep (default) writes the "
-            "real values, because this dataset trains a local model that "
-            "needs them. randomize substitutes a same-length, same-shape "
-            "surrogate, so the model still learns what a token looks like "
-            "without learning a real one — the right choice when a dataset "
-            "leaves this machine. redact writes placeholders, which teaches "
-            "the model to emit a slug where a live token belongs."
+            "How credentials leave the corpus. randomize (default) "
+            "substitutes a same-length, same-shape surrogate, so the model "
+            "learns what a token looks like without learning a real one. "
+            "keep writes the real values — deliberate only, since a small "
+            "LoRA over a duplicated corpus memorizes them verbatim. redact "
+            "writes placeholders, which teaches the model to emit a slug "
+            "where a live token belongs."
         ),
     )
 
