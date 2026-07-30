@@ -52,7 +52,7 @@
     </section>
 
     <section class="surface">
-        <div class="surface-header"><div><h2>Export</h2><p>Renders kept turns to <code>train.jsonl</code> and <code>eval.jsonl</code>. Credentials are carried through as-is unless you choose otherwise; the split is by session so an eval score cannot measure memorization.</p></div></div>
+        <div class="surface-header"><div><h2>Export</h2><p>Renders kept turns to <code>train.jsonl</code> and <code>eval.jsonl</code>. Credentials are replaced with same-shape surrogates unless you choose otherwise; the split is by session so an eval score cannot measure memorization.</p></div></div>
         <form class="capability-config" id="training-export-form">
             <div class="field">
                 <label for="export-name">Dataset name</label>
@@ -80,11 +80,11 @@
             <div class="field">
                 <label for="export-secrets">Credentials</label>
                 <select id="export-secrets" name="secrets">
-                    <option value="keep">Keep — real values, for a model running on your hardware</option>
                     <option value="randomize">Randomize — same length and shape, different value</option>
+                    <option value="keep">Keep — real values, for a model running on your hardware</option>
                     <option value="redact">Redact — replace with placeholders</option>
                 </select>
-                <small>Keep is the default because this model needs working credentials to do the job. Randomize is the one to pick if the dataset leaves this machine: the model still learns that a forty-character opaque token follows <code>ghp_</code> without ever seeing a real one. Redact teaches it to emit a placeholder where a live token belongs, which fails silently at the worst moment.</small>
+                <small>Randomize is the default: the model still learns that a forty-character opaque token follows <code>ghp_</code> without ever seeing a real one, and one credential maps to the same surrogate everywhere it appears. Keep writes the real values, which is defensible for a model that never leaves this hardware but is the regime where a few epochs over a duplicated corpus memorizes them verbatim. Redact teaches it to emit a placeholder where a live token belongs, which fails silently at the worst moment.</small>
             </div>
             <div class="form-actions"><button class="button" type="submit">Export dataset</button></div>
             <small data-export-status></small>
