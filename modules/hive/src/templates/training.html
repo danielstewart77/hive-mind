@@ -52,7 +52,7 @@
     </section>
 
     <section class="surface">
-        <div class="surface-header"><div><h2>Export</h2><p>Renders kept turns to <code>train.jsonl</code> and <code>eval.jsonl</code>. Credentials are always redacted; the split is by session so an eval score cannot measure memorization.</p></div></div>
+        <div class="surface-header"><div><h2>Export</h2><p>Renders kept turns to <code>train.jsonl</code> and <code>eval.jsonl</code>. Credentials are carried through as-is unless you choose otherwise; the split is by session so an eval score cannot measure memorization.</p></div></div>
         <form class="capability-config" id="training-export-form">
             <div class="field">
                 <label for="export-name">Dataset name</label>
@@ -76,6 +76,15 @@
             <div class="field">
                 <label for="eval-fraction">Eval fraction</label>
                 <input id="eval-fraction" name="eval_fraction" type="number" step="0.01" min="0" max="0.5" value="0.05">
+            </div>
+            <div class="field">
+                <label for="export-secrets">Credentials</label>
+                <select id="export-secrets" name="secrets">
+                    <option value="keep">Keep — real values, for a model running on your hardware</option>
+                    <option value="randomize">Randomize — same length and shape, different value</option>
+                    <option value="redact">Redact — replace with placeholders</option>
+                </select>
+                <small>Keep is the default because this model needs working credentials to do the job. Randomize is the one to pick if the dataset leaves this machine: the model still learns that a forty-character opaque token follows <code>ghp_</code> without ever seeing a real one. Redact teaches it to emit a placeholder where a live token belongs, which fails silently at the worst moment.</small>
             </div>
             <div class="form-actions"><button class="button" type="submit">Export dataset</button></div>
             <small data-export-status></small>
@@ -229,7 +238,7 @@ window.addEventListener("DOMContentLoaded", function () {
         setStatus(curateForm, "[data-curate-status]", "Curating — this walks every captured turn and takes a minute or two…");
         try {
             const result = await api("/api/training/curate", {method: "POST", body: JSON.stringify(readForm(curateForm))});
-            setStatus(curateForm, "[data-curate-status]", "Kept " + formatCount(result.kept) + " of " + formatCount(result.total) + " across " + formatCount(result.clusters) + " clusters. " + formatCount(result.secret_rows) + " rows carry credentials and will be redacted at export.");
+            setStatus(curateForm, "[data-curate-status]", "Kept " + formatCount(result.kept) + " of " + formatCount(result.total) + " across " + formatCount(result.clusters) + " clusters. " + formatCount(result.secret_rows) + " rows carry credentials, which export keeps unless you change the credentials setting.");
             refresh();
         } catch (error) {
             setStatus(curateForm, "[data-curate-status]", error.message, true);
