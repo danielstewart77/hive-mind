@@ -599,6 +599,11 @@ async def activity_page(request: Request):
     return _console_page(request, "activity.html")
 
 
+@app.get("/training", response_class=HTMLResponse)
+async def training_page(request: Request):
+    return _console_page(request, "training.html")
+
+
 @app.get("/api/overview")
 async def api_overview(user: dict = Depends(require_auth)):
     del user
@@ -1878,14 +1883,26 @@ def _hive_tools_headers() -> dict[str, str]:
 
 
 async def _hive_tools_request(
-    method: str, path: str, *, params: dict | None = None
+    method: str,
+    path: str,
+    *,
+    params: dict | None = None,
+    json_body: dict | None = None,
+    timeout: float = 30.0,
 ) -> dict:
+    """Call Hive Tools.
+
+    ``timeout`` is a parameter because the training pipeline's curate and
+    export passes walk the whole corpus and run for minutes — far past the
+    30 seconds that every other Hive Tools call comfortably fits in.
+    """
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.request(
                 method,
                 f"{_hive_tools_base_url().rstrip('/')}{path}",
                 params=params,
+                json=json_body,
                 headers=_hive_tools_headers(),
             )
         response.raise_for_status()
@@ -1895,6 +1912,81 @@ async def _hive_tools_request(
     except (httpx.HTTPError, ValueError) as exc:
         raise HTTPException(status_code=502, detail=f"Hive Tools request failed: {exc}") from exc
     return data if isinstance(data, dict) else {}
+
+
+# Curate and export walk the whole corpus; on a corpus of ~9k turns curation
+# is around 25 seconds and grows with capture. Give them real headroom —
+# Hive Tools already caps them server-side.
+_TRAINING_LONG_TIMEOUT_SECONDS = 1_800.0
+_TRAINING_RUN_KINDS = {"curate", "export", "train"}
+
+
+@app.get("/api/training/status")
+async def api_training_status(user: dict = Depends(require_auth)):
+    """Corpus counts, curation breakdown, GPU state, latest run per kind."""
+    del user
+    return await _hive_tools_request("GET", "/training/status")
+
+
+@app.get("/api/training/runs")
+async def api_training_runs(
+    kind: str | None = None, limit: int = 20, user: dict = Depends(require_auth)
+):
+    del user
+    if kind and kind not in _TRAINING_RUN_KINDS:
+        raise HTTPException(status_code=400, detail=f"Unknown run kind: {kind}")
+    params: dict = {"limit": max(1, min(limit, 200))}
+    if kind:
+        params["kind"] = kind
+    return await _hive_tools_request("GET", "/training/runs", params=params)
+
+
+@app.post("/api/training/curate")
+async def api_training_curate(request: Request, user: dict = Depends(require_auth)):
+    """Run a curation pass. Writes verdicts in place; never deletes rows."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object")
+    result = await _hive_tools_request(
+        "POST",
+        "/training/curate",
+        json_body=body,
+        timeout=_TRAINING_LONG_TIMEOUT_SECONDS,
+    )
+    log_event(log, "training.curate.requested", **_actor_fields(user), options=body)
+    return result
+
+
+@app.post("/api/training/export")
+async def api_training_export(request: Request, user: dict = Depends(require_auth)):
+    """Write train/eval JSONL from kept rows, with credentials redacted."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object")
+    result = await _hive_tools_request(
+        "POST",
+        "/training/export",
+        json_body=body,
+        timeout=_TRAINING_LONG_TIMEOUT_SECONDS,
+    )
+    log_event(log, "training.export.requested", **_actor_fields(user), options=body)
+    return result
+
+
+@app.post("/api/training/train")
+async def api_training_train(request: Request, user: dict = Depends(require_auth)):
+    """Plan a fine-tune, or launch one when the caller sets dry_run false."""
+    body = await request.json()
+    if not isinstance(body, dict) or not str(body.get("train_file") or "").strip():
+        raise HTTPException(status_code=400, detail="train_file is required")
+    result = await _hive_tools_request("POST", "/training/train", json_body=body)
+    log_event(
+        log,
+        "training.train.requested",
+        **_actor_fields(user),
+        dry_run=bool(body.get("dry_run", True)),
+    )
+    return result
 
 
 @app.post("/api/minds/{name}/restart")

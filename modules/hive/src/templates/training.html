@@ -1,0 +1,293 @@
+{% extends "layout.html" %}
+{% block title %}Training · Hive{% endblock %}
+{% block content %}
+<main class="page">
+    <header class="page-header">
+        <div class="page-header-copy">
+            <p class="page-eyebrow">Model training</p>
+            <h1 class="page-title">Training</h1>
+            <p class="page-description">Every turn each mind takes is captured raw. Curation decides which of them should reach a trainer, export renders them with credentials scrubbed, and a fine-tune turns them into an adapter this Hive can serve.</p>
+        </div>
+        <div class="page-actions"><button class="button button-quiet" id="training-refresh" type="button"><i data-lucide="refresh-cw"></i>Refresh</button></div>
+    </header>
+
+    <section class="metric-grid" aria-label="Corpus summary">
+        <article class="metric surface"><div class="metric-top"><span class="metric-label">Captured turns</span><span class="metric-icon"><i data-lucide="database"></i></span></div><div class="metric-value" id="tr-total">—</div><div class="metric-detail" id="tr-sessions">Across all sessions</div></article>
+        <article class="metric surface"><div class="metric-top"><span class="metric-label">Kept</span><span class="metric-icon"><i data-lucide="circle-check-big"></i></span></div><div class="metric-value" id="tr-kept">—</div><div class="metric-detail" id="tr-kept-detail">Survived curation</div></article>
+        <article class="metric surface"><div class="metric-top"><span class="metric-label">With reasoning</span><span class="metric-icon"><i data-lucide="brain-circuit"></i></span></div><div class="metric-value" id="tr-reasoning">—</div><div class="metric-detail">Kept turns that show their work</div></article>
+        <article class="metric surface"><div class="metric-top"><span class="metric-label">GPU free</span><span class="metric-icon"><i data-lucide="cpu"></i></span></div><div class="metric-value" id="tr-gpu">—</div><div class="metric-detail" id="tr-gpu-detail">Needed before a run can start</div></article>
+    </section>
+
+    <div id="training-error" class="error-state" hidden></div>
+
+    <section class="surface">
+        <div class="surface-header"><div><h2>Curation</h2><p>Rules run in order and write a verdict onto every row. Nothing is deleted, so a changed policy can be re-applied to the whole corpus.</p></div></div>
+        <div class="overview-stack">
+            <form class="capability-config" id="training-curate-form">
+                <div class="field">
+                    <label for="keep-per-cluster">Keep per duplicate cluster</label>
+                    <input id="keep-per-cluster" name="keep_per_cluster" type="number" min="1" max="1000" value="3" required>
+                    <small>Scheduled skills fire on a timer, so their turns are near-identical. One discards genuine variety in a recurring task; unbounded lets a single alert skill drown out every hand-written session.</small>
+                </div>
+                <div class="field">
+                    <label for="min-length">Minimum turn size (tokens)</label>
+                    <input id="min-length" name="min_length_tokens" type="number" min="0" value="60">
+                </div>
+                <div class="field">
+                    <label for="max-length">Maximum turn size (tokens)</label>
+                    <input id="max-length" name="max_length_tokens" type="number" min="512" value="32000">
+                </div>
+                <div class="field">
+                    <label><input type="checkbox" name="exclude_secret_rows"> Exclude rows containing credentials entirely</label>
+                    <small>Off by default: export redacts every credential regardless, and the underlying turn is usually a good demonstration of tool use.</small>
+                </div>
+                <div class="form-actions">
+                    <button class="button" type="submit">Run curation</button>
+                    <button class="button button-quiet" type="button" id="training-reset">Reset verdicts</button>
+                </div>
+                <small data-curate-status></small>
+            </form>
+            <div id="training-breakdown"><div class="loading-state">Loading curation breakdown…</div></div>
+        </div>
+    </section>
+
+    <section class="surface">
+        <div class="surface-header"><div><h2>Export</h2><p>Renders kept turns to <code>train.jsonl</code> and <code>eval.jsonl</code>. Credentials are always redacted; the split is by session so an eval score cannot measure memorization.</p></div></div>
+        <form class="capability-config" id="training-export-form">
+            <div class="field">
+                <label for="export-name">Dataset name</label>
+                <input id="export-name" name="name" value="v1" pattern="[A-Za-z0-9._-]{1,64}" required>
+            </div>
+            <div class="field">
+                <label for="export-mode">Reasoning</label>
+                <select id="export-mode" name="mode">
+                    <option value="stripped">Stripped — for a non-reasoning base model</option>
+                    <option value="reasoning">Inline — thoughts kept in front of the action they produced</option>
+                </select>
+            </div>
+            <div class="field">
+                <label for="export-harness">Harness</label>
+                <select id="export-harness" name="harness">
+                    <option value="">Both</option>
+                    <option value="claude_code">Claude Code only</option>
+                    <option value="codex">Codex only</option>
+                </select>
+            </div>
+            <div class="field">
+                <label for="eval-fraction">Eval fraction</label>
+                <input id="eval-fraction" name="eval_fraction" type="number" step="0.01" min="0" max="0.5" value="0.05">
+            </div>
+            <div class="form-actions"><button class="button" type="submit">Export dataset</button></div>
+            <small data-export-status></small>
+        </form>
+    </section>
+
+    <section class="surface">
+        <div class="surface-header"><div><h2>Fine-tune</h2><p>A LoRA run takes the whole GPU, so it is described and checked before it is started. Planning is always safe.</p></div></div>
+        <form class="capability-config" id="training-train-form">
+            <div class="field">
+                <label for="train-file">Training file</label>
+                <input id="train-file" name="train_file" placeholder="/home/daniel/Storage/Dev/hive_mind/data/training_sets/v1/train.jsonl" required>
+            </div>
+            <div class="field">
+                <label for="train-name">Adapter name</label>
+                <input id="train-name" name="name" value="hive-harness-lora" pattern="[A-Za-z0-9._-]{1,64}" required>
+            </div>
+            <div class="field">
+                <label for="train-epochs">Epochs</label>
+                <input id="train-epochs" name="epochs" type="number" min="1" max="20" value="2">
+            </div>
+            <div class="field">
+                <label for="train-seqlen">Max sequence length</label>
+                <input id="train-seqlen" name="max_sequence_length" type="number" min="512" value="8192">
+            </div>
+            <div class="form-actions">
+                <button class="button" type="submit">Check feasibility</button>
+                <button class="button button-quiet" type="button" id="training-launch">Launch run</button>
+            </div>
+            <small data-train-status></small>
+        </form>
+        <p class="page-description">Once an adapter is trained and served, point a mind at it from that mind's page under <a href="/minds">Minds</a> — the default-model editor there is what actually switches a mind over.</p>
+    </section>
+
+    <section class="surface">
+        <div class="surface-header"><div><h2>Run history</h2><p>Every curation, export and fine-tune, newest first.</p></div></div>
+        <div id="training-runs"><div class="loading-state">Loading runs…</div></div>
+    </section>
+</main>
+<script>
+window.addEventListener("DOMContentLoaded", function () {
+    const h = window.HiveConsole;
+    const errorBox = document.getElementById("training-error");
+
+    function showError(message) {
+        errorBox.textContent = message;
+        errorBox.hidden = !message;
+    }
+
+    function setStatus(form, selector, message, isError) {
+        const el = form.querySelector(selector);
+        if (!el) return;
+        el.textContent = message;
+        el.className = isError ? "is-error" : "";
+    }
+
+    function formatCount(value) {
+        return typeof value === "number" ? value.toLocaleString() : "—";
+    }
+
+    async function api(path, options) {
+        const response = await fetch(path, Object.assign({headers: {"Content-Type": "application/json"}}, options || {}));
+        const payload = response.status === 204 ? {} : await response.json().catch(function () { return {}; });
+        if (!response.ok) {
+            const detail = payload && payload.detail;
+            throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail || payload));
+        }
+        return payload;
+    }
+
+    function renderBreakdown(stats) {
+        const reasons = stats.by_exclusion_reason || {};
+        const labels = {
+            near_duplicate: "Near-duplicate of a kept turn",
+            no_assistant_response: "Captured with an empty response",
+            harness_error: "Harness errored during the turn",
+            too_short: "Too small to teach anything",
+            too_long: "Exceeds the training window",
+            interrupted: "Interrupted before finishing",
+            tool_error_dominant: "Mostly failing tool calls, never recovered",
+            malformed_blocks: "Unparseable block array",
+            contains_secret: "Contained credentials (excluded by policy)"
+        };
+        const entries = Object.keys(reasons);
+        if (!entries.length) {
+            return '<div class="loading-state">No curation has run yet. Every row is pending.</div>';
+        }
+        const rows = entries.map(function (key) {
+            return '<tr><td>' + h.escapeHtml(labels[key] || key) + '</td><td>' + formatCount(reasons[key]) + '</td></tr>';
+        }).join("");
+        return '<table class="data-table"><thead><tr><th>Excluded because</th><th>Turns</th></tr></thead><tbody>' + rows + '</tbody></table>';
+    }
+
+    function renderRuns(runs) {
+        if (!runs.length) return '<div class="loading-state">Nothing has run yet.</div>';
+        const rows = runs.map(function (run) {
+            const when = run.started_at ? new Date(run.started_at * 1000).toLocaleString() : "—";
+            const took = run.duration_seconds != null ? run.duration_seconds + "s" : "—";
+            const summary = run.report ? Object.keys(run.report).slice(0, 4).map(function (k) {
+                return h.escapeHtml(k) + " " + h.escapeHtml(String(run.report[k]));
+            }).join(", ") : (run.error ? h.escapeHtml(run.error) : "—");
+            return '<tr><td>' + h.escapeHtml(run.kind) + '</td><td>' + h.escapeHtml(run.status) + '</td><td>' + h.escapeHtml(when) + '</td><td>' + h.escapeHtml(took) + '</td><td>' + summary + '</td></tr>';
+        }).join("");
+        return '<table class="data-table"><thead><tr><th>Kind</th><th>Status</th><th>Started</th><th>Took</th><th>Result</th></tr></thead><tbody>' + rows + '</tbody></table>';
+    }
+
+    async function refresh() {
+        try {
+            const stats = await api("/api/training/status");
+            showError("");
+            if (stats.exists === false) {
+                showError("No training corpus found at " + (stats.corpus_path || "the configured path") + ".");
+                return;
+            }
+            const flags = stats.by_flag || {};
+            document.getElementById("tr-total").textContent = formatCount(stats.total);
+            document.getElementById("tr-sessions").textContent = formatCount(stats.sessions) + " sessions";
+            document.getElementById("tr-kept").textContent = formatCount(flags.keep || 0);
+            document.getElementById("tr-kept-detail").textContent = formatCount(flags.pending || 0) + " still pending";
+            document.getElementById("tr-reasoning").textContent = formatCount(stats.kept_with_reasoning);
+            const gpu = stats.gpu || {};
+            const free = gpu.available ? Math.max(0, (gpu.total_mib || 0) - (gpu.used_mib || 0)) : null;
+            document.getElementById("tr-gpu").textContent = free == null ? "—" : (free / 1024).toFixed(1) + " GB";
+            document.getElementById("tr-gpu-detail").textContent = gpu.available ? h.escapeHtml(gpu.name || "GPU") : "No GPU visible";
+            document.getElementById("training-breakdown").innerHTML = renderBreakdown(stats);
+            const runs = await api("/api/training/runs?limit=25");
+            document.getElementById("training-runs").innerHTML = renderRuns(runs.runs || []);
+        } catch (error) {
+            showError(error.message);
+        }
+    }
+
+    function readForm(form) {
+        const data = new FormData(form);
+        const body = {};
+        data.forEach(function (value, key) {
+            if (value === "") return;
+            const input = form.elements[key];
+            if (input && input.type === "checkbox") { body[key] = input.checked; return; }
+            body[key] = input && input.type === "number" ? Number(value) : value;
+        });
+        form.querySelectorAll('input[type="checkbox"]').forEach(function (box) {
+            body[box.name] = box.checked;
+        });
+        return body;
+    }
+
+    const curateForm = document.getElementById("training-curate-form");
+    curateForm.addEventListener("submit", async function (event) {
+        event.preventDefault();
+        setStatus(curateForm, "[data-curate-status]", "Curating — this walks every captured turn and takes a minute or two…");
+        try {
+            const result = await api("/api/training/curate", {method: "POST", body: JSON.stringify(readForm(curateForm))});
+            setStatus(curateForm, "[data-curate-status]", "Kept " + formatCount(result.kept) + " of " + formatCount(result.total) + " across " + formatCount(result.clusters) + " clusters. " + formatCount(result.secret_rows) + " rows carry credentials and will be redacted at export.");
+            refresh();
+        } catch (error) {
+            setStatus(curateForm, "[data-curate-status]", error.message, true);
+        }
+    });
+
+    document.getElementById("training-reset").addEventListener("click", async function () {
+        setStatus(curateForm, "[data-curate-status]", "Returning every row to pending…");
+        try {
+            const result = await api("/api/training/curate", {method: "POST", body: JSON.stringify({reset: true})});
+            setStatus(curateForm, "[data-curate-status]", "Reset " + formatCount(result.reset_rows) + " rows to pending.");
+            refresh();
+        } catch (error) {
+            setStatus(curateForm, "[data-curate-status]", error.message, true);
+        }
+    });
+
+    const exportForm = document.getElementById("training-export-form");
+    exportForm.addEventListener("submit", async function (event) {
+        event.preventDefault();
+        const body = readForm(exportForm);
+        if (body.harness) { body.harness = [body.harness]; }
+        setStatus(exportForm, "[data-export-status]", "Exporting…");
+        try {
+            const result = await api("/api/training/export", {method: "POST", body: JSON.stringify(body)});
+            setStatus(exportForm, "[data-export-status]", formatCount(result.train_examples) + " train and " + formatCount(result.eval_examples) + " eval examples written to " + result.train_path);
+            refresh();
+        } catch (error) {
+            setStatus(exportForm, "[data-export-status]", error.message, true);
+        }
+    });
+
+    const trainForm = document.getElementById("training-train-form");
+
+    async function submitTrain(dryRun) {
+        const body = readForm(trainForm);
+        body.dry_run = dryRun;
+        setStatus(trainForm, "[data-train-status]", dryRun ? "Checking feasibility…" : "Launching…");
+        try {
+            const result = await api("/api/training/train", {method: "POST", body: JSON.stringify(body)});
+            if (dryRun) {
+                const blockers = (result.blockers || []);
+                setStatus(trainForm, "[data-train-status]", result.can_run ? "Ready to run — needs about " + Math.round((result.required_mib || 0) / 1024) + " GB." : "Cannot run: " + blockers.join("; "), !result.can_run);
+            } else if (result.launched) {
+                setStatus(trainForm, "[data-train-status]", "Launched as container " + String(result.container_id || "").slice(0, 12) + ".");
+            } else {
+                setStatus(trainForm, "[data-train-status]", "Refused: " + ((result.plan && result.plan.blockers) || [result.error || "unknown"]).join("; "), true);
+            }
+            refresh();
+        } catch (error) {
+            setStatus(trainForm, "[data-train-status]", error.message, true);
+        }
+    }
+
+    trainForm.addEventListener("submit", function (event) { event.preventDefault(); submitTrain(true); });
+    document.getElementById("training-launch").addEventListener("click", function () { submitTrain(false); });
+    document.getElementById("training-refresh").addEventListener("click", refresh);
+    refresh();
+});
+</script>
+{% endblock %}
