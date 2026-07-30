@@ -17,7 +17,7 @@ def test_find_local_config_reads_runtime_yaml(tmp_path, monkeypatch):
         "name: bob\nharness: claude_cli\ndefault_model: qwen3\n"
     )
     monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_DIR", tmp_path / "hive_mind")
-    monkeypatch.setattr(settings_data, "SKIPPY_MINDS_DIR", tmp_path / "skippy")
+    monkeypatch.setattr(settings_data, "EDGE_MINDS_DIR", tmp_path / "edge")
 
     result = settings_data._find_local_config("bob")
 
@@ -26,26 +26,32 @@ def test_find_local_config_reads_runtime_yaml(tmp_path, monkeypatch):
     assert result["config"]["default_model"] == "qwen3"
 
 
-def test_find_local_config_reads_mind_md_frontmatter(tmp_path, monkeypatch):
-    mind_dir = tmp_path / "skippy" / "skippy"
+def test_find_local_config_reads_edge_mind_runtime_yaml(tmp_path, monkeypatch):
+    """An edge Mind installed on this host is local, not remote.
+
+    Its runtime.yaml lives in its own checkout, mounted at
+    /minds_edge/<name>/ — which is what makes the console's default-model
+    editor reachable for it at all.
+    """
+    mind_dir = tmp_path / "edge" / "skippy"
     mind_dir.mkdir(parents=True)
-    (mind_dir / "MIND.md").write_text(
-        "---\nname: skippy\nmodel: opus\nharness: claude_cli_claude\n---\n"
-        "Skippy the Magnificent — elder mind.\n"
+    (mind_dir / "runtime.yaml").write_text(
+        "name: skippy\nharness: claude_cli\nprovider: anthropic\n"
+        "deployment: systemd\ndefault_model: opus\n"
     )
     monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_DIR", tmp_path / "hive_mind")
-    monkeypatch.setattr(settings_data, "SKIPPY_MINDS_DIR", tmp_path / "skippy")
+    monkeypatch.setattr(settings_data, "EDGE_MINDS_DIR", tmp_path / "edge")
 
     result = settings_data._find_local_config("skippy")
 
-    assert result["source"] == "MIND.md"
-    assert result["config"]["model"] == "opus"
-    assert "Skippy the Magnificent" in result["body"]
+    assert result["source"] == "runtime.yaml"
+    assert result["config"]["default_model"] == "opus"
+    assert result["config"]["deployment"] == "systemd"
 
 
 def test_find_local_config_returns_none_for_remote_mind(tmp_path, monkeypatch):
     monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_DIR", tmp_path / "hive_mind")
-    monkeypatch.setattr(settings_data, "SKIPPY_MINDS_DIR", tmp_path / "skippy")
+    monkeypatch.setattr(settings_data, "EDGE_MINDS_DIR", tmp_path / "edge")
 
     assert settings_data._find_local_config("arnold") is None
 
@@ -55,7 +61,7 @@ def test_build_mind_registry_merges_broker_and_local(tmp_path, monkeypatch):
     mind_dir.mkdir(parents=True)
     (mind_dir / "runtime.yaml").write_text("harness: claude_cli\n")
     monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_DIR", tmp_path / "hive_mind")
-    monkeypatch.setattr(settings_data, "SKIPPY_MINDS_DIR", tmp_path / "skippy")
+    monkeypatch.setattr(settings_data, "EDGE_MINDS_DIR", tmp_path / "edge")
 
     broker_minds = [
         {"name": "bob", "id": "b9f2", "gateway_url": "http://bob:8420", "model": "qwen3"},
@@ -71,7 +77,7 @@ def test_build_mind_registry_merges_broker_and_local(tmp_path, monkeypatch):
 
 def test_build_mind_registry_skips_malformed_entries(tmp_path, monkeypatch):
     monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_DIR", tmp_path / "hive_mind")
-    monkeypatch.setattr(settings_data, "SKIPPY_MINDS_DIR", tmp_path / "skippy")
+    monkeypatch.setattr(settings_data, "EDGE_MINDS_DIR", tmp_path / "edge")
 
     rows = settings_data.build_mind_registry([{"name": "ok"}, "not-a-dict", None])
 
@@ -91,7 +97,7 @@ def test_build_mind_registry_redacts_runtime_secrets(tmp_path, monkeypatch):
         "  bearer_token: another-secret\n"
     )
     monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_DIR", tmp_path / "hive_mind")
-    monkeypatch.setattr(settings_data, "SKIPPY_MINDS_DIR", tmp_path / "skippy")
+    monkeypatch.setattr(settings_data, "EDGE_MINDS_DIR", tmp_path / "edge")
 
     rows = settings_data.build_mind_registry([{"name": "bob", "id": "b9f2"}])
     config = rows[0]["local_config"]["config"]

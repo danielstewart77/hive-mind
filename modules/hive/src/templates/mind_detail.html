@@ -50,7 +50,11 @@ window.addEventListener("DOMContentLoaded", async function () {
         status.textContent = "Saving…";
         try {
             const data = await h.requestJson("/api/minds/" + encodeURIComponent(editor.dataset.mindName) + "/configuration", {method: "PATCH", headers: {"Content-Type": "application/json"}, body: JSON.stringify({default_model: event.target.elements.default_model.value})});
-            status.textContent = "Saved. Restart this Mind to activate the new default model."; restart.hidden = !data.restart_required;
+            const restartable = data.restartable !== false;
+            status.textContent = restartable
+                ? "Saved. Restart this Mind to activate the new default model."
+                : "Saved. Restart this Mind on its host (" + (data.configuration.deployment || "host") + ") to activate the new default model.";
+            restart.hidden = !data.restart_required || !restartable;
         } catch (error) { status.textContent = error.message; }
     });
     document.getElementById("mind-restart").addEventListener("click", async function () {

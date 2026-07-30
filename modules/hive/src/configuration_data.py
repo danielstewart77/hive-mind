@@ -19,6 +19,7 @@ from config import BASE_DIR
 
 HIVE_MIND_MINDS_DIR = Path("/minds_hive_mind")
 HIVE_MIND_MINDS_CONFIG_DIR = Path("/minds_hive_mind_config")
+EDGE_MINDS_DIR = Path("/minds_edge")
 
 _CONFIGURABLE_CAPABILITY_IDS = {"inference-proxy", "ollama", "pihole"}
 _MIND_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -173,12 +174,21 @@ def get_edge_mind_metadata(name: str) -> dict[str, str] | None:
 
 
 def _runtime_paths(name: str) -> tuple[Path, Path]:
+    """Read path and write path for a Mind's runtime.yaml.
+
+    A containerized Mind's file lives under hive_mind's minds/, mounted
+    twice — read-only for display, read-write for these narrow edits. An
+    edge Mind on this host keeps its own file in its hive-edge-minds
+    checkout, mounted read-write at /minds_edge/<name>/, where read and
+    write are the same path.
+    """
     if not _MIND_NAME_RE.fullmatch(name):
         raise ValueError("Invalid Mind name")
-    return (
-        HIVE_MIND_MINDS_DIR / name / "runtime.yaml",
-        HIVE_MIND_MINDS_CONFIG_DIR / name / "runtime.yaml",
-    )
+    source = HIVE_MIND_MINDS_DIR / name / "runtime.yaml"
+    if source.is_file():
+        return (source, HIVE_MIND_MINDS_CONFIG_DIR / name / "runtime.yaml")
+    edge = EDGE_MINDS_DIR / name / "runtime.yaml"
+    return (edge, edge)
 
 
 def local_runtime_configuration(name: str) -> dict[str, Any]:

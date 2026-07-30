@@ -21,13 +21,17 @@ services:
       # Lucent sqlite, read-only, for the /memory browser. hive_nervous_system
       # retired 2026-07-24 — lucent now lives in hive_mind's own nervous-system/.
       - ${LUCENT_DB_HOST_DIR:-/home/daniel/Storage/Dev/hive_mind/nervous-system/data}:/lucent:ro
-      # Per-mind config files, read-only, for the /settings mind registry.
-      # Containerized minds (ada/bob/bilby/nagatha/hex-bot) keep
-      # runtime.yaml under hive_mind's minds/; bare-metal Skippy keeps
-      # MIND.md under his own repo's minds/. Remote minds (arnold, zach,
-      # hex, mordecai if off-host) have no local file here at all.
+      # Per-mind config files for the /settings mind registry and the
+      # per-Mind default-model editor. Containerized minds
+      # (ada/bob/bilby/nagatha/hex-bot) keep runtime.yaml under hive_mind's
+      # minds/. Remote minds (arnold, zach, hex) have no local file here.
       - ${HIVE_MIND_DIR:-/home/daniel/Storage/Dev/hive_mind}/minds:/minds_hive_mind:ro
-      - ${SKIPPY_DIR:-/home/daniel/Storage/hive_mind_skippy}/minds:/minds_skippy:ro
+      # Edge minds installed on this host keep their own runtime.yaml in
+      # their hive-edge-minds checkout. Mounted per mind at its own name so
+      # /minds_edge/<name>/runtime.yaml is uniform with the mount above, and
+      # read-write because the default-model editor rewrites that one field.
+      - ${SKIPPY_DIR:-/home/daniel/Storage/hive-edge-mind-skippy}/minds/skippy:/minds_edge/skippy:rw
+      - ${MORDECAI_DIR:-/home/daniel/Storage/hive-edge-mind-mordecai}/minds/mordecai:/minds_edge/mordecai:rw
       # Same hive_mind minds/ dir, read-write, scoped to voice_ref.wav
       # uploads only (see api_settings_voice_upload) — kept as a second
       # mount rather than loosening the read-only one above, so the

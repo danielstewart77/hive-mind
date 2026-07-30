@@ -1,9 +1,9 @@
 """Local per-mind config discovery for the /settings mind registry.
 
 Containerized minds (ada/bob/bilby/nagatha/hex-bot) keep a `runtime.yaml`
-under hive_mind's `minds/<name>/`; bare-metal Skippy keeps a `MIND.md`
-(YAML frontmatter + prose body) under his own repo's `minds/<name>/`.
-Both directories are mounted read-only into this container — see
+under hive_mind's `minds/<name>/`; an edge mind on this host keeps its own
+`runtime.yaml` under its hive-edge-minds checkout, mounted at
+`/minds_edge/<name>/`. Both are mounted into this container — see
 docker-compose.yml. A mind with neither is remote: no local file to show,
 only whatever the broker reports.
 """
@@ -17,7 +17,7 @@ from typing import Any
 import yaml
 
 HIVE_MIND_MINDS_DIR = Path("/minds_hive_mind")
-SKIPPY_MINDS_DIR = Path("/minds_skippy")
+EDGE_MINDS_DIR = Path("/minds_edge")
 HIVE_MIND_MINDS_VOICE_DIR = Path("/minds_hive_mind_voice")
 HIVE_TOOLS_REPO_DIR = Path("/hive_tools_repo")
 HIVE_INIT_DIR = Path("/hive_init")
@@ -45,36 +45,20 @@ DOWNLOAD_ALLOWED_FILES = {
 
 _WAV_MAX_BYTES = 20 * 1024 * 1024  # ~10s of clean speech is a few hundred KB; 20MB is generous headroom
 
-_FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n?(.*)$", re.DOTALL)
-
-
-def _parse_mind_md(text: str) -> dict[str, Any]:
-    """Split a MIND.md's YAML frontmatter from its prose body."""
-    match = _FRONTMATTER_RE.match(text)
-    if not match:
-        return {"config": {}, "body": text.strip()}
-    front, body = match.groups()
-    try:
-        config = yaml.safe_load(front) or {}
-    except yaml.YAMLError:
-        config = {}
-    return {"config": config, "body": body.strip()}
-
 
 def _find_local_config(short_name: str) -> dict[str, Any] | None:
     """Look up a mind's local config file by its short name, either mount."""
-    runtime_path = HIVE_MIND_MINDS_DIR / short_name / "runtime.yaml"
-    if runtime_path.is_file():
+    for runtime_path in (
+        HIVE_MIND_MINDS_DIR / short_name / "runtime.yaml",
+        EDGE_MINDS_DIR / short_name / "runtime.yaml",
+    ):
+        if not runtime_path.is_file():
+            continue
         try:
             config = yaml.safe_load(runtime_path.read_text()) or {}
         except yaml.YAMLError as exc:
             return {"source": "runtime.yaml", "path": str(runtime_path), "error": str(exc)}
         return {"source": "runtime.yaml", "path": str(runtime_path), "config": config, "body": ""}
-
-    mind_md_path = SKIPPY_MINDS_DIR / short_name / "MIND.md"
-    if mind_md_path.is_file():
-        parsed = _parse_mind_md(mind_md_path.read_text())
-        return {"source": "MIND.md", "path": str(mind_md_path), **parsed}
 
     return None
 

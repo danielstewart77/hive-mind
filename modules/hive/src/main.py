@@ -1789,6 +1789,7 @@ async def api_mind_configuration(name: str, user: dict = Depends(require_auth)):
             "harness": configuration.get("harness"),
             "provider": configuration.get("provider"),
             "default_model": configuration.get("default_model"),
+            "deployment": configuration.get("deployment") or "container",
         },
         "models": models,
     }
@@ -1823,14 +1824,19 @@ async def api_mind_configuration_update(
         previous_model=previous_configuration.get("default_model"), default_model=default_model,
         restart_required=True,
     )
+    deployment = str(configuration.get("deployment") or "container")
     return {
         "saved": True,
         "restart_required": True,
+        # Only a containerized Mind can be bounced from here; anything else
+        # runs under an init system this console does not reach.
+        "restartable": deployment == "container",
         "configuration": {
             "name": configuration.get("name") or name,
             "harness": configuration.get("harness"),
             "provider": configuration.get("provider"),
             "default_model": configuration.get("default_model"),
+            "deployment": deployment,
         },
     }
 
@@ -1892,9 +1898,18 @@ async def _hive_tools_request(
 @app.post("/api/minds/{name}/restart")
 async def api_mind_restart(name: str, user: dict = Depends(require_auth)):
     try:
-        local_runtime_configuration(name)
+        configuration = local_runtime_configuration(name)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    deployment = str(configuration.get("deployment") or "container")
+    if deployment != "container":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"This Mind runs as {deployment}, not a container. "
+                "Restart it on its host to activate the new model."
+            ),
+        )
     result = await _hive_tools_request(
         "POST",
         "/docker/restart",
