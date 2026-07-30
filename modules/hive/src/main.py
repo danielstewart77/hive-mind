@@ -625,6 +625,7 @@ async def api_overview(user: dict = Depends(require_auth)):
         ),
     )
     registry = _add_session_activity(build_mind_registry(minds), sessions)
+    sessions = _add_session_mind_names(sessions, registry)
     capability_data = await _capability_node_data()
     tools_node = next(
         node for node in capability_data["nodes"] if node["id"] == "hive-tools"
@@ -1847,7 +1848,8 @@ async def api_settings_hive_comms_sessions(user: dict = Depends(require_auth)):
     sessions = await _gateway_json("/sessions")
     if not isinstance(sessions, list):
         sessions = []
-    return {"sessions": sessions}
+    registry = build_mind_registry(await _broker_minds_safe())
+    return {"sessions": _add_session_mind_names(sessions, registry)}
 
 
 @app.delete("/api/settings/hive-comms/sessions/{session_id}")
@@ -2166,6 +2168,29 @@ def _add_session_activity(registry: list[dict], sessions: list[dict]) -> list[di
         row["activity_status"] = "active" if row["active_session_count"] else "registered"
         enriched.append(row)
     return enriched
+
+
+def _add_session_mind_names(
+    sessions: list[dict], registry: list[dict]
+) -> list[dict]:
+    """Add display names to sessions without replacing their routing IDs."""
+    names: dict[str, str] = {}
+    for mind in registry:
+        name = str(mind.get("name") or "").strip()
+        mind_id = str(mind.get("id") or "").strip()
+        if not name:
+            continue
+        names[name] = name
+        if mind_id:
+            names[mind_id] = name
+
+    return [
+        {
+            **session,
+            "mind_name": names.get(str(session.get("mind_id") or ""), "Unknown mind"),
+        }
+        for session in sessions
+    ]
 
 
 async def _service_health(
