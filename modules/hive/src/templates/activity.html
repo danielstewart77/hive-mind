@@ -13,7 +13,7 @@ window.addEventListener("DOMContentLoaded", function () {
         try {
             const sessions = (await h.requestJson("/api/settings/hive-comms/sessions")).sessions || [];
             list.innerHTML = sessions.length ? sessions.map(function (session) {
-                return '<li class="activity-row"><span class="activity-icon"><i data-lucide="message-circle"></i></span><span class="activity-copy"><strong>' + h.escapeHtml(session.mind_id || "Unknown mind") + '</strong><small>' + h.escapeHtml(session.summary || ("Session " + (session.id || "").slice(0, 8))) + '</small></span><span class="status-pill is-good"><span></span>' + h.escapeHtml(session.status || "Active") + '</span></li>';
+                return '<li class="activity-row"><span class="activity-icon"><i data-lucide="message-circle"></i></span><span class="activity-copy"><strong>' + h.escapeHtml(session.mind_name || "Unknown mind") + '</strong><small>' + h.escapeHtml(session.summary || ("Session " + (session.id || "").slice(0, 8))) + '</small></span><span class="status-pill is-good"><span></span>' + h.escapeHtml(session.status || "Active") + '</span></li>';
             }).join("") : '<li class="empty-state"><span class="empty-icon"><i data-lucide="inbox"></i></span><h3>No sessions</h3><p>Conversation activity will appear here.</p></li>';
             if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}});
         } catch (error) { list.innerHTML = '<li><div class="error-state">' + h.escapeHtml(error.message) + '</div></li>'; }

@@ -232,6 +232,7 @@ def test_overview_api_combines_minds_sessions_and_service_health(tmp_path, monke
     assert body["services"]["tools"]["installed"] is True
     assert body["minds"][0]["last_activity"] == 456
     assert body["minds"][0]["activity_status"] == "active"
+    assert body["sessions"][0]["mind_name"] == "ada"
     assert health.await_args_list[0].kwargs["headers"] == {
         "Authorization": "Bearer comms-test-token"
     }
@@ -258,6 +259,41 @@ def test_session_activity_does_not_treat_registration_as_a_heartbeat():
     assert by_name["nagatha"]["activity_status"] == "active"
     assert by_name["bob"]["last_activity"] is None
     assert by_name["bob"]["activity_status"] == "registered"
+
+
+def test_session_mind_names_resolve_ids_without_changing_routing_values():
+    sessions = [
+        {"id": "session-1", "mind_id": "mind-1"},
+        {"id": "session-2", "mind_id": "missing-id"},
+    ]
+    registry = [{"id": "mind-1", "name": "Mordecai"}]
+
+    rows = main_mod._add_session_mind_names(sessions, registry)
+
+    assert rows[0]["mind_name"] == "Mordecai"
+    assert rows[0]["mind_id"] == "mind-1"
+    assert rows[1]["mind_name"] == "Unknown mind"
+    assert "mind_name" not in sessions[0]
+
+
+def test_unlabelled_mind_identifiers_are_not_rendered_in_console_views():
+    templates = main_mod.BASE_DIR / "templates"
+    activity = (templates / "activity.html").read_text()
+    overview = (templates / "overview.html").read_text()
+    settings = (templates / "settings.html").read_text()
+    rules = (templates / "rules.html").read_text()
+    rosters = "".join(
+        (templates / name).read_text()
+        for name in ("overview.html", "minds.html", "edge_minds.html")
+    )
+
+    assert "session.mind_id" not in activity
+    assert "session.mind_id" not in overview
+    assert "item.mind_id" not in settings
+    assert "m.id[:8]" not in rules
+    assert "event-mind-raw" not in rules
+    assert 'h.escapeHtml((mind.id || "").slice(0, 8))' not in rosters
+    assert 'h.escapeHtml((item.id || "").slice(0, 8))' not in rosters
 
 
 def test_edge_minds_api_returns_external_minds_as_managed_nodes(tmp_path, monkeypatch):

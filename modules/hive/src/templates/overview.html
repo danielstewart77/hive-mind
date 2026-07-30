@@ -54,7 +54,7 @@ window.addEventListener("DOMContentLoaded", async function () {
             const cfg = mind.local_config && mind.local_config.config || {};
             const model = mind.model || cfg.default_model || "Not reported";
             const harness = mind.harness || cfg.harness || "Unknown runtime";
-            return '<tr><td><div class="entity-cell"><span class="entity-avatar">' + h.escapeHtml((mind.name || "?").slice(0, 2)) + '</span><span class="entity-copy"><a href="/minds/' + encodeURIComponent(mind.id || mind.name) + '">' + h.escapeHtml(mind.name) + '</a><small>' + h.escapeHtml((mind.id || "").slice(0, 8)) + '</small></span></div></td><td>' + h.statusPill(mind.activity_status === "active", "Active session", "Registered") + '</td><td><span>' + h.escapeHtml(model) + '</span><br><small class="faint">' + h.escapeHtml(harness) + '</small></td><td class="muted">' + h.escapeHtml(h.formatTime(mind.last_activity)) + '</td></tr>';
+            return '<tr><td><div class="entity-cell"><span class="entity-avatar">' + h.escapeHtml((mind.name || "?").slice(0, 2)) + '</span><span class="entity-copy"><a href="/minds/' + encodeURIComponent(mind.id || mind.name) + '">' + h.escapeHtml(mind.name) + '</a></span></div></td><td>' + h.statusPill(mind.activity_status === "active", "Active session", "Registered") + '</td><td><span>' + h.escapeHtml(model) + '</span><br><small class="faint">' + h.escapeHtml(harness) + '</small></td><td class="muted">' + h.escapeHtml(h.formatTime(mind.last_activity)) + '</td></tr>';
         }).join("") : '<tr><td colspan="4"><div class="empty-state"><h3>No minds registered</h3><p>Use the setup guide to connect the first mind.</p><a class="button button-primary" href="/setup">Open setup</a></div></td></tr>';
 
         const services = [
@@ -65,7 +65,7 @@ window.addEventListener("DOMContentLoaded", async function () {
 
         const sessions = data.sessions || [];
         document.getElementById("overview-sessions").innerHTML = sessions.length ? sessions.slice(0, 5).map(function (session) {
-            return '<li class="activity-row"><span class="activity-icon"><i data-lucide="message-circle"></i></span><span class="activity-copy"><strong>' + h.escapeHtml(session.mind_id || "Unknown mind") + '</strong><small>' + h.escapeHtml(session.summary || session.status || "Session") + '</small></span></li>';
+            return '<li class="activity-row"><span class="activity-icon"><i data-lucide="message-circle"></i></span><span class="activity-copy"><strong>' + h.escapeHtml(session.mind_name || "Unknown mind") + '</strong><small>' + h.escapeHtml(session.summary || session.status || "Session") + '</small></span></li>';
         }).join("") : '<li class="empty-state"><h3>No active sessions</h3><p>New conversations will appear here.</p></li>';
         if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}});
     } catch (error) {

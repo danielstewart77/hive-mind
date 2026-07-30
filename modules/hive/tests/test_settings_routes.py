@@ -197,12 +197,20 @@ def test_api_settings_hive_comms_sessions_requires_auth(tmp_path, monkeypatch):
 
 def test_api_settings_hive_comms_sessions_lists_from_gateway(tmp_path, monkeypatch):
     client = _authed_client(tmp_path, monkeypatch)
-    fake_sessions = [{"id": "sess-1", "mind_id": "bob", "status": "idle"}]
-    with patch.object(main_mod, "_gateway_json", new=AsyncMock(return_value=fake_sessions)):
+    fake_sessions = [{"id": "sess-1", "mind_id": "mind-1", "status": "idle"}]
+    broker_minds = [{"id": "mind-1", "name": "bob"}]
+    with (
+        patch.object(main_mod, "_gateway_json", new=AsyncMock(return_value=fake_sessions)),
+        patch.object(
+            main_mod, "_broker_minds_safe", new=AsyncMock(return_value=broker_minds)
+        ),
+    ):
         response = client.get("/api/settings/hive-comms/sessions")
 
     assert response.status_code == 200
-    assert response.json()["sessions"] == fake_sessions
+    assert response.json()["sessions"] == [
+        {**fake_sessions[0], "mind_name": "bob"}
+    ]
 
 
 def test_api_settings_hive_comms_session_delete_requires_auth(tmp_path, monkeypatch):

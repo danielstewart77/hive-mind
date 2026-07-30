@@ -329,7 +329,7 @@ def scaffold_internal_mind(
         base = (ollama_base_url or DEFAULT_OLLAMA_BASE_URL).rstrip("/")
         runtime["env"] = _OLLAMA_ENV[harness](base, ollama_api_key)
 
-    compose = {
+    compose: dict[str, Any] = {
         "services": {
             name: {
                 "build": {"context": "../../..", "dockerfile": "Dockerfile"},
