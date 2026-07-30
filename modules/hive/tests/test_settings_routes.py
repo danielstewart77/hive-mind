@@ -393,3 +393,49 @@ def test_api_settings_check_mind_name_flags_taken_name(tmp_path, monkeypatch):
 
     assert taken.json() == {"name": "bob", "available": False}
     assert free.json() == {"name": "newton", "available": True}
+
+
+def test_mind_configuration_flags_non_container_deployment(tmp_path, monkeypatch):
+    """A systemd edge Mind saves its model but cannot be bounced from here."""
+    client = _authed_client(tmp_path, monkeypatch)
+    updated = {
+        "name": "skippy",
+        "provider": "anthropic",
+        "deployment": "systemd",
+        "default_model": "opus",
+    }
+    with (
+        patch.object(
+            main_mod,
+            "local_runtime_configuration",
+            return_value={"name": "skippy", "default_model": "sonnet"},
+        ),
+        patch.object(main_mod, "update_local_runtime_model", return_value=updated),
+        patch.object(main_mod, "_gateway_request", new=AsyncMock(return_value={})),
+    ):
+        response = client.patch(
+            "/api/minds/skippy/configuration", json={"default_model": "opus"}
+        )
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["restartable"] is False
+    assert body["configuration"]["deployment"] == "systemd"
+
+
+def test_mind_restart_refuses_non_container_deployment(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
+    tools = AsyncMock(return_value={})
+    with (
+        patch.object(
+            main_mod,
+            "local_runtime_configuration",
+            return_value={"name": "skippy", "deployment": "systemd"},
+        ),
+        patch.object(main_mod, "_hive_tools_request", new=tools),
+    ):
+        response = client.post("/api/minds/skippy/restart")
+
+    assert response.status_code == 400
+    assert "systemd" in response.json()["detail"]
+    tools.assert_not_awaited()
