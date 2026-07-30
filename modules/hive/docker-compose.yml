@@ -8,6 +8,7 @@ services:
     env_file: .env
     environment:
       - HIVE_HOST=0.0.0.0
+      - HIVE_LOG_FORMAT=json
       - HIVE_DB_PATH=/data/hive.db
       - LUCENT_DB_PATH=/lucent/lucent.db
       # Parent domain so the session cookie is shared with the terminal
@@ -43,6 +44,11 @@ services:
       - ${INFERENCE_PROXY_DIR:-/home/daniel/Storage/Dev/inference-proxy}:/inference_proxy_repo:rw
     networks:
       - hivemind
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
 
 networks:
   hivemind:

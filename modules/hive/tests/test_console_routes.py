@@ -6,6 +6,7 @@ import sys
 from unittest.mock import AsyncMock, patch
 
 import httpx
+import pytest
 from starlette.testclient import TestClient
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -85,17 +86,20 @@ def test_configuration_surfaces_render_actionable_controls(tmp_path, monkeypatch
     assert "Request restart" in client.get("/minds/ada").text
 
 
-def test_core_mind_installation_is_not_presented_as_automated(tmp_path, monkeypatch):
+def test_both_kinds_of_mind_are_reachable_from_the_console(tmp_path, monkeypatch):
+    """Internal and edge minds are separate install paths, and the console has
+    to offer both — /minds only ever linked to the edge form."""
     client = _authed_client(tmp_path, monkeypatch)
 
     setup = client.get("/setup").text
     minds = client.get("/minds").text
 
-    assert "Core Mind provisioning is not automated yet" in setup
+    for page in (setup, minds):
+        assert 'href="/minds/new"' in page
+        assert 'href="/edge-minds/new"' in page
+    # Identity is still conversational; the form scaffolds a runtime only.
+    assert "authored in conversation" in setup
     assert "A name check does not reserve the name or install a runtime" in setup
-    assert "Add an Edge Mind" in setup
-    assert "Add Edge Mind" in minds
-    assert ">Create mind<" not in minds
 
 
 def test_new_configuration_mutations_require_authentication(tmp_path, monkeypatch):
@@ -312,6 +316,97 @@ def test_edge_mind_rows_require_topology_evidence_and_apply_profile_overrides(
     assert rows[0]["profile"] == "sentinel"
 
 
+def _bootstrap_body(**overrides):
+    body = {
+        "name": "atlas",
+        "profile": "standard",
+        "role": "operator",
+        "deployment": "container",
+        "harness": "claude_cli",
+        "provider": "anthropic",
+        "surfaces": ["telegram"],
+        "port": 8421,
+    }
+    body.update(overrides)
+    return body
+
+
+# Harness and provider are separate axes. Every pair here has a working
+# mind_templates/ implementation; the console used to offer a single fused
+# dropdown that omitted codex+ollama entirely.
+_HARNESS_PROVIDER_PAIRS = [
+    ("claude_cli", "anthropic", "sonnet"),
+    ("claude_cli", "ollama", "qwen3:8b"),
+    ("codex_cli", "openai", "gpt-5.4"),
+    ("codex_cli", "ollama", "qwen3:8b"),
+]
+
+
+@pytest.mark.parametrize("harness,provider,model", _HARNESS_PROVIDER_PAIRS)
+@pytest.mark.parametrize("deployment", ["systemd", "container", "windows-task"])
+def test_edge_mind_bootstrap_covers_every_harness_provider_deployment(
+    tmp_path, monkeypatch, harness, provider, model, deployment
+):
+    client = _authed_client(tmp_path, monkeypatch)
+    monkeypatch.setenv("OLLAMA_URL", "http://192.168.4.64:8899")
+
+    response = client.post(
+        "/api/edge-minds/bootstrap",
+        json=_bootstrap_body(
+            harness=harness, provider=provider, deployment=deployment
+        ),
+    )
+
+    assert response.status_code == 200, response.json()
+    body = response.json()
+    command = body["command"]
+    # The generated command has to be one setup.sh actually accepts.
+    assert f"--harness {harness}" in command
+    assert f"--provider {provider}" in command
+    assert f"--deployment {deployment}" in command
+    assert body["registration"]["harness"] == harness
+    assert body["registration"]["provider"] == provider
+    assert body["registration"]["model"] == model
+
+
+def test_edge_mind_bootstrap_emits_the_role_setup_sh_accepts(tmp_path, monkeypatch):
+    """setup.sh's roles are operator|sandboxed. The console said `satellite`,
+    so every satellite bootstrap it generated died on setup.sh's role check."""
+    client = _authed_client(tmp_path, monkeypatch)
+
+    ok = client.post(
+        "/api/edge-minds/bootstrap", json=_bootstrap_body(role="sandboxed")
+    )
+    assert ok.status_code == 200
+    assert "--role sandboxed" in ok.json()["command"]
+
+    stale = client.post(
+        "/api/edge-minds/bootstrap", json=_bootstrap_body(role="satellite")
+    )
+    assert stale.status_code == 400
+
+
+def test_edge_mind_bootstrap_rejects_pairs_the_cli_cannot_serve(
+    tmp_path, monkeypatch
+):
+    client = _authed_client(tmp_path, monkeypatch)
+
+    for harness, provider in [("claude_cli", "openai"), ("codex_cli", "anthropic")]:
+        response = client.post(
+            "/api/edge-minds/bootstrap",
+            json=_bootstrap_body(harness=harness, provider=provider),
+        )
+        assert response.status_code == 400, f"{harness}+{provider} must be rejected"
+        assert provider in response.json()["detail"]
+
+    for field, value in [("harness", "codex_sdk_codex"), ("provider", "bogus")]:
+        response = client.post(
+            "/api/edge-minds/bootstrap", json=_bootstrap_body(**{field: value})
+        )
+        assert response.status_code == 400
+        assert field in response.json()["detail"].lower()
+
+
 def test_edge_mind_bootstrap_validates_input_and_never_includes_credentials(
     tmp_path, monkeypatch
 ):
@@ -321,15 +416,7 @@ def test_edge_mind_bootstrap_validates_input_and_never_includes_credentials(
 
     response = client.post(
         "/api/edge-minds/bootstrap",
-        json={
-            "name": "atlas",
-            "profile": "standard",
-            "role": "satellite",
-            "deployment": "container",
-            "harness": "codex_cli_codex",
-            "surfaces": ["telegram"],
-            "port": 8421,
-        },
+        json=_bootstrap_body(harness="codex_cli", provider="openai"),
     )
 
     assert response.status_code == 200
@@ -340,22 +427,12 @@ def test_edge_mind_bootstrap_validates_input_and_never_includes_credentials(
     assert "--profile standard" in command
     assert body["mind_id"] in command
     assert "COMMS_URL=http://192.168.4.64:8426" in command
-    assert body["registration"]["name"] == "atlas"
     assert body["components"][0]["name"] == "Edge Mind runtime"
     assert "token" not in command.lower()
     assert "password" not in command.lower()
 
     invalid = client.post(
-        "/api/edge-minds/bootstrap",
-        json={
-            "name": "../bad",
-            "profile": "standard",
-            "role": "operator",
-            "deployment": "systemd",
-            "harness": "claude_cli_claude",
-            "surfaces": [],
-            "port": 8421,
-        },
+        "/api/edge-minds/bootstrap", json=_bootstrap_body(name="../bad")
     )
     assert invalid.status_code == 400
 
@@ -366,46 +443,34 @@ def test_sentinel_edge_mind_bootstrap_is_rejected_until_bundle_exists(
     client = _authed_client(tmp_path, monkeypatch)
 
     response = client.post(
-        "/api/edge-minds/bootstrap",
-        json={
-            "name": "sentinel-one",
-            "profile": "sentinel",
-            "role": "operator",
-            "deployment": "container",
-            "harness": "codex_cli_codex",
-            "surfaces": ["telegram"],
-            "port": 8421,
-        },
+        "/api/edge-minds/bootstrap", json=_bootstrap_body(profile="sentinel")
     )
 
     assert response.status_code == 400
     assert "not automated" in response.json()["detail"]
     page = client.get("/edge-minds/new").text
     assert 'name="profile" value="sentinel"' not in page
-    assert "installing the full Sentinel" in page
 
 
-def test_edge_mind_bootstrap_wires_supported_ollama_harness(tmp_path, monkeypatch):
+def test_ollama_provider_requires_a_url_and_rewrites_config(tmp_path, monkeypatch):
     client = _authed_client(tmp_path, monkeypatch)
+    monkeypatch.delenv("OLLAMA_URL", raising=False)
 
+    with patch.object(main_mod, "get_capability_endpoint", return_value=""):
+        missing = client.post(
+            "/api/edge-minds/bootstrap", json=_bootstrap_body(provider="ollama")
+        )
+    assert missing.status_code == 400
+    assert "ollama" in missing.json()["detail"].lower()
+
+    monkeypatch.setenv("OLLAMA_URL", "http://192.168.4.64:8899")
     response = client.post(
         "/api/edge-minds/bootstrap",
-        json={
-            "name": "local-one",
-            "profile": "standard",
-            "role": "operator",
-            "deployment": "container",
-            "harness": "claude_cli_ollama",
-            "surfaces": ["telegram"],
-            "port": 8421,
-            "default_model": "qwen3:8b",
-            "ollama_url": "http://192.168.4.64:11434",
-        },
+        json=_bootstrap_body(provider="ollama", default_model="qwen3:8b"),
     )
-
     assert response.status_code == 200
     command = response.json()["command"]
-    assert "http://192.168.4.64:11434" in command
+    assert "http://192.168.4.64:8899" in command
     assert "config.yaml" in command
     assert response.json()["registration"]["model"] == "qwen3:8b"
 
@@ -417,40 +482,34 @@ def test_edge_mind_bootstrap_preserves_an_empty_surface_selection(
 
     response = client.post(
         "/api/edge-minds/bootstrap",
-        json={
-            "name": "headless-one",
-            "profile": "standard",
-            "role": "satellite",
-            "deployment": "container",
-            "harness": "codex_cli_codex",
-            "surfaces": [],
-            "port": 8421,
-        },
+        json=_bootstrap_body(harness="codex_cli", provider="openai", surfaces=[]),
     )
 
     assert response.status_code == 200
     assert "--surfaces none" in response.json()["command"]
 
 
-def test_edge_mind_bootstrap_rejects_unimplemented_harness(tmp_path, monkeypatch):
+def test_install_options_are_the_forms_single_source_of_truth(tmp_path, monkeypatch):
     client = _authed_client(tmp_path, monkeypatch)
+    monkeypatch.setenv("OLLAMA_URL", "http://192.168.4.64:8899")
 
-    response = client.post(
-        "/api/edge-minds/bootstrap",
-        json={
-            "name": "future-one",
-            "profile": "standard",
-            "role": "satellite",
-            "deployment": "container",
-            "harness": "codex_sdk_codex",
-            "surfaces": [],
-            "port": 8421,
-        },
-    )
+    options = client.get("/api/minds/install-options").json()
 
-    assert response.status_code == 400
-    assert "harness" in response.json()["detail"].lower()
+    by_harness = {item["value"]: item["providers"] for item in options["harnesses"]}
+    assert sorted(by_harness) == ["claude_cli", "codex_cli"]
+    assert sorted(by_harness["claude_cli"]) == ["anthropic", "ollama"]
+    assert sorted(by_harness["codex_cli"]) == ["ollama", "openai"]
+    assert options["roles"] == ["operator", "sandboxed"]
+    assert sorted(options["deployments"]) == ["container", "systemd", "windows-task"]
 
+    # Every advertised pair must actually build a plan.
+    for harness, providers in by_harness.items():
+        for provider in providers:
+            response = client.post(
+                "/api/edge-minds/bootstrap",
+                json=_bootstrap_body(harness=harness, provider=provider),
+            )
+            assert response.status_code == 200, (harness, provider)
 
 def test_edge_mind_verify_checks_health_and_registers_with_comms(tmp_path, monkeypatch):
     client = _authed_client(tmp_path, monkeypatch)
@@ -473,7 +532,8 @@ def test_edge_mind_verify_checks_health_and_registers_with_comms(tmp_path, monke
                 "mind_id": mind_id,
                 "gateway_url": "http://192.168.4.16:8421",
                 "model": "gpt-5.5",
-                "harness": "codex_cli_codex",
+                "harness": "codex_cli",
+                "provider": "openai",
                 "profile": "sentinel",
                 "role": "operator",
                 "deployment": "container",
@@ -506,9 +566,10 @@ def test_edge_mind_verify_rejects_mismatched_identity(tmp_path, monkeypatch):
                 "mind_id": "6f12a60a-b5fd-4ba4-b2f1-07065a49145d",
                 "gateway_url": "http://192.168.4.20:8421",
                 "model": "sonnet",
-                "harness": "claude_cli_claude",
+                "harness": "claude_cli",
+                "provider": "anthropic",
                 "profile": "standard",
-                "role": "satellite",
+                "role": "sandboxed",
                 "deployment": "systemd",
             },
         )
@@ -532,9 +593,10 @@ def test_edge_mind_verify_rejects_an_unready_runtime(tmp_path, monkeypatch):
                 "mind_id": mind_id,
                 "gateway_url": "http://192.168.4.20:8421",
                 "model": "sonnet",
-                "harness": "claude_cli_claude",
+                "harness": "claude_cli",
+                "provider": "anthropic",
                 "profile": "standard",
-                "role": "satellite",
+                "role": "sandboxed",
                 "deployment": "systemd",
             },
         )

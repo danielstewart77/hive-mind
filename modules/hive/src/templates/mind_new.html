@@ -1,0 +1,127 @@
+{% extends "layout.html" %}
+{% block title %}Add Mind · Hive{% endblock %}
+{% block content %}
+<main class="page">
+    <header class="page-header">
+        <div class="page-header-copy"><p class="page-eyebrow">Core cognition</p><h1 class="page-title">Add a Mind</h1><p class="page-description">A containerised Mind in this Hive's own stack. Pick the harness and the provider; identity comes later, in conversation.</p></div>
+        <div class="page-actions"><a class="button button-quiet" href="/minds"><i data-lucide="arrow-left"></i>Cancel</a></div>
+    </header>
+    <div class="setup-grid edge-setup-grid">
+        <section class="surface">
+            <div class="settings-section-copy"><h2>Runtime</h2><p>This creates a runtime, not a personality. Soul, voice, and backstory are authored conversationally once the Mind is answering.</p></div>
+            <form class="surface-body overview-stack" id="mind-form">
+                <div class="form-grid">
+                    <div class="field"><label for="mind-name">Mind name</label><input id="mind-name" name="name" type="text" pattern="[a-z](?:[a-z0-9]|-){1,31}" placeholder="atlas" required><small id="mind-name-status">Lowercase letters, numbers, and hyphens.</small></div>
+                    <div class="field"><label for="mind-description">Description</label><input id="mind-description" name="description" type="text" placeholder="What this Mind is for."></div>
+                </div>
+                <div class="field is-full"><label>Harness</label><div class="choice-grid"><label class="choice"><input type="radio" name="harness" value="claude_cli" checked><span class="choice-copy"><strong>Claude CLI</strong><small>Long-lived stream-json session per conversation.</small></span></label><label class="choice"><input type="radio" name="harness" value="codex_cli"><span class="choice-copy"><strong>Codex CLI</strong><small>One <code>codex exec</code> subprocess per turn.</small></span></label></div></div>
+                <div class="form-grid">
+                    <div class="field"><label for="mind-provider">Provider</label><select id="mind-provider" name="provider"></select><small>Where inference goes. Independent of the harness.</small></div>
+                    <div class="field"><label for="mind-default-model">Initial model</label><input id="mind-default-model" name="default_model" required></div>
+                    <div class="field" id="mind-ollama-field"><label for="mind-ollama-url">Ollama URL</label><input id="mind-ollama-url" name="ollama_url" type="url" value="{{ default_ollama_url }}" placeholder="http://host.docker.internal:8899"><small>Defaults to the inference proxy, so the Mind is metered.</small></div>
+                    <div class="field" id="mind-ollama-key-field"><label for="mind-ollama-key">Proxy key</label><input id="mind-ollama-key" name="ollama_api_key" type="text" placeholder="hmp-…"><small>Only if the endpoint authenticates. Bare Ollama needs none.</small></div>
+                </div>
+                <div id="mind-error" class="error-state" hidden></div>
+                <div class="form-actions"><button class="button button-primary" type="submit"><i data-lucide="wand-sparkles"></i>Scaffold Mind</button></div>
+            </form>
+        </section>
+        <aside class="overview-stack">
+            <section class="surface">
+                <div class="surface-header"><div><h2>What gets written</h2><p>Two files, in this Hive's minds directory.</p></div></div>
+                <ul class="service-list">
+                    <li class="service-row"><span class="service-icon"><i data-lucide="file-cog"></i></span><span class="service-copy"><strong>runtime.yaml</strong><small>Harness, provider, model, and the provider env block.</small></span></li>
+                    <li class="service-row"><span class="service-icon"><i data-lucide="container"></i></span><span class="service-copy"><strong>container/compose.yaml</strong><small>One service on the hivemind network.</small></span></li>
+                </ul>
+            </section>
+            <div class="notice"><i data-lucide="sparkles"></i><span>Identity is not scaffolded. A Mind with no soul answers as a blank harness until you give it one.</span></div>
+            <section class="surface" id="mind-result" hidden>
+                <div class="surface-header"><div><h2>Next steps</h2><p>Run on the Hive host, then register.</p></div></div>
+                <div class="surface-body overview-stack"><dl class="detail-grid" id="mind-identity"></dl><div id="mind-commands"></div><p id="mind-next-step"></p><button class="button button-primary" type="button" id="mind-register">Register with the broker</button><small id="mind-register-status"></small></div>
+            </section>
+        </aside>
+    </div>
+</main>
+<script>
+window.addEventListener("DOMContentLoaded", function () {
+    const h = window.HiveConsole, form = document.getElementById("mind-form");
+    let created = null;
+    const options = {{ install_options | tojson }};
+    const defaultModels = {};
+    options.providers.forEach(function (item) { defaultModels[item.value] = item.default_model; });
+    const providersFor = {};
+    options.harnesses.forEach(function (item) { providersFor[item.value] = item.providers; });
+    const providerLabels = {anthropic: "Anthropic", openai: "OpenAI", ollama: "Ollama (local)"};
+
+    function selectedHarness() { return form.querySelector('[name="harness"]:checked').value; }
+
+    function renderProviders() {
+        const select = form.elements.provider, previous = select.value;
+        const allowed = providersFor[selectedHarness()] || [];
+        select.innerHTML = allowed.map(function (value) {
+            return '<option value="' + value + '">' + (providerLabels[value] || value) + '</option>';
+        }).join("");
+        select.value = allowed.indexOf(previous) !== -1 ? previous : allowed[0];
+        onProviderChange();
+    }
+
+    function onProviderChange() {
+        const provider = form.elements.provider.value, isOllama = provider === "ollama";
+        form.elements.default_model.value = defaultModels[provider] || "";
+        document.getElementById("mind-ollama-field").hidden = !isOllama;
+        document.getElementById("mind-ollama-key-field").hidden = !isOllama;
+    }
+
+    form.addEventListener("change", function (event) {
+        if (event.target.name === "harness") renderProviders();
+        if (event.target.name === "provider") onProviderChange();
+    });
+
+    // Catch a collision before the scaffold runs, not after.
+    form.elements.name.addEventListener("blur", async function () {
+        const value = form.elements.name.value.trim().toLowerCase();
+        const status = document.getElementById("mind-name-status");
+        if (!value) { status.textContent = "Lowercase letters, numbers, and hyphens."; return; }
+        try {
+            const data = await h.requestJson("/api/settings/new-mind/check-name?name=" + encodeURIComponent(value));
+            status.textContent = data.available ? value + " is available." : value + " is already taken.";
+        } catch (error) { status.textContent = error.message; }
+    });
+
+    form.addEventListener("submit", async function (event) {
+        event.preventDefault();
+        const errorBox = document.getElementById("mind-error");
+        errorBox.hidden = true;
+        const body = {
+            name: form.elements.name.value,
+            description: form.elements.description.value,
+            harness: selectedHarness(),
+            provider: form.elements.provider.value,
+            default_model: form.elements.default_model.value,
+            ollama_url: form.elements.ollama_url.value,
+            ollama_api_key: form.elements.ollama_api_key.value
+        };
+        try {
+            const data = await h.requestJson("/api/minds", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+            created = data.registration;
+            document.getElementById("mind-identity").innerHTML = [["Mind ID", data.mind_id], ["Harness", data.registration.harness + " · " + data.registration.provider], ["Model", data.registration.model]].map(function (item) { return '<div class="detail-item"><dt>' + h.escapeHtml(item[0]) + '</dt><dd class="mono">' + h.escapeHtml(item[1]) + '</dd></div>'; }).join("");
+            document.getElementById("mind-commands").innerHTML = (data.commands || []).map(function (step, index) { const id = "mind-command-" + index; return '<div><p class="command-label">' + h.escapeHtml(step.name) + '</p><div class="code-wrap"><pre class="code-panel" id="' + id + '">' + h.escapeHtml(step.command) + '</pre><button class="icon-button" type="button" data-copy="#' + id + '" aria-label="Copy command"><i data-lucide="copy"></i></button></div></div>'; }).join("");
+            document.getElementById("mind-next-step").textContent = data.next_step || "";
+            document.getElementById("mind-result").hidden = false;
+            if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}});
+        } catch (error) { errorBox.hidden = false; errorBox.textContent = error.message; }
+    });
+
+    document.getElementById("mind-register").addEventListener("click", async function () {
+        const status = document.getElementById("mind-register-status");
+        if (!created) { status.textContent = "Scaffold the Mind first."; return; }
+        status.textContent = "Registering…";
+        try {
+            await h.requestJson("/api/minds/" + encodeURIComponent(created.name) + "/register", {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"});
+            status.textContent = "Registered. " + created.name + " is part of the Hive.";
+        } catch (error) { status.textContent = error.message; }
+    });
+
+    renderProviders();
+});
+</script>
+{% endblock %}
