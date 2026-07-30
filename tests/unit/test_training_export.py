@@ -1,8 +1,8 @@
 """Unit tests for rendering curated turns into training JSONL.
 
 Covers block-array to message-list translation, parallel tool-call grouping,
-reasoning placement in both modes, mandatory redaction, tool-result capping,
-and the session-level train/eval split.
+reasoning placement in both modes, the three-way credential policy,
+tool-result capping, and the session-level train/eval split.
 """
 
 from __future__ import annotations
@@ -22,6 +22,8 @@ from core.training_curation import CurationPolicy, curate
 from core.training_export import (
     MODE_REASONING,
     MODE_STRIPPED,
+    SECRETS_RANDOMIZE,
+    SECRETS_REDACT,
     ExportOptions,
     export_dataset,
     render_turn,
@@ -132,8 +134,8 @@ def test_no_empty_reasoning_key_when_a_group_has_no_thought():
     assert all("reasoning" not in m for m in messages)
 
 
-def test_redaction_is_applied_and_cannot_be_disabled():
-    blocks = [
+def _credential_blocks():
+    return [
         {"type": "tool_use", "name": "Bash", "input": {"command": "cat .env"}, "id": "t1"},
         {
             "type": "tool_result",
@@ -142,7 +144,32 @@ def test_redaction_is_applied_and_cannot_be_disabled():
         },
         {"type": "text", "text": "the key is sk-ant-api03-QQQQwwwwEEEErrrr1234"},
     ]
-    serialized = json.dumps(render_turn("show me sk-ant-api03-ZZZZyyyyXXXXvvvv9999", blocks, ExportOptions()))
+
+
+def test_credentials_survive_by_default():
+    """The corpus trains a local model that needs the real values.
+
+    Substituting placeholders teaches it that a redaction slug is what goes
+    in the credential slot, so it emits one when it needs a live token.
+    """
+    serialized = json.dumps(
+        render_turn("here is sk-ant-api03-ZZZZyyyyXXXXvvvv9999", _credential_blocks(), ExportOptions())
+    )
+    assert "ghp_AAAAbbbbCCCCddddEEEEffff" in serialized
+    assert "sk-ant-api03-QQQQwwwwEEEErrrr1234" in serialized
+    assert "sk-ant-api03-ZZZZyyyyXXXXvvvv9999" in serialized
+    assert "REDACTED" not in serialized
+
+
+def test_redaction_scrubs_everything_when_asked():
+    """For a dataset leaving this machine."""
+    serialized = json.dumps(
+        render_turn(
+            "here is sk-ant-api03-ZZZZyyyyXXXXvvvv9999",
+            _credential_blocks(),
+            ExportOptions(secrets=SECRETS_REDACT),
+        )
+    )
     assert "ghp_AAAAbbbb" not in serialized
     assert "sk-ant-api03-QQQQ" not in serialized
     assert "sk-ant-api03-ZZZZ" not in serialized
@@ -245,8 +272,39 @@ def test_export_can_filter_by_harness_and_reasoning(db_path, tmp_path):
     )
 
 
+def test_system_prompt_is_redacted_only_when_redaction_is_on(db_path, tmp_path):
+    _add(db_path, "s1", system_prompt="your token is ghp_SYSTEMbbbbCCCCddddEEEE")
+    curate(db_path)
+
+    export_dataset(db_path, tmp_path / "raw", ExportOptions(eval_fraction=0.0))
+    assert "ghp_SYSTEMbbbbCCCCddddEEEE" in (tmp_path / "raw" / "train.jsonl").read_text()
+
+    export_dataset(
+        db_path, tmp_path / "clean", ExportOptions(eval_fraction=0.0, secrets=SECRETS_REDACT)
+    )
+    assert "ghp_SYSTEMbbbb" not in (tmp_path / "clean" / "train.jsonl").read_text()
+
+
+def test_randomization_keeps_shape_without_keeping_the_value():
+    """Neither the real token nor a placeholder — a same-shaped stand-in."""
+    serialized = json.dumps(
+        render_turn(
+            "here is sk-ant-api03-ZZZZyyyyXXXXvvvv9999",
+            _credential_blocks(),
+            ExportOptions(secrets=SECRETS_RANDOMIZE),
+        )
+    )
+    assert "ghp_AAAAbbbbCCCCddddEEEEffff" not in serialized
+    assert "sk-ant-api03-ZZZZyyyyXXXXvvvv9999" not in serialized
+    assert "REDACTED" not in serialized
+    assert "ghp_" in serialized
+    assert "sk-ant-api03-" in serialized
+
+
 def test_invalid_options_are_rejected():
     with pytest.raises(ValueError):
         ExportOptions(mode="hallucinate")
+    with pytest.raises(ValueError):
+        ExportOptions(secrets="yolo")
     with pytest.raises(ValueError):
         ExportOptions(eval_fraction=1.5)
