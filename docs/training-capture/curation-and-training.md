@@ -94,11 +94,7 @@ rewrites content. What credentials do on the way *out* is an export
 decision, controlled by `ExportOptions.secrets` — `--secrets` on the CLI, a
 dropdown in the console — with three values.
 
-`keep` **(default)**. This dataset trains a model that runs on this
-hardware, for this hive, and that model needs real credentials to do the
-work it is being taught.
-
-`randomize` **(the right choice when a dataset leaves this machine)**. Each
+`randomize` **(default)**. Each
 credential becomes a *different* string of the same length and character
 class, with the vendor prefix preserved: `ghp_` stays `ghp_`, and the
 thirty-six characters after it become something else. The model learns the
@@ -108,6 +104,17 @@ in two hundred turns becomes the *same* surrogate in all of them (the model
 sees a consistent world, not noise) and a re-export with the same salt
 reproduces the dataset byte for byte. Private keys are the exception: a key
 block has no shape worth preserving, so it is dropped wholesale.
+
+This is the default because it is the only policy that survives both failure
+modes at once, and it is what the field settled on independently: clinical
+de-identification calls it *hiding in plain sight*, adopted after
+sentinel-token redaction was found to teach models to emit the sentinel.
+
+`keep` **(deliberate only)**. Real values. This dataset trains a model that
+runs on this hardware, so it is not absurd — but memorization scales with
+duplication and with epochs, and a LoRA doing several passes over a few
+thousand turns is exactly the regime where extraction works. The corpus
+itself is unaffected either way; this only governs what lands in the JSONL.
 
 `redact` **(bluntest)**. Placeholders. This teaches the model that
 `<REDACTED_SECRET>` is what belongs in the credential slot, so it emits one
@@ -127,8 +134,9 @@ Contaminated rows are kept during curation, because the underlying turn is
 usually a good demonstration of tool use. `--exclude-secret-rows` drops them
 instead.
 
-Detection is deliberately over-eager, since it costs nothing under `keep`
-and a missed credential is permanent under the other two. Auth *schemes*
+Detection is deliberately over-eager, since a missed credential is permanent
+once it is in the weights and an over-eager match costs only a surrogate
+where none was needed. Auth *schemes*
 (`Bearer`, `Basic`), type annotations (`password: str`), and env indirection
 (`TOKEN=$OTHER`) are allowlisted so ordinary code survives intact.
 
