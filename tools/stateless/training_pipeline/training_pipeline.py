@@ -122,6 +122,7 @@ def cmd_export(args) -> dict:
         eval_fraction=args.eval_fraction,
         include_system_prompt=not args.no_system_prompt,
         max_tool_result_chars=args.max_tool_result_chars,
+        secrets=args.secrets,
     )
     run_id = start_run(ledger, KIND_EXPORT, options=options.__dict__)
     try:
@@ -212,6 +213,20 @@ def build_parser() -> argparse.ArgumentParser:
     export_p.add_argument("--eval-fraction", type=float, default=0.05)
     export_p.add_argument("--no-system-prompt", action="store_true")
     export_p.add_argument("--max-tool-result-chars", type=int, default=8_000)
+    export_p.add_argument(
+        "--secrets",
+        choices=["keep", "randomize", "redact"],
+        default="keep",
+        help=(
+            "How credentials leave the corpus. keep (default) writes the "
+            "real values, because this dataset trains a local model that "
+            "needs them. randomize substitutes a same-length, same-shape "
+            "surrogate, so the model still learns what a token looks like "
+            "without learning a real one — the right choice when a dataset "
+            "leaves this machine. redact writes placeholders, which teaches "
+            "the model to emit a slug where a live token belongs."
+        ),
+    )
 
     train_p = sub.add_parser("train", help="plan or launch a fine-tune")
     train_p.add_argument("--train-file", required=True)

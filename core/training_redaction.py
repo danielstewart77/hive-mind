@@ -210,31 +210,158 @@ def redact_blocks(blocks: list[dict]) -> list[dict]:
     Returns a new list; the input is not mutated. ``tool_use.input`` is
     redacted through its JSON serialization so a credential passed as a
     command argument (``curl -H "Authorization: Bearer …"``) is caught
-    regardless of how deeply it is nested.
+    regardless of how deeply it is nested. If a placeholder breaks that JSON
+    — a secret spanning a quote boundary — the arguments are dropped rather
+    than the credential shipped.
     """
-    redacted: list[dict] = []
-    for block in blocks:
-        item = dict(block)
-        if isinstance(item.get("text"), str):
-            item["text"] = redact_text(item["text"])
-        if isinstance(item.get("content"), str):
-            item["content"] = redact_text(item["content"])
-        raw_input = item.get("input")
-        if raw_input is not None:
-            serialized = json.dumps(raw_input, ensure_ascii=False)
-            cleaned = redact_text(serialized)
-            if cleaned != serialized:
-                try:
-                    item["input"] = json.loads(cleaned)
-                except json.JSONDecodeError:
-                    # A placeholder broke the JSON (a secret spanning a
-                    # quote boundary). Keep the row usable by dropping the
-                    # arguments rather than shipping the credential.
-                    item["input"] = {"_redacted": True}
-        redacted.append(item)
-    return redacted
+    return _map_blocks(blocks, redact_text)
 
 
 def count_secrets_in_row(user_content: str, assistant_blocks: str) -> list[SecretHit]:
     """Detect credentials across both text-bearing columns of a turn row."""
     return find_secrets(user_content or "") + find_secrets(assistant_blocks or "")
+
+
+# ---------------------------------------------------------------------------
+# Randomization
+# ---------------------------------------------------------------------------
+#
+# Replacement with a placeholder and replacement with nothing are both wrong
+# for a model that has to use real credentials. A placeholder teaches the
+# model that ``<REDACTED_SECRET>`` is what belongs in the credential slot, so
+# it emits one where a live token is needed. Leaving the real value teaches
+# the model that specific token, which then lives in the weights.
+#
+# Substituting a *different* string of the same length and character class
+# avoids both. The model learns that a forty-character opaque token follows
+# ``ghp_``, which is the transferable fact, and never sees the real one.
+#
+# The mapping is deterministic per secret, derived by HMAC from a salt. One
+# credential appearing in two hundred turns becomes the same surrogate in all
+# of them, so the model sees a consistent world rather than noise — and a
+# re-export with the same salt reproduces the dataset byte for byte.
+
+_DEFAULT_SALT = "hive-training-surrogate-v1"
+
+# Vendor prefixes are the part of a credential that is *supposed* to be
+# learned: "a GitHub token starts ghp_ and runs 36 more characters" is the
+# transferable fact, and scrambling it into "xwo_" teaches a token shape
+# that exists nowhere. Longest first, so ``sk-ant-api03-`` wins over ``sk-``.
+_PRESERVED_PREFIXES = (
+    "sk-ant-api03-",
+    "sk-proj-",
+    "sk-ant-",
+    "github_pat_",
+    "xoxb-",
+    "xoxp-",
+    "xoxa-",
+    "xoxr-",
+    "xoxs-",
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "ghr_",
+    "AKIA",
+    "ASIA",
+    "sk-",
+    "eyJ",
+)
+
+
+def _surrogate_for(secret: str, salt: str) -> str:
+    """A stable stand-in of the same length and character class."""
+    import hashlib
+    import hmac
+    import string
+
+    prefix = ""
+    for candidate in _PRESERVED_PREFIXES:
+        if secret.startswith(candidate):
+            prefix = candidate
+            break
+    body = secret[len(prefix) :]
+
+    digest = hmac.new(salt.encode(), secret.encode(), hashlib.sha256).digest()
+    stream = iter(digest * ((len(body) // len(digest)) + 2))
+    out: list[str] = [prefix]
+    for char in body:
+        byte = next(stream)
+        if char.isdigit():
+            out.append(string.digits[byte % 10])
+        elif char.islower():
+            out.append(string.ascii_lowercase[byte % 26])
+        elif char.isupper():
+            out.append(string.ascii_uppercase[byte % 26])
+        else:
+            # Structural characters — separators, dots, dashes, the ``ghp_``
+            # style prefixes' underscore — are shape, not secret. Keeping
+            # them is what makes the surrogate look like a real credential.
+            out.append(char)
+    return "".join(out)
+
+
+def randomize_text(text: str, salt: str = _DEFAULT_SALT) -> str:
+    """Replace each credential with a same-shaped surrogate.
+
+    Keyword-introduced assignments swap only the value; the keyword and
+    separator survive, so ``GITHUB_TOKEN=`` still reads as an assignment.
+    """
+    if not text:
+        return text
+    result = text
+    for name, pattern, _ in _RULES:
+        if name == "env_assignment":
+
+            def _sub_assignment(match: re.Match[str]) -> str:
+                value = match.group(2)
+                if not _assignment_value_is_secret(value):
+                    return match.group(0)
+                return f"{match.group(1)}{_surrogate_for(value, salt)}"
+
+            result = pattern.sub(_sub_assignment, result)
+        elif name == "bearer_header":
+
+            def _sub_bearer(match: re.Match[str]) -> str:
+                scheme = match.group(1)
+                credential = match.group(0)[len(scheme) :]
+                return f"{scheme}{_surrogate_for(credential, salt)}"
+
+            result = pattern.sub(_sub_bearer, result)
+        elif name == "private_key":
+            # A key block has no useful shape to preserve beyond "long
+            # base64 between markers", and surrogating megabytes of it buys
+            # nothing. Replace it wholesale.
+            result = pattern.sub("<REDACTED_PRIVATE_KEY>", result)
+        else:
+            result = pattern.sub(
+                lambda m: _surrogate_for(m.group(0), salt), result
+            )
+    return result
+
+
+def randomize_blocks(blocks: list[dict], salt: str = _DEFAULT_SALT) -> list[dict]:
+    """Randomize every text-bearing field of an ``assistant_blocks`` array."""
+    return _map_blocks(blocks, lambda text: randomize_text(text, salt))
+
+
+def _map_blocks(blocks: list[dict], transform) -> list[dict]:
+    """Apply ``transform`` to every string an assistant block can carry."""
+    mapped: list[dict] = []
+    for block in blocks:
+        item = dict(block)
+        if isinstance(item.get("text"), str):
+            item["text"] = transform(item["text"])
+        if isinstance(item.get("content"), str):
+            item["content"] = transform(item["content"])
+        raw_input = item.get("input")
+        if raw_input is not None:
+            serialized = json.dumps(raw_input, ensure_ascii=False)
+            cleaned = transform(serialized)
+            if cleaned != serialized:
+                try:
+                    item["input"] = json.loads(cleaned)
+                except json.JSONDecodeError:
+                    item["input"] = {"_redacted": True}
+        mapped.append(item)
+    return mapped
