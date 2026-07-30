@@ -415,7 +415,16 @@ async def new_edge_mind_page(request: Request):
         edge_hive_tools_url=os.getenv("EDGE_HIVE_TOOLS_URL", ""),
         edge_ollama_url=get_capability_endpoint("ollama")
         or os.getenv("OLLAMA_URL", ""),
+        install_options=_mind_install_options(),
     )
+
+
+@app.get("/api/minds/install-options")
+async def api_mind_install_options(user: dict = Depends(require_auth)):
+    """Valid harness/provider/role/deployment combinations, for the install
+    forms. One source of truth, so the console cannot drift from setup.sh."""
+    del user
+    return _mind_install_options()
 
 
 @app.get("/capability-nodes", response_class=HTMLResponse)
@@ -576,15 +585,62 @@ async def api_edge_minds(user: dict = Depends(require_auth)):
 
 _EDGE_MIND_PROFILES = {"standard", "sentinel"}
 _EDGE_MIND_BOOTSTRAP_PROFILES = {"standard"}
-_EDGE_MIND_ROLES = {"operator", "satellite"}
+# `sandboxed` is the word setup.sh accepts. The console said `satellite`, so
+# every satellite bootstrap it generated died on setup.sh's role check.
+_EDGE_MIND_ROLES = {"operator", "sandboxed"}
 _EDGE_MIND_DEPLOYMENTS = {"systemd", "container", "windows-task"}
-_EDGE_MIND_HARNESSES = {
-    "claude_cli_claude",
-    "claude_cli_ollama",
-    "claude_sdk_claude",
-    "codex_cli_codex",
+
+# Harness and provider are separate axes, matching mind_templates/ and
+# minds/<name>/runtime.yaml. The harness picks the CLI; the provider picks
+# where inference goes. Each CLI speaks one first-party dialect, and ollama is
+# the alternative both share.
+_MIND_HARNESSES = {"claude_cli", "codex_cli"}
+_MIND_PROVIDERS = {"anthropic", "openai", "ollama"}
+_HARNESS_PROVIDERS = {
+    "claude_cli": ("anthropic", "ollama"),
+    "codex_cli": ("openai", "ollama"),
+}
+_PROVIDER_DEFAULT_MODELS = {
+    "anthropic": "sonnet",
+    "openai": "gpt-5.4",
+    "ollama": "qwen3:8b",
 }
 _EDGE_MIND_SURFACES = {"telegram", "discord"}
+
+
+def _mind_install_options() -> dict:
+    """The one source of truth the install forms render from.
+
+    Hardcoding these in the template is how the console drifted out of step
+    with setup.sh in the first place.
+    """
+    return {
+        "harnesses": [
+            {
+                "value": harness,
+                "label": "Claude CLI" if harness == "claude_cli" else "Codex CLI",
+                "providers": list(providers),
+            }
+            for harness, providers in sorted(_HARNESS_PROVIDERS.items())
+        ],
+        "providers": [
+            {"value": provider, "default_model": _PROVIDER_DEFAULT_MODELS[provider]}
+            for provider in sorted(_MIND_PROVIDERS)
+        ],
+        "roles": sorted(_EDGE_MIND_ROLES),
+        "deployments": sorted(_EDGE_MIND_DEPLOYMENTS),
+        "surfaces": sorted(_EDGE_MIND_SURFACES),
+    }
+
+
+def _validate_harness_provider(harness: str, provider: str) -> None:
+    if harness not in _MIND_HARNESSES:
+        raise ValueError("Unknown harness")
+    if provider not in _MIND_PROVIDERS:
+        raise ValueError("Unknown provider")
+    if provider not in _HARNESS_PROVIDERS[harness]:
+        allowed = " or ".join(_HARNESS_PROVIDERS[harness])
+        raise ValueError(f"{harness} cannot use the {provider} provider (want {allowed})")
 
 
 def _edge_mind_name_overrides() -> set[str]:
@@ -623,6 +679,7 @@ def _build_edge_mind_bootstrap(body: dict) -> dict:
     role = str(body.get("role") or "")
     deployment = str(body.get("deployment") or "")
     harness = str(body.get("harness") or "")
+    provider = str(body.get("provider") or "")
     surfaces = body.get("surfaces") or []
     raw_mind_id = str(body.get("mind_id") or uuid.uuid4())
     try:
@@ -637,11 +694,9 @@ def _build_edge_mind_bootstrap(body: dict) -> dict:
         raise ValueError("Unknown Edge Mind role")
     if deployment not in _EDGE_MIND_DEPLOYMENTS:
         raise ValueError("Unknown deployment type")
-    if harness not in _EDGE_MIND_HARNESSES:
-        raise ValueError("Unknown harness")
+    _validate_harness_provider(harness, provider)
     default_model = str(
-        body.get("default_model")
-        or ("sonnet" if harness.startswith("claude") else "gpt-5.4")
+        body.get("default_model") or _PROVIDER_DEFAULT_MODELS[provider]
     ).strip()
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}", default_model):
         raise ValueError("Invalid default model")
@@ -668,7 +723,7 @@ def _build_edge_mind_bootstrap(body: dict) -> dict:
         if value:
             endpoint_settings[key] = normalize_endpoint(value)
     ollama_url = ""
-    if harness == "claude_cli_ollama":
+    if provider == "ollama":
         ollama_url = str(
             body.get("ollama_url")
             or os.getenv("OLLAMA_URL")
@@ -676,7 +731,7 @@ def _build_edge_mind_bootstrap(body: dict) -> dict:
             or ""
         )
         if not ollama_url:
-            raise ValueError("Ollama URL is required for the Ollama harness")
+            raise ValueError("Ollama URL is required for the Ollama provider")
         ollama_url = normalize_endpoint(ollama_url)
     args = [
         "./setup.sh",
@@ -690,6 +745,8 @@ def _build_edge_mind_bootstrap(body: dict) -> dict:
         deployment,
         "--harness",
         harness,
+        "--provider",
+        provider,
         "--surfaces",
         ",".join(surfaces) or "none",
         "--port",
@@ -714,21 +771,13 @@ def _build_edge_mind_bootstrap(body: dict) -> dict:
             + " >> .env"
         )
     prepare_environment = " && ".join(environment_commands)
-    provider = (
-        "ollama"
-        if harness.endswith("_ollama")
-        else "anthropic"
-        if harness.startswith("claude")
-        else "openai"
-    )
     runtime_commands = [
         setup_command,
         "sed -i "
         + shlex.quote(f"s|^default_model:.*|default_model: {default_model}|")
         + f" minds/{shlex.quote(name)}/runtime.yaml",
-        "sed -i "
-        + shlex.quote(f"s|^provider:.*|provider: {provider}|")
-        + f" minds/{shlex.quote(name)}/runtime.yaml",
+        # No provider sed: setup.sh --provider already wrote it. Only the
+        # model needs overriding, since setup.sh picks a per-provider default.
         "sed -i "
         + shlex.quote(f"s|^default_model:.*|default_model: {default_model}|")
         + " config.yaml",
@@ -765,6 +814,7 @@ def _build_edge_mind_bootstrap(body: dict) -> dict:
             "mind_id": mind_id,
             "model": default_model,
             "harness": harness,
+            "provider": provider,
             "profile": profile,
             "role": role,
             "deployment": deployment,
@@ -819,6 +869,7 @@ async def api_edge_mind_verify(request: Request, user: dict = Depends(require_au
     gateway_url = str(body.get("gateway_url") or "")
     model = str(body.get("model") or "")
     harness = str(body.get("harness") or "")
+    provider = str(body.get("provider") or "")
     profile = str(body.get("profile") or "")
     role = str(body.get("role") or "")
     deployment = str(body.get("deployment") or "")
@@ -831,8 +882,10 @@ async def api_edge_mind_verify(request: Request, user: dict = Depends(require_au
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}", model):
         raise HTTPException(status_code=400, detail="Invalid model name")
-    if harness not in _EDGE_MIND_HARNESSES:
-        raise HTTPException(status_code=400, detail="Unknown harness")
+    try:
+        _validate_harness_provider(harness, provider)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if profile not in _EDGE_MIND_PROFILES:
         raise HTTPException(status_code=400, detail="Unknown profile")
     if role not in _EDGE_MIND_ROLES or deployment not in _EDGE_MIND_DEPLOYMENTS:
@@ -858,7 +911,6 @@ async def api_edge_mind_verify(request: Request, user: dict = Depends(require_au
     )
     if existing and str(existing.get("id") or "") != mind_id:
         raise HTTPException(status_code=409, detail="That Mind name is already registered")
-    broker_harness = "codex_cli" if harness.startswith("codex") else "claude_cli"
     broker_result = await _gateway_request(
         "POST",
         "/broker/minds",
@@ -867,7 +919,9 @@ async def api_edge_mind_verify(request: Request, user: dict = Depends(require_au
             "name": name,
             "gateway_url": gateway_url,
             "model": model,
-            "harness": broker_harness,
+            # Already the broker's vocabulary — no collapsing step needed now
+            # that the console and the edge repo agree on the harness names.
+            "harness": harness,
         },
     )
     set_edge_mind_metadata(

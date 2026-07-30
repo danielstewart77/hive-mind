@@ -11,18 +11,18 @@
             <div class="settings-section-copy"><h2>Deployment profile</h2><p>A profile defines the software bundle around the mind. It does not define identity, personality, voice, or backstory.</p></div>
             <form class="surface-body overview-stack" id="edge-form">
                 <input type="hidden" name="profile" value="standard">
-                <div class="choice-grid edge-profile-grid"><div class="choice"><span class="choice-copy"><strong>Standard Edge Mind</strong><small>One connected mind runtime with the chosen harness and surfaces.</small></span></div></div>
-                <div class="notice"><i data-lucide="construction"></i><span>Existing Sentinel deployments remain visible in Topology, but installing the full Sentinel, telemetry, Loki, Grafana, and dashboard bundle is not automated yet.</span></div>
+                <div class="choice-grid edge-profile-grid"><div class="choice"><span class="choice-copy"><strong>Standard Edge Mind</strong><small>One connected mind runtime with the chosen harness, provider, and surfaces.</small></span></div></div>
                 <div class="form-grid">
                     <div class="field"><label for="edge-name">Mind name</label><input id="edge-name" name="name" type="text" pattern="[a-z](?:[a-z0-9]|-){1,31}" placeholder="atlas" required><small>Lowercase letters, numbers, and hyphens.</small></div>
                     <div class="field"><label for="edge-port">Local port</label><input id="edge-port" name="port" type="number" min="1024" max="65535" value="8421" required></div>
                 </div>
-                <div class="field is-full"><label>Machine role</label><div class="choice-grid"><label class="choice"><input type="radio" name="role" value="operator" checked><span class="choice-copy"><strong>Operator</strong><small>Full host access for a machine you control.</small></span></label><label class="choice"><input type="radio" name="role" value="satellite"><span class="choice-copy"><strong>Satellite</strong><small>Conversation and memory without host control.</small></span></label></div></div>
+                <div class="field is-full"><label>Machine role</label><div class="choice-grid"><label class="choice"><input type="radio" name="role" value="operator" checked><span class="choice-copy"><strong>Operator</strong><small>Full host access for a machine you control.</small></span></label><label class="choice"><input type="radio" name="role" value="sandboxed"><span class="choice-copy"><strong>Sandboxed</strong><small>Conversation and memory without host control.</small></span></label></div></div>
+                <div class="field is-full"><label>Harness</label><div class="choice-grid"><label class="choice"><input type="radio" name="harness" value="claude_cli" checked><span class="choice-copy"><strong>Claude CLI</strong><small>Long-lived stream-json session per conversation.</small></span></label><label class="choice"><input type="radio" name="harness" value="codex_cli"><span class="choice-copy"><strong>Codex CLI</strong><small>One <code>codex exec</code> subprocess per turn.</small></span></label></div></div>
                 <div class="form-grid">
                     <div class="field"><label for="edge-deployment">Deployment</label><select id="edge-deployment" name="deployment"><option value="systemd">Linux service</option><option value="container">Container</option><option value="windows-task">Windows task</option></select></div>
-                    <div class="field"><label for="edge-harness">Harness and provider</label><select id="edge-harness" name="harness"><option value="claude_cli_claude">Claude CLI with Anthropic</option><option value="claude_cli_ollama">Claude CLI with Ollama</option><option value="codex_cli_codex">Codex CLI with OpenAI</option><option value="claude_sdk_claude">Claude SDK with Anthropic</option></select></div>
+                    <div class="field"><label for="edge-provider">Provider</label><select id="edge-provider" name="provider"></select><small>Where inference goes. Independent of the harness.</small></div>
                     <div class="field"><label for="edge-default-model">Initial model</label><input id="edge-default-model" name="default_model" value="sonnet" required></div>
-                    <div class="field"><label for="edge-ollama-url">Ollama URL</label><input id="edge-ollama-url" name="ollama_url" type="url" value="{{ edge_ollama_url }}" placeholder="http://ollama-host:11434"><small>Required only for the Ollama harness.</small></div>
+                    <div class="field" id="edge-ollama-field"><label for="edge-ollama-url">Ollama URL</label><input id="edge-ollama-url" name="ollama_url" type="url" value="{{ edge_ollama_url }}" placeholder="http://ollama-host:11434"><small>Required only for the Ollama provider.</small></div>
                 </div>
                 <div class="form-grid">
                     <div class="field"><label for="edge-comms-url">Hive Comms URL</label><input id="edge-comms-url" name="comms_url" type="url" value="{{ edge_comms_url }}" placeholder="http://hive-host:8426" required><small>Address reachable from the target machine.</small></div>
@@ -51,17 +51,44 @@
 window.addEventListener("DOMContentLoaded", function () {
     const h = window.HiveConsole, form = document.getElementById("edge-form");
     let deploymentPlan = null;
-    const previews = {standard: [["Edge Mind runtime", "Harness, surfaces, and deployment service", "orbit"]]};
+    // Rendered from the server's install options so the form cannot offer a
+    // pair setup.sh would reject.
+    const options = {{ install_options | tojson }};
+    const defaultModels = {};
+    options.providers.forEach(function (item) { defaultModels[item.value] = item.default_model; });
+    const providersFor = {};
+    options.harnesses.forEach(function (item) { providersFor[item.value] = item.providers; });
+    const providerLabels = {anthropic: "Anthropic", openai: "OpenAI", ollama: "Ollama (local)"};
+
+    function selectedHarness() { return form.querySelector('[name="harness"]:checked').value; }
+
+    function renderProviders() {
+        const select = form.elements.provider, previous = select.value;
+        const allowed = providersFor[selectedHarness()] || [];
+        select.innerHTML = allowed.map(function (value) {
+            return '<option value="' + value + '">' + (providerLabels[value] || value) + '</option>';
+        }).join("");
+        select.value = allowed.indexOf(previous) !== -1 ? previous : allowed[0];
+        onProviderChange();
+    }
+
+    function onProviderChange() {
+        const provider = form.elements.provider.value;
+        form.elements.default_model.value = defaultModels[provider] || "";
+        // Only the Ollama provider needs a URL, and it is required then.
+        const ollamaField = document.getElementById("edge-ollama-field");
+        ollamaField.hidden = provider !== "ollama";
+        form.elements.ollama_url.required = provider === "ollama";
+    }
+
     function renderPreview() {
-        const profile = form.elements.profile.value;
         document.getElementById("bundle-profile-copy").textContent = "Standard profile";
-        document.getElementById("bundle-preview").innerHTML = previews[profile].map(function (item) { return '<li class="service-row"><span class="service-icon"><i data-lucide="' + item[2] + '"></i></span><span class="service-copy"><strong>' + item[0] + '</strong><small>' + item[1] + '</small></span></li>'; }).join("");
+        document.getElementById("bundle-preview").innerHTML = [["Edge Mind runtime", "Harness, provider, surfaces, and deployment service", "orbit"]].map(function (item) { return '<li class="service-row"><span class="service-icon"><i data-lucide="' + item[2] + '"></i></span><span class="service-copy"><strong>' + item[0] + '</strong><small>' + item[1] + '</small></span></li>'; }).join("");
         if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}});
     }
     form.addEventListener("change", function (event) {
-        if (event.target.name === "harness") {
-            form.elements.default_model.value = event.target.value === "claude_cli_ollama" ? "qwen3:8b" : event.target.value.startsWith("claude") ? "sonnet" : "gpt-5.4";
-        }
+        if (event.target.name === "harness") renderProviders();
+        if (event.target.name === "provider") onProviderChange();
     });
     form.addEventListener("submit", async function (event) {
         event.preventDefault();
@@ -71,7 +98,8 @@ window.addEventListener("DOMContentLoaded", function () {
             profile: form.elements.profile.value,
             role: form.querySelector('[name="role"]:checked').value,
             deployment: form.elements.deployment.value,
-            harness: form.elements.harness.value,
+            harness: selectedHarness(),
+            provider: form.elements.provider.value,
             surfaces: Array.from(form.querySelectorAll('[name="surface"]:checked')).map(function (input) { return input.value; }),
             port: Number(form.elements.port.value),
             comms_url: form.elements.comms_url.value,
@@ -83,7 +111,7 @@ window.addEventListener("DOMContentLoaded", function () {
         try {
             const data = await h.requestJson("/api/edge-minds/bootstrap", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
             deploymentPlan = Object.assign({}, data.registration, {mind_id: data.mind_id});
-            document.getElementById("bootstrap-identity").innerHTML = [["Mind ID", data.mind_id], ["Profile", data.profile], ["Hive Comms", data.required_settings.COMMS_URL || "Enter on target"]].map(function (item) { return '<div class="detail-item"><dt>' + h.escapeHtml(item[0]) + '</dt><dd class="mono">' + h.escapeHtml(item[1]) + '</dd></div>'; }).join("");
+            document.getElementById("bootstrap-identity").innerHTML = [["Mind ID", data.mind_id], ["Harness", data.registration.harness + " · " + data.registration.provider], ["Hive Comms", data.required_settings.COMMS_URL || "Enter on target"]].map(function (item) { return '<div class="detail-item"><dt>' + h.escapeHtml(item[0]) + '</dt><dd class="mono">' + h.escapeHtml(item[1]) + '</dd></div>'; }).join("");
             document.getElementById("bootstrap-commands").innerHTML = (data.commands || []).map(function (step, index) { const id = "bootstrap-command-" + index; return '<div><p class="command-label">' + h.escapeHtml(step.name) + '</p><div class="code-wrap"><pre class="code-panel" id="' + id + '">' + h.escapeHtml(step.command) + '</pre><button class="icon-button" type="button" data-copy="#' + id + '" aria-label="Copy command"><i data-lucide="copy"></i></button></div></div>'; }).join("");
             document.getElementById("edge-registration-model").value = deploymentPlan.model;
             document.getElementById("bootstrap-result").hidden = false;
@@ -99,6 +127,7 @@ window.addEventListener("DOMContentLoaded", function () {
         try { await h.requestJson("/api/edge-minds/verify", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)}); status.textContent = "Verified and registered. This Edge Mind is now part of the Hive."; }
         catch (error) { status.textContent = error.message; }
     });
+    renderProviders();
     renderPreview();
 });
 </script>
