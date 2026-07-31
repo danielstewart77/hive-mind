@@ -20,7 +20,7 @@ def test_claude_cli_imports_with_example_fallback() -> None:
     from minds.harness import claude_cli
 
     assert claude_cli.NAME == claude_cli.RUNTIME["name"]
-    assert claude_cli.DEFAULT_MODEL
+    assert claude_cli.RUNTIME_PATH.is_file()
     assert claude_cli.app.title == f"Mind: {claude_cli.NAME}"
 
 
@@ -28,7 +28,7 @@ def test_codex_cli_imports_with_example_fallback() -> None:
     from minds.harness import codex_cli
 
     assert codex_cli.NAME == codex_cli.RUNTIME["name"]
-    assert codex_cli.DEFAULT_MODEL
+    assert codex_cli.RUNTIME_PATH.is_file()
     assert codex_cli.app.title == f"Mind: {codex_cli.NAME}"
 
 

@@ -628,6 +628,16 @@ async def ws_attach(ws: WebSocket, session_id: str):
         await ws.close(code=4409, reason="session has no conversation to attach to")
         return
 
+    # Nor can it be attached to without a model. Every row gets one at
+    # creation, resolved from the mind's own configuration; substituting a
+    # default here would open the terminal on a model the session never
+    # agreed to and hide the fact that the row is broken.
+    session_model = (session.get("model") or "").strip()
+    if not session_model:
+        log.error("session %s has no model — refusing attach", session_id)
+        await ws.close(code=4409, reason="session has no model")
+        return
+
     # Same (owner_type, owner_ref, client_ref) resolution the stream-json
     # respawn paths use — without it the mind's Stop hook finds no CLIENT_REF
     # in the tmux pane's env and the session never rotates.
@@ -637,7 +647,7 @@ async def ws_attach(ws: WebSocket, session_id: str):
     params = urlencode({
         "resume_sid": conversation_id,
         "harness_sid": session.get("harness_sid") or "",
-        "model": session.get("model") or "sonnet",
+        "model": session_model,
         # Initial pty geometry from the browser tile, so the TUI's first
         # paint matches; live changes arrive as resize control frames.
         "cols": ws.query_params.get("cols") or "80",

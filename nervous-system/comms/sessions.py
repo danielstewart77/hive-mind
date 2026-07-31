@@ -728,10 +728,15 @@ class SessionManager:
             )
             return None
         log.info("rotation: finalizing, retiring session=%s", old_id)
+        # A rotation replaces the conversation, not the conversation's model.
+        # Naming it explicitly means a `/model` switch survives the swap, and
+        # a default changed in the console mid-conversation cannot reach in
+        # and move a live one — that default is for the *next* conversation.
         new = await self.create_session(
             owner_type=routing["owner_type"],
             owner_ref=routing["owner_ref"],
             client_ref=client_ref,
+            model=session["model"],
             mind_id=session["mind_id"],
             rotated_from=old_id,
         )

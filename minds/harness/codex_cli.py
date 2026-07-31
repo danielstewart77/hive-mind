@@ -44,6 +44,7 @@ from minds.pty_attach import (
     seeded_pane_command,
 )
 from minds.pty_attach import teardown as teardown_pty
+from minds import runtime_api
 from core.hive_logging import configure_logging, install_fastapi_logging, log_event
 
 MIND_NAME = os.environ.get("MIND_NAME", "example")
@@ -53,10 +54,10 @@ PROJECT_DIR = Path("/usr/src/app")
 
 log = configure_logging(f"hive-mind.minds.{MIND_NAME}")
 
-RUNTIME = yaml.safe_load((MIND_DIR / "runtime.yaml").read_text())
+RUNTIME_PATH = MIND_DIR / "runtime.yaml"
+RUNTIME = yaml.safe_load(RUNTIME_PATH.read_text())
 NAME: str = RUNTIME["name"]
 MIND_ID: str = RUNTIME["mind_id"]
-DEFAULT_MODEL: str = RUNTIME["default_model"]
 PROVIDER: str = RUNTIME["provider"]
 RUNTIME_ENV: dict[str, Any] = RUNTIME.get("env", {}) or {}
 
@@ -193,8 +194,10 @@ async def _reap_proc(proc: asyncio.subprocess.Process | None) -> None:
 @app.on_event("startup")
 async def _startup() -> None:
     await _fetch_secrets_on_startup()
-    log.info("%s ready (mind_id=%s, default_model=%s, codex_home=%s)",
-             NAME, MIND_ID, DEFAULT_MODEL, CODEX_HOME)
+    await runtime_api.register_with_broker(
+        RUNTIME_PATH, mind_name=MIND_NAME, mind_id=MIND_ID, log=log
+    )
+    log.info("%s ready (mind_id=%s, codex_home=%s)", NAME, MIND_ID, CODEX_HOME)
 
 
 @app.get("/health")
@@ -214,7 +217,15 @@ async def list_sessions() -> list[dict]:
 async def create_session(req: Request) -> Any:
     body = await req.json()
     sid = body.get("session_id") or str(uuid4())
-    model = body.get("model") or DEFAULT_MODEL
+    # No default. A spawn that arrives without a model has already lost the
+    # one the gateway resolved from this mind's broker row, and quietly
+    # substituting a house favourite is how that goes unnoticed for weeks.
+    model = str(body.get("model") or "").strip()
+    if not model:
+        return JSONResponse(
+            {"error": "model required — the gateway resolves it per session"},
+            status_code=400,
+        )
     # The gateway's conversation id. Codex cannot adopt it — see THREADS —
     # so it is never passed to the CLI; this session's thread is whatever
     # codex minted for it, if it has spoken at all.
@@ -482,11 +493,16 @@ def _rotate_pty(
 
     # The old thread id must go: it belongs to the conversation being
     # replaced, and a later reattach that resumed it would undo the rotation.
+    if not model:
+        log.warning("Refusing to rotate session %s: no model to carry over",
+                    session_id)
+        return False
+
     THREADS.pop(session_id, None)
     before = _existing_rollout_paths()
 
     argv = seeded_pane_command(
-        _terminal_argv(model or DEFAULT_MODEL, None),
+        _terminal_argv(model, None),
         system_prompt,
         CODEX_HOME / "rotation-seeds" / f"{session_id}.txt",
     )
@@ -504,6 +520,7 @@ def _rotate_pty(
 
 install_pty_attach(app, mind_name=NAME, terminals=TERMINALS,
                    spawn=_spawn_pty, rotate=_rotate_pty)
+runtime_api.install_runtime_routes(app, path=RUNTIME_PATH, mind_id=MIND_ID, log=log)
 
 
 async def _run_codex_turn(sid: str, content: str, images: list[dict] | None) -> Any:
