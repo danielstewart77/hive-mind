@@ -642,13 +642,17 @@
         });
 
         // ── pty attach over WS ────────────────────────────────────
+        // Every handler comes off before the close, because close() is
+        // asynchronous and a socket in CLOSING still delivers whatever the
+        // browser has queued for it. Leaving onmessage attached let the
+        // outgoing socket keep writing into the terminal alongside its
+        // replacement — two tmux clients' cursor-addressed update streams
+        // interleaved into one buffer, which is corruption no repaint can
+        // undo. See TerminalRouting.detachSocket.
         function closeSocket() {
-            if (ws) {
-                const dead = ws;
-                ws = null;
-                dead.onclose = null;
-                try { dead.close(); } catch (err) { /* already closing */ }
-            }
+            const dead = ws;
+            ws = null;
+            TerminalRouting.detachSocket(dead);
         }
         // TEXT frames are the control channel (the pty end parses them as
         // JSON); terminal bytes always travel as BINARY frames.
