@@ -100,7 +100,7 @@ def test_catalog_annotates_which_tags_are_pulled(monkeypatch):
 
 def test_catalog_reports_what_fits_in_the_free_vram(monkeypatch):
     monkeypatch.setattr(training_models, "installed_serve_tags", lambda url=None: set())
-    rows = {row["id"]: row for row in catalog(free_vram_mib=16_000)}
+    rows = {row["id"]: row for row in catalog(free_vram_mib=24_000)}
     assert rows["Qwen/Qwen3-8B"]["fits_now"] is True
     assert rows["Qwen/Qwen3-30B-A3B-Instruct-2507"]["fits_now"] is False
 

@@ -124,17 +124,40 @@ def read_gpu_state() -> GpuState:
         return GpuState()
 
 
+#: Fallback weight footprints, in MiB, for a base the catalog does not know.
+#: Sized for the largest model this hardware can train, because refusing a
+#: run that would have fit is recoverable and an OOM at hour three is not.
+UNKNOWN_MODEL_4BIT_MIB = 22_000
+UNKNOWN_MODEL_BF16_MIB = 60_000
+
+
 def estimate_required_mib(spec: FineTuneSpec) -> int:
-    """Rough VRAM floor for a 4-bit LoRA at this sequence length.
+    """Rough VRAM floor for a LoRA over this base at this sequence length.
 
     Deliberately a crude linear model. Its job is to stop a run that will
     certainly OOM twenty minutes in, not to predict allocation precisely —
     the trainer reports the truth once it starts.
+
+    The weight term comes from the catalog, because it is the base model
+    that decides it. A single constant here — which is what this was —
+    charged an 8B model the footprint of a 30B one and refused runs that
+    would have fitted twice over.
     """
-    weights = 22_000 if spec.load_in_4bit else 60_000
-    activations = int(
-        spec.max_sequence_length * spec.per_device_batch_size * 1.6
-    )
+    from core.training_models import get as _get_base_model
+
+    base = _get_base_model(spec.base_model)
+    if base is not None:
+        # The catalog quotes weights under 4-bit loading. bf16 holds four
+        # times the bytes per parameter; three times is the conservative
+        # rounding of that difference plus its optimizer overhead.
+        weights = (
+            base.weights_vram_mib if spec.load_in_4bit else base.weights_vram_mib * 3
+        )
+    else:
+        weights = (
+            UNKNOWN_MODEL_4BIT_MIB if spec.load_in_4bit else UNKNOWN_MODEL_BF16_MIB
+        )
+    activations = int(spec.max_sequence_length * spec.per_device_batch_size * 1.6)
     return weights + activations
 
 

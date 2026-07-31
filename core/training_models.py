@@ -31,6 +31,11 @@ OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 ARCH_DENSE = "dense"
 ARCH_MOE = "moe"
 
+#: The sequence length the catalog quotes its VRAM figures at. The train
+#: form defaults here too, so a number shown beside a model is the number
+#: that model will actually need if nothing else is touched.
+REFERENCE_SEQUENCE_LENGTH = 8_192
+
 
 @dataclass(frozen=True)
 class BaseModel:
@@ -50,14 +55,23 @@ class BaseModel:
     """Why you would pick this one, in a sentence a non-specialist reads."""
 
     recommended: bool = False
-    train_vram_mib: int = 0
-    """Rough 4-bit LoRA floor at 8k sequence length. Crude on purpose —
-    it exists to sort the list and to warn, not to predict allocation."""
+    weights_vram_mib: int = 0
+    """What the weights alone occupy under 4-bit loading. Crude on purpose:
+    it is the model-dependent half of the launch planner's estimate, and
+    exists to stop a run that will certainly OOM rather than to predict
+    allocation. Activations — the sequence-length-dependent half — are the
+    planner's to add, since they depend on settings this entry knows
+    nothing about."""
 
     tags: tuple[str, ...] = field(default_factory=tuple)
 
+    @property
+    def train_vram_mib(self) -> int:
+        """What a run at the default 8k sequence length needs, for display."""
+        return self.weights_vram_mib + int(REFERENCE_SEQUENCE_LENGTH * 1.6)
+
     def as_dict(self) -> dict:
-        return asdict(self)
+        return {**asdict(self), "train_vram_mib": self.train_vram_mib}
 
 
 # Ordered smallest-first within each architecture group. Every entry is a
@@ -77,7 +91,7 @@ CATALOG: tuple[BaseModel, ...] = (
             "well on its own — treat a good result here as a green light for "
             "a larger base, not as the finished product."
         ),
-        train_vram_mib=11_000,
+        weights_vram_mib=4_000,
         tags=("fast", "smoke-test"),
     ),
     BaseModel(
@@ -94,7 +108,7 @@ CATALOG: tuple[BaseModel, ...] = (
             "house style at the same time."
         ),
         recommended=True,
-        train_vram_mib=15_000,
+        weights_vram_mib=6_500,
         tags=("balanced", "first-real-run"),
     ),
     BaseModel(
@@ -109,7 +123,7 @@ CATALOG: tuple[BaseModel, ...] = (
             "stylistically flat — a second opinion from a different pretrain "
             "is cheaper than another epoch on the same one."
         ),
-        train_vram_mib=20_000,
+        weights_vram_mib=9_000,
         tags=("alternative-lineage",),
     ),
     BaseModel(
@@ -123,7 +137,7 @@ CATALOG: tuple[BaseModel, ...] = (
             "live inference workload. Pick it once an 8B run has proved the "
             "dataset is worth the extra hours."
         ),
-        train_vram_mib=24_000,
+        weights_vram_mib=10_500,
         tags=("balanced",),
     ),
     BaseModel(
@@ -139,7 +153,7 @@ CATALOG: tuple[BaseModel, ...] = (
             "experts your corpus happens to activate and leaving the rest "
             "untouched. Already the default for several minds here."
         ),
-        train_vram_mib=26_000,
+        weights_vram_mib=14_000,
         tags=("moe", "already-served"),
     ),
     BaseModel(
@@ -154,7 +168,7 @@ CATALOG: tuple[BaseModel, ...] = (
             "for the fine-tune to show an improvement. Mixture-of-experts, "
             "so expect a longer run and a fussier result than a dense base."
         ),
-        train_vram_mib=34_000,
+        weights_vram_mib=19_500,
         tags=("moe", "code"),
     ),
     BaseModel(
@@ -172,7 +186,7 @@ CATALOG: tuple[BaseModel, ...] = (
             "base of half the size. Reach for it when a smaller fine-tune "
             "has already proved out the dataset."
         ),
-        train_vram_mib=38_000,
+        weights_vram_mib=19_800,
         tags=("moe", "largest"),
     ),
 )
