@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import sqlite3
-import stat
-import tempfile
 import time
 import urllib.parse
 from pathlib import Path
@@ -173,26 +170,24 @@ def get_edge_mind_metadata(name: str) -> dict[str, str] | None:
     }
 
 
-def _runtime_paths(name: str) -> tuple[Path, Path]:
-    """Read path and write path for a Mind's runtime.yaml.
+def _runtime_path(name: str) -> Path:
+    """Where a Mind on this host keeps its runtime.yaml, for reading.
 
-    A containerized Mind's file lives under hive_mind's minds/, mounted
-    twice — read-only for display, read-write for these narrow edits. An
-    edge Mind on this host keeps its own file in its hive-edge-minds
-    checkout, mounted read-write at /minds_edge/<name>/, where read and
-    write are the same path.
+    A containerized Mind's file lives under hive_mind's minds/; an edge Mind
+    on this host keeps its own in its checkout, mounted at
+    /minds_edge/<name>/. Both are read-only here — the console configures a
+    Mind through its HTTP API (see mind_runtime.py), which is the one path
+    that also reaches a Mind on another machine. This read is the bootstrap
+    for registering a Mind that has never started.
     """
     if not _MIND_NAME_RE.fullmatch(name):
         raise ValueError("Invalid Mind name")
     source = HIVE_MIND_MINDS_DIR / name / "runtime.yaml"
-    if source.is_file():
-        return (source, HIVE_MIND_MINDS_CONFIG_DIR / name / "runtime.yaml")
-    edge = EDGE_MINDS_DIR / name / "runtime.yaml"
-    return (edge, edge)
+    return source if source.is_file() else EDGE_MINDS_DIR / name / "runtime.yaml"
 
 
 def local_runtime_configuration(name: str) -> dict[str, Any]:
-    source, _ = _runtime_paths(name)
+    source = _runtime_path(name)
     if not source.is_file():
         raise ValueError("This Mind has no local runtime configuration")
     try:
@@ -203,40 +198,6 @@ def local_runtime_configuration(name: str) -> dict[str, Any]:
         raise ValueError("Runtime configuration must be a mapping")
     if configuration.get("remote") is True:
         raise ValueError("This Mind is remote and must be configured on its host")
-    return configuration
-
-
-def update_local_runtime_model(name: str, default_model: str) -> dict[str, Any]:
-    if not _MODEL_NAME_RE.fullmatch(default_model):
-        raise ValueError("Model name contains unsupported characters")
-    source, target = _runtime_paths(name)
-    configuration = local_runtime_configuration(name)
-    source_text = target.read_text() if target.is_file() else source.read_text()
-    replacement = f"default_model: {json.dumps(default_model)}"
-    updated_text, count = re.subn(
-        r"^default_model\s*:.*$", replacement, source_text, count=1, flags=re.MULTILINE
-    )
-    if count != 1:
-        raise ValueError("Runtime configuration has no default_model field")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target_metadata = target.stat() if target.exists() else source.stat()
-    file_descriptor, temporary_name = tempfile.mkstemp(
-        prefix="runtime-", suffix=".yaml", dir=target.parent
-    )
-    try:
-        with os.fdopen(file_descriptor, "w") as temporary_file:
-            temporary_file.write(updated_text)
-            temporary_file.flush()
-            os.fsync(temporary_file.fileno())
-            os.fchmod(temporary_file.fileno(), stat.S_IMODE(target_metadata.st_mode))
-            os.fchown(
-                temporary_file.fileno(), target_metadata.st_uid, target_metadata.st_gid
-            )
-        os.replace(temporary_name, target)
-    finally:
-        if os.path.exists(temporary_name):
-            os.unlink(temporary_name)
-    configuration["default_model"] = default_model
     return configuration
 
 
@@ -349,6 +310,9 @@ def scaffold_internal_mind(
                     "HIVE_TOOLS_TOKEN=${HIVE_TOOLS_TOKEN}",
                     "COMMS_URL=http://hive-comms:8424",
                     "COMMS_BEARER_TOKEN=${COMMS_BEARER_TOKEN}",
+                    # A Mind re-registers from its own runtime.yaml on every
+                    # start, and POST /broker/minds is an admin route.
+                    "COMMS_ADMIN_BEARER_TOKEN=${COMMS_ADMIN_BEARER_TOKEN}",
                     "HIVEMIND_BROKER_URL=http://hive-comms:8424",
                     "HIVEMIND_BROKER_TOKEN=${COMMS_BEARER_TOKEN}",
                     "GATEWAY_URL=http://server:8420",

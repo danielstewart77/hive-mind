@@ -56,9 +56,9 @@ from configuration_data import (
     scaffold_internal_mind,
     set_capability_endpoint,
     set_edge_mind_metadata,
-    update_local_runtime_model,
 )
 from graph_data import get_graph_data
+import mind_runtime
 from hive_logging import configure_logging, install_fastapi_logging, log_event
 from credentials_data import list_credentials, rotate_credential, set_github_pat
 from settings_data import (
@@ -278,12 +278,29 @@ async def _gateway_json(path: str, params: dict | None = None) -> dict | list:
         raise HTTPException(status_code=502, detail=f"Gateway unavailable: {exc}") from exc
 
 
+def _admin_headers() -> dict:
+    """The gateway's admin bearer, required by every consequential route.
+
+    Registering a Mind, changing its row, and writing its runtime.yaml are
+    all admin operations — the service token comms hands out for reads is
+    rejected on all of them.
+    """
+    token = os.getenv("COMMS_ADMIN_BEARER_TOKEN", "")
+    if not token:
+        raise HTTPException(
+            status_code=503,
+            detail="COMMS_ADMIN_BEARER_TOKEN is not configured for this console",
+        )
+    return {"Authorization": f"Bearer {token}"}
+
+
 async def _gateway_request(
     method: str,
     path: str,
     *,
     params: dict | None = None,
     json_body: dict | None = None,
+    admin: bool = False,
 ) -> dict | list:
     url = f"{_gateway_base_url().rstrip('/')}{path}"
     async with httpx.AsyncClient(timeout=15.0) as client:
@@ -292,7 +309,7 @@ async def _gateway_request(
             url,
             params=params,
             json=json_body,
-            headers=_gateway_headers(),
+            headers=_admin_headers() if admin else _gateway_headers(),
         )
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=response.text)
@@ -1763,13 +1780,20 @@ async def api_settings_minds(user: dict = Depends(require_auth)):
     return {"minds": _add_session_activity(build_mind_registry(broker_minds), sessions)}
 
 
+async def _mind_gateway_url(name: str) -> str:
+    """The registered gateway URL for a Mind, by display name."""
+    for mind in await _broker_minds_safe():
+        if str(mind.get("name") or "").lower() == name.strip().lower():
+            return str(mind.get("gateway_url") or "")
+    raise HTTPException(status_code=404, detail="That Mind is not registered")
+
+
 @app.get("/api/minds/{name}/configuration")
 async def api_mind_configuration(name: str, user: dict = Depends(require_auth)):
     del user
-    try:
-        configuration = local_runtime_configuration(name)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    configuration = await mind_runtime.fetch_configuration(
+        await _mind_gateway_url(name)
+    )
     try:
         model_rows = await _gateway_json("/models")
     except HTTPException:
@@ -1810,31 +1834,39 @@ async def api_mind_configuration_update(
     default_model = str(
         body.get("default_model") if isinstance(body, dict) else ""
     ).strip()
-    try:
-        previous_configuration = local_runtime_configuration(name)
-        configuration = update_local_runtime_model(name, default_model)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    gateway_url = await _mind_gateway_url(name)
+
+    # The Mind's own file first, then the broker row that caches it. In this
+    # order a failure leaves the two agreeing rather than diverging: the Mind
+    # re-registers from the file on its next start, so a row written against
+    # a file that never took would be undone anyway.
+    previous_configuration = await mind_runtime.fetch_configuration(gateway_url)
+    configuration = await mind_runtime.push_default_model(gateway_url, default_model)
     try:
         await _gateway_request(
             "PUT",
             f"/broker/minds/{urllib.parse.quote(name)}",
             json_body={"model": default_model},
+            admin=True,
         )
     except HTTPException:
         previous_model = str(previous_configuration.get("default_model") or "")
         if previous_model:
-            update_local_runtime_model(name, previous_model)
+            await mind_runtime.push_default_model(gateway_url, previous_model)
         raise
     log_event(
         log, "mind.configuration.updated", **_actor_fields(user), mind_name=name,
-        previous_model=previous_configuration.get("default_model"), default_model=default_model,
-        restart_required=True,
+        previous_model=previous_configuration.get("default_model"),
+        default_model=default_model,
     )
     deployment = str(configuration.get("deployment") or "container")
     return {
         "saved": True,
-        "restart_required": True,
+        # Live on the next session this Mind is asked for. The broker row the
+        # gateway reads at session creation has already been updated, and the
+        # Mind's own file now says the same thing, so a restart would change
+        # nothing about the model.
+        "restart_required": False,
         # Only a containerized Mind can be bounced from here; anything else
         # runs under an init system this console does not reach.
         "restartable": deployment == "container",
