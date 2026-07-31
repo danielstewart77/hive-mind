@@ -10,9 +10,9 @@ file that currently holds it, which is what this module does — it does not
 guess a uniform scheme across all credentials, because not all credentials
 share one. HIVE_TOOLS_TOKEN is issued per-consumer from a sqlite table
 (sha256-hashed, see hive-tools/auth_api.py) and has no symmetric env copy to
-fan out to; GitHub PATs and the Planka password have no rotation API at
-all. Both are listed as informational, non-rotatable entries so the tab is
-honest about what it can and can't do.
+fan out to; GitHub PATs have no rotation API at all. It's listed as an
+informational, non-rotatable entry so the tab is honest about what it can
+and can't do.
 """
 
 from __future__ import annotations
