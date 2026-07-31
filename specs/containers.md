@@ -97,10 +97,6 @@ Same image/Dockerfile pattern as voice-server (`Dockerfile.voice.kokoro`), conta
 
 Walks `minds/*/.claude/skills/*/SKILL.md` at startup and registers a job per `schedule:`-declared skill.
 
-### planka-db / planka
-
-Unchanged from any standard Planka deployment: `postgres:14-alpine` (`hive-mind-planka-db`) + `ghcr.io/plankanban/planka:latest` (`hive-mind-planka`, host port `3000:1337`), named volumes for Postgres data and Planka's avatars/backgrounds/attachments.
-
 ---
 
 ## Network
@@ -118,8 +114,6 @@ docker network create hivemind
 | `hive-comms` | 8424 | HTTP |
 | `voice-server` | 8422 | HTTP |
 | `voice-server-kokoro` | 8422 | HTTP |
-| `planka-db` | 5432 | PostgreSQL |
-| `planka` | 1337 | HTTP |
 
 ---
 
@@ -127,8 +121,6 @@ docker network create hivemind
 
 | Volume | Container path | Contents |
 |--------|---------------|----------|
-| `planka-db` | `/var/lib/postgresql/data` | Kanban DB |
-| `planka-data` | `/app/public/*`, `/app/private/attachments` | Kanban files |
 | `whisper-cache` | `/home/hivemind/.cache` | Whisper STT + Chatterbox TTS models |
 | `kokoro-cache` | `/home/hivemind/.cache` | Kokoro TTS models |
 

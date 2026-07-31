@@ -94,7 +94,6 @@ hive-mind/
 │       ├── crypto/crypto.py      # CoinGecko crypto prices
 │       ├── weather/weather.py    # Open-Meteo weather
 │       ├── notify/notify.py      # Telegram/email notifications
-│       ├── planka/planka.py      # Planka Kanban board
 │       ├── reminders/reminders.py # One-time reminders (SQLite)
 │       ├── secrets/secrets.py    # Keyring secret management
 │       ├── x_api/x_api.py       # X/Twitter search
@@ -170,7 +169,6 @@ models:
 
 Secrets are stored in the system keyring (`keyrings.alt.file.PlaintextKeyring`).
 Use `get_credential()` from `core/secrets.py` to read them.
-A minimal `.env` remains for docker-compose interpolation (Planka only).
 
 ## Gateway API
 

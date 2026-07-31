@@ -440,8 +440,7 @@ def run_post_merge_pipeline(
     3. cleanup_story_directory -- best-effort (log but don't stop)
     4. notify_completion -- best-effort (log but don't stop)
 
-    Note: This does NOT rebuild containers (handled by skill via compose_up)
-    and does NOT move the Planka card (handled by skill via planka_move_card).
+    Note: This does NOT rebuild containers (handled by skill via compose_up).
 
     Args:
         card_name: Name of the story card.
