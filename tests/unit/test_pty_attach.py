@@ -143,14 +143,14 @@ class TestAttachRoute:
     def test_attach_without_a_conversation_id_is_refused(self):
         client = TestClient(_app(_echo_spawn))
         with pytest.raises(Exception) as excinfo:
-            with client.websocket_connect("/sessions/s1/attach-pty") as ws:
+            with client.websocket_connect("/sessions/s1/attach-pty?model=opus") as ws:
                 ws.receive_bytes()
         assert excinfo.value.code == 1008
         assert not pty_attach.PTYS
 
     def test_bytes_round_trip_through_the_pty(self):
         client = TestClient(_app(_echo_spawn))
-        with client.websocket_connect("/sessions/s2/attach-pty?resume_sid=c2") as ws:
+        with client.websocket_connect("/sessions/s2/attach-pty?model=opus&resume_sid=c2") as ws:
             ws.send_bytes(b"hello\n")
             assert b"hello" in ws.receive_bytes()
 
@@ -161,7 +161,7 @@ class TestAttachRoute:
         nothing here has to remember bytes."""
         terminals = FakeTerminals()
         client = TestClient(_app(_echo_spawn, terminals=terminals))
-        with client.websocket_connect("/sessions/s3/attach-pty?resume_sid=c3") as ws:
+        with client.websocket_connect("/sessions/s3/attach-pty?model=opus&resume_sid=c3") as ws:
             ws.send_bytes(b"first\n")
             assert b"first" in ws.receive_bytes()
 
@@ -169,7 +169,7 @@ class TestAttachRoute:
         assert handle.detached_at is not None
         assert handle.proc is None          # the client ended with the socket
 
-        with client.websocket_connect("/sessions/s3/attach-pty?resume_sid=c3") as ws:
+        with client.websocket_connect("/sessions/s3/attach-pty?model=opus&resume_sid=c3") as ws:
             ws.send_bytes(b"second\n")
             assert b"second" in _read_until(ws, b"second")
             assert pty_attach.PTYS["s3"] is handle   # same conversation
@@ -180,10 +180,10 @@ class TestAttachRoute:
         was replaced rather than that its terminal exited."""
         client = TestClient(_app(_echo_spawn))
         with pytest.raises(Exception) as excinfo:
-            with client.websocket_connect("/sessions/s8/attach-pty?resume_sid=c8") as first:
+            with client.websocket_connect("/sessions/s8/attach-pty?model=opus&resume_sid=c8") as first:
                 first.send_bytes(b"one\n")
                 first.receive_bytes()
-                with client.websocket_connect("/sessions/s8/attach-pty?resume_sid=c8"):
+                with client.websocket_connect("/sessions/s8/attach-pty?model=opus&resume_sid=c8"):
                     # Whatever the pty had already echoed drains first; the
                     # eviction is what ends the stream.
                     for _ in range(10):
@@ -196,7 +196,7 @@ class TestAttachRoute:
 
         client = TestClient(_app(_refuse))
         with pytest.raises(Exception) as excinfo:
-            with client.websocket_connect("/sessions/s4/attach-pty?resume_sid=c4") as ws:
+            with client.websocket_connect("/sessions/s4/attach-pty?model=opus&resume_sid=c4") as ws:
                 ws.receive_bytes()
         assert excinfo.value.code == 1008
 
@@ -206,7 +206,7 @@ class TestAttachRoute:
 
         client = TestClient(_app(_boom))
         with pytest.raises(Exception) as excinfo:
-            with client.websocket_connect("/sessions/s5/attach-pty?resume_sid=c5") as ws:
+            with client.websocket_connect("/sessions/s5/attach-pty?model=opus&resume_sid=c5") as ws:
                 ws.receive_bytes()
         assert excinfo.value.code == 1011
 
@@ -215,7 +215,7 @@ class TestAttachRoute:
         with nobody able to reach it."""
         terminals = FakeTerminals()
         client = TestClient(_app(_echo_spawn, terminals=terminals))
-        with client.websocket_connect("/sessions/s6/attach-pty?resume_sid=c6") as ws:
+        with client.websocket_connect("/sessions/s6/attach-pty?model=opus&resume_sid=c6") as ws:
             ws.send_bytes(b"x\n")
             ws.receive_bytes()
 
@@ -234,7 +234,7 @@ class TestAttachRoute:
 
         client = TestClient(_app(_spawn))
         with client.websocket_connect(
-            "/sessions/s9/attach-pty?resume_sid=c9&owner_type=terminal"
+            "/sessions/s9/attach-pty?model=opus&resume_sid=c9&owner_type=terminal"
             "&owner_ref=daniel&harness_sid=thread-3&cols=100&rows=30"
         ) as ws:
             ws.send_bytes(b"y\n")
@@ -252,7 +252,7 @@ class TestAttachRoute:
         # reattach instead of sitting black.
         monkeypatch.setattr(pty_attach, "_PTY_KEEPALIVE_S", 0.05)
         client = TestClient(_app(_echo_spawn))
-        with client.websocket_connect("/sessions/s10/attach-pty?resume_sid=c10") as ws:
+        with client.websocket_connect("/sessions/s10/attach-pty?model=opus&resume_sid=c10") as ws:
             assert ws.receive_bytes() == b"\x00"
 
     def test_winsize_is_clamped_to_something_a_tui_can_render(self):
@@ -332,7 +332,7 @@ class TestRotateRoute:
     def test_rotation_repoints_the_live_handle(self):
         calls: list[dict] = []
         client = TestClient(self._rotating_app(calls))
-        with client.websocket_connect("/sessions/r1/attach-pty?resume_sid=old") as ws:
+        with client.websocket_connect("/sessions/r1/attach-pty?model=opus&resume_sid=old") as ws:
             ws.send_bytes(b"x\n")
             ws.receive_bytes()
             resp = client.post("/sessions/r1/rotate-pty", json={
@@ -363,7 +363,7 @@ class TestRotateRoute:
 
     def test_a_mind_with_no_live_terminal_reports_rotated_false(self):
         client = TestClient(self._rotating_app([], result=False))
-        with client.websocket_connect("/sessions/r4/attach-pty?resume_sid=old") as ws:
+        with client.websocket_connect("/sessions/r4/attach-pty?model=opus&resume_sid=old") as ws:
             ws.send_bytes(b"x\n")
             ws.receive_bytes()
             resp = client.post("/sessions/r4/rotate-pty", json={"new_claude_sid": "new"})
@@ -421,7 +421,7 @@ class TestMirroredTurns:
 
     def test_a_chat_turn_is_overlaid_on_the_attached_tile(self):
         client = TestClient(_app(_echo_spawn))
-        with client.websocket_connect("/sessions/m1/attach-pty?resume_sid=c-m1") as ws:
+        with client.websocket_connect("/sessions/m1/attach-pty?model=opus&resume_sid=c-m1") as ws:
             ws.send_bytes(b"warmup\n")
             ws.receive_bytes()
 
@@ -441,7 +441,7 @@ class TestMirroredTurns:
 
     def test_a_turn_with_no_assistant_text_paints_nothing(self):
         client = TestClient(_app(_echo_spawn))
-        with client.websocket_connect("/sessions/m2/attach-pty?resume_sid=c-m2") as ws:
+        with client.websocket_connect("/sessions/m2/attach-pty?model=opus&resume_sid=c-m2") as ws:
             ws.send_bytes(b"warmup\n")
             ws.receive_bytes()
             assert pty_attach.mirror_turn(
