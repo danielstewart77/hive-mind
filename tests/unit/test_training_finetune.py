@@ -128,3 +128,61 @@ def test_modelfile_serves_the_adapter_over_a_shared_base(train_file):
     text = ollama_modelfile(_spec(train_file), "/adapters/v1", "qwen3:30b")
     assert text.splitlines()[0] == "FROM qwen3:30b"
     assert "ADAPTER /adapters/v1" in text
+
+
+def test_the_cache_directory_comes_from_the_environment(monkeypatch, tmp_path):
+    """A container has to be told the host path; it cannot derive one."""
+    from core.training_finetune import huggingface_cache_dir
+
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "models"))
+    assert huggingface_cache_dir() == str(tmp_path / "models")
+
+
+def test_an_uncreatable_cache_path_is_still_returned(monkeypatch):
+    """The path is for the Docker daemon on the host, not for this process."""
+    from pathlib import Path
+
+    from core.training_finetune import huggingface_cache_dir
+
+    monkeypatch.setenv("HF_HOME", "/home/daniel/.cache/huggingface")
+
+    def refuse(*args, **kwargs):
+        raise PermissionError("read-only container filesystem")
+
+    monkeypatch.setattr(Path, "mkdir", refuse)
+    assert huggingface_cache_dir() == "/home/daniel/.cache/huggingface"
+
+
+def test_the_launch_command_mounts_the_cache_and_asks_for_train_mode(
+    monkeypatch, train_file, tmp_path
+):
+    """Without the cache mount every run re-downloads the whole base model."""
+    import subprocess
+
+    from core.training_finetune import GpuState, launch
+
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "models"))
+    captured = {}
+
+    class _Completed:
+        stdout = "abc123\n"
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        return _Completed()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/" + name)
+
+    launch(
+        _spec(train_file, max_sequence_length=1024),
+        tmp_path,
+        gpu=GpuState(total_mib=49_140, used_mib=0, name="A6000", available=True),
+    )
+
+    command = captured["command"]
+    assert "--mode" in command and command[command.index("--mode") + 1] == "train"
+    assert any(
+        str(tmp_path / "models") in part and "/root/.cache/huggingface" in part
+        for part in command
+    )
