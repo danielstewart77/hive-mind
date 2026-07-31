@@ -28,10 +28,6 @@ Service name for all keys: `hive-mind`.
 
 `HIVE_TOOLS_TOKEN`, `MCP_AUTH_TOKEN`, `X_BEARER_TOKEN`, `LINKEDIN_CLIENT_ID`/`LINKEDIN_CLIENT_SECRET`, `LUCENT_ADMIN_BEARER_TOKEN`/`COMMS_ADMIN_BEARER_TOKEN`, `SMS_INBOUND_HMAC_SECRET`.
 
-## Keys that stay in `.env` regardless — third-party, genuinely can't use a keyring
-
-Planka's own admin/DB credentials: `PLANKA_SECRET_KEY_BASE`, `PLANKA_DB_PASSWORD`, `PLANKA_BASE_URL`, `PLANKA_ADMIN_EMAIL`, `PLANKA_ADMIN_PASSWORD`, `PLANKA_ADMIN_NAME`, `PLANKA_ADMIN_USERNAME`. Planka can't read a keyring — this is the one place the "third-party only" framing genuinely holds.
-
 ## Rules
 
 - Never hardcode secrets in source code

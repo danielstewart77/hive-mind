@@ -54,8 +54,6 @@ Two separate `.env` files hold real secrets, both consumed via Docker Compose `e
 - Repo root `.env` (copy from `.env.example`) — `COMMS_BEARER_TOKEN`, bot tokens, SMTP.
 - `nervous-system/.env` (copy from `nervous-system/.env.example`) — `LUCENT_BEARER_TOKEN`, `COMMS_BEARER_TOKEN` (must match the root value — comms checks incoming requests against it), the two admin bearer tokens.
 
-Planka's own admin credentials (`PLANKA_DB_PASSWORD`, `PLANKA_SECRET_KEY_BASE`, `PLANKA_ADMIN_*`) are the one case that's genuinely third-party-only — Planka can't read a keyring, so those five stay `.env`-only regardless.
-
 ### Secrets actually required for a basic single-mind deployment
 
 | Key | Where | Used by |
@@ -65,4 +63,4 @@ Planka's own admin credentials (`PLANKA_DB_PASSWORD`, `PLANKA_SECRET_KEY_BASE`, 
 | `TELEGRAM_BOT_TOKEN` / `DISCORD_BOT_TOKEN` | root `.env` | Whichever surface(s) you run |
 | Claude Code credentials | mounted from `HOST_CLAUDE_DIR` (host `~/.claude`), not a keyring secret | Every mind's Claude CLI subprocess |
 
-`HIVE_TOOLS_TOKEN`, `MCP_AUTH_TOKEN`, `LINKEDIN_CLIENT_ID`/`SECRET`, and Planka's vars are only needed if you're actually running those integrations.
+`HIVE_TOOLS_TOKEN`, `MCP_AUTH_TOKEN`, and `LINKEDIN_CLIENT_ID`/`SECRET` are only needed if you're actually running those integrations.

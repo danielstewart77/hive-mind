@@ -146,7 +146,7 @@ in Python heuristics.
 
 ## Story Requirements
 
-When writing Planka stories for Hive Mind development, every story that involves
+When writing stories for Hive Mind development, every story that involves
 logic or reasoning must include:
 
 1. **The skill file path** — `skills/<name>/SKILL.md`
