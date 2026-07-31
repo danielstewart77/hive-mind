@@ -84,6 +84,7 @@ async def test_create_session_wires_drain_and_buffers_unsolicited_text(backend):
         resp = await backend.create_session(_JsonRequest({
             "session_id": "s1",
             "client_ref": "12345",
+            "model": "opus",
         }))
 
     assert resp["status"] == "running"

@@ -7,6 +7,10 @@ services:
     environment:
       - MIND_NAME=example
       - CLAUDE_CONFIG_DIR=/home/hivemind/.claude-config
+      - COMMS_URL=http://hive-comms:8424
+      # A mind re-registers from its own runtime.yaml on every start, and
+      # POST /broker/minds is an admin route.
+      - COMMS_ADMIN_BEARER_TOKEN=${COMMS_ADMIN_BEARER_TOKEN}
       - PYTHON_KEYRING_BACKEND=core.keyring_backend.HiveMindKeyring
       - PYTHONNOUSERSITE=1
       - PYTHONPATH=/usr/src/app/vendor
