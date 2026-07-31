@@ -143,3 +143,98 @@ def test_training_endpoints_require_authentication(tmp_path, monkeypatch):
             kwargs["json"] = {}
         response = getattr(client, method)(path, **kwargs)
         assert response.status_code in (302, 303, 307, 401, 403), path
+
+
+def test_base_models_proxies_to_hive_tools(tmp_path, monkeypatch, tools_call):
+    tools_call.return_value = {"default": "Qwen/Qwen3-8B", "models": []}
+    client = _authed_client(tmp_path, monkeypatch)
+
+    response = client.get("/api/training/base-models")
+
+    assert response.status_code == 200
+    assert response.json()["default"] == "Qwen/Qwen3-8B"
+    tools_call.assert_awaited_once_with("GET", "/training/base-models")
+
+
+def test_base_models_requires_authentication(tmp_path, monkeypatch):
+    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
+    monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
+    response = TestClient(main_mod.app).get(
+        "/api/training/base-models", follow_redirects=False
+    )
+    assert response.status_code in (302, 303, 307, 401)
+
+
+def test_deploy_proxies_the_body_to_hive_tools(tmp_path, monkeypatch, tools_call):
+    tools_call.return_value = {"deployed": True, "model_name": "skippy-lora"}
+    client = _authed_client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/api/training/deploy",
+        json={"name": "skippy-lora", "adapter_dir": "/data/v1/adapter"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["deployed"] is True
+    args, kwargs = tools_call.await_args
+    assert args == ("POST", "/training/deploy")
+    assert kwargs["json_body"]["adapter_dir"] == "/data/v1/adapter"
+
+
+def test_deploy_needs_an_adapter(tmp_path, monkeypatch, tools_call):
+    client = _authed_client(tmp_path, monkeypatch)
+    response = client.post("/api/training/deploy", json={"name": "skippy-lora"})
+    assert response.status_code == 400
+    tools_call.assert_not_awaited()
+
+
+def test_deploy_needs_a_name(tmp_path, monkeypatch, tools_call):
+    client = _authed_client(tmp_path, monkeypatch)
+    response = client.post(
+        "/api/training/deploy", json={"adapter_dir": "/data/v1/adapter"}
+    )
+    assert response.status_code == 400
+    tools_call.assert_not_awaited()
+
+
+def test_deploy_gets_the_long_timeout(tmp_path, monkeypatch, tools_call):
+    """Uploading a merged model or waiting on a conversion is not a 30s call."""
+    client = _authed_client(tmp_path, monkeypatch)
+    client.post(
+        "/api/training/deploy",
+        json={"name": "skippy-lora", "adapter_dir": "/data/v1/adapter"},
+    )
+    _, kwargs = tools_call.await_args
+    assert kwargs["timeout"] == main_mod._TRAINING_LONG_TIMEOUT_SECONDS
+
+
+def test_the_page_explains_every_decision_it_asks_for(tmp_path, monkeypatch):
+    """The hints are the feature. A control without one is a trap."""
+    client = _authed_client(tmp_path, monkeypatch)
+    body = client.get("/training").text
+
+    for phrase in (
+        "mixture-of-experts",
+        "lora rank",
+        "quantization",
+        "merge into the weights",
+        "stack the adapter on the base",
+    ):
+        assert phrase in body.lower(), f"the page never mentions {phrase}"
+
+    # Each of the four stages is present and numbered, so the order the
+    # pipeline actually runs in is visible without reading the docs.
+    for heading in ("1 · Curation", "2 · Export", "3 · Fine-tune", "4 · Deploy"):
+        assert heading in body
+
+
+def test_every_form_control_that_can_surprise_someone_has_a_hint(
+    tmp_path, monkeypatch
+):
+    import re
+
+    client = _authed_client(tmp_path, monkeypatch)
+    body = client.get("/training").text
+
+    hints = re.findall(r'data-hint="([^"]{40,})"', body)
+    assert len(hints) >= 18, f"only {len(hints)} explained controls"

@@ -1928,6 +1928,13 @@ async def api_training_status(user: dict = Depends(require_auth)):
     return await _hive_tools_request("GET", "/training/status")
 
 
+@app.get("/api/training/base-models")
+async def api_training_base_models(user: dict = Depends(require_auth)):
+    """Candidate bases, annotated with what this host can train and serve."""
+    del user
+    return await _hive_tools_request("GET", "/training/base-models")
+
+
 @app.get("/api/training/runs")
 async def api_training_runs(
     kind: str | None = None, limit: int = 20, user: dict = Depends(require_auth)
@@ -1985,6 +1992,30 @@ async def api_training_train(request: Request, user: dict = Depends(require_auth
         "training.train.requested",
         **_actor_fields(user),
         dry_run=bool(body.get("dry_run", True)),
+    )
+    return result
+
+
+@app.post("/api/training/deploy")
+async def api_training_deploy(request: Request, user: dict = Depends(require_auth)):
+    """Serve a trained adapter through Ollama, or start the merge first."""
+    body = await request.json()
+    if not isinstance(body, dict) or not str(body.get("adapter_dir") or "").strip():
+        raise HTTPException(status_code=400, detail="adapter_dir is required")
+    if not str(body.get("name") or "").strip():
+        raise HTTPException(status_code=400, detail="name is required")
+    result = await _hive_tools_request(
+        "POST",
+        "/training/deploy",
+        json_body=body,
+        timeout=_TRAINING_LONG_TIMEOUT_SECONDS,
+    )
+    log_event(
+        log,
+        "training.deploy.requested",
+        **_actor_fields(user),
+        model_name=body.get("name"),
+        strategy=body.get("strategy", "adapter"),
     )
     return result
 

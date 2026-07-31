@@ -1,12 +1,19 @@
 {% extends "layout.html" %}
 {% block title %}Training · Hive{% endblock %}
 {% block content %}
+{#
+  Every control on this page carries an explanation, because the page asks
+  for decisions whose vocabulary is not shared — quantization, LoRA rank,
+  mixture-of-experts — and whose consequences are measured in GPU-days and
+  in credentials that end up inside model weights. The hints are in the
+  markup rather than in a script so they stay greppable and reviewable.
+#}
 <main class="page">
     <header class="page-header">
         <div class="page-header-copy">
             <p class="page-eyebrow">Model training</p>
             <h1 class="page-title">Training</h1>
-            <p class="page-description">Every turn each mind takes is captured raw. Curation decides which of them should reach a trainer, export renders them with credentials scrubbed, and a fine-tune turns them into an adapter this Hive can serve.</p>
+            <p class="page-description">Every turn each mind takes is captured raw. Curation decides which of them should reach a trainer, export renders them as a dataset, fine-tuning turns that dataset into an adapter, and deploy puts the adapter in front of a mind. Four stages, in that order — each one only sees what the stage before it produced.</p>
         </div>
         <div class="page-actions"><button class="button button-quiet" id="training-refresh" type="button"><i data-lucide="refresh-cw"></i>Refresh</button></div>
     </header>
@@ -21,25 +28,25 @@
     <div id="training-error" class="error-state" hidden></div>
 
     <section class="surface">
-        <div class="surface-header"><div><h2>Curation</h2><p>Rules run in order and write a verdict onto every row. Nothing is deleted, so a changed policy can be re-applied to the whole corpus.</p></div></div>
+        <div class="surface-header"><div><h2>1 · Curation</h2><p>Rules run in order and write a verdict onto every row. Nothing is deleted, so a changed policy can be re-applied to the whole corpus at any time.</p></div></div>
         <div class="overview-stack">
             <form class="capability-config" id="training-curate-form">
                 <div class="field">
-                    <label for="keep-per-cluster">Keep per duplicate cluster</label>
+                    <label for="keep-per-cluster">Keep per duplicate cluster<button class="hint" type="button" tabindex="0" data-hint="The knob that matters most. Scheduled skills fire on a timer, so their turns come out nearly identical — on this corpus, near-duplicates were 60% of every row, and one alert skill alone accounted for 316 of them. A cluster is a group of those look-alikes, and this is how many of each survive. Set it to 1 and a recurring task loses all its genuine variety; leave it unbounded and a handful of timer-driven skills drown out every hand-written debugging session you actually want the model to learn from.">?</button></label>
                     <input id="keep-per-cluster" name="keep_per_cluster" type="number" min="1" max="1000" value="3" required>
-                    <small>Scheduled skills fire on a timer, so their turns are near-identical. One discards genuine variety in a recurring task; unbounded lets a single alert skill drown out every hand-written session.</small>
+                </div>
+                <div class="field-row">
+                    <div class="field">
+                        <label for="min-length">Minimum turn size (tokens)<button class="hint" type="button" tabindex="0" data-hint="Turns smaller than this are dropped unless they contain a tool call. A token is roughly three-quarters of a word. Very short turns — an acknowledgement, a one-word answer — carry no behaviour worth learning and cost a training slot each.">?</button></label>
+                        <input id="min-length" name="min_length_tokens" type="number" min="0" value="60">
+                    </div>
+                    <div class="field">
+                        <label for="max-length">Maximum turn size (tokens)<button class="hint" type="button" tabindex="0" data-hint="Turns larger than this cannot fit in the training window and are dropped here rather than truncated mid-thought later. Keep it at or below the sequence length you plan to train at — a turn excluded here can be re-included later by re-running curation with a higher ceiling.">?</button></label>
+                        <input id="max-length" name="max_length_tokens" type="number" min="512" value="32000">
+                    </div>
                 </div>
                 <div class="field">
-                    <label for="min-length">Minimum turn size (tokens)</label>
-                    <input id="min-length" name="min_length_tokens" type="number" min="0" value="60">
-                </div>
-                <div class="field">
-                    <label for="max-length">Maximum turn size (tokens)</label>
-                    <input id="max-length" name="max_length_tokens" type="number" min="512" value="32000">
-                </div>
-                <div class="field">
-                    <label><input type="checkbox" name="exclude_secret_rows"> Exclude rows containing credentials entirely</label>
-                    <small>Off by default: export redacts every credential regardless, and the underlying turn is usually a good demonstration of tool use.</small>
+                    <label><input type="checkbox" name="exclude_secret_rows"> Exclude rows containing credentials entirely<button class="hint" type="button" tabindex="0" data-hint="Off by default. The corpus is captured from real tool output, so some turns contain real tokens and passwords — but export replaces them before anything reaches a trainer, and the underlying turn is usually a good demonstration of tool use. Turn this on only if you want those turns gone from the dataset altogether rather than sanitized.">?</button></label>
                 </div>
                 <div class="form-actions">
                     <button class="button" type="submit">Run curation</button>
@@ -52,39 +59,42 @@
     </section>
 
     <section class="surface">
-        <div class="surface-header"><div><h2>Export</h2><p>Renders kept turns to <code>train.jsonl</code> and <code>eval.jsonl</code>. Credentials are replaced with same-shape surrogates unless you choose otherwise; the split is by session so an eval score cannot measure memorization.</p></div></div>
+        <div class="surface-header"><div><h2>2 · Export</h2><p>Renders the kept turns into <code>train.jsonl</code> and <code>eval.jsonl</code>. The split is by session, never by turn, so an eval score cannot be measuring memorization of a session the model already trained on.</p></div></div>
         <form class="capability-config" id="training-export-form">
-            <div class="field">
-                <label for="export-name">Dataset name</label>
-                <input id="export-name" name="name" value="v1" pattern="[A-Za-z0-9._-]{1,64}" required>
+            <div class="field-row">
+                <div class="field">
+                    <label for="export-name">Dataset name<button class="hint" type="button" tabindex="0" data-hint="Names the folder the dataset is written to, and is how you pick it again in the fine-tune step below. Exporting twice under the same name overwrites; use a new name when you change a policy and want to compare.">?</button></label>
+                    <input id="export-name" name="name" value="v1" pattern="[A-Za-z0-9._-]{1,64}" required>
+                </div>
+                <div class="field">
+                    <label for="export-mode">Reasoning<button class="hint" type="button" tabindex="0" data-hint="Captured turns often include the model's private thinking before it acted. Stripped drops those entirely — the right choice for a base model that does not reason. Inline keeps each thought in front of the action it produced, which teaches the model to think before acting, but only helps if the base model supports reasoning at inference.">?</button></label>
+                    <select id="export-mode" name="mode">
+                        <option value="stripped">Stripped — for a non-reasoning base model</option>
+                        <option value="reasoning">Inline — thoughts kept in front of the action they produced</option>
+                    </select>
+                </div>
+            </div>
+            <div class="field-row">
+                <div class="field">
+                    <label for="export-harness">Harness<button class="hint" type="button" tabindex="0" data-hint="Which harness the turns were captured from. Claude Code and Codex format tool calls differently, so a mixed dataset teaches both formats — fine if the fine-tune will drive both, muddled if it will only ever drive one.">?</button></label>
+                    <select id="export-harness" name="harness">
+                        <option value="">Both</option>
+                        <option value="claude_code">Claude Code only</option>
+                        <option value="codex">Codex only</option>
+                    </select>
+                </div>
+                <div class="field">
+                    <label for="eval-fraction">Eval fraction<button class="hint" type="button" tabindex="0" data-hint="What share of sessions is held back from training and used to score the result. Five percent is plenty on a corpus this size. Zero means no eval file and no way to tell whether the run learned anything or just memorized.">?</button></label>
+                    <input id="eval-fraction" name="eval_fraction" type="number" step="0.01" min="0" max="0.5" value="0.05">
+                </div>
             </div>
             <div class="field">
-                <label for="export-mode">Reasoning</label>
-                <select id="export-mode" name="mode">
-                    <option value="stripped">Stripped — for a non-reasoning base model</option>
-                    <option value="reasoning">Inline — thoughts kept in front of the action they produced</option>
-                </select>
-            </div>
-            <div class="field">
-                <label for="export-harness">Harness</label>
-                <select id="export-harness" name="harness">
-                    <option value="">Both</option>
-                    <option value="claude_code">Claude Code only</option>
-                    <option value="codex">Codex only</option>
-                </select>
-            </div>
-            <div class="field">
-                <label for="eval-fraction">Eval fraction</label>
-                <input id="eval-fraction" name="eval_fraction" type="number" step="0.01" min="0" max="0.5" value="0.05">
-            </div>
-            <div class="field">
-                <label for="export-secrets">Credentials</label>
+                <label for="export-secrets">Credentials<button class="hint" type="button" tabindex="0" data-hint="The corpus contains real tokens and passwords, because it was captured from real tool output. Randomize (default) swaps each one for a different string of the same length and shape, keeping the vendor prefix — the model learns what a GitHub token looks like without ever seeing yours, and the same credential maps to the same surrogate everywhere so the world stays consistent. Keep writes the real values; defensible only for a model that never leaves this hardware, and a few epochs over a duplicated corpus is exactly the regime where a model memorizes them verbatim. Redact writes placeholders, which teaches the model to type REDACTED where a live token belongs — a silent failure at the worst possible moment.">?</button></label>
                 <select id="export-secrets" name="secrets">
                     <option value="randomize">Randomize — same length and shape, different value</option>
                     <option value="keep">Keep — real values, for a model running on your hardware</option>
                     <option value="redact">Redact — replace with placeholders</option>
                 </select>
-                <small>Randomize is the default: the model still learns that a forty-character opaque token follows <code>ghp_</code> without ever seeing a real one, and one credential maps to the same surrogate everywhere it appears. Keep writes the real values, which is defensible for a model that never leaves this hardware but is the regime where a few epochs over a duplicated corpus memorizes them verbatim. Redact teaches it to emit a placeholder where a live token belongs, which fails silently at the worst moment.</small>
             </div>
             <div class="form-actions"><button class="button" type="submit">Export dataset</button></div>
             <small data-export-status></small>
@@ -92,35 +102,118 @@
     </section>
 
     <section class="surface">
-        <div class="surface-header"><div><h2>Fine-tune</h2><p>A LoRA run takes the whole GPU, so it is described and checked before it is started. Planning is always safe.</p></div></div>
+        <div class="surface-header"><div><h2>3 · Fine-tune</h2><p>Trains a LoRA adapter: a few hundred megabytes of weight deltas that ride on top of an existing model rather than replacing it. A run takes the whole GPU, so it is described and checked before it is started.</p></div></div>
         <form class="capability-config" id="training-train-form">
             <div class="field">
-                <label for="train-file">Training file</label>
-                <input id="train-file" name="train_file" placeholder="/home/daniel/Storage/Dev/hive_mind/data/training_sets/v1/train.jsonl" required>
+                <label for="train-dataset">Dataset<button class="hint" type="button" tabindex="0" data-hint="An exported dataset from step 2. The count beside each one is how many training examples it holds — under a thousand and a fine-tune mostly learns formatting; several thousand is where behaviour starts to transfer.">?</button></label>
+                <select id="train-dataset" name="train_file" required><option value="">Nothing exported yet</option></select>
             </div>
+
+            <div class="field is-full">
+                <label>Base model<button class="hint" type="button" tabindex="0" data-hint="The model the adapter is trained on top of, and the single most consequential choice here. Two properties decide most of it, and neither is visible in the name. Dense models apply every weight to every token and behave predictably under LoRA. Mixture-of-experts models route each token to a few specialist sub-networks, which makes them fast to serve but means a fine-tune only trains whichever experts your corpus happens to activate. Bigger is not automatically better: a 30B model needs the GPU to itself for most of a day, while an 8B trains in a few hours alongside live inference.">?</button></label>
+                <div class="option-list" id="train-base-models"><div class="loading-state">Loading base models…</div></div>
+            </div>
+
+            <div class="field-row">
+                <div class="field">
+                    <label for="train-name">Adapter name<button class="hint" type="button" tabindex="0" data-hint="Names the adapter directory this run writes, and is what you pick from in the deploy step below.">?</button></label>
+                    <input id="train-name" name="name" value="hive-harness-lora" pattern="[A-Za-z0-9._-]{1,64}" required>
+                </div>
+                <div class="field">
+                    <label for="train-epochs">Epochs<button class="hint" type="button" tabindex="0" data-hint="How many complete passes the trainer makes over the dataset. One pass often under-fits; two or three is the usual range. Past that, on a corpus of a few thousand examples, the model stops generalizing and starts reciting — including any credentials the export left in.">?</button></label>
+                    <input id="train-epochs" name="epochs" type="number" min="1" max="20" value="2">
+                </div>
+            </div>
+
+            <div class="field-row">
+                <div class="field">
+                    <label for="train-seqlen">Max sequence length<button class="hint" type="button" tabindex="0" data-hint="The longest example the run can see, in tokens. Costs VRAM roughly in proportion, so halving it is the first lever when a run will not fit. Anything longer than this was already dropped at curation, so raising it above the curation ceiling buys nothing.">?</button></label>
+                    <input id="train-seqlen" name="max_sequence_length" type="number" min="512" step="512" value="8192">
+                </div>
+                <div class="field">
+                    <label for="train-rank">LoRA rank<button class="hint" type="button" tabindex="0" data-hint="How much capacity the adapter has. Think of it as how many independent adjustments it can make to the base model. Low values (8–16) are enough to learn a format and a tone. High values (64+) can learn content, and can also overfit a small corpus into memorizing it. 32 is a reasonable middle for a few thousand examples.">?</button></label>
+                    <input id="train-rank" name="lora_rank" type="number" min="1" max="512" value="32">
+                </div>
+            </div>
+
+            <div class="field-row">
+                <div class="field">
+                    <label for="train-lr">Learning rate<button class="hint" type="button" tabindex="0" data-hint="How big a step the trainer takes on each update. Too high and the model degrades into nonsense in the first few hundred steps; too low and the run finishes having learned nothing. 1e-4 is a standard LoRA starting point — change it only in response to a loss curve, not on a hunch.">?</button></label>
+                    <input id="train-lr" name="learning_rate" type="number" step="0.00001" min="0.000001" max="0.01" value="0.0001">
+                </div>
+                <div class="field">
+                    <label for="train-accum">Gradient accumulation<button class="hint" type="button" tabindex="0" data-hint="The GPU can only hold one or two examples at a time at this sequence length, but training is more stable when updates are averaged over more. This accumulates that many small batches before updating, which buys the stability of a larger batch without the memory of one. Costs time, not VRAM.">?</button></label>
+                    <input id="train-accum" name="gradient_accumulation_steps" type="number" min="1" max="256" value="16">
+                </div>
+            </div>
+
             <div class="field">
-                <label for="train-name">Adapter name</label>
-                <input id="train-name" name="name" value="hive-harness-lora" pattern="[A-Za-z0-9._-]{1,64}" required>
+                <label><input type="checkbox" name="load_in_4bit" checked> Load the base in 4-bit while training<button class="hint hint-below" type="button" tabindex="0" data-hint="Compresses the base model's weights to four bits each during training so a much larger model fits in the same VRAM. This is what makes a 30B model trainable on one card at all. It costs a little fidelity and some speed. Turn it off only for a model small enough to hold uncompressed — the result is slightly more faithful and the run is faster when it fits.">?</button></label>
             </div>
-            <div class="field">
-                <label for="train-epochs">Epochs</label>
-                <input id="train-epochs" name="epochs" type="number" min="1" max="20" value="2">
-            </div>
-            <div class="field">
-                <label for="train-seqlen">Max sequence length</label>
-                <input id="train-seqlen" name="max_sequence_length" type="number" min="512" value="8192">
-            </div>
+
             <div class="form-actions">
                 <button class="button" type="submit">Check feasibility</button>
                 <button class="button button-quiet" type="button" id="training-launch">Launch run</button>
             </div>
             <small data-train-status></small>
         </form>
-        <p class="page-description">Once an adapter is trained and served, point a mind at it from that mind's page under <a href="/minds">Minds</a> — the default-model editor there is what actually switches a mind over.</p>
     </section>
 
     <section class="surface">
-        <div class="surface-header"><div><h2>Run history</h2><p>Every curation, export and fine-tune, newest first.</p></div></div>
+        <div class="surface-header"><div><h2>4 · Deploy</h2><p>A trained adapter is weight deltas and nothing a server can load on its own. Deploying pairs it with its base model and registers the result with Ollama under a name a mind can be pointed at.</p></div></div>
+        <form class="capability-config" id="training-deploy-form">
+            <div class="field">
+                <label for="deploy-adapter">Adapter<button class="hint" type="button" tabindex="0" data-hint="A completed fine-tune. Adapters still training do not appear here — the trainer writes its weights only when the run finishes.">?</button></label>
+                <select id="deploy-adapter" name="adapter_dir" required><option value="">Nothing trained yet</option></select>
+            </div>
+            <div class="field">
+                <label for="deploy-name">Serve as<button class="hint" type="button" tabindex="0" data-hint="The Ollama model name this becomes. This is the name you will select on a mind's page to switch it over. Reusing an existing name replaces it.">?</button></label>
+                <input id="deploy-name" name="name" value="hive-harness-lora" pattern="[A-Za-z0-9._:-]{1,64}" required>
+            </div>
+
+            <div class="field is-full">
+                <label>Strategy<button class="hint" type="button" tabindex="0" data-hint="Training reads the model's full-precision weights. Serving uses a compressed copy of them. That difference is what these two options are about.">?</button></label>
+                <div class="option-list">
+                    <label class="choice">
+                        <input type="radio" name="strategy" value="adapter" checked>
+                        <span class="choice-copy">
+                            <strong>Stack the adapter on the base</strong>
+                            <small>Seconds, and a few hundred megabytes. Ollama keeps one copy of the base model for every fine-tune built on it. The cost is that the adapter was fitted against the full-precision weights while the served copy is compressed — close, not identical, and the gap shows up as a fine-tune that feels weaker than its eval score suggested.</small>
+                        </span>
+                    </label>
+                    <label class="choice">
+                        <input type="radio" name="strategy" value="merge">
+                        <span class="choice-copy">
+                            <strong>Merge into the weights and convert</strong>
+                            <small>Folds the adapter into the model, then compresses the result — so the thing being compressed is the thing that was trained, and there is no mismatch. Costs a conversion pass measured in hours and a full model's worth of disk, every deploy. Starts a container and finishes later; press Deploy again once it does to serve the result.</small>
+                        </span>
+                    </label>
+                </div>
+            </div>
+
+            <div class="field-row">
+                <div class="field">
+                    <label for="deploy-ctx">Context window<button class="hint" type="button" tabindex="0" data-hint="How many tokens the served model can hold at once. Larger costs VRAM at inference for every loaded copy. It is unrelated to the sequence length you trained at — a model can be served with more context than it saw in training.">?</button></label>
+                    <input id="deploy-ctx" name="num_ctx" type="number" min="512" step="512" value="32768">
+                </div>
+                <div class="field">
+                    <label for="deploy-temp">Temperature<button class="hint" type="button" tabindex="0" data-hint="How much randomness the served model uses when choosing each next token. Low values make it repeatable and literal, which is what driving a harness wants. High values make it inventive, which is what driving a harness does not want.">?</button></label>
+                    <input id="deploy-temp" name="temperature" type="number" step="0.05" min="0" max="2" value="0.2">
+                </div>
+                <div class="field">
+                    <label for="deploy-quant">Quantization<button class="hint hint-below" type="button" tabindex="0" data-hint="Only applies to the merge strategy: how hard to compress the merged model. q4_K_M is roughly four bits per weight and is what most models here are served at. q5 and q8 are larger and more faithful. This has no effect when stacking an adapter, since the base is already compressed.">?</button></label>
+                    <input id="deploy-quant" name="quantization" value="q4_K_M" pattern="[A-Za-z0-9_]{2,12}">
+                </div>
+            </div>
+
+            <div class="form-actions"><button class="button" type="submit">Deploy</button></div>
+            <small data-deploy-status></small>
+            <p class="page-description">Once a model is served, point a mind at it from that mind's page under <a href="/minds">Minds</a> — the default-model editor there is what actually switches a mind over.</p>
+        </form>
+    </section>
+
+    <section class="surface">
+        <div class="surface-header"><div><h2>Run history</h2><p>Every curation, export, fine-tune and deploy, newest first.</p></div></div>
         <div id="training-runs"><div class="loading-state">Loading runs…</div></div>
     </section>
 </main>
@@ -128,6 +221,8 @@
 window.addEventListener("DOMContentLoaded", function () {
     const h = window.HiveConsole;
     const errorBox = document.getElementById("training-error");
+    let baseModels = [];
+    let selectedBase = "";
 
     function showError(message) {
         errorBox.textContent = message;
@@ -143,6 +238,10 @@ window.addEventListener("DOMContentLoaded", function () {
 
     function formatCount(value) {
         return typeof value === "number" ? value.toLocaleString() : "—";
+    }
+
+    function gb(mib) {
+        return (mib / 1024).toFixed(1) + " GB";
     }
 
     async function api(path, options) {
@@ -191,6 +290,70 @@ window.addEventListener("DOMContentLoaded", function () {
         return '<table class="data-table"><thead><tr><th>Kind</th><th>Status</th><th>Started</th><th>Took</th><th>Result</th></tr></thead><tbody>' + rows + '</tbody></table>';
     }
 
+    function renderBaseModels() {
+        const container = document.getElementById("train-base-models");
+        if (!baseModels.length) {
+            container.innerHTML = '<div class="loading-state">No base models available.</div>';
+            return;
+        }
+        container.innerHTML = baseModels.map(function (model) {
+            const meta = [];
+            meta.push('<span>' + h.escapeHtml(model.parameters_b + "B parameters") + '</span>');
+            meta.push('<span>' + (model.architecture === "moe" ? "Mixture-of-experts" : "Dense") + '</span>');
+            meta.push('<span class="' + (model.fits_now === false ? "is-warn" : "") + '">Needs ' + gb(model.train_vram_mib) + (model.fits_now === false ? " — more than is free now" : "") + '</span>');
+            if (!model.serve_tag_installed) {
+                meta.push('<span class="is-warn">Base not pulled — deploy will download it</span>');
+            }
+            if (model.recommended) { meta.push('<span class="is-good">Recommended</span>'); }
+            return '<label class="choice">' +
+                '<input type="radio" name="base_model" value="' + h.escapeHtml(model.id) + '"' + (model.id === selectedBase ? " checked" : "") + '>' +
+                '<span class="choice-copy"><strong>' + h.escapeHtml(model.label) + '</strong>' +
+                '<small>' + h.escapeHtml(model.note) + '</small>' +
+                '<span class="model-meta">' + meta.join("") + '</span></span></label>';
+        }).join("");
+    }
+
+    function renderDatasets(datasets) {
+        const select = document.getElementById("train-dataset");
+        if (!datasets.length) {
+            select.innerHTML = '<option value="">Nothing exported yet — run step 2 first</option>';
+            return;
+        }
+        const current = select.value;
+        select.innerHTML = datasets.map(function (set) {
+            return '<option value="' + h.escapeHtml(set.train_file) + '">' + h.escapeHtml(set.name) +
+                ' — ' + formatCount(set.train_examples) + ' train, ' + formatCount(set.eval_examples) + ' eval</option>';
+        }).join("");
+        if (current) select.value = current;
+    }
+
+    function renderAdapters(adapters) {
+        const select = document.getElementById("deploy-adapter");
+        const trained = (adapters || []).filter(function (a) { return a.trained; });
+        if (!trained.length) {
+            select.innerHTML = '<option value="">Nothing trained yet — run step 3 first</option>';
+            return;
+        }
+        const current = select.value;
+        select.innerHTML = trained.map(function (adapter) {
+            const label = adapter.name + " (" + adapter.dataset + ")" + (adapter.merged_gguf ? " — merged copy ready" : "");
+            return '<option value="' + h.escapeHtml(adapter.adapter_dir) + '" data-base="' + h.escapeHtml(adapter.base_model) + '">' + h.escapeHtml(label) + '</option>';
+        }).join("");
+        if (current) select.value = current;
+    }
+
+    async function loadBaseModels() {
+        try {
+            const payload = await api("/api/training/base-models");
+            baseModels = payload.models || [];
+            selectedBase = selectedBase || payload.default || (baseModels[0] || {}).id || "";
+            renderBaseModels();
+        } catch (error) {
+            document.getElementById("train-base-models").innerHTML =
+                '<div class="loading-state">Could not load base models: ' + h.escapeHtml(error.message) + '</div>';
+        }
+    }
+
     async function refresh() {
         try {
             const stats = await api("/api/training/status");
@@ -207,9 +370,11 @@ window.addEventListener("DOMContentLoaded", function () {
             document.getElementById("tr-reasoning").textContent = formatCount(stats.kept_with_reasoning);
             const gpu = stats.gpu || {};
             const free = gpu.available ? Math.max(0, (gpu.total_mib || 0) - (gpu.used_mib || 0)) : null;
-            document.getElementById("tr-gpu").textContent = free == null ? "—" : (free / 1024).toFixed(1) + " GB";
+            document.getElementById("tr-gpu").textContent = free == null ? "—" : gb(free);
             document.getElementById("tr-gpu-detail").textContent = gpu.available ? h.escapeHtml(gpu.name || "GPU") : "No GPU visible";
             document.getElementById("training-breakdown").innerHTML = renderBreakdown(stats);
+            renderDatasets(stats.datasets || []);
+            renderAdapters(stats.adapters || []);
             const runs = await api("/api/training/runs?limit=25");
             document.getElementById("training-runs").innerHTML = renderRuns(runs.runs || []);
         } catch (error) {
@@ -223,8 +388,9 @@ window.addEventListener("DOMContentLoaded", function () {
         data.forEach(function (value, key) {
             if (value === "") return;
             const input = form.elements[key];
-            if (input && input.type === "checkbox") { body[key] = input.checked; return; }
-            body[key] = input && input.type === "number" ? Number(value) : value;
+            const field = input && input.length !== undefined && !input.type ? input[0] : input;
+            if (field && field.type === "checkbox") { return; }
+            body[key] = field && field.type === "number" ? Number(value) : value;
         });
         form.querySelectorAll('input[type="checkbox"]').forEach(function (box) {
             body[box.name] = box.checked;
@@ -238,7 +404,7 @@ window.addEventListener("DOMContentLoaded", function () {
         setStatus(curateForm, "[data-curate-status]", "Curating — this walks every captured turn and takes a minute or two…");
         try {
             const result = await api("/api/training/curate", {method: "POST", body: JSON.stringify(readForm(curateForm))});
-            setStatus(curateForm, "[data-curate-status]", "Kept " + formatCount(result.kept) + " of " + formatCount(result.total) + " across " + formatCount(result.clusters) + " clusters. " + formatCount(result.secret_rows) + " rows carry credentials, which export keeps unless you change the credentials setting.");
+            setStatus(curateForm, "[data-curate-status]", "Kept " + formatCount(result.kept) + " of " + formatCount(result.total) + " across " + formatCount(result.clusters) + " clusters. " + formatCount(result.secret_rows) + " rows carry credentials, which export replaces unless you change the credentials setting.");
             refresh();
         } catch (error) {
             setStatus(curateForm, "[data-curate-status]", error.message, true);
@@ -276,14 +442,18 @@ window.addEventListener("DOMContentLoaded", function () {
     async function submitTrain(dryRun) {
         const body = readForm(trainForm);
         body.dry_run = dryRun;
+        if (!body.train_file) {
+            setStatus(trainForm, "[data-train-status]", "Export a dataset first — there is nothing to train on.", true);
+            return;
+        }
         setStatus(trainForm, "[data-train-status]", dryRun ? "Checking feasibility…" : "Launching…");
         try {
             const result = await api("/api/training/train", {method: "POST", body: JSON.stringify(body)});
             if (dryRun) {
                 const blockers = (result.blockers || []);
-                setStatus(trainForm, "[data-train-status]", result.can_run ? "Ready to run — needs about " + Math.round((result.required_mib || 0) / 1024) + " GB." : "Cannot run: " + blockers.join("; "), !result.can_run);
+                setStatus(trainForm, "[data-train-status]", result.can_run ? "Ready to run — needs about " + gb(result.required_mib || 0) + "." : "Cannot run: " + blockers.join("; "), !result.can_run);
             } else if (result.launched) {
-                setStatus(trainForm, "[data-train-status]", "Launched as container " + String(result.container_id || "").slice(0, 12) + ".");
+                setStatus(trainForm, "[data-train-status]", "Launched as container " + String(result.container_id || "").slice(0, 12) + ". It writes its adapter when it finishes; the deploy step will list it then.");
             } else {
                 setStatus(trainForm, "[data-train-status]", "Refused: " + ((result.plan && result.plan.blockers) || [result.error || "unknown"]).join("; "), true);
             }
@@ -295,8 +465,42 @@ window.addEventListener("DOMContentLoaded", function () {
 
     trainForm.addEventListener("submit", function (event) { event.preventDefault(); submitTrain(true); });
     document.getElementById("training-launch").addEventListener("click", function () { submitTrain(false); });
-    document.getElementById("training-refresh").addEventListener("click", refresh);
+    trainForm.addEventListener("change", function (event) {
+        if (event.target.name === "base_model") { selectedBase = event.target.value; }
+    });
+
+    const deployForm = document.getElementById("training-deploy-form");
+    deployForm.addEventListener("submit", async function (event) {
+        event.preventDefault();
+        const body = readForm(deployForm);
+        const chosen = document.getElementById("deploy-adapter").selectedOptions[0];
+        if (!body.adapter_dir || !chosen) {
+            setStatus(deployForm, "[data-deploy-status]", "Train an adapter first — there is nothing to deploy.", true);
+            return;
+        }
+        if (chosen.dataset.base) { body.base_model = chosen.dataset.base; }
+        setStatus(deployForm, "[data-deploy-status]", body.strategy === "merge" ? "Merging and converting — this takes a while…" : "Uploading the adapter to Ollama…");
+        try {
+            const result = await api("/api/training/deploy", {method: "POST", body: JSON.stringify(body)});
+            if (result.deployed) {
+                setStatus(deployForm, "[data-deploy-status]", "Serving as " + result.model_name + ". Point a mind at it from its own page.");
+            } else if (result.stage === "converting") {
+                setStatus(deployForm, "[data-deploy-status]", result.detail || "Conversion started. Press Deploy again once it finishes.");
+            } else {
+                setStatus(deployForm, "[data-deploy-status]", "Refused: " + (result.blockers || ["unknown"]).join("; "), true);
+            }
+            refresh();
+        } catch (error) {
+            setStatus(deployForm, "[data-deploy-status]", error.message, true);
+        }
+    });
+
+    document.getElementById("training-refresh").addEventListener("click", function () {
+        refresh();
+        loadBaseModels();
+    });
     refresh();
+    loadBaseModels();
 });
 </script>
 {% endblock %}
