@@ -327,7 +327,17 @@
                 repaint();
             });
         }
+        // Scroll alone is not the trigger. onScroll fires when lines move
+        // into scrollback, and the thing on the other end of this socket is
+        // tmux — which lives in the alternate screen buffer, where nothing
+        // ever scrolls into scrollback and a full-screen app simply redraws
+        // in place. Hooking scroll only would leave the repaint dead for
+        // every session anyone actually opens. New output is the real
+        // signal, and onWriteParsed carries it for both buffers. It cannot
+        // feed itself the way a render hook would: refresh() repaints, it
+        // does not write.
         term.onScroll(scheduleRepaint);
+        term.onWriteParsed(scheduleRepaint);
 
         // The renderer is the other half. xterm's default DOM renderer
         // paints the grid as a few thousand row divs and cell spans, and
@@ -995,6 +1005,7 @@
                     webgl: !!webgl,
                     canvases: xtermEl.querySelectorAll(".xterm-screen canvas").length,
                     repaints: repaints,
+                    altBuffer: isAltBuffer(),
                 };
             },
             checkLiveness: function () { reattachIfStale(FOREGROUND_STALE_MS); },

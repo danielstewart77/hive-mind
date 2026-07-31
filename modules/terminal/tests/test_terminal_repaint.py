@@ -260,6 +260,22 @@ def test_scrolling_repaints_once_a_frame_not_once_a_line(tile):
     assert after - before < lines / 4, "repaint fired per line instead of per frame"
 
 
+def test_output_repaints_in_the_alternate_buffer_too(tile):
+    # tmux runs in the alternate screen buffer, where nothing ever scrolls
+    # into scrollback — a full-screen app redraws in place. A repaint hung
+    # on scroll alone would be dead for every session anyone opens.
+    tile.pty_writes("\x1b[?1049h")  # switch to the alternate buffer
+    tile.page.wait_for_timeout(300)
+    assert _renderer(tile)["altBuffer"], "the terminal never entered the alternate buffer"
+
+    before = _renderer(tile)["repaints"]
+    tile.pty_writes("".join("redrawn line %d\r\n" % i for i in range(200)))
+    tile.page.wait_for_timeout(1000)
+    after = _renderer(tile)["repaints"]
+    assert after > before, "output in the alternate buffer never repainted"
+    assert after - before < 50, "repaint fired per write instead of per frame"
+
+
 def test_the_tile_clips_its_own_paint(tile):
     # The grid is narrower than the tile by whatever a whole number of
     # cells leaves over, and the strips of stale text either side of the
