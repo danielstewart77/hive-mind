@@ -442,11 +442,13 @@ class _PtyHandle:
     the terminal currently looks like.
     """
 
-    __slots__ = ("session_id", "terminals", "tmux_name", "conversation_id", "proc",
-                 "master_fd", "cols", "rows", "queue", "detached_at", "alive", "loop")
+    __slots__ = ("session_id", "terminals", "tmux_name", "conversation_id", "model",
+                 "proc", "master_fd", "cols", "rows", "queue", "detached_at", "alive",
+                 "loop")
 
     def __init__(self, session_id: str, terminals: "TmuxTerminals",
-                 conversation_id: str, cols: int = 80, rows: int = 24):
+                 conversation_id: str, cols: int = 80, rows: int = 24,
+                 model: str = ""):
         self.session_id = session_id
         # The tmux server this session's terminal lives on. Held per handle
         # rather than looked up globally: one process hosts one mind, but a
@@ -456,6 +458,10 @@ class _PtyHandle:
         # The session's conversation id, minted by the gateway and handed
         # down. The mind records it for logging; it never chooses it.
         self.conversation_id = conversation_id
+        # The model this terminal's harness process was started on. A
+        # rotation replaces the conversation, never the model — so when one
+        # arrives without an explicit model, this is the answer.
+        self.model = model
         self.cols, self.rows = clamp_winsize(cols, rows)
         self.proc: subprocess.Popen | None = None   # the attached tmux client
         self.master_fd: int | None = None
@@ -667,7 +673,8 @@ def _open_session_pty(session_id, spawn, terminals, **spawn_kwargs) -> _PtyHandl
         _detach_client(handle)
     else:
         handle = _PtyHandle(session_id, terminals,
-                            spawn_kwargs.get("conversation_id") or "", cols, rows)
+                            spawn_kwargs.get("conversation_id") or "", cols, rows,
+                            model=spawn_kwargs.get("model") or "")
         PTYS[session_id] = handle
 
     proc, master_fd = spawn(session_id=session_id, **spawn_kwargs)
@@ -736,7 +743,12 @@ def install_pty_attach(
                 rotate,
                 session_id=session_id,
                 new_claude_sid=new_claude_sid,
-                model=body.get("model") or "",
+                # A rotation turns over the conversation, never the model.
+                # Absent an explicit one, the pane keeps what it started on
+                # rather than falling back to the mind's current default —
+                # which would silently switch a live terminal's model the
+                # moment someone edited that default in the console.
+                model=body.get("model") or handle.model,
                 system_prompt=body.get("system_prompt") or "",
                 client_ref=body.get("client_ref"),
                 owner_type=body.get("owner_type"),
@@ -762,7 +774,7 @@ def install_pty_attach(
         session_id: str,
         resume_sid: str | None = None,
         harness_sid: str | None = None,
-        model: str = "sonnet",
+        model: str = "",
         cols: int = 80,
         rows: int = 24,
         client_ref: str | None = None,
@@ -789,6 +801,14 @@ def install_pty_attach(
         if not (resume_sid or "").strip():
             log.warning("attach-pty for session %s carried no conversation id", session_id)
             await websocket.close(code=1008, reason="no conversation id for this session")
+            return
+
+        # Same rule as the stream-json spawn: the model comes from the
+        # session the gateway resolved, or the attach fails loudly. A default
+        # here starts a terminal on a model the session never agreed to.
+        if not (model or "").strip():
+            log.warning("attach-pty for session %s carried no model", session_id)
+            await websocket.close(code=1008, reason="no model for this session")
             return
 
         # hive-comms has no chat-id-like concept for a browser tile —

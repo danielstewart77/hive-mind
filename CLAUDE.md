@@ -170,6 +170,30 @@ models:
 Secrets are stored in the system keyring (`keyrings.alt.file.PlaintextKeyring`).
 Use `get_credential()` from `core/secrets.py` to read them.
 
+### Which model a session runs on
+
+Three layers, each with one owner:
+
+| Layer | Owner | Lifetime |
+|---|---|---|
+| `minds/<name>/runtime.yaml` → `default_model` | the mind, on disk | durable truth |
+| `broker.minds.model` | comms | a cache of the above |
+| `sessions.model` | comms | one conversation's snapshot |
+
+Every mind re-registers from its own `runtime.yaml` on start
+(`minds/runtime_api.py` → `POST /broker/minds`, an upsert on `mind_id`), so
+the broker row converges on the file rather than drifting from it. The same
+module serves `GET`/`PATCH /runtime`, which is how the console edits a mind's
+default — the file first, the broker row second, over HTTP for every mind
+including the ones on other machines.
+
+`create_session` resolves `caller-supplied model || broker.minds.model`, and
+raises when it has neither. Nothing below it defaults: a mind handed a spawn
+or an `attach-pty` with no model refuses. A rotation passes the retiring
+session's own model explicitly, so a `/model` switch survives it and a
+changed default cannot reach into a live conversation — that default is for
+the next one.
+
 ## Gateway API
 
 | Method | Path | Purpose |
