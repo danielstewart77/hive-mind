@@ -120,9 +120,12 @@ def _open_tile(page, base):
 
 
 def _screen(page) -> str:
-    return page.evaluate(
-        "() => document.querySelector('.term-panel .xterm-rows').innerText"
-    )
+    """What the terminal holds for the visible rows.
+
+    Read out of the buffer rather than off the DOM: the grid is painted by
+    WebGL onto a canvas, and there are no row elements to inspect.
+    """
+    return "\n".join(page.evaluate("() => window.screenText()").values())
 
 
 def test_a_text_frame_is_never_printed_into_the_pane(page):

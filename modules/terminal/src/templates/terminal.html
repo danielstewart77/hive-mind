@@ -47,6 +47,7 @@
 
 <script src="{{ request.url_for('static', path='vendor/xterm/xterm.js') }}"></script>
 <script src="{{ request.url_for('static', path='vendor/xterm/addon-fit.js') }}"></script>
+<script src="{{ request.url_for('static', path='vendor/xterm/addon-webgl.js') }}"></script>
 <script src="{{ request.url_for('static', path='terminal-routing.js') }}?v={{ asset_versions['terminal-routing.js'] }}"></script>
 <script>
 (function () {
@@ -307,8 +308,68 @@
         // being clicked into) ends with the whole viewport repainted from
         // the buffer. refresh() walks the visible rows only, so it costs a
         // fraction of the fit that usually precedes it.
+        let repaints = 0;
         function repaint() {
+            repaints++;
             try { term.refresh(0, term.rows - 1); } catch (e) {}
+        }
+        // Text scrolling up is the moment an invalidation is most likely to
+        // go missing, so every scroll ends in a repaint. Coalesced onto a
+        // frame rather than fired per line: a build log scrolls hundreds of
+        // lines a second and repainting each one would stall the tab, while
+        // one repaint per frame is visually indistinguishable — the screen
+        // cannot show more than a frame's worth of scrolling anyway.
+        let repaintRaf = null;
+        function scheduleRepaint() {
+            if (repaintRaf) return;
+            repaintRaf = requestAnimationFrame(function () {
+                repaintRaf = null;
+                repaint();
+            });
+        }
+        term.onScroll(scheduleRepaint);
+
+        // The renderer is the other half. xterm's default DOM renderer
+        // paints the grid as a few thousand row divs and cell spans, and
+        // the artifacts here are invalidations the browser drops somewhere
+        // across that tree. WebGL collapses the whole grid into a single
+        // canvas: one composited layer with no per-row elements to lose
+        // track of, and no sub-cell slack outside a painted surface for the
+        // stale strips either side of the grid to live in. It also costs
+        // less under exactly the heavy scrolling that provokes the bug.
+        // The addon attaches to a live screen, so this runs after open().
+        let webgl = null;
+        function loadRenderer() {
+            if (!window.WebglAddon) return;
+            try {
+                const addon = new window.WebglAddon.WebglAddon();
+                // A lost context leaves the canvas blank for good. Dropping
+                // the addon returns xterm to its built-in DOM renderer —
+                // slower and artifact-prone, but readable, and the paint
+                // sweep that guards that renderer comes back with it.
+                addon.onContextLoss(function () {
+                    try { addon.dispose(); } catch (e) {}
+                    webgl = null;
+                    repaint();
+                });
+                term.loadAddon(addon);
+                webgl = addon;
+            } catch (e) {
+                webgl = null;   // no WebGL here; the DOM renderer still works
+            }
+        }
+        // What the terminal believes is on screen, straight out of the
+        // buffer. Under WebGL there is no DOM to read a tile back from and
+        // selecting the canvas gives you nothing, so this is how a garbled
+        // tile gets read without touching it.
+        function screenText() {
+            const buf = term.buffer.active;
+            const out = [];
+            for (let y = 0; y < term.rows; y++) {
+                const line = buf.getLine(buf.viewportY + y);
+                out.push(line ? line.translateToString(true) : "");
+            }
+            return out.join("\n");
         }
         // Garbage on screen has exactly two possible homes, and they need
         // opposite fixes. Either xterm painted the wrong thing into the DOM,
@@ -319,6 +380,8 @@
         // Comparing each painted row against the buffer it was rendered
         // from can: a row that disagrees is xterm's fault, and a screen full
         // of garbage over rows that all agree is not.
+        // Only the DOM renderer has rows to compare; under WebGL there is
+        // one canvas and nothing to read back, which is the point of it.
         function paintCheck() {
             const rows = xtermEl.querySelector(".xterm-rows");
             if (!rows) return null;
@@ -915,6 +978,7 @@
             mindId: function () { return mindId; },
             mount: function () {
                 term.open(xtermEl);
+                loadRenderer();
                 // term.textarea only exists once xterm has opened.
                 term.textarea.addEventListener("focus", function () { setFocusedPanel(panel); });
                 resizeObserver.observe(xtermEl);
@@ -925,6 +989,14 @@
             fit: doFit,
             repaint: repaint,
             paintCheck: paintCheck,
+            screenText: screenText,
+            rendererInfo: function () {
+                return {
+                    webgl: !!webgl,
+                    canvases: xtermEl.querySelectorAll(".xterm-screen canvas").length,
+                    repaints: repaints,
+                };
+            },
             checkLiveness: function () { reattachIfStale(FOREGROUND_STALE_MS); },
             focus: function () { setFocusedPanel(panel); term.focus(); },
             refreshLabel: applyLabel,
@@ -1090,14 +1162,29 @@
         openPanels.forEach(function (p) { report[p.sessionId] = p.paintCheck(); });
         return report;
     };
-    // Running the sweep is what keeps the tile readable, which is why it is
-    // not behind the debug flag. It walks every painted row and reads the
-    // text back out, and that read is the point: it forces the browser to
-    // resolve the rows it has been treating as unchanged, which is exactly
-    // the invalidation that was going missing while text scrolled. A tile
-    // left alone would otherwise accumulate stale strips indefinitely,
-    // since the buffer behind them is already correct and nothing marks
-    // them dirty a second time.
+    // window.rendererInfo() answers the first question about a garbled
+    // tile — which renderer is actually behind it. A tile reporting
+    // webgl:false has fallen back to the DOM renderer, and everything the
+    // paint sweep below exists for applies again.
+    window.screenText = function () {
+        const report = {};
+        openPanels.forEach(function (p) { report[p.sessionId] = p.screenText(); });
+        return report;
+    };
+    window.rendererInfo = function () {
+        const report = {};
+        openPanels.forEach(function (p) { report[p.sessionId] = p.rendererInfo(); });
+        return report;
+    };
+    // The sweep is the DOM renderer's safety net, and it reports nothing
+    // for a tile on WebGL — there are no rows to read back, only a canvas.
+    // Where it does apply, walking every painted row and reading the text
+    // back out is the point: the read forces the browser to resolve rows it
+    // has been treating as unchanged, which is exactly the invalidation
+    // that goes missing while text scrolls. A fallen-back tile left alone
+    // would otherwise accumulate stale strips indefinitely, since the
+    // buffer behind them is already correct and nothing marks them dirty a
+    // second time.
     //
     // If a row genuinely disagrees with its buffer the sweep repaints it,
     // but that is the rarer half. The flag only adds the readout.
