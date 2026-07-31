@@ -276,6 +276,24 @@ def test_output_repaints_in_the_alternate_buffer_too(tile):
     assert after - before < 50, "repaint fired per write instead of per frame"
 
 
+def test_the_reported_grid_is_the_grid_being_painted(tile):
+    # The pty is spawned at whatever geometry the tile reports, and tmux
+    # paints to that. Diagnosing stale columns starts with knowing which
+    # grid the browser thinks it has, so it has to be the real one.
+    info = _renderer(tile)
+    measured = tile.evaluate(
+        """() => {
+            const rows = document.querySelectorAll('.xterm-rows > *').length;
+            const screen = document.querySelector('.xterm-screen');
+            return {rows: rows, width: screen.getBoundingClientRect().width};
+        }"""
+    )
+    assert info["cols"] > 20 and info["rows"] > 5
+    # The grid has to fit the screen it is drawn on, to within a cell.
+    assert measured["width"] / info["cols"] > 3, "reported cols do not fit the screen"
+    assert measured["width"] / info["cols"] < 30
+
+
 def test_the_tile_clips_its_own_paint(tile):
     # The grid is narrower than the tile by whatever a whole number of
     # cells leaves over, and the strips of stale text either side of the
