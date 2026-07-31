@@ -22,8 +22,14 @@ WORKDIR /opt
 
 # Converter and quantizer for merge mode. Only the conversion tooling is
 # built — inference lives in Ollama, not here.
+#
+# The converter's own requirements file pins a CPU build of torch, which
+# silently replaces this image's CUDA build: torchvision then fails to load
+# its ops and every training run lands on the CPU. So its dependencies are
+# installed by name instead, which is all the safetensors path actually
+# needs, and torch is left alone.
 RUN git clone --depth 1 https://github.com/ggml-org/llama.cpp.git /opt/llama.cpp && \
-    pip install --no-cache-dir -r /opt/llama.cpp/requirements/requirements-convert_hf_to_gguf.txt && \
+    pip install --no-cache-dir gguf numpy sentencepiece protobuf && \
     cmake -S /opt/llama.cpp -B /opt/llama.cpp/build -DLLAMA_CURL=OFF -DGGML_NATIVE=ON && \
     cmake --build /opt/llama.cpp/build --target llama-quantize -j "$(nproc)" && \
     cp /opt/llama.cpp/build/bin/llama-quantize /opt/llama.cpp/llama-quantize && \
@@ -33,6 +39,14 @@ COPY requirements.txt /opt/trainer/requirements.txt
 RUN pip install --no-cache-dir -r /opt/trainer/requirements.txt
 
 COPY train.py /opt/trainer/train.py
+
+# A dependency that quietly swaps the CUDA torch for a CPU one produces a
+# working image that trains at a fiftieth of the speed and fails at the
+# first quantized load. Fail the build instead.
+RUN python -c "import torch, torchvision, transformers, peft, trl, bitsandbytes; \
+assert torch.version.cuda, f'torch has no CUDA build: {torch.__version__}'; \
+from transformers import AutoModelForCausalLM; \
+print('trainer ok', torch.__version__, transformers.__version__)"
 
 WORKDIR /workspace
 ENTRYPOINT ["python", "/opt/trainer/train.py"]
