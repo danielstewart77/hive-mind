@@ -1,17 +1,23 @@
-"""Stale glyphs on screen have to be repaintable from the buffer.
+"""Text that scrolls up has to leave the screen it scrolled off correct.
 
-xterm paints only the rows it has marked dirty, so an invalidation the
-browser drops is never retried — the buffer behind the garbage is already
-correct and no later write touches those rows again. That is why the
-artifacts on this terminal survive indefinitely, and why dragging a
-selection across them brings the text back correct: a selection forces
-those rows to re-render. The cure is to force the same re-render at the
-moments an invalidation is known to go missing, so reading the terminal
-never depends on selecting it.
+The artifacts on this terminal are invalidations the browser drops: the
+buffer behind the garbage is already right, no later write touches those
+rows, and the mess survives until something forces a re-render — which is
+why dragging a selection across it brings the text back.
 
-These drive a real browser because the bug is in what the page paints:
-the check is that a row whose DOM has gone stale is restored from the
-terminal's own buffer, which is precisely the observed failure.
+Two things stop that. The grid is painted by WebGL, so it is one canvas on
+one composited layer rather than a few thousand row divs and cell spans
+for an invalidation to go missing across, and there is no sub-cell slack
+outside a painted surface for the stale strips either side of the grid to
+live in. And every scroll ends in a repaint, coalesced onto a frame so
+that a screen's worth of scrolling costs one repaint, not one per line.
+
+WebGL can still be unavailable or lose its context, and xterm then falls
+back to its DOM renderer — the artifact-prone one. Everything that guards
+that renderer is still here and still tested, on a tile driven into the
+fallback deliberately.
+
+These drive a real browser because the bug is in what the page paints.
 """
 
 import json
@@ -83,9 +89,24 @@ def live_app():
     server.should_exit = True
 
 
-@pytest.fixture()
-def tile(live_app):
-    """One mounted tile whose buffer holds a known line of pty output."""
+class Tile:
+    """A mounted tile, plus the pty end of its socket to write more from."""
+
+    def __init__(self, page):
+        self.page = page
+        self.ws = None
+
+    def pty_writes(self, text):
+        """Send bytes as the pty would — a binary frame on the attach socket."""
+        assert self.ws is not None, "the tile never attached"
+        self.ws.send(text.encode())
+
+    # the tests drive the page directly for everything else
+    def __getattr__(self, name):
+        return getattr(self.page, name)
+
+
+def _open_tile(live_app):
     base, token = live_app
     with playwright_api.sync_playwright() as p:
         try:
@@ -104,6 +125,7 @@ def tile(live_app):
             ]
         )
         page = ctx.new_page()
+        tile = Tile(page)
         page.route(
             "**/api/terminal/sessions*",
             lambda r: r.fulfill(
@@ -114,25 +136,82 @@ def tile(live_app):
             "**/api/terminal/labels*",
             lambda r: r.fulfill(status=200, content_type="application/json", body="{}"),
         )
+
         # Terminal output is always a BINARY frame; a TEXT frame is the
         # control channel and the tile deliberately never prints it.
-        page.route_web_socket(
-            "**/api/terminal/attach/**",
-            lambda ws: ws.send(PTY_TEXT.encode()),
-        )
+        def _attach(ws):
+            tile.ws = ws
+            ws.send(PTY_TEXT.encode())
+
+        page.route_web_socket("**/api/terminal/attach/**", _attach)
         page.goto(base + "/terminal")
         page.wait_for_selector(".term-card", timeout=15000)
         page.click(".term-card")
         page.wait_for_selector(".term-panel .xterm-viewport", timeout=15000)
         page.wait_for_timeout(800)
-        yield page
+        yield tile
         browser.close()
 
 
-def _painted(page):
-    return page.evaluate(
-        "() => document.querySelector('.xterm-rows').textContent"
+@pytest.fixture()
+def tile(live_app):
+    yield from _open_tile(live_app)
+
+
+@pytest.fixture()
+def dom_tile(live_app):
+    """A tile driven off WebGL and onto the fallback DOM renderer.
+
+    Losing the context is a real event — a GPU reset, a driver update, a
+    browser reclaiming contexts from a backgrounded tab — and the tile has
+    to stay readable through it.
+    """
+    for one in _open_tile(live_app):
+        _lose_webgl(one)
+        one.page.wait_for_selector(".term-panel .xterm-rows", timeout=5000)
+        one.page.wait_for_timeout(200)
+        yield one
+
+
+def _lose_webgl(page):
+    """Take the GL context away the way a GPU reset would.
+
+    Headless Chromium runs on SwiftShader, which offers no
+    WEBGL_lose_context extension, so where the real thing isn't available
+    fall back to dispatching the event a real loss delivers — that event
+    is what the addon actually listens for.
+    """
+    lost = page.evaluate(
+        """() => {
+            let hit = 0;
+            for (const c of document.querySelectorAll('.xterm-screen canvas')) {
+                const gl = c.getContext('webgl2') || c.getContext('webgl');
+                if (!gl) continue;
+                const ext = gl.getExtension('WEBGL_lose_context');
+                if (ext) ext.loseContext();
+                else c.dispatchEvent(new Event('webglcontextlost', {cancelable: true}));
+                hit++;
+            }
+            return hit;
+        }"""
     )
+    if not lost:
+        pytest.skip("no WebGL context to lose in this browser")
+
+
+def _renderer(page):
+    (only,) = page.evaluate("() => window.rendererInfo()").values()
+    return only
+
+
+def _on_screen(page):
+    """What the terminal holds for the visible rows, whatever paints them."""
+    (only,) = page.evaluate("() => window.screenText()").values()
+    return only
+
+
+def _painted(page):
+    return page.evaluate("() => document.querySelector('.xterm-rows').textContent")
 
 
 def _go_stale(page):
@@ -152,42 +231,39 @@ def _go_stale(page):
     )
 
 
-def test_the_pty_line_is_on_screen_to_begin_with(tile):
-    assert PTY_TEXT in _painted(tile)
+# ── the grid is one canvas ────────────────────────────────────────────
 
 
-def test_clicking_the_tile_repaints_it_from_the_buffer(tile):
-    _go_stale(tile)
-    assert GARBAGE in _painted(tile)
-    tile.dispatch_event(".term-panel", "mousedown")
-    tile.wait_for_timeout(200)
-    painted = _painted(tile)
-    assert PTY_TEXT in painted and GARBAGE not in painted
+def test_the_grid_is_painted_by_webgl(tile):
+    # One canvas on one composited layer is the fix: no per-row elements
+    # for an invalidation to go missing across.
+    info = _renderer(tile)
+    if not info["webgl"]:
+        pytest.skip("browser has no WebGL")
+    assert info["canvases"] >= 1
 
 
-def test_returning_to_the_tab_repaints_every_tile(tile):
-    # A backgrounded tab has rAF throttled, and xterm's render debouncer
-    # rides on rAF: rows dirtied while away can go unpainted forever.
-    _go_stale(tile)
-    tile.evaluate("() => document.dispatchEvent(new Event('visibilitychange'))")
-    tile.wait_for_timeout(200)
-    painted = _painted(tile)
-    assert PTY_TEXT in painted and GARBAGE not in painted
+def test_the_pty_line_reaches_the_screen(tile):
+    assert PTY_TEXT in _on_screen(tile)
 
 
-def test_a_resize_that_changes_the_grid_repaints(tile):
-    _go_stale(tile)
-    tile.set_viewport_size({"width": 760, "height": DESKTOP["height"]})
-    tile.wait_for_timeout(2600)  # the refit sweep runs every 2s
-    painted = _painted(tile)
-    assert PTY_TEXT in painted and GARBAGE not in painted
+def test_scrolling_repaints_once_a_frame_not_once_a_line(tile):
+    # A build log scrolls hundreds of lines a second. Repainting each one
+    # would stall the tab, and a frame can only show one screen anyway.
+    lines = 400
+    before = _renderer(tile)["repaints"]
+    tile.pty_writes("".join("scrolling line %d\r\n" % i for i in range(lines)))
+    tile.page.wait_for_timeout(1000)
+    after = _renderer(tile)["repaints"]
+    assert "scrolling line %d" % (lines - 1) in _on_screen(tile)
+    assert after > before, "scrolled text never triggered a repaint"
+    assert after - before < lines / 4, "repaint fired per line instead of per frame"
 
 
 def test_the_tile_clips_its_own_paint(tile):
     # The grid is narrower than the tile by whatever a whole number of
     # cells leaves over, and the strips of stale text either side of the
-    # terminal sit in that slack — no row covers them, so no repaint xterm
-    # performs can reach them. Containment is what keeps paint inside.
+    # terminal sit in that slack. Containment keeps paint inside.
     style = tile.evaluate(
         """() => {
             const s = getComputedStyle(document.querySelector('.term-xterm'));
@@ -217,43 +293,94 @@ def test_the_terminal_still_fills_the_tile_it_is_clipped_to(tile):
     assert box["screenWidth"] > box["contentWidth"] * 0.95
 
 
-def test_paint_check_reports_a_clean_tile_as_clean(tile):
-    report = tile.evaluate("() => window.paintCheck()")
-    (only,) = report.values()
+# ── and when WebGL goes away ──────────────────────────────────────────
+
+
+def test_a_lost_context_leaves_a_readable_tile(dom_tile):
+    # The point of the fallback: the conversation stays legible even though
+    # the renderer under it changed mid-session.
+    assert _renderer(dom_tile)["webgl"] is False
+    assert PTY_TEXT in _painted(dom_tile)
+
+
+def test_clicking_the_tile_repaints_it_from_the_buffer(dom_tile):
+    _go_stale(dom_tile)
+    assert GARBAGE in _painted(dom_tile)
+    dom_tile.dispatch_event(".term-panel", "mousedown")
+    dom_tile.page.wait_for_timeout(200)
+    painted = _painted(dom_tile)
+    assert PTY_TEXT in painted and GARBAGE not in painted
+
+
+def test_returning_to_the_tab_repaints_every_tile(dom_tile):
+    # A backgrounded tab has rAF throttled, and xterm's render debouncer
+    # rides on rAF: rows dirtied while away can go unpainted forever.
+    _go_stale(dom_tile)
+    dom_tile.evaluate("() => document.dispatchEvent(new Event('visibilitychange'))")
+    dom_tile.page.wait_for_timeout(200)
+    painted = _painted(dom_tile)
+    assert PTY_TEXT in painted and GARBAGE not in painted
+
+
+def test_a_resize_that_changes_the_grid_repaints(dom_tile):
+    _go_stale(dom_tile)
+    dom_tile.set_viewport_size({"width": 760, "height": DESKTOP["height"]})
+    dom_tile.page.wait_for_timeout(2600)  # the refit sweep runs every 2s
+    painted = _painted(dom_tile)
+    assert PTY_TEXT in painted and GARBAGE not in painted
+
+
+def test_paint_check_reports_a_clean_tile_as_clean(dom_tile):
+    (only,) = dom_tile.evaluate("() => window.paintCheck()").values()
     assert only["drift"] == 0
     assert only["rows"] > 0
 
 
-def test_paint_check_catches_a_row_the_dom_has_lost(tile):
-    # The whole point: tell "xterm painted the wrong thing" apart from "the
-    # DOM is right and the pixels are stale", without selecting the text —
-    # selecting forces a repaint and destroys the evidence.
-    _go_stale(tile)
-    report = tile.evaluate("() => window.paintCheck()")
-    (only,) = report.values()
+def test_paint_check_catches_a_row_the_dom_has_lost(dom_tile):
+    # Tell "xterm painted the wrong thing" apart from "the DOM is right and
+    # the pixels are stale", without selecting the text — selecting forces a
+    # repaint and destroys the evidence.
+    _go_stale(dom_tile)
+    (only,) = dom_tile.evaluate("() => window.paintCheck()").values()
     assert only["drift"] >= 1
     sample = only["samples"][0]
     assert GARBAGE in sample["dom"]
     assert GARBAGE not in sample["buffer"]
 
 
-def test_paintcheck_mode_puts_the_count_in_the_tile_header(tile):
+def test_the_sweep_runs_without_the_debug_flag(dom_tile):
+    # The sweep is what keeps a fallen-back tile readable while text
+    # scrolls, so it has to run on a plain page load — not only when
+    # someone thinks to ask for it.
+    _go_stale(dom_tile)
+    assert GARBAGE in _painted(dom_tile)
+    dom_tile.page.wait_for_timeout(2600)
+    painted = _painted(dom_tile)
+    assert PTY_TEXT in painted and GARBAGE not in painted
+
+
+def test_the_paint_sweep_reports_nothing_for_a_webgl_tile(tile):
+    # A canvas has no rows to read back, so the sweep has nothing to say —
+    # and must not mistake that for a tile it should be repainting.
+    if not _renderer(tile)["webgl"]:
+        pytest.skip("browser has no WebGL")
+    (only,) = tile.evaluate("() => window.paintCheck()").values()
+    assert only is None
+
+
+def test_paintcheck_mode_puts_the_count_in_the_tile_header(dom_tile):
     # Reading a number off the header is the whole interface: no devtools,
     # no typing into a terminal that cannot be copied out of.
-    tile.goto(tile.url.split("#")[0] + "?paintcheck=1")
-    tile.wait_for_selector(".term-card", timeout=15000)
-    tile.click(".term-card")
-    tile.wait_for_selector(".term-panel .xterm-viewport", timeout=15000)
-    tile.wait_for_timeout(2600)
-    assert "dom-drift" in tile.eval_on_selector(".term-panel-info", "e => e.innerText")
-
-
-def test_the_sweep_runs_without_the_debug_flag(tile):
-    # The sweep is what keeps the tile readable while text scrolls, so it
-    # has to run on a plain page load — not only when someone thinks to
-    # ask for it. A row that drifts heals on its own within a sweep.
-    _go_stale(tile)
-    assert GARBAGE in _painted(tile)
-    tile.wait_for_timeout(2600)
-    painted = _painted(tile)
-    assert PTY_TEXT in painted and GARBAGE not in painted
+    dom_tile.page.goto(dom_tile.page.url.split("#")[0] + "?paintcheck=1")
+    dom_tile.page.wait_for_selector(".term-card", timeout=15000)
+    dom_tile.page.click(".term-card")
+    dom_tile.page.wait_for_selector(".term-panel .xterm-viewport", timeout=15000)
+    # Let the socket finish attaching first — the header carries the attach
+    # state too, and a late "attached" would overwrite the readout.
+    dom_tile.page.wait_for_timeout(800)
+    _lose_webgl(dom_tile.page)
+    dom_tile.page.wait_for_selector(".term-panel .xterm-rows", timeout=5000)
+    dom_tile.page.wait_for_timeout(2600)  # the sweep runs every 2s
+    assert "dom-drift" in dom_tile.page.eval_on_selector(
+        ".term-panel-info", "e => e.innerText"
+    )
