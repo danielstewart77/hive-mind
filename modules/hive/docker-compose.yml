@@ -29,9 +29,12 @@ services:
       # Edge minds installed on this host keep their own runtime.yaml in
       # their hive-edge-minds checkout. Mounted per mind at its own name so
       # /minds_edge/<name>/runtime.yaml is uniform with the mount above, and
-      # read-write because the default-model editor rewrites that one field.
-      - ${SKIPPY_DIR:-/home/daniel/Storage/hive-edge-mind-skippy}/minds/skippy:/minds_edge/skippy:rw
-      - ${MORDECAI_DIR:-/home/daniel/Storage/hive-edge-mind-mordecai}/minds/mordecai:/minds_edge/mordecai:rw
+      # read-only: configuration is written through each Mind's own
+      # PATCH /runtime API, which is the one path that also reaches a Mind
+      # on another machine. These mounts are for display and for registering
+      # a Mind that has never started.
+      - ${SKIPPY_DIR:-/home/daniel/Storage/hive-edge-mind-skippy}/minds/skippy:/minds_edge/skippy:ro
+      - ${MORDECAI_DIR:-/home/daniel/Storage/hive-edge-mind-mordecai}/minds/mordecai:/minds_edge/mordecai:ro
       # Same hive_mind minds/ dir, read-write, scoped to voice_ref.wav
       # uploads only (see api_settings_voice_upload) — kept as a second
       # mount rather than loosening the read-only one above, so the

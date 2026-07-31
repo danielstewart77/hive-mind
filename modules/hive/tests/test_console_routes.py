@@ -83,7 +83,7 @@ def test_configuration_surfaces_render_actionable_controls(tmp_path, monkeypatch
 
     assert "Save and test" in client.get("/capability-nodes").text
     assert "Verify and register Mind" in client.get("/edge-minds/new").text
-    assert "Request restart" in client.get("/minds/ada").text
+    assert "Restart runtime" in client.get("/minds/ada").text
 
 
 def test_both_kinds_of_mind_are_reachable_from_the_console(tmp_path, monkeypatch):

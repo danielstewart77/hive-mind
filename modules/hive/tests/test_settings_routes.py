@@ -67,51 +67,64 @@ def test_api_settings_minds_merges_broker_and_local_config(tmp_path, monkeypatch
     assert minds[0]["activity_status"] == "active"
 
 
-def test_mind_configuration_route_updates_model_and_broker(tmp_path, monkeypatch):
+def test_mind_configuration_route_pushes_to_the_mind_then_the_broker(
+    tmp_path, monkeypatch
+):
+    """The Mind's own runtime.yaml is written first, its broker row second.
+
+    The Mind re-registers from that file on its next start, so a broker row
+    written against a file that never took would be silently undone.
+    """
     client = _authed_client(tmp_path, monkeypatch)
-    updated = {
-        "name": "bob",
-        "remote": False,
-        "provider": "ollama",
-        "default_model": "qwen3:8b",
-    }
     gateway = AsyncMock(return_value={"status": "updated"})
+    push = AsyncMock(
+        return_value={"name": "bob", "provider": "ollama", "default_model": "qwen3:8b"}
+    )
     with (
+        patch.object(main_mod, "_mind_gateway_url", new=AsyncMock(return_value="http://bob:8420")),
         patch.object(
-            main_mod,
-            "local_runtime_configuration",
-            return_value={"name": "bob", "default_model": "old-model"},
+            main_mod.mind_runtime,
+            "fetch_configuration",
+            new=AsyncMock(return_value={"name": "bob", "default_model": "old-model"}),
         ),
-        patch.object(main_mod, "update_local_runtime_model", return_value=updated),
+        patch.object(main_mod.mind_runtime, "push_default_model", new=push),
         patch.object(main_mod, "_gateway_request", new=gateway),
     ):
         response = client.patch(
-            "/api/minds/bob/configuration",
-            json={"default_model": "qwen3:8b"},
+            "/api/minds/bob/configuration", json={"default_model": "qwen3:8b"}
         )
 
     assert response.status_code == 200
-    assert response.json()["configuration"]["default_model"] == "qwen3:8b"
+    body = response.json()
+    assert body["configuration"]["default_model"] == "qwen3:8b"
+    # Live at the next session — nothing reads the model at boot.
+    assert body["restart_required"] is False
+    assert push.await_args.args == ("http://bob:8420", "qwen3:8b")
     assert gateway.await_args.args[:2] == ("PUT", "/broker/minds/bob")
     assert gateway.await_args.kwargs["json_body"] == {"model": "qwen3:8b"}
+    # Broker writes are admin-only; the service token comms hands out for
+    # reads is rejected on this route.
+    assert gateway.await_args.kwargs["admin"] is True
 
 
-def test_mind_configuration_lists_models_for_current_provider(tmp_path, monkeypatch):
+def test_mind_configuration_reads_the_mind_over_http(tmp_path, monkeypatch):
+    """Including a Mind on another machine, which no bind mount can reach."""
     client = _authed_client(tmp_path, monkeypatch)
     models = [
         {"name": "sonnet", "provider": "anthropic"},
         {"name": "qwen3:8b", "provider": "ollama"},
     ]
     with (
+        patch.object(main_mod, "_mind_gateway_url", new=AsyncMock(return_value="http://bob:8420")),
         patch.object(
-            main_mod,
-            "local_runtime_configuration",
-            return_value={
+            main_mod.mind_runtime,
+            "fetch_configuration",
+            new=AsyncMock(return_value={
                 "name": "bob",
                 "harness": "claude_cli",
                 "provider": "ollama",
                 "default_model": "qwen3:8b",
-            },
+            }),
         ),
         patch.object(main_mod, "_gateway_json", new=AsyncMock(return_value=models)),
     ):
@@ -119,40 +132,62 @@ def test_mind_configuration_lists_models_for_current_provider(tmp_path, monkeypa
 
     assert response.status_code == 200
     assert response.json()["models"] == ["qwen3:8b"]
+    assert response.json()["configuration"]["default_model"] == "qwen3:8b"
 
 
-def test_mind_configuration_rolls_back_file_when_broker_update_fails(
+def test_mind_configuration_restores_the_file_when_the_broker_update_fails(
     tmp_path, monkeypatch
 ):
     client = _authed_client(tmp_path, monkeypatch)
-    update = patch.object(
-        main_mod,
-        "update_local_runtime_model",
+    push = AsyncMock(
         side_effect=[
             {"name": "bob", "default_model": "qwen3:8b"},
             {"name": "bob", "default_model": "old-model"},
-        ],
+        ]
     )
     with (
+        patch.object(main_mod, "_mind_gateway_url", new=AsyncMock(return_value="http://bob:8420")),
         patch.object(
-            main_mod,
-            "local_runtime_configuration",
-            return_value={"name": "bob", "default_model": "old-model"},
+            main_mod.mind_runtime,
+            "fetch_configuration",
+            new=AsyncMock(return_value={"name": "bob", "default_model": "old-model"}),
         ),
+        patch.object(main_mod.mind_runtime, "push_default_model", new=push),
         patch.object(
             main_mod,
             "_gateway_request",
             new=AsyncMock(side_effect=HTTPException(status_code=502, detail="down")),
         ),
-        update as update_mock,
     ):
         response = client.patch(
-            "/api/minds/bob/configuration",
-            json={"default_model": "qwen3:8b"},
+            "/api/minds/bob/configuration", json={"default_model": "qwen3:8b"}
         )
 
     assert response.status_code == 502
-    assert update_mock.call_args_list[1].args == ("bob", "old-model")
+    assert push.await_args_list[1].args == ("http://bob:8420", "old-model")
+
+
+def test_mind_configuration_reports_a_mind_that_is_down(tmp_path, monkeypatch):
+    """A Mind that cannot be reached cannot be configured — the file is
+    authoritative, so a broker row written alone would not survive its next
+    start."""
+    client = _authed_client(tmp_path, monkeypatch)
+    gateway = AsyncMock(return_value={})
+    with (
+        patch.object(main_mod, "_mind_gateway_url", new=AsyncMock(return_value="http://bob:8420")),
+        patch.object(
+            main_mod.mind_runtime,
+            "fetch_configuration",
+            new=AsyncMock(side_effect=HTTPException(status_code=502, detail="Mind is unreachable")),
+        ),
+        patch.object(main_mod, "_gateway_request", new=gateway),
+    ):
+        response = client.patch(
+            "/api/minds/bob/configuration", json={"default_model": "qwen3:8b"}
+        )
+
+    assert response.status_code == 502
+    gateway.assert_not_awaited()
 
 
 def test_mind_restart_submits_hive_tools_approval(tmp_path, monkeypatch):
@@ -413,12 +448,15 @@ def test_mind_configuration_flags_non_container_deployment(tmp_path, monkeypatch
         "default_model": "opus",
     }
     with (
+        patch.object(main_mod, "_mind_gateway_url", new=AsyncMock(return_value="http://skippy:8421")),
         patch.object(
-            main_mod,
-            "local_runtime_configuration",
-            return_value={"name": "skippy", "default_model": "sonnet"},
+            main_mod.mind_runtime,
+            "fetch_configuration",
+            new=AsyncMock(return_value={"name": "skippy", "default_model": "sonnet"}),
         ),
-        patch.object(main_mod, "update_local_runtime_model", return_value=updated),
+        patch.object(
+            main_mod.mind_runtime, "push_default_model", new=AsyncMock(return_value=updated)
+        ),
         patch.object(main_mod, "_gateway_request", new=AsyncMock(return_value={})),
     ):
         response = client.patch(

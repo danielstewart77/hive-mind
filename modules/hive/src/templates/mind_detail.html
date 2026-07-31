@@ -10,7 +10,7 @@
     <div class="overview-stack" id="mind-content">
         <section class="surface"><div class="surface-header"><h2>Overview</h2><span id="mind-status"></span></div><div class="surface-body"><dl class="detail-grid" id="mind-details"></dl></div></section>
         <section class="surface"><div class="surface-header"><div><h2>Runtime configuration</h2><p>Secret values are removed before this reaches the browser.</p></div></div><div class="surface-body"><div class="code-wrap"><pre class="code-panel" id="mind-config">Loading…</pre><button class="icon-button" type="button" data-copy="#mind-config" aria-label="Copy configuration"><i data-lucide="copy"></i></button></div></div></section>
-        <section class="surface" id="mind-editor" hidden><div class="surface-header"><div><h2>Default model</h2><p>Changes apply to new sessions after the Mind runtime restarts.</p></div></div><form class="surface-body overview-stack" id="mind-model-form"><div class="field"><label for="mind-default-model">Model name</label><input id="mind-default-model" name="default_model" list="mind-model-options" required><datalist id="mind-model-options"></datalist><small>Use a model supported by this Mind's configured provider.</small></div><div class="form-actions"><button class="button" type="submit">Save model</button><button class="button button-primary" id="mind-restart" type="button" hidden>Request restart</button></div><small id="mind-model-status"></small></form></section>
+        <section class="surface" id="mind-editor" hidden><div class="surface-header"><div><h2>Default model</h2><p>Written to this Mind&#39;s runtime.yaml and its registry row. Applies to the next session it is asked for; conversations already running keep their model.</p></div></div><form class="surface-body overview-stack" id="mind-model-form"><div class="field"><label for="mind-default-model">Model name</label><input id="mind-default-model" name="default_model" list="mind-model-options" required><datalist id="mind-model-options"></datalist><small>Use a model supported by this Mind's configured provider.</small></div><div class="form-actions"><button class="button" type="submit">Save model</button><button class="button button-primary" id="mind-restart" type="button" hidden>Restart runtime</button></div><small id="mind-model-status"></small></form></section>
     </div>
 </main>
 <script>
@@ -33,11 +33,17 @@ window.addEventListener("DOMContentLoaded", async function () {
         ];
         document.getElementById("mind-details").innerHTML = details.map(function (item) { return '<div class="detail-item"><dt>' + h.escapeHtml(item[0]) + '</dt><dd>' + h.escapeHtml(item[1]) + '</dd></div>'; }).join("");
         document.getElementById("mind-config").textContent = mind.local_config ? JSON.stringify(cfg, null, 2) : "This mind is remote. Runtime configuration is managed on its host.";
-        if (mind.local_config && !cfg.remote && mind.local_config.source === "runtime.yaml") {
-            const editor = document.getElementById("mind-editor"); editor.hidden = false; editor.dataset.mindName = mind.name;
+        // Every registered Mind is configured the same way: over its own
+        // HTTP API. A Mind that is down answers nothing, and the editor says
+        // so rather than offering an edit that could not be written.
+        const editor = document.getElementById("mind-editor"); editor.dataset.mindName = mind.name; editor.hidden = false;
+        try {
             const configuration = await h.requestJson("/api/minds/" + encodeURIComponent(mind.name) + "/configuration");
             document.getElementById("mind-default-model").value = configuration.configuration.default_model || cfg.default_model || mind.model || "";
             document.getElementById("mind-model-options").innerHTML = (configuration.models || []).map(function (model) { return '<option value="' + h.escapeHtml(model) + '"></option>'; }).join("");
+        } catch (error) {
+            document.getElementById("mind-model-form").hidden = true;
+            document.getElementById("mind-model-status").textContent = "Cannot reach this Mind to read its configuration: " + error.message;
         }
         if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}});
     } catch (error) {
@@ -50,11 +56,8 @@ window.addEventListener("DOMContentLoaded", async function () {
         status.textContent = "Saving…";
         try {
             const data = await h.requestJson("/api/minds/" + encodeURIComponent(editor.dataset.mindName) + "/configuration", {method: "PATCH", headers: {"Content-Type": "application/json"}, body: JSON.stringify({default_model: event.target.elements.default_model.value})});
-            const restartable = data.restartable !== false;
-            status.textContent = restartable
-                ? "Saved. Restart this Mind to activate the new default model."
-                : "Saved. Restart this Mind on its host (" + (data.configuration.deployment || "host") + ") to activate the new default model.";
-            restart.hidden = !data.restart_required || !restartable;
+            status.textContent = "Saved. The next session this Mind is asked for starts on " + (data.configuration.default_model || "the new model") + ".";
+            restart.hidden = data.restartable === false;
         } catch (error) { status.textContent = error.message; }
     });
     document.getElementById("mind-restart").addEventListener("click", async function () {
