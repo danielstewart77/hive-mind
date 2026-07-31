@@ -20,10 +20,18 @@ from __future__ import annotations
 import os
 import re
 import secrets
-import stat
-import tempfile
+import time
 from pathlib import Path
 from typing import Any
+
+# Each .env is bind-mounted into this container as a single file, so the
+# usual write-temp-then-os.replace dance is impossible: renaming over a
+# bind-mount target fails with EBUSY, and even if it didn't, the new inode
+# would leave the mount pointing at the old one. Rewriting in place is the
+# only thing that works here, so a copy of the original goes to this
+# console-owned directory first — a truncated nervous-system/.env would
+# take the hive down with it.
+BACKUP_DIR = Path(os.environ.get("ENV_BACKUP_DIR", "/data/env-backups"))
 
 ENV_FILES: dict[str, Path] = {
     "nervous_system": Path("/env_nervous_system/.env"),
@@ -55,8 +63,20 @@ def _redact(value: str | None) -> str | None:
     return f"...{value[-4:]}"
 
 
-def _write_env_value(path: Path, key: str, new_value: str) -> bool:
-    """Replace KEY=... in place, atomically. Returns False if the key isn't in this file."""
+def _backup(text: str, label: str, key: str) -> None:
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    destination = BACKUP_DIR / f"{label}-{key}-{stamp}.env"
+    destination.write_text(text)
+    destination.chmod(0o600)
+
+
+def _write_env_value(path: Path, key: str, new_value: str, label: str = "env") -> bool:
+    """Replace KEY=... in place. Returns False if the key isn't in this file.
+
+    The write preserves the inode (see BACKUP_DIR's note): mode and ownership
+    are therefore untouched by construction.
+    """
     if not path.is_file():
         return False
     text = path.read_text()
@@ -69,21 +89,11 @@ def _write_env_value(path: Path, key: str, new_value: str) -> bool:
     )
     if count != 1:
         return False
-    metadata = path.stat()
-    file_descriptor, temporary_name = tempfile.mkstemp(
-        prefix=".env-", suffix=".tmp", dir=path.parent
-    )
-    try:
-        with os.fdopen(file_descriptor, "w") as temporary_file:
-            temporary_file.write(updated_text)
-            temporary_file.flush()
-            os.fsync(temporary_file.fileno())
-            os.fchmod(temporary_file.fileno(), stat.S_IMODE(metadata.st_mode))
-            os.fchown(temporary_file.fileno(), metadata.st_uid, metadata.st_gid)
-        os.replace(temporary_name, path)
-    finally:
-        if os.path.exists(temporary_name):
-            os.unlink(temporary_name)
+    _backup(text, label, key)
+    with open(path, "w") as env_file:
+        env_file.write(updated_text)
+        env_file.flush()
+        os.fsync(env_file.fileno())
     return True
 
 
@@ -226,7 +236,7 @@ def rotate_credential(key: str) -> dict[str, Any]:
     written = []
     for file_label, env_key in group["locations"]:
         path = ENV_FILES[file_label]
-        if _write_env_value(path, env_key, new_value):
+        if _write_env_value(path, env_key, new_value, label=file_label):
             written.append({"file": file_label, "env_key": env_key})
 
     if not written:

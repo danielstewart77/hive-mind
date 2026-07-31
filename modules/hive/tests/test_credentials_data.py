@@ -20,6 +20,7 @@ def _patch_env_files(monkeypatch, tmp_path, **files):
     env_files = {label: tmp_path / f"missing-{label}.env" for label in credentials_data.ENV_FILES}
     env_files.update(files)
     monkeypatch.setattr(credentials_data, "ENV_FILES", env_files)
+    monkeypatch.setattr(credentials_data, "BACKUP_DIR", tmp_path / "backups")
 
 
 def test_list_credentials_reports_in_sync_shared_secret(tmp_path, monkeypatch):
@@ -111,11 +112,41 @@ def test_rotate_credential_raises_when_key_absent_everywhere(tmp_path, monkeypat
         credentials_data.rotate_credential("comms_bearer_token")
 
 
-def test_write_env_value_preserves_file_permissions(tmp_path):
+def test_write_env_value_preserves_inode_and_permissions(tmp_path, monkeypatch):
+    """The .env files are single-file bind mounts: replacing the inode breaks the mount."""
+    monkeypatch.setattr(credentials_data, "BACKUP_DIR", tmp_path / "backups")
     path = tmp_path / "secret.env"
     _write_env(path, TOKEN="old")
     path.chmod(0o600)
+    inode_before = path.stat().st_ino
 
     assert credentials_data._write_env_value(path, "TOKEN", "new") is True
     assert credentials_data._read_env_value(path, "TOKEN") == "new"
+    assert path.stat().st_ino == inode_before
     assert oct(path.stat().st_mode)[-3:] == "600"
+
+
+def test_write_env_value_backs_up_the_original_before_rewriting(tmp_path, monkeypatch):
+    backups = tmp_path / "backups"
+    monkeypatch.setattr(credentials_data, "BACKUP_DIR", backups)
+    path = tmp_path / "secret.env"
+    _write_env(path, TOKEN="old", OTHER="keep")
+
+    credentials_data._write_env_value(path, "TOKEN", "new", label="skippy")
+
+    written = list(backups.iterdir())
+    assert len(written) == 1
+    assert written[0].name.startswith("skippy-TOKEN-")
+    assert "TOKEN=old" in written[0].read_text()
+    assert "OTHER=keep" in written[0].read_text()
+
+
+def test_write_env_value_leaves_file_untouched_when_key_absent(tmp_path, monkeypatch):
+    backups = tmp_path / "backups"
+    monkeypatch.setattr(credentials_data, "BACKUP_DIR", backups)
+    path = tmp_path / "secret.env"
+    _write_env(path, OTHER="keep")
+
+    assert credentials_data._write_env_value(path, "TOKEN", "new") is False
+    assert path.read_text() == "OTHER=keep\n"
+    assert not backups.exists()
