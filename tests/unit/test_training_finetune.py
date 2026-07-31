@@ -186,3 +186,33 @@ def test_the_launch_command_mounts_the_cache_and_asks_for_train_mode(
         str(tmp_path / "models") in part and "/root/.cache/huggingface" in part
         for part in command
     )
+
+
+def test_the_estimate_follows_the_base_model(train_file):
+    """One constant for every model charged an 8B the footprint of a 30B."""
+    from core.training_finetune import estimate_required_mib
+
+    small = estimate_required_mib(_spec(train_file, base_model="Qwen/Qwen3-8B"))
+    large = estimate_required_mib(
+        _spec(train_file, base_model="Qwen/Qwen3-30B-A3B-Instruct-2507")
+    )
+    assert small < large
+
+
+def test_an_eight_billion_parameter_run_fits_on_a_card_serving_inference(train_file):
+    """The case that matters: an A6000 with half its VRAM already in use."""
+    from core.training_finetune import GpuState, plan_run
+
+    plan = plan_run(
+        _spec(train_file, base_model="Qwen/Qwen3-8B", max_sequence_length=8_192),
+        gpu=GpuState(total_mib=49_140, used_mib=24_500, name="A6000", available=True),
+    )
+    assert plan.can_run, plan.blockers
+
+
+def test_an_unknown_base_is_charged_the_conservative_footprint(train_file):
+    """A model the catalog has never heard of must not be waved through."""
+    from core.training_finetune import UNKNOWN_MODEL_4BIT_MIB, estimate_required_mib
+
+    estimate = estimate_required_mib(_spec(train_file, base_model="acme/mystery-70b"))
+    assert estimate > UNKNOWN_MODEL_4BIT_MIB
