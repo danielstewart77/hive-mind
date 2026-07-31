@@ -104,6 +104,20 @@ def send_notification(message: str) -> None:
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
+def _broker_token() -> str:
+    """The comms bearer token.
+
+    ``COMMS_BEARER_TOKEN`` is the canonical name — it is what
+    ``comms/auth.py`` actually reads. ``HIVEMIND_BROKER_TOKEN`` is a
+    legacy alias carrying the same value on bare-metal installs; it is
+    honoured so a mind whose env predates the consolidation still
+    authenticates.
+    """
+    return os.environ.get("COMMS_BEARER_TOKEN") or os.environ.get(
+        "HIVEMIND_BROKER_TOKEN", ""
+    )
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Poll broker for inter-mind result")
     parser.add_argument("--conversation_id", required=True)
@@ -117,8 +131,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--bearer_token",
-        default=os.environ.get("HIVEMIND_BROKER_TOKEN", ""),
-        help="Bearer token. Defaults to $HIVEMIND_BROKER_TOKEN. Omit for no-auth brokers.",
+        default=_broker_token(),
+        help=(
+            "Bearer token. Defaults to $COMMS_BEARER_TOKEN, falling back to the "
+            "legacy $HIVEMIND_BROKER_TOKEN alias. Omit for no-auth brokers."
+        ),
     )
     return parser.parse_args(argv)
 

@@ -111,3 +111,43 @@ class TestBuildNotification:
         assert "security_triage" in msg
         assert "1800" in msg or "30" in msg  # seconds or minutes
         assert "conv-1" in msg
+
+
+class TestBrokerToken:
+    """COMMS_BEARER_TOKEN is canonical; HIVEMIND_BROKER_TOKEN is a legacy alias."""
+
+    def test_prefers_comms_bearer_token(self, monkeypatch):
+        mod = _import_poll()
+        monkeypatch.setenv("COMMS_BEARER_TOKEN", "canonical")
+        monkeypatch.setenv("HIVEMIND_BROKER_TOKEN", "legacy")
+        assert mod._broker_token() == "canonical"
+
+    def test_falls_back_to_legacy_alias(self, monkeypatch):
+        mod = _import_poll()
+        monkeypatch.delenv("COMMS_BEARER_TOKEN", raising=False)
+        monkeypatch.setenv("HIVEMIND_BROKER_TOKEN", "legacy")
+        assert mod._broker_token() == "legacy"
+
+    def test_empty_canonical_falls_back(self, monkeypatch):
+        mod = _import_poll()
+        monkeypatch.setenv("COMMS_BEARER_TOKEN", "")
+        monkeypatch.setenv("HIVEMIND_BROKER_TOKEN", "legacy")
+        assert mod._broker_token() == "legacy"
+
+    def test_no_token_set_yields_empty(self, monkeypatch):
+        mod = _import_poll()
+        monkeypatch.delenv("COMMS_BEARER_TOKEN", raising=False)
+        monkeypatch.delenv("HIVEMIND_BROKER_TOKEN", raising=False)
+        assert mod._broker_token() == ""
+
+    def test_parse_args_uses_canonical_token(self, monkeypatch):
+        mod = _import_poll()
+        monkeypatch.setenv("COMMS_BEARER_TOKEN", "canonical")
+        monkeypatch.delenv("HIVEMIND_BROKER_TOKEN", raising=False)
+        args = mod.parse_args([
+            "--conversation_id", "conv-1",
+            "--from_mind", "ada",
+            "--to_mind", "nagatha",
+            "--request_type", "quick_query",
+        ])
+        assert args.bearer_token == "canonical"
