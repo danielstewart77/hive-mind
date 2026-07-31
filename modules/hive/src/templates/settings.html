@@ -68,10 +68,16 @@ window.addEventListener("DOMContentLoaded", function () {
             list.innerHTML = rows.map(function (item) {
                 const locations = item.locations.map(function (loc) { return h.escapeHtml(loc.file) + " (" + h.escapeHtml(loc.env_key) + "): " + (loc.present ? h.escapeHtml(loc.preview || "set") : "missing"); }).join(", ");
                 const syncNote = item.locations.length && !item.in_sync ? '<br><strong style="color:var(--color-danger,#c0392b)">Out of sync across files</strong>' : "";
-                const action = item.rotatable
-                    ? '<button class="button" type="button" data-rotate="' + h.escapeHtml(item.key) + '">Rotate</button>'
-                    : '<span class="pill" title="' + h.escapeHtml(item.manual_reason || "") + '">Manual only</span>';
-                return '<li class="service-row"><span class="service-icon"><i data-lucide="key-round"></i></span><span class="service-copy"><strong>' + h.escapeHtml(item.label) + '</strong><small>' + locations + syncNote + '</small></span>' + action + '</li>';
+                const note = item.note ? '<br><em>' + h.escapeHtml(item.note) + '</em>' : "";
+                let action;
+                if (item.rotatable) {
+                    action = '<button class="button" type="button" data-rotate="' + h.escapeHtml(item.key) + '">Rotate</button>';
+                } else if (item.settable) {
+                    action = '<span style="display:flex;gap:8px;align-items:center"><input type="password" placeholder="Paste new PAT" data-set-input="' + h.escapeHtml(item.key) + '" style="max-width:220px"><button class="button" type="button" data-set="' + h.escapeHtml(item.key) + '">Save</button></span>';
+                } else {
+                    action = '<span class="pill" title="' + h.escapeHtml(item.manual_reason || "") + '">Manual only</span>';
+                }
+                return '<li class="service-row"><span class="service-icon"><i data-lucide="key-round"></i></span><span class="service-copy"><strong>' + h.escapeHtml(item.label) + '</strong><small>' + locations + syncNote + note + '</small></span>' + action + '</li>';
             }).join("");
             refreshIcons();
         } catch (error) { list.innerHTML = '<li><div class="error-state">' + h.escapeHtml(error.message) + '</div></li>'; }
@@ -84,7 +90,12 @@ window.addEventListener("DOMContentLoaded", function () {
     if (section === "access") { document.getElementById("sessions-refresh").addEventListener("click", loadSessions); document.getElementById("settings-sessions").addEventListener("click", async function (event) { const button = event.target.closest("[data-delete-session]"); if (!button || !window.confirm("Delete this session?")) return; try { await h.requestJson("/api/settings/hive-comms/sessions/" + encodeURIComponent(button.dataset.deleteSession), {method: "DELETE"}); loadSessions(); } catch (error) { window.alert(error.message); } }); loadSessions(); }
     if (section === "connections") { document.getElementById("connections-refresh").addEventListener("click", loadConnections); loadConnections(); }
     if (section === "voice") { document.getElementById("voice-minds").addEventListener("submit", async function (event) { const form = event.target.closest(".voice-form"); if (!form) return; event.preventDefault(); const status = form.querySelector("[data-status]"); status.textContent = "Uploading…"; try { await h.requestJson("/api/settings/voice/" + encodeURIComponent(form.dataset.mind) + "/voice-ref", {method: "POST", body: new FormData(form)}); status.textContent = "Uploaded"; loadVoice(); } catch (error) { status.textContent = error.message; } }); loadVoice(); }
-    if (section === "credentials") { document.getElementById("settings-credentials").addEventListener("click", async function (event) { const button = event.target.closest("[data-rotate]"); if (!button) return; const key = button.dataset.rotate; if (!window.confirm("Rotate this credential? Nothing restarts automatically — you'll need to bounce the affected services yourself.")) return; button.disabled = true; button.textContent = "Rotating…"; try { const result = await h.requestJson("/api/settings/credentials/" + encodeURIComponent(key) + "/rotate", {method: "POST"}); window.alert("Rotated. Restart: " + (result.restart_targets || []).join(", ")); loadCredentials(); } catch (error) { window.alert(error.message); button.disabled = false; button.textContent = "Rotate"; } }); loadCredentials(); }
+    if (section === "credentials") { document.getElementById("settings-credentials").addEventListener("click", async function (event) {
+        const rotateButton = event.target.closest("[data-rotate]");
+        if (rotateButton) { const key = rotateButton.dataset.rotate; if (!window.confirm("Rotate this credential? Nothing restarts automatically — you'll need to bounce the affected services yourself.")) return; rotateButton.disabled = true; rotateButton.textContent = "Rotating…"; try { const result = await h.requestJson("/api/settings/credentials/" + encodeURIComponent(key) + "/rotate", {method: "POST"}); window.alert("Rotated. Restart: " + (result.restart_targets || []).join(", ")); loadCredentials(); } catch (error) { window.alert(error.message); rotateButton.disabled = false; rotateButton.textContent = "Rotate"; } return; }
+        const setButton = event.target.closest("[data-set]");
+        if (setButton) { const key = setButton.dataset.set; const input = document.querySelector('[data-set-input="' + key + '"]'); const token = (input && input.value || "").trim(); if (!token) { window.alert("Paste the new token first."); return; } setButton.disabled = true; setButton.textContent = "Verifying…"; try { const result = await h.requestJson("/api/settings/credentials/" + encodeURIComponent(key) + "/set", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({token: token})}); window.alert("Verified as " + (result.login || "unknown") + " and written to: " + (result.written || []).map(function (w) { return w.file; }).join(", ")); loadCredentials(); } catch (error) { window.alert(error.message); setButton.disabled = false; setButton.textContent = "Save"; } }
+    }); loadCredentials(); }
     if (section === "advanced") loadDownloads();
 });
 </script>

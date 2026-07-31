@@ -55,6 +55,9 @@ services:
       - ${SKIPPY_DIR:-/home/daniel/Storage/hive-edge-mind-skippy}/.env:/env_edge/skippy/.env:rw
       - ${MORDECAI_DIR:-/home/daniel/Storage/hive-edge-mind-mordecai}/.env:/env_edge/mordecai/.env:rw
       - ${HIVE_TOOLS_DIR:-/home/daniel/Storage/hive-tools}/.env:/env_hive_tools/.env:rw
+      # The GitHub PAT's two live homes, for the same tab's paste-to-set flow.
+      - ${GIT_CREDENTIALS_FILE:-/home/daniel/.git-credentials}:/gh/.git-credentials:rw
+      - ${GH_HOSTS_FILE:-/home/daniel/.config/gh/hosts.yml}:/gh/hosts.yml:rw
     networks:
       - hivemind
     logging:

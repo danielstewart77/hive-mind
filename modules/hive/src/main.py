@@ -60,7 +60,7 @@ from configuration_data import (
 )
 from graph_data import get_graph_data
 from hive_logging import configure_logging, install_fastapi_logging, log_event
-from credentials_data import list_credentials, rotate_credential
+from credentials_data import list_credentials, rotate_credential, set_github_pat
 from settings_data import (
     build_mind_registry,
     hive_tools_status,
@@ -2460,6 +2460,21 @@ async def api_settings_credentials_rotate(key: str, user: dict = Depends(require
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     log_event(
         log, "credential.rotated", **_actor_fields(user),
+        credential=result["key"], written_to=[w["file"] for w in result["written"]],
+    )
+    return result
+
+
+@app.post("/api/settings/credentials/github_pat/set")
+async def api_settings_credentials_set_github_pat(
+    payload: dict, user: dict = Depends(require_auth)
+):
+    try:
+        result = set_github_pat(str(payload.get("token", "")))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_event(
+        log, "credential.set", **_actor_fields(user),
         credential=result["key"], written_to=[w["file"] for w in result["written"]],
     )
     return result

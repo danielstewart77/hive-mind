@@ -496,6 +496,51 @@ def test_api_settings_credentials_rotate_returns_result(tmp_path, monkeypatch):
     mock_rotate.assert_called_once_with("comms_bearer_token")
 
 
+def test_api_settings_credentials_set_github_pat_requires_auth(tmp_path, monkeypatch):
+    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
+    monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
+    client = TestClient(main_mod.app)
+
+    response = client.post(
+        "/api/settings/credentials/github_pat/set", json={"token": "ghp_x"}
+    )
+    assert response.status_code == 401
+
+
+def test_api_settings_credentials_set_github_pat_returns_result(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
+    fake_result = {
+        "key": "github_pat",
+        "label": "GitHub personal access token",
+        "login": "danielstewart77",
+        "preview": "...cdef",
+        "written": [{"file": "git_credentials", "env_key": "github.com"}],
+        "restart_targets": [],
+    }
+    with patch.object(main_mod, "set_github_pat", return_value=fake_result) as mock_set:
+        response = client.post(
+            "/api/settings/credentials/github_pat/set", json={"token": "ghp_new"}
+        )
+
+    assert response.status_code == 200
+    assert response.json() == fake_result
+    mock_set.assert_called_once_with("ghp_new")
+
+
+def test_api_settings_credentials_set_github_pat_400s_on_rejected_token(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
+    with patch.object(
+        main_mod, "set_github_pat",
+        side_effect=ValueError("GitHub rejected that token (401) — nothing was written"),
+    ):
+        response = client.post(
+            "/api/settings/credentials/github_pat/set", json={"token": "ghp_bad"}
+        )
+
+    assert response.status_code == 400
+    assert "nothing was written" in response.json()["detail"]
+
+
 def test_api_settings_credentials_rotate_rejects_manual_only(tmp_path, monkeypatch):
     client = _authed_client(tmp_path, monkeypatch)
     with patch.object(
