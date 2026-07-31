@@ -178,12 +178,21 @@ def plan_run(spec: FineTuneSpec, gpu: GpuState | None = None) -> LaunchPlan:
 def huggingface_cache_dir() -> str:
     """Host directory holding downloaded base weights.
 
-    Read from the environment so a host that keeps models on a second disk
-    says so once, rather than every caller guessing.
+    This path is handed to ``docker run``, so it is interpreted by the
+    daemon on the host — not inside whatever container this code happens to
+    be running in. A service container therefore has to be *told* the host
+    path via ``HF_HOME``; left to guess, it would derive one from its own
+    home directory and have Docker create that directory on the host.
+
+    Creating it is best-effort for the same reason: the path may well not
+    exist in this filesystem, and that is not an error.
     """
     configured = os.environ.get("HF_HOME") or os.environ.get("HUGGINGFACE_HUB_CACHE")
     path = Path(configured) if configured else Path.home() / ".cache" / "huggingface"
-    path.mkdir(parents=True, exist_ok=True)
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
     return str(path)
 
 
