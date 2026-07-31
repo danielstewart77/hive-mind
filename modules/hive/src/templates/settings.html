@@ -9,6 +9,7 @@
             <a href="/settings/access" class="{% if settings_section == 'access' %}is-active{% endif %}">Owner and access</a>
             <a href="/settings/connections" class="{% if settings_section == 'connections' %}is-active{% endif %}">Connections</a>
             <a href="/settings/voice" class="{% if settings_section == 'voice' %}is-active{% endif %}">Voice</a>
+            <a href="/settings/credentials" class="{% if settings_section == 'credentials' %}is-active{% endif %}">Credentials</a>
             <a href="/settings/advanced" class="{% if settings_section == 'advanced' %}is-active{% endif %}">Advanced</a>
         </div>
         <div class="settings-content">
@@ -23,6 +24,8 @@
         {% elif settings_section == 'voice' %}
             <section class="surface"><div class="settings-section-copy"><h2>Voice services</h2><p>Server health and reference clips used for voice cloning.</p></div><ul class="service-list" id="voice-servers"><li class="loading-state">Checking voice servers…</li></ul></section>
             <section class="surface"><div class="surface-header"><div><h2>Mind voices</h2><p>Upload a clean WAV reference clip for a registered mind.</p></div></div><div class="surface-body overview-stack" id="voice-minds"><div class="loading-state">Loading minds…</div></div></section>
+        {% elif settings_section == 'credentials' %}
+            <section class="surface"><div class="settings-section-copy"><h2>Shared-secret tokens</h2><p>Rotating writes a new value to every file that holds it. Nothing restarts automatically — restart the listed services yourself once rotation completes.</p></div><ul class="service-list" id="settings-credentials"><li class="loading-state">Loading credentials…</li></ul></section>
         {% elif settings_section == 'advanced' %}
             <section class="surface"><div class="settings-section-copy"><h2>Installer downloads</h2><p>Approved bootstrap assets published by Hive Init.</p></div><ul class="service-list" id="settings-downloads"><li class="loading-state">Loading downloads…</li></ul></section>
             <section class="surface"><div class="settings-section-copy"><h2>Diagnostics</h2><p>Detailed runtime configuration is available on each Mind page with secrets removed.</p></div><div class="surface-body"><a class="button" href="/minds"><i data-lucide="brain-circuit"></i>Open mind diagnostics</a></div></section>
@@ -58,6 +61,21 @@ window.addEventListener("DOMContentLoaded", function () {
             document.getElementById("voice-minds").innerHTML = (data.minds || []).map(function (mind) { return '<form class="voice-form detail-item" data-mind="' + h.escapeHtml(mind.name) + '"><div style="display:flex;align-items:center;gap:12px"><span class="entity-avatar">' + h.escapeHtml(mind.name.slice(0,2)) + '</span><span class="entity-copy"><strong>' + h.escapeHtml(mind.name) + '</strong><small>' + (mind.voice_ref ? "Reference clip configured" : "No reference clip") + '</small></span><input type="file" name="file" accept="audio/wav,.wav" required style="margin-left:auto;max-width:240px"><button class="button" type="submit">Upload</button></div><small data-status></small></form>'; }).join(""); refreshIcons();
         } catch (error) { document.getElementById("voice-minds").innerHTML = '<div class="error-state">' + h.escapeHtml(error.message) + '</div>'; }
     }
+    async function loadCredentials() {
+        const list = document.getElementById("settings-credentials");
+        try {
+            const rows = (await h.requestJson("/api/settings/credentials")).credentials || [];
+            list.innerHTML = rows.map(function (item) {
+                const locations = item.locations.map(function (loc) { return h.escapeHtml(loc.file) + " (" + h.escapeHtml(loc.env_key) + "): " + (loc.present ? h.escapeHtml(loc.preview || "set") : "missing"); }).join(", ");
+                const syncNote = item.locations.length && !item.in_sync ? '<br><strong style="color:var(--color-danger,#c0392b)">Out of sync across files</strong>' : "";
+                const action = item.rotatable
+                    ? '<button class="button" type="button" data-rotate="' + h.escapeHtml(item.key) + '">Rotate</button>'
+                    : '<span class="pill" title="' + h.escapeHtml(item.manual_reason || "") + '">Manual only</span>';
+                return '<li class="service-row"><span class="service-icon"><i data-lucide="key-round"></i></span><span class="service-copy"><strong>' + h.escapeHtml(item.label) + '</strong><small>' + locations + syncNote + '</small></span>' + action + '</li>';
+            }).join("");
+            refreshIcons();
+        } catch (error) { list.innerHTML = '<li><div class="error-state">' + h.escapeHtml(error.message) + '</div></li>'; }
+    }
     async function loadDownloads() {
         const list = document.getElementById("settings-downloads");
         try { const rows = (await h.requestJson("/api/settings/downloads")).downloads || []; list.innerHTML = rows.length ? rows.map(function (item) { return '<li class="service-row"><span class="service-icon"><i data-lucide="download"></i></span><span class="service-copy"><strong>' + h.escapeHtml(item.filename) + '</strong><small>' + h.escapeHtml(item.size_bytes) + ' bytes</small></span><a class="button" href="/downloads/' + encodeURIComponent(item.filename) + '">Download</a></li>'; }).join("") : '<li class="empty-state"><h3>No installer assets</h3><p>Hive Init has not published downloads on this host.</p></li>'; refreshIcons(); }
@@ -66,6 +84,7 @@ window.addEventListener("DOMContentLoaded", function () {
     if (section === "access") { document.getElementById("sessions-refresh").addEventListener("click", loadSessions); document.getElementById("settings-sessions").addEventListener("click", async function (event) { const button = event.target.closest("[data-delete-session]"); if (!button || !window.confirm("Delete this session?")) return; try { await h.requestJson("/api/settings/hive-comms/sessions/" + encodeURIComponent(button.dataset.deleteSession), {method: "DELETE"}); loadSessions(); } catch (error) { window.alert(error.message); } }); loadSessions(); }
     if (section === "connections") { document.getElementById("connections-refresh").addEventListener("click", loadConnections); loadConnections(); }
     if (section === "voice") { document.getElementById("voice-minds").addEventListener("submit", async function (event) { const form = event.target.closest(".voice-form"); if (!form) return; event.preventDefault(); const status = form.querySelector("[data-status]"); status.textContent = "Uploading…"; try { await h.requestJson("/api/settings/voice/" + encodeURIComponent(form.dataset.mind) + "/voice-ref", {method: "POST", body: new FormData(form)}); status.textContent = "Uploaded"; loadVoice(); } catch (error) { status.textContent = error.message; } }); loadVoice(); }
+    if (section === "credentials") { document.getElementById("settings-credentials").addEventListener("click", async function (event) { const button = event.target.closest("[data-rotate]"); if (!button) return; const key = button.dataset.rotate; if (!window.confirm("Rotate this credential? Nothing restarts automatically — you'll need to bounce the affected services yourself.")) return; button.disabled = true; button.textContent = "Rotating…"; try { const result = await h.requestJson("/api/settings/credentials/" + encodeURIComponent(key) + "/rotate", {method: "POST"}); window.alert("Rotated. Restart: " + (result.restart_targets || []).join(", ")); loadCredentials(); } catch (error) { window.alert(error.message); button.disabled = false; button.textContent = "Rotate"; } }); loadCredentials(); }
     if (section === "advanced") loadDownloads();
 });
 </script>

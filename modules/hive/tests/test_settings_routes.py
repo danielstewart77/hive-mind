@@ -447,3 +447,62 @@ def test_mind_restart_refuses_non_container_deployment(tmp_path, monkeypatch):
     assert response.status_code == 400
     assert "systemd" in response.json()["detail"]
     tools.assert_not_awaited()
+
+
+# ── credentials ────────────────────────────────────────────────────────
+
+
+def test_api_settings_credentials_requires_auth(tmp_path, monkeypatch):
+    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
+    monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
+    client = TestClient(main_mod.app)
+
+    assert client.get("/api/settings/credentials").status_code == 401
+
+
+def test_api_settings_credentials_lists_from_credentials_data(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
+    fake = [{"key": "comms_bearer_token", "label": "Hive Comms bearer token", "rotatable": True}]
+    with patch.object(main_mod, "list_credentials", return_value=fake):
+        response = client.get("/api/settings/credentials")
+
+    assert response.status_code == 200
+    assert response.json()["credentials"] == fake
+
+
+def test_api_settings_credentials_rotate_requires_auth(tmp_path, monkeypatch):
+    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
+    monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
+    client = TestClient(main_mod.app)
+
+    response = client.post("/api/settings/credentials/comms_bearer_token/rotate")
+    assert response.status_code == 401
+
+
+def test_api_settings_credentials_rotate_returns_result(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
+    fake_result = {
+        "key": "comms_bearer_token",
+        "label": "Hive Comms bearer token",
+        "preview": "...abcd",
+        "written": [{"file": "nervous_system", "env_key": "COMMS_BEARER_TOKEN"}],
+        "restart_targets": ["hive-comms container"],
+    }
+    with patch.object(main_mod, "rotate_credential", return_value=fake_result) as mock_rotate:
+        response = client.post("/api/settings/credentials/comms_bearer_token/rotate")
+
+    assert response.status_code == 200
+    assert response.json() == fake_result
+    mock_rotate.assert_called_once_with("comms_bearer_token")
+
+
+def test_api_settings_credentials_rotate_rejects_manual_only(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
+    with patch.object(
+        main_mod, "rotate_credential",
+        side_effect=ValueError("Issued per-consumer from hive-tools' own token store"),
+    ):
+        response = client.post("/api/settings/credentials/hive_tools_token/rotate")
+
+    assert response.status_code == 400
+    assert "hive-tools" in response.json()["detail"]

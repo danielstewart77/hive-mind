@@ -60,6 +60,7 @@ from configuration_data import (
 )
 from graph_data import get_graph_data
 from hive_logging import configure_logging, install_fastapi_logging, log_event
+from credentials_data import list_credentials, rotate_credential
 from settings_data import (
     build_mind_registry,
     hive_tools_status,
@@ -1738,7 +1739,7 @@ async def settings_page(request: Request):
     return RedirectResponse(url="/settings/general", status_code=303)
 
 
-_SETTINGS_SECTIONS = {"general", "access", "connections", "voice", "advanced"}
+_SETTINGS_SECTIONS = {"general", "access", "connections", "voice", "credentials", "advanced"}
 
 
 @app.get("/settings/{section}", response_class=HTMLResponse)
@@ -2443,6 +2444,25 @@ async def api_settings_voice_upload(
 async def api_settings_downloads(user: dict = Depends(require_auth)):
     del user
     return {"downloads": list_downloads()}
+
+
+@app.get("/api/settings/credentials")
+async def api_settings_credentials(user: dict = Depends(require_auth)):
+    del user
+    return {"credentials": list_credentials()}
+
+
+@app.post("/api/settings/credentials/{key}/rotate")
+async def api_settings_credentials_rotate(key: str, user: dict = Depends(require_auth)):
+    try:
+        result = rotate_credential(key)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_event(
+        log, "credential.rotated", **_actor_fields(user),
+        credential=result["key"], written_to=[w["file"] for w in result["written"]],
+    )
+    return result
 
 
 @app.get("/downloads/{filename}")

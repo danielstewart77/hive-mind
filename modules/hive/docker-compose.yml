@@ -46,6 +46,15 @@ services:
       - ${HIVE_INIT_DIR:-/home/daniel/Storage/Dev/hive-init}:/hive_init:ro
       # Fixed destination used by the Capability Nodes one-click clone action.
       - ${INFERENCE_PROXY_DIR:-/home/daniel/Storage/Dev/inference-proxy}:/inference_proxy_repo:rw
+      # Shared-secret .env files for the /settings credentials tab. Each is
+      # bind-mounted as a single file, read-write, so rotation can write a
+      # new value in place — see credentials_data.py for which key lives in
+      # which file and why they must move together.
+      - ${HIVE_MIND_DIR:-/home/daniel/Storage/Dev/hive_mind}/nervous-system/.env:/env_nervous_system/.env:rw
+      - ${HIVE_MIND_DIR:-/home/daniel/Storage/Dev/hive_mind}/.env:/env_hive_mind/.env:rw
+      - ${SKIPPY_DIR:-/home/daniel/Storage/hive-edge-mind-skippy}/.env:/env_edge/skippy/.env:rw
+      - ${MORDECAI_DIR:-/home/daniel/Storage/hive-edge-mind-mordecai}/.env:/env_edge/mordecai/.env:rw
+      - ${HIVE_TOOLS_DIR:-/home/daniel/Storage/hive-tools}/.env:/env_hive_tools/.env:rw
     networks:
       - hivemind
     logging:
