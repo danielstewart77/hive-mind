@@ -322,7 +322,48 @@
         return list.length ? "#s=" + list.map(encodeURIComponent).join(",") : "";
     }
 
+    /**
+     * Tear a terminal socket down so it can never write again.
+     *
+     * `close()` is asynchronous: the socket enters CLOSING and any frames
+     * already in flight still fire `onmessage` until the handshake
+     * finishes. A reattach that only closes the old socket therefore has a
+     * window where two sockets are live at once, and both call
+     * `term.write()` into the same terminal.
+     *
+     * That window is what corrupted the screen. Each socket carries a
+     * separate tmux client's update stream, and a tmux client emits
+     * cursor-addressed deltas against its own model of what the terminal
+     * already shows — it writes "move right two columns" where it believes
+     * blank cells sit rather than spending bytes on spaces. Interleave two
+     * such streams and each one's cursor moves land inside the other's,
+     * leaving cells neither client will ever write again. The buffer ends
+     * up holding text no repaint can reclaim, because both clients are
+     * certain those cells are already correct.
+     *
+     * So the handlers come off first and the close comes second. A socket
+     * with no `onmessage` cannot reach the terminal no matter how many
+     * frames the browser still has queued for it.
+     *
+     * @param {WebSocket|null} socket
+     * @returns {boolean}  whether there was a socket to detach
+     */
+    function detachSocket(socket) {
+        if (!socket) return false;
+        socket.onmessage = null;
+        socket.onclose = null;
+        socket.onerror = null;
+        socket.onopen = null;
+        try {
+            socket.close();
+        } catch (err) {
+            /* already closing or closed — the handlers are off either way */
+        }
+        return true;
+    }
+
     root.TerminalRouting = {
+        detachSocket: detachSocket,
         parseOpenFragment: parseOpenFragment,
         formatOpenFragment: formatOpenFragment,
         pageScrollLines: pageScrollLines,

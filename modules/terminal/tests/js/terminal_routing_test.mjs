@@ -17,6 +17,7 @@ new Function(readFileSync(join(here, "..", "..", "src", "static", "terminal-rout
 const {
     pickReattachTarget, isActive, retryDelayMs, socketIsStale, attemptsAfterSocket, attachExhausted, contrastText, pendingImeText, shouldResetImeAccumulator, pageScrollLines,
     pageScrollAction, wheelReport, dragWheelSteps, parseOpenFragment, formatOpenFragment,
+    detachSocket,
 } = globalThis.TerminalRouting;
 
 const tests = {
@@ -313,6 +314,44 @@ const tests = {
     "a socket with nothing received yet is never called dead"() {
         // lastRecvAt 0 means the socket just opened; leave it to onopen/onclose.
         assert.equal(socketIsStale(100000, 0, 15000), false);
+    },
+
+    "a detached socket can never write to the terminal again"() {
+        // The exact bug: close() is asynchronous, so a socket left holding
+        // onmessage kept feeding term.write() alongside its replacement.
+        // Two tmux clients' update streams in one buffer is corruption no
+        // repaint can undo, so the handler must be gone before the close.
+        const written = [];
+        const socket = {
+            onmessage: (ev) => written.push(ev.data),
+            onclose: () => {},
+            onerror: () => {},
+            onopen: () => {},
+            closed: false,
+            close() { this.closed = true; },
+        };
+        assert.equal(detachSocket(socket), true);
+        assert.equal(socket.onmessage, null);
+        assert.equal(socket.onclose, null);
+        assert.equal(socket.onerror, null);
+        assert.equal(socket.onopen, null);
+        assert.equal(socket.closed, true);
+    },
+
+    "handlers come off even when the close itself throws"() {
+        // A socket already closing throws from close() in some browsers.
+        // The teardown still has to hold, or the throw resurrects the bug.
+        const socket = {
+            onmessage: () => {},
+            close() { throw new Error("already closing"); },
+        };
+        assert.equal(detachSocket(socket), true);
+        assert.equal(socket.onmessage, null);
+    },
+
+    "detaching nothing is a no-op, not a crash"() {
+        assert.equal(detachSocket(null), false);
+        assert.equal(detachSocket(undefined), false);
     },
 };
 
