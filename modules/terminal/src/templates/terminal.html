@@ -1006,6 +1006,13 @@
                     canvases: xtermEl.querySelectorAll(".xterm-screen canvas").length,
                     repaints: repaints,
                     altBuffer: isAltBuffer(),
+                    // The grid the tile is painting. tmux paints to the
+                    // geometry of the pty it was handed, so a disagreement
+                    // between this and `tmux list-panes` is stale text no
+                    // repaint can reach: the columns tmux never writes keep
+                    // whatever was in them, and the ones it writes past wrap.
+                    cols: term.cols,
+                    rows: term.rows,
                 };
             },
             checkLiveness: function () { reattachIfStale(FOREGROUND_STALE_MS); },
