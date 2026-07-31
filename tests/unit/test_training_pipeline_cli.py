@@ -275,3 +275,173 @@ def test_every_subcommand_emits_exactly_one_json_object(capsys, corpus, ledger):
         out = capsys.readouterr().out.strip()
         assert len(out.splitlines()) == 1
         json.loads(out)
+
+
+def test_base_models_lists_the_catalog_with_a_default(capsys, corpus, ledger):
+    code, payload = _run(capsys, _base(corpus, ledger) + ["base-models"])
+    assert code == 0
+    ids = [model["id"] for model in payload["models"]]
+    assert payload["default"] in ids
+    assert all(model["note"] for model in payload["models"])
+
+
+def test_train_passes_every_knob_into_the_spec(capsys, corpus, ledger, tmp_path):
+    """The console exposes these; a knob that never reaches the spec is a lie."""
+    train_file = tmp_path / "train.jsonl"
+    train_file.write_text('{"messages": []}\n')
+    code, payload = _run(
+        capsys,
+        _base(corpus, ledger)
+        + [
+            "train",
+            "--train-file",
+            str(train_file),
+            "--base-model",
+            "Qwen/Qwen3-14B",
+            "--lora-rank",
+            "16",
+            "--lora-dropout",
+            "0.1",
+            "--epochs",
+            "3",
+            "--batch-size",
+            "2",
+            "--gradient-accumulation-steps",
+            "8",
+            "--max-sequence-length",
+            "4096",
+            "--warmup-ratio",
+            "0.1",
+            "--no-4bit",
+            "--seed",
+            "5",
+            "--dry-run",
+        ],
+    )
+    assert code == 0
+    spec = payload["spec"]
+    assert spec["base_model"] == "Qwen/Qwen3-14B"
+    assert spec["lora_rank"] == 16
+    assert spec["lora_alpha"] == 32, "alpha defaults to twice the rank"
+    assert spec["lora_dropout"] == 0.1
+    assert spec["epochs"] == 3
+    assert spec["per_device_batch_size"] == 2
+    assert spec["gradient_accumulation_steps"] == 8
+    assert spec["max_sequence_length"] == 4096
+    assert spec["warmup_ratio"] == 0.1
+    assert spec["load_in_4bit"] is False
+    assert spec["seed"] == 5
+
+
+def test_an_explicit_lora_alpha_overrides_the_derived_one(
+    capsys, corpus, ledger, tmp_path
+):
+    train_file = tmp_path / "train.jsonl"
+    train_file.write_text('{"messages": []}\n')
+    _, payload = _run(
+        capsys,
+        _base(corpus, ledger)
+        + [
+            "train",
+            "--train-file",
+            str(train_file),
+            "--lora-rank",
+            "16",
+            "--lora-alpha",
+            "128",
+            "--dry-run",
+        ],
+    )
+    assert payload["spec"]["lora_alpha"] == 128
+
+
+def test_deploy_records_a_refusal_in_the_ledger(capsys, corpus, ledger, tmp_path):
+    """A deploy that never reached Ollama still has to be visible as history."""
+    code, payload = _run(
+        capsys,
+        _base(corpus, ledger)
+        + [
+            "deploy",
+            "--name",
+            "skippy-lora",
+            "--adapter-dir",
+            str(tmp_path / "missing"),
+            "--base-model",
+            "Qwen/Qwen3-8B",
+        ],
+    )
+    assert code == 0
+    assert payload["deployed"] is False
+    assert payload["stage"] == "refused"
+
+    _, runs = _run(capsys, _base(corpus, ledger) + ["runs", "--kind", "deploy"])
+    assert runs["runs"][0]["status"] == "failed"
+
+
+def test_deploy_takes_the_serve_tag_from_the_catalog(capsys, corpus, ledger, tmp_path):
+    adapter = tmp_path / "adapter"
+    adapter.mkdir()
+    (adapter / "adapter_model.safetensors").write_bytes(b"weights")
+    captured = {}
+
+    def fake_deploy(request, ollama_url=None, trainer_image=None):
+        captured["serve_tag"] = request.serve_tag
+        from core.training_deploy import DeployResult
+
+        return DeployResult(
+            deployed=True, model_name=request.model_name, stage="served"
+        )
+
+    original = cli.deploy
+    cli.deploy = fake_deploy
+    try:
+        code, payload = _run(
+            capsys,
+            _base(corpus, ledger)
+            + [
+                "deploy",
+                "--name",
+                "skippy-lora",
+                "--adapter-dir",
+                str(adapter),
+                "--base-model",
+                "Qwen/Qwen3-8B",
+            ],
+        )
+    finally:
+        cli.deploy = original
+
+    assert code == 0
+    assert captured["serve_tag"] == "qwen3:8b"
+    assert payload["deployed"] is True
+
+    _, runs = _run(capsys, _base(corpus, ledger) + ["runs", "--kind", "deploy"])
+    assert runs["runs"][0]["status"] == "succeeded"
+
+
+def test_status_lists_exported_datasets_and_trained_adapters(
+    capsys, corpus, ledger, tmp_path, monkeypatch
+):
+    """The train and deploy forms ask for paths; status is where they come from."""
+    sets_dir = tmp_path / "training_sets"
+    run_dir = sets_dir / "v1"
+    (run_dir / "adapter").mkdir(parents=True)
+    (run_dir / "train.jsonl").write_text('{"messages": []}\n{"messages": []}\n')
+    (run_dir / "eval.jsonl").write_text('{"messages": []}\n')
+    (run_dir / "finetune_spec.json").write_text(
+        json.dumps({"output_name": "skippy-lora", "base_model": "Qwen/Qwen3-8B"})
+    )
+    (run_dir / "adapter" / "adapter_model.safetensors").write_bytes(b"weights")
+    monkeypatch.setattr(cli, "DEFAULT_SETS_DIR", sets_dir)
+
+    _, payload = _run(capsys, _base(corpus, ledger) + ["status"])
+
+    dataset = payload["datasets"][0]
+    assert dataset["name"] == "v1"
+    assert dataset["train_examples"] == 2
+    assert dataset["eval_examples"] == 1
+
+    adapter = payload["adapters"][0]
+    assert adapter["name"] == "skippy-lora"
+    assert adapter["trained"] is True
+    assert adapter["base_model"] == "Qwen/Qwen3-8B"

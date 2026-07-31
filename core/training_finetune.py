@@ -19,6 +19,7 @@ rather than raising deep inside a subprocess call.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from dataclasses import asdict, dataclass, field
@@ -174,6 +175,18 @@ def plan_run(spec: FineTuneSpec, gpu: GpuState | None = None) -> LaunchPlan:
     )
 
 
+def huggingface_cache_dir() -> str:
+    """Host directory holding downloaded base weights.
+
+    Read from the environment so a host that keeps models on a second disk
+    says so once, rather than every caller guessing.
+    """
+    configured = os.environ.get("HF_HOME") or os.environ.get("HUGGINGFACE_HUB_CACHE")
+    path = Path(configured) if configured else Path.home() / ".cache" / "huggingface"
+    path.mkdir(parents=True, exist_ok=True)
+    return str(path)
+
+
 def write_spec(spec: FineTuneSpec, out_dir: str | Path) -> Path:
     """Persist the job spec beside the dataset it trains on."""
     out_dir = Path(out_dir)
@@ -216,10 +229,24 @@ def launch(
         f"hive-trainer-{spec.output_name}",
         "--volume",
         f"{host_dir}:/workspace",
+        # Base weights are tens of gigabytes and every run of every model
+        # would re-download them into a fresh container filesystem. The
+        # cache is the difference between a run starting in seconds and a
+        # run starting in an hour.
+        "--volume",
+        f"{huggingface_cache_dir()}:/root/.cache/huggingface",
         image,
+        "--mode",
+        "train",
         "--spec",
         "/workspace/finetune_spec.json",
     ]
+    # Some bases are gated behind an accepted licence. A token in the
+    # environment is passed through; its absence is not an error, because
+    # most of the catalog needs none.
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    if token:
+        command[3:3] = ["--env", f"HF_TOKEN={token}"]
     try:
         completed = subprocess.run(
             command, capture_output=True, text=True, timeout=120, check=True

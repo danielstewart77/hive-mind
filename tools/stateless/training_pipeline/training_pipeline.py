@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stateless CLI over the training pipeline: status, curate, export, train.
+"""Stateless CLI over the training pipeline: curate, export, train, deploy.
 
 Every subcommand prints one JSON object to stdout and exits non-zero on
 failure, so the console can call it across a container boundary without
@@ -11,6 +11,8 @@ container needs torch.
     training_pipeline.py curate --keep-per-cluster 3
     training_pipeline.py export --mode stripped --out-dir data/training_sets/v1
     training_pipeline.py train --train-file …/train.jsonl --dry-run
+    training_pipeline.py base-models
+    training_pipeline.py deploy --name skippy-lora --adapter-dir …/adapter
     training_pipeline.py runs --kind curate --limit 10
 """
 
@@ -40,8 +42,25 @@ from core.training_finetune import (  # noqa: E402
     plan_run,
     read_gpu_state,
 )
+from core.training_deploy import (  # noqa: E402
+    DEFAULT_NUM_CTX,
+    DEFAULT_QUANTIZATION,
+    DEFAULT_TEMPERATURE,
+    STRATEGIES,
+    STRATEGY_ADAPTER,
+    DeployRequest,
+    adapter_weight_file,
+    deploy,
+    merged_gguf_path,
+)
+from core.training_models import (  # noqa: E402
+    DEFAULT_BASE_MODEL_ID,
+    catalog,
+)
+from core.training_models import get as get_base_model  # noqa: E402
 from core.training_runs import (  # noqa: E402
     KIND_CURATE,
+    KIND_DEPLOY,
     KIND_EXPORT,
     KIND_TRAIN,
     STATUS_FAILED,
@@ -82,9 +101,122 @@ def cmd_status(args) -> dict:
             (KIND_CURATE, latest_run(ledger, KIND_CURATE)),
             (KIND_EXPORT, latest_run(ledger, KIND_EXPORT)),
             (KIND_TRAIN, latest_run(ledger, KIND_TRAIN)),
+            (KIND_DEPLOY, latest_run(ledger, KIND_DEPLOY)),
         )
     }
+    stats["datasets"] = _datasets()
+    stats["adapters"] = _adapters()
     return stats
+
+
+def _datasets() -> list[dict]:
+    """Exported datasets on disk, newest first.
+
+    The train form asks for a path to a JSONL file, which is an unfair
+    question to put in front of anyone who has only ever pressed Export.
+    Listing what exists turns it into a choice.
+    """
+    rows = []
+    if not DEFAULT_SETS_DIR.is_dir():
+        return rows
+    for directory in sorted(DEFAULT_SETS_DIR.iterdir()):
+        train_file = directory / "train.jsonl"
+        if not train_file.is_file():
+            continue
+        eval_file = directory / "eval.jsonl"
+        rows.append(
+            {
+                "name": directory.name,
+                "train_file": str(train_file),
+                "eval_file": str(eval_file) if eval_file.is_file() else "",
+                "train_examples": _count_lines(train_file),
+                "eval_examples": _count_lines(eval_file) if eval_file.is_file() else 0,
+                "modified_at": int(train_file.stat().st_mtime),
+            }
+        )
+    rows.sort(key=lambda row: row["modified_at"], reverse=True)
+    return rows
+
+
+def _count_lines(path: Path) -> int:
+    with path.open("rb") as handle:
+        return sum(1 for _ in handle)
+
+
+def _adapters() -> list[dict]:
+    """Trained adapters on disk, so deploy can offer a list rather than a path."""
+    rows = []
+    if not DEFAULT_SETS_DIR.is_dir():
+        return rows
+    for spec_path in sorted(DEFAULT_SETS_DIR.glob("*/finetune_spec.json")):
+        adapter_dir = spec_path.parent / "adapter"
+        try:
+            spec = json.loads(spec_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        weights = adapter_weight_file(adapter_dir)
+        rows.append(
+            {
+                "name": spec.get("output_name") or spec_path.parent.name,
+                "dataset": spec_path.parent.name,
+                "adapter_dir": str(adapter_dir),
+                "base_model": spec.get("base_model", ""),
+                "trained": weights is not None,
+                "merged_gguf": str(merged_gguf_path(adapter_dir))
+                if merged_gguf_path(adapter_dir).is_file()
+                else "",
+                "modified_at": int(spec_path.stat().st_mtime),
+            }
+        )
+    rows.sort(key=lambda row: row["modified_at"], reverse=True)
+    return rows
+
+
+def cmd_base_models(args) -> dict:
+    """The catalog, annotated with what this host can train and serve today."""
+    gpu = read_gpu_state()
+    free = gpu.free_mib if gpu.available else None
+    return {
+        "default": DEFAULT_BASE_MODEL_ID,
+        "gpu": gpu.__dict__,
+        "models": catalog(free_vram_mib=free, ollama_url=args.ollama_url),
+    }
+
+
+def cmd_deploy(args) -> dict:
+    ledger = _ledger(args)
+    base = get_base_model(args.base_model) if args.base_model else None
+    serve_tag = args.serve_tag or (base.serve_tag if base else "")
+    request = DeployRequest(
+        model_name=args.name,
+        adapter_dir=args.adapter_dir,
+        serve_tag=serve_tag,
+        strategy=args.strategy,
+        base_model=args.base_model or (base.id if base else ""),
+        quantization=args.quantization,
+        temperature=args.temperature,
+        num_ctx=args.num_ctx,
+        system_prompt=args.system_prompt or "",
+    )
+    run_id = start_run(ledger, KIND_DEPLOY, options=request.as_dict())
+    result = deploy(request, ollama_url=args.ollama_url, trainer_image=args.image)
+    if result.deployed:
+        finish_run(
+            ledger, run_id, status=STATUS_SUCCEEDED, report=result.as_dict()
+        )
+    elif result.stage == "converting":
+        # Left open on purpose: the merge container is still working, and
+        # the reaper or the next deploy call closes the row.
+        pass
+    else:
+        finish_run(
+            ledger,
+            run_id,
+            status=STATUS_FAILED,
+            report=result.as_dict(),
+            error="; ".join(result.blockers) or "deploy refused",
+        )
+    return {"run_id": run_id, **result.as_dict()}
 
 
 def cmd_curate(args) -> dict:
@@ -151,9 +283,16 @@ def cmd_train(args) -> dict:
         eval_file=str(args.eval_file or (train_file.parent / "eval.jsonl")),
         output_dir=str(out_dir / "adapter"),
         lora_rank=args.lora_rank,
+        lora_alpha=args.lora_alpha if args.lora_alpha else args.lora_rank * 2,
+        lora_dropout=args.lora_dropout,
         learning_rate=args.learning_rate,
         epochs=args.epochs,
+        per_device_batch_size=args.batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
         max_sequence_length=args.max_sequence_length,
+        warmup_ratio=args.warmup_ratio,
+        load_in_4bit=not args.no_4bit,
+        seed=args.seed,
     )
     if args.dry_run:
         return plan_run(spec).as_dict()
@@ -233,18 +372,55 @@ def build_parser() -> argparse.ArgumentParser:
     train_p.add_argument("--eval-file")
     train_p.add_argument("--out-dir")
     train_p.add_argument("--name", default="hive-harness-lora")
-    train_p.add_argument("--base-model", default=FineTuneSpec().base_model)
+    train_p.add_argument("--base-model", default=DEFAULT_BASE_MODEL_ID)
     train_p.add_argument("--image", default="hive-mind-trainer:latest")
     train_p.add_argument("--lora-rank", type=int, default=32)
+    train_p.add_argument(
+        "--lora-alpha",
+        type=int,
+        default=0,
+        help="scaling for the adapter's contribution; defaults to twice the rank",
+    )
+    train_p.add_argument("--lora-dropout", type=float, default=0.05)
     train_p.add_argument("--learning-rate", type=float, default=1e-4)
     train_p.add_argument("--epochs", type=int, default=2)
+    train_p.add_argument("--batch-size", type=int, default=1)
+    train_p.add_argument("--gradient-accumulation-steps", type=int, default=16)
     train_p.add_argument("--max-sequence-length", type=int, default=8_192)
+    train_p.add_argument("--warmup-ratio", type=float, default=0.03)
+    train_p.add_argument(
+        "--no-4bit",
+        action="store_true",
+        help="load the base in bf16 instead of 4-bit — faster and more "
+        "faithful, and only possible on a model small enough to fit",
+    )
+    train_p.add_argument("--seed", type=int, default=17)
     train_p.add_argument(
         "--dry-run", action="store_true", help="report feasibility, launch nothing"
     )
 
+    models_p = sub.add_parser(
+        "base-models", help="candidate base models, annotated for this host"
+    )
+    models_p.add_argument("--ollama-url", help="where to check which tags are pulled")
+
+    deploy_p = sub.add_parser("deploy", help="serve a trained adapter through Ollama")
+    deploy_p.add_argument("--name", required=True, help="the Ollama model name to create")
+    deploy_p.add_argument("--adapter-dir", required=True)
+    deploy_p.add_argument("--base-model", default="", help="catalog id it was trained from")
+    deploy_p.add_argument(
+        "--serve-tag", default="", help="override the catalog's Ollama base tag"
+    )
+    deploy_p.add_argument("--strategy", choices=list(STRATEGIES), default=STRATEGY_ADAPTER)
+    deploy_p.add_argument("--quantization", default=DEFAULT_QUANTIZATION)
+    deploy_p.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE)
+    deploy_p.add_argument("--num-ctx", type=int, default=DEFAULT_NUM_CTX)
+    deploy_p.add_argument("--system-prompt", default="")
+    deploy_p.add_argument("--image", default="hive-mind-trainer:latest")
+    deploy_p.add_argument("--ollama-url", help="Ollama endpoint to create the model on")
+
     runs_p = sub.add_parser("runs", help="list ledger entries")
-    runs_p.add_argument("--kind", choices=["curate", "export", "train"])
+    runs_p.add_argument("--kind", choices=["curate", "export", "train", "deploy"])
     runs_p.add_argument("--limit", type=int, default=20)
 
     return parser
@@ -255,6 +431,8 @@ COMMANDS = {
     "curate": cmd_curate,
     "export": cmd_export,
     "train": cmd_train,
+    "base-models": cmd_base_models,
+    "deploy": cmd_deploy,
     "runs": cmd_runs,
 }
 
