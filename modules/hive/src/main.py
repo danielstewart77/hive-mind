@@ -94,6 +94,9 @@ app = FastAPI(
     description="Admin console for the hive mind",
     version="1.0.0",
     lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 install_fastapi_logging(app, log, "hive-control-plane")
 
