@@ -24,7 +24,8 @@ from pathlib import Path
 KIND_CURATE = "curate"
 KIND_EXPORT = "export"
 KIND_TRAIN = "train"
-VALID_KINDS = frozenset({KIND_CURATE, KIND_EXPORT, KIND_TRAIN})
+KIND_DEPLOY = "deploy"
+VALID_KINDS = frozenset({KIND_CURATE, KIND_EXPORT, KIND_TRAIN, KIND_DEPLOY})
 
 STATUS_RUNNING = "running"
 STATUS_SUCCEEDED = "succeeded"

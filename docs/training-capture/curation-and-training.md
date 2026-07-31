@@ -192,13 +192,80 @@ The adapter is served through Ollama with an `ADAPTER` directive over a
 shared base tag, so a new fine-tune costs adapter-sized disk rather than
 another full model.
 
+## Choosing a base model
+
+`core/training_models.py` is the catalog, and it is data rather than a
+dropdown hardcoded in the console: each entry carries the HuggingFace repo
+the trainer loads, the Ollama tag its adapter will be served over, a rough
+4-bit VRAM floor, and a plain-language note about the trade. The console
+renders those notes as help text and `base-models` prints the same rows.
+
+Two properties decide most of it and neither is visible in the name:
+
+- **dense or mixture-of-experts.** Only a fraction of an MoE model's
+  experts fire per token, so it serves fast for its size — and a LoRA over
+  it trains whichever experts the corpus happens to activate, leaving the
+  rest untouched. Dense models behave predictably under LoRA. A first real
+  fine-tune should be dense, which is why the recommended default is.
+- **whether the served tag is pulled.** A base you have not pulled is a
+  download standing between a click and a served adapter, so the catalog
+  resolves that against the local Ollama at call time.
+
+The recommended entry is Qwen3 8B: dense, trains in hours beside a live
+inference workload, and large enough to hold a tool-calling format and a
+house style at once.
+
+## Deploying
+
+Training produces a LoRA adapter, which is weight deltas and nothing a
+server can load on its own. `core/training_deploy.py` has the two honest
+ways to put one in front of a mind.
+
+**adapter** stacks it on the base tag already pulled. Seconds, and
+adapter-sized disk, because Ollama keeps one copy of the base for every
+fine-tune built on it. The catch is that the adapter was fitted against
+full-precision weights while the served tag is a quantized copy — close,
+not identical, and the gap shows up as a fine-tune that feels weaker than
+its eval score.
+
+**merge** folds the adapter into the weights, converts to GGUF and
+quantizes that, so the thing being quantized is the thing that was trained.
+A conversion pass and a full model's worth of disk per deploy. Merging
+needs torch and a converter, so it runs in the trainer container: the first
+`deploy --strategy merge` launches the conversion and reports
+`stage: converting`, and the next one serves the GGUF it produced.
+
+Both talk to Ollama over HTTP and address files by digest, because the
+caller is usually a container with an Ollama endpoint and no Ollama binary.
+
+## The trainer container
+
+`docker/trainer/` is the only image in the hive carrying torch and CUDA,
+and the only place either is imported. It has two modes — `train` reads
+`finetune_spec.json` and writes an adapter plus a `result.json`; `merge`
+folds an adapter back into a base and converts it — because both need the
+same heavyweight dependency set.
+
+The spec keeps host paths, so it stays inspectable and re-runnable by hand
+on the host that wrote it. The container only sees the dataset directory at
+`/workspace`, so the entrypoint remaps any path it cannot open to the same
+filename there. The launcher also mounts the HuggingFace cache, without
+which every run of every model re-downloads tens of gigabytes into a fresh
+container filesystem.
+
+```bash
+docker build -t hive-mind-trainer:latest docker/trainer
+```
+
 ## Running it
 
 ```bash
 venv/bin/python tools/stateless/training_pipeline/training_pipeline.py status
+venv/bin/python tools/stateless/training_pipeline/training_pipeline.py base-models
 venv/bin/python tools/stateless/training_pipeline/training_pipeline.py curate --keep-per-cluster 3
 venv/bin/python tools/stateless/training_pipeline/training_pipeline.py export --mode reasoning --name v1
 venv/bin/python tools/stateless/training_pipeline/training_pipeline.py train --train-file data/training_sets/v1/train.jsonl --dry-run
+venv/bin/python tools/stateless/training_pipeline/training_pipeline.py deploy --name skippy-lora --adapter-dir data/training_sets/v1/adapter --base-model Qwen/Qwen3-8B
 ```
 
 `curate --reset` returns every row to `pending` so a changed policy can be
