@@ -204,6 +204,11 @@ def _assignment_value_is_secret(value: str) -> bool:
         return False
     if _PLAIN_URL_RE.match(cleaned):
         return False
+    # ``AUTH="Authorization: Bearer $TOKEN"`` — the assignment rule stops at
+    # the space, so what it captured is the header *name*. No credential
+    # ends in a colon.
+    if cleaned.endswith(":"):
+        return False
     # ``TOKEN=$COMMS_BEARER_TOKEN`` and ``TOKEN=<REDACTED_SECRET>`` are the
     # safe forms we want the model to imitate, not values to scrub.
     if _PLACEHOLDER_RE.match(cleaned):
