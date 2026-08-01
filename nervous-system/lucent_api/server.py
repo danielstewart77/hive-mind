@@ -22,7 +22,13 @@ log = configure_logging("lucent-api")
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="lucent-api", version="0.1.0")
+    app = FastAPI(
+        title="lucent-api",
+        version="0.1.0",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
     install_fastapi_logging(app, log, "lucent-api")
 
     @app.get("/health")
