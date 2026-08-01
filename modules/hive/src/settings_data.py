@@ -16,6 +16,8 @@ from typing import Any
 
 import yaml
 
+from capability_install import has_checkout
+
 HIVE_MIND_MINDS_DIR = Path("/minds_hive_mind")
 EDGE_MINDS_DIR = Path("/minds_edge")
 HIVE_MIND_MINDS_VOICE_DIR = Path("/minds_hive_mind_voice")
@@ -116,14 +118,16 @@ def build_mind_registry(broker_minds: list[dict]) -> list[dict]:
 def hive_tools_status() -> dict[str, Any]:
     """Whether the hive-tools repo is present on this host.
 
-    A missing host path is auto-created empty by compose's bind mount, so
-    "directory exists but has no entries" is treated the same as "not
-    cloned" — there is currently no git remote configured for hive-tools
-    to clone *from*, so that case is surfaced but not actionable yet.
+    Presence means a git checkout, not merely a non-empty directory: compose
+    auto-creates both the mount root and a `.env` placeholder inside it on a
+    host that never cloned, so counting entries would report a bare mount as
+    installed and hide the Capability Nodes clone action that fixes it.
     """
     if not HIVE_TOOLS_REPO_DIR.is_dir():
         return {"present": False, "path": str(HIVE_TOOLS_REPO_DIR), "capabilities": []}
-    entries = list(HIVE_TOOLS_REPO_DIR.iterdir())
+    # One predicate for "installed" across the console: a bare .git left by an
+    # interrupted clone is not a checkout. See capability_install.has_checkout.
+    present = has_checkout(HIVE_TOOLS_REPO_DIR)
     tools_dir = HIVE_TOOLS_REPO_DIR / "tools"
     capabilities = []
     if tools_dir.is_dir():
@@ -144,9 +148,8 @@ def hive_tools_status() -> dict[str, Any]:
                 }
             )
     return {
-        "present": bool(entries),
+        "present": present,
         "path": str(HIVE_TOOLS_REPO_DIR),
-        "entry_count": len(entries),
         "capabilities": capabilities,
     }
 

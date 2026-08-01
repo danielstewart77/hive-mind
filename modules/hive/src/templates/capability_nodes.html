@@ -35,8 +35,20 @@ window.addEventListener("DOMContentLoaded", function () {
     }
     function installationControls(node) {
         if (!node.installable) return "";
-        if (node.installed) return '<div class="capability-install"><a class="button button-quiet" href="' + h.escapeHtml(node.repository) + '" target="_blank" rel="noopener">View source</a><small>Cloned at ' + h.escapeHtml(node.path) + '</small></div>';
-        return '<div class="capability-install"><button class="button" type="button" data-capability-install="' + h.escapeHtml(node.id) + '">Clone source</button><small data-capability-install-status>Clone the audited public repository into this Hive host.</small></div>';
+        const placement = node.placement_note ? '<small class="capability-placement">' + h.escapeHtml(node.placement_note) + '</small>' : "";
+        if (node.installed) {
+            // No usable url means the operator has not told the Hive where the
+            // service answers for a browser. Say so — the git clone url that
+            // used to stand in here is not the node's own site, and offering
+            // it as one made the card look configured when it was not.
+            const link = node.configure_url
+                ? '<a class="button button-quiet" href="' + h.escapeHtml(node.configure_url) + '" target="_blank" rel="noopener">' + h.escapeHtml(node.configure_label || "Configure") + '</a>'
+                : '';
+            const reach = node.configure_url ? '' : '<small>' + h.escapeHtml(node.configure_hint || "") + '</small>';
+            return '<div class="capability-install">' + link + '<small>Cloned at ' + h.escapeHtml(node.path) + '</small>' + reach + placement + '</div>';
+        }
+        const destination = 'Clone the audited public repository into ' + h.escapeHtml(node.path) + '.' + (node.path_hint ? ' ' + h.escapeHtml(node.path_hint) : "");
+        return '<div class="capability-install"><button class="button" type="button" data-capability-install="' + h.escapeHtml(node.id) + '">Clone source</button><small data-capability-install-status>' + destination + '</small>' + placement + '</div>';
     }
     async function loadOllama() {
         const target = document.querySelector("[data-ollama-models]");

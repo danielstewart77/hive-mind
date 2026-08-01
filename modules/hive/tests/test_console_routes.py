@@ -216,6 +216,15 @@ def test_overview_api_combines_minds_sessions_and_service_health(tmp_path, monke
         patch.object(main_mod, "_gateway_json", new=AsyncMock(return_value=sessions)),
         patch.object(main_mod, "_service_health", new=health),
         patch.object(main_mod, "hive_tools_status", return_value={"present": True, "path": "/tools"}),
+        patch.object(
+            main_mod,
+            "hive_tools_install_status",
+            return_value={
+                "installed": True,
+                "path": "/tools",
+                "repository": "https://example.invalid/hive-tools.git",
+            },
+        ),
     ):
         response = client.get("/api/overview")
 
@@ -844,6 +853,18 @@ def test_capability_nodes_leave_optional_unconfigured_services_idle(tmp_path, mo
             main_mod,
             "hive_tools_status",
             return_value={"present": False, "path": "/tools", "capabilities": []},
+        ),
+        # Pinned, not inherited from the host: the summary counts depend on
+        # whether hive-tools is installed, and inside the Hive container the
+        # mounted repo really is there.
+        patch.object(
+            main_mod,
+            "hive_tools_install_status",
+            return_value={
+                "installed": False,
+                "path": "/tools",
+                "repository": "https://github.com/danielstewart77/hive-tools.git",
+            },
         ),
         patch.object(main_mod, "_service_health", new=health),
     ):

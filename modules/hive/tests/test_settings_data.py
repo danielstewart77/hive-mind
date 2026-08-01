@@ -126,16 +126,23 @@ def test_hive_tools_status_discovers_supported_capabilities(tmp_path, monkeypatc
 # ── hive-tools status ─────────────────────────────────────────────────
 
 
-def test_hive_tools_status_present_when_dir_has_entries(tmp_path, monkeypatch):
+def test_hive_tools_status_present_when_dir_holds_a_checkout(tmp_path, monkeypatch):
     repo = tmp_path / "hive-tools"
-    repo.mkdir()
+    (repo / ".git").mkdir(parents=True)
     (repo / "README.md").write_text("hi")
     monkeypatch.setattr(settings_data, "HIVE_TOOLS_REPO_DIR", repo)
 
-    status = settings_data.hive_tools_status()
+    assert settings_data.hive_tools_status()["present"] is True
 
-    assert status["present"] is True
-    assert status["entry_count"] == 1
+
+def test_hive_tools_status_absent_when_dir_holds_only_the_env_placeholder(
+    tmp_path, monkeypatch
+):
+    repo = tmp_path / "hive-tools"
+    (repo / ".env").mkdir(parents=True)
+    monkeypatch.setattr(settings_data, "HIVE_TOOLS_REPO_DIR", repo)
+
+    assert settings_data.hive_tools_status()["present"] is False
 
 
 def test_hive_tools_status_absent_when_dir_empty(tmp_path, monkeypatch):

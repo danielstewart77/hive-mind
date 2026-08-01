@@ -43,7 +43,14 @@ from auth import (
     set_session_cookie,
     verify_user_credentials,
 )
-from capability_install import clone_inference_proxy, inference_proxy_status
+from capability_install import (
+    HIVE_TOOLS_PLACEMENT_NOTE,
+    InstallInProgress,
+    clone_hive_tools,
+    clone_inference_proxy,
+    hive_tools_install_status,
+    inference_proxy_status,
+)
 from config import BASE_DIR
 from configuration_data import (
     DEFAULT_OLLAMA_BASE_URL,
@@ -1182,6 +1189,21 @@ async def api_inference_proxy_install(user: dict = Depends(require_auth)):
     return result
 
 
+@app.post("/api/capability-nodes/hive-tools/install")
+async def api_hive_tools_install(user: dict = Depends(require_auth)):
+    del user
+    try:
+        result = await asyncio.to_thread(clone_hive_tools)
+    except InstallInProgress as exc:
+        # Transient: the operator double-clicked, or has two tabs open.
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return result
+
+
 def _ollama_endpoint() -> str:
     endpoint = get_capability_endpoint("ollama") or os.getenv("OLLAMA_URL") or os.getenv(
         "OLLAMA_BASE_URL"
@@ -1907,8 +1929,38 @@ async def api_settings_hive_comms_session_delete(
     return result
 
 
+# Hostnames that never resolve in the operator's browser: the placeholder
+# .env.example ships for every LAN url, and the compose service names, which
+# resolve on the container network and nowhere else.
+_UNREACHABLE_HOSTS = frozenset({"hive-host", "hive-tools", "hive-comms", "hive-lucent"})
+
+
 def _hive_tools_base_url() -> str:
     return os.getenv("HIVE_TOOLS_URL") or "http://hive-tools:9421"
+
+
+def _hive_tools_console_url() -> str:
+    """A hive-tools URL a *browser* can reach.
+
+    The service-to-service base url is a compose hostname, which resolves for
+    this container and for nothing the operator is sitting in front of.
+
+    .env.example ships the LAN urls pointed at the literal placeholder host, so
+    a fresh install that has not been filled in yet is treated as unconfigured
+    rather than rendered as a link that opens a dead tab.
+    """
+    for candidate in (
+        os.getenv("HIVE_TOOLS_PUBLIC_URL"),
+        os.getenv("EDGE_HIVE_TOOLS_URL"),
+        os.getenv("HIVE_TOOLS_URL"),
+    ):
+        candidate = (candidate or "").strip()
+        if not candidate.startswith(("http://", "https://")):
+            continue
+        if urllib.parse.urlsplit(candidate).hostname in _UNREACHABLE_HOSTS:
+            continue
+        return candidate
+    return ""
 
 
 def _hive_tools_headers() -> dict[str, str]:
@@ -2098,6 +2150,7 @@ async def api_operation_status(
 def _capability_node_specs() -> list[dict]:
     voice_urls = _voice_server_urls()
     proxy_installation = inference_proxy_status()
+    tools_installation = hive_tools_install_status()
     return [
         {
             "id": "hive-tools",
@@ -2108,6 +2161,25 @@ def _capability_node_specs() -> list[dict]:
             "health_path": "/health",
             "auto_discover": True,
             "configured": bool(os.getenv("HIVE_TOOLS_URL")),
+            "installable": True,
+            "installed": tools_installation["installed"],
+            "repository": tools_installation["repository"],
+            "path": tools_installation["path"],
+            # Recreate, not restart: both the bind mount source and this
+            # container's own HIVE_TOOLS_DIR are fixed when the container is
+            # created, so `docker restart` re-reads neither.
+            "path_hint": (
+                "Set HIVE_TOOLS_DIR in the Hive's .env, then recreate the Hive "
+                "container (docker compose up -d) to clone somewhere else."
+            ),
+            "placement_note": HIVE_TOOLS_PLACEMENT_NOTE,
+            "configure_url": _hive_tools_console_url(),
+            "configure_label": "Configure",
+            "configure_hint": (
+                "Set EDGE_HIVE_TOOLS_URL in the Hive's .env to an address your "
+                "browser can reach, then recreate the Hive container, to link "
+                "straight to the Hive Tools console from here."
+            ),
             "access": "Operator policy and approval gates",
             "consumers": "Authorized operator minds",
             "icon": "shield-check",
@@ -2209,11 +2281,7 @@ async def _capability_node_data() -> dict:
             node.pop("authentication_required_statuses", set())
         )
         explicitly_configured = bool(node.pop("configured", bool(endpoint)))
-        installed = (
-            bool(tools.get("present"))
-            if node["id"] == "hive-tools"
-            else node.get("installed")
-        )
+        installed = node.get("installed")
         configured = bool(endpoint) and (explicitly_configured or installed is True)
         if endpoint and (configured or auto_discover):
             probes.append(
@@ -2248,7 +2316,8 @@ async def _capability_node_data() -> dict:
             }
         )
         if node["id"] == "hive-tools":
-            node["path"] = tools.get("path")
+            # `path` stays the host path from the spec — the mount point this
+            # container sees is not something the operator can act on.
             node["capabilities"] = tools.get("capabilities", [])
         nodes.append(node)
     if probes:
@@ -2430,7 +2499,7 @@ async def api_settings_hive_tools(user: dict = Depends(require_auth)):
         service_name="Hive Tools",
         repair_action="Start the Hive Tools service, then retry.",
     )
-    status["remote_configured"] = False  # no git remote set up for hive-tools yet
+    status["remote_configured"] = hive_tools_install_status()["installed"]
     return status
 
 

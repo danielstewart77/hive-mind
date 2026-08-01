@@ -294,7 +294,11 @@ def test_api_settings_hive_tools_requires_auth(tmp_path, monkeypatch):
 
 def test_api_settings_hive_tools_reports_presence_and_health(tmp_path, monkeypatch):
     client = _authed_client(tmp_path, monkeypatch)
+    # remote_configured is a live check of the mounted repo, so it is stubbed
+    # rather than left to whether /hive_tools_repo happens to exist on the
+    # machine running the tests — inside the Hive container it does.
     with patch.object(main_mod, "hive_tools_status", return_value={"present": True, "path": "/x"}), \
+         patch.object(main_mod, "hive_tools_install_status", return_value={"installed": False}), \
          patch.object(main_mod, "_service_health", new=AsyncMock(return_value={"reachable": True, "detail": {}})):
         response = client.get("/api/settings/hive-tools")
 
@@ -303,6 +307,18 @@ def test_api_settings_hive_tools_reports_presence_and_health(tmp_path, monkeypat
     assert body["present"] is True
     assert body["container_health"]["reachable"] is True
     assert body["remote_configured"] is False
+
+
+def test_api_settings_hive_tools_reports_an_installed_repo_as_configured(
+    tmp_path, monkeypatch
+):
+    client = _authed_client(tmp_path, monkeypatch)
+    with patch.object(main_mod, "hive_tools_status", return_value={"present": True, "path": "/x"}), \
+         patch.object(main_mod, "hive_tools_install_status", return_value={"installed": True}), \
+         patch.object(main_mod, "_service_health", new=AsyncMock(return_value={"reachable": True, "detail": {}})):
+        response = client.get("/api/settings/hive-tools")
+
+    assert response.json()["remote_configured"] is True
 
 
 # ── voice ──────────────────────────────────────────────────────────────

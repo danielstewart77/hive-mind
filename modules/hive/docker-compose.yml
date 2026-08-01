@@ -14,6 +14,14 @@ services:
       # Parent domain so the session cookie is shared with the terminal
       # site, which mounts the same auth db and secret.
       - HIVE_COOKIE_DOMAIN=sparktobloom.com
+      # Who the Capability Nodes clone action hands its checkout to. This
+      # container runs as root, so without it every cloned file lands
+      # root-owned on the host and the operator hits git's dubious-ownership
+      # refusal on their own repository. Matching the mount point instead is
+      # not enough: when the destination does not exist yet, Docker creates
+      # the bind source root-owned, and there is nothing to match.
+      - HOST_UID=${HOST_UID:-1000}
+      - HOST_GID=${HOST_GID:-1000}
     volumes:
       - ./src:/app/src
       # Auth db — shared with the terminal site.
@@ -41,10 +49,14 @@ services:
       # blast radius of "settings can write files" stays legible in code.
       - ${HIVE_MIND_DIR:-/home/daniel/Storage/Dev/hive_mind}/minds:/minds_hive_mind_voice:rw
       - ${HIVE_MIND_DIR:-/home/daniel/Storage/Dev/hive_mind}/minds:/minds_hive_mind_config:rw
-      # Hive-tools repo, read-only, existence/status check only for the
-      # /settings hive-tools card. A missing host path is auto-created
-      # empty by compose, which doubles as the "not cloned yet" signal.
-      - ${HIVE_TOOLS_DIR:-/home/daniel/Storage/hive-tools}:/hive_tools_repo:ro
+      # (see the HOST_UID/HOST_GID note in the environment block above)
+      # Hive-tools repo. Read-write because the Capability Nodes clone action
+      # installs into it; a missing host path is auto-created empty by
+      # compose, which doubles as the "not cloned yet" signal. The default is
+      # relative to this file so a fresh checkout of the hive resolves it on
+      # any OS — set HIVE_TOOLS_DIR in .env to put the repo elsewhere, then
+      # recreate (up -d): this source is fixed when the container is created.
+      - ${HIVE_TOOLS_DIR:-./capabilities/hive-tools}:/hive_tools_repo:rw
       # Hive-init installer assets, read-only, served from the downloads tab.
       - ${HIVE_INIT_DIR:-/home/daniel/Storage/Dev/hive-init}:/hive_init:ro
       # Fixed destination used by the Capability Nodes one-click clone action.
@@ -57,7 +69,7 @@ services:
       - ${HIVE_MIND_DIR:-/home/daniel/Storage/Dev/hive_mind}/.env:/env_hive_mind/.env:rw
       - ${SKIPPY_DIR:-/home/daniel/Storage/hive-edge-mind-skippy}/.env:/env_edge/skippy/.env:rw
       - ${MORDECAI_DIR:-/home/daniel/Storage/hive-edge-mind-mordecai}/.env:/env_edge/mordecai/.env:rw
-      - ${HIVE_TOOLS_DIR:-/home/daniel/Storage/hive-tools}/.env:/env_hive_tools/.env:rw
+      - ${HIVE_TOOLS_DIR:-./capabilities/hive-tools}/.env:/env_hive_tools/.env:rw
       # The GitHub PAT's two live homes, for the same tab's paste-to-set flow.
       - ${GIT_CREDENTIALS_FILE:-/home/daniel/.git-credentials}:/gh/.git-credentials:rw
       - ${GH_HOSTS_FILE:-/home/daniel/.config/gh/hosts.yml}:/gh/hosts.yml:rw
