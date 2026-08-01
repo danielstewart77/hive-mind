@@ -46,6 +46,10 @@ class InstallInProgress(ValueError):
 # reopen the hole and needs a filesystem lock instead.
 _HIVE_TOOLS_INSTALL_LOCK = threading.Lock()
 
+# The inference proxy is the other installable node and clones the same way,
+# so it needs the same guard for the same reasons.
+_INFERENCE_PROXY_INSTALL_LOCK = threading.Lock()
+
 HIVE_TOOLS_PLACEMENT_NOTE = (
     "Hive Tools is the human approval gate for privileged actions, so clone it "
     "somewhere no non-operator Mind has mounted. Operator Minds have host access "
@@ -59,25 +63,49 @@ def inference_proxy_directory() -> Path:
     )
 
 
+def inference_proxy_install_running() -> bool:
+    return _INFERENCE_PROXY_INSTALL_LOCK.locked()
+
+
 def inference_proxy_status() -> dict:
-    path = inference_proxy_directory()
-    installed = path.is_dir() and (path / ".git").is_dir()
     return {
-        "installed": installed,
-        "path": str(path),
+        # has_checkout, not a bare .git: an interrupted clone leaves the
+        # directory behind and the node would report itself installed forever,
+        # which is the state hive-tools was fixed out of.
+        "installed": has_checkout(inference_proxy_directory()),
+        "installing": inference_proxy_install_running(),
+        "path": str(inference_proxy_directory()),
         "repository": INFERENCE_PROXY_REPOSITORY,
     }
 
 
 def clone_inference_proxy() -> dict:
+    if not _INFERENCE_PROXY_INSTALL_LOCK.acquire(blocking=False):
+        raise InstallInProgress("An inference proxy install is already running")
+    try:
+        return _clone_inference_proxy_locked()
+    finally:
+        _INFERENCE_PROXY_INSTALL_LOCK.release()
+
+
+def _clone_inference_proxy_locked() -> dict:
     """Clone the fixed public repository into the mounted capability path."""
     path = inference_proxy_directory()
     if path.is_symlink():
         raise ValueError("The inference proxy destination may not be a symbolic link")
-    if (path / ".git").is_dir():
+    if has_checkout(path):
         return inference_proxy_status()
-    if path.exists() and (not path.is_dir() or any(path.iterdir())):
+    if path.exists() and not path.is_dir():
         raise ValueError("The inference proxy destination is not empty")
+    if path.is_dir():
+        occupied = sorted(entry.name for entry in path.iterdir() if entry.name != ".git")
+        if occupied:
+            raise ValueError("The inference proxy destination is not empty")
+        # A bare .git is the wreckage of an interrupted attempt, not user
+        # content, and git clone refuses a directory holding one. Clearing it
+        # is the way back — otherwise the retry this action exists to offer
+        # fails permanently and only rm -rf on the host recovers.
+        shutil.rmtree(path / ".git", ignore_errors=True)
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         subprocess.run(
@@ -134,9 +162,22 @@ def has_checkout(path: Path) -> bool:
         return False
 
 
+def hive_tools_install_running() -> bool:
+    """Whether a clone is in flight right now, for any caller.
+
+    The card repaints every 30 seconds and a clone takes minutes, so an
+    in-flight install has to be process state rather than something the tab
+    that clicked remembers: otherwise that repaint hands every open tab a
+    fresh enabled button over a running install — the clicking tab loses its
+    own progress line, and a second operator's click earns a 503.
+    """
+    return _HIVE_TOOLS_INSTALL_LOCK.locked()
+
+
 def hive_tools_install_status() -> dict:
     return {
         "installed": has_checkout(hive_tools_directory()),
+        "installing": hive_tools_install_running(),
         "path": hive_tools_host_path(),
         "repository": HIVE_TOOLS_REPOSITORY,
     }

@@ -25,6 +25,9 @@ def test_clone_inference_proxy_uses_fixed_public_repository(tmp_path, monkeypatc
         ]
         assert kwargs["timeout"] == 120
         (destination / ".git").mkdir(parents=True)
+        # A finished clone leaves checked-out content beside .git; a bare .git
+        # is the wreckage of an interrupted one and is not an install.
+        (destination / "README.md").write_text("# inference-proxy\n")
 
     with patch.object(capability_install.subprocess, "run", side_effect=clone):
         result = capability_install.clone_inference_proxy()
@@ -48,6 +51,7 @@ def test_clone_inference_proxy_refuses_nonempty_destination(tmp_path, monkeypatc
 def test_clone_inference_proxy_is_idempotent(tmp_path, monkeypatch):
     destination = tmp_path / "inference-proxy"
     (destination / ".git").mkdir(parents=True)
+    (destination / "README.md").write_text("# inference-proxy\n")
     monkeypatch.setenv("INFERENCE_PROXY_REPO_DIR", str(destination))
 
     with patch.object(capability_install.subprocess, "run") as clone:

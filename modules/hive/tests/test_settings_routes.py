@@ -539,7 +539,24 @@ def test_api_settings_credentials_rotate_returns_result(tmp_path, monkeypatch):
         "key": "comms_bearer_token",
         "label": "Hive Comms bearer token",
         "preview": "...abcd",
+        "locations": [
+            {
+                "file": "nervous_system",
+                "path": "/env/nervous_system.env",
+                "env_key": "COMMS_BEARER_TOKEN",
+                "written": True,
+                "reason": None,
+            },
+            {
+                "file": "hive_tools",
+                "path": "/env_hive_tools/.env",
+                "env_key": "COMMS_BEARER_TOKEN",
+                "written": False,
+                "reason": "/env_hive_tools/.env is a directory, not a file",
+            },
+        ],
         "written": [{"file": "nervous_system", "env_key": "COMMS_BEARER_TOKEN"}],
+        "complete": False,
         "restart_targets": ["hive-comms container"],
     }
     with patch.object(main_mod, "rotate_credential", return_value=fake_result) as mock_rotate:
@@ -568,7 +585,24 @@ def test_api_settings_credentials_set_github_pat_returns_result(tmp_path, monkey
         "label": "GitHub personal access token",
         "login": "danielstewart77",
         "preview": "...cdef",
+        "locations": [
+            {
+                "file": "git_credentials",
+                "path": "/root/.git-credentials",
+                "env_key": "github.com",
+                "written": True,
+                "reason": None,
+            },
+            {
+                "file": "gh_hosts",
+                "path": "/root/.config/gh/hosts.yml",
+                "env_key": "oauth_token",
+                "written": False,
+                "reason": "no file at /root/.config/gh/hosts.yml",
+            },
+        ],
         "written": [{"file": "git_credentials", "env_key": "github.com"}],
+        "complete": False,
         "restart_targets": [],
     }
     with patch.object(main_mod, "set_github_pat", return_value=fake_result) as mock_set:

@@ -1,6 +1,9 @@
 """What the Capability Nodes cards render from, for the hive-tools node."""
 
+import json
 import os
+import shutil
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -8,11 +11,44 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from starlette.testclient import TestClient
 
 import auth
 import capability_install
 import main as main_mod
+
+
+def _render_installation_controls(node: dict) -> str:
+    """Run the card's real branch, rather than grepping its source.
+
+    Reading the template as text cannot see branch order, reachability or
+    polarity: a branch moved below the function's final return, or a condition
+    inverted, leaves every substring a grep looks for exactly where it was.
+    Node is the only JS runtime this repo can reach, so the function is lifted
+    out and executed against a stub of the `h` helper the page provides.
+    """
+    template = (
+        Path(main_mod.BASE_DIR) / "templates" / "capability_nodes.html"
+    ).read_text()
+    body = template.split("function installationControls(node) {", 1)[1]
+    body = body.split("\n    }", 1)[0]
+    script = (
+        "const h = {escapeHtml: function (value) {"
+        "  return String(value === undefined || value === null ? '' : value)"
+        "    .replace(/&/g, '&amp;').replace(/</g, '&lt;')"
+        "    .replace(/>/g, '&gt;').replace(/\"/g, '&quot;');"
+        "}};\n"
+        "function installationControls(node) {" + body + "\n}\n"
+        "process.stdout.write(installationControls(JSON.parse(process.argv[1])) || '');"
+    )
+    result = subprocess.run(
+        ["node", "-e", script, json.dumps(node)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout
 
 
 def _hive_tools_node() -> dict:
@@ -165,7 +201,7 @@ def test_every_install_card_branch_emits_the_placement_note():
     # The bare `if (!node.installable) return ""` guard is not a card.
     cards = [line for line in returns if "capability-install" in line]
 
-    assert len(cards) == 2, "expected an installed and a not-installed card"
+    assert len(cards) == 3, "expected installed, installing and not-installed cards"
     assert all("placement" in line for line in cards)
 
     # …and `placement` must actually be the node's note, not a constant that
@@ -174,3 +210,70 @@ def test_every_install_card_branch_emits_the_placement_note():
         line for line in body.splitlines() if "const placement" in line
     )
     assert "node.placement_note ?" in definition
+
+
+# Requirement 6 — a clone takes minutes and the grid repaints every 30 seconds.
+# Until the in-flight state was server truth, that repaint handed every tab a
+# fresh enabled Clone button over a running install: the tab that started it
+# lost its own progress line, and a second operator's click earned a 503.
+def test_an_install_in_flight_is_visible_to_every_tab(tmp_path, monkeypatch):
+    destination = tmp_path / "hive-tools"
+    destination.mkdir()
+    monkeypatch.setenv("HIVE_TOOLS_REPO_DIR", str(destination))
+
+    assert _hive_tools_node()["installing"] is False
+
+    # A tab that did not start the install reads the same process state the
+    # one that did is holding.
+    with capability_install._HIVE_TOOLS_INSTALL_LOCK:
+        during = _hive_tools_node()
+
+    assert during["installing"] is True
+    assert during["installed"] is False
+
+    if shutil.which("node") is None:
+        pytest.skip("node is required to execute the card's rendering branch")
+
+    base = {"installable": True, "id": "hive-tools", "path": str(destination)}
+    mid_clone = _render_installation_controls({**base, **during})
+    idle = _render_installation_controls({**base, "installing": False, "installed": False})
+
+    # Mid-clone the button is shut and says so, and carries no install handle —
+    # a card that still offered the click could only earn a 503.
+    assert "disabled" in mid_clone
+    assert "Cloning source" in mid_clone
+    assert "data-capability-install=" not in mid_clone
+
+    # And the same function offers a live button when no clone is running, so
+    # a branch that is dead, mis-ordered or inverted cannot pass both halves.
+    assert "data-capability-install=" in idle
+    assert "disabled" not in idle
+
+
+def test_the_inference_proxy_node_guards_its_clone_like_hive_tools(tmp_path, monkeypatch):
+    """Requirement 14 — real-checkout truth, a refused second clone, in-flight to every tab."""
+    destination = tmp_path / "inference-proxy"
+    destination.mkdir()
+    monkeypatch.setenv("INFERENCE_PROXY_REPO_DIR", str(destination))
+
+    def _node() -> dict:
+        return next(
+            node for node in main_mod._capability_node_specs()
+            if node["id"] == "inference-proxy"
+        )
+
+    # A bare .git is the wreckage of an interrupted clone, not an install.
+    # Reading it as one is what made a broken node look permanently successful.
+    (destination / ".git").mkdir()
+    assert _node()["installed"] is False
+    (destination / "README.md").write_text("real content\n")
+    assert _node()["installed"] is True
+
+    # A tab that did not start the clone reads the same process state as the
+    # one that did, and a second install is refused rather than run twice over
+    # the same directory.
+    assert _node()["installing"] is False
+    with capability_install._INFERENCE_PROXY_INSTALL_LOCK:
+        assert _node()["installing"] is True
+        with pytest.raises(capability_install.InstallInProgress):
+            capability_install.clone_inference_proxy()

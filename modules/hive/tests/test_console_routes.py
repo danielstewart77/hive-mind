@@ -221,6 +221,7 @@ def test_overview_api_combines_minds_sessions_and_service_health(tmp_path, monke
             "hive_tools_install_status",
             return_value={
                 "installed": True,
+                "installing": False,
                 "path": "/tools",
                 "repository": "https://example.invalid/hive-tools.git",
             },
@@ -862,6 +863,7 @@ def test_capability_nodes_leave_optional_unconfigured_services_idle(tmp_path, mo
             "hive_tools_install_status",
             return_value={
                 "installed": False,
+                "installing": False,
                 "path": "/tools",
                 "repository": "https://github.com/danielstewart77/hive-tools.git",
             },

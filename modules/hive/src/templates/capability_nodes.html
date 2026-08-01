@@ -36,6 +36,11 @@ window.addEventListener("DOMContentLoaded", function () {
     function installationControls(node) {
         if (!node.installable) return "";
         const placement = node.placement_note ? '<small class="capability-placement">' + h.escapeHtml(node.placement_note) + '</small>' : "";
+        // A clone outlives several repaints of this grid. The server reports
+        // the in-flight install, so every tab holds the button shut for the
+        // duration rather than the one that clicked it losing its progress
+        // line and the others offering a click that can only earn a 503.
+        if (node.installing) return '<div class="capability-install"><button class="button" type="button" disabled>Clone source</button><small data-capability-install-status>Cloning source…</small>' + placement + '</div>';
         if (node.installed) {
             // No usable url means the operator has not told the Hive where the
             // service answers for a browser. Say so — the git clone url that

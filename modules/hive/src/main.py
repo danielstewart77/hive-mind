@@ -1183,6 +1183,9 @@ async def api_inference_proxy_install(user: dict = Depends(require_auth)):
     del user
     try:
         result = await asyncio.to_thread(clone_inference_proxy)
+    except InstallInProgress as exc:
+        # Transient: the operator double-clicked, or has two tabs open.
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except RuntimeError as exc:
@@ -2212,6 +2215,7 @@ def _capability_node_specs() -> list[dict]:
             "configured": bool(os.getenv("HIVE_TOOLS_URL")),
             "installable": True,
             "installed": tools_installation["installed"],
+            "installing": tools_installation["installing"],
             "repository": tools_installation["repository"],
             "path": tools_installation["path"],
             # Recreate, not restart: both the bind mount source and this
@@ -2250,6 +2254,7 @@ def _capability_node_specs() -> list[dict]:
             "configurable": True,
             "installable": True,
             "installed": proxy_installation["installed"],
+            "installing": proxy_installation["installing"],
             "repository": proxy_installation["repository"],
             "path": proxy_installation["path"],
             "access": "Proxy-issued client keys",
@@ -2614,6 +2619,8 @@ async def api_settings_credentials_rotate(key: str, user: dict = Depends(require
     log_event(
         log, "credential.rotated", **_actor_fields(user),
         credential=result["key"], written_to=[w["file"] for w in result["written"]],
+        complete=result["complete"],
+        skipped=[r["file"] for r in result["locations"] if not r["written"]],
     )
     return result
 
@@ -2629,6 +2636,8 @@ async def api_settings_credentials_set_github_pat(
     log_event(
         log, "credential.set", **_actor_fields(user),
         credential=result["key"], written_to=[w["file"] for w in result["written"]],
+        complete=result["complete"],
+        skipped=[r["file"] for r in result["locations"] if not r["written"]],
     )
     return result
 

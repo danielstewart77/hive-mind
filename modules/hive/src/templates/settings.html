@@ -66,7 +66,11 @@ window.addEventListener("DOMContentLoaded", function () {
         try {
             const rows = (await h.requestJson("/api/settings/credentials")).credentials || [];
             list.innerHTML = rows.map(function (item) {
-                const locations = item.locations.map(function (loc) { return h.escapeHtml(loc.file) + " (" + h.escapeHtml(loc.env_key) + "): " + (loc.present ? h.escapeHtml(loc.preview || "set") : "missing"); }).join(", ");
+                // "unreadable" is its own word: the remedy for a missing value
+                // is to write one, and offering that over a file this console
+                // merely cannot parse would overwrite a credential that is
+                // present and fine.
+                const locations = item.locations.map(function (loc) { return h.escapeHtml(loc.file) + " (" + h.escapeHtml(loc.env_key) + "): " + (loc.unreadable ? "unreadable" : loc.present ? h.escapeHtml(loc.preview || "set") : "missing"); }).join(", ");
                 const syncNote = item.locations.length && !item.in_sync ? '<br><strong style="color:var(--color-danger,#c0392b)">Out of sync across files</strong>' : "";
                 const note = item.note ? '<br><em>' + h.escapeHtml(item.note) + '</em>' : "";
                 let action;
@@ -90,11 +94,23 @@ window.addEventListener("DOMContentLoaded", function () {
     if (section === "access") { document.getElementById("sessions-refresh").addEventListener("click", loadSessions); document.getElementById("settings-sessions").addEventListener("click", async function (event) { const button = event.target.closest("[data-delete-session]"); if (!button || !window.confirm("Delete this session?")) return; try { await h.requestJson("/api/settings/hive-comms/sessions/" + encodeURIComponent(button.dataset.deleteSession), {method: "DELETE"}); loadSessions(); } catch (error) { window.alert(error.message); } }); loadSessions(); }
     if (section === "connections") { document.getElementById("connections-refresh").addEventListener("click", loadConnections); loadConnections(); }
     if (section === "voice") { document.getElementById("voice-minds").addEventListener("submit", async function (event) { const form = event.target.closest(".voice-form"); if (!form) return; event.preventDefault(); const status = form.querySelector("[data-status]"); status.textContent = "Uploading…"; try { await h.requestJson("/api/settings/voice/" + encodeURIComponent(form.dataset.mind) + "/voice-ref", {method: "POST", body: new FormData(form)}); status.textContent = "Uploaded"; loadVoice(); } catch (error) { status.textContent = error.message; } }); loadVoice(); }
-    if (section === "credentials") { document.getElementById("settings-credentials").addEventListener("click", async function (event) {
+    if (section === "credentials") {
+    // Writing a credential to five files is five operations, not one. The
+    // report names each file and, where it was skipped, why — a summary that
+    // said "rotated" over four of five is how one consumer keeps a token the
+    // rest of the hive has stopped honouring.
+    function locationReport(result) {
+        const rows = result.locations || [];
+        const lines = rows.map(function (row) { return (row.written ? "✓ " : "✗ ") + row.file + (row.written ? "" : " — " + row.reason); });
+        const done = rows.filter(function (row) { return row.written; }).length;
+        const heading = result.complete ? "Written to all " + rows.length + " locations." : "Partial: " + done + " of " + rows.length + " locations written.";
+        return [heading].concat(lines).join("\n");
+    }
+    document.getElementById("settings-credentials").addEventListener("click", async function (event) {
         const rotateButton = event.target.closest("[data-rotate]");
-        if (rotateButton) { const key = rotateButton.dataset.rotate; if (!window.confirm("Rotate this credential? Nothing restarts automatically — you'll need to bounce the affected services yourself.")) return; rotateButton.disabled = true; rotateButton.textContent = "Rotating…"; try { const result = await h.requestJson("/api/settings/credentials/" + encodeURIComponent(key) + "/rotate", {method: "POST"}); window.alert("Rotated. Restart: " + (result.restart_targets || []).join(", ")); loadCredentials(); } catch (error) { window.alert(error.message); rotateButton.disabled = false; rotateButton.textContent = "Rotate"; } return; }
+        if (rotateButton) { const key = rotateButton.dataset.rotate; if (!window.confirm("Rotate this credential? Nothing restarts automatically — you'll need to bounce the affected services yourself.")) return; rotateButton.disabled = true; rotateButton.textContent = "Rotating…"; try { const result = await h.requestJson("/api/settings/credentials/" + encodeURIComponent(key) + "/rotate", {method: "POST"}); window.alert(locationReport(result) + "\n\nRestart: " + (result.restart_targets || []).join(", ")); loadCredentials(); } catch (error) { window.alert(error.message); rotateButton.disabled = false; rotateButton.textContent = "Rotate"; } return; }
         const setButton = event.target.closest("[data-set]");
-        if (setButton) { const key = setButton.dataset.set; const input = document.querySelector('[data-set-input="' + key + '"]'); const token = (input && input.value || "").trim(); if (!token) { window.alert("Paste the new token first."); return; } setButton.disabled = true; setButton.textContent = "Verifying…"; try { const result = await h.requestJson("/api/settings/credentials/" + encodeURIComponent(key) + "/set", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({token: token})}); window.alert("Verified as " + (result.login || "unknown") + " and written to: " + (result.written || []).map(function (w) { return w.file; }).join(", ")); loadCredentials(); } catch (error) { window.alert(error.message); setButton.disabled = false; setButton.textContent = "Save"; } }
+        if (setButton) { const key = setButton.dataset.set; const input = document.querySelector('[data-set-input="' + key + '"]'); const token = (input && input.value || "").trim(); if (!token) { window.alert("Paste the new token first."); return; } setButton.disabled = true; setButton.textContent = "Verifying…"; try { const result = await h.requestJson("/api/settings/credentials/" + encodeURIComponent(key) + "/set", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({token: token})}); window.alert("Verified as " + (result.login || "unknown") + ".\n\n" + locationReport(result)); loadCredentials(); } catch (error) { window.alert(error.message); setButton.disabled = false; setButton.textContent = "Save"; } }
     }); loadCredentials(); }
     if (section === "advanced") loadDownloads();
 });
