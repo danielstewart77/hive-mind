@@ -123,11 +123,10 @@ CREDENTIAL_GROUPS: list[dict[str, Any]] = [
         "label": "Hive Comms bearer token",
         "rotatable": True,
         "note": (
-            "Guards every comms route. One secret under one name — broker "
-            "clients read COMMS_BEARER_TOKEN directly, and the old "
-            "HIVEMIND_BROKER_TOKEN mirror is gone from every env file here. "
-            "The admin token below IS a separate credential — it guards the "
-            "admin-only comms routes."
+            "Guards every comms route — one secret, one name, written to "
+            "each location below. The admin token is a separate credential "
+            "guarding the admin-only routes; rotating one does not rotate "
+            "the other."
         ),
         "locations": [
             ("nervous_system", "COMMS_BEARER_TOKEN"),
