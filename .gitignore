@@ -171,6 +171,7 @@ minds/*
 !minds/pty_attach.py
 !minds/pty_notice.py
 !minds/runtime_api.py
+!minds/skills_api.py
 !minds/harness/
 !minds/harness/**
 minds/harness/__pycache__/
