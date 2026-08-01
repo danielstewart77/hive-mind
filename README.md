@@ -61,7 +61,7 @@ Human-readable guides, background, and reference material — organized by topic
 | [docs/architecture/nervous-system.md](docs/architecture/nervous-system.md) | Lucent (vector store + KG) — consumer-side overview; the service itself lives at [nervous-system/](nervous-system/) |
 | [docs/architecture/mind-folder-contract.md](docs/architecture/mind-folder-contract.md) | The "drop a folder, the hive picks it up" contract: layout, env, per-harness hook registration |
 | [docs/architecture/mind-body-nervous-system.md](docs/architecture/mind-body-nervous-system.md) | The mind / body / nervous system organism model — privilege tiers, auth boundaries, design decisions |
-| [docs/standalone-mind.md](docs/standalone-mind.md) | Bare-metal systemd deployment pattern (reference: [hive_mind_skippy](https://github.com/danielstewart77/hive_mind_skippy)) |
+| [docs/standalone-mind.md](docs/standalone-mind.md) | Bare-metal systemd deployment pattern (reference: [hive-edge-minds](https://github.com/danielstewart77/hive-edge-minds)) |
 | [docs/multi-mind-architecture.md](docs/multi-mind-architecture.md) | Multi-mind system architecture — container isolation, secrets, gateway security, inter-mind broker messaging |
 | [docs/mind-claude-folder.md](docs/mind-claude-folder.md) | Per-mind `.claude` folder convention and Docker wiring |
 | [docs/training-capture/data-contract.md](docs/training-capture/data-contract.md) | Per-turn training-data schema captured by each harness's Stop hook |
