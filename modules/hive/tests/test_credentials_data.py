@@ -70,7 +70,7 @@ def test_rotate_credential_writes_new_value_to_every_location(tmp_path, monkeypa
     skippy = tmp_path / "skippy.env"
     _write_env(nervous_system, COMMS_BEARER_TOKEN="old", OTHER_KEY="untouched")
     _write_env(hive_mind, COMMS_BEARER_TOKEN="old")
-    _write_env(skippy, COMMS_BEARER_TOKEN="old", HIVEMIND_BROKER_TOKEN="old")
+    _write_env(skippy, COMMS_BEARER_TOKEN="old")
     _patch_env_files(
         monkeypatch, tmp_path,
         nervous_system=nervous_system, hive_mind=hive_mind, skippy=skippy,
@@ -82,9 +82,8 @@ def test_rotate_credential_writes_new_value_to_every_location(tmp_path, monkeypa
     assert new_comms != "old"
     assert credentials_data._read_env_value(hive_mind, "COMMS_BEARER_TOKEN") == new_comms
     assert credentials_data._read_env_value(skippy, "COMMS_BEARER_TOKEN") == new_comms
-    assert credentials_data._read_env_value(skippy, "HIVEMIND_BROKER_TOKEN") == new_comms
     assert credentials_data._read_env_value(nervous_system, "OTHER_KEY") == "untouched"
-    assert len(result["written"]) == 4
+    assert len(result["written"]) == 3
     assert result["restart_targets"]
 
 
@@ -250,11 +249,11 @@ def test_set_github_pat_errors_when_no_file_has_an_entry(tmp_path, monkeypatch):
         credentials_data.set_github_pat("ghp_new")
 
 
-def test_comms_bearer_group_carries_alias_note():
+def test_comms_bearer_note_distinguishes_it_from_the_admin_token():
     comms = next(
         r for r in credentials_data.list_credentials() if r["key"] == "comms_bearer_token"
     )
-    assert "HIVEMIND_BROKER_TOKEN" in comms["note"]
+    assert "separate credential" in comms["note"]
 
 
 def test_write_env_value_leaves_file_untouched_when_key_absent(tmp_path, monkeypatch):

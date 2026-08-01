@@ -314,7 +314,6 @@ def scaffold_internal_mind(
                     # start, and POST /broker/minds is an admin route.
                     "COMMS_ADMIN_BEARER_TOKEN=${COMMS_ADMIN_BEARER_TOKEN}",
                     "HIVEMIND_BROKER_URL=http://hive-comms:8424",
-                    "HIVEMIND_BROKER_TOKEN=${COMMS_BEARER_TOKEN}",
                     "GATEWAY_URL=http://server:8420",
                     "SPECS_DIR=/usr/src/app/specs/data-classes",
                     f"AUTO_REMEMBER_LOG_DIR=/usr/src/app/minds/{name}/data/auto-remember",

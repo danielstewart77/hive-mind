@@ -114,19 +114,18 @@ def _write_env_value(path: Path, key: str, new_value: str, label: str = "env") -
     return True
 
 
-# Each location is (env-file label, literal key in that file) — the key
-# name isn't always the credential's own key: edge minds mirror
-# COMMS_BEARER_TOKEN into a second literal line, HIVEMIND_BROKER_TOKEN,
-# because bare-metal installs have no compose layer to alias it for them.
+# Each location is (env-file label, literal key in that file). The key name
+# can differ from the credential's own key where a file names it something
+# else; a rotation writes every listed location with the same value.
 CREDENTIAL_GROUPS: list[dict[str, Any]] = [
     {
         "key": "comms_bearer_token",
         "label": "Hive Comms bearer token",
         "rotatable": True,
         "note": (
-            "One secret, several names: edge minds mirror it as "
-            "HIVEMIND_BROKER_TOKEN for their bare-metal broker clients, so "
-            "that line is the same value by design, not a second credential. "
+            "Guards every comms route. One secret under one name — broker "
+            "clients read COMMS_BEARER_TOKEN directly, and the old "
+            "HIVEMIND_BROKER_TOKEN mirror is gone from every env file here. "
             "The admin token below IS a separate credential — it guards the "
             "admin-only comms routes."
         ),
@@ -134,9 +133,7 @@ CREDENTIAL_GROUPS: list[dict[str, Any]] = [
             ("nervous_system", "COMMS_BEARER_TOKEN"),
             ("hive_mind", "COMMS_BEARER_TOKEN"),
             ("skippy", "COMMS_BEARER_TOKEN"),
-            ("skippy", "HIVEMIND_BROKER_TOKEN"),
             ("mordecai", "COMMS_BEARER_TOKEN"),
-            ("mordecai", "HIVEMIND_BROKER_TOKEN"),
             ("hive_tools", "COMMS_BEARER_TOKEN"),
         ],
         "restart_targets": [
