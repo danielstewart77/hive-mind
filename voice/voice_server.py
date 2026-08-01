@@ -63,7 +63,12 @@ from fastapi import FastAPI, HTTPException, UploadFile  # noqa: E402
 from fastapi.responses import Response  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
-app = FastAPI(title="Hive Mind Voice Server")
+app = FastAPI(
+    title="Hive Mind Voice Server",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 install_fastapi_logging(app, log, "voice-server")
 
 _DEVICE = "cuda" if _GPU_OK and torch.cuda.is_available() else "cpu"

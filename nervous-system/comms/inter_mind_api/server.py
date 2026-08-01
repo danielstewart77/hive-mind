@@ -40,7 +40,14 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="inter-mind-api", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(
+        title="inter-mind-api",
+        version="0.1.0",
+        lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
     install_fastapi_logging(app, log, "inter-mind-api")
 
     @app.get("/health")

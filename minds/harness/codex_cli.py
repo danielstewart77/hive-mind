@@ -71,7 +71,7 @@ CODEX_HOME = Path(
     or str(MIND_DIR / ".codex")
 )
 
-app = FastAPI(title=f"Mind: {NAME}")
+app = FastAPI(title=f"Mind: {NAME}", docs_url=None, redoc_url=None, openapi_url=None)
 install_fastapi_logging(app, log, f"mind:{NAME}")
 
 # session_id -> {"system_prompt": str, "thread_id": str | None, "model": str}

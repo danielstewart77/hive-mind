@@ -76,7 +76,7 @@ elif _MCP_DEFAULT.exists():
 else:
     MCP_CONFIG = ""
 
-app = FastAPI(title=f"Mind: {NAME}")
+app = FastAPI(title=f"Mind: {NAME}", docs_url=None, redoc_url=None, openapi_url=None)
 install_fastapi_logging(app, log, f"mind:{NAME}")
 
 # session_id -> {"proc": Process, "model": str, "resume_sid": str | None}
