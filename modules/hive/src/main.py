@@ -66,6 +66,7 @@ from configuration_data import (
 )
 from graph_data import get_graph_data
 import mind_runtime
+import mind_skills
 from hive_logging import configure_logging, install_fastapi_logging, log_event
 from credentials_data import list_credentials, rotate_credential, set_github_pat
 from settings_data import (
@@ -1903,6 +1904,54 @@ async def api_mind_configuration_update(
             "deployment": deployment,
         },
     }
+
+
+@app.get("/api/minds/{name}/skills")
+async def api_mind_skills(name: str, user: dict = Depends(require_auth)):
+    """Every skill this Mind knows, repo side against installed side."""
+    del user
+    return await mind_skills.fetch_skills(await _mind_gateway_url(name))
+
+
+@app.get("/api/minds/{name}/skills/{skill}/diff")
+async def api_mind_skill_diff(name: str, skill: str, user: dict = Depends(require_auth)):
+    del user
+    return await mind_skills.fetch_diff(await _mind_gateway_url(name), skill)
+
+
+@app.post("/api/minds/{name}/skills/{skill}/install")
+async def api_mind_skill_install(
+    name: str, skill: str, user: dict = Depends(require_auth)
+):
+    """Copy the repo's version onto this Mind — applying and reverting alike."""
+    result = await mind_skills.install(await _mind_gateway_url(name), skill)
+    log_event(
+        log, "mind.skill.installed", **_actor_fields(user), mind_name=name, skill=skill
+    )
+    return result
+
+
+@app.post("/api/minds/{name}/skills/{skill}/write-back")
+async def api_mind_skill_write_back(
+    name: str, skill: str, user: dict = Depends(require_auth)
+):
+    """Copy this Mind's version into its repo checkout. Nothing is committed."""
+    result = await mind_skills.write_back(await _mind_gateway_url(name), skill)
+    log_event(
+        log, "mind.skill.written_back", **_actor_fields(user), mind_name=name, skill=skill
+    )
+    return result
+
+
+@app.delete("/api/minds/{name}/skills/{skill}")
+async def api_mind_skill_remove(
+    name: str, skill: str, user: dict = Depends(require_auth)
+):
+    result = await mind_skills.remove(await _mind_gateway_url(name), skill)
+    log_event(
+        log, "mind.skill.removed", **_actor_fields(user), mind_name=name, skill=skill
+    )
+    return result
 
 
 @app.get("/api/settings/hive-comms/sessions")

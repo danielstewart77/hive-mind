@@ -11,12 +11,83 @@
         <section class="surface"><div class="surface-header"><h2>Overview</h2><span id="mind-status"></span></div><div class="surface-body"><dl class="detail-grid" id="mind-details"></dl></div></section>
         <section class="surface"><div class="surface-header"><div><h2>Runtime configuration</h2><p>Secret values are removed before this reaches the browser.</p></div></div><div class="surface-body"><div class="code-wrap"><pre class="code-panel" id="mind-config">Loading…</pre><button class="icon-button" type="button" data-copy="#mind-config" aria-label="Copy configuration"><i data-lucide="copy"></i></button></div></div></section>
         <section class="surface" id="mind-editor" hidden><div class="surface-header"><div><h2>Default model</h2><p>Written to this Mind&#39;s runtime.yaml and its registry row. Applies to the next session it is asked for; conversations already running keep their model.</p></div></div><form class="surface-body overview-stack" id="mind-model-form"><div class="field"><label for="mind-default-model">Model name</label><input id="mind-default-model" name="default_model" list="mind-model-options" required><datalist id="mind-model-options"></datalist><small>Use a model supported by this Mind's configured provider.</small></div><div class="form-actions"><button class="button" type="submit">Save model</button><button class="button button-primary" id="mind-restart" type="button" hidden>Restart runtime</button></div><small id="mind-model-status"></small></form></section>
+        <section class="surface" id="mind-skills" hidden><div class="surface-header"><div><h2>Skills</h2><p>The repo&#39;s copy against this Mind&#39;s. Applying copies the repo&#39;s directory into the one this Mind&#39;s harness loads skills from. When the harness picks it up is the harness&#39;s business.</p></div><span id="mind-skills-harness"></span></div><div class="surface-body"><div id="mind-skills-status"></div><table class="data-table" id="mind-skills-table" hidden><thead><tr><th>Skill</th><th>Repo</th><th>This Mind</th><th></th></tr></thead><tbody id="mind-skills-rows"></tbody></table></div></section>
     </div>
 </main>
 <script>
 window.addEventListener("DOMContentLoaded", async function () {
     const h = window.HiveConsole;
     const requested = document.querySelector("[data-mind-id]").dataset.mindId;
+
+    // A Mind that has edited a skill for its own job is the interesting
+    // case, not an error — say what differs and offer both directions.
+    // "Not in the repo" is the ordinary state for most of a Mind's skills —
+    // the repo ships the hive-native ones, the Mind accumulates its own. It
+    // is not junk awaiting cleanup, and Remove deletes a directory that is
+    // under no version control, so it asks first.
+    const SKILL_STATES = {
+        same: {label: "In sync", actions: []},
+        differs: {label: "Edited on this Mind", actions: ["diff", "install", "write-back"]},
+        not_installed: {label: "In the repo only", actions: ["install"]},
+        local_only: {label: "Not in the repo", actions: ["write-back", "remove"]},
+        unreadable: {label: "Cannot be read", actions: []}
+    };
+    const ACTION_LABELS = {diff: "What changed", install: "Apply repo copy", "write-back": "Write into repo", remove: "Remove from Mind"};
+    const CONFIRM_ACTIONS = {remove: "Delete this skill from the Mind? Its directory is not under version control, so this cannot be undone."};
+
+    async function renderSkills(name) {
+        const section = document.getElementById("mind-skills");
+        const status = document.getElementById("mind-skills-status");
+        const table = document.getElementById("mind-skills-table");
+        section.dataset.mindName = name; section.hidden = false;
+        status.textContent = "Loading skills…"; table.hidden = true;
+        let payload;
+        try {
+            payload = await h.requestJson("/api/minds/" + encodeURIComponent(name) + "/skills");
+        } catch (error) {
+            status.textContent = "Cannot reach this Mind to read its skills: " + error.message;
+            return;
+        }
+        document.getElementById("mind-skills-harness").textContent = (payload.harness || "") + " skills";
+        const rows = payload.skills || [];
+        if (!rows.length) { status.textContent = "This Mind has no skills on either side."; return; }
+        status.textContent = "";
+        table.hidden = false;
+        document.getElementById("mind-skills-rows").innerHTML = rows.map(function (row) {
+            const state = SKILL_STATES[row.state] || {label: row.state, actions: []};
+            const buttons = state.actions.map(function (action) {
+                return '<button class="button button-quiet" type="button" data-skill="' + h.escapeHtml(row.name) + '" data-action="' + action + '">' + ACTION_LABELS[action] + "</button>";
+            }).join(" ");
+            return '<tr><td>' + h.escapeHtml(row.name) + '</td><td>' + (row.repo !== null && row.repo !== undefined ? "present" : "absent") +
+                '</td><td>' + h.escapeHtml(state.label) + '</td><td class="row-actions">' + buttons +
+                '</td></tr><tr class="skill-diff" data-diff-for="' + h.escapeHtml(row.name) + '" hidden><td colspan="4"><pre class="code-panel"></pre></td></tr>';
+        }).join("");
+        if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}});
+    }
+
+    document.getElementById("mind-skills").addEventListener("click", async function (event) {
+        const button = event.target.closest("button[data-skill]");
+        if (!button) return;
+        const name = this.dataset.mindName, skill = button.dataset.skill, action = button.dataset.action;
+        if (CONFIRM_ACTIONS[action] && !window.confirm(CONFIRM_ACTIONS[action])) return;
+        const base = "/api/minds/" + encodeURIComponent(name) + "/skills/" + encodeURIComponent(skill);
+        const status = document.getElementById("mind-skills-status");
+        button.disabled = true;
+        try {
+            if (action === "diff") {
+                const row = this.querySelector('[data-diff-for="' + CSS.escape(skill) + '"]');
+                if (!row.hidden) { row.hidden = true; return; }
+                row.querySelector("pre").textContent = (await h.requestJson(base + "/diff")).diff || "(identical)";
+                row.hidden = false;
+                return;
+            }
+            if (action === "install") await h.requestJson(base + "/install", {method: "POST"});
+            if (action === "write-back") await h.requestJson(base + "/write-back", {method: "POST"});
+            if (action === "remove") await h.requestJson(base, {method: "DELETE"});
+            await renderSkills(name);
+        } catch (error) { status.textContent = error.message; }
+        finally { button.disabled = false; }
+    });
     try {
         const minds = (await h.requestJson("/api/settings/minds")).minds || [];
         const mind = minds.find(function (item) { return item.id === requested || item.name === requested || (item.id || "").startsWith(requested); });
@@ -45,6 +116,7 @@ window.addEventListener("DOMContentLoaded", async function () {
             document.getElementById("mind-model-form").hidden = true;
             document.getElementById("mind-model-status").textContent = "Cannot reach this Mind to read its configuration: " + error.message;
         }
+        await renderSkills(mind.name);
         if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}});
     } catch (error) {
         document.getElementById("mind-content").hidden = true;
