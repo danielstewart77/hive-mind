@@ -13,7 +13,7 @@ The rest of this repo is the **consumer side**:
 
 ## Network wiring
 
-`hive-lucent` and `hive-comms` join the external `hivemind` Docker network. Mind containers reach them as `http://hive-lucent:8424` and `http://hive-comms:8424`. Both also bind host ports — `127.0.0.1:8425` (lucent) and `127.0.0.1:8426` (comms) — for direct curl/debugging and for any bare-metal consumer (e.g., the `hive_mind_skippy` standalone mind).
+`hive-lucent` and `hive-comms` join the external `hivemind` Docker network. Mind containers reach them as `http://hive-lucent:8424` and `http://hive-comms:8424`. Both also bind host ports — `127.0.0.1:8425` (lucent) and `127.0.0.1:8426` (comms) — for direct curl/debugging and for any bare-metal consumer (e.g., the `hive-edge-minds` standalone mind).
 
 ## Bearer auth
 

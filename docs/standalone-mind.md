@@ -8,7 +8,7 @@ A mind that runs as a single bare-metal systemd service on its own host instead 
 
 ## Reference deployment
 
-**👉 [github.com/danielstewart77/hive_mind_skippy](https://github.com/danielstewart77/hive_mind_skippy)** *(private)*
+**👉 [github.com/danielstewart77/hive-edge-minds](https://github.com/danielstewart77/hive-edge-minds)** *(private)*
 
 Skippy is the canonical standalone mind. The repo branched from `hive-mind` and runs as one systemd unit hosting:
 
