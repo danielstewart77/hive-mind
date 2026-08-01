@@ -169,6 +169,7 @@ minds/*
 !minds/__init__.py
 !minds/proactive.py
 !minds/pty_attach.py
+!minds/pty_notice.py
 !minds/runtime_api.py
 !minds/harness/
 !minds/harness/**
