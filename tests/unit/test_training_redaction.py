@@ -66,6 +66,8 @@ def test_detects_and_replaces_credentials(text):
         '_LINKEDIN_TOKEN_URL = "https://www.linkedin.com/oauth/v2/accessToken"',
         # Passing a secret is not stating one.
         "bearer_token=args.bearer_token",
+        # The assignment rule stops at the space, capturing a header name.
+        'AUTH="Authorization: Bearer $LUCENT_BEARER_TOKEN"',
     ],
 )
 def test_leaves_ordinary_code_and_prose_alone(text):
