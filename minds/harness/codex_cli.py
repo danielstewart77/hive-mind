@@ -44,7 +44,7 @@ from minds.pty_attach import (
     seeded_pane_command,
 )
 from minds.pty_attach import teardown as teardown_pty
-from minds import runtime_api
+from minds import runtime_api, skills_api
 from core.hive_logging import configure_logging, install_fastapi_logging, log_event
 
 MIND_NAME = os.environ.get("MIND_NAME", "example")
@@ -521,6 +521,7 @@ def _rotate_pty(
 install_pty_attach(app, mind_name=NAME, terminals=TERMINALS,
                    spawn=_spawn_pty, rotate=_rotate_pty)
 runtime_api.install_runtime_routes(app, path=RUNTIME_PATH, mind_id=MIND_ID, log=log)
+skills_api.install_skills_routes(app, harness="codex_cli", mind_id=MIND_ID, log=log)
 
 
 async def _run_codex_turn(sid: str, content: str, images: list[dict] | None) -> Any:
