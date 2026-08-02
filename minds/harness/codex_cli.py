@@ -194,9 +194,9 @@ async def _reap_proc(proc: asyncio.subprocess.Process | None) -> None:
 @app.on_event("startup")
 async def _startup() -> None:
     await _fetch_secrets_on_startup()
-    await runtime_api.register_with_broker(
+    asyncio.ensure_future(runtime_api.registration_loop(
         RUNTIME_PATH, mind_name=MIND_NAME, mind_id=MIND_ID, log=log
-    )
+    ))
     log.info("%s ready (mind_id=%s, codex_home=%s)", NAME, MIND_ID, CODEX_HOME)
 
 
