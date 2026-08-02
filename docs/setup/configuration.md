@@ -25,7 +25,7 @@ discord_allowed_channels: []
 
 ### Fields in `config.yaml.example` with no current reader
 
-`server_port`, `idle_timeout_minutes`, `max_sessions`, `default_model`, `autopilot_guards`, `mcp_port`, `providers`, `models` are parsed by `config.py` but nothing in this repo reads the parsed values — they're left over from the retired `server.py` gateway, which owned all of this before the gateway moved to `hive-comms`. `group_chat` is parsed and read by `nervous-system/comms/inter_mind_api/`, which is dead code (not built by any Dockerfile, not started by any compose service — group chat currently has no working end-to-end path). None of these currently do anything; treat them as reserved, not configuration you need to tune.
+`server_port`, `max_sessions`, `default_model`, `autopilot_guards`, `mcp_port`, `providers`, `models` are parsed by `config.py` but nothing in this repo reads the parsed values — they're left over from the retired `server.py` gateway, which owned all of this before the gateway moved to `hive-comms`. `group_chat` is parsed and read by `nervous-system/comms/inter_mind_api/`, which is dead code (not built by any Dockerfile, not started by any compose service — group chat currently has no working end-to-end path). None of these currently do anything; treat them as reserved, not configuration you need to tune.
 
 ### Scheduled Tasks
 

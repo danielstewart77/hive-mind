@@ -432,6 +432,7 @@ def _spawn_pty(
     *, session_id: str, model: str, conversation_id: str, cols: int, rows: int,
     harness_sid: str | None = None, client_ref: str | None = None,
     owner_type: str | None = None, owner_ref: str | None = None,
+    system_prompt: str = "",
 ) -> tuple[Any, int]:
     """Attach a pty to this session's interactive `codex`, starting it if needed.
 
@@ -450,8 +451,18 @@ def _spawn_pty(
 
     fresh = not TERMINALS.alive(session_id) and not thread_id
     before = _existing_rollout_paths() if fresh else set()
+    # ``system_prompt`` is a carry-forward comms is still holding: a rotation
+    # seeded this conversation and no turn ever landed on it. Codex has no
+    # system-prompt flag, so it rides in as the opening turn — the same
+    # channel a rotation uses. ``start`` no-ops on a live terminal, so a
+    # reattach never re-seeds.
     TERMINALS.start(
-        session_id, _terminal_argv(model, thread_id),
+        session_id,
+        seeded_pane_command(
+            _terminal_argv(model, thread_id),
+            system_prompt,
+            CODEX_HOME / "rotation-seeds" / f"{session_id}.txt",
+        ),
         env_overrides=pane_env, cols=cols, rows=rows,
     )
     if fresh:

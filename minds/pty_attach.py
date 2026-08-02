@@ -15,7 +15,7 @@ starting a rival CLI process. tmux owns the screen model and the history: it
 repaints on attach and on live resize, which is why there is no scrollback
 ring, no VT emulator and no snapshot painter here. A turn in flight survives
 a closed tab, a locked phone or a dropped connection; the process ends only
-on an explicit teardown or via the idle reaper.
+on an explicit teardown; being unattached has no deadline.
 
 The tmux plumbing is harness-agnostic — :class:`TmuxTerminals` knows how to
 start, attach to, respawn and kill a session's terminal, and each mind
@@ -55,9 +55,7 @@ _PTY_CHUNK = 65536
 _PTY_MIN_COLS, _PTY_MAX_COLS = 20, 500
 _PTY_MIN_ROWS, _PTY_MAX_ROWS = 5, 200
 
-# An unattached terminal is kept alive this long so switching browser tiles,
-# locking a phone, or losing wifi does not destroy an in-flight turn.
-_PTY_IDLE_TIMEOUT_S = float(os.environ.get("PTY_IDLE_TIMEOUT_SECONDS", "3600"))
+# How often to collect registry entries for terminals whose harness exited.
 _PTY_REAP_INTERVAL_S = 60.0
 
 # How often to send a keepalive byte to an attached socket. A mobile
@@ -264,6 +262,30 @@ def capped_seed(system_prompt: str) -> str:
     return notice + system_prompt[-(MAX_SEED_CHARS - len(notice)):]
 
 
+SEED_STALE_AFTER_SECONDS = 3600
+
+
+def _sweep_stale_seeds(seed_dir) -> None:
+    """Delete seed files no pane ever consumed.
+
+    A seed is read and deleted by the pane's own shell, so one still sitting
+    here an hour later belongs to a pane that never started — a tmux failure
+    between the write and the spawn leaves the file behind and nothing else
+    ever collects it. Each one is a plaintext dump of the mind's soul and
+    recent memory, so they do not get to accumulate.
+    """
+    cutoff = time.time() - SEED_STALE_AFTER_SECONDS
+    try:
+        stale = [p for p in seed_dir.glob("*.txt") if p.stat().st_mtime < cutoff]
+    except OSError:
+        return
+    for path in stale:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
 def seeded_pane_command(
     argv: list[str], system_prompt: str, seed_file: Path, *, seed_flag: str = "",
 ) -> list[str]:
@@ -286,7 +308,9 @@ def seeded_pane_command(
 
     system_prompt = capped_seed(system_prompt)
     seed_file.parent.mkdir(parents=True, exist_ok=True)
+    _sweep_stale_seeds(seed_file.parent)
     seed_file.write_text(system_prompt)
+    seed_file.chmod(0o600)
     quoted_seed = shlex.quote(str(seed_file))
     harness = " ".join(shlex.quote(arg) for arg in argv)
     flag = f"{seed_flag} " if seed_flag else ""
@@ -297,6 +321,43 @@ def seeded_pane_command(
         f'seed=$(cat {quoted_seed}); rm -f {quoted_seed}; '
         f'exec {harness} {flag}"$seed"',
     ]
+
+
+async def fetch_carry_forward(session_id: str, claude_sid: str) -> str:
+    """The rotation seed comms is still holding for this conversation, if any.
+
+    A terminal rotation composes a carry-forward and hands it to the
+    respawned pane as a system prompt. That copy reaches no transcript and
+    dies with the process, so until the conversation's first turn lands, the
+    row in comms is the only durable record of it. Asking here is what lets a
+    pane that died before that first turn — restart, crash, tab closed and
+    never reopened — come back carrying what the rotation composed.
+
+    Empty string means nothing to apply, which is the ordinary case. Failure
+    to reach comms is also an empty string: the transcript is the primary
+    recovery path and needs no gateway, so a terminal that cannot be seeded
+    still opens. Refusing the attach would turn a lost seed into a lost
+    terminal.
+    """
+    import aiohttp
+
+    comms_url = os.environ.get("COMMS_URL", "").rstrip("/")
+    token = os.environ.get("COMMS_ADMIN_BEARER_TOKEN", "")
+    if not comms_url or not token or not claude_sid:
+        return ""
+    async with aiohttp.ClientSession() as http:
+        async with http.get(
+            f"{comms_url}/sessions/{session_id}/carry-forward",
+            params={"claude_sid": claude_sid},
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=aiohttp.ClientTimeout(total=5),
+        ) as resp:
+            if resp.status >= 400:
+                log.warning("carry-forward lookup for session %s returned %s",
+                            session_id, resp.status)
+                return ""
+            body = await resp.json()
+    return (body or {}).get("carry_forward") or ""
 
 
 class TmuxTerminals:
@@ -669,19 +730,29 @@ def mirror_turn(
     return push_overlay(session_id, "".join(parts).encode())
 
 
-async def reap_idle() -> None:
-    """Kill terminals whose harness exited, or that nobody came back to."""
+async def reap_dead() -> None:
+    """Drop the registry entry for any terminal whose harness has exited.
+
+    Only ever collects what is already gone. A live terminal is ended by an
+    explicit teardown and by nothing else — being unattached is the normal
+    state between tiles, not evidence of abandonment, and a conversation the
+    user simply walked away from is still theirs when they come back.
+    """
     while True:
         await asyncio.sleep(_PTY_REAP_INTERVAL_S)
-        now = time.time()
-        for session_id, handle in list(PTYS.items()):
-            if not handle.terminals.alive(session_id):
-                teardown(session_id)
-            elif (handle.queue is None and handle.detached_at is not None
-                    and now - handle.detached_at > _PTY_IDLE_TIMEOUT_S):
-                log.info("Reaping terminal for session %s — unattached for %.0fs",
-                         session_id, now - handle.detached_at)
-                teardown(session_id)
+        # One sweep's worth of trouble must not end the sweeps. Liveness and
+        # teardown both shell out to tmux, so a momentarily unavailable
+        # binary or a failed fork raises here — and an unguarded raise ends
+        # the task for the life of the process, after which nothing is ever
+        # reaped again and the failure is invisible.
+        try:
+            for session_id, handle in list(PTYS.items()):
+                if not handle.terminals.alive(session_id):
+                    teardown(session_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Terminal reaper sweep failed")
 
 
 def _control_frame(handle: _PtyHandle, text: str) -> bool:
@@ -760,7 +831,7 @@ def install_pty_attach(
 
     @app.on_event("startup")
     async def _start_pty_reaper() -> None:  # pragma: no cover - lifecycle glue
-        asyncio.ensure_future(reap_idle())
+        asyncio.ensure_future(reap_dead())
 
     @app.post("/sessions/{session_id}/pty-notice")
     async def pty_notice_route(session_id: str, request: Request):
@@ -903,11 +974,30 @@ def install_pty_attach(
         client_ref = client_ref or session_id
 
         cols, rows = clamp_winsize(cols, rows)
+        # A rotation that never got its first turn left its carry-forward
+        # with comms and nowhere else. A live terminal is not asked about at
+        # all: its harness is already running, so a seed could only be
+        # discarded, and the round trip would sit between the socket's accept
+        # and its first painted byte on every reattach — the common case.
+        # Only a cold open can use an answer.
+        carry_forward = ""
+        try:
+            if not terminals.alive(session_id):
+                carry_forward = await fetch_carry_forward(session_id, resume_sid)
+            if carry_forward:
+                log.info("Seeding terminal for session %s with a stored "
+                         "carry-forward (%d chars)", session_id, len(carry_forward))
+        except Exception:
+            log.warning("Could not read a stored carry-forward for session %s",
+                        session_id, exc_info=True)
+            carry_forward = ""
+
         try:
             handle = _open_session_pty(
                 session_id, spawn, terminals, model=model, conversation_id=resume_sid,
                 harness_sid=harness_sid, cols=cols, rows=rows,
                 client_ref=client_ref, owner_type=owner_type, owner_ref=owner_ref,
+                system_prompt=carry_forward,
             )
         except PtyUnavailable as exc:
             log.info("attach-pty refused for %s session %s: %s", mind_name, session_id, exc)
