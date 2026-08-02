@@ -115,7 +115,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     mind_id       TEXT DEFAULT 'ada',
     group_session_id TEXT,
     rotation_armed INTEGER NOT NULL DEFAULT 0,
-    rotated_from  TEXT
+    rotated_from  TEXT,
+    carry_forward TEXT,
+    carry_forward_sid TEXT,
+    carry_forward_at REAL
 );
 
 CREATE TABLE IF NOT EXISTS active_sessions (
@@ -157,6 +160,23 @@ CREATE INDEX IF NOT EXISTS idx_session_turns_lookup
     ON session_turns (session_id, created_at ASC);
 """
 
+# Columns that must never ride out on a bulk session listing. A stored
+# carry-forward is a fully composed prompt — the mind's soul, its
+# decay-weighted recent memory and the conversation's last exchange — and
+# `GET /sessions/{id}/carry-forward` guards it behind the admin credential.
+# Every listing route answers to the far weaker service token, so a
+# `SELECT *` that reached the wire would hand the same blob to any surface
+# bot or mind container that holds it.
+_PRIVATE_SESSION_COLUMNS = ("carry_forward", "carry_forward_sid", "carry_forward_at")
+
+
+def _public_session_row(row) -> dict:
+    """A session row as a plain dict, minus the columns no listing may leak."""
+    session = dict(row)
+    for column in _PRIVATE_SESSION_COLUMNS:
+        session.pop(column, None)
+    return session
+
 
 class SessionManager:
     # Idle interval after which the observer event stream emits a ping.
@@ -166,6 +186,12 @@ class SessionManager:
     # kills close their own sessions, while inactivity remains resumable.
     REAP_IDLE_AFTER_SECONDS = 7 * 86400
     REAP_INTERVAL_SECONDS = 3600.0
+    # How long a stored carry-forward stays applicable. Long enough that the
+    # case it exists for — a pane that died before its first turn, recovered
+    # whenever the user next opens a tile — is comfortably covered; short
+    # enough that a seed whose clearing signal was lost cannot resurface on
+    # top of a conversation that has moved on. See get_carry_forward.
+    CARRY_FORWARD_TTL_SECONDS = 7 * 86400
 
     def __init__(self, model_registry: ModelRegistry):
         self._registry = model_registry
@@ -250,6 +276,19 @@ class SessionManager:
             await self._db.commit()
         except Exception:
             pass  # Column already exists
+        # A terminal rotation's carry-forward, and the conversation it was
+        # composed for. It used to exist only as a system prompt on the
+        # respawned pane — deleted from disk the moment that process read it,
+        # and never written to a transcript — so any death of that pane before
+        # the user's first turn lost minutes of composed context with no way
+        # to recover it. The session row outlives every process bound to it.
+        for column in ("carry_forward TEXT", "carry_forward_sid TEXT",
+                       "carry_forward_at REAL"):
+            try:
+                await self._db.execute(f"ALTER TABLE sessions ADD COLUMN {column}")
+                await self._db.commit()
+            except Exception:
+                pass  # Column already exists
         # Backfill: every session owns a conversation id. Rows created before
         # the id was minted at session creation may still be blank — those are
         # sessions that never finished a turn, so there is no conversation on
@@ -304,10 +343,18 @@ class SessionManager:
 
         A session with a live tracked subprocess is skipped no matter how
         old its last_active is — liveness beats the timestamp.
+
+        Browser terminals are exempt outright. This process tracks no
+        subprocess for one — the harness lives in the mind's tmux, out of
+        reach of `self._procs` — so the liveness check above cannot see that
+        a pane is running, and suspending the row closes the next attach with
+        4411 while the conversation carries on behind it. A terminal ends when
+        it is explicitly closed, and nothing else gets to end it.
         """
         cutoff = time.time() - self.REAP_IDLE_AFTER_SECONDS
         rows = await self._db.execute_fetchall(
-            "SELECT id FROM sessions WHERE status = 'idle' AND last_active < ?",
+            "SELECT id FROM sessions WHERE status = 'idle' AND last_active < ? "
+            "AND owner_ref != 'terminal'",
             (cutoff,),
         )
         stale = [r["id"] for r in rows if r["id"] not in self._procs]
@@ -437,7 +484,7 @@ class SessionManager:
         query += " ORDER BY last_active DESC"
 
         rows = await self._db.execute(query, params)
-        sessions = [dict(r) for r in await rows.fetchall()]
+        sessions = [_public_session_row(r) for r in await rows.fetchall()]
 
         # If client filtering requested, also check active_sessions.
         # A session that is the current active binding but is not live is
@@ -520,7 +567,7 @@ class SessionManager:
 
         rows = await self._db.execute(query, params)
         for row in await rows.fetchall():
-            session = dict(row)
+            session = _public_session_row(row)
             if session["id"] in seen:
                 continue
             session["surface"] = self._surface_label(session.get("owner_type", ""))
@@ -585,7 +632,8 @@ class SessionManager:
         return await self._session_dict(result["session_id"])
 
     async def record_turn(
-        self, client_type: str, client_ref: str, role: str, content: str
+        self, client_type: str, client_ref: str, role: str, content: str,
+        claude_sid: str | None = None,
     ) -> dict:
         """Append one turn to the active session's ``session_turns`` ledger.
 
@@ -600,12 +648,89 @@ class SessionManager:
         active = await self.get_active_session(client_type, client_ref)
         if not active:
             return {"ok": False, "error": "no active session"}
+        now = time.time()
         await self._db.execute(
             "INSERT INTO session_turns (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-            (active["id"], role, content, time.time()),
+            (active["id"], role, content, now),
         )
+        # This is the only write a browser-terminal turn ever makes, so it is
+        # also the only chance to say the session was used. `send_message`
+        # keeps `last_active` current for chat surfaces; without the same here
+        # a terminal in daily use looks untouched since the day it was created,
+        # and the stale-session sweep eventually suspends it out from under a
+        # pane that is still running.
+        await self._db.execute(
+            "UPDATE sessions SET last_active = ? WHERE id = ?", (now, active["id"]),
+        )
+        # A completed turn is the only evidence a rotation actually took: the
+        # seeded conversation has a transcript now, so `--resume` carries the
+        # context by itself and the stored copy has done its job. Leaving it
+        # would re-apply the seed on top of a conversation that already
+        # contains it.
+        #
+        # Scoped to the conversation the turn was typed into, when the caller
+        # says which. A rotation's composition runs for minutes and the user
+        # keeps typing through it — that is what the late-turn ledger exists
+        # for — so a detached Stop child can still be posting a turn from the
+        # old conversation after the new seed has been written. Unscoped, that
+        # straggler clears a seed composed after it, for a conversation it
+        # never saw, and the pane it was meant for opens bare.
+        if claude_sid:
+            await self._db.execute(
+                "UPDATE sessions SET carry_forward = NULL, carry_forward_sid = NULL, carry_forward_at = NULL "
+                "WHERE id = ? AND carry_forward_sid = ?",
+                (active["id"], claude_sid),
+            )
+        else:
+            await self._db.execute(
+                "UPDATE sessions SET carry_forward = NULL, carry_forward_sid = NULL, carry_forward_at = NULL "
+                "WHERE id = ?",
+                (active["id"],),
+            )
         await self._db.commit()
         return {"ok": True, "session_id": active["id"]}
+
+    async def get_carry_forward(
+        self, session_id: str, claude_sid: str
+    ) -> str | None:
+        """The stored carry-forward for ``claude_sid``, if it is still owed one.
+
+        Answers only for the conversation the seed was composed for. A mind
+        reattaching asks about the id it is about to resume, and a stored seed
+        belonging to some earlier conversation is not an answer to that
+        question — replaying it would graft one conversation's context onto
+        another's. A blank ``claude_sid`` matches nothing for the same reason.
+
+        None means "nothing to apply", which is the ordinary case: either no
+        rotation is outstanding, or its first turn already landed and
+        ``record_turn`` cleared it.
+
+        A seed also expires on its own after ``CARRY_FORWARD_TTL_SECONDS``.
+        Clearing depends on a turn being reported, and every reporter is
+        fire-and-forget: the terminal Stop hook swallows a failed POST and
+        the detached child that made it exits immediately, so a gateway
+        restart or a timeout at the wrong moment drops the only signal there
+        will ever be. Without a bound, that one lost POST arms the seed
+        permanently and some reattach weeks later replays a dead
+        conversation's context over a live one. Re-applying a seed the user
+        genuinely never used is worth minutes; it is not worth months.
+        """
+        if not (claude_sid or "").strip():
+            return None
+        cur = await self._db.execute(
+            "SELECT carry_forward, carry_forward_at FROM sessions "
+            "WHERE id = ? AND carry_forward_sid = ?",
+            (session_id, claude_sid),
+        )
+        row = await cur.fetchone()
+        if not row:
+            return None
+        stored_at = row["carry_forward_at"]
+        if stored_at is not None and time.time() - stored_at > self.CARRY_FORWARD_TTL_SECONDS:
+            log.info("Discarding a carry-forward for session %s stored %.0fs ago",
+                     session_id, time.time() - stored_at)
+            return None
+        return row["carry_forward"]
 
     # ------------------------------------------------------------------
     # Rotation arming (finalize-on-user-turn)
@@ -703,10 +828,18 @@ class SessionManager:
             )
             return {"ok": False, "error": "no live terminal", "session_id": session_id}
 
+        # The carry-forward is stored with the conversation it was composed
+        # for, not just handed to the pane that happens to be running. The
+        # pane holds it as a system prompt, which reaches no transcript and
+        # dies with the process; until the first turn lands there is nothing
+        # else anywhere that remembers it. See get_carry_forward.
+        _now = time.time()
         await self._db.execute(
             "UPDATE sessions SET claude_sid = ?, harness_sid = NULL, "
+            "carry_forward = ?, carry_forward_sid = ?, carry_forward_at = ?, "
             "rotation_armed = 0, last_active = ? WHERE id = ?",
-            (new_claude_sid, time.time(), session_id),
+            (new_claude_sid, system_prompt_blocks, new_claude_sid, _now,
+             _now, session_id),
         )
         await self._db.commit()
         log.info("rotation: session %s now on conversation %s", session_id, new_claude_sid)
@@ -1269,6 +1402,22 @@ class SessionManager:
                                         await self._db.execute(
                                             "INSERT INTO session_turns (session_id, role, content, created_at) VALUES (?, 'assistant', ?, ?)",
                                             (session_id, "".join(_assistant_buf), now),
+                                        )
+                                    # Same reasoning as record_turn: a completed
+                                    # turn is the evidence the rotation took. The
+                                    # terminal Stop hook is not the only way a
+                                    # rotated conversation gets its first turn —
+                                    # a `/switch` hands the conversation to a chat
+                                    # surface, and without this the seed would
+                                    # outlive it and be re-applied on top of the
+                                    # transcript the next time a tile opened cold.
+                                    if _pinned_sid:
+                                        await self._db.execute(
+                                            "UPDATE sessions SET carry_forward = NULL, "
+                                            "carry_forward_sid = NULL, "
+                                            "carry_forward_at = NULL "
+                                            "WHERE id = ? AND carry_forward_sid = ?",
+                                            (session_id, _pinned_sid),
                                         )
                                     await self._db.commit()
                                     elapsed = time.monotonic() - t0
@@ -1938,7 +2087,7 @@ class SessionManager:
             "SELECT * FROM sessions WHERE group_session_id = ? ORDER BY last_active ASC",
             (group_session_id,),
         )
-        return [dict(r) for r in await rows.fetchall()]
+        return [_public_session_row(r) for r in await rows.fetchall()]
 
     # ------------------------------------------------------------------
     # Helpers

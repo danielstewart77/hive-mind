@@ -99,6 +99,14 @@ Both layers are required. Neither works without the other.
 Each session is a Claude CLI (or Codex CLI) subprocess managed by `nervous-system/comms/sessions.py`. Sessions are stored in SQLite (`nervous-system/data/sessions.db`). The session manager handles:
 
 - **Process pool**: one subprocess per active session
-- **Idle reaper**: kills sessions idle for longer than `idle_timeout_minutes` (default 30)
-- **Last-active tracking**: updated on every streamed event, so HITL waits don't trigger the reaper
+- **Idle reaper**: after seven days untouched (`REAP_IDLE_AFTER_SECONDS`), an idle
+  session is marked `suspended` and unbound from its surface. Nothing is killed —
+  a session with a live tracked subprocess is skipped outright, and a suspended
+  session respawns on its next turn. Sessions whose `owner_ref` is `terminal`
+  are excluded outright: their harness runs in the mind's tmux, so no
+  subprocess is tracked here to make them look alive, and a pane ends only on
+  an explicit close.
+- **Last-active tracking**: updated on every streamed event, so HITL waits don't
+  trigger the reaper — and by `record_turn`, which is the only write a browser
+  terminal's turn ever makes
 - **Resume**: sessions can be resumed by passing `resume_session_id` at creation

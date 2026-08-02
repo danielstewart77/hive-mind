@@ -28,10 +28,20 @@ half-open mobile connections are detectable client-side long before the
 browser's own dead-connection timeout fires.
 
 A second attach to one session evicts the first (close code **1012**) — one
-conversation, one keyboard. The process ends only on `DELETE /sessions/{id}`,
-`POST /sessions/{id}/release?surface=terminal`, or the idle reaper
-(`PTY_IDLE_TIMEOUT_SECONDS`, default one hour unattached). A turn in flight
-survives a closed tab.
+conversation, one keyboard. The process ends only on `DELETE /sessions/{id}`
+or `POST /sessions/{id}/release?surface=terminal`. A terminal is never
+collected for being unattached — that is the normal state between tiles, and
+a conversation must not be destroyed by its user's absence. A reaper runs,
+but only to drop registry entries for terminals whose harness has already
+exited. A turn in flight survives a closed tab.
+
+The session row is exempt from the stale-session sweep for the same reason.
+That sweep skips anything holding a live subprocess, but a terminal's harness
+lives in the mind's tmux where comms tracks no process for it — so the row
+would look abandoned however hard the pane was being used, and suspending it
+closes the next attach with 4411 while the conversation carries on behind it.
+Terminal turns also keep `last_active` current through `record_turn`, which
+is the only write a pty turn ever makes.
 
 Turns that arrive on another surface are overlaid onto the attached socket
 by `mirror_turn` — tmux owns the pane's contents and has no way to be told
@@ -55,6 +65,34 @@ reads the seed, deletes it and `exec`s the harness with it; `capped_seed`
 trims anything past 120,000 chars to its tail. Claude takes it via
 `--append-system-prompt`; codex has no such flag and takes it as the
 positional opening turn.
+
+That file is one process's opening context and is deleted as it is read, and
+a system prompt reaches no transcript — so until the rotated conversation's
+first turn lands, nothing on disk remembers what the rotation composed.
+hive-comms therefore stores it on the session row (`carry_forward`, keyed to
+`carry_forward_sid`) at the same moment it writes the new `claude_sid`. A
+mind starting a terminal asks `GET /sessions/{id}/carry-forward?claude_sid=`
+and re-applies whatever it is owed. A completed turn clears the row — it is
+the only evidence the rotation took, and from then on `--resume` carries the
+context by itself — so both turn paths clear it: `record_turn` for the
+terminal's Stop hook and `send_message` for a conversation adopted by a chat
+surface. Each clears only a seed composed for the conversation the turn was
+typed into, since composition runs for minutes and a straggling Stop child
+can still be reporting a pre-rotation turn after the new seed is written.
+
+Every clearing signal is nonetheless fire-and-forget, so the seed also
+expires on its own after `CARRY_FORWARD_TTL_SECONDS`: one dropped POST would
+otherwise arm it permanently, and a reattach weeks later would replay a dead
+conversation's context over a live one.
+
+The route is admin-guarded — the body is soul, recent memory and the last
+exchange in one string — which is also why the column is stripped from every
+bulk session listing: those answer to the service token every surface bot
+holds, and a `SELECT *` would hand the same blob to all of them. A mind that
+cannot reach the gateway opens an unseeded terminal rather than none, since
+the transcript is the primary recovery path. A live terminal is never asked:
+its harness is already running, so the answer could only be discarded, and
+the round trip would delay every reattach.
 
 tmux targets are prefix-matched, so every session lookup uses the `=`
 exact-match form; without it one session id can answer for another's pane.

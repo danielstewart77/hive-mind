@@ -12,6 +12,7 @@ The tmux server itself is stubbed here so these run anywhere; the real one
 is exercised in ``test_tmux_terminal.py``.
 """
 
+import asyncio
 import fcntl
 import json
 import os
@@ -19,6 +20,7 @@ import pty
 import struct
 import subprocess
 import termios
+import time
 from pathlib import Path
 from types import SimpleNamespace as types_SimpleNamespace
 
@@ -371,6 +373,154 @@ class TestRotateRoute:
             assert pty_attach.PTYS["r4"].conversation_id == "old"
 
 
+class TestCarryForwardOnAttach:
+    """A rotation seeds a pane with context that exists nowhere else.
+
+    The seed is a system prompt on one process and a file deleted the instant
+    that process reads it, so it reaches no transcript. Whatever kills the
+    pane before the user's first turn — a restart, a crash, a closed tab that
+    never came back — used to take the whole carry-forward with it, and the
+    reattach resumed a conversation id with nothing behind it. comms holds
+    the seed on the session row until a turn proves the rotation took; the
+    mind asks for it as it starts the terminal.
+    """
+
+    def _recording_spawn(self, seen: list):
+        def spawn(**kwargs):
+            seen.append(kwargs)
+            return _echo_spawn(**kwargs)
+        return spawn
+
+    def test_a_stored_carry_forward_is_applied_to_the_new_terminal(self, monkeypatch):
+        seen: list = []
+
+        async def fetch(session_id, claude_sid):
+            assert (session_id, claude_sid) == ("s-cf", "conv-rotated")
+            return "<soul>carried forward</soul>"
+
+        monkeypatch.setattr(pty_attach, "fetch_carry_forward", fetch)
+        client = TestClient(_app(self._recording_spawn(seen)))
+        with client.websocket_connect(
+            "/sessions/s-cf/attach-pty?model=opus&resume_sid=conv-rotated"
+        ) as ws:
+            ws.send_bytes(b"x\n")
+            ws.receive_bytes()
+
+        assert seen[0]["system_prompt"] == "<soul>carried forward</soul>"
+
+    def test_a_terminal_with_nothing_owed_is_started_unseeded(self, monkeypatch):
+        """The ordinary case: no rotation outstanding, or its first turn
+        already landed and the transcript carries the context by itself."""
+        seen: list = []
+
+        async def fetch(session_id, claude_sid):
+            return ""
+
+        monkeypatch.setattr(pty_attach, "fetch_carry_forward", fetch)
+        client = TestClient(_app(self._recording_spawn(seen)))
+        with client.websocket_connect(
+            "/sessions/s-plain/attach-pty?model=opus&resume_sid=conv-1"
+        ) as ws:
+            ws.send_bytes(b"x\n")
+            ws.receive_bytes()
+
+        assert seen[0]["system_prompt"] == ""
+
+    def test_a_live_terminal_is_never_asked_for_a_carry_forward(self, monkeypatch):
+        """Reattaching to a running pane is the common case, and its harness
+        already holds its context — the answer could only be discarded. Asking
+        anyway puts a gateway round trip between the socket's accept and the
+        terminal's first painted byte, every single time.
+        """
+        asked: list = []
+
+        async def fetch(session_id, claude_sid):
+            asked.append(session_id)
+            return "<soul>should never be applied</soul>"
+
+        monkeypatch.setattr(pty_attach, "fetch_carry_forward", fetch)
+        terminals = FakeTerminals()
+        terminals.live.add("s-live")  # tmux already holds this conversation
+        client = TestClient(_app(_echo_spawn, terminals=terminals))
+        with client.websocket_connect(
+            "/sessions/s-live/attach-pty?model=opus&resume_sid=conv-1"
+        ) as ws:
+            ws.send_bytes(b"x\n")
+            ws.receive_bytes()
+
+        assert asked == []
+
+    def test_a_comms_that_cannot_be_reached_still_opens_the_terminal(self, monkeypatch):
+        """Losing the seed is bad; refusing to open the terminal is worse.
+
+        The transcript is the primary recovery path and needs no help from
+        comms, so an unreachable gateway degrades to an unseeded pane.
+        """
+        seen: list = []
+
+        async def fetch(session_id, claude_sid):
+            raise OSError("comms is down")
+
+        monkeypatch.setattr(pty_attach, "fetch_carry_forward", fetch)
+        client = TestClient(_app(self._recording_spawn(seen)))
+        with client.websocket_connect(
+            "/sessions/s-down/attach-pty?model=opus&resume_sid=conv-1"
+        ) as ws:
+            ws.send_bytes(b"x\n")
+            ws.receive_bytes()
+
+        assert seen[0]["system_prompt"] == ""
+
+
+class TestReaper:
+    """Only what is already dead gets collected.
+
+    A terminal used to be killed after an hour unattached, which made the
+    user's absence sufficient to destroy a conversation — including a freshly
+    rotated one whose carry-forward had not yet reached a transcript. Being
+    unattached is the normal state between tiles and carries no deadline.
+    """
+
+    async def _one_pass(self, monkeypatch):
+        monkeypatch.setattr(pty_attach, "_PTY_REAP_INTERVAL_S", 0.01)
+        task = asyncio.ensure_future(pty_attach.reap_dead())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    def _detached(self, terminals, idle_for: float):
+        handle = pty_attach._PtyHandle("sess-a", terminals, "conv-1", 80, 24)
+        handle.queue = None
+        handle.detached_at = time.time() - idle_for
+        pty_attach.PTYS["sess-a"] = handle
+        return handle
+
+    @pytest.mark.asyncio
+    async def test_a_terminal_whose_harness_exited_is_collected(self, monkeypatch):
+        terminals = FakeTerminals()
+        self._detached(terminals, idle_for=0)
+        # tmux says the session is gone: the harness exited or the user
+        # typed `exit`. Nothing to preserve, and the registry entry is a
+        # corpse the next attach would find.
+        terminals.live.discard("sess-a")
+
+        await self._one_pass(monkeypatch)
+
+        assert "sess-a" not in pty_attach.PTYS
+
+    @pytest.mark.asyncio
+    async def test_a_detached_terminal_outlives_any_amount_of_idleness(self, monkeypatch):
+        terminals = FakeTerminals()
+        terminals.live.add("sess-a")
+        self._detached(terminals, idle_for=365 * 24 * 60 * 60)
+
+        await self._one_pass(monkeypatch)
+
+        assert terminals.killed == []
+        assert "sess-a" in pty_attach.PTYS
+        assert pty_attach.PTYS["sess-a"].alive
+
+
 class TestSeededPaneCommand:
     """A composed carry-forward is tens of thousands of characters. Put in
     the tmux command it comes back as "command too long"; put in one argv
@@ -505,6 +655,37 @@ class TestClaudeCliWiring:
         assert started[0][1][0] == "claude"
         assert attached[0][1]["cols"] == 100
 
+    def test_a_fresh_spawn_carries_the_seed_all_the_way_into_the_pane(
+        self, claude, monkeypatch, tmp_path
+    ):
+        """The route proves the seed reaches ``spawn_pty``'s argument; this
+        proves the adapter does something with it. Between the two is where a
+        harness can accept a carry-forward and quietly drop it, leaving a
+        rotated conversation to open with none of the context that was
+        composed for it and every test still green.
+        """
+        monkeypatch.setattr(claude, "CONFIG_DIR", tmp_path)
+        started = {}
+        monkeypatch.setattr(claude.TERMINALS, "start",
+                            lambda sid, argv, **kw: started.update(argv=argv))
+        monkeypatch.setattr(
+            claude.TERMINALS, "attach",
+            lambda sid, **kw: (types_SimpleNamespace(pid=1, poll=lambda: None), -1),
+        )
+
+        claude._spawn_pty(session_id="a3", model="opus", conversation_id="conv-9",
+                          cols=100, rows=30, system_prompt="<soul>carried forward</soul>")
+
+        # The seed travels in a file, never in the tmux command — so what the
+        # pane is handed is a shell that reads it back.
+        assert started["argv"][:2] == ["/bin/sh", "-c"]
+        assert "--append-system-prompt" in started["argv"][2]
+        seed_file = tmp_path / "rotation-seeds" / "conv-9.txt"
+        assert seed_file.read_text() == "<soul>carried forward</soul>"
+        assert str(seed_file) in started["argv"][2]
+        # And it is not left lying around world-readable.
+        assert seed_file.stat().st_mode & 0o077 == 0
+
     def test_rotation_declines_when_there_is_no_live_terminal(self, claude, monkeypatch):
         monkeypatch.setattr(claude.TERMINALS, "alive", lambda sid: False)
         assert claude._rotate_pty(session_id="a2", new_claude_sid="conv-3") is False
@@ -613,6 +794,36 @@ class TestCodexCliThreads:
 
         assert "resume" not in started["argv"]
         assert watched["session_id"] == "n3"
+
+    def test_a_fresh_spawn_carries_the_seed_all_the_way_into_the_pane(
+        self, codex, monkeypatch, tmp_path
+    ):
+        """Codex has no system-prompt flag, so the seed rides in as the
+        positional opening turn. Dropping it between ``spawn_pty`` and tmux
+        would leave a rotated conversation opening bare, with nothing failing.
+        """
+        codex.THREADS.clear()
+        monkeypatch.setattr(codex, "CODEX_HOME", tmp_path)
+        started = {}
+        monkeypatch.setattr(codex.TERMINALS, "alive", lambda sid: False)
+        monkeypatch.setattr(codex.TERMINALS, "start",
+                            lambda sid, argv, **kw: started.update(argv=argv))
+        monkeypatch.setattr(
+            codex.TERMINALS, "attach",
+            lambda sid, **kw: (types_SimpleNamespace(pid=1, poll=lambda: None), -1),
+        )
+        monkeypatch.setattr(codex, "_watch_for_new_thread_in_background",
+                            lambda sid, before: None)
+
+        codex._spawn_pty(session_id="n4", model="gpt-5",
+                         conversation_id="gateway-uuid", cols=80, rows=24,
+                         system_prompt="<soul>carried forward</soul>")
+
+        assert started["argv"][:2] == ["/bin/sh", "-c"]
+        seed_file = tmp_path / "rotation-seeds" / "n4.txt"
+        assert seed_file.read_text() == "<soul>carried forward</soul>"
+        assert str(seed_file) in started["argv"][2]
+        assert seed_file.stat().st_mode & 0o077 == 0
 
     def test_the_gateways_copy_of_the_thread_id_wins_after_a_redeploy(
         self, codex, monkeypatch

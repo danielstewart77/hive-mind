@@ -344,6 +344,7 @@ def _spawn_pty(
     *, session_id: str, model: str, conversation_id: str, cols: int, rows: int,
     harness_sid: str | None = None, client_ref: str | None = None,
     owner_type: str | None = None, owner_ref: str | None = None,
+    system_prompt: str = "",
 ) -> tuple[Any, int]:
     """Attach a pty to this session's interactive `claude`, starting it if needed.
 
@@ -361,8 +362,18 @@ def _spawn_pty(
     del harness_sid  # claude adopts the gateway's id; nothing else to track
     ensure_tui_first_run_flags(CONFIG_DIR, str(PROJECT_DIR))
     pane_env = _pane_env(client_ref, owner_type, owner_ref)
+    # ``system_prompt`` is a carry-forward comms is still holding: a rotation
+    # seeded this conversation and no turn ever landed on it, so the seed has
+    # to be applied again or the context the rotation composed is gone.
+    # ``start`` no-ops on a live terminal, so a reattach never re-seeds.
     TERMINALS.start(
-        session_id, _terminal_argv(model, conversation_id),
+        session_id,
+        seeded_pane_command(
+            _terminal_argv(model, conversation_id),
+            system_prompt,
+            CONFIG_DIR / "rotation-seeds" / f"{conversation_id}.txt",
+            seed_flag="--append-system-prompt",
+        ),
         env_overrides=pane_env, cols=cols, rows=rows,
     )
     proc, master_fd = TERMINALS.attach(

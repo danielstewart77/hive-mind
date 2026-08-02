@@ -324,7 +324,7 @@ def test_with_no_prior_exchange_the_rotation_line_stands_alone(wired):
 
 # 6 ------------------------------------------------------------------------
 @pytest.mark.parametrize("harness", ["claude_cli", "codex_cli"])
-def test_codex_draws_the_same_notices_as_claude(harness):
+def test_codex_draws_the_same_notices_as_claude(harness, monkeypatch):
     # The recap is composed above the adapters so the two cannot drift on the
     # wording — which only holds while both adapters actually install the
     # shared surface. A harness that stops doing so loses every notice
@@ -332,7 +332,10 @@ def test_codex_draws_the_same_notices_as_claude(harness):
     import importlib
 
     # The adapters resolve their mind folder from MIND_NAME at import time.
-    os.environ.setdefault("MIND_NAME", "example")
+    # setenv, not setdefault: run on a host that already exports a real
+    # MIND_NAME and setdefault leaves it alone, sending the import at a mind
+    # folder this repo does not ship. The test wants the example mind.
+    monkeypatch.setenv("MIND_NAME", "example")
     module = importlib.import_module(f"minds.harness.{harness}")
     routes = {r.path for r in module.app.routes}
     assert "/sessions/{session_id}/pty-notice" in routes

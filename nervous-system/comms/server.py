@@ -289,6 +289,12 @@ class RecordTurnRequest(BaseModel):
     client_ref: str
     role: str
     content: str
+    # The conversation the turn was typed into. Optional because an older
+    # hook won't send it; when it is present the stored carry-forward is
+    # only cleared if it was composed for this same conversation, so a turn
+    # still in flight from before a rotation cannot clear the seed the
+    # rotation just wrote.
+    claude_sid: str | None = None
 
 
 class HarnessStateRequest(BaseModel):
@@ -322,8 +328,32 @@ async def record_turn(body: RecordTurnRequest):
     so the literal path wins the match.
     """
     return await session_mgr.record_turn(
-        body.client_type, body.client_ref, body.role, body.content
+        body.client_type, body.client_ref, body.role, body.content,
+        claude_sid=body.claude_sid,
     )
+
+
+@app.get(
+    "/sessions/{session_id}/carry-forward",
+    dependencies=[Depends(require_admin_bearer)],
+)
+async def get_carry_forward(session_id: str, claude_sid: str = ""):
+    """The rotation carry-forward a mind still owes this conversation.
+
+    A mind calls this as it starts a terminal, handing the conversation id it
+    is about to resume; a non-null answer means that conversation was seeded
+    by a rotation whose first turn never landed, and the seed has to be
+    re-applied or the context is gone. Declared before
+    ``/sessions/{session_id}`` so the literal suffix wins the match.
+
+    Admin-gated, and not incidentally: the body is a fully composed prompt —
+    the mind's soul, its decay-weighted recent memory and the conversation's
+    last exchange — on a port that answers across the LAN.
+    """
+    return {
+        "session_id": session_id,
+        "carry_forward": await session_mgr.get_carry_forward(session_id, claude_sid),
+    }
 
 
 @app.get("/sessions/{session_id}")
