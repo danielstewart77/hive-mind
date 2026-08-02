@@ -149,7 +149,6 @@ Non-secret settings in `config.yaml`:
 
 ```yaml
 server_port: 8420
-idle_timeout_minutes: 30
 max_sessions: 10
 default_model: sonnet
 
