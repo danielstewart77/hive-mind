@@ -105,15 +105,20 @@ def test_plan_blocks_when_docker_is_absent(train_file, monkeypatch):
     assert any("docker" in b for b in plan.blockers)
 
 
-def test_blocked_launch_refuses_structurally_and_still_writes_the_spec(
-    train_file, tmp_path, monkeypatch
-):
+def test_a_refused_launch_writes_no_spec_file(train_file, tmp_path, monkeypatch):
+    """Requirement 10: a refused launch cannot disturb a running trainer.
+
+    The trainer reads its spec minutes after launch, after the image pull
+    and the weights download. A refusal that wrote the spec anyway would
+    hand a running job hyperparameters nobody selected.
+    """
     monkeypatch.setattr("core.training_finetune.shutil.which", lambda _: "/usr/bin/docker")
     gpu = GpuState(name="A6000", total_mib=49_140, used_mib=49_000, available=True)
-    result = launch(_spec(train_file), tmp_path / "out", gpu=gpu)
+    out_dir = tmp_path / "out"
+    result = launch(_spec(train_file), out_dir, gpu=gpu)
     assert result["launched"] is False
     assert result["plan"]["blockers"]
-    assert (tmp_path / "out" / "finetune_spec.json").exists()
+    assert not list(out_dir.glob("finetune_spec*.json"))
 
 
 def test_write_spec_round_trips(train_file, tmp_path):
@@ -216,3 +221,114 @@ def test_an_unknown_base_is_charged_the_conservative_footprint(train_file):
 
     estimate = estimate_required_mib(_spec(train_file, base_model="acme/mystery-70b"))
     assert estimate > UNKNOWN_MODEL_4BIT_MIB
+
+
+# --------------------------------------------------- GPU arbitration (R3, R5)
+
+
+def test_the_desktop_reserve_is_held_back_on_top_of_current_usage(train_file):
+    """Requirement 3: a job that would leave under the reserve is refused.
+
+    The card also drives the display. The reserve is headroom for the
+    compositor to *grow* into, so it sits on top of what the desktop
+    already holds rather than being assumed to be part of it.
+    """
+    from core.training_finetune import DESKTOP_RESERVE_MIB
+
+    spec = _spec(train_file)
+    required = estimate_required_mib(spec)
+    # Exactly enough for the job, one MiB short of also covering the reserve.
+    total = 49_140
+    used = total - (required + DESKTOP_RESERVE_MIB - 1)
+    gpu = GpuState(name="A6000", total_mib=total, used_mib=used, available=True)
+    assert not plan_run(spec, gpu=gpu).can_run
+
+    roomier = GpuState(
+        name="A6000",
+        total_mib=total,
+        used_mib=used - 1,
+        available=True,
+    )
+    assert plan_run(spec, gpu=roomier).can_run
+
+
+def test_the_memory_cap_leaves_the_reserve_unclaimable(train_file):
+    """The fraction handed to the trainer is what physically enforces R3."""
+    from core.training_finetune import DESKTOP_RESERVE_MIB, memory_fraction_for
+
+    total = 49_140
+    fraction = memory_fraction_for(total)
+    assert 0 < fraction < 1
+    claimable = total * fraction
+    assert total - claimable >= DESKTOP_RESERVE_MIB - 1
+    # An unreadable card means no cap rather than a refusal to run.
+    assert memory_fraction_for(0) == 0.0
+
+
+def test_launch_keeps_the_container_so_its_outcome_can_be_read(train_file, tmp_path, monkeypatch):
+    """Requirement 5: restore must be able to name how the run ended.
+
+    ``--rm`` deletes the container the instant it exits, leaving no exit
+    code — a crash at hour three then reads identically to a success.
+    """
+    recorded = {}
+
+    class _Completed:
+        returncode = 0
+        stdout = "abc123\n"
+        stderr = ""
+
+    def _fake_run(command, **kwargs):
+        recorded["command"] = command
+        return _Completed()
+
+    monkeypatch.setattr("core.training_finetune.shutil.which", lambda _: "/usr/bin/docker")
+    monkeypatch.setattr("core.training_finetune.subprocess.run", _fake_run)
+    gpu = GpuState(name="A6000", total_mib=49_140, used_mib=0, available=True)
+    result = launch(_spec(train_file), tmp_path / "out", gpu=gpu)
+
+    assert result["launched"] is True
+    assert "--rm" not in recorded["command"]
+
+
+def test_the_job_spec_name_is_unique_per_job(train_file, tmp_path):
+    """Two jobs sharing a dataset directory get their own spec files."""
+    first = write_spec(_spec(train_file, output_name="run-a"), tmp_path)
+    second = write_spec(_spec(train_file, output_name="run-b", epochs=9), tmp_path)
+    assert first != second
+    assert json.loads(first.read_text())["epochs"] != 9
+
+
+def test_an_empty_training_file_is_not_a_usable_spec(tmp_path):
+    """A curation pass that kept nothing must not read as a successful run."""
+    empty = tmp_path / "train.jsonl"
+    empty.write_text("")
+    problems = FineTuneSpec(train_file=str(empty)).validate()
+    assert any("empty" in problem for problem in problems)
+
+
+def test_the_plan_counts_the_memory_a_launch_will_reclaim(train_file, monkeypatch):
+    """The card is full of things the launch is about to stop.
+
+    Requirement: feasibility judges against what will be free after
+    preflight, names what has to die for it, and still refuses a job too
+    big even with everything reclaimed.
+    """
+    monkeypatch.setattr("core.training_finetune.shutil.which", lambda _: "/usr/bin/docker")
+    # Voice and Ollama between them hold all but ten gigabytes.
+    gpu = GpuState(name="A6000", total_mib=49_140, used_mib=38_518, available=True)
+
+    without_reclaim = plan_run(_spec(train_file), gpu=gpu)
+    assert not without_reclaim.can_run
+
+    fits = plan_run(_spec(train_file), gpu=gpu, reclaimable_mib=36_370)
+    assert fits.can_run
+    assert fits.reclaimable_mib == 36_370
+    assert any("36370" in note for note in fits.notes)
+    assert any("Ollama" in note for note in fits.notes)
+
+    too_big = plan_run(
+        _spec(train_file, max_sequence_length=131_072), gpu=gpu, reclaimable_mib=36_370
+    )
+    assert not too_big.can_run
+    assert any("reclaimable" in b for b in too_big.blockers)

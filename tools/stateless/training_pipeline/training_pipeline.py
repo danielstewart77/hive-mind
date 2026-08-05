@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import traceback
 from pathlib import Path
@@ -85,10 +86,36 @@ def _ledger(args) -> Path:
     return Path(args.ledger or os.getenv("TRAINING_RUNS_DB") or DEFAULT_LEDGER)
 
 
+def _trainer_is_alive(run) -> bool:
+    """True when this run's trainer container still exists and is running.
+
+    Consulted before the reaper fails an over-age run. Docker being
+    unreachable answers *alive*: mistaking a live trainer for a dead one
+    closes its ledger row, and everything keyed to that row then acts on a
+    GPU the trainer is still holding.
+    """
+    name = (run.options or {}).get("output_name")
+    if run.kind != KIND_TRAIN or not name:
+        return False
+    try:
+        completed = subprocess.run(
+            ["docker", "inspect", "--format", "{{.State.Running}}", f"hive-trainer-{name}"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return True
+    if completed.returncode != 0:
+        # docker answered, and it has no such container: the trainer is gone.
+        return False
+    return completed.stdout.strip() == "true"
+
+
 def cmd_status(args) -> dict:
     corpus = _corpus(args)
     ledger = _ledger(args)
-    reap_stale_runs(ledger)
+    reap_stale_runs(ledger, is_alive=_trainer_is_alive)
     if not corpus.exists():
         return {"corpus_path": str(corpus), "exists": False}
     stats = corpus_stats(corpus)
@@ -148,7 +175,10 @@ def _adapters() -> list[dict]:
     rows = []
     if not DEFAULT_SETS_DIR.is_dir():
         return rows
-    for spec_path in sorted(DEFAULT_SETS_DIR.glob("*/finetune_spec.json")):
+    # Spec files are named per job (finetune_spec.<name>.json) so two runs
+    # sharing a dataset directory cannot overwrite each other's; the older
+    # single-name form is still matched for datasets trained before that.
+    for spec_path in sorted(DEFAULT_SETS_DIR.glob("*/finetune_spec*.json")):
         adapter_dir = spec_path.parent / "adapter"
         try:
             spec = json.loads(spec_path.read_text())
@@ -295,7 +325,7 @@ def cmd_train(args) -> dict:
         seed=args.seed,
     )
     if args.dry_run:
-        return plan_run(spec).as_dict()
+        return plan_run(spec, reclaimable_mib=args.reclaimable_mib).as_dict()
 
     run_id = start_run(ledger, KIND_TRAIN, options=spec.as_dict())
     result = launch(spec, out_dir, image=args.image)
@@ -317,7 +347,7 @@ def cmd_train(args) -> dict:
 
 def cmd_runs(args) -> dict:
     ledger = _ledger(args)
-    reap_stale_runs(ledger)
+    reap_stale_runs(ledger, is_alive=_trainer_is_alive)
     return {
         "runs": [run.as_dict() for run in list_runs(ledger, args.kind, args.limit)]
     }
@@ -397,6 +427,13 @@ def build_parser() -> argparse.ArgumentParser:
     train_p.add_argument("--seed", type=int, default=17)
     train_p.add_argument(
         "--dry-run", action="store_true", help="report feasibility, launch nothing"
+    )
+    train_p.add_argument(
+        "--reclaimable-mib",
+        type=int,
+        default=0,
+        help="VRAM a real launch would free before starting — the caller "
+        "owning the arbitration knows this, the planner does not",
     )
 
     models_p = sub.add_parser(

@@ -18,6 +18,7 @@ import json
 import sqlite3
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -186,25 +187,51 @@ def latest_run(db_path: str | Path, kind: str) -> Run | None:
     return runs[0] if runs else None
 
 
-def reap_stale_runs(db_path: str | Path, older_than_seconds: int = 6 * 3600) -> int:
+def reap_stale_runs(
+    db_path: str | Path,
+    older_than_seconds: int = 6 * 3600,
+    is_alive: Callable[[Run], bool] | None = None,
+) -> int:
     """Fail runs that outlived any plausible execution.
 
     A pipeline process killed mid-run leaves its row ``running`` forever,
     and a stuck run is indistinguishable from a live one in the console.
     Ageing them out keeps the panel honest without inventing a heartbeat.
+
+    ``is_alive`` is the heartbeat for the one kind that legitimately runs
+    longer than the cutoff. A LoRA over a real corpus passes six hours
+    without difficulty, and this function is called from every status and
+    runs poll — so without a liveness check, opening the console panel
+    mid-afternoon marked a healthy run failed, and anything keyed to that
+    row then acted on a training job that was still holding the GPU.
+    A run whose container is still up is left alone however old it is.
     """
     init_db(db_path)
     cutoff = int(time.time()) - older_than_seconds
     with connect(db_path) as conn:
+        candidates = [
+            Run.from_row(row)
+            for row in conn.execute(
+                "SELECT * FROM training_runs WHERE status = ? AND started_at < ?",
+                (STATUS_RUNNING, cutoff),
+            )
+        ]
+        doomed = [
+            run.id
+            for run in candidates
+            if not (is_alive(run) if is_alive is not None else False)
+        ]
+        if not doomed:
+            return 0
+        placeholders = ",".join("?" for _ in doomed)
         cursor = conn.execute(
             "UPDATE training_runs SET status = ?, finished_at = ?, error = ? "
-            "WHERE status = ? AND started_at < ?",
+            f"WHERE id IN ({placeholders})",
             (
                 STATUS_FAILED,
                 int(time.time()),
                 "run exceeded the maximum runtime and was reaped",
-                STATUS_RUNNING,
-                cutoff,
+                *doomed,
             ),
         )
         conn.commit()

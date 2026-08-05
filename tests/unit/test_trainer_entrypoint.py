@@ -34,10 +34,16 @@ def test_an_existing_path_is_used_as_written(trainer, tmp_path):
 
 
 def test_a_host_path_is_remapped_into_the_workspace(trainer, tmp_path):
-    """The launcher mounts the dataset dir; the spec still says /home/…."""
+    """The launcher mounts the dataset dir; the spec still says /home/….
+
+    The host path has to be one that cannot exist on the machine running
+    the tests. Naming the real dataset directory made this pass only
+    until the first export actually created it, at which point the test
+    asserted the opposite of what it says.
+    """
     (tmp_path / "train.jsonl").write_text("{}\n")
     resolved = trainer.resolve_in_workspace(
-        "/home/daniel/Storage/Dev/hive_mind/data/training_sets/v1/train.jsonl",
+        str(tmp_path / "no-such-host-dir" / "training_sets" / "v1" / "train.jsonl"),
         tmp_path,
     )
     assert resolved == tmp_path / "train.jsonl"
@@ -151,3 +157,51 @@ def test_a_failed_training_run_writes_a_failure_record(trainer, tmp_path, monkey
     written = json.loads((tmp_path / "adapter" / "result.json").read_text())
     assert written["status"] == "failed"
     assert "CUDA out of memory" in written["error"]
+
+
+class _FakeCuda:
+    def __init__(self, available=True, devices=1):
+        self._available = available
+        self._devices = devices
+        self.applied = []
+
+    def is_available(self):
+        return self._available
+
+    def device_count(self):
+        return self._devices
+
+    def set_per_process_memory_fraction(self, fraction, device):
+        self.applied.append((fraction, device))
+
+
+class _FakeTorch:
+    def __init__(self, cuda):
+        self.cuda = cuda
+
+
+def test_the_memory_cap_is_applied_to_every_device(trainer):
+    """Requirement 3: the reserve is enforced inside the training process.
+
+    Planning arithmetic cannot hold VRAM back — the allocator grows to
+    whatever is free, hours after anyone looked, and the display server on
+    this card is what fails when it does.
+    """
+    cuda = _FakeCuda(devices=2)
+    applied = trainer.apply_memory_cap({"gpu_memory_fraction": 0.958}, _FakeTorch(cuda))
+    assert applied == 0.958
+    assert cuda.applied == [(0.958, 0), (0.958, 1)]
+
+
+def test_no_fraction_means_no_cap(trainer):
+    """A headless machine, or an unreadable card, runs uncapped."""
+    cuda = _FakeCuda()
+    assert trainer.apply_memory_cap({}, _FakeTorch(cuda)) == 0.0
+    assert trainer.apply_memory_cap({"gpu_memory_fraction": 0.0}, _FakeTorch(cuda)) == 0.0
+    assert cuda.applied == []
+
+
+def test_no_cuda_device_means_no_cap(trainer):
+    cuda = _FakeCuda(available=False)
+    assert trainer.apply_memory_cap({"gpu_memory_fraction": 0.9}, _FakeTorch(cuda)) == 0.0
+    assert cuda.applied == []
