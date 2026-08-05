@@ -47,8 +47,6 @@ from core.training_deploy import (  # noqa: E402
     DEFAULT_NUM_CTX,
     DEFAULT_QUANTIZATION,
     DEFAULT_TEMPERATURE,
-    STRATEGIES,
-    STRATEGY_MERGE,
     DeployRequest,
     adapter_weight_file,
     deploy,
@@ -224,7 +222,6 @@ def cmd_deploy(args) -> dict:
         model_name=args.name,
         adapter_dir=args.adapter_dir,
         serve_tag=serve_tag,
-        strategy=args.strategy,
         base_model=args.base_model or (base.id if base else ""),
         quantization=args.quantization,
         temperature=args.temperature,
@@ -456,7 +453,6 @@ def build_parser() -> argparse.ArgumentParser:
     deploy_p.add_argument(
         "--serve-tag", default="", help="override the catalog's Ollama base tag"
     )
-    deploy_p.add_argument("--strategy", choices=list(STRATEGIES), default=STRATEGY_MERGE)
     deploy_p.add_argument(
         "--quantization",
         default=DEFAULT_QUANTIZATION,
