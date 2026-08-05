@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -35,6 +36,10 @@ from pathlib import Path
 
 WORKSPACE = Path(os.environ.get("TRAINER_WORKSPACE", "/workspace"))
 RESULT_NAME = "result.json"
+
+
+class Terminated(Exception):
+    """The run was cancelled from outside rather than failing on its own."""
 
 
 def format_duration(seconds: float) -> str:
@@ -196,6 +201,180 @@ def apply_memory_cap(spec: dict, torch) -> float:
     return fraction
 
 
+def eval_batch_size(spec: dict) -> int:
+    """How many examples evaluation sees at once.
+
+    Transformers defaults this to 8 while a spec here asks for a train
+    batch of 1. Eight sequences at 8192 tokens against Qwen3's 151936-token
+    vocabulary is a nineteen-gigabyte logits tensor — the exact allocation
+    that took down the run of 2026-08-04 at its first epoch boundary, after
+    a full healthy epoch and on a card the control plane had sized for a
+    batch of one.
+
+    Absence means "match training", not zero: ``gpu_memory_fraction``
+    already demonstrates what happens when a legitimate value and an
+    unset field share a sentinel.
+    """
+    named = spec.get("per_device_eval_batch_size")
+    if named is None:
+        named = spec.get("per_device_batch_size", 1)
+    size = int(named)
+    if size < 1:
+        # The container never runs the spec through FineTuneSpec.validate,
+        # and the module docstring advertises hand-editing the file. A zero
+        # reaches SFTConfig unchallenged and is rejected by the DataLoader
+        # at the first epoch boundary, an hour in.
+        raise ValueError(f"batch size must be at least 1, got {size}")
+    return size
+
+
+def clear_epoch_adapters(out_dir: Path) -> None:
+    """Drop any epoch adapters from an earlier run of this output directory.
+
+    The output directory is per dataset and nothing else empties it, so a
+    relaunch that dies inside epoch 1 would otherwise "recover" an adapter
+    from the previous run — different weights, possibly different
+    hyperparameters, and the result.json naming it overwritten in place.
+    """
+    for entry in out_dir.glob("epoch-*"):
+        shutil.rmtree(entry, ignore_errors=True)
+
+
+def build_sft_kwargs(spec: dict, out_dir: Path, has_eval: bool) -> dict:
+    """Every training argument, as data — so it is checkable without trl.
+
+    trl and transformers exist only inside the trainer image, so a config
+    assembled inline can be verified by nothing but a grep over this file,
+    which cannot tell a batch of 1 from a batch of 8. A dict can be built
+    and read anywhere.
+    """
+    return {
+        "output_dir": str(out_dir / "checkpoints"),
+        "num_train_epochs": spec.get("epochs", 2),
+        "per_device_train_batch_size": spec.get("per_device_batch_size", 1),
+        "per_device_eval_batch_size": eval_batch_size(spec),
+        "gradient_accumulation_steps": spec.get("gradient_accumulation_steps", 16),
+        "learning_rate": spec.get("learning_rate", 1e-4),
+        "warmup_ratio": spec.get("warmup_ratio", 0.03),
+        "max_length": spec.get("max_sequence_length", 8192),
+        "bf16": True,
+        # Every step, not every tenth. At an effective batch of sixteen a
+        # step is tens of seconds, so ten of them is a five-minute silence
+        # in which a working run and a hung one look the same.
+        "logging_steps": 1,
+        "save_strategy": "epoch",
+        "eval_strategy": "epoch" if has_eval else "no",
+        "gradient_checkpointing": True,
+        # Reentrant checkpointing silently drops gradients when nothing
+        # entering a checkpointed block requires grad — precisely the
+        # shape of a frozen 4-bit base with LoRA adapters on top, which
+        # works today only because Transformers applies an
+        # input-requires-grad workaround on our behalf. Torch 2.9 is also
+        # the release that turns the unset default into a hard error.
+        "gradient_checkpointing_kwargs": {"use_reentrant": False},
+        "report_to": [],
+        "seed": spec.get("seed", 17),
+        "dataset_text_field": "text",
+        # A progress bar redraws one line with carriage returns, which is
+        # a line that never ends and therefore never appears in `docker
+        # logs`. Plain per-step lines are the only form a log reader sees.
+        "disable_tqdm": True,
+    }
+
+
+def epoch_adapter_dir(out_dir: Path, epoch: float) -> Path:
+    """Where a completed epoch's adapter lands.
+
+    Deliberately not ``out_dir`` itself. The pipeline decides a run
+    finished by finding ``adapter_model.safetensors`` directly under the
+    output directory and reads nothing else — so writing one there every
+    epoch would offer a half-trained adapter to deploy as though the run
+    had completed, with the failure recorded in a file nothing opens.
+    """
+    return out_dir / f"epoch-{int(epoch) if epoch == int(epoch) else int(epoch) + 1}"
+
+
+def save_epoch_adapter(model, out_dir: Path, epoch: float) -> Path | None:
+    """Write a finished epoch's adapter. Returns the path, or None.
+
+    Never raises. ``CallbackHandler.call_event`` has no try/except, so an
+    exception here leaves ``trainer.train()`` entirely — and a full disk
+    during the epoch-1 write would kill a run that was going to finish.
+    This exists to save an hour of training, not to spend one.
+
+    Staged and renamed because peft writes the weights first and the
+    config last, straight to the target with no temp file: a process
+    killed mid-write leaves a truncated ``adapter_model.safetensors``,
+    which every reader downstream accepts as a usable adapter.
+    """
+    target = epoch_adapter_dir(out_dir, epoch)
+    # Process-unique: two trainers sharing an output directory must not
+    # delete each other's staging mid-write and each report success over a
+    # truncated tree.
+    staging = target.with_name(f".{target.name}.{os.getpid()}.partial")
+    try:
+        if staging.exists():
+            shutil.rmtree(staging)
+        model.save_pretrained(str(staging))
+        if target.exists():
+            shutil.rmtree(target)
+        os.replace(staging, target)
+    except Exception as exc:  # noqa: BLE001 — a lost safety net is not a lost run
+        stage(f"could not save the adapter for epoch {int(epoch)}: {exc}")
+        shutil.rmtree(staging, ignore_errors=True)
+        return None
+    stage(f"adapter for epoch {int(epoch)} saved to {target}")
+    return target
+
+
+def newest_epoch_adapter(out_dir: Path) -> Path | None:
+    """The most recent epoch adapter left on disk, if any is complete.
+
+    A directory without weights is an epoch that died mid-write, and
+    offering it is worse than offering nothing.
+    """
+    candidates = []
+    try:
+        entries = list(out_dir.glob("epoch-*"))
+    except OSError:
+        return None
+    for entry in entries:
+        if (entry / "adapter_model.safetensors").is_file():
+            try:
+                candidates.append((int(entry.name.split("-")[-1]), entry))
+            except ValueError:
+                continue
+    if not candidates:
+        return None
+    return max(candidates)[1]
+
+
+def _epoch_saver_class(out_dir: Path, announce_eval: bool = False):
+    """Built lazily: transformers only exists inside the trainer image.
+
+    Bound to ``on_epoch_end``, which Transformers fires immediately before
+    ``_maybe_log_save_evaluate`` — and inside that, evaluation runs before
+    the checkpoint save. The built-in ``save_strategy="epoch"`` is
+    therefore on the far side of the evaluation that crashed, which is why
+    last night's run lost a completed epoch to an OOM and left an empty
+    checkpoints directory behind.
+    """
+    from transformers import TrainerCallback
+
+    class EpochSaver(TrainerCallback):
+        def on_epoch_end(self, args, state, control, model=None, **kwargs):
+            if model is not None:
+                save_epoch_adapter(model, out_dir, float(state.epoch or 0))
+            if announce_eval:
+                # Evaluation logs nothing until it finishes, and at an eval
+                # batch of one it is now minutes rather than seconds. An
+                # unexplained pause on the same step is the picture
+                # `logging_steps=1` exists to prevent.
+                stage("evaluating — no step lines until this finishes")
+
+    return EpochSaver
+
+
 def _progress_reporter_class():
     """Built lazily: transformers only exists inside the trainer image."""
     from transformers import TrainerCallback
@@ -235,8 +414,16 @@ def run_training(spec: dict) -> dict:
         raise FileNotFoundError(f"training file not found: {train_file}")
     if train_file.stat().st_size == 0:
         raise ValueError(f"training file is empty: {train_file}")
-    eval_file = resolve_in_workspace(spec.get("eval_file") or "")
+    # An unset eval file must not become Path(""), which is the current
+    # directory, which exists — so the run passes the existence check and
+    # dies tokenizing a directory, after the weights download.
+    declared_eval = str(spec.get("eval_file") or "").strip()
+    eval_file = resolve_in_workspace(declared_eval) if declared_eval else None
     out_dir = output_dir_in_workspace(spec["output_dir"])
+    # Before the weights download, not after: a bad batch size otherwise
+    # surfaces at the first epoch boundary, an hour in.
+    eval_batch_size(spec)
+    clear_epoch_adapters(out_dir)
 
     stage(f"fetching the tokenizer for {spec['base_model']}")
     tokenizer = AutoTokenizer.from_pretrained(spec["base_model"], trust_remote_code=True)
@@ -278,44 +465,25 @@ def run_training(spec: dict) -> dict:
     stage(f"tokenizing {train_file.name}")
     train_dataset = build_dataset(load_jsonl(train_file), tokenizer)
     eval_dataset = (
-        build_dataset(load_jsonl(eval_file), tokenizer) if eval_file.exists() else None
+        build_dataset(load_jsonl(eval_file), tokenizer)
+        if eval_file is not None and eval_file.is_file()
+        else None
     )
     stage(
         f"{len(train_dataset)} training examples, "
         f"{len(eval_dataset) if eval_dataset is not None else 0} for eval"
     )
 
-    config = SFTConfig(
-        output_dir=str(out_dir / "checkpoints"),
-        num_train_epochs=spec.get("epochs", 2),
-        per_device_train_batch_size=spec.get("per_device_batch_size", 1),
-        gradient_accumulation_steps=spec.get("gradient_accumulation_steps", 16),
-        learning_rate=spec.get("learning_rate", 1e-4),
-        warmup_ratio=spec.get("warmup_ratio", 0.03),
-        max_length=spec.get("max_sequence_length", 8192),
-        bf16=True,
-        # Every step, not every tenth. At an effective batch of sixteen a
-        # step is tens of seconds, so ten of them is a five-minute silence
-        # in which a working run and a hung one look the same.
-        logging_steps=1,
-        save_strategy="epoch",
-        eval_strategy="epoch" if eval_dataset is not None else "no",
-        gradient_checkpointing=True,
-        # Reentrant checkpointing silently drops gradients when nothing
-        # entering a checkpointed block requires grad — precisely the
-        # shape of a frozen 4-bit base with LoRA adapters on top, which
-        # works today only because Transformers applies an
-        # input-requires-grad workaround on our behalf. Torch 2.9 is also
-        # the release that turns the unset default into a hard error.
-        gradient_checkpointing_kwargs={"use_reentrant": False},
-        report_to=[],
-        seed=spec.get("seed", 17),
-        dataset_text_field="text",
-        # A progress bar redraws one line with carriage returns, which is
-        # a line that never ends and therefore never appears in `docker
-        # logs`. Plain per-step lines are the only form a log reader sees.
-        disable_tqdm=True,
-    )
+    has_eval = eval_dataset is not None and len(eval_dataset) > 0
+    if eval_dataset is not None and not has_eval:
+        # A zero-row eval set is not None, so it would turn evaluation on
+        # and then evaluate nothing: no eval_loss, no exception, and a run
+        # that reports success having measured itself against an empty
+        # file.
+        stage("the eval file has no usable examples — skipping evaluation")
+        eval_dataset = None
+
+    config = SFTConfig(**build_sft_kwargs(spec, out_dir, has_eval))
 
     trainer = SFTTrainer(
         model=model,
@@ -325,6 +493,11 @@ def run_training(spec: dict) -> dict:
         peft_config=peft_config,
     )
     trainer.add_callback(_progress_reporter_class()())
+    # Unconditionally: a run without evaluation still loses every completed
+    # epoch to a stopped container, a host reboot, or an OOM on a
+    # max-length training batch, and its checkpoints directory is empty for
+    # the same reason last night's was.
+    trainer.add_callback(_epoch_saver_class(out_dir, announce_eval=has_eval)())
     started = time.time()
     stage("training starts now — a line lands every step")
     train_output = trainer.train()
@@ -419,9 +592,33 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _raise_on_termination() -> None:
+    """Turn ``docker stop`` into an exception the run can record.
+
+    Python's default SIGTERM handling exits the process without unwinding,
+    so a cancelled run wrote no ``result.json`` at all — and cancelling is
+    how a run being watched go wrong actually ends. Two hours of training
+    would sit in an epoch directory with nothing anywhere saying so.
+    """
+    import signal
+
+    def _handler(signum, _frame):
+        # An Exception, not KeyboardInterrupt: the run's outcome handler
+        # catches Exception, and BaseException would sail straight past it
+        # into the exact silence this exists to close.
+        raise Terminated(f"cancelled by signal {signum}")
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _handler)
+        except (ValueError, OSError):  # not the main thread, or unsupported
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.mode == "train":
+        _raise_on_termination()
         # First line of the container's life: everything before this is
         # Python starting up, and everything after is minutes long.
         stage("trainer container is up, reading the job spec")
@@ -431,8 +628,22 @@ def main(argv: list[str] | None = None) -> int:
         try:
             result = run_training(spec)
         except Exception as exc:  # noqa: BLE001 — the run's outcome is a file
+            # Nothing downstream reads this file; the console finds
+            # adapters by scanning for weights, and an epoch directory is
+            # deliberately somewhere it does not scan. So the record has
+            # to name what the run left behind, or a recovered epoch is
+            # on disk and invisible.
+            recovered = newest_epoch_adapter(out_dir)
+            if recovered is not None:
+                stage(f"training died, but epoch adapter {recovered} survived")
             write_result(
-                out_dir, {"status": "failed", "mode": "train", "error": str(exc)}
+                out_dir,
+                {
+                    "status": "failed",
+                    "mode": "train",
+                    "error": str(exc),
+                    "recovered_adapter_dir": str(recovered) if recovered else "",
+                },
             )
             raise
         write_result(out_dir, result)
