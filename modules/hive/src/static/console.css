@@ -412,3 +412,25 @@ a { color: inherit; }
 .model-meta span.is-good { border-color: #2f5d4a; color: #7fd0a8; }
 .model-meta span.is-warn { border-color: #6b5324; color: #d9b169; }
 .field-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; }
+
+/* Trainer output. A poll into a scrollback pane, not a terminal — the run
+   is a detached container and nothing here can touch it. */
+.training-log { border-top: 1px solid var(--console-line); padding: 14px 16px 16px; }
+.training-log-header { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+.training-log-header small { flex: 1; color: var(--console-muted); font-size: 12px; }
+.training-log pre {
+    max-height: 320px;
+    margin: 0;
+    padding: 12px;
+    overflow: auto;
+    background: var(--console-surface-2);
+    border: 1px solid var(--console-line);
+    border-radius: var(--console-radius);
+    color: var(--console-text);
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+.training-log > small { display: block; margin-top: 8px; color: var(--console-muted); font-size: 12px; }
