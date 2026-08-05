@@ -2075,6 +2075,13 @@ async def api_training_base_models(user: dict = Depends(require_auth)):
     return await _hive_tools_request("GET", "/training/base-models")
 
 
+@app.get("/api/training/in-flight")
+async def api_training_in_flight(user: dict = Depends(require_auth)):
+    """The run holding the card, so a reloaded page can reattach to it."""
+    del user
+    return await _hive_tools_request("GET", "/training/in-flight")
+
+
 @app.post("/api/training/kill")
 async def api_training_kill(request: Request, user: dict = Depends(require_auth)):
     """Stop a run in flight.

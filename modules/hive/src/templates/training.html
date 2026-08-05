@@ -462,6 +462,7 @@ window.addEventListener("DOMContentLoaded", function () {
             // stack and evicts Ollama before the launch even returns, and
             // a pane that appears afterwards misses the first ten seconds.
             startLogTail(body.name, "stopping the voice stack and evicting Ollama…");
+            setLaunchable(false, body.name);
         }
         try {
             const result = await api("/api/training/train", {method: "POST", body: JSON.stringify(body)});
@@ -477,6 +478,7 @@ window.addEventListener("DOMContentLoaded", function () {
             } else {
                 stopLogTail("");
                 logPane.hidden = true;
+                setLaunchable(true, "");
                 setStatus(trainForm, "[data-train-status]", "Refused: " + ((result.plan && result.plan.blockers) || [result.error || "unknown"]).join("; "), true);
             }
             refresh();
@@ -539,6 +541,10 @@ window.addEventListener("DOMContentLoaded", function () {
         try {
             const result = await api("/api/training/logs?name=" + encodeURIComponent(name));
             const beat = result.heartbeat || {};
+            // The card frees itself the moment the trainer exits, whoever
+            // was watching. Re-enabling here means a finished run leaves
+            // the console ready without a reload.
+            if (logEverArrived && !beat.live) { setLaunchable(true, ""); }
             if (result.available) {
                 const stuck = logBody.scrollTop + logBody.clientHeight >= logBody.scrollHeight - 40;
                 logBody.textContent = (result.lines || []).join("\n");
@@ -626,12 +632,41 @@ window.addEventListener("DOMContentLoaded", function () {
         }
     });
 
+    // A run outlives the page that started it. Reloading, or opening the
+    // console from another machine, has to find the run already there —
+    // otherwise the honest reading of an empty page is "nothing is
+    // training", and the next thing that happens is a second launch.
+    async function attachToRunInFlight() {
+        let flight;
+        try {
+            flight = await api("/api/training/in-flight");
+        } catch (error) {
+            return;
+        }
+        setLaunchable(!flight.in_flight, flight.name || "");
+        if (!flight.in_flight) { return; }
+        const field = trainForm.querySelector("[name=name]");
+        if (field) { field.value = flight.name; }
+        startLogTail(flight.name, "attaching to the run already in flight…");
+    }
+
+    function setLaunchable(canLaunch, runningName) {
+        const launch = document.getElementById("training-launch");
+        launch.disabled = !canLaunch;
+        launch.title = canLaunch
+            ? ""
+            : "A run is already in flight" + (runningName ? " (" + runningName + ")" : "")
+                + ". One card, one trainer.";
+    }
+
     document.getElementById("training-refresh").addEventListener("click", function () {
         refresh();
         loadBaseModels();
+        attachToRunInFlight();
     });
     refresh();
     loadBaseModels();
+    attachToRunInFlight();
 });
 </script>
 {% endblock %}
