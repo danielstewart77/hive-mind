@@ -500,6 +500,22 @@ window.addEventListener("DOMContentLoaded", function () {
         if (target) { target.textContent = text; }
     }
 
+    // A run can go a minute between log lines. Something has to move every
+    // second or a live run and a dead poller look identical.
+    const TICKS = ["|", "/", "-", "\\"];
+    let tick = 0;
+
+    function describeBeat(beat) {
+        tick = (tick + 1) % TICKS.length;
+        if (!beat || !beat.live) { return "not running"; }
+        const mins = Math.floor((beat.uptime_seconds || 0) / 60);
+        const secs = (beat.uptime_seconds || 0) % 60;
+        const elapsed = (mins ? mins + "m " : "") + secs + "s";
+        return TICKS[tick] + " running " + elapsed
+            + " · " + gb(beat.vram_mib || 0) + " on the card"
+            + " · " + (beat.gpu_util_pct || 0) + "% busy";
+    }
+
     function stopLogTail(reason) {
         if (logTimer) { clearInterval(logTimer); logTimer = null; }
         if (reason) { setLogStatus(reason); }
@@ -508,6 +524,7 @@ window.addEventListener("DOMContentLoaded", function () {
     async function pollLog(name) {
         try {
             const result = await api("/api/training/logs?name=" + encodeURIComponent(name));
+            const beat = result.heartbeat || {};
             if (result.available) {
                 const stuck = logBody.scrollTop + logBody.clientHeight >= logBody.scrollHeight - 40;
                 logBody.textContent = (result.lines || []).join("\n");
@@ -515,12 +532,15 @@ window.addEventListener("DOMContentLoaded", function () {
                 // yanking the view mid-scroll is how a log becomes unreadable.
                 if (stuck) { logBody.scrollTop = logBody.scrollHeight; }
                 logEverArrived = true;
-                setLogStatus(result.archived ? name + " (finished — archived output)" : name);
+                setLogStatus(result.archived
+                    ? name + " · finished, showing archived output"
+                    : name + " · " + describeBeat(beat));
             } else if (!logEverArrived && logWaitingLabel) {
                 // Before the container exists, "no trainer container" is
                 // the literal truth and exactly the wrong thing to say to
                 // someone who just pressed launch.
-                setLogStatus(logWaitingLabel);
+                tick = (tick + 1) % TICKS.length;
+                setLogStatus(TICKS[tick] + " " + logWaitingLabel);
             } else {
                 setLogStatus(result.reason || "no trainer container");
             }
@@ -539,7 +559,7 @@ window.addEventListener("DOMContentLoaded", function () {
         setLogStatus(logWaitingLabel);
         logPane.scrollIntoView({behavior: "smooth", block: "nearest"});
         pollLog(name);
-        logTimer = setInterval(function () { pollLog(name); }, 2000);
+        logTimer = setInterval(function () { pollLog(name); }, 1000);
     }
 
     document.getElementById("training-log-stop").addEventListener("click", function () {
