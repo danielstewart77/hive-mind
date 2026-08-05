@@ -505,15 +505,23 @@ window.addEventListener("DOMContentLoaded", function () {
     const TICKS = ["|", "/", "-", "\\"];
     let tick = 0;
 
+    function describeCard(beat) {
+        // Free gigabytes rather than a percentage: the question anyone
+        // actually has is whether the next thing will fit.
+        if (!beat || !beat.vram_total_mib) { return ""; }
+        return (beat.gpu_name || "GPU")
+            + " · " + (beat.gpu_util_pct || 0) + "% busy"
+            + " · " + gb(beat.vram_free_mib || 0) + " free of " + gb(beat.vram_total_mib);
+    }
+
     function describeBeat(beat) {
         tick = (tick + 1) % TICKS.length;
-        if (!beat || !beat.live) { return "not running"; }
+        const card = describeCard(beat);
+        if (!beat || !beat.live) { return card || "not running"; }
         const mins = Math.floor((beat.uptime_seconds || 0) / 60);
         const secs = (beat.uptime_seconds || 0) % 60;
         const elapsed = (mins ? mins + "m " : "") + secs + "s";
-        return TICKS[tick] + " running " + elapsed
-            + " · " + gb(beat.vram_mib || 0) + " on the card"
-            + " · " + (beat.gpu_util_pct || 0) + "% busy";
+        return TICKS[tick] + " running " + elapsed + (card ? " · " + card : "");
     }
 
     function stopLogTail(reason) {
@@ -533,14 +541,15 @@ window.addEventListener("DOMContentLoaded", function () {
                 if (stuck) { logBody.scrollTop = logBody.scrollHeight; }
                 logEverArrived = true;
                 setLogStatus(result.archived
-                    ? name + " · finished, showing archived output"
+                    ? name + " · finished, showing archived output · " + describeCard(beat)
                     : name + " · " + describeBeat(beat));
             } else if (!logEverArrived && logWaitingLabel) {
                 // Before the container exists, "no trainer container" is
                 // the literal truth and exactly the wrong thing to say to
                 // someone who just pressed launch.
                 tick = (tick + 1) % TICKS.length;
-                setLogStatus(TICKS[tick] + " " + logWaitingLabel);
+                const card = describeCard(beat);
+                setLogStatus(TICKS[tick] + " " + logWaitingLabel + (card ? " · " + card : ""));
             } else {
                 setLogStatus(result.reason || "no trainer container");
             }

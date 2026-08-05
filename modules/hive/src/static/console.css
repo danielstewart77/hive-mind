@@ -416,8 +416,16 @@ a { color: inherit; }
 /* Trainer output. A poll into a scrollback pane, not a terminal — the run
    is a detached container and nothing here can touch it. */
 .training-log { border-top: 1px solid var(--console-line); padding: 14px 16px 16px; }
-.training-log-header { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
-.training-log-header small { flex: 1; color: var(--console-muted); font-size: 12px; }
+/* The status line carries the card's name, load and free memory, so it
+   gets its own row rather than being squeezed between the buttons. */
+.training-log-header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 8px; }
+.training-log-header small {
+    flex: 1 1 100%;
+    order: 3;
+    color: var(--console-muted);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+}
 .training-log pre {
     /* Six field rows tall even while empty. A pane that collapses to the
        height of one input reads as broken during the quarter of an hour a
