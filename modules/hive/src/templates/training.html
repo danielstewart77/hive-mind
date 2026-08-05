@@ -139,7 +139,7 @@
             <div class="field-row">
                 <div class="field">
                     <label for="train-lr">Learning rate<button class="hint" type="button" tabindex="0" data-hint="How big a step the trainer takes on each update. Too high and the model degrades into nonsense in the first few hundred steps; too low and the run finishes having learned nothing. 1e-4 is a standard LoRA starting point — change it only in response to a loss curve, not on a hunch.">?</button></label>
-                    <input id="train-lr" name="learning_rate" type="number" step="0.00001" min="0.000001" max="0.01" value="0.0001">
+                    <input id="train-lr" name="learning_rate" type="number" step="any" min="0.000001" max="0.01" value="0.0001">
                 </div>
                 <div class="field">
                     <label for="train-accum">Gradient accumulation<button class="hint" type="button" tabindex="0" data-hint="The GPU can only hold one or two examples at a time at this sequence length, but training is more stable when updates are averaged over more. This accumulates that many small batches before updating, which buys the stability of a larger batch without the memory of one. Costs time, not VRAM.">?</button></label>
@@ -453,7 +453,7 @@ window.addEventListener("DOMContentLoaded", function () {
                 const blockers = (result.blockers || []);
                 setStatus(trainForm, "[data-train-status]", result.can_run ? "Ready to run — needs about " + gb(result.required_mib || 0) + "." : "Cannot run: " + blockers.join("; "), !result.can_run);
             } else if (result.launched) {
-                setStatus(trainForm, "[data-train-status]", "Launched as container " + String(result.container_id || "").slice(0, 12) + ". It writes its adapter when it finishes; the deploy step will list it then.");
+                setStatus(trainForm, "[data-train-status]", "Launched as container " + String(result.container_id || "").slice(0, 12) + ". The voice stack is stopped and Ollama unloaded for the duration; both come back automatically when the run ends. It writes its adapter when it finishes; the deploy step will list it then.");
             } else {
                 setStatus(trainForm, "[data-train-status]", "Refused: " + ((result.plan && result.plan.blockers) || [result.error || "unknown"]).join("; "), true);
             }
