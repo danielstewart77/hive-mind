@@ -109,3 +109,29 @@ def test_reaper_fails_runs_that_outlived_their_budget(ledger):
 
 def test_get_run_returns_none_for_unknown_id(ledger):
     assert get_run(ledger, "no-such-run") is None
+
+
+def test_a_long_run_whose_trainer_is_alive_is_not_reaped(ledger):
+    """Requirement 12: a healthy LoRA outlives the cutoff and must survive.
+
+    The reaper fires on every status and runs poll, so opening the console
+    mid-afternoon used to mark a still-training job failed — and anything
+    keyed to that row then acted on a GPU the trainer was still holding.
+    """
+    from core.training_runs import KIND_TRAIN
+
+    alive = start_run(ledger, KIND_TRAIN, options={"output_name": "still-going"})
+    dead = start_run(ledger, KIND_TRAIN, options={"output_name": "gone"})
+    with connect(ledger) as conn:
+        conn.execute(
+            "UPDATE training_runs SET started_at = ?",
+            (int(time.time()) - 99_999,),
+        )
+        conn.commit()
+
+    def is_alive(run):
+        return (run.options or {}).get("output_name") == "still-going"
+
+    assert reap_stale_runs(ledger, older_than_seconds=3_600, is_alive=is_alive) == 1
+    assert get_run(ledger, alive).status == STATUS_RUNNING
+    assert get_run(ledger, dead).status == STATUS_FAILED
