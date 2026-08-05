@@ -458,6 +458,12 @@ window.addEventListener("DOMContentLoaded", function () {
             return;
         }
         setStatus(trainForm, "[data-train-status]", dryRun ? "Checking feasibility…" : "Launching…");
+        if (!dryRun) {
+            // Before the request, not after it. Preflight stops the voice
+            // stack and evicts Ollama before the launch even returns, and
+            // a pane that appears afterwards misses the first ten seconds.
+            startLogTail(body.name, "stopping the voice stack and evicting Ollama…");
+        }
         try {
             const result = await api("/api/training/train", {method: "POST", body: JSON.stringify(body)});
             if (dryRun) {
@@ -469,8 +475,9 @@ window.addEventListener("DOMContentLoaded", function () {
                 setStatus(trainForm, "[data-train-status]", result.can_run ? ready : "Cannot run: " + blockers.join("; "), !result.can_run);
             } else if (result.launched) {
                 setStatus(trainForm, "[data-train-status]", "Launched as container " + String(result.container_id || "").slice(0, 12) + ". The voice stack is stopped and Ollama unloaded for the duration; both come back automatically when the run ends. It writes its adapter when it finishes; the deploy step will list it then.");
-                startLogTail(body.name);
             } else {
+                stopLogTail("");
+                logPane.hidden = true;
                 setStatus(trainForm, "[data-train-status]", "Refused: " + ((result.plan && result.plan.blockers) || [result.error || "unknown"]).join("; "), true);
             }
             refresh();
@@ -483,6 +490,8 @@ window.addEventListener("DOMContentLoaded", function () {
     // A poll, not a socket. The run outlives every tab watching it, and a
     // connection the trainer appeared to depend on is one nobody dares close.
     let logTimer = null;
+    let logWaitingLabel = "";
+    let logEverArrived = false;
     const logPane = document.getElementById("training-log");
     const logBody = document.getElementById("training-log-body");
 
@@ -505,7 +514,13 @@ window.addEventListener("DOMContentLoaded", function () {
                 // Follow the tail only while the reader is already at it —
                 // yanking the view mid-scroll is how a log becomes unreadable.
                 if (stuck) { logBody.scrollTop = logBody.scrollHeight; }
-                setLogStatus(name);
+                logEverArrived = true;
+                setLogStatus(result.archived ? name + " (finished — archived output)" : name);
+            } else if (!logEverArrived && logWaitingLabel) {
+                // Before the container exists, "no trainer container" is
+                // the literal truth and exactly the wrong thing to say to
+                // someone who just pressed launch.
+                setLogStatus(logWaitingLabel);
             } else {
                 setLogStatus(result.reason || "no trainer container");
             }
@@ -514,14 +529,17 @@ window.addEventListener("DOMContentLoaded", function () {
         }
     }
 
-    function startLogTail(name) {
+    function startLogTail(name, waitingFor) {
         if (!name) { return; }
         stopLogTail("");
         logPane.hidden = false;
         logBody.textContent = "";
-        setLogStatus("waiting for the trainer to start…");
+        logEverArrived = false;
+        logWaitingLabel = waitingFor || "waiting for the trainer to start…";
+        setLogStatus(logWaitingLabel);
+        logPane.scrollIntoView({behavior: "smooth", block: "nearest"});
         pollLog(name);
-        logTimer = setInterval(function () { pollLog(name); }, 5000);
+        logTimer = setInterval(function () { pollLog(name); }, 2000);
     }
 
     document.getElementById("training-log-stop").addEventListener("click", function () {
