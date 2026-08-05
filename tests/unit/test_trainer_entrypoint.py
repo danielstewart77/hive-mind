@@ -232,3 +232,15 @@ def test_the_trainer_logs_every_step_not_every_tenth(trainer):
     # value is what ships, so the declaration is what is checked.
     source = Path(trainer.__file__).read_text()
     assert "logging_steps=1," in source
+
+
+def test_gradient_checkpointing_passes_use_reentrant_explicitly(trainer):
+    """Requirement: the run does not depend on a workaround to learn.
+
+    Reentrant checkpointing drops gradients when nothing entering a
+    checkpointed block requires grad, which is what a frozen 4-bit base
+    under LoRA looks like — and torch 2.9 turns the unset default into
+    an error rather than a warning.
+    """
+    source = Path(trainer.__file__).read_text()
+    assert 'gradient_checkpointing_kwargs={"use_reentrant": False}' in source
