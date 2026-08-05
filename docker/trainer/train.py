@@ -243,6 +243,13 @@ def run_training(spec: dict) -> dict:
         save_strategy="epoch",
         eval_strategy="epoch" if eval_dataset is not None else "no",
         gradient_checkpointing=True,
+        # Reentrant checkpointing silently drops gradients when nothing
+        # entering a checkpointed block requires grad — precisely the
+        # shape of a frozen 4-bit base with LoRA adapters on top, which
+        # works today only because Transformers applies an
+        # input-requires-grad workaround on our behalf. Torch 2.9 is also
+        # the release that turns the unset default into a hard error.
+        gradient_checkpointing_kwargs={"use_reentrant": False},
         report_to=[],
         seed=spec.get("seed", 17),
         dataset_text_field="text",
