@@ -50,6 +50,16 @@ class FineTuneSpec:
     learning_rate: float = 1e-4
     epochs: int = 2
     per_device_batch_size: int = 1
+
+    #: Examples evaluation sees at once. ``None`` means "match training",
+    #: which is what stops Transformers applying its own default of 8 —
+    #: eight max-length sequences of logits against a 150k vocabulary is
+    #: nineteen gigabytes, and it is the allocation that killed the run of
+    #: 2026-08-04 at its first epoch boundary. Absence rather than zero,
+    #: because a sentinel that collides with a legitimate value is how
+    #: ``gpu_memory_fraction`` lost the ability to express "no cap".
+    per_device_eval_batch_size: int | None = None
+
     gradient_accumulation_steps: int = 16
     max_sequence_length: int = 8_192
     warmup_ratio: float = 0.03
@@ -85,12 +95,25 @@ class FineTuneSpec:
             problems.append("learning_rate must be between 0 and 1")
         if self.lora_rank < 1:
             problems.append("lora_rank must be at least 1")
+        if self.per_device_batch_size < 1:
+            problems.append("per_device_batch_size must be at least 1")
+        if (
+            self.per_device_eval_batch_size is not None
+            and self.per_device_eval_batch_size < 1
+        ):
+            problems.append("per_device_eval_batch_size must be at least 1")
         if self.max_sequence_length < 512:
             problems.append("max_sequence_length must be at least 512")
         return problems
 
     def effective_batch_size(self) -> int:
         return self.per_device_batch_size * self.gradient_accumulation_steps
+
+    def effective_eval_batch_size(self) -> int:
+        """What evaluation will actually use, unnamed or not."""
+        if self.per_device_eval_batch_size is None:
+            return self.per_device_batch_size
+        return self.per_device_eval_batch_size
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -196,7 +219,13 @@ def estimate_required_mib(spec: FineTuneSpec) -> int:
         weights = (
             UNKNOWN_MODEL_4BIT_MIB if spec.load_in_4bit else UNKNOWN_MODEL_BF16_MIB
         )
-    activations = int(spec.max_sequence_length * spec.per_device_batch_size * 1.6)
+    # The larger of the two batches, because the peak is whichever pass
+    # holds the most logits at once — and this comment's own warning
+    # about the eval pass used to be the only place evaluation appeared.
+    # An estimate blind to it returns the same verdict for a spec that
+    # fits and one that OOMs, and blesses the launch either way.
+    batch = max(spec.per_device_batch_size, spec.effective_eval_batch_size())
+    activations = int(spec.max_sequence_length * batch * 1.6)
     return weights + activations
 
 

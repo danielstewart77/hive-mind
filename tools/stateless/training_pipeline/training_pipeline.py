@@ -321,6 +321,7 @@ def cmd_train(args) -> dict:
         learning_rate=args.learning_rate,
         epochs=args.epochs,
         per_device_batch_size=args.batch_size,
+        per_device_eval_batch_size=args.eval_batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         max_sequence_length=args.max_sequence_length,
         warmup_ratio=args.warmup_ratio,
@@ -418,6 +419,10 @@ def build_parser() -> argparse.ArgumentParser:
     train_p.add_argument("--learning-rate", type=float, default=1e-4)
     train_p.add_argument("--epochs", type=int, default=2)
     train_p.add_argument("--batch-size", type=int, default=1)
+    # Unset means "match the training batch". Naming it larger is how
+    # Transformers' own default of 8 took the card down; the feasibility
+    # estimate now sizes against whichever of the two is bigger.
+    train_p.add_argument("--eval-batch-size", type=int, default=None)
     train_p.add_argument("--gradient-accumulation-steps", type=int, default=16)
     train_p.add_argument("--max-sequence-length", type=int, default=8_192)
     train_p.add_argument("--warmup-ratio", type=float, default=0.03)

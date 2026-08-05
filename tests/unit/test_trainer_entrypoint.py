@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -227,11 +228,7 @@ def test_the_trainer_logs_every_step_not_every_tenth(trainer):
     seconds, so logging every tenth step is a five-minute silence in
     which a working run and a hung one are the same picture.
     """
-    # The config is built inside run_training, which imports torch and trl
-    # — neither of which exists outside the trainer image. The declared
-    # value is what ships, so the declaration is what is checked.
-    source = Path(trainer.__file__).read_text()
-    assert "logging_steps=1," in source
+    assert trainer.build_sft_kwargs({}, Path("/out"), has_eval=True)["logging_steps"] == 1
 
 
 def test_gradient_checkpointing_passes_use_reentrant_explicitly(trainer):
@@ -242,8 +239,9 @@ def test_gradient_checkpointing_passes_use_reentrant_explicitly(trainer):
     under LoRA looks like — and torch 2.9 turns the unset default into
     an error rather than a warning.
     """
-    source = Path(trainer.__file__).read_text()
-    assert 'gradient_checkpointing_kwargs={"use_reentrant": False}' in source
+    kwargs = trainer.build_sft_kwargs({}, Path("/out"), has_eval=True)
+    assert kwargs["gradient_checkpointing"] is True
+    assert kwargs["gradient_checkpointing_kwargs"] == {"use_reentrant": False}
 
 
 def test_the_progress_line_carries_position_pace_and_what_is_left(trainer):
@@ -263,3 +261,168 @@ def test_the_progress_line_carries_position_pace_and_what_is_left(trainer):
     # Before the first step there is no rate, and inventing one is worse
     # than admitting there isn't one.
     assert "eta unknown" in trainer.format_progress(step=0, total=377, elapsed=0)
+
+
+# ------------------------------------------------- the evaluation OOM
+
+
+def test_evaluation_uses_the_training_batch_size_unless_the_spec_names_one(
+    trainer, tmp_path
+):
+    """Requirement 1: eval processes as many examples at a time as training.
+
+    Transformers defaults ``per_device_eval_batch_size`` to 8 while this
+    spec asks for a train batch of 1. Eight sequences of 8192 tokens
+    against a 151936-token vocabulary is nineteen gigabytes of logits,
+    which is exactly the allocation that killed the 2026-08-04 run at the
+    first epoch boundary — after a full healthy epoch, and after the
+    control plane had signed off on a card sized for a batch of one.
+    """
+    # A train batch above the default is the only case that separates
+    # "mirrors training" from "hard-coded to one".
+    mirrored = trainer.build_sft_kwargs(
+        {"per_device_batch_size": 4}, tmp_path, has_eval=True
+    )
+    assert mirrored["per_device_train_batch_size"] == 4
+    assert mirrored["per_device_eval_batch_size"] == 4
+
+    named = trainer.build_sft_kwargs(
+        {"per_device_batch_size": 4, "per_device_eval_batch_size": 1},
+        tmp_path,
+        has_eval=True,
+    )
+    assert named["per_device_eval_batch_size"] == 1
+
+    # A dict nothing consumes satisfies every assertion above while the
+    # run still builds its config inline, so the wiring is part of the
+    # requirement. trl cannot be imported outside the trainer image.
+    source = Path(trainer.__file__).read_text()
+    assert "SFTConfig(**build_sft_kwargs(" in source
+
+
+def test_the_end_of_an_epoch_writes_an_epoch_stamped_adapter(trainer, tmp_path):
+    """Requirement 3: an epoch's adapter is on disk before its evaluation.
+
+    Transformers fires ``on_epoch_end`` (trainer.py:2789) before
+    ``_maybe_log_save_evaluate`` (2790), inside which evaluation (3221)
+    precedes the checkpoint save (3228). So the epoch save has to hang off
+    ``on_epoch_end`` — the built-in ``save_strategy="epoch"`` is on the
+    wrong side of the evaluation that crashes.
+
+    The directory is stamped with the epoch and is not ``out_dir`` itself:
+    ``_adapters()`` reads a bare ``adapter_model.safetensors`` as "this run
+    finished", and writing one there at every epoch would offer a
+    half-trained adapter to deploy as though the run had completed.
+    """
+    saved = []
+
+    class _Model:
+        def save_pretrained(self, path):
+            Path(path).mkdir(parents=True, exist_ok=True)
+            (Path(path) / "adapter_model.safetensors").write_bytes(b"weights")
+            saved.append(path)
+
+    written = trainer.save_epoch_adapter(_Model(), tmp_path, epoch=1.0)
+
+    assert written == tmp_path / "epoch-1"
+    assert (tmp_path / "epoch-1" / "adapter_model.safetensors").is_file()
+    # Not where the pipeline looks for a finished run.
+    assert not (tmp_path / "adapter_model.safetensors").exists()
+
+    # Every epoch, each under its own number — a constant stamp would have
+    # epoch two overwrite epoch one.
+    assert trainer.save_epoch_adapter(_Model(), tmp_path, epoch=2.0) == (
+        tmp_path / "epoch-2"
+    )
+    # An epoch cut short mid-way rounds up to the epoch it was inside.
+    assert trainer.epoch_adapter_dir(tmp_path, 1.4) == tmp_path / "epoch-2"
+
+    # Staged and renamed, so a kill mid-write cannot leave a truncated
+    # weights file that every downstream reader accepts as an adapter.
+    class _DyingModel:
+        def save_pretrained(self, path):
+            Path(path).mkdir(parents=True, exist_ok=True)
+            (Path(path) / "adapter_model.safetensors").write_bytes(b"trunc")
+            raise OSError("killed mid-write")
+
+    assert trainer.save_epoch_adapter(_DyingModel(), tmp_path, epoch=5.0) is None
+    assert not (tmp_path / "epoch-5").exists()
+    assert list(tmp_path.glob(".epoch-5*")) == []
+
+    # Bound to the hook that fires before evaluation — and to no other, so
+    # the save cannot drift onto on_evaluate or on_save and land on the far
+    # side of the crash it exists to survive. The ordering itself lives in
+    # the library and is verified against transformers 4.57.1.
+    import ast
+    import inspect
+
+    factory = inspect.getsource(trainer._epoch_saver_class)
+    tree = ast.parse(textwrap.dedent(factory))
+    klass = next(n for n in ast.walk(tree) if isinstance(n, ast.ClassDef))
+    hooks = {n.name: n for n in klass.body if isinstance(n, ast.FunctionDef)}
+    assert list(hooks) == ["on_epoch_end"]
+    assert "save_epoch_adapter(" in ast.unparse(hooks["on_epoch_end"])
+
+    # And it is actually attached to the trainer, unconditionally — a run
+    # with no eval set still loses a completed epoch to a stopped container.
+    source = Path(trainer.__file__).read_text()
+    assert "trainer.add_callback(_epoch_saver_class(out_dir" in source
+    assert "if has_eval:\n        trainer.add_callback(_epoch_saver_class" not in source
+
+
+def test_a_failed_epoch_adapter_write_does_not_kill_the_run(trainer, tmp_path, capsys):
+    """Requirement 4: the safety net cannot become the thing that drops you.
+
+    ``CallbackHandler.call_event`` has no try/except, so an exception out
+    of ``on_epoch_end`` propagates out of ``trainer.train()``. A full disk
+    or a bind-mount blip during the epoch-1 write would then terminate a
+    run that was going to finish — the write exists to save an hour of
+    training, not to spend one.
+    """
+
+    class _RefusingModel:
+        def save_pretrained(self, path):
+            raise OSError(28, "No space left on device")
+
+    assert trainer.save_epoch_adapter(_RefusingModel(), tmp_path, epoch=1.0) is None
+    assert "epoch 1" in capsys.readouterr().out.lower()
+
+
+def test_a_failed_run_records_the_newest_epoch_adapter_it_left_behind(
+    trainer, tmp_path
+):
+    """Requirement 5: a lost run says what it left you.
+
+    Nothing in the repo reads ``result.json``; the console lists adapters
+    by scanning for weights files, and an epoch directory is deliberately
+    somewhere it does not scan. Without the path in the failure record the
+    recovered adapter exists and is invisible.
+    """
+    # Nine and ten, because "newest" sorted as text puts epoch-9 last.
+    for epoch in (9, 10):
+        (tmp_path / f"epoch-{epoch}").mkdir(parents=True)
+        (tmp_path / f"epoch-{epoch}" / "adapter_model.safetensors").write_bytes(b"w")
+    # An epoch that died mid-write has no weights and is not offered.
+    (tmp_path / "epoch-11").mkdir()
+
+    assert trainer.newest_epoch_adapter(tmp_path) == tmp_path / "epoch-10"
+    assert trainer.newest_epoch_adapter(tmp_path / "empty") is None
+
+    # A relaunch clears what the previous run left, so a recovered adapter
+    # always belongs to the run whose failure named it.
+    trainer.clear_epoch_adapters(tmp_path)
+    assert trainer.newest_epoch_adapter(tmp_path) is None
+
+    # And the failure record names it. run_training imports torch on its
+    # first line, which is absent outside the trainer image — the same
+    # shape as any other exception the run can die of.
+    (tmp_path / "epoch-2").mkdir()
+    (tmp_path / "epoch-2" / "adapter_model.safetensors").write_bytes(b"w")
+    spec_path = tmp_path / "finetune_spec.json"
+    spec_path.write_text(json.dumps({"output_dir": str(tmp_path)}))
+    with pytest.raises(Exception):
+        trainer.main(["--mode", "train", "--spec", str(spec_path)])
+
+    record = json.loads((tmp_path / "result.json").read_text())
+    assert record["status"] == "failed"
+    assert record["recovered_adapter_dir"] == str(tmp_path / "epoch-2")

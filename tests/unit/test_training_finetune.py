@@ -45,6 +45,8 @@ def test_a_valid_spec_reports_no_problems(train_file):
         {"learning_rate": 5},
         {"lora_rank": 0},
         {"max_sequence_length": 128},
+        {"per_device_batch_size": 0},
+        {"per_device_eval_batch_size": 0},
     ],
 )
 def test_invalid_hyperparameters_are_reported(train_file, kwargs):
@@ -332,3 +334,34 @@ def test_the_plan_counts_the_memory_a_launch_will_reclaim(train_file, monkeypatc
     )
     assert not too_big.can_run
     assert any("reclaimable" in b for b in too_big.blockers)
+
+
+def test_the_estimate_sizes_the_card_against_the_larger_batch(train_file):
+    """Requirement 2: feasibility counts the eval pass, not just training.
+
+    The estimate charged the card for the training batch alone, so a spec
+    naming a larger eval batch produced an identical verdict and an
+    identical OOM — with the planner having blessed it. The peak arrives
+    at the evaluation pass, which is where the 2026-08-04 run died.
+    """
+    train_only = estimate_required_mib(_spec(train_file, per_device_batch_size=1))
+    bigger_eval = estimate_required_mib(
+        _spec(train_file, per_device_batch_size=1, per_device_eval_batch_size=4)
+    )
+    assert bigger_eval > train_only
+
+    # Unnamed, evaluation mirrors training rather than falling back to one.
+    assert (
+        _spec(train_file, per_device_batch_size=4).effective_eval_batch_size() == 4
+    )
+    assert estimate_required_mib(_spec(train_file, per_device_batch_size=4)) == (
+        estimate_required_mib(
+            _spec(train_file, per_device_batch_size=4, per_device_eval_batch_size=4)
+        )
+    )
+
+    # The larger of the two, in both directions: a small eval batch must
+    # not shrink an estimate the training batch already needs.
+    assert estimate_required_mib(
+        _spec(train_file, per_device_batch_size=8, per_device_eval_batch_size=1)
+    ) == estimate_required_mib(_spec(train_file, per_device_batch_size=8))
