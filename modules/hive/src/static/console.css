@@ -419,7 +419,12 @@ a { color: inherit; }
 .training-log-header { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
 .training-log-header small { flex: 1; color: var(--console-muted); font-size: 12px; }
 .training-log pre {
-    max-height: 320px;
+    /* Six field rows tall even while empty. A pane that collapses to the
+       height of one input reads as broken during the quarter of an hour a
+       run spends downloading weights. */
+    min-height: 260px;
+    max-height: 460px;
+    resize: vertical;
     margin: 0;
     padding: 12px;
     overflow: auto;
