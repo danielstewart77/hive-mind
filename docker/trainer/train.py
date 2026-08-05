@@ -37,6 +37,19 @@ WORKSPACE = Path(os.environ.get("TRAINER_WORKSPACE", "/workspace"))
 RESULT_NAME = "result.json"
 
 
+def stage(message: str) -> None:
+    """Announce what the run is about to spend minutes doing.
+
+    Everything expensive here — importing torch, pulling tens of
+    gigabytes of base weights, tokenizing a corpus — is silent by
+    default, so a watcher sees an empty pane for a quarter of an hour and
+    cannot tell a downloading run from a hung one. Each line is flushed
+    on its own: buffered progress is the same as no progress to anyone
+    reading ``docker logs``.
+    """
+    print(f"[{time.strftime('%H:%M:%S')}] {message}", flush=True)
+
+
 # ---------------------------------------------------------------- paths
 
 
@@ -150,12 +163,14 @@ def apply_memory_cap(spec: dict, torch) -> float:
 
 
 def run_training(spec: dict) -> dict:
+    stage("loading torch and the training libraries")
     import torch
     from peft import LoraConfig
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
     from trl import SFTConfig, SFTTrainer
 
-    apply_memory_cap(spec, torch)
+    capped = apply_memory_cap(spec, torch)
+    stage(f"capped this process at {capped:.2f} of the card")
 
     train_file = resolve_in_workspace(spec["train_file"])
     if not train_file.exists():
@@ -165,6 +180,7 @@ def run_training(spec: dict) -> dict:
     eval_file = resolve_in_workspace(spec.get("eval_file") or "")
     out_dir = output_dir_in_workspace(spec["output_dir"])
 
+    stage(f"fetching the tokenizer for {spec['base_model']}")
     tokenizer = AutoTokenizer.from_pretrained(spec["base_model"], trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -178,6 +194,10 @@ def run_training(spec: dict) -> dict:
             bnb_4bit_compute_dtype=torch.bfloat16,
         )
 
+    stage(
+        f"loading base weights for {spec['base_model']} — this downloads tens of "
+        "gigabytes the first time and is cached after"
+    )
     model = AutoModelForCausalLM.from_pretrained(
         spec["base_model"],
         quantization_config=quantization,
@@ -186,6 +206,7 @@ def run_training(spec: dict) -> dict:
         trust_remote_code=True,
     )
     model.config.use_cache = False
+    stage("base weights are on the card")
 
     peft_config = LoraConfig(
         r=spec.get("lora_rank", 32),
@@ -196,9 +217,14 @@ def run_training(spec: dict) -> dict:
         target_modules="all-linear",
     )
 
+    stage(f"tokenizing {train_file.name}")
     train_dataset = build_dataset(load_jsonl(train_file), tokenizer)
     eval_dataset = (
         build_dataset(load_jsonl(eval_file), tokenizer) if eval_file.exists() else None
+    )
+    stage(
+        f"{len(train_dataset)} training examples, "
+        f"{len(eval_dataset) if eval_dataset is not None else 0} for eval"
     )
 
     config = SFTConfig(
@@ -217,6 +243,10 @@ def run_training(spec: dict) -> dict:
         report_to=[],
         seed=spec.get("seed", 17),
         dataset_text_field="text",
+        # A progress bar redraws one line with carriage returns, which is
+        # a line that never ends and therefore never appears in `docker
+        # logs`. Plain per-step lines are the only form a log reader sees.
+        disable_tqdm=True,
     )
 
     trainer = SFTTrainer(
@@ -227,9 +257,12 @@ def run_training(spec: dict) -> dict:
         peft_config=peft_config,
     )
     started = time.time()
+    stage("training starts now — a line lands every 10 steps")
     train_output = trainer.train()
+    stage("training finished; writing the adapter")
     trainer.model.save_pretrained(str(out_dir))
     tokenizer.save_pretrained(str(out_dir))
+    stage(f"adapter written to {out_dir}")
 
     metrics = dict(getattr(train_output, "metrics", {}) or {})
     return {
@@ -320,6 +353,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.mode == "train":
+        # First line of the container's life: everything before this is
+        # Python starting up, and everything after is minutes long.
+        stage("trainer container is up, reading the job spec")
         spec_path = resolve_in_workspace(args.spec or str(WORKSPACE / "finetune_spec.json"))
         spec = json.loads(spec_path.read_text())
         out_dir = output_dir_in_workspace(spec["output_dir"])
