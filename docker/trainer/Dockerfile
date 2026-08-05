@@ -12,16 +12,19 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     HF_HOME=/root/.cache/huggingface
 
-# git and build tooling are for llama.cpp's converter, used by merge mode.
+# git is for llama.cpp's converter, used by merge mode.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        git build-essential cmake curl ca-certificates && \
+        git curl ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt
 
-# Converter and quantizer for merge mode. Only the conversion tooling is
-# built — inference lives in Ollama, not here.
+# llama.cpp's HF-to-GGUF converter, and nothing else from that repo. Merge
+# mode stops at f16 and Ollama quantizes on import, so there is no compiled
+# artifact here — which is the point: the quantizer this image used to
+# build was linked against a shared library the image did not ship, so it
+# died with exit 127 at the last step of a two-hour merge.
 #
 # The converter's own requirements file pins a CPU build of torch, which
 # silently replaces this image's CUDA build: torchvision then fails to load
@@ -29,11 +32,7 @@ WORKDIR /opt
 # installed by name instead, which is all the safetensors path actually
 # needs, and torch is left alone.
 RUN git clone --depth 1 https://github.com/ggml-org/llama.cpp.git /opt/llama.cpp && \
-    pip install --no-cache-dir gguf numpy sentencepiece protobuf && \
-    cmake -S /opt/llama.cpp -B /opt/llama.cpp/build -DLLAMA_CURL=OFF -DGGML_NATIVE=ON && \
-    cmake --build /opt/llama.cpp/build --target llama-quantize -j "$(nproc)" && \
-    cp /opt/llama.cpp/build/bin/llama-quantize /opt/llama.cpp/llama-quantize && \
-    rm -rf /opt/llama.cpp/build
+    pip install --no-cache-dir gguf numpy sentencepiece protobuf
 
 COPY requirements.txt /opt/trainer/requirements.txt
 RUN pip install --no-cache-dir -r /opt/trainer/requirements.txt

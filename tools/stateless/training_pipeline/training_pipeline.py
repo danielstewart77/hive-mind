@@ -48,7 +48,7 @@ from core.training_deploy import (  # noqa: E402
     DEFAULT_QUANTIZATION,
     DEFAULT_TEMPERATURE,
     STRATEGIES,
-    STRATEGY_ADAPTER,
+    STRATEGY_MERGE,
     DeployRequest,
     adapter_weight_file,
     deploy,
@@ -456,8 +456,12 @@ def build_parser() -> argparse.ArgumentParser:
     deploy_p.add_argument(
         "--serve-tag", default="", help="override the catalog's Ollama base tag"
     )
-    deploy_p.add_argument("--strategy", choices=list(STRATEGIES), default=STRATEGY_ADAPTER)
-    deploy_p.add_argument("--quantization", default=DEFAULT_QUANTIZATION)
+    deploy_p.add_argument("--strategy", choices=list(STRATEGIES), default=STRATEGY_MERGE)
+    deploy_p.add_argument(
+        "--quantization",
+        default=DEFAULT_QUANTIZATION,
+        help="target type Ollama quantizes the merged f16 GGUF to on import",
+    )
     deploy_p.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE)
     deploy_p.add_argument("--num-ctx", type=int, default=DEFAULT_NUM_CTX)
     deploy_p.add_argument("--system-prompt", default="")
