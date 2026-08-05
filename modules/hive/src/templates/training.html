@@ -191,25 +191,7 @@
                 <input id="deploy-name" name="name" value="hive-harness-lora" pattern="[A-Za-z0-9._:-]{1,64}" required>
             </div>
 
-            <div class="field is-full">
-                <label>Strategy<button class="hint" type="button" tabindex="0" data-hint="Training reads the model's full-precision weights. Serving uses a compressed copy of them. That difference is what these two options are about.">?</button></label>
-                <div class="option-list">
-                    <label class="choice">
-                        <input type="radio" name="strategy" value="adapter" checked>
-                        <span class="choice-copy">
-                            <strong>Stack the adapter on the base</strong>
-                            <small>Seconds, and a few hundred megabytes. Ollama keeps one copy of the base model for every fine-tune built on it. The cost is that the adapter was fitted against the full-precision weights while the served copy is compressed — close, not identical, and the gap shows up as a fine-tune that feels weaker than its eval score suggested.</small>
-                        </span>
-                    </label>
-                    <label class="choice">
-                        <input type="radio" name="strategy" value="merge">
-                        <span class="choice-copy">
-                            <strong>Merge into the weights and convert</strong>
-                            <small>Folds the adapter into the model, then compresses the result — so the thing being compressed is the thing that was trained, and there is no mismatch. Costs a conversion pass measured in hours and a full model's worth of disk, every deploy. Starts a container and finishes later; press Deploy again once it does to serve the result.</small>
-                        </span>
-                    </label>
-                </div>
-            </div>
+            <p class="page-description is-full">Deploying folds the adapter into the model's full-precision weights, converts the result, and hands that to Ollama to compress — so the thing being compressed is the thing that was trained. It costs a conversion pass measured in hours and a full model's worth of disk. The first press starts a container and finishes later; press Deploy again once it does to serve the result.</p>
 
             <div class="field-row">
                 <div class="field">
@@ -221,7 +203,7 @@
                     <input id="deploy-temp" name="temperature" type="number" step="0.05" min="0" max="2" value="0.2">
                 </div>
                 <div class="field">
-                    <label for="deploy-quant">Quantization<button class="hint hint-below" type="button" tabindex="0" data-hint="Only applies to the merge strategy: how hard to compress the merged model. q4_K_M is roughly four bits per weight and is what most models here are served at. q5 and q8 are larger and more faithful. This has no effect when stacking an adapter, since the base is already compressed.">?</button></label>
+                    <label for="deploy-quant">Quantization<button class="hint hint-below" type="button" tabindex="0" data-hint="How hard Ollama compresses the merged model when it imports it. q4_K_M is roughly four bits per weight and is what most models here are served at. q5 and q8 are larger and more faithful. Changing your mind costs another upload, not another merge — the converted file is kept uncompressed.">?</button></label>
                     <input id="deploy-quant" name="quantization" value="q4_K_M" pattern="[A-Za-z0-9_]{2,12}">
                 </div>
             </div>
@@ -681,7 +663,7 @@ window.addEventListener("DOMContentLoaded", function () {
             return;
         }
         if (chosen.dataset.base) { body.base_model = chosen.dataset.base; }
-        setStatus(deployForm, "[data-deploy-status]", body.strategy === "merge" ? "Merging and converting — this takes a while…" : "Uploading the adapter to Ollama…");
+        setStatus(deployForm, "[data-deploy-status]", "Merging, converting and compressing — this takes a while…");
         try {
             const result = await api("/api/training/deploy", {method: "POST", body: JSON.stringify(body)});
             if (result.deployed) {

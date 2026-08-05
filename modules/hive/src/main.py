@@ -2198,7 +2198,7 @@ async def api_training_deploy(request: Request, user: dict = Depends(require_aut
         "training.deploy.requested",
         **_actor_fields(user),
         model_name=body.get("name"),
-        strategy=body.get("strategy", "adapter"),
+        strategy=body.get("strategy", "merge"),
     )
     return result
 

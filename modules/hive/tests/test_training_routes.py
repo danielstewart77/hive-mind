@@ -218,8 +218,10 @@ def test_the_page_explains_every_decision_it_asks_for(tmp_path, monkeypatch):
         "mixture-of-experts",
         "lora rank",
         "quantization",
-        "merge into the weights",
-        "stack the adapter on the base",
+        # Deploy is no longer a choice between two routes, so what the page
+        # owes the reader is what the one route costs them.
+        "full-precision weights",
+        "hands that to ollama to compress",
     ):
         assert phrase in body.lower(), f"the page never mentions {phrase}"
 
