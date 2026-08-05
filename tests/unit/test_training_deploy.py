@@ -1,10 +1,10 @@
 """Unit tests for turning a trained adapter into a served model.
 
 Nothing here talks to a real Ollama or starts a real container. What is
-worth testing is the decision layer: what counts as deployable, that the
-merge is the only route and Ollama the only quantizer, and that every
-failure comes back as a structured refusal the console can render rather
-than an exception.
+worth testing is the decision layer: what counts as deployable, what the
+merge container is launched with, what Ollama is asked to do with the file
+it is handed, and that every failure comes back as a structured refusal the
+console can render rather than an exception.
 """
 
 from __future__ import annotations
@@ -63,18 +63,6 @@ def test_a_directory_without_weights_is_a_problem(tmp_path):
         model_name="x", adapter_dir=str(empty), serve_tag="qwen3:8b"
     )
     assert any("no adapter weights" in problem for problem in request.validate())
-
-
-def test_the_retired_adapter_strategy_is_refused_as_unknown(adapter_dir):
-    """Requirement 1: merge is the only route the API accepts.
-
-    Ollama can only stack a LoRA onto the architectures its own converter
-    understands, which excludes what this hive trains. Silently promoting
-    the request to a merge would turn one click into an hour of GPU and a
-    full model of disk without anyone asking for it.
-    """
-    request = _request(adapter_dir, strategy="adapter")
-    assert any("unknown strategy" in problem for problem in request.validate())
 
 
 def test_the_serve_tag_is_required(adapter_dir):
@@ -156,14 +144,13 @@ def test_merge_launches_a_conversion_when_no_gguf_exists_yet(
     assert "--gpus" in commands[0]
 
 
-def test_the_merge_container_is_told_nothing_about_quantization(
+def test_the_merge_container_is_launched_with_the_paths_it_needs(
     adapter_dir, monkeypatch
 ):
-    """Requirement 5: the target type is chosen at import, not at merge.
+    """The whole argv, so the container is asked for exactly one thing.
 
-    Passing it here is what made changing q4 to q8 cost another two-hour
-    merge instead of another upload — and is the argument the retired
-    quantizer read.
+    The target type belongs to the import, not the merge — pinning it here
+    is what made changing q4 to q8 cost another two-hour conversion.
     """
     commands = []
 
@@ -175,14 +162,22 @@ def test_the_merge_container_is_told_nothing_about_quantization(
         "run",
         lambda cmd, **kw: (commands.append(list(cmd)), _Completed())[1],
     )
-    result = deploy(
+    deploy(
         _request(adapter_dir, quantization="q8_0", base_model="Qwen/Qwen3-8B"),
         ollama_url="http://ollama.test",
     )
 
-    assert result.stage == "converting"
-    assert "q8_0" not in commands[0]
-    assert "--quantization" not in commands[0]
+    trainer_args = commands[0][commands[0].index("hive-mind-trainer:latest") + 1 :]
+    assert trainer_args == [
+        "--mode",
+        "merge",
+        "--base-model",
+        "Qwen/Qwen3-8B",
+        "--adapter",
+        f"/workspace/{adapter_dir.name}",
+        "--out",
+        f"/workspace/{MERGED_GGUF_NAME}",
+    ]
 
 
 def test_merge_serves_the_gguf_once_the_conversion_has_produced_one(

@@ -6,15 +6,10 @@ converts the result to GGUF and has Ollama quantize that on import. The
 thing being quantized is therefore the thing that was trained, at the cost
 of a conversion pass and a full model's worth of disk per deploy.
 
-There is no adapter-stacking route. Ollama can only bolt a LoRA onto the
-handful of architectures its own converter understands, so the fast path
-was unavailable for most of the catalog — including everything trained
-here — and a route that refuses more often than it works is a route that
-only teaches people to distrust the button.
-
-Quantizing is Ollama's job, not ours. ``/api/create`` takes a ``quantize``
-field and applies it to an f16 GGUF, which means the trainer image does not
-have to carry a compiled quantizer to ship one working deploy.
+Quantizing is Ollama's job. ``/api/create`` takes a ``quantize`` field and
+applies it to an f16 GGUF, so the merge stops at full precision and the
+target type is chosen at import — which means changing q4 to q8 costs an
+upload rather than another merge.
 
 Merging needs torch and a converter, which is exactly the dependency set
 kept out of every service image, so it runs in the trainer container the
@@ -39,9 +34,6 @@ from pathlib import Path
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 
-STRATEGY_MERGE = "merge"
-STRATEGIES = (STRATEGY_MERGE,)
-
 # What the trainer writes, and what a merge run is expected to produce.
 # The merged file is full-precision on purpose: Ollama quantizes on import.
 ADAPTER_WEIGHT_NAMES = ("adapter_model.safetensors", "adapter_model.bin")
@@ -61,16 +53,11 @@ class DeployRequest:
     against, so the caller passes the base model's catalog entry rather
     than inventing one.
 
-    ``strategy`` survives as a field with exactly one legal value so that a
-    caller still asking for the retired adapter route is told so, rather
-    than having its request quietly reinterpreted as a merge that costs an
-    hour of GPU and a full model of disk.
     """
 
     model_name: str
     adapter_dir: str
     serve_tag: str
-    strategy: str = STRATEGY_MERGE
     base_model: str = ""
     quantization: str = DEFAULT_QUANTIZATION
     temperature: float = DEFAULT_TEMPERATURE
@@ -81,11 +68,6 @@ class DeployRequest:
         problems: list[str] = []
         if not self.model_name:
             problems.append("model_name is required")
-        if self.strategy not in STRATEGIES:
-            problems.append(
-                f"unknown strategy {self.strategy!r}; expected one of "
-                + ", ".join(STRATEGIES)
-            )
         if not self.serve_tag:
             problems.append("serve_tag is required")
         adapter = Path(self.adapter_dir)
@@ -105,7 +87,6 @@ class DeployRequest:
             "model_name": self.model_name,
             "adapter_dir": self.adapter_dir,
             "serve_tag": self.serve_tag,
-            "strategy": self.strategy,
             "base_model": self.base_model,
             "quantization": self.quantization,
             "temperature": self.temperature,
@@ -118,7 +99,6 @@ class DeployRequest:
 class DeployResult:
     deployed: bool = False
     model_name: str = ""
-    strategy: str = ""
     stage: str = ""
     """``served`` when Ollama has the model, ``converting`` when a merge
     container is still working, ``refused`` when nothing was started."""
@@ -132,7 +112,6 @@ class DeployResult:
         return {
             "deployed": self.deployed,
             "model_name": self.model_name,
-            "strategy": self.strategy,
             "stage": self.stage,
             "detail": self.detail,
             "blockers": list(self.blockers),
@@ -240,7 +219,6 @@ def deploy(
     if problems:
         return DeployResult(
             model_name=request.model_name,
-            strategy=request.strategy,
             stage="refused",
             blockers=problems,
         )
@@ -257,7 +235,6 @@ def _create_model(
     except (urllib.error.URLError, OSError, TimeoutError) as exc:
         return DeployResult(
             model_name=request.model_name,
-            strategy=request.strategy,
             stage="refused",
             blockers=[f"Ollama at {ollama_url} refused the create: {exc}"],
             modelfile=modelfile,
@@ -266,7 +243,6 @@ def _create_model(
     if response.get("error"):
         return DeployResult(
             model_name=request.model_name,
-            strategy=request.strategy,
             stage="refused",
             blockers=[status],
             modelfile=modelfile,
@@ -274,7 +250,6 @@ def _create_model(
     return DeployResult(
         deployed=True,
         model_name=request.model_name,
-        strategy=request.strategy,
         stage="served",
         detail=status or "created",
         modelfile=modelfile,
@@ -298,7 +273,6 @@ def _deploy_merged(
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
             return DeployResult(
                 model_name=request.model_name,
-                strategy=request.strategy,
                 stage="refused",
                 blockers=[f"could not upload the merged model: {exc}"],
             )
@@ -331,10 +305,8 @@ def _launch_merge(
     back out, so it is minutes-to-hours of work and gets the same treatment
     a training run does: launched, recorded, and polled later.
 
-    No quantization is passed. The container's only job is to produce the
-    f16 GGUF; the target type is chosen at the moment Ollama imports it,
-    which means changing your mind about q4 versus q8 costs an upload
-    rather than another merge.
+    The container's only job is to produce the f16 GGUF. The target type
+    is chosen at the moment Ollama imports it.
     """
     host_dir = str(Path(workspace).resolve())
     adapter_name = Path(request.adapter_dir).name
@@ -366,20 +338,17 @@ def _launch_merge(
     except subprocess.CalledProcessError as exc:
         return DeployResult(
             model_name=request.model_name,
-            strategy=request.strategy,
             stage="refused",
             blockers=[(exc.stderr or exc.stdout or "docker refused the merge").strip()[:2000]],
         )
     except (subprocess.SubprocessError, OSError) as exc:
         return DeployResult(
             model_name=request.model_name,
-            strategy=request.strategy,
             stage="refused",
             blockers=[str(exc)],
         )
     return DeployResult(
         model_name=request.model_name,
-        strategy=request.strategy,
         stage="converting",
         container_id=completed.stdout.strip(),
         detail=(
