@@ -1,20 +1,20 @@
 """Turn a trained adapter into a model Ollama will serve.
 
 Training produces a LoRA adapter: a few hundred megabytes of weight deltas
-that mean nothing on their own. Deploy is what puts them in front of a
-mind, and there are two honest ways to do it.
+that mean nothing on their own. Deploy folds them into the base weights,
+converts the result to GGUF and has Ollama quantize that on import. The
+thing being quantized is therefore the thing that was trained, at the cost
+of a conversion pass and a full model's worth of disk per deploy.
 
-**adapter** stacks the adapter on top of a base tag already pulled. Ollama
-holds one copy of the base for every fine-tune built on it, so a deploy
-costs adapter-sized disk and finishes in seconds. The catch is that the
-adapter was fitted against the full-precision weights while the served tag
-is a quantized copy of them — close, not identical, and the difference
-shows up as a fine-tune that feels weaker than its eval score.
+There is no adapter-stacking route. Ollama can only bolt a LoRA onto the
+handful of architectures its own converter understands, so the fast path
+was unavailable for most of the catalog — including everything trained
+here — and a route that refuses more often than it works is a route that
+only teaches people to distrust the button.
 
-**merge** folds the adapter into the weights, converts the result to GGUF
-and quantizes that. No mismatch, because the thing being quantized is the
-thing that was trained. It costs a conversion pass and a full model's worth
-of disk per deploy.
+Quantizing is Ollama's job, not ours. ``/api/create`` takes a ``quantize``
+field and applies it to an f16 GGUF, which means the trainer image does not
+have to carry a compiled quantizer to ship one working deploy.
 
 Merging needs torch and a converter, which is exactly the dependency set
 kept out of every service image, so it runs in the trainer container the
@@ -39,13 +39,13 @@ from pathlib import Path
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 
-STRATEGY_ADAPTER = "adapter"
 STRATEGY_MERGE = "merge"
-STRATEGIES = (STRATEGY_ADAPTER, STRATEGY_MERGE)
+STRATEGIES = (STRATEGY_MERGE,)
 
 # What the trainer writes, and what a merge run is expected to produce.
+# The merged file is full-precision on purpose: Ollama quantizes on import.
 ADAPTER_WEIGHT_NAMES = ("adapter_model.safetensors", "adapter_model.bin")
-MERGED_GGUF_NAME = "merged.gguf"
+MERGED_GGUF_NAME = "merged-f16.gguf"
 
 DEFAULT_QUANTIZATION = "q4_K_M"
 DEFAULT_TEMPERATURE = 0.2
@@ -56,17 +56,21 @@ DEFAULT_NUM_CTX = 32_768
 class DeployRequest:
     """One deploy, fully described.
 
-    ``serve_tag`` is the base the adapter rides on under the adapter
-    strategy and the tokenizer/config source under merge. It is not a free
-    choice: it must be the same model the adapter was trained against, so
-    the caller passes the base model's catalog entry rather than inventing
-    one.
+    ``serve_tag`` is the tokenizer and config source for the merge. It is
+    not a free choice: it must be the same model the adapter was trained
+    against, so the caller passes the base model's catalog entry rather
+    than inventing one.
+
+    ``strategy`` survives as a field with exactly one legal value so that a
+    caller still asking for the retired adapter route is told so, rather
+    than having its request quietly reinterpreted as a merge that costs an
+    hour of GPU and a full model of disk.
     """
 
     model_name: str
     adapter_dir: str
     serve_tag: str
-    strategy: str = STRATEGY_ADAPTER
+    strategy: str = STRATEGY_MERGE
     base_model: str = ""
     quantization: str = DEFAULT_QUANTIZATION
     temperature: float = DEFAULT_TEMPERATURE
@@ -87,7 +91,7 @@ class DeployRequest:
         adapter = Path(self.adapter_dir)
         if not adapter.is_dir():
             problems.append(f"adapter directory not found: {self.adapter_dir!r}")
-        elif self.strategy == STRATEGY_ADAPTER and adapter_weight_file(adapter) is None:
+        elif adapter_weight_file(adapter) is None:
             problems.append(
                 f"no adapter weights in {self.adapter_dir!r} — expected one of "
                 + ", ".join(ADAPTER_WEIGHT_NAMES)
@@ -155,8 +159,6 @@ def render_modelfile(request: DeployRequest, from_ref: str) -> str:
     rendered, returned and stored beside the adapter.
     """
     lines = [f"FROM {from_ref}"]
-    if request.strategy == STRATEGY_ADAPTER:
-        lines.append(f"ADAPTER {request.adapter_dir}")
     lines.append(f"PARAMETER temperature {request.temperature}")
     lines.append(f"PARAMETER num_ctx {request.num_ctx}")
     if request.system_prompt:
@@ -243,9 +245,7 @@ def deploy(
             blockers=problems,
         )
 
-    if request.strategy == STRATEGY_MERGE:
-        return _deploy_merged(request, ollama_url, trainer_image, workspace)
-    return _deploy_adapter(request, ollama_url)
+    return _deploy_merged(request, ollama_url, trainer_image, workspace)
 
 
 def _create_model(
@@ -281,33 +281,6 @@ def _create_model(
     )
 
 
-def _deploy_adapter(request: DeployRequest, ollama_url: str) -> DeployResult:
-    weights = adapter_weight_file(request.adapter_dir)
-    assert weights is not None  # validate() already established this
-    try:
-        digest = upload_blob(weights, ollama_url)
-    except (urllib.error.URLError, OSError, TimeoutError) as exc:
-        return DeployResult(
-            model_name=request.model_name,
-            strategy=request.strategy,
-            stage="refused",
-            blockers=[f"could not upload the adapter to {ollama_url}: {exc}"],
-        )
-    payload = {
-        "model": request.model_name,
-        "from": request.serve_tag,
-        "adapters": {weights.name: digest},
-        "parameters": {
-            "temperature": request.temperature,
-            "num_ctx": request.num_ctx,
-        },
-        "stream": False,
-    }
-    if request.system_prompt:
-        payload["system"] = request.system_prompt
-    return _create_model(request, ollama_url, payload, request.serve_tag)
-
-
 def merged_gguf_path(adapter_dir: str | Path) -> Path:
     return Path(adapter_dir).parent / MERGED_GGUF_NAME
 
@@ -338,6 +311,10 @@ def _deploy_merged(
             },
             "stream": False,
         }
+        if request.quantization:
+            # The uploaded file is f16. Ollama shrinks it on import, which
+            # is the only quantizer in this pipeline.
+            payload["quantize"] = request.quantization
         if request.system_prompt:
             payload["system"] = request.system_prompt
         return _create_model(request, ollama_url, payload, gguf.name)
@@ -353,6 +330,11 @@ def _launch_merge(
     A merge loads the base model in full precision and writes a whole model
     back out, so it is minutes-to-hours of work and gets the same treatment
     a training run does: launched, recorded, and polled later.
+
+    No quantization is passed. The container's only job is to produce the
+    f16 GGUF; the target type is chosen at the moment Ollama imports it,
+    which means changing your mind about q4 versus q8 costs an upload
+    rather than another merge.
     """
     host_dir = str(Path(workspace).resolve())
     adapter_name = Path(request.adapter_dir).name
@@ -376,8 +358,6 @@ def _launch_merge(
         f"/workspace/{adapter_name}",
         "--out",
         f"/workspace/{MERGED_GGUF_NAME}",
-        "--quantization",
-        request.quantization,
     ]
     try:
         completed = subprocess.run(
@@ -404,7 +384,7 @@ def _launch_merge(
         container_id=completed.stdout.strip(),
         detail=(
             "Merging the adapter into the base weights and converting to "
-            f"GGUF at {request.quantization}. Run deploy again when it "
-            "finishes to serve the result."
+            "GGUF. Run deploy again when it finishes to upload the result "
+            f"and have Ollama quantize it to {request.quantization}."
         ),
     )

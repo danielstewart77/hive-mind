@@ -128,13 +128,34 @@ def test_merge_mode_takes_the_paths_it_needs(trainer):
             "--adapter",
             "/workspace/adapter",
             "--out",
-            "/workspace/merged.gguf",
-            "--quantization",
-            "q5_K_M",
+            "/workspace/merged-f16.gguf",
         ]
     )
     assert args.mode == "merge"
-    assert args.quantization == "q5_K_M"
+    assert args.out == "/workspace/merged-f16.gguf"
+
+
+def test_the_merge_converts_once_to_f16_and_compresses_nothing(
+    trainer, tmp_path, monkeypatch
+):
+    """Requirement 2: one full-size file out, no compressor of our own.
+
+    The quantizer this image used to build was linked against a library it
+    did not ship, so a two-hour merge died at exit 127 on its last step.
+    Ollama quantizes on import; a second command here is the bug returning.
+    """
+    commands = []
+    monkeypatch.setattr(
+        trainer.subprocess, "run", lambda cmd, **kw: commands.append(list(cmd))
+    )
+    out_file = tmp_path / "merged-f16.gguf"
+
+    trainer.convert_to_gguf(tmp_path / "merged-hf", out_file)
+
+    assert len(commands) == 1
+    only = commands[0]
+    assert only[only.index("--outtype") + 1] == "f16"
+    assert only[only.index("--outfile") + 1] == str(out_file)
 
 
 def test_a_failed_training_run_writes_a_failure_record(trainer, tmp_path, monkeypatch):

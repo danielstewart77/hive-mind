@@ -12,8 +12,9 @@ Two modes, because both need the same heavyweight dependency set:
            to the spec's output directory alongside a ``result.json`` the
            control plane polls for.
 ``merge``  folds a trained adapter into the base weights and converts the
-           result to GGUF, which is what the deploy step's merge strategy
-           needs and cannot do from a service image.
+           result to an f16 GGUF, which is what the deploy step needs and
+           cannot do from a service image. It stops at f16: Ollama does the
+           quantizing when it imports the file.
 
 **Paths.** The control plane writes host paths into the spec, and this
 container only sees the dataset directory, mounted at ``/workspace``. Rather
@@ -522,37 +523,33 @@ def run_training(spec: dict) -> dict:
 # ----------------------------------------------------------------- merge
 
 
-def convert_to_gguf(merged_dir: Path, out_file: Path, quantization: str) -> None:
-    """Convert merged HF weights to GGUF, then quantize to the target type.
+def convert_to_gguf(merged_dir: Path, out_file: Path) -> None:
+    """Convert merged HF weights to GGUF at f16, and stop there.
 
-    llama.cpp's converter writes f16; the quantizer turns that into the type
-    Ollama will serve. Two steps, because a direct convert-to-q4 loses the
-    importance matrix the quantizer applies.
+    Quantizing is Ollama's job. ``/api/create`` takes a ``quantize`` field
+    and applies it to exactly this file, so building llama.cpp's quantizer
+    into this image bought a second implementation of a step that already
+    worked — and shipped it broken, linked against a shared library the
+    image does not carry.
     """
     converter = Path(
         os.environ.get("LLAMA_CPP_CONVERT", "/opt/llama.cpp/convert_hf_to_gguf.py")
     )
-    intermediate = out_file.with_name(out_file.stem + "-f16.gguf")
     subprocess.run(
         [
             sys.executable,
             str(converter),
             str(merged_dir),
             "--outfile",
-            str(intermediate),
+            str(out_file),
             "--outtype",
             "f16",
         ],
         check=True,
     )
-    quantizer = Path(os.environ.get("LLAMA_CPP_QUANTIZE", "/opt/llama.cpp/llama-quantize"))
-    subprocess.run(
-        [str(quantizer), str(intermediate), str(out_file), quantization], check=True
-    )
-    intermediate.unlink(missing_ok=True)
 
 
-def run_merge(base_model: str, adapter: Path, out_file: Path, quantization: str) -> dict:
+def run_merge(base_model: str, adapter: Path, out_file: Path) -> dict:
     import torch
     from peft import PeftModel
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -567,13 +564,13 @@ def run_merge(base_model: str, adapter: Path, out_file: Path, quantization: str)
     merged_dir = out_file.parent / "merged-hf"
     merged.save_pretrained(str(merged_dir), safe_serialization=True)
     tokenizer.save_pretrained(str(merged_dir))
-    convert_to_gguf(merged_dir, out_file, quantization)
+    convert_to_gguf(merged_dir, out_file)
     return {
         "status": "succeeded",
         "mode": "merge",
         "gguf": str(out_file),
         "base_model": base_model,
-        "quantization": quantization,
+        "quantization": "f16",
         "duration_seconds": int(time.time() - started),
     }
 
@@ -588,7 +585,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-model", default="")
     parser.add_argument("--adapter", default="")
     parser.add_argument("--out", default="")
-    parser.add_argument("--quantization", default="q4_K_M")
     return parser
 
 
@@ -648,10 +644,10 @@ def main(argv: list[str] | None = None) -> int:
             raise
         write_result(out_dir, result)
     else:
-        out_file = Path(args.out or (WORKSPACE / "merged.gguf"))
+        out_file = Path(args.out or (WORKSPACE / "merged-f16.gguf"))
         adapter = resolve_in_workspace(args.adapter)
         try:
-            result = run_merge(args.base_model, adapter, out_file, args.quantization)
+            result = run_merge(args.base_model, adapter, out_file)
         except Exception as exc:  # noqa: BLE001
             write_result(
                 out_file.parent, {"status": "failed", "mode": "merge", "error": str(exc)}
