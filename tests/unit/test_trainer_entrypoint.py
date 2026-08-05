@@ -218,3 +218,17 @@ def test_the_trainer_announces_each_stage_as_it_starts_it(trainer, capsys):
     captured = capsys.readouterr().out
     assert "loading base weights" in captured
     assert captured.endswith("\n")
+
+
+def test_the_trainer_logs_every_step_not_every_tenth(trainer):
+    """Requirement: as much feedback as the run can give.
+
+    At an effective batch of sixteen an optimizer step is tens of
+    seconds, so logging every tenth step is a five-minute silence in
+    which a working run and a hung one are the same picture.
+    """
+    # The config is built inside run_training, which imports torch and trl
+    # — neither of which exists outside the trainer image. The declared
+    # value is what ships, so the declaration is what is checked.
+    source = Path(trainer.__file__).read_text()
+    assert "logging_steps=1," in source
