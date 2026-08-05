@@ -2075,6 +2075,25 @@ async def api_training_base_models(user: dict = Depends(require_auth)):
     return await _hive_tools_request("GET", "/training/base-models")
 
 
+@app.get("/api/training/logs")
+async def api_training_logs(
+    name: str, tail: int = 200, user: dict = Depends(require_auth)
+):
+    """Recent trainer output, for watching a run go by.
+
+    Read-only in the strictest sense: nothing here starts, stops or reaps
+    anything, so a closed tab is not an event the run can notice.
+    """
+    del user
+    if not name.strip():
+        raise HTTPException(status_code=400, detail="name is required")
+    return await _hive_tools_request(
+        "GET",
+        "/training/logs",
+        params={"name": name.strip(), "tail": max(1, min(tail, 2_000))},
+    )
+
+
 @app.get("/api/training/runs")
 async def api_training_runs(
     kind: str | None = None, limit: int = 20, user: dict = Depends(require_auth)
