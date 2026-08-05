@@ -2075,6 +2075,23 @@ async def api_training_base_models(user: dict = Depends(require_auth)):
     return await _hive_tools_request("GET", "/training/base-models")
 
 
+@app.post("/api/training/kill")
+async def api_training_kill(request: Request, user: dict = Depends(require_auth)):
+    """Stop a run in flight.
+
+    Restoring the voice stack and closing the ledger is the watcher's job,
+    not this route's — two restore paths racing is how the voice stack
+    comes back twice.
+    """
+    del user
+    body = await request.json()
+    if not isinstance(body, dict) or not str(body.get("name", "")).strip():
+        raise HTTPException(status_code=400, detail="name is required")
+    return await _hive_tools_request(
+        "POST", "/training/kill", json_body={"name": str(body["name"]).strip()}
+    )
+
+
 @app.get("/api/training/logs")
 async def api_training_logs(
     name: str, tail: int = 200, user: dict = Depends(require_auth)

@@ -78,8 +78,8 @@
                 <div class="field">
                     <label for="export-harness">Harness<button class="hint" type="button" tabindex="0" data-hint="Which harness the turns were captured from. Claude Code and Codex format tool calls differently, so a mixed dataset teaches both formats — fine if the fine-tune will drive both, muddled if it will only ever drive one.">?</button></label>
                     <select id="export-harness" name="harness">
+                        <option value="claude_code" selected>Claude Code only</option>
                         <option value="">Both</option>
-                        <option value="claude_code">Claude Code only</option>
                         <option value="codex">Codex only</option>
                     </select>
                 </div>
@@ -162,6 +162,7 @@
             <div class="training-log-header">
                 <strong>Trainer output</strong>
                 <small data-log-status></small>
+                <button class="button button-quiet" type="button" id="training-kill">Kill run</button>
                 <button class="button button-quiet" type="button" id="training-log-stop">Stop watching</button>
             </div>
             <pre id="training-log-body" tabindex="0"></pre>
@@ -525,6 +526,23 @@ window.addEventListener("DOMContentLoaded", function () {
 
     document.getElementById("training-log-stop").addEventListener("click", function () {
         stopLogTail("stopped watching — the run is untouched");
+    });
+
+    document.getElementById("training-kill").addEventListener("click", async function () {
+        const name = (readForm(trainForm).name || "").trim();
+        if (!name) { return; }
+        if (!window.confirm("Stop the run '" + name + "'? Its adapter is not written until it finishes, so the work so far is lost.")) { return; }
+        try {
+            const result = await api("/api/training/kill", {method: "POST", body: JSON.stringify({name: name})});
+            // The watcher restores the voice stack and closes the ledger;
+            // nothing here does, so two restores can never race.
+            setStatus(trainForm, "[data-train-status]", result.stopped
+                ? "Stopping — the voice stack comes back and the run is recorded as cancelled."
+                : "Nothing to stop: " + (result.reason || "no run in flight"), !result.stopped);
+            refresh();
+        } catch (error) {
+            setStatus(trainForm, "[data-train-status]", error.message, true);
+        }
     });
 
     trainForm.addEventListener("submit", function (event) { event.preventDefault(); submitTrain(true); });
