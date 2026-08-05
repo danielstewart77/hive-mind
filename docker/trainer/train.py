@@ -236,7 +236,10 @@ def run_training(spec: dict) -> dict:
         warmup_ratio=spec.get("warmup_ratio", 0.03),
         max_length=spec.get("max_sequence_length", 8192),
         bf16=True,
-        logging_steps=10,
+        # Every step, not every tenth. At an effective batch of sixteen a
+        # step is tens of seconds, so ten of them is a five-minute silence
+        # in which a working run and a hung one look the same.
+        logging_steps=1,
         save_strategy="epoch",
         eval_strategy="epoch" if eval_dataset is not None else "no",
         gradient_checkpointing=True,
@@ -257,7 +260,7 @@ def run_training(spec: dict) -> dict:
         peft_config=peft_config,
     )
     started = time.time()
-    stage("training starts now — a line lands every 10 steps")
+    stage("training starts now — a line lands every step")
     train_output = trainer.train()
     stage("training finished; writing the adapter")
     trainer.model.save_pretrained(str(out_dir))
