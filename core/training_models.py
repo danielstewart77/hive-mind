@@ -48,8 +48,8 @@ class BaseModel:
     parameters_b: float
     architecture: str
     serve_tag: str
-    """Ollama tag the trained adapter is served over under the adapter
-    strategy. Must be the same weights the trainer loaded, quantized."""
+    """Ollama tag naming this base. Must be the same weights the trainer
+    loaded, quantized."""
 
     note: str
     """Why you would pick this one, in a sentence a non-specialist reads."""

@@ -135,27 +135,34 @@ def test_merge_mode_takes_the_paths_it_needs(trainer):
     assert args.out == "/workspace/merged-f16.gguf"
 
 
-def test_the_merge_converts_once_to_f16_and_compresses_nothing(
+def test_the_merge_writes_a_full_precision_gguf_at_the_output_path(
     trainer, tmp_path, monkeypatch
 ):
-    """Requirement 2: one full-size file out, no compressor of our own.
+    """The converter is the whole of the conversion, and it writes f16.
 
-    The quantizer this image used to build was linked against a library it
-    did not ship, so a two-hour merge died at exit 127 on its last step.
-    Ollama quantizes on import; a second command here is the bug returning.
+    Ollama quantizes on import, so the file this leaves behind is the one
+    that gets uploaded — full size, at the path the caller named.
     """
     commands = []
     monkeypatch.setattr(
         trainer.subprocess, "run", lambda cmd, **kw: commands.append(list(cmd))
     )
+    merged_dir = tmp_path / "merged-hf"
     out_file = tmp_path / "merged-f16.gguf"
 
-    trainer.convert_to_gguf(tmp_path / "merged-hf", out_file)
+    trainer.convert_to_gguf(merged_dir, out_file)
 
-    assert len(commands) == 1
-    only = commands[0]
-    assert only[only.index("--outtype") + 1] == "f16"
-    assert only[only.index("--outfile") + 1] == str(out_file)
+    assert commands == [
+        [
+            trainer.sys.executable,
+            "/opt/llama.cpp/convert_hf_to_gguf.py",
+            str(merged_dir),
+            "--outfile",
+            str(out_file),
+            "--outtype",
+            "f16",
+        ]
+    ]
 
 
 def test_a_failed_training_run_writes_a_failure_record(trainer, tmp_path, monkeypatch):
