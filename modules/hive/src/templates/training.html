@@ -163,6 +163,16 @@
                 <strong>Trainer output</strong>
                 <small data-log-status></small>
                 <button class="button button-quiet" type="button" id="training-kill">Kill run</button>
+                <div class="run-tiles" data-run-tiles hidden>
+                    <span class="run-tile run-tile-live" title="the page is still polling"><span class="run-pulse"></span></span>
+                    <span class="run-tile"><span class="run-tile-label">Step</span><span class="run-tile-value" data-tile="step">—</span></span>
+                    <span class="run-tile"><span class="run-tile-label">Done</span><span class="run-tile-value" data-tile="percent">—</span></span>
+                    <span class="run-tile"><span class="run-tile-label">Elapsed</span><span class="run-tile-value" data-tile="elapsed">—</span></span>
+                    <span class="run-tile"><span class="run-tile-label">Remaining</span><span class="run-tile-value" data-tile="left">—</span></span>
+                    <span class="run-tile"><span class="run-tile-label">Card</span><span class="run-tile-value" data-tile="card">—</span></span>
+                    <span class="run-tile"><span class="run-tile-label">Busy</span><span class="run-tile-value" data-tile="util">—</span></span>
+                    <span class="run-tile"><span class="run-tile-label">Free</span><span class="run-tile-value" data-tile="free">—</span></span>
+                </div>
             </div>
             <pre id="training-log-body" tabindex="0"></pre>
             <small>Polled, not streamed. The run is a detached container and the watcher lives on the server, so closing this page — or the laptop — changes nothing about it.</small>
@@ -501,35 +511,87 @@ window.addEventListener("DOMContentLoaded", function () {
         if (target) { target.textContent = text; }
     }
 
-    // A run can go a minute between log lines. Something has to move every
-    // second or a live run and a dead poller look identical.
-    const TICKS = ["|", "/", "-", "\\"];
-    let tick = 0;
+    // A run can go a minute between log lines, so something has to move
+    // every second or a live run and a dead poller look identical. That is
+    // the pulsing dot's whole job — it is CSS, so it moves without the
+    // poller redrawing anything and without shifting its neighbours.
+    const tiles = document.querySelector("[data-run-tiles]");
+    const pulse = tiles && tiles.querySelector(".run-pulse");
+    const TILE_NAMES = ["step", "percent", "elapsed", "left", "card", "util", "free"];
 
-    function describeCard(beat) {
-        // Free gigabytes rather than a percentage: the question anyone
-        // actually has is whether the next thing will fit.
-        if (!beat || !beat.vram_total_mib) { return ""; }
-        return (beat.gpu_name || "GPU")
-            + " · " + (beat.gpu_util_pct || 0) + "% busy"
-            + " · " + gb(beat.vram_free_mib || 0) + " free of " + gb(beat.vram_total_mib);
+    function setTile(name, value) {
+        const cell = tiles && tiles.querySelector('[data-tile="' + name + '"]');
+        if (cell) { cell.textContent = value; }
     }
 
-    function describeBeat(beat, progress) {
-        tick = (tick + 1) % TICKS.length;
-        const card = describeCard(beat);
-        if (!beat || !beat.live) { return card || "not running"; }
+    function beatThePulse() {
+        // Restarted per completed poll rather than left running forever:
+        // an animation that cannot stop cannot testify to anything. The
+        // reflow between removing and adding is what rewinds it.
+        if (!pulse) { return; }
+        pulse.classList.remove("is-beating");
+        void pulse.offsetWidth;
+        pulse.classList.add("is-beating");
+    }
+
+    function clock(seconds) {
+        const total = Math.max(0, Math.floor(seconds || 0));
+        const hours = Math.floor(total / 3600);
+        const minutes = Math.floor((total % 3600) / 60);
+        // Rolls to hours, because "125m 59s" is both wider than the tile
+        // reserves and slower to read than "2h 05m".
+        if (hours) { return hours + "h " + String(minutes).padStart(2, "0") + "m"; }
+        if (minutes) { return minutes + "m " + String(total % 60).padStart(2, "0") + "s"; }
+        return total + "s";
+    }
+
+    function renderTiles(beat, progress, pending) {
+        if (!tiles) { return; }
+        const live = !!(beat && beat.live);
+        // The dot survives the window between pressing launch and the
+        // container existing, because that window is minutes long and is
+        // exactly when someone wants to know the page is still alive. The
+        // value tiles do not, since seven dashes read as a run whose
+        // numbers stopped arriving.
+        tiles.hidden = !(live || pending);
+        tiles.querySelectorAll(".run-tile:not(.run-tile-live)").forEach(function (tile) {
+            tile.hidden = !live;
+        });
+        if (live || pending) { beatThePulse(); }
+        // Hidden and blanked, not one or the other: an unhidden strip that
+        // kept its last values would present a finished run's numbers as
+        // current, and the values outlive the hiding otherwise.
+        if (!live) {
+            TILE_NAMES.forEach(function (name) { setTile(name, "—"); });
+            return;
+        }
         // Once the trainer is reporting steps its own numbers replace the
         // container's uptime: uptime counts the weight download too, so
         // early on the two disagree by most of an hour.
-        const where = progress && progress.total_steps
-            ? "step " + progress.step + "/" + progress.total_steps
-                + " · " + progress.percent + "%"
-                + " · " + progress.elapsed + " elapsed"
-                + " · " + progress.eta + " left"
-            : "running " + Math.floor((beat.uptime_seconds || 0) / 60) + "m "
-                + ((beat.uptime_seconds || 0) % 60) + "s";
-        return TICKS[tick] + " " + where + (card ? " · " + card : "");
+        const stepping = progress && progress.total_steps;
+        setTile("step", stepping ? progress.step + "/" + progress.total_steps : "—");
+        setTile("percent", stepping ? progress.percent + "%" : "—");
+        setTile("elapsed", stepping ? progress.elapsed : clock(beat.uptime_seconds));
+        setTile("left", stepping ? progress.eta : "unknown");
+        // A card nobody could read reports zero percent busy and zero free,
+        // which during a run that is pegging it is a confident lie. The
+        // whole heartbeat is missing or none of it is.
+        const readable = !!beat.vram_total_mib;
+        setTile("card", readable ? (beat.gpu_name || "GPU") : "unreadable");
+        setTile("util", readable ? (beat.gpu_util_pct || 0) + "%" : "—");
+        // Free gigabytes rather than a percentage: the question anyone
+        // actually has is whether the next thing will fit.
+        setTile("free", readable
+            ? gb(beat.vram_free_mib || 0).replace(" GB", "") + " of " + gb(beat.vram_total_mib)
+            : "—");
+    }
+
+    function describeBeat(beat) {
+        // Prose only. Every number lives in a tile now — repeating any of
+        // them here rebuilds the run-on shifting string the tiles replaced,
+        // and the idle card already has its own metric at the top of the
+        // page.
+        return beat && beat.live ? "running" : "not running";
     }
 
     function stopLogTail(reason) {
@@ -553,20 +615,22 @@ window.addEventListener("DOMContentLoaded", function () {
                 if (stuck) { logBody.scrollTop = logBody.scrollHeight; }
                 logEverArrived = true;
                 setLogStatus(result.archived
-                    ? name + " · finished, showing archived output · " + describeCard(beat)
-                    : name + " · " + describeBeat(beat, result.progress));
+                    ? name + " · finished, showing archived output"
+                    : name + " · " + describeBeat(beat));
             } else if (!logEverArrived && logWaitingLabel) {
                 // Before the container exists, "no trainer container" is
                 // the literal truth and exactly the wrong thing to say to
                 // someone who just pressed launch.
-                tick = (tick + 1) % TICKS.length;
-                const card = describeCard(beat);
-                setLogStatus(TICKS[tick] + " " + logWaitingLabel + (card ? " · " + card : ""));
+                setLogStatus(logWaitingLabel);
             } else {
                 setLogStatus(result.reason || "no trainer container");
             }
+            renderTiles(beat, result.progress, !logEverArrived && !!logWaitingLabel);
         } catch (error) {
             setLogStatus(error.message);
+            // A poll that failed knows nothing about the run. Leaving the
+            // last good numbers up presents stale readings as current.
+            renderTiles(null, null);
         }
     }
 
@@ -578,6 +642,7 @@ window.addEventListener("DOMContentLoaded", function () {
         logEverArrived = false;
         logWaitingLabel = waitingFor || "waiting for the trainer to start…";
         setLogStatus(logWaitingLabel);
+        renderTiles(null, null);
         logPane.scrollIntoView({behavior: "smooth", block: "nearest"});
         pollLog(name);
         logTimer = setInterval(function () { pollLog(name); }, 1000);
@@ -586,7 +651,7 @@ window.addEventListener("DOMContentLoaded", function () {
     document.getElementById("training-kill").addEventListener("click", async function () {
         const name = (readForm(trainForm).name || "").trim();
         if (!name) { return; }
-        if (!window.confirm("Stop the run '" + name + "'? Its adapter is not written until it finishes, so the work so far is lost.")) { return; }
+        if (!window.confirm("Stop the run '" + name + "'? Every completed epoch has an adapter saved beside the output; anything since the last epoch boundary is lost.")) { return; }
         try {
             const result = await api("/api/training/kill", {method: "POST", body: JSON.stringify({name: name})});
             // The watcher restores the voice stack and closes the ledger;

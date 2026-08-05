@@ -1,6 +1,7 @@
 """Route tests for the training panel and its Hive Tools proxy."""
 
 import os
+import re
 import sys
 from unittest.mock import AsyncMock, patch
 
@@ -238,3 +239,122 @@ def test_every_form_control_that_can_surprise_someone_has_a_hint(
 
     hints = re.findall(r'data-hint="([^"]{40,})"', body)
     assert len(hints) >= 18, f"only {len(hints)} explained controls"
+
+
+# ----------------------------------------- the run header's status tiles
+
+TILES = ("step", "percent", "elapsed", "left", "card", "util", "free")
+
+#: What each tile must reserve, in `ch`, to hold its widest real value.
+#: A `ch` is the advance of a zero and a percent sign is wider than that,
+#: so these are sized against rendered text, not digit counts.
+RESERVED = {
+    "step": 12,      # "10000/12000"
+    "percent": 6,    # "100%"
+    "elapsed": 8,    # "10h 05m"
+    "left": 8,       # "unknown"
+    "card": 12,      # constant per host
+    "util": 6,       # "100%"
+    "free": 17,      # "12.3 of 48.0 GB"
+}
+
+
+def _page(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
+    return client.get("/training").text, client.get("/static/console.css").text
+
+
+def test_each_run_value_gets_its_own_labelled_tile(tmp_path, monkeypatch):
+    """Requirement 1: one labelled tile per value, each carrying its value.
+
+    The header used to be a single line joined with separators, so seven
+    unrelated numbers competed for one width and every one of them moved
+    whenever any other changed.
+    """
+    body, _ = _page(tmp_path, monkeypatch)
+
+    for tile in TILES:
+        assert f'data-tile="{tile}"' in body, f"no tile for {tile}"
+        # A tile nothing ever writes to is a permanent em-dash, which is
+        # indistinguishable from a run whose numbers stopped arriving.
+        assert f'setTile("{tile}"' in body, f"nothing ever fills {tile}"
+    # And setTile writes what it is handed rather than being a stub.
+    assert re.search(
+        r"function setTile\(name, value\)\s*{[^}]*textContent = value", body
+    ), "setTile does not write its value"
+    for label in ("Step", "Done", "Elapsed", "Remaining", "Card", "Busy", "Free"):
+        assert f">{label}<" in body, f"tile {label} is unlabelled"
+    # And the filling runs on the poll, not merely in a function nobody
+    # calls.
+    assert "renderTiles(beat, result.progress" in body
+
+
+def test_a_tile_cannot_be_resized_by_its_own_value(tmp_path, monkeypatch):
+    """Requirement 2: ninety nine to one hundred moves nothing beside it.
+
+    Two mechanisms, both needed. Tabular figures stop a 1 being narrower
+    than a 0, and a reserved width stops the tile growing when a digit is
+    added. There is no browser in this suite, so the declarations are what
+    is checked — but the reserved widths are checked as numbers, since a
+    selector that exists and reserves nothing is the pre-fix behaviour
+    wearing the fix's clothes.
+    """
+    _, css = _page(tmp_path, monkeypatch)
+
+    assert "tabular-nums" in css[css.index(".run-tile-value") :][:400]
+    for tile, floor in RESERVED.items():
+        match = re.search(
+            r'\.run-tile-value\[data-tile="%s"\][^}]*min-width:\s*(\d+)ch' % tile, css
+        )
+        assert match, f"{tile} reserves no width"
+        assert int(match.group(1)) >= floor, (
+            f"{tile} reserves {match.group(1)}ch, needs {floor}ch"
+        )
+
+
+def test_the_pulsing_dot_stops_when_the_polling_stops(tmp_path, monkeypatch):
+    """Requirement 3: a dot that proves the page is still polling.
+
+    The spinner it replaces cycled four glyphs of four different widths —
+    the largest single source of movement in this header — but it did
+    testify, because it only advanced when a poll returned. An animation
+    set to run forever keeps pulsing through a hung fetch, so this one
+    fires once and is restarted by each completed poll.
+    """
+    body, css = _page(tmp_path, monkeypatch)
+
+    # The dot lives in the strip, not merely somewhere in the document.
+    strip = body[body.index("data-run-tiles") : body.index("</div>", body.index("data-run-tiles"))]
+    dot = re.search(r"<span[^>]*class=\"run-pulse\"[^>]*>", strip)
+    assert dot, "no pulsing dot inside the run strip"
+    # A hidden dot proves nothing, and the strip's own hiding is the only
+    # thing entitled to take it off screen.
+    assert "hidden" not in dot.group(0)
+
+    # Fires once per beat rather than looping, and something binds it.
+    assert "@keyframes run-pulse" in css
+    animation = re.search(r"\.run-pulse\.is-beating\s*{[^}]*animation:([^;]+);", css)
+    assert animation, "nothing binds the keyframes"
+    assert "infinite" not in animation.group(1)
+    assert "beatThePulse" in body and "classList.remove(\"is-beating\")" in body
+
+
+def test_the_tiles_are_absent_until_a_run_is_live(tmp_path, monkeypatch):
+    """Requirement 4: an idle machine shows no run tiles.
+
+    The strip ships hidden and is only revealed by a heartbeat reporting a
+    live trainer, so a finished run puts it away again rather than leaving
+    the last numbers on screen looking current.
+    """
+    body, css = _page(tmp_path, monkeypatch)
+
+    strip = body[body.index("data-run-tiles") : body.index("data-run-tiles") + 120]
+    assert "hidden" in strip
+    # An author-origin display beats the UA stylesheet's [hidden] rule, so
+    # without this the attribute is a flag nothing reads.
+    assert re.search(r"\.run-tiles\[hidden\]\s*{[^}]*display:\s*none", css)
+    # Revealed by the heartbeat rather than unconditionally.
+    assert "tiles.hidden = !(live || pending)" in body
+    assert "const live = !!(beat && beat.live)" in body
+    # And blanked, since values outlive the hiding.
+    assert 'TILE_NAMES.forEach(function (name) { setTile(name, "—"); })' in body

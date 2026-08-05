@@ -426,6 +426,92 @@ a { color: inherit; }
     font-size: 12px;
     font-variant-numeric: tabular-nums;
 }
+/* One tile per value. Strung together on a single line, seven unrelated
+   numbers shared one width, so utilisation ticking 99 to 100 shunted the
+   six beside it a character sideways once a second. Each tile reserves the
+   width of its own widest plausible value and nothing beyond it moves. */
+.run-tiles {
+    flex: 1 1 100%;
+    order: 4;
+    display: flex;
+    /* Wrap rather than shrink: a phone cannot hold seven side by side, and
+       a tile narrower than its contents is the problem this is fixing. */
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 4px;
+}
+/* An author-origin display beats the UA stylesheet's [hidden] rule, so
+   without this the hidden attribute sets a flag nothing reads and the
+   strip stays on screen in every state. */
+.run-tiles[hidden] { display: none; }
+.run-tile {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 4px 10px;
+    border: 1px solid var(--console-line);
+    border-radius: 7px;
+    background: var(--console-surface-2);
+}
+.run-tile-label {
+    color: var(--console-muted);
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+.run-tile-value {
+    /* Tabular figures so a 1 is no narrower than a 0, and a reserved
+       minimum so adding a digit cannot widen the tile. Both are needed:
+       either alone still moves. */
+    font-variant-numeric: tabular-nums;
+    font-size: 12px;
+    min-width: 5ch;
+    text-align: right;
+    white-space: nowrap;
+}
+/* Reserved per tile, because "100%" and "12.3 of 48.0 GB" cannot share one
+   width without the short ones swimming in whitespace. Sized against the
+   widest value each one can actually hold, with room for the units and
+   glyphs — `ch` is the advance of a zero, and a percent sign in this face
+   is half again as wide as that, so a reserve counted in digits alone is
+   the tile growing at 100% all over again. */
+.run-tile-value[data-tile="step"] { min-width: 12ch; }
+.run-tile-value[data-tile="percent"] { min-width: 6ch; }
+.run-tile-value[data-tile="elapsed"] { min-width: 8ch; }
+.run-tile-value[data-tile="left"] { min-width: 8ch; }
+.run-tile-value[data-tile="card"] { min-width: 12ch; text-align: left; }
+.run-tile-value[data-tile="util"] { min-width: 6ch; }
+.run-tile-value[data-tile="free"] { min-width: 17ch; }
+/* Proof that the poller is alive. The spinner it replaces cycled four
+   glyphs of four different widths, which was the single largest source of
+   movement in this header — but it did testify to the poller, because it
+   only advanced when a poll returned. A CSS animation set to run forever
+   would keep pulsing through a hung fetch and a cleared timer alike, so
+   this one fires once and is restarted by each completed poll. When polls
+   stop, so does the dot. */
+.run-tile-live { padding: 4px 9px; }
+.run-pulse {
+    display: block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--console-green);
+    opacity: 0.35;
+}
+.run-pulse.is-beating { animation: run-pulse 900ms ease-out 1; }
+@keyframes run-pulse {
+    0% { opacity: 1; transform: scale(1); }
+    100% { opacity: 0.35; transform: scale(0.8); }
+}
+@media (prefers-reduced-motion: reduce) {
+    /* Still a beat, just no scaling — going fully static would leave a
+       reduced-motion reader with no way to tell a live poller from a dead
+       one, which is the whole job of this dot. */
+    @keyframes run-pulse {
+        0% { opacity: 1; }
+        100% { opacity: 0.35; }
+    }
+}
 .training-log pre {
     /* Six field rows tall even while empty. A pane that collapses to the
        height of one input reads as broken during the quarter of an hour a
