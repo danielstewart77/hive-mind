@@ -205,3 +205,16 @@ def test_no_cuda_device_means_no_cap(trainer):
     cuda = _FakeCuda(available=False)
     assert trainer.apply_memory_cap({"gpu_memory_fraction": 0.9}, _FakeTorch(cuda)) == 0.0
     assert cuda.applied == []
+
+
+def test_the_trainer_announces_each_stage_as_it_starts_it(trainer, capsys):
+    """Requirement: something is on screen from launch until the run ends.
+
+    Every expensive step here is silent by default, so without this the
+    pane is empty for the quarter of an hour it takes to pull weights and
+    a downloading run is indistinguishable from a hung one.
+    """
+    trainer.stage("loading base weights")
+    captured = capsys.readouterr().out
+    assert "loading base weights" in captured
+    assert captured.endswith("\n")
