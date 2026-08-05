@@ -9,12 +9,15 @@ import pytest
 from core.training_runs import (
     KIND_CURATE,
     KIND_EXPORT,
+    KIND_TRAIN,
+    STATUS_CANCELLED,
     STATUS_FAILED,
     STATUS_RUNNING,
     STATUS_SUCCEEDED,
     connect,
     finish_run,
     get_run,
+    init_db,
     latest_run,
     list_runs,
     reap_stale_runs,
@@ -135,3 +138,25 @@ def test_a_long_run_whose_trainer_is_alive_is_not_reaped(ledger):
     assert reap_stale_runs(ledger, older_than_seconds=3_600, is_alive=is_alive) == 1
     assert get_run(ledger, alive).status == STATUS_RUNNING
     assert get_run(ledger, dead).status == STATUS_FAILED
+
+
+def test_a_cancelled_run_closes_once_and_is_not_a_failure(tmp_path):
+    """Requirement: a run stopped on purpose is recorded as cancelled.
+
+    A ledger that only has "failed" makes a run you killed deliberately
+    indistinguishable from one that broke, and the difference is the
+    whole reason anyone opens the ledger.
+    """
+    ledger = tmp_path / "runs.db"
+    init_db(ledger)
+    run_id = start_run(ledger, KIND_TRAIN, options={"output_name": "run-a"})
+
+    finish_run(ledger, run_id, status=STATUS_CANCELLED, error="stopped by the operator")
+    closed = get_run(ledger, run_id)
+    assert closed.status == STATUS_CANCELLED
+    assert closed.status != STATUS_FAILED
+    assert closed.finished_at is not None
+
+    # A watcher retrying a dropped call must not rewrite a recorded outcome.
+    finish_run(ledger, run_id, status=STATUS_SUCCEEDED)
+    assert get_run(ledger, run_id).status == STATUS_CANCELLED
