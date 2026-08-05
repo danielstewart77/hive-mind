@@ -163,7 +163,6 @@
                 <strong>Trainer output</strong>
                 <small data-log-status></small>
                 <button class="button button-quiet" type="button" id="training-kill">Kill run</button>
-                <button class="button button-quiet" type="button" id="training-log-stop">Stop watching</button>
             </div>
             <pre id="training-log-body" tabindex="0"></pre>
             <small>Polled, not streamed. The run is a detached container and the watcher lives on the server, so closing this page — or the laptop — changes nothing about it.</small>
@@ -514,14 +513,21 @@ window.addEventListener("DOMContentLoaded", function () {
             + " · " + gb(beat.vram_free_mib || 0) + " free of " + gb(beat.vram_total_mib);
     }
 
-    function describeBeat(beat) {
+    function describeBeat(beat, progress) {
         tick = (tick + 1) % TICKS.length;
         const card = describeCard(beat);
         if (!beat || !beat.live) { return card || "not running"; }
-        const mins = Math.floor((beat.uptime_seconds || 0) / 60);
-        const secs = (beat.uptime_seconds || 0) % 60;
-        const elapsed = (mins ? mins + "m " : "") + secs + "s";
-        return TICKS[tick] + " running " + elapsed + (card ? " · " + card : "");
+        // Once the trainer is reporting steps its own numbers replace the
+        // container's uptime: uptime counts the weight download too, so
+        // early on the two disagree by most of an hour.
+        const where = progress && progress.total_steps
+            ? "step " + progress.step + "/" + progress.total_steps
+                + " · " + progress.percent + "%"
+                + " · " + progress.elapsed + " elapsed"
+                + " · " + progress.eta + " left"
+            : "running " + Math.floor((beat.uptime_seconds || 0) / 60) + "m "
+                + ((beat.uptime_seconds || 0) % 60) + "s";
+        return TICKS[tick] + " " + where + (card ? " · " + card : "");
     }
 
     function stopLogTail(reason) {
@@ -542,7 +548,7 @@ window.addEventListener("DOMContentLoaded", function () {
                 logEverArrived = true;
                 setLogStatus(result.archived
                     ? name + " · finished, showing archived output · " + describeCard(beat)
-                    : name + " · " + describeBeat(beat));
+                    : name + " · " + describeBeat(beat, result.progress));
             } else if (!logEverArrived && logWaitingLabel) {
                 // Before the container exists, "no trainer container" is
                 // the literal truth and exactly the wrong thing to say to
@@ -570,10 +576,6 @@ window.addEventListener("DOMContentLoaded", function () {
         pollLog(name);
         logTimer = setInterval(function () { pollLog(name); }, 1000);
     }
-
-    document.getElementById("training-log-stop").addEventListener("click", function () {
-        stopLogTail("stopped watching — the run is untouched");
-    });
 
     document.getElementById("training-kill").addEventListener("click", async function () {
         const name = (readForm(trainForm).name || "").trim();
