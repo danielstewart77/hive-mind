@@ -65,8 +65,11 @@ from core.training_runs import (  # noqa: E402
     KIND_EXPORT,
     KIND_TRAIN,
     STATUS_FAILED,
+    STATUS_RUNNING,
     STATUS_SUCCEEDED,
+    TERMINAL_STATUSES,
     finish_run,
+    get_run,
     latest_run,
     list_runs,
     reap_stale_runs,
@@ -460,7 +463,45 @@ def build_parser() -> argparse.ArgumentParser:
     runs_p.add_argument("--kind", choices=["curate", "export", "train", "deploy"])
     runs_p.add_argument("--limit", type=int, default=20)
 
+    close_p = sub.add_parser("close-run", help="close an open ledger entry")
+    close_p.add_argument("--run-id", required=True)
+    close_p.add_argument(
+        "--status", required=True, choices=sorted(TERMINAL_STATUSES)
+    )
+    close_p.add_argument("--error", default="")
+    close_p.add_argument("--artifact-path", default="")
+
     return parser
+
+
+def cmd_close_run(args) -> dict:
+    """Close a run someone else was watching.
+
+    The trainer runs detached and the process that launched it is long
+    gone by the time it ends, so whoever *is* watching needs a way to
+    write the outcome down. Closing an already-closed run is reported,
+    not raised: a watcher retrying after a dropped call must not turn a
+    recorded outcome into an error.
+    """
+    ledger = _ledger(args)
+    before = get_run(ledger, args.run_id)
+    if before is None:
+        return {"run_id": args.run_id, "closed": False, "reason": "no such run"}
+    if before.status != STATUS_RUNNING:
+        return {
+            "run_id": args.run_id,
+            "closed": False,
+            "reason": f"already {before.status}",
+            "status": before.status,
+        }
+    finish_run(
+        ledger,
+        args.run_id,
+        status=args.status,
+        error=args.error or None,
+        artifact_path=args.artifact_path or None,
+    )
+    return {"run_id": args.run_id, "closed": True, "status": args.status}
 
 
 COMMANDS = {
@@ -471,6 +512,7 @@ COMMANDS = {
     "base-models": cmd_base_models,
     "deploy": cmd_deploy,
     "runs": cmd_runs,
+    "close-run": cmd_close_run,
 }
 
 

@@ -31,7 +31,11 @@ VALID_KINDS = frozenset({KIND_CURATE, KIND_EXPORT, KIND_TRAIN, KIND_DEPLOY})
 STATUS_RUNNING = "running"
 STATUS_SUCCEEDED = "succeeded"
 STATUS_FAILED = "failed"
-TERMINAL_STATUSES = frozenset({STATUS_SUCCEEDED, STATUS_FAILED})
+#: A run the operator stopped on purpose. Its own status rather than a
+#: failure: a stopped run and a broken one look identical in a ledger that
+#: only has "failed", and the difference is the whole reason to look.
+STATUS_CANCELLED = "cancelled"
+TERMINAL_STATUSES = frozenset({STATUS_SUCCEEDED, STATUS_FAILED, STATUS_CANCELLED})
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS training_runs (
