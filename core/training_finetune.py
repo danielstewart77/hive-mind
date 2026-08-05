@@ -56,11 +56,29 @@ class FineTuneSpec:
     load_in_4bit: bool = True
     seed: int = 17
 
+    #: Hard ceiling on the fraction of the card this job may allocate,
+    #: applied inside the trainer by ``torch.cuda.set_per_process_memory_
+    #: fraction``. Planning arithmetic cannot enforce a reserve — the
+    #: allocator grows past any estimate hours in, and on this host the
+    #: display server is on the same card, so the desktop is what dies.
+    #: Zero means no cap, which is only correct on a headless machine.
+    gpu_memory_fraction: float = 0.0
+
     def validate(self) -> list[str]:
         """Return human-readable problems; empty means the spec is usable."""
         problems: list[str] = []
-        if not self.train_file or not Path(self.train_file).exists():
+        train_path = Path(self.train_file) if self.train_file else None
+        if not self.train_file or train_path is None or not train_path.exists():
             problems.append(f"train file not found: {self.train_file!r}")
+        elif train_path.stat().st_size == 0:
+            # A curation pass that kept nothing still writes a file. The
+            # trainer would exit zero having learned nothing, and the run
+            # would be reported as a success.
+            problems.append(f"train file is empty: {self.train_file!r}")
+        if self.eval_file and not Path(self.eval_file).exists():
+            problems.append(f"eval file not found: {self.eval_file!r}")
+        if not 0.0 <= self.gpu_memory_fraction <= 1.0:
+            problems.append("gpu_memory_fraction must be between 0 and 1")
         if self.epochs < 1:
             problems.append("epochs must be at least 1")
         if not 0 < self.learning_rate < 1:
@@ -130,6 +148,27 @@ def read_gpu_state() -> GpuState:
 UNKNOWN_MODEL_4BIT_MIB = 22_000
 UNKNOWN_MODEL_BF16_MIB = 60_000
 
+#: VRAM this host never lets a training job claim, because Xorg and
+#: gnome-shell are on the same card and a failed surface allocation takes
+#: the desktop — and every terminal, tile and chat window on it — with it.
+#: Enforced as a cap inside the trainer process, not merely subtracted in a
+#: planning function: the allocator's peak arrives hours in, at the first
+#: max-length batch and again at the eval pass.
+DESKTOP_RESERVE_MIB = 2_048
+
+
+def memory_fraction_for(total_mib: int, reserve_mib: int = DESKTOP_RESERVE_MIB) -> float:
+    """Fraction of the card the trainer may allocate, leaving the reserve.
+
+    Returns 0.0 for an unknown card size, which the trainer reads as "no
+    cap" — refusing to run because nvidia-smi was unreadable would be a
+    worse failure than running uncapped on a machine that may be headless.
+    """
+    if total_mib <= 0:
+        return 0.0
+    usable = max(0, total_mib - reserve_mib)
+    return round(usable / total_mib, 4)
+
 
 def estimate_required_mib(spec: FineTuneSpec) -> int:
     """Rough VRAM floor for a LoRA over this base at this sequence length.
@@ -170,22 +209,59 @@ class LaunchPlan:
     required_mib: int = 0
     can_run: bool = False
     blockers: list[str] = field(default_factory=list)
+    reclaimable_mib: int = 0
+    """VRAM a launch will take back before the trainer starts."""
+
+    notes: list[str] = field(default_factory=list)
+    """What the verdict is counting on. Populated only when the run needs
+    memory it does not yet have — an answer of "it fits" is worth nothing
+    without the sentence naming what has to be stopped for it to fit."""
 
     def as_dict(self) -> dict:
         return asdict(self)
 
 
-def plan_run(spec: FineTuneSpec, gpu: GpuState | None = None) -> LaunchPlan:
-    """Decide whether this job can start right now, and say why not."""
+def plan_run(
+    spec: FineTuneSpec,
+    gpu: GpuState | None = None,
+    reclaimable_mib: int = 0,
+) -> LaunchPlan:
+    """Decide whether this job can start, and say why not.
+
+    A launch is not a bare ``docker run``: it first stops the voice stack
+    and evicts Ollama's loaded models, so the card a trainer wakes up on
+    is emptier than the one this function is looking at. Judging against
+    what is free *right now* refuses runs that would fit with room to
+    spare, and the operator is left staring at a number that was never
+    the relevant one. The caller that owns the arbitration passes what it
+    is about to reclaim; nothing is assumed here, because a caller that
+    frees nothing must still get an honest refusal.
+    """
     gpu = gpu if gpu is not None else read_gpu_state()
     required = estimate_required_mib(spec)
+    reclaimable = max(0, reclaimable_mib)
+    effective_free = gpu.free_mib + reclaimable
     blockers = list(spec.validate())
+    notes: list[str] = []
     if not gpu.available:
         blockers.append("no GPU visible to nvidia-smi")
-    elif gpu.free_mib < required:
+    elif effective_free < required + DESKTOP_RESERVE_MIB:
+        # The reserve sits on top of what the desktop already holds, not
+        # inside it: the compositor grows when a browser tab wakes up at
+        # hour three, and that growth is what has to fit.
         blockers.append(
-            f"GPU has {gpu.free_mib} MiB free; this job needs about "
-            f"{required} MiB. Free VRAM or lower max_sequence_length."
+            f"GPU has {gpu.free_mib} MiB free"
+            + (f" and {reclaimable} MiB reclaimable" if reclaimable else "")
+            + f"; this job needs about {required} MiB plus "
+            f"{DESKTOP_RESERVE_MIB} MiB reserved for the desktop. "
+            "Free VRAM or lower max_sequence_length."
+        )
+    elif reclaimable and gpu.free_mib < required + DESKTOP_RESERVE_MIB:
+        notes.append(
+            f"Fits only after launch reclaims {reclaimable} MiB: the voice "
+            f"stack is stopped and Ollama's loaded models are evicted. Free "
+            f"now is {gpu.free_mib} MiB, and this job needs about {required} "
+            f"MiB plus {DESKTOP_RESERVE_MIB} MiB reserved for the desktop."
         )
     if not shutil.which("docker"):
         blockers.append("docker is not available on this host")
@@ -195,6 +271,8 @@ def plan_run(spec: FineTuneSpec, gpu: GpuState | None = None) -> LaunchPlan:
         required_mib=required,
         can_run=not blockers,
         blockers=blockers,
+        reclaimable_mib=reclaimable,
+        notes=notes,
     )
 
 
@@ -219,11 +297,26 @@ def huggingface_cache_dir() -> str:
     return str(path)
 
 
+def spec_filename(output_name: str) -> str:
+    """Spec file name for this job, unique per run within a dataset dir.
+
+    A fixed ``finetune_spec.json`` is read by the trainer minutes after
+    launch — after the image pull and the base-weights download — so a
+    second launch against the same dataset directory could rewrite the
+    file a running trainer had not yet read, and it would train
+    hyperparameters nobody selected while the ledger recorded the first
+    run's options. Keying the name to the job removes the collision
+    rather than racing it.
+    """
+    safe = "".join(c if (c.isalnum() or c in "._-") else "_" for c in output_name)
+    return f"finetune_spec.{safe or 'job'}.json"
+
+
 def write_spec(spec: FineTuneSpec, out_dir: str | Path) -> Path:
     """Persist the job spec beside the dataset it trains on."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / "finetune_spec.json"
+    path = out_dir / spec_filename(spec.output_name)
     path.write_text(json.dumps(spec.as_dict(), indent=2, sort_keys=True))
     return path
 
@@ -240,21 +333,32 @@ def launch(
     while the GPU is busy serving inference, and the caller renders the
     blockers rather than a stack trace.
     """
+    gpu = gpu if gpu is not None else read_gpu_state()
+    if not spec.gpu_memory_fraction:
+        spec.gpu_memory_fraction = memory_fraction_for(gpu.total_mib)
     plan = plan_run(spec, gpu=gpu)
-    spec_path = write_spec(spec, out_dir)
     if not plan.can_run:
+        # Deliberately before write_spec: a refused launch used to
+        # overwrite the spec file of a job already training out of the
+        # same dataset directory.
         return {
             "launched": False,
             "plan": plan.as_dict(),
-            "spec_path": str(spec_path),
+            "spec_path": "",
         }
+    spec_path = write_spec(spec, out_dir)
 
     host_dir = str(Path(out_dir).resolve())
     command = [
         "docker",
         "run",
-        "--rm",
         "--detach",
+        # No --rm. The container is the only record of how the run ended:
+        # self-removal on exit leaves nothing to read an exit code from,
+        # so a crash at hour three is indistinguishable from a success and
+        # gets reported as one. The watcher removes it after reading.
+        "--label",
+        f"hive.training.output_name={spec.output_name}",
         "--gpus",
         "all",
         "--name",
@@ -271,7 +375,7 @@ def launch(
         "--mode",
         "train",
         "--spec",
-        "/workspace/finetune_spec.json",
+        f"/workspace/{spec_filename(spec.output_name)}",
     ]
     # Some bases are gated behind an accepted licence. A token in the
     # environment is passed through; its absence is not an error, because

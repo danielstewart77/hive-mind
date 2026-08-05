@@ -126,15 +126,42 @@ def write_result(out_dir: Path, payload: dict) -> Path:
     return path
 
 
+def apply_memory_cap(spec: dict, torch) -> float:
+    """Cap this process's share of the card, and return what was applied.
+
+    The host's display server shares this GPU. Without a cap the caching
+    allocator grows to whatever is free — typically at the first
+    max-length batch, hours after anyone checked — and the next surface
+    allocation Xorg makes fails, taking the desktop and every window on it
+    down. A planning-time subtraction cannot prevent that; only a limit
+    inside this process can.
+
+    A fraction of zero or a machine with no CUDA device means no cap, so a
+    headless run is unaffected.
+    """
+    fraction = float(spec.get("gpu_memory_fraction") or 0.0)
+    if not 0.0 < fraction < 1.0:
+        return 0.0
+    if not torch.cuda.is_available():
+        return 0.0
+    for device in range(torch.cuda.device_count()):
+        torch.cuda.set_per_process_memory_fraction(fraction, device)
+    return fraction
+
+
 def run_training(spec: dict) -> dict:
     import torch
     from peft import LoraConfig
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
     from trl import SFTConfig, SFTTrainer
 
+    apply_memory_cap(spec, torch)
+
     train_file = resolve_in_workspace(spec["train_file"])
     if not train_file.exists():
         raise FileNotFoundError(f"training file not found: {train_file}")
+    if train_file.stat().st_size == 0:
+        raise ValueError(f"training file is empty: {train_file}")
     eval_file = resolve_in_workspace(spec.get("eval_file") or "")
     out_dir = output_dir_in_workspace(spec["output_dir"])
 
