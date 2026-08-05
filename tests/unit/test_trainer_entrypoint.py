@@ -244,3 +244,22 @@ def test_gradient_checkpointing_passes_use_reentrant_explicitly(trainer):
     """
     source = Path(trainer.__file__).read_text()
     assert 'gradient_checkpointing_kwargs={"use_reentrant": False}' in source
+
+
+def test_the_progress_line_carries_position_pace_and_what_is_left(trainer):
+    """Requirement: the console can say how much time is left.
+
+    The estimate is made in the trainer because only the trainer knows
+    when training began — the container's uptime includes the weight
+    download, which on a cold cache is most of the first half hour.
+    """
+    line = trainer.format_progress(step=24, total=377, elapsed=758, loss=1.6377)
+    assert "step 24/377" in line
+    assert "6%" in line
+    assert "elapsed 12m 38s" in line
+    assert "eta 3h 05m" in line
+    assert "loss 1.6377" in line
+
+    # Before the first step there is no rate, and inventing one is worse
+    # than admitting there isn't one.
+    assert "eta unknown" in trainer.format_progress(step=0, total=377, elapsed=0)

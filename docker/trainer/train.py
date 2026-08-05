@@ -37,6 +37,40 @@ WORKSPACE = Path(os.environ.get("TRAINER_WORKSPACE", "/workspace"))
 RESULT_NAME = "result.json"
 
 
+def format_duration(seconds: float) -> str:
+    """A duration a person reads at a glance: ``2h 14m`` or ``47s``."""
+    seconds = max(0, int(seconds))
+    hours, rest = divmod(seconds, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    if minutes:
+        return f"{minutes}m {secs:02d}s"
+    return f"{secs}s"
+
+
+def format_progress(step: int, total: int, elapsed: float, loss: float | None = None) -> str:
+    """One line carrying position, pace and what is left.
+
+    The estimate is made here rather than by whoever reads the log,
+    because only this process knows how long training has actually been
+    running — a container's uptime includes the download, which on a
+    cold cache is most of the first half hour and would put the first
+    estimates out by an order of magnitude.
+    """
+    total = max(1, total)
+    step = max(0, min(step, total))
+    percent = int(round(100 * step / total))
+    remaining = (elapsed / step) * (total - step) if step else 0
+    line = (
+        f"step {step}/{total} · {percent}% · elapsed {format_duration(elapsed)}"
+        f" · eta {format_duration(remaining) if step else 'unknown'}"
+    )
+    if loss is not None:
+        line += f" · loss {loss:.4f}"
+    return line
+
+
 def stage(message: str) -> None:
     """Announce what the run is about to spend minutes doing.
 
@@ -162,6 +196,30 @@ def apply_memory_cap(spec: dict, torch) -> float:
     return fraction
 
 
+def _progress_reporter_class():
+    """Built lazily: transformers only exists inside the trainer image."""
+    from transformers import TrainerCallback
+
+    class ProgressReporter(TrainerCallback):
+        """Prints where the run is and when it will be done, every step."""
+
+        def on_train_begin(self, args, state, control, **kwargs):
+            self.started = time.time()
+
+        def on_log(self, args, state, control, logs=None, **kwargs):
+            loss = (logs or {}).get("loss")
+            stage(
+                format_progress(
+                    int(state.global_step),
+                    int(state.max_steps),
+                    time.time() - getattr(self, "started", time.time()),
+                    float(loss) if isinstance(loss, (int, float)) else None,
+                )
+            )
+
+    return ProgressReporter
+
+
 def run_training(spec: dict) -> dict:
     stage("loading torch and the training libraries")
     import torch
@@ -266,6 +324,7 @@ def run_training(spec: dict) -> dict:
         eval_dataset=eval_dataset,
         peft_config=peft_config,
     )
+    trainer.add_callback(_progress_reporter_class()())
     started = time.time()
     stage("training starts now — a line lands every step")
     train_output = trainer.train()
