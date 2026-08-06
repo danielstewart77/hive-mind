@@ -431,7 +431,11 @@ async def activate_session(session_id: str, body: ActivateRequest):
 
 @app.post("/sessions/{session_id}/model")
 async def switch_model(session_id: str, body: ModelSwitchRequest):
-    return await session_mgr.switch_model(session_id, body.model)
+    """A model this mind may not run is a bad request, not a server fault."""
+    try:
+        return await session_mgr.switch_model(session_id, body.model)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/sessions/{session_id}/autopilot")
