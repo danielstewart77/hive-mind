@@ -28,7 +28,6 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
-from comms.models import ModelRegistry, Provider
 from comms.sessions import SessionManager
 
 SEED = "<soul>who you are</soul>\n<recent>what just happened</recent>"
@@ -40,8 +39,7 @@ def _run(coro):
 
 async def _make_manager(tmp: str) -> SessionManager:
     os.environ["SESSIONS_DB_PATH"] = os.path.join(tmp, "sessions.db")
-    mgr = SessionManager(ModelRegistry({"anthropic": Provider(name="anthropic")},
-                                       {"opus": "anthropic"}))
+    mgr = SessionManager()
     await mgr.start()
     return mgr
 

@@ -73,27 +73,45 @@ def public_runtime(path: Path) -> dict[str, Any]:
     return {k: loaded[k] for k in PUBLIC_FIELDS if k in loaded}
 
 
-def update_default_model(path: Path, model: str) -> dict[str, Any]:
-    """Rewrite `default_model` in place, atomically, preserving the rest.
+#: Fields the console may write, and the pattern each value must match. A
+#: provider is a name in the proxy's providers table; a model is a deployment
+#: name from that provider's listing.
+WRITABLE_FIELDS = {
+    "default_model": _MODEL_NAME_RE,
+    "provider": re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"),
+}
 
-    A line-level substitution rather than a YAML round-trip: dumping the
-    parsed document back would strip the comments that explain each field to
-    whoever opens the file next.
+
+def update_runtime_fields(path: Path, fields: dict[str, str]) -> dict[str, Any]:
+    """Rewrite the given fields in place, atomically, preserving the rest.
+
+    Line-level substitution rather than a YAML round-trip: dumping the parsed
+    document back would strip the comments that explain each field to whoever
+    opens the file next. Every field lands in one write, so a mind is never
+    left holding a provider that does not host the model beside it.
     """
-    if not _MODEL_NAME_RE.fullmatch(model or ""):
-        raise ValueError("Model name contains unsupported characters")
+    if not fields:
+        raise ValueError("Nothing to write")
+    unknown = sorted(set(fields) - set(WRITABLE_FIELDS))
+    if unknown:
+        raise ValueError(f"Not a writable field: {', '.join(unknown)}")
+    for field, value in fields.items():
+        if not WRITABLE_FIELDS[field].fullmatch(value or ""):
+            raise ValueError(f"{field} contains unsupported characters")
+
     path = Path(path)
     load_runtime(path)  # reject a malformed file before touching it
-    text = path.read_text()
-    updated, count = re.subn(
-        r"^default_model\s*:.*$",
-        f"default_model: {model}",
-        text,
-        count=1,
-        flags=re.MULTILINE,
-    )
-    if count != 1:
-        raise ValueError("Runtime configuration has no default_model field")
+    updated = path.read_text()
+    for field, value in fields.items():
+        updated, count = re.subn(
+            rf"^{field}\s*:.*$",
+            f"{field}: {value}",
+            updated,
+            count=1,
+            flags=re.MULTILINE,
+        )
+        if count != 1:
+            raise ValueError(f"Runtime configuration has no {field} field")
 
     fd, temporary = tempfile.mkstemp(prefix="runtime-", suffix=".yaml", dir=path.parent)
     try:
@@ -277,7 +295,7 @@ def install_runtime_routes(app: FastAPI, *, path: Path, mind_id: str, log) -> No
 
     @app.patch("/runtime")
     async def patch_runtime(req: Request) -> Any:
-        """Set this mind's default model, durably.
+        """Set this mind's provider and default model, durably.
 
         Sessions already running keep the model they spawned with; the next
         one the gateway creates uses this.
@@ -291,15 +309,22 @@ def install_runtime_routes(app: FastAPI, *, path: Path, mind_id: str, log) -> No
         model = str(body.get("default_model") or "").strip()
         if not model:
             return JSONResponse({"error": "default_model required"}, status_code=400)
+        fields = {"default_model": model}
+        provider = str(body.get("provider") or "").strip()
+        if provider:
+            fields["provider"] = provider
         try:
-            configuration = update_default_model(path, model)
+            configuration = update_runtime_fields(path, fields)
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         except OSError as exc:
             return JSONResponse(
                 {"error": f"could not write runtime.yaml: {exc}"}, status_code=500
             )
-        log_event(log, "mind.runtime.updated", mind_id=mind_id, default_model=model)
+        log_event(
+            log, "mind.runtime.updated", mind_id=mind_id,
+            default_model=model, provider=provider or None,
+        )
         return {
             "saved": True,
             "configuration": {

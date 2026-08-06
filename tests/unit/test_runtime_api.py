@@ -52,16 +52,16 @@ class TestLoad:
             runtime_api.load_runtime(tmp_path / "absent.yaml")
 
 
-class TestUpdateDefaultModel:
+class TestUpdateRuntimeFields:
     def test_writes_the_new_model(self, runtime_file):
         assert (
-            runtime_api.update_default_model(runtime_file, "opus")["default_model"]
+            runtime_api.update_runtime_fields(runtime_file, {"default_model": "opus"})["default_model"]
             == "opus"
         )
         assert runtime_api.load_runtime(runtime_file)["default_model"] == "opus"
 
     def test_preserves_comments_and_other_fields(self, runtime_file):
-        runtime_api.update_default_model(runtime_file, "opus")
+        runtime_api.update_runtime_fields(runtime_file, {"default_model": "opus"})
         text = runtime_file.read_text()
         assert "# The model every new conversation starts on." in text
         assert "resume_policy: always" in text
@@ -69,18 +69,37 @@ class TestUpdateDefaultModel:
     def test_accepts_an_ollama_tag(self, runtime_file):
         model = "qwen3:30b-a3b-instruct-2507-q4_K_M"
         assert (
-            runtime_api.update_default_model(runtime_file, model)["default_model"]
+            runtime_api.update_runtime_fields(runtime_file, {"default_model": model})["default_model"]
             == model
         )
 
     @pytest.mark.parametrize("model", ["", "opus; rm -rf /", "opus\nname: evil"])
     def test_rejects_an_unusable_model_name(self, runtime_file, model):
         with pytest.raises(ValueError):
-            runtime_api.update_default_model(runtime_file, model)
+            runtime_api.update_runtime_fields(runtime_file, {"default_model": model})
         assert runtime_api.load_runtime(runtime_file)["default_model"] == "sonnet"
 
+    def test_writes_the_provider_alongside_the_model(self, runtime_file):
+        """One write, so a mind never holds a provider that lacks its model."""
+        saved = runtime_api.update_runtime_fields(
+            runtime_file, {"provider": "ollama", "default_model": "qwen35-131k"}
+        )
+        assert (saved["provider"], saved["default_model"]) == ("ollama", "qwen35-131k")
+        reloaded = runtime_api.load_runtime(runtime_file)
+        assert (reloaded["provider"], reloaded["default_model"]) == (
+            "ollama",
+            "qwen35-131k",
+        )
+
+    def test_refuses_a_field_outside_the_writable_set(self, runtime_file):
+        with pytest.raises(ValueError):
+            runtime_api.update_runtime_fields(runtime_file, {"gateway_url": "http://x"})
+        assert runtime_api.load_runtime(runtime_file)["gateway_url"] == (
+            "http://example:8420"
+        )
+
     def test_leaves_no_temporary_files_behind(self, runtime_file):
-        runtime_api.update_default_model(runtime_file, "opus")
+        runtime_api.update_runtime_fields(runtime_file, {"default_model": "opus"})
         assert [p.name for p in runtime_file.parent.iterdir()] == ["runtime.yaml"]
 
 
@@ -95,7 +114,7 @@ class TestRegistrationPayload:
         }
 
     def test_tracks_an_edit(self, runtime_file):
-        runtime_api.update_default_model(runtime_file, "opus")
+        runtime_api.update_runtime_fields(runtime_file, {"default_model": "opus"})
         assert runtime_api.registration_payload(runtime_file)["model"] == "opus"
 
     def test_incomplete_file_raises_rather_than_registering_a_half_mind(
@@ -218,7 +237,7 @@ class TestRegisterWithBroker:
     ):
         monkeypatch.setenv("COMMS_URL", "http://hive-comms:8424")
         monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin")
-        runtime_api.update_default_model(runtime_file, "opus")
+        runtime_api.update_runtime_fields(runtime_file, {"default_model": "opus"})
         posted: dict = {}
 
         class _Session:

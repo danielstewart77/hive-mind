@@ -10,7 +10,7 @@ description: "Example — starter mind, Claude CLI, Anthropic-backed."
 
 harness: claude_cli
 provider: anthropic
-default_model: sonnet
+default_model: claude-sonnet-5
 runtime_config_dir: /usr/src/app/minds/example/.claude
 resume_policy: always
 

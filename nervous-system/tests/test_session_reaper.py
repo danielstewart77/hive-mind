@@ -21,7 +21,6 @@ import os
 import tempfile
 import time
 
-from comms.models import ModelRegistry, Provider
 from comms.sessions import SessionManager
 
 
@@ -29,13 +28,10 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def _registry() -> ModelRegistry:
-    return ModelRegistry({"anthropic": Provider(name="anthropic")}, {"opus": "anthropic"})
-
 
 async def _make_manager(tmp: str, *, stop_loop: bool = True) -> SessionManager:
     os.environ["SESSIONS_DB_PATH"] = os.path.join(tmp, "sessions.db")
-    mgr = SessionManager(_registry())
+    mgr = SessionManager()
     await mgr.start()
     if stop_loop:
         # Logic tests drive reap_stale_sessions by hand; the periodic

@@ -17,7 +17,6 @@ import tempfile
 import time
 from unittest.mock import patch
 
-from comms.models import ModelRegistry, Provider
 from comms.sessions import SessionManager
 
 
@@ -25,16 +24,10 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def _registry() -> ModelRegistry:
-    return ModelRegistry(
-        {"anthropic": Provider(name="anthropic")},
-        {"opus": "anthropic", "sonnet": "anthropic"},
-    )
-
 
 async def _make_manager(tmp: str) -> SessionManager:
     os.environ["SESSIONS_DB_PATH"] = os.path.join(tmp, "sessions.db")
-    mgr = SessionManager(_registry())
+    mgr = SessionManager()
     await mgr.start()
     return mgr
 
