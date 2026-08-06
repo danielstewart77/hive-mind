@@ -88,3 +88,32 @@ async def push_default_model(gateway_url: str, default_model: str) -> dict:
             status_code=502, detail=f"Mind is unreachable: {exc}"
         ) from exc
     return _unwrap(response)
+
+
+async def fetch_models(gateway_url: str) -> list[dict]:
+    """What this Mind may run, asked with this Mind's own credential.
+
+    The Mind queries the inference proxy with its own client key, so the
+    proxy's own per-client filtering decides the answer: a deployment this
+    Mind would be refused never reaches the picker. A console that listed
+    the union would offer settings the proxy rejects at the first turn,
+    which surfaces as a Mind that stopped answering rather than as a choice
+    that was never allowed.
+
+    A Mind too old to serve the route, or one that cannot reach the proxy,
+    yields an empty list rather than raising — the editor is still usable
+    by typing a name, and an error here would hide the whole form.
+    """
+    url = (gateway_url or "").strip().rstrip("/")
+    if not url:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            response = await client.get(f"{url}/models", headers=admin_headers())
+    except (httpx.HTTPError, HTTPException):
+        return []
+    if response.status_code != 200:
+        return []
+    body = response.json()
+    rows = body.get("models") if isinstance(body, dict) else None
+    return [r for r in rows if isinstance(r, dict) and r.get("name")] if isinstance(rows, list) else []

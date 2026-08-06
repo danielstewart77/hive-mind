@@ -1820,28 +1820,27 @@ async def _mind_gateway_url(name: str) -> str:
 @app.get("/api/minds/{name}/configuration")
 async def api_mind_configuration(name: str, user: dict = Depends(require_auth)):
     del user
-    configuration = await mind_runtime.fetch_configuration(
-        await _mind_gateway_url(name)
-    )
-    try:
-        model_rows = await _gateway_json("/models")
-    except HTTPException:
-        model_rows = []
+    gateway_url = await _mind_gateway_url(name)
+    configuration = await mind_runtime.fetch_configuration(gateway_url)
+    # Asked of the Mind, not the gateway: the Mind holds the proxy client
+    # key whose permissions decide the answer.
+    model_rows = await mind_runtime.fetch_models(gateway_url)
     provider = str(configuration.get("provider") or "")
     harness = str(configuration.get("harness") or "")
-    model_provider = (
-        "ollama"
-        if provider == "ollama"
-        else "anthropic"
-        if harness.startswith("claude")
-        else ""
-    )
+    # The harness decides the wire format, so it decides which half of the
+    # proxy catalog this Mind can address: a claude CLI speaks Anthropic
+    # Messages, a codex CLI speaks the OpenAI shape. Keying off `provider`
+    # alone left every codex Mind with an empty picker, because a Mind
+    # reaching the proxy declares `provider: anthropic` whatever it runs.
+    buckets = {"anthropic" if harness.startswith("claude") else "openai"}
+    if provider == "ollama":
+        buckets.add("ollama")
     models = [
         str(row.get("name"))
         for row in model_rows
         if isinstance(row, dict)
         and row.get("name")
-        and row.get("provider") == model_provider
+        and row.get("provider") in buckets
     ]
     return {
         "configuration": {

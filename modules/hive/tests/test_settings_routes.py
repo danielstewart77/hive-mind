@@ -126,12 +126,16 @@ def test_mind_configuration_reads_the_mind_over_http(tmp_path, monkeypatch):
                 "default_model": "qwen3:8b",
             }),
         ),
-        patch.object(main_mod, "_gateway_json", new=AsyncMock(return_value=models)),
+        patch.object(
+            main_mod.mind_runtime, "fetch_models", new=AsyncMock(return_value=models)
+        ),
     ):
         response = client.get("/api/minds/bob/configuration")
 
     assert response.status_code == 200
-    assert response.json()["models"] == ["qwen3:8b"]
+    # A claude harness pointed at Ollama still reaches the hosted models
+    # through the same proxy base URL, so both buckets are offered.
+    assert response.json()["models"] == ["sonnet", "qwen3:8b"]
     assert response.json()["configuration"]["default_model"] == "qwen3:8b"
 
 

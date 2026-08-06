@@ -156,3 +156,59 @@ def test_no_admin_token_refuses_the_write(monkeypatch):
         assert exc.value.status_code == 503
 
     _run(scenario())
+
+# ---------------------------------------------------------------- model picker
+
+
+CATALOG = [
+    {"name": "opus", "provider": "anthropic"},
+    {"name": "claude-opus-5", "provider": "anthropic"},
+    {"name": "gpt-5.4", "provider": "openai"},
+    {"name": "gpt-5.6", "provider": "openai"},
+    {"name": "gemma4-131k", "provider": "ollama"},
+]
+
+
+def _picker(monkeypatch, *, harness, provider):
+    """The model names this Mind's editor would offer."""
+    import main as main_mod
+
+    async def fake_configuration(_gateway):
+        return {"name": "m", "harness": harness, "provider": provider,
+                "default_model": "x", "deployment": "container"}
+
+    async def fake_gateway_url(_name):
+        return "http://m:8420"
+
+    async def fake_models(_gateway):
+        return CATALOG
+
+    monkeypatch.setattr(main_mod.mind_runtime, "fetch_configuration", fake_configuration)
+    monkeypatch.setattr(main_mod, "_mind_gateway_url", fake_gateway_url)
+    monkeypatch.setattr(main_mod.mind_runtime, "fetch_models", fake_models)
+    result = asyncio.run(main_mod.api_mind_configuration("m", user={"sub": "t"}))
+    return set(result["models"])
+
+
+def test_a_codex_mind_is_offered_the_openai_shaped_models(monkeypatch):
+    """Requirement 4: Nagatha runs gpt-5.4 and her picker listed nothing.
+
+    A Mind reaching the proxy declares `provider: anthropic` whatever it
+    actually runs, so keying the picker off the provider alone matched no
+    bucket for a codex harness and produced an empty list.
+    """
+    assert _picker(monkeypatch, harness="codex_cli", provider="anthropic") == {
+        "gpt-5.4",
+        "gpt-5.6",
+    }
+
+
+def test_a_claude_mind_on_ollama_is_offered_both_the_local_and_hosted_models(
+    monkeypatch,
+):
+    """Bob runs a local tag through the proxy and could run a hosted one."""
+    assert _picker(monkeypatch, harness="claude_cli", provider="ollama") == {
+        "opus",
+        "claude-opus-5",
+        "gemma4-131k",
+    }
