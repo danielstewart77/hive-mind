@@ -42,13 +42,21 @@ window.addEventListener("DOMContentLoaded", async function () {
     // this side, and nothing is offered that the proxy would refuse.
     let modelRows = [];
 
+    // `preferred` is the Mind's current model when the picker first renders,
+    // and empty once the operator has changed provider. A current model the
+    // listing no longer offers is kept and selected rather than replaced with
+    // whatever sorts first: silently swapping it means an operator who opened
+    // this page for an unrelated reason and pressed Save rewrites the Mind's
+    // model without ever seeing the change.
     function renderModelOptions(provider, preferred) {
         const select = document.getElementById("mind-default-model");
         const rows = modelRows.filter(function (row) { return row.provider === provider; });
-        select.innerHTML = rows.map(function (row) {
+        const missing = preferred && !rows.some(function (row) { return row.name === preferred; });
+        select.innerHTML = (missing ? '<option value="' + h.escapeHtml(preferred) + '" selected>' + h.escapeHtml(preferred) + " — set now, no longer offered</option>" : "") + rows.map(function (row) {
             return '<option value="' + h.escapeHtml(row.name) + '"' + (row.name === preferred ? " selected" : "") + ">" + h.escapeHtml(row.label || row.name) + "</option>";
         }).join("");
-        if (rows.length && !rows.some(function (row) { return row.name === preferred; })) select.selectedIndex = 0;
+        if (!preferred && rows.length) select.selectedIndex = 0;
+        return missing;
     }
 
     function populateModelPicker(rows, currentModel, currentProvider) {
@@ -80,7 +88,9 @@ window.addEventListener("DOMContentLoaded", async function () {
         providerSelect.innerHTML = providers.map(function (p) {
             return '<option value="' + h.escapeHtml(p.name) + '"' + (p.name === selectedProvider ? " selected" : "") + ">" + h.escapeHtml(p.label) + "</option>";
         }).join("");
-        renderModelOptions(selectedProvider, currentModel);
+        if (renderModelOptions(selectedProvider, currentModel)) {
+            status.textContent = "This Mind is set to " + currentModel + ", which its provider no longer offers. It stays selected until you pick something else.";
+        }
         providerSelect.onchange = function () { renderModelOptions(providerSelect.value, ""); };
     }
 
