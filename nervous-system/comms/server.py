@@ -24,7 +24,6 @@ from comms.config import PROJECT_DIR, config
 import comms.broker as broker
 from comms.auth import require_admin_bearer, require_bearer
 from comms.broker import check_secret_scope, get_secret_scopes, grant_secret_scope, revoke_secret_scope
-from comms.models import ModelRegistry, Provider
 from comms.network_identity import resolve_container_name
 from comms.secrets import get_credential
 from comms.sessions import SessionManager
@@ -48,25 +47,11 @@ try:
 except Exception:
     pass  # keyring unavailable — fall through to env_file / .env
 
-# ---------------------------------------------------------------------------
-# Bootstrap model registry from config
-# ---------------------------------------------------------------------------
-def _build_registry() -> ModelRegistry:
-    providers = {}
-    for name, pconf in config.providers.items():
-        if isinstance(pconf, dict):
-            providers[name] = Provider(
-                name=name,
-                env_overrides=pconf.get("env", {}),
-                api_base=pconf.get("api_base"),
-            )
-        else:
-            providers[name] = Provider(name=name)
-    return ModelRegistry(providers=providers, static_models=config.models)
-
-
-model_registry = _build_registry()
-session_mgr = SessionManager(model_registry)
+# The gateway keeps no model table and no map of model to provider. A mind
+# reports what its own proxy credential may address, and the proxy routes on
+# the model name — anything cached here would be a second opinion about
+# someone else's permissions.
+session_mgr = SessionManager()
 
 
 @asynccontextmanager
@@ -529,8 +514,13 @@ async def stop_remote_control(session_id: str):
 # Model listing
 # ---------------------------------------------------------------------------
 @app.get("/models")
-async def list_models():
-    return await model_registry.list_models()
+async def list_models(mind_id: str):
+    """What one mind may run, asked of that mind.
+
+    A mind is required: two minds hold different proxy keys, so there is no
+    such thing as the hive's model list.
+    """
+    return {"models": await session_mgr.mind_models(mind_id)}
 
 
 # ---------------------------------------------------------------------------
@@ -839,13 +829,18 @@ async def _handle_command(cmd: str, parts: list[str], body: CommandRequest):
         )
 
     if cmd == "/model":
-        if len(parts) < 2:
-            return await model_registry.list_models()
-        model_name = parts[1]
         active = await session_mgr.get_active_session(body.owner_type, body.client_ref)
+        if len(parts) < 2:
+            if not active:
+                return {"error": "No active session. Use /new first."}
+            return {"models": await session_mgr.mind_models(active["mind_id"])}
+        model_name = parts[1]
         if not active:
             return {"error": "No active session. Use /new first."}
-        return await session_mgr.switch_model(active["id"], model_name)
+        try:
+            return await session_mgr.switch_model(active["id"], model_name)
+        except ValueError as exc:
+            return {"error": str(exc)}
 
     if cmd == "/autopilot":
         active = await session_mgr.get_active_session(body.owner_type, body.client_ref)

@@ -30,14 +30,14 @@ def _load_yaml_config() -> dict:
 
 _yaml_data = _load_yaml_config()
 _DEFAULT_PROVIDERS: dict = _yaml_data.get("providers", {})
-_DEFAULT_MODELS: dict = _yaml_data.get("models", {})
 
 
 @dataclass
 class _Config:
     server_port: int = int(os.environ.get("COMMS_PORT", "8424"))
+    # Which upstream hosts which model is the inference proxy's business;
+    # the gateway carries no model table of its own.
     providers: dict = field(default_factory=lambda: dict(_DEFAULT_PROVIDERS))
-    models: dict = field(default_factory=lambda: dict(_DEFAULT_MODELS))
 
 
 config = _Config()
