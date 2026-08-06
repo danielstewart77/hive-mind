@@ -381,7 +381,7 @@ def _bootstrap_body(**overrides):
 # mind_templates/ implementation; the console used to offer a single fused
 # dropdown that omitted codex+ollama entirely.
 _HARNESS_PROVIDER_PAIRS = [
-    ("claude_cli", "anthropic", "sonnet"),
+    ("claude_cli", "anthropic", "claude-sonnet-5"),
     ("claude_cli", "ollama", "qwen3:8b"),
     ("codex_cli", "openai", "gpt-5.4"),
     ("codex_cli", "ollama", "qwen3:8b"),

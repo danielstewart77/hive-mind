@@ -74,13 +74,22 @@ async def fetch_configuration(gateway_url: str) -> dict:
     return _unwrap(response)
 
 
-async def push_default_model(gateway_url: str, default_model: str) -> dict:
-    """Write `default_model` into this Mind's runtime.yaml."""
+async def push_default_model(
+    gateway_url: str, default_model: str, provider: str = ""
+) -> dict:
+    """Write the provider and `default_model` into this Mind's runtime.yaml.
+
+    Both travel in one PATCH so the Mind is never left holding a provider that
+    does not host the model beside it.
+    """
+    payload: dict = {"default_model": default_model}
+    if provider:
+        payload["provider"] = provider
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             response = await client.patch(
                 _endpoint(gateway_url),
-                json={"default_model": default_model},
+                json=payload,
                 headers=admin_headers(),
             )
     except httpx.HTTPError as exc:

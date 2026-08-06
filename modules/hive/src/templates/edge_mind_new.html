@@ -21,7 +21,7 @@
                 <div class="form-grid">
                     <div class="field"><label for="edge-deployment">Deployment</label><select id="edge-deployment" name="deployment"><option value="systemd">Linux service</option><option value="container">Container</option><option value="windows-task">Windows task</option></select></div>
                     <div class="field"><label for="edge-provider">Provider</label><select id="edge-provider" name="provider"></select><small>Where inference goes. Independent of the harness.</small></div>
-                    <div class="field"><label for="edge-default-model">Initial model</label><input id="edge-default-model" name="default_model" value="sonnet" required></div>
+                    <div class="field"><label for="edge-default-model">Initial model</label><input id="edge-default-model" name="default_model" value="claude-sonnet-5" required></div>
                     <div class="field" id="edge-ollama-field"><label for="edge-ollama-url">Ollama URL</label><input id="edge-ollama-url" name="ollama_url" type="url" value="{{ edge_ollama_url }}" placeholder="http://ollama-host:11434"><small>Required only for the Ollama provider.</small></div>
                 </div>
                 <div class="form-grid">

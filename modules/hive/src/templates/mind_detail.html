@@ -10,7 +10,7 @@
     <div class="overview-stack" id="mind-content">
         <section class="surface"><div class="surface-header"><h2>Overview</h2><span id="mind-status"></span></div><div class="surface-body"><dl class="detail-grid" id="mind-details"></dl></div></section>
         <section class="surface"><div class="surface-header"><div><h2>Runtime configuration</h2><p>Secret values are removed before this reaches the browser.</p></div></div><div class="surface-body"><div class="code-wrap"><pre class="code-panel" id="mind-config">Loading…</pre><button class="icon-button" type="button" data-copy="#mind-config" aria-label="Copy configuration"><i data-lucide="copy"></i></button></div></div></section>
-        <section class="surface" id="mind-editor" hidden><div class="surface-header"><div><h2>Default model</h2><p>Written to this Mind&#39;s runtime.yaml and its registry row. Applies to the next session it is asked for; conversations already running keep their model.</p></div></div><form class="surface-body overview-stack" id="mind-model-form"><div class="field"><label for="mind-default-model">Model name</label><input id="mind-default-model" name="default_model" list="mind-model-options" required><datalist id="mind-model-options"></datalist><small>Use a model supported by this Mind's configured provider.</small></div><div class="form-actions"><button class="button" type="submit">Save model</button><button class="button button-primary" id="mind-restart" type="button" hidden>Restart runtime</button></div><small id="mind-model-status"></small></form></section>
+        <section class="surface" id="mind-editor" hidden><div class="surface-header"><div><h2>Default model</h2><p>Written to this Mind&#39;s runtime.yaml and its registry row. Applies to the next session it is asked for; conversations already running keep their model.</p></div></div><form class="surface-body overview-stack" id="mind-model-form"><div class="field"><label for="mind-provider">Provider</label><select id="mind-provider" name="provider" required></select><small>The upstream hosting the model. This Mind's own proxy key decides which appear.</small></div><div class="field"><label for="mind-default-model">Model</label><select id="mind-default-model" name="default_model" required></select><small>Every model this Mind is permitted to run on the chosen provider.</small></div><div class="form-actions"><button class="button" type="submit" id="mind-model-save">Save model</button><button class="button button-primary" id="mind-restart" type="button" hidden>Restart runtime</button></div><small id="mind-model-status"></small></form></section>
         <section class="surface" id="mind-skills" hidden><div class="surface-header"><div><h2>Skills</h2><p>The repo&#39;s copy against this Mind&#39;s. Applying copies the repo&#39;s directory into the one this Mind&#39;s harness loads skills from. When the harness picks it up is the harness&#39;s business.</p></div><span id="mind-skills-harness"></span></div><div class="surface-body"><div id="mind-skills-status"></div><table class="data-table" id="mind-skills-table" hidden><thead><tr><th>Skill</th><th>Repo</th><th>This Mind</th><th></th></tr></thead><tbody id="mind-skills-rows"></tbody></table></div></section>
     </div>
 </main>
@@ -34,6 +34,55 @@ window.addEventListener("DOMContentLoaded", async function () {
     };
     const ACTION_LABELS = {diff: "What changed", install: "Apply repo copy", "write-back": "Write into repo", remove: "Remove from Mind"};
     const CONFIRM_ACTIONS = {remove: "Delete this skill from the Mind? Its directory is not under version control, so this cannot be undone."};
+
+    // The picker is two dependent selects over one flat listing: the Mind
+    // reports every model its own proxy key may address, each row naming the
+    // provider hosting it, so the provider list is whatever those rows say.
+    // A provider added to the proxy therefore appears here with no change on
+    // this side, and nothing is offered that the proxy would refuse.
+    let modelRows = [];
+
+    function renderModelOptions(provider, preferred) {
+        const select = document.getElementById("mind-default-model");
+        const rows = modelRows.filter(function (row) { return row.provider === provider; });
+        select.innerHTML = rows.map(function (row) {
+            return '<option value="' + h.escapeHtml(row.name) + '"' + (row.name === preferred ? " selected" : "") + ">" + h.escapeHtml(row.label || row.name) + "</option>";
+        }).join("");
+        if (rows.length && !rows.some(function (row) { return row.name === preferred; })) select.selectedIndex = 0;
+    }
+
+    function populateModelPicker(rows, currentModel, currentProvider) {
+        const status = document.getElementById("mind-model-status");
+        const save = document.getElementById("mind-model-save");
+        const providerSelect = document.getElementById("mind-provider");
+        modelRows = rows.filter(function (row) { return row && row.name && row.provider; });
+        // Nothing offered means the Mind could not reach the proxy. Saving a
+        // model chosen from an empty list is impossible, and saving nothing is
+        // worse than saying so.
+        if (!modelRows.length) {
+            providerSelect.innerHTML = "";
+            document.getElementById("mind-default-model").innerHTML = "";
+            save.disabled = true;
+            status.textContent = "This Mind reported no available models, so its provider cannot be reached right now. Nothing can be saved until it answers.";
+            return;
+        }
+        save.disabled = false;
+        status.textContent = "";
+        const providers = [];
+        modelRows.forEach(function (row) {
+            if (!providers.some(function (p) { return p.name === row.provider; })) providers.push({name: row.provider, label: row.provider_label || row.provider});
+        });
+        // The Mind's current model decides the provider shown, not the
+        // provider field in its file: those disagree for a codex Mind, which
+        // declares `anthropic` whatever it actually runs.
+        const owning = modelRows.find(function (row) { return row.name === currentModel; });
+        const selectedProvider = (owning && owning.provider) || (providers.some(function (p) { return p.name === currentProvider; }) ? currentProvider : providers[0].name);
+        providerSelect.innerHTML = providers.map(function (p) {
+            return '<option value="' + h.escapeHtml(p.name) + '"' + (p.name === selectedProvider ? " selected" : "") + ">" + h.escapeHtml(p.label) + "</option>";
+        }).join("");
+        renderModelOptions(selectedProvider, currentModel);
+        providerSelect.onchange = function () { renderModelOptions(providerSelect.value, ""); };
+    }
 
     async function renderSkills(name) {
         const section = document.getElementById("mind-skills");
@@ -110,8 +159,7 @@ window.addEventListener("DOMContentLoaded", async function () {
         const editor = document.getElementById("mind-editor"); editor.dataset.mindName = mind.name; editor.hidden = false;
         try {
             const configuration = await h.requestJson("/api/minds/" + encodeURIComponent(mind.name) + "/configuration");
-            document.getElementById("mind-default-model").value = configuration.configuration.default_model || cfg.default_model || mind.model || "";
-            document.getElementById("mind-model-options").innerHTML = (configuration.models || []).map(function (model) { return '<option value="' + h.escapeHtml(model) + '"></option>'; }).join("");
+            populateModelPicker(configuration.models || [], configuration.configuration.default_model || cfg.default_model || mind.model || "", configuration.configuration.provider || cfg.provider || "");
         } catch (error) {
             document.getElementById("mind-model-form").hidden = true;
             document.getElementById("mind-model-status").textContent = "Cannot reach this Mind to read its configuration: " + error.message;
@@ -127,7 +175,7 @@ window.addEventListener("DOMContentLoaded", async function () {
         const editor = document.getElementById("mind-editor"), status = document.getElementById("mind-model-status"), restart = document.getElementById("mind-restart");
         status.textContent = "Saving…";
         try {
-            const data = await h.requestJson("/api/minds/" + encodeURIComponent(editor.dataset.mindName) + "/configuration", {method: "PATCH", headers: {"Content-Type": "application/json"}, body: JSON.stringify({default_model: event.target.elements.default_model.value})});
+            const data = await h.requestJson("/api/minds/" + encodeURIComponent(editor.dataset.mindName) + "/configuration", {method: "PATCH", headers: {"Content-Type": "application/json"}, body: JSON.stringify({default_model: event.target.elements.default_model.value, provider: event.target.elements.provider.value})});
             status.textContent = "Saved. The next session this Mind is asked for starts on " + (data.configuration.default_model || "the new model") + ".";
             restart.hidden = data.restartable === false;
         } catch (error) { status.textContent = error.message; }

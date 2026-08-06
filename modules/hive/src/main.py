@@ -782,7 +782,7 @@ _HARNESS_PROVIDERS = {
     "codex_cli": ("openai", "ollama"),
 }
 _PROVIDER_DEFAULT_MODELS = {
-    "anthropic": "sonnet",
+    "anthropic": "claude-sonnet-5",
     "openai": "gpt-5.4",
     "ollama": "qwen3:8b",
 }
@@ -1822,25 +1822,22 @@ async def api_mind_configuration(name: str, user: dict = Depends(require_auth)):
     del user
     gateway_url = await _mind_gateway_url(name)
     configuration = await mind_runtime.fetch_configuration(gateway_url)
-    # Asked of the Mind, not the gateway: the Mind holds the proxy client
-    # key whose permissions decide the answer.
-    model_rows = await mind_runtime.fetch_models(gateway_url)
-    provider = str(configuration.get("provider") or "")
-    harness = str(configuration.get("harness") or "")
-    # The harness decides the wire format, so it decides which half of the
-    # proxy catalog this Mind can address: a claude CLI speaks Anthropic
-    # Messages, a codex CLI speaks the OpenAI shape. Keying off `provider`
-    # alone left every codex Mind with an empty picker, because a Mind
-    # reaching the proxy declares `provider: anthropic` whatever it runs.
-    buckets = {"anthropic" if harness.startswith("claude") else "openai"}
-    if provider == "ollama":
-        buckets.add("ollama")
+    # Asked of the Mind, not the gateway: the Mind holds the proxy client key
+    # whose permissions decide the answer, and the proxy already filtered the
+    # listing to the request shape this Mind's harness speaks. Nothing is
+    # re-sorted here — the console groups by the provider each row names, so a
+    # provider added to the proxy appears with no change on this side.
     models = [
-        str(row.get("name"))
-        for row in model_rows
-        if isinstance(row, dict)
-        and row.get("name")
-        and row.get("provider") in buckets
+        {
+            "name": str(row.get("name")),
+            "label": str(row.get("label") or row.get("name")),
+            "provider": str(row.get("provider") or ""),
+            "provider_label": str(
+                row.get("provider_label") or row.get("provider") or ""
+            ),
+        }
+        for row in await mind_runtime.fetch_models(gateway_url)
+        if isinstance(row, dict) and row.get("name")
     ]
     return {
         "configuration": {
@@ -1862,6 +1859,7 @@ async def api_mind_configuration_update(
     default_model = str(
         body.get("default_model") if isinstance(body, dict) else ""
     ).strip()
+    provider = str(body.get("provider") if isinstance(body, dict) else "").strip()
     gateway_url = await _mind_gateway_url(name)
 
     # The Mind's own file first, then the broker row that caches it. In this
@@ -1869,7 +1867,9 @@ async def api_mind_configuration_update(
     # re-registers from the file on its next start, so a row written against
     # a file that never took would be undone anyway.
     previous_configuration = await mind_runtime.fetch_configuration(gateway_url)
-    configuration = await mind_runtime.push_default_model(gateway_url, default_model)
+    configuration = await mind_runtime.push_default_model(
+        gateway_url, default_model, provider
+    )
     try:
         await _gateway_request(
             "PUT",
@@ -1880,12 +1880,17 @@ async def api_mind_configuration_update(
     except HTTPException:
         previous_model = str(previous_configuration.get("default_model") or "")
         if previous_model:
-            await mind_runtime.push_default_model(gateway_url, previous_model)
+            await mind_runtime.push_default_model(
+                gateway_url,
+                previous_model,
+                str(previous_configuration.get("provider") or ""),
+            )
         raise
     log_event(
         log, "mind.configuration.updated", **_actor_fields(user), mind_name=name,
         previous_model=previous_configuration.get("default_model"),
         default_model=default_model,
+        provider=provider or None,
     )
     deployment = str(configuration.get("deployment") or "container")
     return {

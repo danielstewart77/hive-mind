@@ -161,16 +161,15 @@ def test_no_admin_token_refuses_the_write(monkeypatch):
 
 
 CATALOG = [
-    {"name": "opus", "provider": "anthropic"},
-    {"name": "claude-opus-5", "provider": "anthropic"},
-    {"name": "gpt-5.4", "provider": "openai"},
-    {"name": "gpt-5.6", "provider": "openai"},
-    {"name": "gemma4-131k", "provider": "ollama"},
+    {"name": "claude-opus-5", "label": "Opus 5", "provider": "anthropic",
+     "provider_label": "Anthropic"},
+    {"name": "qwen35-131k", "label": "Qwen 3.5 9B (local, 131k)",
+     "provider": "ollama", "provider_label": "Ollama"},
 ]
 
 
 def _picker(monkeypatch, *, harness, provider):
-    """The model names this Mind's editor would offer."""
+    """The rows this Mind's editor would offer."""
     import main as main_mod
 
     async def fake_configuration(_gateway):
@@ -186,29 +185,26 @@ def _picker(monkeypatch, *, harness, provider):
     monkeypatch.setattr(main_mod.mind_runtime, "fetch_configuration", fake_configuration)
     monkeypatch.setattr(main_mod, "_mind_gateway_url", fake_gateway_url)
     monkeypatch.setattr(main_mod.mind_runtime, "fetch_models", fake_models)
-    result = asyncio.run(main_mod.api_mind_configuration("m", user={"sub": "t"}))
-    return set(result["models"])
+    return asyncio.run(main_mod.api_mind_configuration("m", user={"sub": "t"}))["models"]
 
 
-def test_a_codex_mind_is_offered_the_openai_shaped_models(monkeypatch):
-    """Requirement 4: Nagatha runs gpt-5.4 and her picker listed nothing.
+def test_the_console_relays_what_the_mind_reported_without_re_sorting_it(monkeypatch):
+    """The Mind's own key and harness already decided the list.
 
-    A Mind reaching the proxy declares `provider: anthropic` whatever it
-    actually runs, so keying the picker off the provider alone matched no
-    bucket for a codex harness and produced an empty list.
+    The console used to bucket the listing itself, by a `provider` field that
+    means something different on each side — a codex Mind declares `anthropic`
+    whatever it runs — and every Mind it guessed wrong about got an empty
+    picker. Grouping now follows the provider each row names.
     """
-    assert _picker(monkeypatch, harness="codex_cli", provider="anthropic") == {
-        "gpt-5.4",
-        "gpt-5.6",
-    }
+    rows = _picker(monkeypatch, harness="codex_cli", provider="anthropic")
+    assert [row["name"] for row in rows] == ["claude-opus-5", "qwen35-131k"]
 
 
-def test_a_claude_mind_on_ollama_is_offered_both_the_local_and_hosted_models(
-    monkeypatch,
-):
-    """Bob runs a local tag through the proxy and could run a hosted one."""
-    assert _picker(monkeypatch, harness="claude_cli", provider="ollama") == {
-        "opus",
-        "claude-opus-5",
-        "gemma4-131k",
-    }
+def test_each_offered_row_carries_its_label_and_provider(monkeypatch):
+    """A picker shows the label, saves the name, groups by the provider."""
+    rows = {row["name"]: row for row in _picker(
+        monkeypatch, harness="claude_cli", provider="ollama"
+    )}
+    assert rows["claude-opus-5"]["label"] == "Opus 5"
+    assert rows["qwen35-131k"]["provider"] == "ollama"
+    assert rows["qwen35-131k"]["provider_label"] == "Ollama"

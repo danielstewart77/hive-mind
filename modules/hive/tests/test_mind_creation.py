@@ -20,7 +20,7 @@ import configuration_data
 import main as main_mod
 
 _PAIRS = [
-    ("claude_cli", "anthropic", "sonnet"),
+    ("claude_cli", "anthropic", "claude-sonnet-5"),
     ("claude_cli", "ollama", "qwen3:8b"),
     ("codex_cli", "openai", "gpt-5.4"),
     ("codex_cli", "ollama", "qwen3:8b"),

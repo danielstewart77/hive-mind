@@ -91,7 +91,8 @@ def test_mind_configuration_route_pushes_to_the_mind_then_the_broker(
         patch.object(main_mod, "_gateway_request", new=gateway),
     ):
         response = client.patch(
-            "/api/minds/bob/configuration", json={"default_model": "qwen3:8b"}
+            "/api/minds/bob/configuration",
+            json={"default_model": "qwen3:8b", "provider": "ollama"},
         )
 
     assert response.status_code == 200
@@ -99,7 +100,9 @@ def test_mind_configuration_route_pushes_to_the_mind_then_the_broker(
     assert body["configuration"]["default_model"] == "qwen3:8b"
     # Live at the next session — nothing reads the model at boot.
     assert body["restart_required"] is False
-    assert push.await_args.args == ("http://bob:8420", "qwen3:8b")
+    # Provider and model in one write: a Mind holding a provider that does not
+    # host its model is a Mind that stops answering.
+    assert push.await_args.args == ("http://bob:8420", "qwen3:8b", "ollama")
     assert gateway.await_args.args[:2] == ("PUT", "/broker/minds/bob")
     assert gateway.await_args.kwargs["json_body"] == {"model": "qwen3:8b"}
     # Broker writes are admin-only; the service token comms hands out for
@@ -111,8 +114,10 @@ def test_mind_configuration_reads_the_mind_over_http(tmp_path, monkeypatch):
     """Including a Mind on another machine, which no bind mount can reach."""
     client = _authed_client(tmp_path, monkeypatch)
     models = [
-        {"name": "sonnet", "provider": "anthropic"},
-        {"name": "qwen3:8b", "provider": "ollama"},
+        {"name": "claude-sonnet-5", "label": "Sonnet 5", "provider": "anthropic",
+         "provider_label": "Anthropic"},
+        {"name": "qwen3:8b", "label": "qwen3:8b", "provider": "ollama",
+         "provider_label": "Ollama"},
     ]
     with (
         patch.object(main_mod, "_mind_gateway_url", new=AsyncMock(return_value="http://bob:8420")),
@@ -133,9 +138,13 @@ def test_mind_configuration_reads_the_mind_over_http(tmp_path, monkeypatch):
         response = client.get("/api/minds/bob/configuration")
 
     assert response.status_code == 200
-    # A claude harness pointed at Ollama still reaches the hosted models
-    # through the same proxy base URL, so both buckets are offered.
-    assert response.json()["models"] == ["sonnet", "qwen3:8b"]
+    # Relayed as reported: the Mind's own key and harness already decided the
+    # list, and each row names the provider the console groups it under.
+    assert [row["name"] for row in response.json()["models"]] == [
+        "claude-sonnet-5",
+        "qwen3:8b",
+    ]
+    assert response.json()["models"][0]["provider_label"] == "Anthropic"
     assert response.json()["configuration"]["default_model"] == "qwen3:8b"
 
 
@@ -168,7 +177,7 @@ def test_mind_configuration_restores_the_file_when_the_broker_update_fails(
         )
 
     assert response.status_code == 502
-    assert push.await_args_list[1].args == ("http://bob:8420", "old-model")
+    assert push.await_args_list[1].args == ("http://bob:8420", "old-model", "")
 
 
 def test_mind_configuration_reports_a_mind_that_is_down(tmp_path, monkeypatch):
