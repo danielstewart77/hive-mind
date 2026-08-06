@@ -28,19 +28,13 @@ providers:
   anthropic: {}
   ollama:
     api_base: "http://host.docker.internal:11434"
-
-models:
-  sonnet: anthropic
-  opus: anthropic
-  haiku: anthropic
-  # Ollama models are auto-discovered at startup and added here dynamically
 ```
 
-**Model discovery**: `nervous-system/comms/models.py` queries `{api_base}/api/tags` (cached 60s) and registers every available Ollama model by its tag name (e.g. `llama3.1:8b`, `qwen2.5:14b`) alongside the static aliases above — this feeds `GET /models`, not any particular mind's config.
+**Model discovery**: an Ollama model is reachable once it has a row in the inference proxy pointing at the Ollama provider. The proxy's listing is what a mind reports at `GET /models` and what the console offers — a tag pulled on the box but never registered is not addressable, and is therefore not offered.
 
 ## Anthropic (Default)
 
-Standard Claude Code via the Anthropic API. Requires Claude Code credentials (mounted from the host's `~/.claude`, or `CLAUDE_CODE_OAUTH_TOKEN` per-mind) rather than a bare API key. Uses static model aliases (`sonnet`, `opus`, `haiku`).
+Standard Claude Code via the Anthropic API. Requires Claude Code credentials (mounted from the host's `~/.claude`, or `CLAUDE_CODE_OAUTH_TOKEN` per-mind) rather than a bare API key. Models are named by their proxy deployment name (`claude-opus-5`, `claude-sonnet-5`), which is what the proxy routes on.
 
 ## Ollama (Local / Private)
 
@@ -70,12 +64,12 @@ POST /sessions/{id}/model
 {"model": "llama3.1:8b"}
 ```
 
-Or via slash command from any client: `/model opus`, `/model llama3.1:8b` (no argument lists available models). The session is killed and respawned with the new model. Conversation history is preserved via `--resume`.
+Or via slash command from any client: `/model claude-opus-5`, `/model qwen35-131k` (no argument lists what this mind may run). A model the mind's own proxy key cannot address is refused rather than spawned. The session is killed and respawned with the new model. Conversation history is preserved via `--resume`.
 
 ## Adding a New Provider
 
-1. Add a `providers.<name>` entry to `nervous-system/comms/config.yaml` if you want it to show up in `GET /models`'s static list.
-2. For a mind to actually use it, set `provider: <name>` and the matching `env:` block in that mind's `runtime.yaml`.
-3. If the provider needs dynamic model discovery, implement a method in `nervous-system/comms/models.py` (see the Ollama implementation for the pattern).
+1. Add the provider in the inference proxy's admin console (`/admin/providers`): its base URL, its credential, and one path per request shape it serves. A provider that serves both `/v1/messages` and `/v1/responses` is offered to claude and codex minds alike.
+2. Add its models at `/admin/models`, each pointing at that provider. Restrict a model to particular harnesses only to withhold it from one it would otherwise reach.
+3. For a mind to use it, set `provider: <name>` and the model's deployment name in that mind's `runtime.yaml` — or pick both from the console's Mind page, which writes the same file.
 
-No harness code changes are required for providers that are API-compatible with the Anthropic or OpenAI Responses format — env overrides alone are sufficient.
+No code changes anywhere. The gateway holds no model table, and the harnesses reach every provider through the proxy.

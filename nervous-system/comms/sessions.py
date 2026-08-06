@@ -24,7 +24,6 @@ from zoneinfo import ZoneInfo
 import aiosqlite
 
 from comms.config import PROJECT_DIR, config
-from comms.models import ModelRegistry
 from hive_logging import log_event
 
 _TRANSCRIPT_DIR = Path.home() / ".claude" / "projects" / "-usr-src-app"
@@ -193,8 +192,7 @@ class SessionManager:
     # top of a conversation that has moved on. See get_carry_forward.
     CARRY_FORWARD_TTL_SECONDS = 7 * 86400
 
-    def __init__(self, model_registry: ModelRegistry):
-        self._registry = model_registry
+    def __init__(self):
         self._db: aiosqlite.Connection | None = None
         self._procs: dict[str, Any] = {}  # Process (Ada/CLI) or dict (Nagatha/SDK)
         self._mind_ids: dict[str, str] = {}  # session_id -> mind_id
@@ -1446,8 +1444,11 @@ class SessionManager:
         if not session:
             raise ValueError(f"Session not found: {session_id}")
 
-        old_provider = self._registry.get_provider(session["model"])
-        new_provider = self._registry.get_provider(model)
+        if not await self.mind_offers_model(session["mind_id"], model):
+            raise ValueError(
+                f"Model {model!r} is not one this mind may run. "
+                "Its provider decides that, not the hive."
+            )
 
         await self._kill_process(session_id)
         await self._db.execute(
@@ -1466,12 +1467,7 @@ class SessionManager:
             **routing,
         )
 
-        result = await self._session_dict(session_id)
-        if old_provider.name != new_provider.name:
-            result["warning"] = (
-                f"Context from previous {old_provider.name} model may not carry over perfectly."
-            )
-        return result
+        return await self._session_dict(session_id)
 
     # ------------------------------------------------------------------
     # Autopilot
@@ -1816,6 +1812,51 @@ class SessionManager:
             log.exception("rotate-pty on %s for session %s failed", mind_url, session_id)
             return False
         return bool(data.get("rotated"))
+
+    async def mind_models(self, mind_id: str) -> list[dict]:
+        """What a mind reports it may run, asked of the mind.
+
+        The gateway holds no table of models and no map of model to provider:
+        a mind queries the inference proxy with its own key, and the proxy
+        routes on the model name. Anything the gateway cached here would be a
+        second opinion about someone else's permissions, wrong the moment a
+        provider row changed.
+        """
+        try:
+            mind_row = await self._get_mind_row(mind_id)
+        except Exception:
+            return []
+        gateway_url = str((mind_row or {}).get("gateway_url") or "").rstrip("/")
+        if not gateway_url:
+            return []
+        admin = os.environ.get("MIND_ADMIN_TOKEN") or os.environ.get(
+            "COMMS_ADMIN_BEARER_TOKEN", ""
+        )
+        import aiohttp
+        try:
+            async with aiohttp.ClientSession() as http:
+                async with http.get(
+                    f"{gateway_url}/models",
+                    headers={"Authorization": f"Bearer {admin}"} if admin else {},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status != 200:
+                        return []
+                    body = await resp.json()
+        except Exception:
+            log.warning("Could not read models from mind %s", mind_id)
+            return []
+        rows = body.get("models") if isinstance(body, dict) else None
+        return [r for r in rows if isinstance(r, dict) and r.get("name")] if isinstance(rows, list) else []
+
+    async def mind_offers_model(self, mind_id: str, model: str) -> bool:
+        """Whether `model` is one this mind's own credential can address.
+
+        A mind that cannot be reached, or a proxy that is down, yields an empty
+        listing — and an empty listing must not silently approve every name, or
+        the one moment the check matters is the moment it stops working.
+        """
+        return any(str(row.get("name")) == model for row in await self.mind_models(mind_id))
 
     async def _mind_url_for_session(self, session_id: str, mind_id: str | None = None) -> str | None:
         """Resolve a session's mind base URL from the database.

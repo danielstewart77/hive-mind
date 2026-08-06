@@ -54,9 +54,11 @@ When a user requests something no existing tool handles, Claude Code:
 
 ### Backend Flexibility
 
-The system supports multiple providers configured in `config.yaml`:
-- **Anthropic** (default): Full Claude Code capabilities via static aliases (sonnet, opus, haiku)
-- **Ollama**: Local/private operation via any Ollama-hosted model (auto-discovered)
+A mind names a provider in its own `runtime.yaml`, and the model it runs by
+that model's proxy deployment name. The inference proxy owns the mapping from
+model to upstream, so adding a provider is a row there rather than a change
+here, and one locally-hosted model can serve a claude harness and a codex
+harness both.
 
 Per-subprocess env isolation — no global env mutation.
 
@@ -150,7 +152,7 @@ Non-secret settings in `config.yaml`:
 ```yaml
 server_port: 8420
 max_sessions: 10
-default_model: sonnet
+default_model: claude-sonnet-5
 
 providers:
   anthropic: {}
@@ -160,10 +162,6 @@ providers:
       ANTHROPIC_BASE_URL: "http://<ollama-host>:11434"
     api_base: "http://<ollama-host>:11434"
 
-models:
-  sonnet: anthropic
-  opus: anthropic
-  haiku: anthropic
 ```
 
 Secrets are stored in the system keyring (`keyrings.alt.file.PlaintextKeyring`).

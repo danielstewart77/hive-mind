@@ -46,7 +46,6 @@ from fastapi.testclient import TestClient
 # lives at the repo root.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from comms.models import ModelRegistry, Provider  # noqa: E402
 from comms.sessions import ROTATING_NOTICE, SessionManager  # noqa: E402
 from minds import pty_attach, pty_notice  # noqa: E402
 
@@ -138,9 +137,7 @@ def _run(coro):
 
 async def _make_manager(tmp: str) -> SessionManager:
     os.environ["SESSIONS_DB_PATH"] = os.path.join(tmp, "sessions.db")
-    mgr = SessionManager(
-        ModelRegistry({"anthropic": Provider(name="anthropic")}, {"opus": "anthropic"})
-    )
+    mgr = SessionManager()
     await mgr.start()
     return mgr
 

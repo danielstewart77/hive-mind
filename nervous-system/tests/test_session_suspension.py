@@ -8,7 +8,6 @@ import tempfile
 import time
 
 import pytest
-from comms.models import ModelRegistry, Provider
 from comms.sessions import SessionManager
 
 
@@ -18,10 +17,7 @@ def _run(coro):
 
 async def _manager(tmp: str) -> SessionManager:
     os.environ["SESSIONS_DB_PATH"] = os.path.join(tmp, "sessions.db")
-    registry = ModelRegistry(
-        {"anthropic": Provider(name="anthropic")}, {"opus": "anthropic"}
-    )
-    mgr = SessionManager(registry)
+    mgr = SessionManager()
     await mgr.start()
     if mgr._reaper_task:
         mgr._reaper_task.cancel()

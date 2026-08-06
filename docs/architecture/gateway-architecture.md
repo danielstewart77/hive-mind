@@ -29,12 +29,16 @@ Clients are thin — they handle surface-specific I/O and delegate all intellige
 - `GatewayClient.query_stream()` — yields text chunks from SSE, unlimited timeout
 - `GatewayClient.query()` — non-streaming convenience wrapper
 
-## Model Registry
+## Models
 
-`nervous-system/comms/models.py` supports multiple providers:
-- **Anthropic** (default) — static aliases: sonnet, opus, haiku
-- **Ollama** — auto-discovered local models
-- Per-subprocess env isolation — no global env mutation
+The gateway holds no model table. Which upstream hosts which model is the
+inference proxy's `providers` and `models` tables, and the proxy routes on the
+model name — so a model reaches its provider without the gateway having an
+opinion about either. A mind reports what its own proxy key may address
+(`GET /models` on the mind), and that listing is what the console offers and
+what a `/model` switch is checked against.
+
+Per-subprocess env isolation — no global env mutation.
 
 ## Message Broker
 

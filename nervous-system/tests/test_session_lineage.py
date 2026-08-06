@@ -16,7 +16,6 @@ import os
 import tempfile
 import time
 
-from comms.models import ModelRegistry, Provider
 from comms.sessions import SessionManager
 
 
@@ -26,13 +25,10 @@ def _run(coro):
 
 async def _make_manager(tmp: str) -> SessionManager:
     os.environ["SESSIONS_DB_PATH"] = os.path.join(tmp, "sessions.db")
-    mgr = SessionManager(_registry())
+    mgr = SessionManager()
     await mgr.start()
     return mgr
 
-
-def _registry() -> ModelRegistry:
-    return ModelRegistry({"anthropic": Provider(name="anthropic")}, {"opus": "anthropic"})
 
 
 async def _seed(mgr: SessionManager, sid: str, *, client_ref: str,
@@ -195,7 +191,7 @@ def test_migration_adds_lineage_to_a_preexisting_database() -> None:
                 )
                 await db.commit()
 
-            mgr = SessionManager(_registry())
+            mgr = SessionManager()
             await mgr.start()
             try:
                 cur = await mgr._db.execute("PRAGMA table_info(sessions)")
