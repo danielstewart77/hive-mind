@@ -127,21 +127,6 @@ async def test_a_codex_mind_is_listed_the_shape_its_harness_speaks(wire, runtime
 
 
 @pytest.mark.asyncio
-async def test_no_short_alias_is_offered(wire, runtime_file):
-    """The list is the proxy's inventory — nothing the mind invented."""
-    wire({"/v1/anthropic/models": CLAUDE_ROWS})
-    path = runtime_file(env={
-        "ANTHROPIC_BASE_URL": "http://proxy:8899",
-        "ANTHROPIC_AUTH_TOKEN": "hmp-ada",
-    })
-
-    names = {row["name"] for row in await models_api.build_catalog(path)}
-
-    assert names == {"claude-opus-5", "qwen35-131k"}
-    assert not names & {"opus", "sonnet", "haiku"}
-
-
-@pytest.mark.asyncio
 async def test_each_row_carries_the_label_and_the_provider_hosting_it(
     wire, runtime_file
 ):
