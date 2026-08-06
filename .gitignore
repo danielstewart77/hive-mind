@@ -167,6 +167,7 @@ docs/financial/
 minds/*
 !minds/.gitkeep
 !minds/__init__.py
+!minds/models_api.py
 !minds/proactive.py
 !minds/pty_attach.py
 !minds/pty_notice.py
