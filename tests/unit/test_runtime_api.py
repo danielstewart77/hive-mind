@@ -161,6 +161,23 @@ class TestRoutes:
         assert body["default_model"] == "sonnet"
         assert body["provider"] == "anthropic"
 
+    def test_patch_writes_the_provider_the_console_chose(self, client, runtime_file):
+        """The route, not just the writer underneath it.
+
+        The console picks a provider and a model together, and a route that
+        accepted the provider and dropped it would leave a mind pointed at an
+        upstream that does not host its model — with the reply still saying
+        saved.
+        """
+        response = client.patch(
+            "/runtime",
+            json={"default_model": "qwen35-131k", "provider": "ollama"},
+            headers={"Authorization": "Bearer s3cret"},
+        )
+        assert response.status_code == 200
+        loaded = runtime_api.load_runtime(runtime_file)
+        assert (loaded["provider"], loaded["default_model"]) == ("ollama", "qwen35-131k")
+
     def test_patch_writes_the_model_to_disk(self, client, runtime_file):
         response = client.patch(
             "/runtime",
