@@ -1141,6 +1141,39 @@ body:has(.terminal-page) .content-wrapper > .terminal-box { display: none; }
     box-shadow: 0 0 8px rgba(78, 232, 252, 0.55);
 }
 
+/* Voice input. A focused, colour-labelled tile has applyLabel writing an
+   inline `color` onto every button in its header — twice a minute, and on
+   every focus change — so a mic state carried by colour alone is erased
+   mid-flash. `!important` outranks an inline declaration that isn't; the
+   background and glow do the rest of the work. */
+.term-panel-mic {
+    flex-shrink: 0;
+    line-height: 1;
+    padding: 0.3rem 0.55rem;
+}
+.term-action-btn.is-recording {
+    color: #180608 !important;
+    background: #e05c5c;
+    border-color: #e05c5c;
+    box-shadow: 0 0 8px rgba(224, 92, 92, 0.65);
+    animation: term-mic-pulse 1.1s ease-in-out infinite;
+}
+.term-action-btn.is-working {
+    color: #061018 !important;
+    background: #c9a84c;
+    border-color: #c9a84c;
+    box-shadow: 0 0 8px rgba(201, 168, 76, 0.5);
+}
+.term-action-btn.is-error {
+    color: #ffe9e9 !important;
+    background: #8c1f1f;
+    border-color: #e05c5c;
+}
+@keyframes term-mic-pulse {
+    0%, 100% { box-shadow: 0 0 4px rgba(224, 92, 92, 0.45); }
+    50% { box-shadow: 0 0 12px rgba(224, 92, 92, 0.9); }
+}
+
 /* the xterm canvas fills the tile under the header.
 
    The grid is narrower than this box by whatever the tile's width leaves
@@ -1311,6 +1344,8 @@ body:has(.terminal-page) .content-wrapper > .terminal-box { display: none; }
     /* one tile fills the screen on a phone; back arrow replaces the ✕ */
     .term-grid { grid-template-columns: 1fr !important; }
     .term-panel-close { display: none; }
+    /* a phone already dictates into its own keyboard */
+    .term-panel-mic { display: none; }
     .term-mobile-toolbar { display: grid; }
     /* only the keys toolbar shows while the list view is up — hide it there */
     .term-app[data-view="list"] ~ .term-mobile-toolbar { display: none; }

@@ -233,6 +233,7 @@
                 '<span class="term-panel-dot" hidden aria-hidden="true"></span>' +
                 '<span class="term-panel-info">…</span>' +
                 '<button class="term-panel-rename term-action-btn" type="button" title="rename / recolor this session" aria-label="rename this session">✎</button>' +
+                '<button class="term-panel-mic term-action-btn" type="button" title="speak into this terminal" aria-label="voice input" aria-pressed="false">🎙</button>' +
                 '<button class="term-panel-speaker term-action-btn" type="button" title="toggle voice playback" aria-pressed="false">speaker off</button>' +
                 '<button class="term-panel-suspend term-action-btn term-action-btn-danger" type="button" ' +
                     'title="suspend this session and keep its conversation">suspend</button>' +
@@ -267,6 +268,7 @@
         const headControls = Array.from(el.querySelectorAll(".term-panel-head button, .term-panel-head .term-panel-info"));
         const info = el.querySelector(".term-panel-info");
         const xtermEl = el.querySelector(".term-xterm");
+        const micBtn = el.querySelector(".term-panel-mic");
         const speakerBtn = el.querySelector(".term-panel-speaker");
         const suspendBtn = el.querySelector(".term-panel-suspend");
         const closeBtn = el.querySelector(".term-panel-close");
@@ -516,6 +518,7 @@
             standingDown = true;
             info.classList.add("is-stopped");
             setInfo();
+            standDownMic();
         }
         info.addEventListener("click", function () {
             if (standingDown) { reattachAttempts = 0; attach(); }
@@ -700,6 +703,265 @@
             else { closeTtsStream(); stopTtsPlayback(); }
         });
 
+        // ── mic (whisper via the stt proxy, typed into this pane) ────
+        // Three states past idle, and every path out of them releases the
+        // device: a MediaStreamTrack left live keeps the browser's recording
+        // indicator lit for the life of the tab.
+        //
+        // The transcript is typed, never submitted. Whisper runs without a
+        // VAD gate and will happily return "Thank you." for a room's worth
+        // of silence, so the last word on whether it heard you right is
+        // always the user's own Enter.
+        const MIC_MAX_MS = 120000;   // an unattended recording ends itself
+        const MIC_ERROR_MS = 2000;   // how long the red flash sits
+        const MIC_STT_MS = 60000;    // a round trip that never answers still ends
+        let micState = "idle";       // idle | recording | working
+        let micRecorder = null;
+        let micStream = null;
+        let micChunks = [];
+        let micCapTimer = null;
+        let micErrTimer = null;
+        // One capture owns one generation. Every asynchronous continuation —
+        // a resolving getUserMedia, a queued onstop, a fetch in flight —
+        // carries the generation it started under and does nothing if a
+        // later tap or an abandonment has since moved it on. A state check
+        // cannot do this job: state returns to "idle" between captures, so a
+        // stale continuation finds exactly the state it started in.
+        let micRun = 0;
+
+        function setMicState(next) {
+            micState = next;
+            if (micErrTimer) { clearTimeout(micErrTimer); micErrTimer = null; }
+            micBtn.classList.toggle("is-recording", next === "recording");
+            micBtn.classList.toggle("is-working", next === "working");
+            micBtn.classList.remove("is-error");
+            micBtn.setAttribute("aria-pressed", next === "recording" ? "true" : "false");
+            micBtn.title = next === "recording" ? "stop and transcribe"
+                : next === "working" ? "transcribing…"
+                : "speak into this terminal";
+        }
+        // Give the keyboard back to the pane — but only when the mic button
+        // still holds it. A transcript that lands after the user has clicked
+        // into another tile would otherwise drag focus back here mid-sentence
+        // and split their typing across two ptys.
+        function restoreMicFocus() {
+            if (destroyed) return;
+            if (el.contains(document.activeElement)) term.focus();
+        }
+        function micFailed() {
+            setMicState("idle");
+            micBtn.classList.add("is-error");
+            micErrTimer = setTimeout(function () {
+                micErrTimer = null;
+                micBtn.classList.remove("is-error");
+            }, MIC_ERROR_MS);
+            // Every error path ends on the button, so without this the Enter
+            // meant to retry the typed line re-arms the microphone instead.
+            restoreMicFocus();
+        }
+        // Idempotent, and safe against a recorder the browser already
+        // stopped for us — backgrounding a tab ends the track, and stop()
+        // on an inactive recorder throws.
+        function releaseMic() {
+            if (micCapTimer) { clearTimeout(micCapTimer); micCapTimer = null; }
+            if (micRecorder) {
+                try { if (micRecorder.state !== "inactive") micRecorder.stop(); } catch (e) {}
+                micRecorder = null;
+            }
+            if (micStream) {
+                try { micStream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
+                micStream = null;
+            }
+        }
+        // Drop a capture on the floor: the device goes back, the audio is
+        // discarded, and the generation moves on so the stop event this
+        // very call is about to queue transcribes nothing. Stopping a
+        // recorder is not cancelling it — onstop still fires, and without
+        // the bump the words of a recording the user cancelled arrive in
+        // the pane seconds later.
+        function abandonMicCapture() {
+            micRun += 1;
+            micChunks = [];
+            releaseMic();
+        }
+        // The pane has stopped taking input — suspended from another surface,
+        // ended, evicted. Holding the device through that leaves the
+        // browser's recording indicator lit on a tile that can no longer
+        // receive a word of what it is hearing.
+        // Only a live capture: past the stop the device is already back, and
+        // the words are owed an answer. A transcript that returns to a tile
+        // with no socket left has to reach the error state rather than be
+        // dropped here, which is the whole point of that state existing.
+        function standDownMic() {
+            if (micState !== "recording") return;
+            abandonMicCapture();
+            setMicState("idle");
+        }
+        async function startMicCapture() {
+            const media = navigator.mediaDevices;
+            if (!media || !media.getUserMedia || typeof window.MediaRecorder !== "function") {
+                micFailed();
+                return;
+            }
+            const run = ++micRun;
+            let stream;
+            try {
+                stream = await media.getUserMedia({audio: true});
+            } catch (e) {
+                if (run === micRun) micFailed();   // denied, or no input device at all
+                return;
+            }
+            // A tile torn down while the permission prompt was up, or a tap
+            // that superseded this one while it was up, must not come back
+            // holding a live microphone.
+            if (destroyed || run !== micRun || micState !== "idle") {
+                try { stream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
+                return;
+            }
+            micChunks = [];
+            try {
+                micRecorder = new window.MediaRecorder(stream);
+            } catch (e) {
+                try { stream.getTracks().forEach(function (t) { t.stop(); }); } catch (e2) {}
+                micFailed();
+                return;
+            }
+            micStream = stream;
+            micRecorder.ondataavailable = function (ev) {
+                if (ev && ev.data) micChunks.push(ev.data);
+            };
+            micRecorder.onstop = function () { transcribeMicCapture(run); };
+            // The recorder reporting its own failure is not an exception —
+            // it arrives here, with the device still held.
+            micRecorder.onerror = function () {
+                if (run !== micRun) return;
+                abandonMicCapture();
+                micFailed();
+            };
+            // start() throws in its own right — the device can disappear
+            // between getUserMedia resolving and the recorder claiming it —
+            // and an unwrapped throw here leaves the microphone live with
+            // the button showing nothing at all.
+            try {
+                micRecorder.start();
+            } catch (e) {
+                abandonMicCapture();
+                micFailed();
+                return;
+            }
+            setMicState("recording");
+            micCapTimer = setTimeout(function () {
+                micCapTimer = null;
+                if (micState === "recording") stopMicCapture();
+            }, MIC_MAX_MS);
+        }
+        function stopMicCapture() {
+            if (micState !== "recording") return;
+            setMicState("working");
+            if (micCapTimer) { clearTimeout(micCapTimer); micCapTimer = null; }
+            const run = micRun;
+            try {
+                if (micRecorder && micRecorder.state !== "inactive") micRecorder.stop();
+                else transcribeMicCapture(run);
+            } catch (e) {
+                releaseMic();
+                micFailed();
+            }
+        }
+        async function transcribeMicCapture(run) {
+            // Stops the user did not ask for reach here too — a track ending,
+            // a device unplugged, a tab backgrounded — so this is where the
+            // working state is entered, not stopMicCapture. Consuming the
+            // generation is what stops a second stop event, or a tap landing
+            // in the gap, from transcribing the same emptied buffer twice.
+            if (run !== micRun) return;
+            const mine = ++micRun;
+            if (micState !== "working") setMicState("working");
+            const chunks = micChunks;
+            micChunks = [];
+            const type = (micRecorder && micRecorder.mimeType) || "audio/webm";
+            // The device goes back before the round trip, not after: whisper
+            // can take a while, and holding the mic through it is what makes
+            // the browser's indicator look stuck.
+            releaseMic();
+            if (destroyed) { setMicState("idle"); return; }
+            const blob = new Blob(chunks, {type: type});
+            if (!blob.size) { micFailed(); return; }
+            // Which conversation this was spoken to. A rotation mid-flight
+            // repoints the tile at a successor, and words meant for the old
+            // one must not land in a freshly seeded context.
+            const spokenTo = sessionId;
+            const form = new FormData();
+            // The voice server picks its decode path off the name as well as
+            // the type, so a container named wrong is a container decoded
+            // wrong. Firefox records Ogg where Chrome records WebM.
+            const ext = type.indexOf("mp4") >= 0 ? "mp4"
+                : type.indexOf("ogg") >= 0 ? "ogg"
+                : "webm";
+            form.append("file", blob, "audio." + ext);
+            let text = "";
+            // A refusal answers; a blackholed connection does not. Without a
+            // deadline the button sits in the working state until the tile is
+            // closed, which is the one state the click handler will not let
+            // the user leave.
+            const ctl = typeof AbortController === "function" ? new AbortController() : null;
+            const sttTimer = setTimeout(function () {
+                if (ctl) ctl.abort();
+            }, MIC_STT_MS);
+            try {
+                const resp = await fetch("/api/terminal/stt", {
+                    method: "POST", credentials: "same-origin", body: form,
+                    signal: ctl ? ctl.signal : undefined,
+                });
+                if (!resp.ok) { micFailed(); return; }
+                const data = await resp.json();
+                text = (data && data.text ? String(data.text) : "").trim();
+            } catch (e) {
+                micFailed();
+                return;
+            } finally {
+                clearTimeout(sttTimer);
+            }
+            // Abandoned mid-flight — the tile narrowed past the breakpoint,
+            // or stood down. The user was already told the capture was over,
+            // so this is silent rather than an error.
+            if (mine !== micRun) return;
+            if (destroyed || sessionId !== spokenTo) { micFailed(); return; }
+            // sendRaw drops bytes when the socket isn't open — a stood-down
+            // tile looks entirely normal, so a silent drop reads as a flaky
+            // microphone rather than a dead terminal.
+            if (!sendRaw(text)) { micFailed(); return; }
+            setMicState("idle");
+            // Without this the button still holds the keyboard, and the
+            // Enter meant to submit re-arms the mic instead.
+            restoreMicFocus();
+        }
+        micBtn.addEventListener("click", function () {
+            if (micState === "recording") stopMicCapture();
+            else if (micState === "idle") startMicCapture();
+            // working: a second recording here would race two transcripts
+            // into the same line, in whichever order the GPU finished them.
+        });
+        // The button is hidden below the phone breakpoint, so a window
+        // narrowed mid-recording would take the only way to stop it.
+        const micWide = window.matchMedia("(min-width: 860px)");
+        function onMicWidthChange(ev) {
+            if (!ev.matches && micState !== "idle") {
+                abandonMicCapture();
+                setMicState("idle");
+            }
+        }
+        if (micWide.addEventListener) micWide.addEventListener("change", onMicWidthChange);
+        else micWide.addListener(onMicWidthChange);
+        // The only per-panel listener on an object outliving the panel. A
+        // MediaQueryList is global, so leaving it attached retains the whole
+        // closure — the disposed terminal, the detached DOM, the lot — once
+        // per tile ever opened.
+        function detachMicWidth() {
+            if (micWide.removeEventListener) micWide.removeEventListener("change", onMicWidthChange);
+            else micWide.removeListener(onMicWidthChange);
+        }
+
         // ── pty attach over WS ────────────────────────────────────
         // Every handler comes off before the close, because close() is
         // asynchronous and a socket in CLOSING still delivers whatever the
@@ -755,11 +1017,13 @@
                 // the ending and remove it from the terminal session lists.
                 if (ev && ev.code === 4410) {
                     setAttachState("session ended");
+                    standDownMic();
                     refreshSessions();
                     return;
                 }
                 if (ev && ev.code === 4411) {
                     setAttachState("session suspended");
+                    standDownMic();
                     refreshSessions();
                     return;
                 }
@@ -801,11 +1065,17 @@
             socket.onerror = () => setAttachState("connection error");
             ws = socket;
         }
+        // Reports whether the bytes actually went. A tile that has stood
+        // down (evicted by another window, suspended, mid-reattach) looks
+        // no different from a live one, so a caller that can't watch the
+        // pane for an echo — the mic — needs to be told.
         function sendRaw(text) {
-            if (!text) return;
+            if (!text) return false;
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(new TextEncoder().encode(text));
+                return true;
             }
+            return false;
         }
         function isAltBuffer() {
             const buf = term.buffer && term.buffer.active;
@@ -1112,6 +1382,8 @@
                 closeSocket();
                 closeTtsStream();
                 stopTtsPlayback();
+                abandonMicCapture();
+                detachMicWidth();
                 try { term.dispose(); } catch (e) {}
                 if (el.parentNode) el.parentNode.removeChild(el);
             },

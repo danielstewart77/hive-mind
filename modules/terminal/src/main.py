@@ -22,7 +22,17 @@ import httpx
 import websockets
 from websockets.exceptions import WebSocketException
 
-from fastapi import Depends, FastAPI, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -239,6 +249,90 @@ async def api_terminal_tts(request: Request, user: dict = Depends(require_auth))
     except OSError as exc:
         raise HTTPException(status_code=502, detail=f"voice server unavailable: {exc}") from exc
     return Response(content=audio, media_type=ctype)
+
+
+# Two minutes of Opus is well under a megabyte; the cap is loose enough that
+# no real recording meets it and tight enough that the route is not a place
+# to post a film.
+MAX_STT_AUDIO_BYTES = 25 * 1024 * 1024
+# C0 and C1, less the whitespace the collapse above already handles.
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+
+def _multipart_audio(filename: str, content_type: str, audio: bytes) -> tuple[bytes, dict]:
+    """One-file multipart body, built by hand.
+
+    The voice server reads an UploadFile, so the audio has to arrive as a
+    form part rather than a raw body — and both the filename and the content
+    type matter downstream: /stt picks its decode path from them.
+    """
+    boundary = uuid.uuid4().hex
+    safe_name = re.sub(r'[\r\n"]', "", filename) or "audio"
+    safe_type = re.sub(r"[\r\n]", "", content_type) or "application/octet-stream"
+    head = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{safe_name}"\r\n'
+        f"Content-Type: {safe_type}\r\n\r\n"
+    ).encode()
+    body = head + audio + f"\r\n--{boundary}--\r\n".encode()
+    return body, {
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+        "Content-Length": str(len(body)),
+    }
+
+
+@app.post("/api/terminal/stt")
+async def api_terminal_stt(
+    file: UploadFile = File(...),
+    user: dict = Depends(require_auth),
+):
+    """Proxy recorded audio to the voice server's /stt and hand back the text.
+
+    The browser's MediaRecorder produces WebM/Opus on Chrome, MP4 on Safari
+    and Ogg/Opus on Firefox. Only the last takes the voice server's OGG
+    branch; the other two decode anyway, because faster-whisper probes the
+    container rather than trusting the extension.
+    """
+    del user
+    audio = await file.read()
+    if not audio:
+        raise HTTPException(status_code=400, detail="audio is required")
+    if len(audio) > MAX_STT_AUDIO_BYTES:
+        raise HTTPException(status_code=413, detail="audio is too large")
+    payload, headers = _multipart_audio(
+        file.filename or "audio.webm",
+        file.content_type or "application/octet-stream",
+        audio,
+    )
+    url = f"{_voice_api_url()}/stt"
+
+    def _do_post():
+        req = urllib.request.Request(url, data=payload, headers=headers)
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    try:
+        result = await asyncio.to_thread(_do_post)
+    except urllib.error.HTTPError as exc:
+        raise HTTPException(status_code=exc.code, detail="voice server rejected the audio") from exc
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=f"voice server unavailable: {exc}") from exc
+
+    if not isinstance(result, dict):
+        raise HTTPException(status_code=502, detail="voice server returned an unexpected body")
+
+    # faster-whisper joins its segments with a space each of which already
+    # carries a leading one, so a multi-sentence transcript arrives with
+    # doubled gaps. Collapse them; the words themselves are untouched.
+    raw = result.get("text")
+    text = re.sub(r"\s+", " ", raw if isinstance(raw, str) else "").strip()
+    # Whatever comes back is typed straight into a pty. A newline would be a
+    # submit the user never pressed — the whitespace collapse already covers
+    # that — but backspace, escape and the rest of C0 are not whitespace, and
+    # would erase the line the user is holding or be read as an escape
+    # sequence by whatever is running in the pane.
+    text = _CONTROL_CHARS.sub("", text)
+    return {"text": text}
 
 
 @app.get("/api/terminal/sessions")
