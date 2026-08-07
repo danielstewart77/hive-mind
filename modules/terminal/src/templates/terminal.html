@@ -138,18 +138,33 @@
             body: JSON.stringify({name: label.name || "", color: label.color || ""}),
         }).catch(function () {});
     }
+    // The server's copy is the record; this browser's is a warm-start cache
+    // so the first paint is not unlabelled. Read on every poll, not once at
+    // boot — a tab left open on one device has no other way to learn about a
+    // name set on another, and a tab is left open for days.
+    //
+    // `no-store`, because the response carries no cache directive of its own
+    // and a heuristically-cached one is indistinguishable from a current one:
+    // a stale read used to look like the server had lost labels it still
+    // held.
     async function syncLabelsFromServer() {
         let server = null;
         try {
-            const resp = await fetch("/api/terminal/labels", {credentials: "same-origin"});
+            const resp = await fetch("/api/terminal/labels", {
+                credentials: "same-origin", cache: "no-store",
+            });
             if (resp.ok) server = await resp.json();
         } catch (e) {}
         if (!server || typeof server !== "object") return;
-        // One-time migration: labels this browser has that the server lacks.
-        Object.keys(labelsCache).forEach(function (id) {
-            if (!server[id]) pushLabel(id, labelsCache[id]);
-        });
-        labelsCache = Object.assign({}, labelsCache, server);
+        // Nothing changed on the great majority of polls, and repainting
+        // anyway rebuilds the whole rail twice a minute under whatever the
+        // user is doing in it.
+        const next = JSON.stringify(server);
+        if (next === JSON.stringify(labelsCache)) return;
+        // Replaced, not merged. Merging keeps a label this browser holds and
+        // the server does not, which is exactly what a rename or a delete on
+        // another device looks like from here.
+        labelsCache = server;
         cacheLabelsLocally();
         renderCards(lastRows);
         openPanels.forEach(function (p) { p.refreshLabel(); });
@@ -239,6 +254,13 @@
                     '</div>' +
                 '</div>' +
             '</div>' +
+            '<div class="term-rotated" hidden>' +
+                '<div class="term-rotated-head">' +
+                    '<span class="term-rotated-title">This session rotated. Here is where it left off.</span>' +
+                    '<button type="button" class="term-rotated-close term-icon-btn" title="dismiss" aria-label="dismiss">✕</button>' +
+                '</div>' +
+                '<div class="term-rotated-body"></div>' +
+            '</div>' +
             '<div class="term-xterm"></div>';
 
         const panelHead = el.querySelector(".term-panel-head");
@@ -257,6 +279,9 @@
         const headDot = el.querySelector(".term-panel-dot");
         const colorGridSwatches = el.querySelector(".term-color-grid-swatches");
         const colorInput = el.querySelector(".term-color-input");
+        const rotatedEl = el.querySelector(".term-rotated");
+        const rotatedBody = el.querySelector(".term-rotated-body");
+        const rotatedClose = el.querySelector(".term-rotated-close");
 
         const term = new window.Terminal({
             convertEol: true,
@@ -448,6 +473,40 @@
             info.classList.remove("is-stopped");
             setInfo();
         }
+        // A rotation respawns the pane, which takes its screen and scrollback
+        // with it — the terminal goes blank on a conversation that was
+        // mid-flow. This is the only account of what was on it. It sits beside
+        // the terminal rather than in it: the harness owns that pane, runs on
+        // the alternate screen, and repaints over anything written there.
+        // textContent throughout — the body is verbatim conversation text and
+        // is never markup.
+        function showRotated(exchange) {
+            const ex = exchange || {};
+            rotatedBody.textContent = "";
+            [["you", ex.user], ["reply", ex.assistant]].forEach(function (pair) {
+                const text = (pair[1] || "").trim();
+                if (!text) return;
+                const label = document.createElement("div");
+                label.className = "term-rotated-label";
+                label.textContent = pair[0];
+                const body = document.createElement("div");
+                body.className = "term-rotated-text";
+                body.textContent = text;
+                rotatedBody.appendChild(label);
+                rotatedBody.appendChild(body);
+            });
+            // A rotation with nothing recorded before it still gets the
+            // banner: the blank pane is the thing being explained, and a
+            // heading over an empty box reads as a load that failed.
+            rotatedEl.hidden = false;
+            doFit();
+        }
+        rotatedClose.addEventListener("click", function () {
+            rotatedEl.hidden = true;
+            rotatedBody.textContent = "";
+            doFit();
+            term.focus();
+        });
         // A tile that has stopped trying — evicted by another window, refused
         // by the mind, or out of reattach window — must still have a way
         // back, or the only cure is reloading the page. The state text
@@ -682,10 +741,11 @@
                 }
                 // Terminal bytes always arrive as BINARY frames, so a TEXT
                 // frame is the gateway's control channel, never output.
-                // Nothing speaks on it today — a rotation replaces the
-                // conversation behind this session, not the session, so the
-                // tile has nothing to be told. Never printed: echoing a
-                // control frame into the pane corrupts the screen.
+                // Never printed: echoing a control frame into the pane
+                // corrupts the screen.
+                let msg;
+                try { msg = JSON.parse(ev.data); } catch (e) { return; }
+                if (msg && msg.type === "session_rotated") showRotated(msg.exchange);
             };
             socket.onclose = (ev) => {
                 if (ws === socket) ws = null;
@@ -1482,6 +1542,14 @@
 
     showView("list");
     syncLabelsFromServer();
+    // Labels are edited on whichever device is to hand, and a tile is left
+    // open for days — so this tab has to keep asking. On becoming visible
+    // too: a phone that was in a pocket during the edit polls nothing, and
+    // coming back to a stale name is exactly the case this exists for.
+    setInterval(syncLabelsFromServer, 30000);
+    document.addEventListener("visibilitychange", function () {
+        if (document.visibilityState === "visible") syncLabelsFromServer();
+    });
     refreshSessions().then(function (rows) {
         const active = (rows || []).filter(function (r) { return isActiveStatus(r.status); });
         const byId = {};

@@ -1658,3 +1658,54 @@ body:has(.terminal-page) .content-wrapper > .terminal-box { display: none; }
 .rules-actions { display: flex; gap: 8px; margin-top: 6px; }
 .event-mind-raw { color: #6b8c6b; font-size: 0.78em; opacity: 0.8; }
 .rules-edit { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+
+/* ── rotation banner ────────────────────────────────────────────────
+   A rotation respawns the pane, and the respawn takes its screen and
+   scrollback with it. This is the only account of the conversation that
+   was on that screen, so it sits beside the terminal — the harness owns
+   the pane, runs on the alternate screen, and repaints over anything
+   written into it.
+
+   Capped and scrolled rather than truncated: a long last reply stays
+   whole and readable without pushing the terminal off the tile. */
+.term-rotated {
+    display: flex;
+    flex-direction: column;
+    background: #0b1724;
+    border-bottom: 1px solid #1e2d3d;
+    flex-shrink: 0;
+    max-height: 40%;
+}
+/* same display:flex-beats-[hidden] issue as .term-rename-pop above */
+.term-rotated[hidden] { display: none; }
+.term-rotated-head {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.45rem 0.5rem 0.35rem 0.7rem;
+    flex-shrink: 0;
+}
+.term-rotated-title {
+    flex: 1;
+    color: #8fb6c9;
+    font-size: 0.78rem;
+    letter-spacing: 0.01em;
+}
+.term-rotated-body {
+    overflow-y: auto;
+    padding: 0 0.7rem 0.6rem;
+    /* Conversation text arrives with its own newlines and no markup. */
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+.term-rotated-label {
+    color: #5c7284;
+    font-size: 0.7rem;
+    text-transform: lowercase;
+    margin: 0.35rem 0 0.15rem;
+}
+.term-rotated-text {
+    color: #cfdce6;
+    font-size: 0.8rem;
+    line-height: 1.45;
+}

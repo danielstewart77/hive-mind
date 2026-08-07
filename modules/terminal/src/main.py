@@ -23,7 +23,7 @@ import websockets
 from websockets.exceptions import WebSocketException
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -369,13 +369,24 @@ _LABEL_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{3,8}$")
 
 @app.get("/api/terminal/labels")
 async def api_terminal_labels(user: dict = Depends(require_auth)):
+    """Every label, for the tab that asked. Explicitly uncacheable.
+
+    Without a directive a browser may cache a 200 GET heuristically, and a
+    stale read here is indistinguishable from a current one — it reads as
+    the server having lost labels it still holds. The client asks with
+    ``no-store`` as well; both ends, because either alone is one deployment
+    away from being the only one.
+    """
     del user
     conn = _labels_db()
     try:
         rows = conn.execute("SELECT session_id, name, color FROM terminal_labels").fetchall()
     finally:
         conn.close()
-    return {r["session_id"]: {"name": r["name"], "color": r["color"]} for r in rows}
+    return JSONResponse(
+        {r["session_id"]: {"name": r["name"], "color": r["color"]} for r in rows},
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.put("/api/terminal/labels/{session_id}")
