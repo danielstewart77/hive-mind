@@ -30,11 +30,6 @@ _TRANSCRIPT_DIR = Path.home() / ".claude" / "projects" / "-usr-src-app"
 
 log = logging.getLogger("hive-mind.sessions")
 
-# Shown over a browser terminal the moment its rotation starts. The pane is
-# respawned minutes later, at the end of composition, and without this the
-# screen simply turns over with nothing said about why.
-ROTATING_NOTICE = "This session is rotating. A fresh conversation is starting."
-
 
 # ---------------------------------------------------------------------------
 # Subprocess stderr drain — logs stderr lines at WARNING
@@ -784,14 +779,6 @@ class SessionManager:
         from comms import broker  # noqa: PLC0415
 
         mind_id = session["mind_id"]
-        # Composition below runs for minutes. Say so now, while the pane the
-        # user is looking at still holds the old conversation, rather than
-        # letting the screen turn over with no explanation.
-        await self._pty_notice_on_mind(
-            session_id=session_id,
-            mind_id=mind_id,
-            text=ROTATING_NOTICE,
-        )
         mind_row = await broker.get_mind_by_id(self.broker_db, mind_id)
         mind_name = (mind_row or {}).get("name") or mind_id
         system_prompt_blocks = await bootstrap_loader.compose_prompt_blocks(
@@ -802,6 +789,10 @@ class SessionManager:
         )
 
         new_claude_sid = str(uuid.uuid4())
+        # Read last, after composition: a turn typed during that window
+        # belongs in the replay, and reading it earlier would show the user
+        # an exchange older than the one they just had.
+        last_exchange = await self._last_exchange(session_id)
         rotated = await self._rotate_pty_on_mind(
             session_id=session_id,
             new_claude_sid=new_claude_sid,
@@ -811,10 +802,6 @@ class SessionManager:
             client_ref=client_ref,
             owner_type=session.get("owner_type"),
             owner_ref=session.get("owner_ref"),
-            # Read last, after composition: a turn typed during that window
-            # belongs in the replay, and reading it earlier would show the
-            # user an exchange older than the one they just had.
-            last_exchange=await self._last_exchange(session_id),
         )
         if not rotated:
             # No live pane to respawn — there is nothing burning context, and
@@ -840,6 +827,20 @@ class SessionManager:
              _now, session_id),
         )
         await self._db.commit()
+        # The pane was respawned, so the tile's screen and scrollback went
+        # with it — the conversation it was showing is gone from the display
+        # even though nothing it tracks changed. This is the only account of
+        # what was on that screen, and the tile draws it as a banner beside
+        # the terminal rather than into it: the harness owns the pane, runs
+        # on the alternate screen and repaints over anything written there.
+        await self._publish_session_event(
+            session_id,
+            {
+                "type": "session_rotated",
+                "session_id": session_id,
+                "exchange": last_exchange,
+            },
+        )
         log.info("rotation: session %s now on conversation %s", session_id, new_claude_sid)
         return {
             "ok": True,
@@ -882,34 +883,6 @@ class SessionManager:
             # later one wins and the other is dropped.
             exchange[key] = turn["content"]
         return exchange
-
-    async def _pty_notice_on_mind(
-        self, *, session_id: str, mind_id: str, text: str, hold: bool = False
-    ) -> bool:
-        """Ask a mind to draw a notice over a session's terminal.
-
-        Best-effort throughout: no terminal, an older mind without the route,
-        or an unreachable one all mean the user simply does not see the
-        notice. None of them is a reason to abandon the rotation.
-        """
-        mind_url = await self._mind_url_for_session(session_id, mind_id)
-        if not mind_url:
-            return False
-        import aiohttp
-        try:
-            async with aiohttp.ClientSession() as http:
-                resp = await http.post(
-                    f"{mind_url}/sessions/{session_id}/pty-notice",
-                    json={"text": text, "hold": hold},
-                    timeout=aiohttp.ClientTimeout(total=10),
-                )
-                if resp.status != 200:
-                    return False
-                data = await resp.json()
-        except Exception:
-            log.warning("pty-notice on %s for session %s failed", mind_url, session_id)
-            return False
-        return bool(data.get("shown"))
 
     async def _finalize_rotation(self, session: dict) -> str | None:
         """Swap a chat session to a fresh one, carrying the rotation forward.
@@ -1771,7 +1744,6 @@ class SessionManager:
         client_ref: str | None = None,
         owner_type: str | None = None,
         owner_ref: str | None = None,
-        last_exchange: dict | None = None,
     ) -> bool:
         """Ask a mind to start a fresh conversation in a live terminal.
 
@@ -1797,7 +1769,6 @@ class SessionManager:
                         "owner_type": owner_type,
                         "owner_ref": owner_ref,
                         "surface": self._surface_label(owner_type or ""),
-                        "last_exchange": last_exchange or {},
                     },
                     timeout=aiohttp.ClientTimeout(total=20),
                 )

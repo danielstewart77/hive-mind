@@ -696,6 +696,22 @@ async def ws_attach(ws: WebSocket, session_id: str):
         async for event in session_mgr.stream_session_events(watched_id):
             if event.get("type") in ("session_closed", "session_suspended"):
                 return event
+            if event.get("type") == "session_rotated":
+                # An in-place rotation respawned the pane, taking its screen
+                # and scrollback with it. Nothing the tile tracks changed —
+                # same session, same socket — so this is not a close; it is
+                # the one account of the conversation that just vanished off
+                # the screen. TEXT, because BINARY on this socket is terminal
+                # output and printing a control frame corrupts the pane.
+                #
+                # Best-effort: a tab closing as the rotation lands leaves this
+                # sending into a socket that is already going away, and the
+                # recap is decoration. It does not get to raise out of the
+                # watcher and take the bridge down with it.
+                try:
+                    await ws.send_text(json.dumps(event))
+                except Exception:
+                    log.debug("rotation recap not delivered for %s", watched_id)
         return {"type": "session_closed"}
 
     try:
@@ -704,9 +720,9 @@ async def ws_attach(ws: WebSocket, session_id: str):
             http.ws_connect(attach_url) as mind_ws,
         ):
             pump = asyncio.ensure_future(_pump_attach_ws(ws, mind_ws))
-            # A rotation is invisible here on purpose: it replaces the
-            # conversation under this session, not the session, so no event
-            # reaches the bridge and the tile has nothing to follow.
+            # A rotation does not end this bridge — the session, the socket
+            # and the tile all survive it — so the same watcher that ends the
+            # bridge on a close forwards the rotation and keeps going.
             closed = asyncio.ensure_future(_watch_for_close(session_id))
             done, _ = await asyncio.wait(
                 {pump, closed}, return_when=asyncio.FIRST_COMPLETED

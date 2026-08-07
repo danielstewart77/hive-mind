@@ -75,13 +75,9 @@ def _a_mind_with_a_live_pane():
     async def rotated(_self, **_kw):
         return True
 
-    async def notice(_self, **_kw):
-        return True
-
     with patch("comms.broker.get_mind_by_id", mind_row), \
             patch("comms.bootstrap_loader.compose_prompt_blocks", blocks), \
-            patch.object(SessionManager, "_rotate_pty_on_mind", rotated), \
-            patch.object(SessionManager, "_pty_notice_on_mind", notice):
+            patch.object(SessionManager, "_rotate_pty_on_mind", rotated):
         yield
 
 

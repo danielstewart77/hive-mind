@@ -371,7 +371,9 @@ def test_terminal_rotation_keeps_the_session_and_swaps_the_conversation() -> Non
                 assert "<soul>seed</soul>" in calls[0]["system_prompt"]
 
                 # Nothing above the harness moved: the row is still running,
-                # still bound, and nobody was told the session ended.
+                # still bound, and nobody was told the session ended. The one
+                # thing observers hear is the rotation itself, which carries
+                # the screen the respawn wiped — not a close.
                 cur = await mgr._db.execute(
                     "SELECT status, rotation_armed FROM sessions WHERE id = ?", (sid,)
                 )
@@ -379,6 +381,7 @@ def test_terminal_rotation_keeps_the_session_and_swaps_the_conversation() -> Non
                 assert row["status"] == "running"
                 assert row["rotation_armed"] == 0
                 assert await _active_binding(mgr, "web", "terminal-abc") == sid
+                assert queue.get_nowait()["type"] == "session_rotated"
                 assert queue.empty()
             finally:
                 await mgr.shutdown()

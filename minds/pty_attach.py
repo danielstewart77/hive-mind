@@ -43,12 +43,6 @@ from pathlib import Path
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
-from minds import pty_notice
-
-# Popup bodies are conversation text; they live outside every repo working
-# tree and are deleted by the popup that reads them.
-_NOTICE_DIR = Path(os.environ.get("XDG_RUNTIME_DIR") or "/tmp") / "hive-rotation-notices"
-
 log = logging.getLogger("hive-mind.minds.pty")
 
 _PTY_CHUNK = 65536
@@ -391,40 +385,6 @@ class TmuxTerminals:
         """
         target = f"={self.session_name(session_id)}"
         return self._tmux("has-session", "-t", target).returncode == 0
-
-    def notice(self, session_id: str, text: str, *, hold: bool = False) -> bool:
-        """Draw a notice over this session's terminal. False if there isn't one.
-
-        A popup rather than pane output: ``claude`` runs on the alternate
-        screen, ``codex`` paints over anything written ahead of its exec, and
-        ``status off`` leaves the status line with nowhere to render — see
-        :mod:`minds.pty_notice`.
-
-        Launched and never waited on. ``display-popup -E`` does not return
-        until the popup closes, so waiting would hold the rotation's HTTP call
-        open for as long as the popup is up: the gateway's request times out,
-        it concludes the terminal is dead and skips writing the new
-        conversation id, and the session is left pointing at the conversation
-        it just rotated away from. The notice is decoration; it does not get
-        to decide that.
-
-        Best-effort throughout — a notice that cannot be drawn never takes a
-        rotation down with it.
-        """
-        if not text or not self.alive(session_id):
-            return False
-        name = self.session_name(session_id)
-        try:
-            # Not under ``project_dir``: that is the repo the mind works in,
-            # and a notice file is verbatim conversation text that must not
-            # turn up untracked in a working tree the mind runs ``git add``
-            # in.
-            body = pty_notice.write_popup_body(_NOTICE_DIR, name, text)
-            self._tmux_detached(*pty_notice.popup_args(name, body, hold=hold))
-        except Exception:
-            log.exception("Could not draw the notice for session %s", session_id)
-            return False
-        return True
 
     def _tmux_detached(self, *args: str) -> None:
         """Run a tmux command without waiting for it to finish."""
@@ -833,24 +793,6 @@ def install_pty_attach(
     async def _start_pty_reaper() -> None:  # pragma: no cover - lifecycle glue
         asyncio.ensure_future(reap_dead())
 
-    @app.post("/sessions/{session_id}/pty-notice")
-    async def pty_notice_route(session_id: str, request: Request):
-        """Draw a short-lived notice over this session's terminal, if it has one.
-
-        Rotation's own work runs for minutes before the pane is respawned;
-        this is how the gateway says so at the moment it starts, rather than
-        leaving the user to discover it when the screen turns over. Reports
-        ``shown: false`` when nobody has a terminal here.
-        """
-        body = await request.json()
-        text = (body.get("text") or "").strip()
-        if not text:
-            return JSONResponse({"error": "text required"}, status_code=400)
-        shown = await asyncio.to_thread(
-            terminals.notice, session_id, text, hold=bool(body.get("hold")),
-        )
-        return {"session_id": session_id, "shown": bool(shown)}
-
     @app.post("/sessions/{session_id}/rotate-pty")
     async def rotate_pty(session_id: str, request: Request):
         """Turn a live terminal's conversation over without disturbing the tile.
@@ -903,24 +845,10 @@ def install_pty_attach(
         handle.conversation_id = new_claude_sid
         log.info("Rotated the conversation in session %s's terminal onto %s",
                  session_id, new_claude_sid)
-
-        # Drawn here rather than in either harness adapter, so the two cannot
-        # drift on what a rotated terminal says. After the respawn, not
-        # before: the popup goes up over the successor while it starts, which
-        # is exactly the moment the pane would otherwise be blank. Screen text
-        # only — the successor learns nothing from it the carry-forward did
-        # not already carry. Held open until dismissed: it is there to be
-        # read, not glimpsed.
-        await asyncio.to_thread(
-            terminals.notice,
-            session_id,
-            pty_notice.render_recap(
-                body.get("last_exchange"),
-                user_label=os.environ.get("OWNER_NAME", "user"),
-                assistant_label=mind_name,
-            ),
-            hold=True,
-        )
+        # The respawn took the pane's screen and scrollback with it. What was
+        # on that screen is replayed by the gateway, to the browser tile, as
+        # a banner beside the terminal — not from here and not into the pane,
+        # which the harness owns and repaints.
         return {"session_id": session_id, "rotated": True, "claude_sid": new_claude_sid}
 
     @app.websocket("/sessions/{session_id}/attach-pty")
