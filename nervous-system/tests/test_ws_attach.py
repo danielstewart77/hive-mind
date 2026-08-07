@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 
 import aiohttp
@@ -401,3 +402,81 @@ class TestAttachRequiresAConversation:
         with pytest.raises(Exception):
             with client.websocket_connect("/sessions/sess-hollow/attach") as ws:
                 ws.receive_bytes()
+
+
+class TestRotationReachesTheTile:
+    """An in-place rotation respawns the pane, and `respawn-pane -k` takes
+    the pane's screen and scrollback with it — the tile goes blank on a
+    conversation that was mid-flow. Nothing the tile tracks changed, so this
+    is not a close and not a reattach; the gateway hands it the exchange that
+    was on that screen, on the control channel, and the tile draws it beside
+    the terminal. It cannot go into the pane: the harness owns that, runs on
+    the alternate screen, and repaints over anything written there.
+
+    Driven through the real route rather than against the publisher alone —
+    a test that only checks the event is published passes while the leg that
+    carries it to the browser is broken.
+    """
+
+    def test_rotation_delivers_the_previous_exchange_to_the_attached_tile(
+        self, app_client, monkeypatch
+    ):
+        client, server_module = app_client
+        _run(_seed_session_and_mind(server_module, session_id="sess-rot"))
+        mgr = server_module.session_mgr
+
+        async def _seed_turns() -> None:
+            now = time.time()
+            for i, (role, content) in enumerate(
+                [("user", "why did it go blank?"),
+                 ("assistant", "the pane was respawned")]
+            ):
+                await mgr._db.execute(
+                    "INSERT INTO session_turns (session_id, role, content, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    ("sess-rot", role, content, now + i),
+                )
+            await mgr._db.commit()
+        _run(_seed_turns())
+
+        async def fake_rotate(**_kw):
+            return True
+
+        async def fake_blocks(**_kw):
+            return "<soul>seed</soul>"
+
+        mgr._rotate_pty_on_mind = fake_rotate  # type: ignore[assignment]
+        monkeypatch.setattr(
+            "comms.bootstrap_loader.compose_prompt_blocks", fake_blocks
+        )
+
+        fake_ws = _FakeMindWS(incoming=[b"tui output\r\n"])
+        _FakeHttpSession.ws_to_return = fake_ws
+        _FakeHttpSession.raise_on_connect = None
+        monkeypatch.setattr(server_module.aiohttp, "ClientSession", _FakeHttpSession)
+
+        with client.websocket_connect("/sessions/sess-rot/attach") as ws:
+            assert ws.receive_bytes() == b"tui output\r\n"
+
+            session = _run(mgr._get_row("sess-rot"))
+            _run(mgr._rotate_conversation_in_place(session, "terminal-abc"))
+
+            # Read on a deadline. `receive_text` blocks forever on an empty
+            # socket, so a regression that simply stops forwarding would hang
+            # the suite instead of failing it.
+            received: dict = {}
+            reader = threading.Thread(
+                target=lambda: received.setdefault("frame", ws.receive_text()),
+                daemon=True,
+            )
+            reader.start()
+            reader.join(10)
+            assert "frame" in received, "no rotation frame reached the tile"
+            event = json.loads(received["frame"])
+
+        assert event["type"] == "session_rotated"
+        assert event["session_id"] == "sess-rot"
+        assert event["exchange"] == {
+            "user": "why did it go blank?",
+            "assistant": "the pane was respawned",
+        }
