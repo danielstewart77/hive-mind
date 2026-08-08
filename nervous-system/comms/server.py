@@ -349,6 +349,25 @@ async def record_turn(body: RecordTurnRequest):
     )
 
 
+class PtyTextRequest(BaseModel):
+    text: str
+
+
+@app.post(
+    "/sessions/{session_id}/pty-text",
+    dependencies=[Depends(require_admin_bearer)],
+)
+async def publish_pty_text(session_id: str, body: PtyTextRequest):
+    """One block of a terminal's prose, for the tile speaker to read aloud.
+
+    Posted by the mind as it tails the harness's transcript, so a pty-hosted
+    conversation reaches the session event stream that only ``send_message``
+    feeds today. Admin-gated because the body is assistant output on a port
+    that answers across the LAN.
+    """
+    return await session_mgr.publish_pty_text(session_id, body.text)
+
+
 @app.get(
     "/sessions/{session_id}/carry-forward",
     dependencies=[Depends(require_admin_bearer)],
