@@ -317,7 +317,7 @@ def test_send_message_not_armed_never_finalizes() -> None:
 
 
 # ---------------------------------------------------------------------------
-# arm_rotation — terminal-owned sessions finalize immediately
+# arm_rotation + fire_rotation — terminal-owned sessions swap on a typed turn
 # ---------------------------------------------------------------------------
 
 async def _conversation_id(mgr: SessionManager, session_id: str) -> str | None:
@@ -357,7 +357,13 @@ def test_terminal_rotation_keeps_the_session_and_swaps_the_conversation() -> Non
                 mgr.create_session = fail_create  # type: ignore[assignment]
 
                 with _real_create_session():
-                    result = await mgr.arm_rotation("web", "terminal-abc")
+                    # Staging composes the seed; the pane's own typed turn is
+                    # what starts the successor.
+                    await mgr.arm_rotation("web", "terminal-abc", surface="terminal")
+                    result = await mgr.fire_rotation(
+                        "web", "terminal-abc",
+                        claude_sid="conv-full", prompt="carry on",
+                    )
 
                 assert result["ok"] is True
                 assert result["session_id"] == sid
@@ -368,7 +374,10 @@ def test_terminal_rotation_keeps_the_session_and_swaps_the_conversation() -> Non
                 assert calls[0]["new_claude_sid"] == new_conv
                 # The carry-forward has to reach the pane, or the successor
                 # conversation opens knowing nothing.
-                assert "<soul>seed</soul>" in calls[0]["system_prompt"]
+                # The carry-forward reaches the pane as the successor's
+                # opening user turn, with the message that fired it.
+                assert "<soul>seed</soul>" in calls[0]["user_prompt"]
+                assert calls[0]["user_prompt"].endswith("carry on")
 
                 # Nothing above the harness moved: the row is still running,
                 # still bound, and nobody was told the session ended. The one
@@ -408,7 +417,11 @@ def test_terminal_rotation_with_no_live_pane_leaves_the_session_alone() -> None:
                 mgr._rotate_pty_on_mind = declines  # type: ignore[assignment]
 
                 with _real_create_session():
-                    result = await mgr.arm_rotation("web", "terminal-xyz")
+                    await mgr.arm_rotation("web", "terminal-xyz")
+                    result = await mgr.fire_rotation(
+                        "web", "terminal-xyz",
+                        claude_sid="conv-kept", prompt="carry on",
+                    )
 
                 assert result["ok"] is False
                 assert await _conversation_id(mgr, sid) == "conv-kept"

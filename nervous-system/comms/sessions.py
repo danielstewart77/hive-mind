@@ -163,6 +163,16 @@ CREATE INDEX IF NOT EXISTS idx_session_turns_lookup
 # bot or mind container that holds it.
 _PRIVATE_SESSION_COLUMNS = ("carry_forward", "carry_forward_sid", "carry_forward_at")
 
+# The two armed values are not interchangeable, and nothing may test
+# `rotation_armed` for truth. A chat surface (1) is finalized by
+# `send_message` into a *successor row*; a staged terminal (2) keeps its row
+# and swaps only the conversation beneath it. A staged terminal that reached
+# `_finalize_rotation` would be retired for a successor, destroying the
+# permanent session row, its label and its ledger binding — which is the
+# outcome in-place rotation exists to prevent.
+ROTATION_ARMED_CHAT = 1
+ROTATION_ARMED_TERMINAL = 2
+
 
 def _public_session_row(row) -> dict:
     """A session row as a plain dict, minus the columns no listing may leak."""
@@ -599,10 +609,31 @@ class SessionManager:
                         log.info("Mind at %s has no release route — nothing to hand over", mind_url)
                         return False
                     body = await resp.json()
-                    return bool(body.get("released"))
+                    released = bool(body.get("released"))
         except Exception:
             log.exception("Failed to release %s for session %s", surface, session_id)
             return False
+        if released and surface == "terminal":
+            await self._downgrade_staged_rotation(session_id)
+        return released
+
+    async def _downgrade_staged_rotation(self, session_id: str) -> None:
+        """Hand a staged rotation back to the chat path when the pane dies.
+
+        Only a successful fire clears a staged terminal, and only the pane's
+        own hook can fire one — so a conversation adopted by Telegram, whose
+        pane is killed by that adoption, would keep ``rotation_armed = 2``
+        with nothing left able to act on it. It is over its context threshold
+        and can no longer rotate at all; it just keeps growing. Downgrading
+        to the chat value lets ``send_message`` finalize it on the next turn,
+        which is now the only turn it will get. The staged seed is left to
+        expire on its TTL: the successor session composes its own.
+        """
+        await self._db.execute(
+            "UPDATE sessions SET rotation_armed = ? WHERE id = ? AND rotation_armed = ?",
+            (ROTATION_ARMED_CHAT, session_id, ROTATION_ARMED_TERMINAL),
+        )
+        await self._db.commit()
 
     async def get_active_session(self, client_type: str, client_ref: str) -> dict | None:
         """Get the active session for a client surface, only if it's still
@@ -728,31 +759,34 @@ class SessionManager:
     # ------------------------------------------------------------------
     # Rotation arming (finalize-on-user-turn)
     # ------------------------------------------------------------------
-    async def arm_rotation(self, client_type: str, client_ref: str) -> dict:
-        """Mark the active session for (client_type, client_ref) as pending
-        rotation, or finalize it right away for surfaces with no turn-based
-        delivery to defer to.
+    async def arm_rotation(
+        self, client_type: str, client_ref: str, surface: str = "",
+    ) -> dict:
+        """Prepare the active session for (client_type, client_ref) to rotate.
 
         Called by the per-mind ``rotation_check`` Stop hook once it has
         written the carry-forward, INSTEAD of clearing the session inline.
-        For chat surfaces (Telegram/Discord) the Stop hook fires on an
-        assistant turn, so clearing there can kill the old session mid-reply
-        to a message that arrived during the rotation window — arming
-        defers the actual swap to ``send_message``, which finalizes it on
-        the next user turn. The browser terminal never calls
-        ``send_message`` (see ``record_turn``), so there is no later turn to
-        defer to; by the time this is called the hook's multi-minute
-        background work has already finished, so rotating here is still the
-        *last* step of an already-backgrounded rotation, not a synchronous
-        one.
+        The Stop hook fires on an *assistant* turn, so swapping anything here
+        can land mid-reply to a message that arrived during the rotation
+        window; both surfaces therefore defer the swap to the next user turn.
+        A chat surface finalizes in ``send_message``; a terminal, whose raw
+        byte bridge never reaches ``send_message``, is *staged* here and
+        fired by the pane's own hook through ``fire_rotation``.
+
+        ``surface`` is reported by the hook, which runs inside the pane and
+        is the only party that knows one is there. ``owner_ref`` cannot
+        answer this: a Telegram session adopted into a terminal keeps its
+        chat ownership while living in a pane, and keying on it would arm
+        that conversation for a successor row while a pane holds it.
         """
         active = await self.get_active_session(client_type, client_ref)
         if not active:
             return {"ok": False, "error": "no active session"}
-        if active.get("owner_ref") == "terminal":
-            return await self._rotate_conversation_in_place(active, client_ref)
+        if surface == "terminal":
+            return await self._stage_terminal_rotation(active, client_ref)
         await self._db.execute(
-            "UPDATE sessions SET rotation_armed = 1 WHERE id = ?", (active["id"],)
+            "UPDATE sessions SET rotation_armed = ? WHERE id = ?",
+            (ROTATION_ARMED_CHAT, active["id"]),
         )
         await self._db.commit()
         log.info(
@@ -760,19 +794,21 @@ class SessionManager:
         )
         return {"ok": True, "session_id": active["id"]}
 
-    async def _rotate_conversation_in_place(self, session: dict, client_ref: str) -> dict:
-        """Turn a terminal session's conversation over, keeping the session.
+    async def _stage_terminal_rotation(self, session: dict, client_ref: str) -> dict:
+        """Compose a terminal's successor without touching its pane.
 
         The session row is the conversation's permanent identity — the tile,
         its label, the turn ledger and every active_sessions binding are
         keyed to it. What fills up and has to be replaced is the *harness*
-        conversation underneath: a new ``claude_sid``, a pane respawned onto
-        it carrying the carry-forward, and that id written back onto the same
-        row. Nothing above this level moves, so the user sees a terminal that
-        keeps its id and its pane while the context behind it resets.
+        conversation underneath. Staging mints the id that conversation will
+        run under and stores the seed composed for it, and stops there: the
+        user is still typing into the conversation they can see, and
+        replacing the pane out from under them is what the split exists to
+        avoid. ``fire_rotation`` does the swap on their next typed message.
 
-        The old harness transcript is left on disk untouched; it is simply no
-        longer the one this session resumes.
+        Nothing here writes ``claude_sid``. The pane is still running the old
+        conversation, and pointing the row at an id no process holds would
+        strand the session on a conversation that was never started.
         """
         session_id = session["id"]
         from comms import bootstrap_loader  # noqa: PLC0415
@@ -789,6 +825,72 @@ class SessionManager:
         )
 
         new_claude_sid = str(uuid.uuid4())
+        # The seed lives on the row, keyed to the conversation it was
+        # composed for. It is composed here and delivered minutes later —
+        # however long the user takes to reply — so the row is the only thing
+        # that outlives both the composing process and a mind restart in the
+        # gap. See get_carry_forward.
+        _now = time.time()
+        await self._db.execute(
+            "UPDATE sessions SET carry_forward = ?, carry_forward_sid = ?, "
+            "carry_forward_at = ?, rotation_armed = ? WHERE id = ?",
+            (system_prompt_blocks, new_claude_sid, _now,
+             ROTATION_ARMED_TERMINAL, session_id),
+        )
+        await self._db.commit()
+        log.info(
+            "staged rotation: session=%s successor=%s", session_id, new_claude_sid
+        )
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "staged": True,
+            "claude_sid": new_claude_sid,
+        }
+
+    async def fire_rotation(
+        self, client_type: str, client_ref: str, *,
+        claude_sid: str = "", prompt: str = "",
+    ) -> dict:
+        """Swap a staged terminal onto its successor, carrying the message.
+
+        The terminal's equivalent of finalize-on-user-turn, called by the
+        pane's ``UserPromptSubmit`` hook. The difference from a chat surface
+        is where the message goes: it is not re-dispatched to a successor
+        session, it rides in as the successor conversation's *opening user
+        turn*, concatenated onto the staged seed.
+
+        Failure replaces nothing. Everything stays staged — the seed, the
+        successor id and the armed flag — so the message is answered in the
+        conversation it was typed into and a later turn can fire again.
+        """
+        active = await self.get_active_session(client_type, client_ref)
+        if not active:
+            return {"ok": False, "error": "no active session"}
+        session_id = active["id"]
+        # The raw row, not the public dict: the armed flag and the staged
+        # seed are both stripped from anything a listing may return.
+        row = await self._get_row(session_id)
+        if (row or {})["rotation_armed"] != ROTATION_ARMED_TERMINAL:
+            return {"ok": False, "error": "not staged", "session_id": session_id}
+
+        seed = (row or {})["carry_forward"]
+        new_claude_sid = (row or {})["carry_forward_sid"]
+        if not seed or not new_claude_sid:
+            return {"ok": False, "error": "no staged seed", "session_id": session_id}
+
+        # The hook reports the conversation the message was typed into. A
+        # straggling hook process from before an earlier swap would otherwise
+        # fire this one's rotation against a pane that has already moved on.
+        if claude_sid and active.get("claude_sid") and claude_sid != active["claude_sid"]:
+            return {"ok": False, "error": "stale conversation", "session_id": session_id}
+
+        # What the successor opens on: the seed and the typed message as one
+        # string, delivered as a *user* turn. Not both fields — a seed sent as
+        # a system prompt as well would reach the successor twice, once in a
+        # place that submits nothing.
+        delivered = f"{seed}\n\n{prompt}" if prompt else seed
+
         # Read last, after composition: a turn typed during that window
         # belongs in the replay, and reading it earlier would show the user
         # an exchange older than the one they just had.
@@ -796,35 +898,31 @@ class SessionManager:
         rotated = await self._rotate_pty_on_mind(
             session_id=session_id,
             new_claude_sid=new_claude_sid,
-            model=session["model"],
-            mind_id=mind_id,
-            system_prompt=system_prompt_blocks,
+            model=active["model"],
+            mind_id=active["mind_id"],
+            user_prompt=delivered,
             client_ref=client_ref,
-            owner_type=session.get("owner_type"),
-            owner_ref=session.get("owner_ref"),
+            owner_type=active.get("owner_type"),
+            owner_ref=active.get("owner_ref"),
         )
         if not rotated:
-            # No live pane to respawn — there is nothing burning context, and
-            # rewriting claude_sid here would strand the session on a
-            # conversation that was never started and never seeded.
             log.warning(
-                "rotation: session %s has no live terminal; leaving it as it is",
+                "fire-rotation: session %s has no live terminal; staying staged",
                 session_id,
             )
             return {"ok": False, "error": "no live terminal", "session_id": session_id}
 
-        # The carry-forward is stored with the conversation it was composed
-        # for, not just handed to the pane that happens to be running. The
-        # pane holds it as a system prompt, which reaches no transcript and
-        # dies with the process; until the first turn lands there is nothing
-        # else anywhere that remembers it. See get_carry_forward.
+        # What is stored is what was *delivered*, not the seed alone. The
+        # pane takes it as one opening turn and deletes it as it reads it, so
+        # until that turn completes this row is the only account of it — and
+        # a tile that dies before then reattaches asking for it. Handing back
+        # the summary without the message would lose what the user typed.
         _now = time.time()
         await self._db.execute(
             "UPDATE sessions SET claude_sid = ?, harness_sid = NULL, "
             "carry_forward = ?, carry_forward_sid = ?, carry_forward_at = ?, "
             "rotation_armed = 0, last_active = ? WHERE id = ?",
-            (new_claude_sid, system_prompt_blocks, new_claude_sid, _now,
-             _now, session_id),
+            (new_claude_sid, delivered, new_claude_sid, _now, _now, session_id),
         )
         await self._db.commit()
         # The pane was respawned, so the tile's screen and scrollback went
@@ -1094,8 +1192,13 @@ class SessionManager:
             # hook armed this session after writing the carry-forward; swap to
             # a fresh session now and dispatch this turn to it, so the user's
             # message is the new session's first turn. Never fires for
-            # un-armed sessions, so normal delivery is unchanged.
-            if session.get("rotation_armed"):
+            # un-armed sessions, so normal delivery is unchanged — and never
+            # for a *staged terminal*, whose swap keeps this row. Retiring it
+            # for a successor would destroy the permanent session id, its
+            # label and its ledger binding, which is exactly what in-place
+            # rotation exists to prevent. Hence the equality test: a bare
+            # truth test would finalize a 2.
+            if session.get("rotation_armed") == ROTATION_ARMED_CHAT:
                 new_id = await self._finalize_rotation(session)
                 if new_id and new_id != session_id:
                     async for event in self._forward_to_session(new_id, content, images):
@@ -1741,6 +1844,7 @@ class SessionManager:
         model: str,
         mind_id: str,
         system_prompt: str = "",
+        user_prompt: str = "",
         client_ref: str | None = None,
         owner_type: str | None = None,
         owner_ref: str | None = None,
@@ -1752,6 +1856,12 @@ class SessionManager:
         proxied socket and the browser tile untouched. Returns False when the
         mind holds no live terminal for this session (or is too old to have
         the route).
+
+        ``user_prompt``, when given, makes the seed the successor's opening
+        *user* turn rather than its system prompt — a staged rotation carries
+        the message the user typed, and a system prompt submits nothing and
+        reaches no transcript, so the pane would open at an empty prompt with
+        what they typed gone.
         """
         mind_url = await self._mind_url_for_session(session_id, mind_id)
         if not mind_url:
@@ -1765,6 +1875,7 @@ class SessionManager:
                         "new_claude_sid": new_claude_sid,
                         "model": model,
                         "system_prompt": system_prompt,
+                        "user_prompt": user_prompt,
                         "client_ref": client_ref,
                         "owner_type": owner_type,
                         "owner_ref": owner_ref,
