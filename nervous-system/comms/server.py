@@ -267,6 +267,17 @@ async def late_turns(client_type: str, client_ref: str, since: float):
 class ArmRotationRequest(BaseModel):
     client_type: str
     client_ref: str
+    # Reported by the hook, which runs inside the pane and is the only party
+    # that knows one is there. Absent means a chat surface, which is what
+    # every caller predating the staged path is.
+    surface: str = ""
+
+
+class FireRotationRequest(BaseModel):
+    client_type: str
+    client_ref: str
+    claude_sid: str = ""
+    prompt: str = ""
 
 
 class RecordTurnRequest(BaseModel):
@@ -293,11 +304,31 @@ async def arm_rotation(body: ArmRotationRequest):
     Called by the ``rotation_check`` Stop hook after it writes the
     carry-forward, in place of an inline ``/clear``. For chat surfaces the
     actual session swap happens on the next user turn in ``send_message``;
-    for the browser terminal (no later turn to defer to) this finalizes
-    immediately. Declared before ``/sessions/{session_id}`` so the literal
-    path wins the match.
+    for the browser terminal it happens on the next *typed* turn, via
+    ``/sessions/fire-rotation`` below. Either way this call only prepares.
+    Declared before ``/sessions/{session_id}`` so the literal path wins the
+    match.
     """
-    return await session_mgr.arm_rotation(body.client_type, body.client_ref)
+    return await session_mgr.arm_rotation(
+        body.client_type, body.client_ref, surface=body.surface,
+    )
+
+
+@app.post("/sessions/fire-rotation")
+async def fire_rotation(body: FireRotationRequest):
+    """Swap a staged terminal onto its successor, carrying the typed message.
+
+    Called by the pane's UserPromptSubmit hook. The terminal's raw byte
+    bridge never reaches ``send_message``, so this is the terminal's
+    equivalent of finalize-on-user-turn — with the difference that the
+    message being typed is handed to the successor as its opening turn
+    rather than re-dispatched. Declared before ``/sessions/{session_id}`` so
+    the literal path wins the match.
+    """
+    return await session_mgr.fire_rotation(
+        body.client_type, body.client_ref,
+        claude_sid=body.claude_sid, prompt=body.prompt,
+    )
 
 
 @app.post("/sessions/record-turn")

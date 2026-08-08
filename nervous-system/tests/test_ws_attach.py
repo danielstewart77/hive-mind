@@ -422,10 +422,18 @@ class TestRotationReachesTheTile:
         self, app_client, monkeypatch
     ):
         client, server_module = app_client
-        _run(_seed_session_and_mind(server_module, session_id="sess-rot"))
+        _run(_seed_session_and_mind(
+            server_module, session_id="sess-rot", client_ref="terminal-abc",
+        ))
         mgr = server_module.session_mgr
 
         async def _seed_turns() -> None:
+            # A terminal-owned row: it is the pane's rotation that wipes a
+            # screen, and only a terminal's rotation stages rather than
+            # retiring the session.
+            await mgr._db.execute(
+                "UPDATE sessions SET owner_ref = 'terminal' WHERE id = 'sess-rot'"
+            )
             now = time.time()
             for i, (role, content) in enumerate(
                 [("user", "why did it go blank?"),
@@ -458,8 +466,13 @@ class TestRotationReachesTheTile:
         with client.websocket_connect("/sessions/sess-rot/attach") as ws:
             assert ws.receive_bytes() == b"tui output\r\n"
 
-            session = _run(mgr._get_row("sess-rot"))
-            _run(mgr._rotate_conversation_in_place(session, "terminal-abc"))
+            # Staged at the threshold, fired by the pane's own typed turn —
+            # which is the moment the screen is actually replaced.
+            _run(mgr.arm_rotation("web", "terminal-abc", surface="terminal"))
+            _run(mgr.fire_rotation(
+                "web", "terminal-abc",
+                claude_sid="claude-abc", prompt="why did it go blank?",
+            ))
 
             # Read on a deadline. `receive_text` blocks forever on an empty
             # socket, so a regression that simply stops forwarding would hang
