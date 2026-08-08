@@ -17,7 +17,7 @@ new Function(readFileSync(join(here, "..", "..", "src", "static", "terminal-rout
 const {
     pickReattachTarget, isActive, retryDelayMs, socketIsStale, attemptsAfterSocket, attachExhausted, contrastText, pendingImeText, shouldResetImeAccumulator, pageScrollLines,
     pageScrollAction, wheelReport, dragWheelSteps, parseOpenFragment, formatOpenFragment,
-    detachSocket,
+    detachSocket, speakable,
 } = globalThis.TerminalRouting;
 
 const tests = {
@@ -347,6 +347,53 @@ const tests = {
         };
         assert.equal(detachSocket(socket), true);
         assert.equal(socket.onmessage, null);
+    },
+
+    "a fenced code block is not read aloud, only the prose around it"() {
+        const spoken = speakable(
+            "Here is the fix.\n```python\ndef f():\n    return 1\n```\nThat is all."
+        );
+        assert.ok(spoken.includes("Here is the fix."));
+        assert.ok(spoken.includes("That is all."));
+        assert.ok(!spoken.includes("def f()"), "spoke the code");
+        assert.ok(!spoken.includes("```"), "spoke the fence");
+    },
+
+    "a block still being written takes the rest of the chunk with it"() {
+        // A fence that has opened but not closed is code that is still
+        // arriving, not prose that forgot its fence.
+        const spoken = speakable("Applying it now.\n```bash\nrm -rf /tmp/x");
+        assert.ok(spoken.includes("Applying it now."));
+        assert.ok(!spoken.includes("rm -rf"), "spoke an unterminated block");
+    },
+
+    "list markers go, the items stay"() {
+        const spoken = speakable("- first thing\n- second thing\n1. third thing");
+        assert.ok(spoken.includes("first thing"));
+        assert.ok(spoken.includes("third thing"));
+        assert.ok(!/^\s*[-*+]\s/m.test(spoken), "spoke a bullet");
+        assert.ok(!/^\s*\d+[.)]\s/m.test(spoken), "spoke a list number");
+    },
+
+    "inline code keeps its words but loses its backticks"() {
+        const spoken = speakable("Run `pytest` to check.");
+        assert.equal(spoken, "Run pytest to check.");
+    },
+
+    "a decimal number is not mistaken for a list marker"() {
+        // "3.5 seconds" at the start of a line is a measurement, not the
+        // third item of anything.
+        const spoken = speakable("3.5 seconds elapsed");
+        assert.ok(spoken.includes("3.5 seconds"), spoken);
+    },
+
+    "prose with nothing to strip is left exactly as written"() {
+        const plain = "The build passed and the tests are green.";
+        assert.equal(speakable(plain), plain);
+    },
+
+    "a chunk that is only code produces nothing to say"() {
+        assert.equal(speakable("```\nls -la\n```"), "");
     },
 
     "detaching nothing is a no-op, not a crash"() {

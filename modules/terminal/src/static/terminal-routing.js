@@ -362,7 +362,38 @@
         return true;
     }
 
+    /* What a console shows and what it says are not the same text.
+     *
+     * Terminal replies are written for eyes — fenced code, paths, numbered
+     * lists — because that is what a console should get. Read aloud
+     * verbatim it is a minute of backticks and slashes. This runs only on
+     * the copy bound for the voice server, so the screen keeps every
+     * character exactly as written.
+     */
+    function speakable(text) {
+        return String(text == null ? "" : text)
+            /* A fenced block goes whole, language tag and all. An
+             * unterminated fence takes the rest of the chunk with it: a
+             * block still being written is not prose that happens to be
+             * missing its closing fence. */
+            .replace(/```[\s\S]*?(```|$)/g, " ")
+            .replace(/`([^`]*)`/g, "$1")
+            /* Leading markers, never the item's own words. */
+            .replace(/^[ \t]*[-*+][ \t]+/gm, "")
+            .replace(/^[ \t]*\d+[.)][ \t]+/gm, "")
+            .replace(/^[ \t]*>[ \t]?/gm, "")
+            .replace(/^[ \t]*#{1,6}[ \t]+/gm, "")
+            /* Emphasis and table rules read as punctuation otherwise. */
+            .replace(/(\*\*|__)/g, "")
+            .replace(/(^|[\s(])[*_]([^*_\n]+)[*_]($|[\s.,;:!?)])/g, "$1$2$3")
+            .replace(/\|/g, " ")
+            .replace(/[ \t]{2,}/g, " ")
+            .replace(/\n{3,}/g, "\n\n")
+            .trim();
+    }
+
     root.TerminalRouting = {
+        speakable: speakable,
         detachSocket: detachSocket,
         parseOpenFragment: parseOpenFragment,
         formatOpenFragment: formatOpenFragment,

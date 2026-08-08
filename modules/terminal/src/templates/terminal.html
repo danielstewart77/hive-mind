@@ -638,7 +638,7 @@
         }
         async function flushTtsNow() {
             if (ttsFlushTimer) { clearTimeout(ttsFlushTimer); ttsFlushTimer = null; }
-            const text = ttsBuffer.trim();
+            const text = TerminalRouting.speakable(ttsBuffer);
             ttsBuffer = "";
             if (!speakerOn || !text) return;
             try {
@@ -674,7 +674,16 @@
                 try { event = JSON.parse(msg.data); } catch (e) { return; }
                 if (event.type === "assistant") {
                     const chunk = extractText(event);
-                    if (chunk) { ttsBuffer += chunk; scheduleTtsFlush(); }
+                    if (chunk) {
+                        ttsBuffer += chunk;
+                        // A terminal's prose arrives one whole block at a
+                        // time, so there is nothing to wait for. The delay
+                        // below exists for the chat path, which streams
+                        // partial deltas and needs a gap to tell a finished
+                        // sentence from a paused one.
+                        if (event.block_complete) flushTtsNow();
+                        else scheduleTtsFlush();
+                    }
                 } else if (event.type === "user" || event.type === "result") {
                     flushTtsNow();
                 }

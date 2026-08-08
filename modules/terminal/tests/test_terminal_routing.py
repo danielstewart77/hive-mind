@@ -272,3 +272,60 @@ def test_mobile_toolbar_can_reach_the_tiles_scrollback():
     assert viewport, "no viewport rule"
     assert "touch-action: pan-y" in viewport.group(1)
     assert "overscroll-behavior: contain" in viewport.group(1)
+
+
+def test_speaker_off_sends_nothing_to_the_voice_server():
+    """Requirement 3: a silent tile costs no GPU.
+
+    Two independent gates, because either alone leaves a hole. The stream is
+    only opened while the speaker is on, so nothing arrives to speak; and the
+    flush checks again before posting, because the toggle can go off while a
+    buffered block is waiting on its timer.
+    """
+    template = os.path.join(
+        os.path.dirname(__file__), "..", "src", "templates", "terminal.html"
+    )
+    with open(template, encoding="utf-8") as fh:
+        body = fh.read()
+
+    # The stream is subscribed to only when the speaker is on.
+    assert "if (speakerOn) openTtsStream();" in body
+    # And the post is gated again at the moment of sending.
+    idx = body.index("async function flushTtsNow()")
+    flush = body[idx : idx + 700]
+    assert "if (!speakerOn || !text) return;" in flush
+    assert flush.index("if (!speakerOn") < flush.index("/api/terminal/tts"), (
+        "the voice server is called before the speaker toggle is consulted"
+    )
+
+
+def test_a_whole_block_is_spoken_without_waiting_for_the_next():
+    """Requirement 1, browser half: prose is spoken as it appears.
+
+    The 1.5s debounce exists for the chat path, which streams partial
+    deltas and needs a quiet gap to tell a finished sentence from a paused
+    one. A terminal's blocks arrive whole and carry `block_complete`, so
+    waiting on them would put the speech a beat behind the writing — which
+    is the behaviour being replaced.
+    """
+    template = os.path.join(
+        os.path.dirname(__file__), "..", "src", "templates", "terminal.html"
+    )
+    with open(template, encoding="utf-8") as fh:
+        body = fh.read()
+
+    assert "if (event.block_complete) flushTtsNow();" in body
+    assert "else scheduleTtsFlush();" in body
+
+
+def test_the_speaker_strips_through_the_shared_module():
+    """Guard against the stripping being reinlined in the template, where
+    the node suite cannot reach it."""
+    template = os.path.join(
+        os.path.dirname(__file__), "..", "src", "templates", "terminal.html"
+    )
+    with open(template, encoding="utf-8") as fh:
+        body = fh.read()
+
+    assert "TerminalRouting.speakable(ttsBuffer)" in body
+    assert "function speakable(" not in body
