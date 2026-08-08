@@ -1801,7 +1801,13 @@ class SessionManager:
         mind_name = row["name"]
         import aiohttp
         async with aiohttp.ClientSession() as http:
-            resp = await http.post(
+            # ``async with`` on the response, not just the session. A bare
+            # await leaves the body unread on the success path — the only
+            # path that does not touch it — so the connection is never
+            # released and aiohttp logs "Unclosed connection" at ERROR when
+            # the session closes. Once per spawn, which was 159 ERRORs in
+            # twelve hours: enough noise to hide a real one.
+            async with http.post(
                 f"{mind_url}/sessions",
                 json={
                     "session_id": session_id,
@@ -1824,10 +1830,10 @@ class SessionManager:
                     "system_prompt_blocks": system_prompt_blocks,
                 },
                 timeout=aiohttp.ClientTimeout(total=10),
-            )
-            if resp.status != 200:
-                body = await resp.text()
-                raise RuntimeError(f"Mind container {mind_id} spawn failed: {body}")
+            ) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    raise RuntimeError(f"Mind container {mind_id} spawn failed: {body}")
 
         self._procs[session_id] = {"_mind_url": mind_url}
         self._mind_ids[session_id] = mind_id
@@ -1869,7 +1875,10 @@ class SessionManager:
         import aiohttp
         try:
             async with aiohttp.ClientSession() as http:
-                resp = await http.post(
+                # The success path below reads the body and so releases the
+                # connection by itself; the non-200 early return does not.
+                # Holding the response open makes both paths release.
+                async with http.post(
                     f"{mind_url}/sessions/{session_id}/rotate-pty",
                     json={
                         "new_claude_sid": new_claude_sid,
@@ -1882,14 +1891,14 @@ class SessionManager:
                         "surface": self._surface_label(owner_type or ""),
                     },
                     timeout=aiohttp.ClientTimeout(total=20),
-                )
-                if resp.status != 200:
-                    log.warning(
-                        "rotate-pty on %s for session %s returned %s",
-                        mind_url, session_id, resp.status,
-                    )
-                    return False
-                data = await resp.json()
+                ) as resp:
+                    if resp.status != 200:
+                        log.warning(
+                            "rotate-pty on %s for session %s returned %s",
+                            mind_url, session_id, resp.status,
+                        )
+                        return False
+                    data = await resp.json()
         except Exception:
             log.exception("rotate-pty on %s for session %s failed", mind_url, session_id)
             return False

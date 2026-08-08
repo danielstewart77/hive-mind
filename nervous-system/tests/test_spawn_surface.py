@@ -34,6 +34,29 @@ def _capturing_session_class(payloads: list[dict]):
         async def text(self) -> str:
             return ""
 
+        async def json(self) -> dict:
+            return {}
+
+    class _RequestCtx:
+        """What ``aiohttp.ClientSession.post`` actually returns.
+
+        Not a coroutine: a ``_RequestContextManager``, which is both
+        awaitable and an async context manager. The double stubbed only the
+        awaitable half, so a caller holding the response open — the thing
+        that releases the connection instead of leaking it — failed against
+        a fake that the real client would have satisfied.
+        """
+        def __await__(self):
+            async def _resp():
+                return _Resp()
+            return _resp().__await__()
+
+        async def __aenter__(self):
+            return _Resp()
+
+        async def __aexit__(self, *exc):
+            return False
+
     class _FakeClientSession:
         def __init__(self, *a, **kw):
             pass
@@ -44,9 +67,9 @@ def _capturing_session_class(payloads: list[dict]):
         async def __aexit__(self, *exc):
             return False
 
-        async def post(self, url, json=None, timeout=None):
+        def post(self, url, json=None, timeout=None):
             payloads.append(json)
-            return _Resp()
+            return _RequestCtx()
 
     return _FakeClientSession
 
