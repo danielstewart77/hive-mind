@@ -655,6 +655,51 @@ class SessionManager:
             return None
         return await self._session_dict(result["session_id"])
 
+    async def publish_pty_text(self, session_id: str, text: str) -> dict:
+        """Put one block of a terminal's prose on the session's event stream.
+
+        The tile's speaker reads assistant events off ``/sessions/{id}/events``
+        and speaks what it finds. Those events have exactly one source today,
+        ``send_message``, so a conversation hosted in a pty — whose keystrokes
+        are raw bytes and which never calls it — emits none at all, and the
+        speaker has nothing to say. The mind tails the harness's own transcript
+        and posts each prose block here as it lands, which is what makes a
+        terminal speak while it is still writing rather than after it stops.
+
+        Refused for a chat-owned session, and that is the whole of the
+        double-speaking guard. When Telegram is driving, ``send_message`` is
+        already publishing this same prose — the mind's tailer is watching the
+        very transcript that process writes — so accepting it here would put
+        each sentence on the stream twice and a listening tile would say it
+        twice in a row. Gating on ownership rather than on whether a stream
+        happens to be in flight leaves no window for a straggling post to
+        slip through between turns.
+        """
+        text = (text or "").strip()
+        if not text:
+            return {"ok": False, "error": "empty text"}
+        session = await self._get_row(session_id)
+        if not session:
+            return {"ok": False, "error": "session not found"}
+        owner_type = (session["owner_type"] or "").split(":", 1)[0]
+        if owner_type not in self._ADOPTABLE_OWNER_TYPES:
+            return {"ok": False, "error": "not a terminal-owned session"}
+        await self._publish_session_event(
+            session_id,
+            {
+                "type": "assistant",
+                "session_id": session_id,
+                "content": text,
+                # A whole block, not a fragment of one. ``send_message``
+                # streams deltas, so a listener has to wait out a quiet gap
+                # before it knows a sentence ended; these arrive complete,
+                # and a listener that waits anyway turns "speaks as it
+                # writes" back into "speaks a beat behind".
+                "block_complete": True,
+            },
+        )
+        return {"ok": True, "published": True}
+
     async def record_turn(
         self, client_type: str, client_ref: str, role: str, content: str,
         claude_sid: str | None = None,
