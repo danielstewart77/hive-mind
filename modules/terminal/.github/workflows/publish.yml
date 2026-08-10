@@ -25,6 +25,10 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt -r requirements-dev.txt
+      # The tile's browser tests drive a real Chromium. Without this the
+      # suite fails on a missing executable, which reads as a broken test
+      # rather than a runner that was never provisioned.
+      - run: python -m playwright install --with-deps chromium
       - run: python -m pytest -q
 
   publish:
