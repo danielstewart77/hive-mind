@@ -43,6 +43,7 @@ from auth import (
     get_current_user_from_request,
     init_auth_db,
     require_auth,
+    seed_first_user,
     set_session_cookie,
     verify_user_credentials,
 )
@@ -52,9 +53,17 @@ from config import BASE_DIR
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     del app
-    # No seed_first_user here: the auth db is shared with (and owned by)
-    # the hive site, so users already exist by the time this starts.
     init_auth_db()
+    # In the hive deployment the auth db is shared with, and owned by, the
+    # hive site, so users already exist by the time this starts and the
+    # seed variables are unset — making this call a no-op there.
+    #
+    # A standalone deployment has no sibling site to have created an
+    # account, so without this it comes up with an empty users table, a
+    # working login page, and no way in: every attempt renders "invalid
+    # username or password", which is a truthful-looking message for
+    # entirely the wrong reason.
+    seed_first_user()
     yield
 
 
