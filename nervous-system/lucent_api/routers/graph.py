@@ -12,10 +12,11 @@ import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel
 
 from lucent_api.auth import require_admin_bearer
+from lucent_api.soul import soul_key_refusal
 
 log = logging.getLogger(__name__)
 
@@ -23,11 +24,22 @@ router = APIRouter(prefix="/graph", tags=["graph"])
 
 
 def _decode(payload: str) -> Any:
-    """Parse the JSON-string return convention of the underlying functions."""
+    """Parse the JSON-string return convention of the underlying functions.
+
+    A soul-key refusal becomes a real 403 rather than a 200 carrying an
+    error body. Every caller of these routes is fire-and-forget shell —
+    curl piped into jq, with no status check — and a refusal that returns
+    200 is a refusal nobody notices.
+    """
+    from lucent_api.soul import SOUL_KEY_REFUSED
+
     try:
-        return json.loads(payload)
+        body = json.loads(payload)
     except json.JSONDecodeError:
         return {"error": "invalid_json_from_underlying_function", "raw": payload}
+    if isinstance(body, dict) and body.get("code") == SOUL_KEY_REFUSED:
+        raise HTTPException(403, body.get("detail", "soul writes are not allowed here"))
+    return body
 
 
 # ---- Request schemas ----
@@ -243,9 +255,25 @@ def graph_upsert(body: UpsertBody) -> Any:
     from lucent_api.lucent_graph import graph_upsert_direct
     from lucent_api.schema_registry import validate_edge, validate_node
 
+    # The soul boundary, ahead of schema validation and outside the try:
+    # the Mind schema happens not to allow `soul_values` today, so a soul
+    # write here already fails — but as `unknown_field` with a 200, which
+    # reads as a schema gap somebody could reasonably widen. The refusal has
+    # to be the one that means what it says, and a 403 raised inside the
+    # block below would be caught by its own `except Exception` and turned
+    # back into a 200.
     try:
-        # 1. Node validation — type allow-list, property schema, enums.
+        _props_probe = _json.loads(body.properties) if body.properties.strip() != "{}" else {}
+    except Exception:
+        _props_probe = {}
+    _refusal = soul_key_refusal(_props_probe)
+    if _refusal:
+        return _decode(_refusal)
+
+    try:
         props = _json.loads(body.properties) if body.properties.strip() != "{}" else {}
+
+        # 1. Node validation — type allow-list, property schema, enums.
         ok, code, detail = validate_node(body.entity_type, props)
         if not ok:
             return {

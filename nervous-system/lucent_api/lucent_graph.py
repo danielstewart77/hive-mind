@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 
 import requests
 from lucent_api.memory_schema import validate_source
+from lucent_api.soul import soul_key_refusal
 from lucent_api.schema_registry import get_type_spec
 
 logger = logging.getLogger(__name__)
@@ -128,6 +129,9 @@ def graph_upsert_direct(
 
         label = _validate_label(entity_type)
         props = json.loads(properties) if properties.strip() != "{}" else {}
+        refusal = soul_key_refusal(props)
+        if refusal:
+            return refusal
         props.update(meta)
         props["created_at"] = time.time()
 
@@ -305,6 +309,9 @@ def graph_upsert(
 
         label = _validate_label(entity_type)
         props = json.loads(properties) if properties.strip() != "{}" else {}
+        refusal = soul_key_refusal(props)
+        if refusal:
+            return refusal
 
         allowed, orphan_msg = check_orphan_guard(relation, target_name)
         if not allowed:
@@ -781,6 +788,9 @@ def graph_node_create(
 
         label = _validate_label(entity_type)
         props = json.loads(properties) if properties.strip() != "{}" else {}
+        refusal = soul_key_refusal(props)
+        if refusal:
+            return refusal
 
         conn = _get_conn()
         existing = conn.execute(
@@ -851,6 +861,9 @@ def graph_properties_merge(
     try:
         label = _validate_label(entity_type)
         new_props = json.loads(properties) if properties.strip() else {}
+        refusal = soul_key_refusal(new_props)
+        if refusal:
+            return refusal
         if not isinstance(new_props, dict):
             return json.dumps({"ok": False, "code": "invalid_properties",
                                "detail": "properties must be a JSON object"})
@@ -914,6 +927,10 @@ def graph_properties_remove(
         if not isinstance(keys, list):
             return json.dumps({"ok": False, "code": "invalid_keys",
                                "detail": "keys must be a JSON array"})
+
+        refusal = soul_key_refusal({k: None for k in keys})
+        if refusal:
+            return refusal
 
         protected_violations = [k for k in keys if k in _PROTECTED_METADATA_KEYS]
         if protected_violations:

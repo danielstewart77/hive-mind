@@ -66,3 +66,32 @@ if not os.environ.get("LUCENT_ADMIN_BEARER_TOKEN"):
         "LUCENT_ADMIN_BEARER_TOKEN is unset — admin endpoints (schema "
         "mutation) will return 503 until it is set."
     )
+
+
+def require_soul_bearer(authorization: str = Header(default="")) -> None:
+    """Bearer gate for the one route that can change a mind's soul.
+
+    Checks ``LUCENT_SOUL_BEARER_TOKEN`` and nothing else. The service token
+    is deliberately not accepted, and neither is the admin token: the point
+    of this credential is that the ones every hook, cron job and background
+    process on a mind's host already hold cannot reach a soul. Accepting a
+    more privileged token "for convenience" would hand it straight back to
+    hive-tools, which is the path the small model's verdict travelled.
+
+    Unset means locked (503), not open. A soul that is writable because
+    nobody configured a token is the failure mode this exists to close.
+    """
+    expected = os.environ.get("LUCENT_SOUL_BEARER_TOKEN", "")
+    if not expected:
+        raise HTTPException(503, "Soul endpoints disabled: LUCENT_SOUL_BEARER_TOKEN unset")
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(401, "Missing or invalid Authorization header")
+    if authorization[7:] != expected:
+        raise HTTPException(401, "Invalid soul token")
+
+
+if not os.environ.get("LUCENT_SOUL_BEARER_TOKEN"):
+    log.warning(
+        "LUCENT_SOUL_BEARER_TOKEN is unset — soul endpoints will return 503 "
+        "until it is set. Souls are unwritable, not unprotected."
+    )
