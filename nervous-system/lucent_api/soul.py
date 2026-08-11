@@ -28,6 +28,7 @@ hostile process with that UID, and must not be described as though it does.
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
 from datetime import datetime, timezone
 
@@ -65,8 +66,62 @@ def soul_key_refusal(properties: dict | None) -> str | None:
     return None
 
 
+def as_soul_list(value) -> list[str]:
+    """Coerce a stored soul into a list of lines, or raise.
+
+    ``list("I am Skippy")`` is a list of characters, and a stored string
+    reads back as one soul line per letter — with ``ok: true`` on it. The
+    console then renders twelve "lines" and saving that page persists the
+    shredded form through the audited route, permanently.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raise ValueError(
+            "soul_values is stored as a string on this node; it must be a list "
+            "of lines. Repair it through POST /graph/soul before reading."
+        )
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise ValueError("soul_values must be a list of strings")
+    return list(value)
+
+
+def preserve_soul(conn, *, name: str, label: str, props: dict) -> None:
+    """Carry an existing soul across a full-replace property write.
+
+    ``soul_key_refusal`` only fires when the key is *present*, so it stops a
+    general route writing a soul and cheerfully lets one destroy a soul: the
+    upsert paths replace the whole properties blob, and a blob that simply
+    omits ``soul_values`` erases it with a 200 and no provenance row. The
+    boundary has to cover absence as well as presence.
+    """
+    if label != "Mind" or SOUL_KEY in props:
+        return
+    row = conn.execute(
+        "SELECT properties FROM nodes WHERE name = ? AND type = ? LIMIT 1",
+        (name, label),
+    ).fetchone()
+    if not row or not row["properties"]:
+        return
+    try:
+        existing = json.loads(row["properties"])
+    except (TypeError, ValueError):
+        return
+    if isinstance(existing, dict) and SOUL_KEY in existing:
+        props[SOUL_KEY] = existing[SOUL_KEY]
+
+
 def _init_soul_schema(conn) -> None:
-    """Create the provenance table. Idempotent; safe on every call."""
+    """Create the provenance table.
+
+    Called only from the write path. ``executescript`` opens a write
+    transaction even when every statement is a no-op ``IF NOT EXISTS``, so
+    running it on a read would take a write lock — and under a concurrent
+    writer on WAL that raises "database is locked", which the read path then
+    reports as an empty soul. An empty soul read is how a soul gets wiped
+    (the caller sends back the whole list), so a read must never be able to
+    fail this way.
+    """
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS soul_changes (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -101,21 +156,30 @@ def soul_read(*, name: str) -> str:
     """Return a mind's soul as it stands, with its provenance count."""
     try:
         conn = _get_conn()
-        _init_soul_schema(conn)
         row = _find_mind(conn, name)
         if row is None:
             return json.dumps({"ok": False, "code": "not_found",
                                "detail": f"no Mind node named {name!r}"})
         props = json.loads(row["properties"]) if row["properties"] else {}
-        changes = conn.execute(
-            "SELECT COUNT(*) AS n FROM soul_changes WHERE mind_name = ?", (name,)
-        ).fetchone()
+        try:
+            values = as_soul_list(props.get(SOUL_KEY))
+        except ValueError as e:
+            return json.dumps({"ok": False, "code": "malformed_soul",
+                               "detail": str(e)})
+        try:
+            changes = conn.execute(
+                "SELECT COUNT(*) AS n FROM soul_changes WHERE LOWER(mind_name) = LOWER(?)",
+                (name,),
+            ).fetchone()
+            count = changes["n"]
+        except sqlite3.OperationalError:
+            count = 0  # no writes yet, so no table yet
         return json.dumps({
             "ok": True,
             "name": name,
             "mind_id": row["mind_id"],
-            "soul_values": list(props.get(SOUL_KEY) or []),
-            "change_count": changes["n"],
+            "soul_values": values,
+            "change_count": count,
         })
     except Exception as e:  # pragma: no cover - defensive
         return json.dumps({"ok": False, "code": "internal_error", "detail": str(e)})
@@ -128,6 +192,8 @@ def soul_write(
     actor: str,
     reason: str,
     as_of: str | None = None,
+    expected_change_count: int | None = None,
+    allow_shrink: bool = False,
 ) -> str:
     """Replace a mind's soul, recording what it was and who changed it.
 
@@ -135,6 +201,20 @@ def soul_write(
     changes a soul must be able to express, and an append-only door can
     express neither. The prior value is captured in the same transaction, so
     the record cannot drift from what was actually overwritten.
+
+    Whole-list replacement is also how two writers silently destroy each
+    other's work. Both read ``[a, b]``, one writes ``[a, b, mine]`` and the
+    other ``[a, b, theirs]``; the second wins, both get ``ok: true``, and
+    both report to the operator that their line landed. ``expected_change_count``
+    is the compare-and-set: pass the count you read and a write that raced
+    yours is refused rather than applied. Two panes, or one pane and the
+    console — and the console page exists to be used while the mind runs.
+
+    ``allow_shrink`` guards the other direction. Every caller sends the whole
+    list, which it built from a read; a read that failed and was not checked
+    produces an empty list that means "delete everything I am" and is
+    indistinguishable from one that means it. Losing most of a soul is
+    refused unless it was asked for on purpose.
     """
     try:
         if actor not in VALID_ACTORS:
@@ -163,7 +243,40 @@ def soul_write(
                                "detail": f"no Mind node named {name!r}"})
 
         props = json.loads(row["properties"]) if row["properties"] else {}
-        before = list(props.get(SOUL_KEY) or [])
+        try:
+            before = as_soul_list(props.get(SOUL_KEY))
+        except ValueError:
+            before = []  # malformed; this write is the repair
+
+        current_count = conn.execute(
+            "SELECT COUNT(*) AS n FROM soul_changes WHERE LOWER(mind_name) = LOWER(?)",
+            (name,),
+        ).fetchone()["n"]
+        if expected_change_count is not None and expected_change_count != current_count:
+            return json.dumps({
+                "ok": False, "code": "conflict",
+                "detail": (
+                    "this soul changed since you read it "
+                    f"(you saw {expected_change_count} changes, there are now "
+                    f"{current_count}). Read it again and re-apply your edit."
+                ),
+                "change_count": current_count,
+            })
+
+        if before and not allow_shrink:
+            kept = [v for v in soul_values if v in before]
+            if len(kept) * 2 < len(before):
+                return json.dumps({
+                    "ok": False, "code": "shrink_refused",
+                    "detail": (
+                        f"this would drop {len(before) - len(kept)} of {len(before)} "
+                        "existing lines. If that is intended, send allow_shrink=true. "
+                        "If you did not intend it, your read of the current soul "
+                        "probably failed."
+                    ),
+                    "before_count": len(before),
+                })
+
         props[SOUL_KEY] = list(soul_values)
         now = time.time()
         props["updated_at"] = now
@@ -187,8 +300,17 @@ def soul_write(
             "actor": actor,
             "before_count": len(before),
             "after_count": len(soul_values),
+            "change_count": current_count + 1,
         })
     except Exception as e:  # pragma: no cover - defensive
+        # The connection is per-thread and reused, so a failure between the
+        # UPDATE and the provenance INSERT would otherwise leave the soul
+        # change pending on a connection whose next commit belongs to some
+        # unrelated request — a soul edit landing under someone else's write.
+        try:
+            _get_conn().rollback()
+        except Exception:
+            pass
         return json.dumps({"ok": False, "code": "internal_error", "detail": str(e)})
 
 
@@ -196,12 +318,14 @@ def soul_history(*, name: str, limit: int = 50) -> str:
     """Return the recorded changes to a mind's soul, newest first."""
     try:
         conn = _get_conn()
-        _init_soul_schema(conn)
-        rows = conn.execute(
-            "SELECT actor, reason, before_json, after_json, at FROM soul_changes "
-            "WHERE mind_name = ? ORDER BY id DESC LIMIT ?",
-            (name, int(limit)),
-        ).fetchall()
+        try:
+            rows = conn.execute(
+                "SELECT actor, reason, before_json, after_json, at FROM soul_changes "
+                "WHERE LOWER(mind_name) = LOWER(?) ORDER BY id DESC LIMIT ?",
+                (name, int(limit)),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
         return json.dumps({
             "ok": True,
             "name": name,

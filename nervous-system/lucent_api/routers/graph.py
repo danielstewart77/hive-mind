@@ -194,12 +194,26 @@ def graph_upsert_backup(body: UpsertBody) -> Any:
     and trusts the calling mind. Disambiguation conflicts are still surfaced
     in the response so the caller can decide what to do next.
     """
+    import json as _json
+
     from lucent_api.kg_guards import (
         check_disambiguation,
         check_orphan_guard,
         send_disambiguation_message,
     )
     from lucent_api.lucent_graph import graph_upsert_direct
+
+    # Ahead of the orphan and disambiguation guards, and outside the try:
+    # those answer 200 with a `reason`, so a soul write that trips one is
+    # refused for the wrong cause and would start working the moment the
+    # caller supplied an edge.
+    try:
+        _probe = _json.loads(body.properties) if body.properties.strip() != "{}" else {}
+    except Exception:
+        _probe = {}
+    _refusal = soul_key_refusal(_probe)
+    if _refusal:
+        return _decode(_refusal)
 
     try:
         allowed, orphan_msg = check_orphan_guard(body.relation, body.target_name)
@@ -230,6 +244,11 @@ def graph_upsert_backup(body: UpsertBody) -> Any:
                 source=body.source,
             )
         )
+    except HTTPException:
+        # A soul refusal is an HTTPException, and HTTPException is an
+        # Exception: caught below it would come back as 200 with the 403
+        # in a string field, which is the shape `_decode` exists to avoid.
+        raise
     except Exception as e:
         log.exception("graph_upsert_backup failed")
         return {"upserted": False, "error": str(e)}

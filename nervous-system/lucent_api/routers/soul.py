@@ -30,6 +30,8 @@ class SoulWriteBody(BaseModel):
     actor: str
     reason: str
     as_of: str | None = None
+    expected_change_count: int | None = None
+    allow_shrink: bool = False
 
 
 @router.get("")
@@ -52,6 +54,8 @@ def soul_post(body: SoulWriteBody) -> Any:
             actor=body.actor,
             reason=body.reason,
             as_of=body.as_of,
+            expected_change_count=body.expected_change_count,
+            allow_shrink=body.allow_shrink,
         )
     )
 
