@@ -66,6 +66,7 @@ from configuration_data import (
 )
 from graph_data import get_graph_data
 import mind_runtime
+import mind_soul
 import mind_skills
 from hive_logging import configure_logging, install_fastapi_logging, log_event
 from credentials_data import list_credentials, rotate_credential, set_github_pat
@@ -1910,6 +1911,49 @@ async def api_mind_configuration_update(
             "default_model": configuration.get("default_model"),
             "deployment": deployment,
         },
+    }
+
+
+@app.get("/api/minds/{name}/soul")
+async def api_mind_soul(name: str, user: dict = Depends(require_auth)):
+    """This Mind's soul, straight from the graph, with its change record.
+
+    Asked of lucent rather than of the Mind: the soul lives in the graph, and
+    a Mind whose soul is wrong is exactly the Mind you may have stopped.
+    """
+    del user
+    soul = await mind_soul.fetch_soul(name)
+    return {
+        "soul_values": soul.get("soul_values") or [],
+        "change_count": soul.get("change_count") or 0,
+        "history": await mind_soul.fetch_history(name),
+    }
+
+
+@app.put("/api/minds/{name}/soul")
+async def api_mind_soul_update(
+    name: str, request: Request, user: dict = Depends(require_auth)
+):
+    """Replace this Mind's soul, recorded as a console edit.
+
+    The whole list, not a delta: rewriting a line and removing one are the
+    edits this page exists for, and neither is expressible as an append.
+    """
+    del user
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object")
+    values = body.get("soul_values")
+    if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
+        raise HTTPException(
+            status_code=400, detail="soul_values must be a list of strings"
+        )
+    await mind_soul.push_soul(name, values, str(body.get("reason") or ""))
+    soul = await mind_soul.fetch_soul(name)
+    return {
+        "soul_values": soul.get("soul_values") or [],
+        "change_count": soul.get("change_count") or 0,
+        "history": await mind_soul.fetch_history(name),
     }
 
 

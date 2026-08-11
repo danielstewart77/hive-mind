@@ -12,6 +12,7 @@
         <section class="surface"><div class="surface-header"><div><h2>Runtime configuration</h2><p>Secret values are removed before this reaches the browser.</p></div></div><div class="surface-body"><div class="code-wrap"><pre class="code-panel" id="mind-config">Loading…</pre><button class="icon-button" type="button" data-copy="#mind-config" aria-label="Copy configuration"><i data-lucide="copy"></i></button></div></div></section>
         <section class="surface" id="mind-editor" hidden><div class="surface-header"><div><h2>Default model</h2><p>Written to this Mind&#39;s runtime.yaml and its registry row. Applies to the next session it is asked for; conversations already running keep their model.</p></div></div><form class="surface-body overview-stack" id="mind-model-form"><div class="field"><label for="mind-provider">Provider</label><select id="mind-provider" name="provider" required></select><small>The upstream hosting the model. This Mind's own proxy key decides which appear.</small></div><div class="field"><label for="mind-default-model">Model</label><select id="mind-default-model" name="default_model" required></select><small>Every model this Mind is permitted to run on the chosen provider.</small></div><div class="form-actions"><button class="button" type="submit" id="mind-model-save">Save model</button><button class="button button-primary" id="mind-restart" type="button" hidden>Restart runtime</button></div><small id="mind-model-status"></small></form></section>
         <section class="surface" id="mind-skills" hidden><div class="surface-header"><div><h2>Skills</h2><p>The repo&#39;s copy against this Mind&#39;s. Applying copies the repo&#39;s directory into the one this Mind&#39;s harness loads skills from. When the harness picks it up is the harness&#39;s business.</p></div><span id="mind-skills-harness"></span></div><div class="surface-body"><div id="mind-skills-status"></div><table class="data-table" id="mind-skills-table" hidden><thead><tr><th>Skill</th><th>Repo</th><th>This Mind</th><th></th></tr></thead><tbody id="mind-skills-rows"></tbody></table></div></section>
+        <section class="surface" id="mind-soul" hidden><div class="surface-header"><div><h2>Soul</h2><p>What this Mind is told it is, ahead of every turn on every surface. One line per line — this is read as instruction, not description. Edits from here are recorded as yours, distinct from what the Mind decided about itself.</p></div></div><form class="surface-body overview-stack" id="mind-soul-form"><div class="field"><label for="mind-soul-values">Soul</label><textarea id="mind-soul-values" name="soul_values" rows="14" spellcheck="false"></textarea><small>Blank lines are dropped. Removing a line removes it from the Mind.</small></div><div class="field"><label for="mind-soul-reason">Why this changed</label><input id="mind-soul-reason" name="reason" type="text" required placeholder="Stored with the edit — this is what answers &quot;who wrote this line&quot; in six weeks."></div><div class="form-actions"><button class="button" type="submit" id="mind-soul-save">Save soul</button></div><small id="mind-soul-status"></small></form><div class="surface-body" id="mind-soul-history"></div></section>
     </div>
 </main>
 <script>
@@ -175,11 +176,91 @@ window.addEventListener("DOMContentLoaded", async function () {
             document.getElementById("mind-model-status").textContent = "Cannot reach this Mind to read its configuration: " + error.message;
         }
         await renderSkills(mind.name);
+        await renderSoul(mind.name);
         if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}});
     } catch (error) {
         document.getElementById("mind-content").hidden = true;
         const box = document.getElementById("mind-error"); box.hidden = false; box.textContent = error.message;
     }
+
+    // The soul is read from the graph rather than from the Mind: a Mind whose
+    // soul is wrong is exactly the Mind you may have stopped, and routing the
+    // repair through it would make the broken thing a prerequisite.
+    function renderSoulHistory(history) {
+        const box = document.getElementById("mind-soul-history");
+        if (!history || !history.length) { box.textContent = "No recorded changes yet."; return; }
+        box.innerHTML = "";
+        history.forEach(function (entry) {
+            const added = (entry.after || []).filter(function (v) { return (entry.before || []).indexOf(v) === -1; });
+            const gone = (entry.before || []).filter(function (v) { return (entry.after || []).indexOf(v) === -1; });
+            const row = document.createElement("div");
+            row.className = "overview-stack";
+            const who = document.createElement("strong");
+            // "the Mind decided this" and "you typed this" must never look alike.
+            who.textContent = entry.actor === "console" ? "Edited here" : "Decided by the Mind";
+            const when = document.createElement("small");
+            when.textContent = " · " + (entry.at || "");
+            const why = document.createElement("p");
+            why.textContent = entry.reason || "";
+            row.appendChild(who); row.appendChild(when); row.appendChild(why);
+            added.forEach(function (v) { const d = document.createElement("small"); d.textContent = "+ " + v; row.appendChild(d); row.appendChild(document.createElement("br")); });
+            gone.forEach(function (v) { const d = document.createElement("small"); d.textContent = "− " + v; row.appendChild(d); row.appendChild(document.createElement("br")); });
+            box.appendChild(row);
+        });
+    }
+
+    function applySoul(payload) {
+        document.getElementById("mind-soul-values").value = (payload.soul_values || []).join("\n");
+        renderSoulHistory(payload.history || []);
+    }
+
+    async function renderSoul(name) {
+        const section = document.getElementById("mind-soul");
+        const status = document.getElementById("mind-soul-status");
+        // The write used to address the Mind by `requested`, which is the
+        // UUID the minds list links with — and Mind nodes in the graph are
+        // named (Skippy, Ada), so every save from a normal navigation went
+        // to a node that does not exist. Read and write take the same
+        // identifier now, the one the model form on this page already uses.
+        section.dataset.mindName = name;
+        section.hidden = false;
+        const target = section.dataset.mindName;
+        try {
+            applySoul(await h.requestJson("/api/minds/" + encodeURIComponent(target) + "/soul"));
+            status.textContent = "";
+        } catch (error) {
+            document.getElementById("mind-soul-form").hidden = true;
+            status.textContent = "Cannot read this Mind's soul: " + error.message;
+        }
+    }
+
+    document.getElementById("mind-soul-form").addEventListener("submit", async function (event) {
+        event.preventDefault();
+        const status = document.getElementById("mind-soul-status");
+        const button = document.getElementById("mind-soul-save");
+        const lines = document.getElementById("mind-soul-values").value.split("\n")
+            .map(function (v) { return v.trim(); }).filter(function (v) { return v.length; });
+        const reason = document.getElementById("mind-soul-reason").value.trim();
+        if (!reason) { status.textContent = "Say why this changed before saving."; return; }
+        button.disabled = true; status.textContent = "Saving…";
+        try {
+            const target = document.getElementById("mind-soul").dataset.mindName;
+            applySoul(await h.requestJson("/api/minds/" + encodeURIComponent(target) + "/soul", {
+                method: "PUT",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({soul_values: lines, reason: reason})
+            }));
+            document.getElementById("mind-soul-reason").value = "";
+            // Composed fresh from the graph on every dispatch, so a running
+            // conversation keeps the copy already in its prompt.
+            status.textContent = "Saved. Takes effect on this Mind's next turn.";
+        } catch (error) {
+            status.textContent = "Could not save: " + error.message;
+        } finally {
+            button.disabled = false;
+        }
+    });
+
     document.getElementById("mind-model-form").addEventListener("submit", async function (event) {
         event.preventDefault();
         const editor = document.getElementById("mind-editor"), status = document.getElementById("mind-model-status"), restart = document.getElementById("mind-restart");
