@@ -42,6 +42,9 @@ def create_app() -> FastAPI:
     auth_dep = [Depends(require_bearer)]
     app.include_router(graph_router, dependencies=auth_dep)
     app.include_router(memory_router, dependencies=auth_dep)
+    # No auth_dep: the soul router carries its own, stricter credential.
+    from lucent_api.routers.soul import router as soul_router
+    app.include_router(soul_router)
 
     log_event(log, "service.routes.registered", component="lucent-api")
     return app
