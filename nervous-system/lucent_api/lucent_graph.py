@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 
 import requests
 from lucent_api.memory_schema import validate_source
+from lucent_api.soul import SOUL_KEY_REFUSED, preserve_soul, soul_key_refusal
 from lucent_api.schema_registry import get_type_spec
 
 logger = logging.getLogger(__name__)
@@ -128,6 +129,9 @@ def graph_upsert_direct(
 
         label = _validate_label(entity_type)
         props = json.loads(properties) if properties.strip() != "{}" else {}
+        refusal = soul_key_refusal(props)
+        if refusal:
+            return refusal
         props.update(meta)
         props["created_at"] = time.time()
 
@@ -145,6 +149,7 @@ def graph_upsert_direct(
         # No DB-level uniqueness on name/type — disambiguation is a
         # pre-write check (kg_guards.check_disambiguation). Find first,
         # then UPDATE existing or INSERT new.
+        preserve_soul(conn, name=name, label=label, props=props)
         existing = conn.execute(
             "SELECT id FROM nodes WHERE name = ? AND type = ? LIMIT 1",
             (name, label),
@@ -305,6 +310,9 @@ def graph_upsert(
 
         label = _validate_label(entity_type)
         props = json.loads(properties) if properties.strip() != "{}" else {}
+        refusal = soul_key_refusal(props)
+        if refusal:
+            return refusal
 
         allowed, orphan_msg = check_orphan_guard(relation, target_name)
         if not allowed:
@@ -318,6 +326,8 @@ def graph_upsert(
                 "reason": "disambiguation_required",
                 "similar_nodes": disambig.existing_nodes,
             })
+
+        preserve_soul(conn := _get_conn(), name=name, label=label, props=props)
 
         props_str = f" {json.dumps(props)}" if props else ""
         node_repr = f"({label}:{name}{props_str})"
@@ -781,6 +791,9 @@ def graph_node_create(
 
         label = _validate_label(entity_type)
         props = json.loads(properties) if properties.strip() != "{}" else {}
+        refusal = soul_key_refusal(props)
+        if refusal:
+            return refusal
 
         conn = _get_conn()
         existing = conn.execute(
@@ -851,6 +864,9 @@ def graph_properties_merge(
     try:
         label = _validate_label(entity_type)
         new_props = json.loads(properties) if properties.strip() else {}
+        refusal = soul_key_refusal(new_props)
+        if refusal:
+            return refusal
         if not isinstance(new_props, dict):
             return json.dumps({"ok": False, "code": "invalid_properties",
                                "detail": "properties must be a JSON object"})
@@ -914,6 +930,10 @@ def graph_properties_remove(
         if not isinstance(keys, list):
             return json.dumps({"ok": False, "code": "invalid_keys",
                                "detail": "keys must be a JSON array"})
+
+        refusal = soul_key_refusal({k: None for k in keys})
+        if refusal:
+            return refusal
 
         protected_violations = [k for k in keys if k in _PROTECTED_METADATA_KEYS]
         if protected_violations:
@@ -1034,6 +1054,42 @@ def graph_edge_create(
         return json.dumps({"ok": False, "code": "internal_error", "detail": str(e)})
 
 
+
+def _soul_bearing_node_refusal(entity_type: str, name: str) -> str | None:
+    """Refuse a general-route delete of a Mind that still has a soul.
+
+    An erasure leaves nothing behind to explain it: `soul_changes` records
+    changes to a node, and the node is gone. Emptying the soul through
+    POST /graph/soul first makes the loss visible in the record, and only
+    then can the node go.
+    """
+    if entity_type != "Mind":
+        return None
+    try:
+        row = _get_conn().execute(
+            "SELECT properties FROM nodes WHERE name = ? AND type = 'Mind' LIMIT 1",
+            (name,),
+        ).fetchone()
+    except Exception:
+        return None
+    if not row or not row["properties"]:
+        return None
+    try:
+        props = json.loads(row["properties"])
+    except (TypeError, ValueError):
+        return None
+    if isinstance(props, dict) and props.get("soul_values"):
+        return json.dumps({
+            "ok": False,
+            "code": SOUL_KEY_REFUSED,
+            "detail": (
+                f"{name!r} still has a soul. Clear it through POST /graph/soul "
+                "first, so the loss is recorded, then delete the node."
+            ),
+        })
+    return None
+
+
 def graph_node_delete(
     *,
     entity_type: str,
@@ -1045,6 +1101,14 @@ def graph_node_delete(
     setting ``superseded = true`` via /properties/merge.
     """
     try:
+        # Deleting a Mind node deletes its soul, unrecorded — the one erasure
+        # the provenance table can never explain afterwards. Blocked here
+        # rather than in the router because every caller of this function has
+        # the same problem.
+        refusal = _soul_bearing_node_refusal(entity_type, name)
+        if refusal:
+            return refusal
+
         label = _validate_label(entity_type)
         conn = _get_conn()
         row = conn.execute(
