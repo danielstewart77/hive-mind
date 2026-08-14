@@ -182,6 +182,57 @@
         cacheLabelsLocally();
         pushLabel(id, next);
     }
+    // ── compose drafts ────────────────────────────────────────────
+    // One key per session, not one JSON blob for all of them. The labels
+    // cache reads its blob once at boot and writes the whole thing back, so
+    // two tabs each holding their own copy overwrite each other's sessions;
+    // for a name that is a nuisance, for a message the user is halfway
+    // through typing it is their words gone. Per-key writes touch only the
+    // session being typed into, and an ended session's draft is removed
+    // rather than left to grow the blob forever.
+    function draftKey(id) { return "term-draft:" + id; }
+    function getDraft(id) {
+        if (!id) return "";
+        try { return localStorage.getItem(draftKey(id)) || ""; } catch (e) { return ""; }
+    }
+    function setDraft(id, text) {
+        if (!id) return;
+        try {
+            if (text) localStorage.setItem(draftKey(id), text);
+            else localStorage.removeItem(draftKey(id));
+        } catch (e) {}
+    }
+    // Rotation replaces the conversation under a live tile. The unsent text
+    // is the user's, not the conversation's — it follows, the way the label
+    // and the open-set entry already do.
+    function migrateDraft(oldId, newId) {
+        if (!oldId || !newId || oldId === newId) return;
+        const text = getDraft(oldId);
+        setDraft(oldId, "");
+        if (text) setDraft(newId, text);
+    }
+
+    // A draft outlives the tile that wrote it, on purpose — but only as long
+    // as the session it was written to. A session ended from Telegram or the
+    // CLI closes with no tile watching, so nothing would ever drop its key,
+    // and every quota-bound write in this file shares one budget: once drafts
+    // have filled it, labels and the open set silently stop persisting too.
+    // The session list is the authority on what still exists.
+    function pruneDrafts(rows) {
+        const live = {};
+        rows.forEach(function (r) { if (r && r.id) live[r.id] = true; });
+        // Any open tile's session counts as live whatever the listing says —
+        // a rotation's successor is written here before it appears there.
+        openPanels.forEach(function (p, id) { live[id] = true; });
+        let keys;
+        try { keys = Object.keys(localStorage); } catch (e) { return; }
+        keys.forEach(function (k) {
+            if (k.indexOf("term-draft:") !== 0) return;
+            if (live[k.slice("term-draft:".length)]) return;
+            try { localStorage.removeItem(k); } catch (e) {}
+        });
+    }
+
     function migrateLabel(oldId, newId) {
         if (!oldId || !newId || oldId === newId) return;
         const label = labelsCache[oldId];
@@ -262,7 +313,27 @@
                 '</div>' +
                 '<div class="term-rotated-body"></div>' +
             '</div>' +
-            '<div class="term-xterm"></div>';
+            '<div class="term-xterm"></div>' +
+            // The compose box. A phone keyboard's autocorrect, prediction and
+            // voice typing all work by rewriting text already in the field —
+            // and xterm forwards that field to the pty keystroke by
+            // keystroke, so every correction re-sends a region the pty
+            // already has. That is the duplicated-sentence report. Here
+            // nothing reaches the pty until the arrow, so there is no
+            // already-sent region for the keyboard to rewrite.
+            //
+            // A real textarea, so the keyboard's own intelligence applies:
+            // xterm's helper textarea carries autocorrect="off" and is
+            // emptied after every burst, which is what makes suggestions
+            // impossible in the pane itself.
+            '<div class="term-compose" hidden>' +
+                '<textarea class="term-compose-input" rows="2" maxlength="8000" ' +
+                    'autocorrect="on" autocapitalize="sentences" spellcheck="true" ' +
+                    'enterkeyhint="enter" ' +
+                    'placeholder="message — return adds a line, arrow sends" ' +
+                    'aria-label="compose a message"></textarea>' +
+                '<button type="button" class="term-compose-send" title="send" aria-label="send">&#10148;</button>' +
+            '</div>';
 
         const panelHead = el.querySelector(".term-panel-head");
         const headControls = Array.from(el.querySelectorAll(".term-panel-head button, .term-panel-head .term-panel-info"));
@@ -281,6 +352,9 @@
         const headDot = el.querySelector(".term-panel-dot");
         const colorGridSwatches = el.querySelector(".term-color-grid-swatches");
         const colorInput = el.querySelector(".term-color-input");
+        const composeEl = el.querySelector(".term-compose");
+        const composeInput = el.querySelector(".term-compose-input");
+        const composeSend = el.querySelector(".term-compose-send");
         const rotatedEl = el.querySelector(".term-rotated");
         const rotatedBody = el.querySelector(".term-rotated-body");
         const rotatedClose = el.querySelector(".term-rotated-close");
@@ -468,6 +542,10 @@
             const nm = (label.name || "").trim();
             info.textContent = (nm || base) + " · " + attachState;
             info.title = nm ? nm + " · " + base : base;
+            // Every state change funnels through here — setAttachState and
+            // stopWith both end in setInfo — so this is the one hook the box
+            // needs to follow the tile.
+            syncComposeLock();
         }
         function setAttachState(state) {
             attachState = state;
@@ -755,6 +833,11 @@
         // and split their typing across two ptys.
         function restoreMicFocus() {
             if (destroyed) return;
+            // Never out of the compose box. On a landscape phone or a tablet
+            // both the mic and the box are on screen at once, and pulling
+            // focus to the pane there closes the soft keyboard on a
+            // half-written message.
+            if (document.activeElement === composeInput) return;
             if (el.contains(document.activeElement)) term.focus();
         }
         function micFailed() {
@@ -1007,7 +1090,9 @@
             socket.onmessage = (ev) => {
                 lastRecvAt = Date.now();
                 if (ev.data instanceof ArrayBuffer) {
-                    term.write(new Uint8Array(ev.data));
+                    const bytes = new Uint8Array(ev.data);
+                    noteRealOutput(bytes);
+                    term.write(bytes);
                     return;
                 }
                 // Terminal bytes always arrive as BINARY frames, so a TEXT
@@ -1021,10 +1106,24 @@
             socket.onclose = (ev) => {
                 if (ws === socket) ws = null;
                 if (destroyed || deliberateClose) return;
+                // Before anything else decides what to do with the tile: if a
+                // submit went out and the pane never answered, those bytes
+                // were written into a socket that was already gone.
+                //
+                // Except on 4412. That is rotation, and rotation is something
+                // the conversation did in response to a turn — so the turn
+                // landed, however quiet the pane was about it. Restoring there
+                // would seed the successor with a message it has already had.
+                if (!(ev && ev.code === 4412)) restorePendingSubmit();
                 // 4410 = the gateway closed the session on purpose
                 // (end-session, /kill). Don't hunt a successor — report
                 // the ending and remove it from the terminal session lists.
                 if (ev && ev.code === 4410) {
+                    // The session is gone for good, so its stored draft can
+                    // never be resumed — drop it rather than keep a key per
+                    // dead conversation forever. What is on screen stays on
+                    // screen, and stays selectable, for the user to copy out.
+                    setDraft(sessionId, "");
                     setAttachState("session ended");
                     standDownMic();
                     refreshSessions();
@@ -1202,6 +1301,136 @@
         // so a click that turns into a selection has already repainted.
         el.addEventListener("mousedown", function () { setFocusedPanel(panel); repaint(); });
 
+        // ── compose box ───────────────────────────────────────────
+        // Width alone is the wrong gate. A phone in landscape is 915-932 CSS
+        // px — a desktop as far as the 859px breakpoint is concerned — so
+        // gating on width takes the box away on rotation and hands the
+        // duplication back on the same device, mid-sentence. Either a narrow
+        // window or a device that has no hover and a coarse pointer.
+        const narrowMedia = window.matchMedia("(max-width: 859px)");
+        const touchMedia = window.matchMedia("(hover: none) and (pointer: coarse)");
+        function syncComposeShown() {
+            const want = TerminalRouting.composeBoxWanted({
+                narrow: narrowMedia.matches,
+                coarsePointer: touchMedia.matches,
+            });
+            if (composeEl.hidden === !want) return;
+            composeEl.hidden = !want;
+            doFit();
+        }
+        function onComposeMedia() { if (!destroyed) syncComposeShown(); }
+        [narrowMedia, touchMedia].forEach(function (m) {
+            if (m.addEventListener) m.addEventListener("change", onComposeMedia);
+            else if (m.addListener) m.addListener(onComposeMedia);
+        });
+        function detachComposeMedia() {
+            [narrowMedia, touchMedia].forEach(function (m) {
+                if (m.removeEventListener) m.removeEventListener("change", onComposeMedia);
+                else if (m.removeListener) m.removeListener(onComposeMedia);
+            });
+        }
+
+        function composeLockedNow() {
+            return TerminalRouting.composeLocked({
+                attachState: attachState, standingDown: standingDown,
+            });
+        }
+        // readOnly, never disabled: a session ended for good never re-enables,
+        // and iOS refuses to let a disabled textarea be selected or copied —
+        // the user's own unsent words would be visible and unrecoverable.
+        function syncComposeLock() {
+            const locked = composeLockedNow();
+            composeInput.readOnly = locked;
+            composeSend.disabled = locked;
+            composeEl.classList.toggle("is-locked", locked);
+        }
+
+        // Text handed to a socket that has not yet proved it was listening.
+        // A half-open connection still reports OPEN for up to STALE_MS, so
+        // `sendRaw` returning true is not evidence of delivery — it is
+        // evidence the browser had somewhere to put the bytes.
+        let pendingSubmit = "";
+        function submitCompose() {
+            if (composeLockedNow()) return false;
+            const text = composeInput.value;
+            const bytes = TerminalRouting.composeSubmitBytes(
+                text, !!(term.modes && term.modes.bracketedPasteMode));
+            if (!bytes) return false;
+            if (!sendRaw(bytes)) { flashComposeError(); return false; }
+            // Accumulated, not replaced. Sending again is the natural response
+            // to a pane that has not answered, and the second submit must not
+            // discard the first one's only copy.
+            pendingSubmit = pendingSubmit ? pendingSubmit + "\n" + text : text;
+            composeInput.value = "";
+            // The stored draft deliberately survives the submit, and is
+            // cleared only once the pane answers. Everything else that could
+            // hold the safety copy dies with the tile: tapping back to the
+            // session list destroys the panel outright, and iOS discards a
+            // backgrounded tab with no dependable unload. Clearing here loses
+            // the message on the one gesture people make right after sending.
+            return true;
+        }
+        // A submit that could not go anywhere has to say so. The arrow is not
+        // disabled during an outage — the box stays typable through one on
+        // purpose — so without this, tapping send does nothing at all and
+        // nothing on screen explains why.
+        let composeErrTimer = null;
+        function flashComposeError() {
+            composeEl.classList.add("is-error");
+            if (composeErrTimer) clearTimeout(composeErrTimer);
+            composeErrTimer = setTimeout(function () {
+                composeErrTimer = null;
+                composeEl.classList.remove("is-error");
+            }, 1500);
+        }
+        // The pane answered, so the submit landed. Only real output counts:
+        // the pty end sends a NUL keepalive every 5s, and treating that as an
+        // acknowledgement would clear the safety copy of a message that never
+        // arrived, five seconds after it didn't.
+        function noteRealOutput(bytes) {
+            if (!pendingSubmit) return;
+            for (let i = 0; i < bytes.length; i++) {
+                if (bytes[i] !== 0) {
+                    pendingSubmit = "";
+                    // The safety copy is now redundant: what is stored again
+                    // is whatever the user has typed since, which is usually
+                    // nothing.
+                    setDraft(sessionId, composeInput.value);
+                    return;
+                }
+            }
+        }
+        // The socket died without the pane ever answering. Give the words
+        // back rather than letting a phone's screen-lock eat a paragraph the
+        // box has already cleared as if it were sent.
+        function restorePendingSubmit() {
+            if (!pendingSubmit) return;
+            const text = pendingSubmit;
+            pendingSubmit = "";
+            composeInput.value = composeInput.value
+                ? text + "\n" + composeInput.value : text;
+            setDraft(sessionId, composeInput.value);
+        }
+
+        composeInput.value = getDraft(sessionId);
+        // Saved on every keystroke, not on teardown. Mobile switches sessions
+        // by destroying the panel outright (not through closePanel), and iOS
+        // discards a backgrounded tab with no dependable unload — a draft
+        // written at either of those moments is a draft written never.
+        composeInput.addEventListener("input", function () {
+            setDraft(sessionId, composeInput.value);
+        });
+        // Return inserts a newline: xterm's own Enter handling lives on the
+        // pane, and nothing here forwards to it, so this needs no handler at
+        // all. The arrow is the only thing that submits.
+        composeSend.addEventListener("mousedown", function (ev) { ev.preventDefault(); });
+        composeSend.addEventListener("click", function () {
+            submitCompose();
+            composeInput.focus();
+        });
+        syncComposeShown();
+        syncComposeLock();
+
         // ── rotation reattach ─────────────────────────────────────
         function cancelReattachLoop() {
             if (reattachTimer) { clearTimeout(reattachTimer); reattachTimer = null; }
@@ -1211,6 +1440,11 @@
         // ourselves and reattach — the pty is almost certainly still live.
         function forceReattach() {
             if (destroyed || deliberateClose) return;
+            // The zombie case, and the one the compose box exists to survive:
+            // a phone locks, TCP half-opens, the socket keeps reporting OPEN
+            // and a submit is written into nothing. closeSocket nulls onclose,
+            // so the restore has to happen here rather than there.
+            restorePendingSubmit();
             closeSocket();          // nulls onclose, so drive the loop directly
             beginReattachLoop();
         }
@@ -1288,6 +1522,12 @@
             mindName = succ.mind_name || mindName;
             el.dataset.sessionId = sessionId;
             migrateLabel(oldId, sessionId);
+            // The stored draft moves and the old key goes. Re-deriving it
+            // from the textarea instead would leave the retired session's key
+            // behind, and would be wrong the moment the box is not the
+            // freshest copy — a submit still awaiting its answer lives in
+            // storage, not on screen.
+            migrateDraft(oldId, sessionId);
             applyLabel();
             reKey(oldId, sessionId);
             if (speakerOn) openTtsStream();
@@ -1374,6 +1614,23 @@
                 } else term.scrollLines(action.lines);
             },
             sendBytes: function (text) {
+                // The return key belongs to whatever is being typed into. A
+                // draft sitting in the box must not capture it: someone who
+                // tapped the pane to answer a y/n prompt gets their draft
+                // pasted onto the end of that half-typed line and the whole
+                // thing submitted as one — "ya draft for later" answering a
+                // yes/no. Focus is the only thing that says which field the
+                // user means, and a phone has no second return key.
+                //
+                // No flushPendingIme on this path. That dumps xterm's own
+                // pending composition to the pty, which here would prefix a
+                // half-typed word from the pane onto the box's message.
+                if (text === "\r" && !composeEl.hidden
+                        && document.activeElement === composeInput
+                        && TerminalRouting.composeIsSubmittable(composeInput.value)) {
+                    submitCompose();
+                    return;
+                }
                 // The toolbar's return key never reaches xterm's keydown
                 // path, so an open composition would sit in the helper
                 // textarea and arrive after the newline, on the next
@@ -1393,6 +1650,7 @@
                 stopTtsPlayback();
                 abandonMicCapture();
                 detachMicWidth();
+                detachComposeMedia();
                 try { term.dispose(); } catch (e) {}
                 if (el.parentNode) el.parentNode.removeChild(el);
             },
@@ -1402,6 +1660,9 @@
 
     // ── grid / stage management ───────────────────────────────────
     function relayoutGrid() {
+        // The key row belongs to an open tile, and opening or closing one is
+        // the only thing that changes whether there is any.
+        syncKeyRow();
         const n = openPanels.size;
         gridEl.dataset.count = String(n);
         gridEmpty.hidden = n > 0;
@@ -1461,7 +1722,28 @@
         acquireWakeLock();
     }
 
-    function showView(name) { termApp.dataset.view = name; }
+    function showView(name) { termApp.dataset.view = name; syncKeyRow(); }
+
+    // The key row and the compose box answer to the same question — is this a
+    // device with an on-screen keyboard — and they used to answer it in
+    // different places: the box in JS (narrow OR coarse pointer), the row in
+    // a `max-width: 859px` media query. A phone in landscape is 915-932px, so
+    // it got the box and no keys at all: no Esc, no Tab, no Ctrl+C, no arrows,
+    // and no way to send a bare return to the pane. One gate, in JS, driving
+    // both.
+    const keyRowNarrow = window.matchMedia("(max-width: 859px)");
+    const keyRowTouch = window.matchMedia("(hover: none) and (pointer: coarse)");
+    function syncKeyRow() {
+        const want = TerminalRouting.composeBoxWanted({
+            narrow: keyRowNarrow.matches,
+            coarsePointer: keyRowTouch.matches,
+        }) && openPanels.size > 0 && (isWide() || termApp.dataset.view === "stage");
+        toolbar.classList.toggle("is-on", want);
+    }
+    [keyRowNarrow, keyRowTouch].forEach(function (m) {
+        if (m.addEventListener) m.addEventListener("change", syncKeyRow);
+        else if (m.addListener) m.addListener(syncKeyRow);
+    });
 
     // Each panel's own ResizeObserver (see createPanel) is the primary
     // refit trigger, but a foldable unfolding is reported (not reproduced
@@ -1722,6 +2004,7 @@
             if (!resp.ok) return [];
             const rows = await resp.json();
             renderCards(Array.isArray(rows) ? rows : []);
+            pruneDrafts(Array.isArray(rows) ? rows : []);
             return lastRows;
         } catch (err) {
             return [];
@@ -1800,6 +2083,14 @@
     railExpandBtn.addEventListener("click", function () { setRail(false); });
 
     // ── mobile key toolbar (routes to the focused tile) ───────────
+    // A key-row tap must not take the keyboard away from the compose box.
+    // Focus moves on mousedown, so the button stealing it closes the soft
+    // keyboard mid-sentence — and Ctrl+C, the one key someone reaches for
+    // while composing a follow-up to a running turn, is exactly when that
+    // happens.
+    toolbar.addEventListener("mousedown", function (ev) {
+        if (ev.target.closest("button")) ev.preventDefault();
+    });
     toolbar.addEventListener("click", function (ev) {
         const btn = ev.target.closest("button[data-seq], button[data-scroll]");
         if (!btn) return;

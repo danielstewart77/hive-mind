@@ -1309,7 +1309,82 @@ body:has(.terminal-page) .content-wrapper > .terminal-box { display: none; }
     }
 }
 
+/* ── mobile compose box ───────────────────────────────── */
+/* Fixed height, deliberately. `.term-xterm` is flex:1 with a ResizeObserver
+   driving doFit -> sendResize, so a box that grew with its content would
+   shrink the pty a row at a time — and shrinking a tmux pane discards
+   history rather than reserving it, so the transcript above would get
+   quietly shorter as the user typed. The box scrolls inside itself instead;
+   the pane's geometry is settled once, when the box appears. */
+.term-compose {
+    display: flex;
+    align-items: stretch;
+    gap: 0.4rem;
+    padding: 0.4rem 0.5rem;
+    background: #0b1724;
+    border-top: 1px solid #1e2d3d;
+    flex-shrink: 0;
+}
+.term-compose[hidden] { display: none; }
+.term-compose-input {
+    flex: 1;
+    min-width: 0;
+    height: 3.4rem;
+    resize: none;
+    overflow-y: auto;
+    padding: 0.45rem 0.6rem;
+    background: #0d1b28;
+    border: 1px solid #2a3f54;
+    border-radius: 5px;
+    color: #dce8f0;
+    font-family: inherit;
+    /* 16px or iOS zooms the whole page on focus, and the pane comes back
+       from that zoom at the wrong geometry. */
+    font-size: 16px;
+    line-height: 1.35;
+}
+.term-compose-input:focus {
+    outline: none;
+    border-color: #c9a84c;
+}
+.term-compose-input::placeholder { color: #5c7284; }
+.term-compose-send {
+    flex-shrink: 0;
+    min-width: 44px;
+    min-height: 44px;
+    background: #0d1b28;
+    border: 1px solid #2a3f54;
+    border-radius: 5px;
+    color: #c9a84c;
+    font-size: 1.1rem;
+    cursor: pointer;
+}
+.term-compose-send:hover { border-color: #c9a84c; color: #dce8f0; }
+.term-compose-send:disabled { opacity: 0.4; cursor: default; }
+/* Read-only, not disabled: an ended session never re-enables, and iOS will
+   not let a disabled textarea be selected or copied — the user's own unsent
+   words would be visible, permanent and unrecoverable. */
+.term-compose.is-locked .term-compose-input {
+    opacity: 0.55;
+    border-color: #1e2d3d;
+}
+/* A submit the socket would not take. The box stays typable through an
+   outage on purpose, so the arrow is live and tapping it has to say
+   something — silence reads as a dead button. */
+.term-compose.is-error .term-compose-input {
+    border-color: #e0a8a8;
+}
+
+/* A phone in landscape shows the compose box, and the mic types its
+   transcript straight to the pty — bypassing the box, and taking focus off
+   it on the way. One text entry point per device. */
+@media (hover: none) and (pointer: coarse) {
+    .term-panel-mic { display: none; }
+}
+
 /* ── mobile key toolbar ───────────────────────────────── */
+/* Shown by JS, not by a media query — the same gate that decides the compose
+   box, so a landscape phone cannot end up with one and not the other. */
 .term-mobile-toolbar {
     display: none;
     grid-template-columns: repeat(5, 1fr);
@@ -1329,6 +1404,7 @@ body:has(.terminal-page) .content-wrapper > .terminal-box { display: none; }
     min-height: 44px;
     cursor: pointer;
 }
+.term-mobile-toolbar.is-on { display: grid; }
 .term-mobile-toolbar button:hover { border-color: #c9a84c; color: #dce8f0; }
 
 /* Phones: full-bleed shell, one view at a time, single-panel grid. */
@@ -1346,9 +1422,6 @@ body:has(.terminal-page) .content-wrapper > .terminal-box { display: none; }
     .term-panel-close { display: none; }
     /* a phone already dictates into its own keyboard */
     .term-panel-mic { display: none; }
-    .term-mobile-toolbar { display: grid; }
-    /* only the keys toolbar shows while the list view is up — hide it there */
-    .term-app[data-view="list"] ~ .term-mobile-toolbar { display: none; }
     .term-action-btn,
     .term-icon-btn,
     .term-seg-btn {

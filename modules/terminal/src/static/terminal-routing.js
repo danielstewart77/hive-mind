@@ -207,6 +207,106 @@
     }
 
     /**
+     * The bytes one submit of the mobile compose box puts on the wire.
+     *
+     * The box exists because a phone keyboard's autocorrect, prediction and
+     * voice typing all work by rewriting text that is already in the field —
+     * text xterm would have forwarded to the pty keystroke by keystroke, and
+     * that re-send is the duplicated-sentence report. Nothing composed here
+     * reaches the pty until this function runs, so there is no already-sent
+     * region to rewrite.
+     *
+     * A multi-line message has to arrive as one message. Inside a bracketed
+     * paste the TUI reads a CR as a literal newline rather than as submit, so
+     * the whole block lands in the composer and the single trailing CR — sent
+     * outside the brackets — is what submits it.
+     *
+     * Without the mode there is nothing to wrap with: the brackets would be
+     * typed as text. The newlines still become CR, which a line-oriented app
+     * submits one line at a time. That is the app's own paste behaviour, and
+     * inventing something else here would be worse than matching it.
+     *
+     * @param {string} text        the box's contents
+     * @param {boolean} bracketed  whether the app has bracketed paste on
+     *                             (xterm's `term.modes.bracketedPasteMode`)
+     * @returns {string} bytes to send, or "" when there is nothing to submit
+     */
+    function composeSubmitBytes(text, bracketed) {
+        // Trailing newlines are what a return-key-inserts-a-newline box
+        // collects on the way to the arrow; they are not part of the message,
+        // and inside the brackets each one is a blank line in the composer.
+        if (!composeIsSubmittable(text)) return "";
+        var body = String(text).replace(/\r?\n/g, "\r").replace(/\r+$/, "");
+        return bracketed ? "\x1b[200~" + body + "\x1b[201~\r" : body + "\r";
+    }
+
+    /**
+     * Is there a message in the box, as opposed to leftover whitespace?
+     *
+     * The toolbar's return key reads this to decide whether it is submitting
+     * the box or sending a plain CR to the pane. A box holding one stray
+     * space would otherwise capture the only key the user has for answering a
+     * y/n prompt they typed straight into the terminal, and answer it with a
+     * space.
+     *
+     * @param {string} text  the box's contents
+     * @returns {boolean}
+     */
+    function composeIsSubmittable(text) {
+        return String(text == null ? "" : text).trim() !== "";
+    }
+
+    /**
+     * Whether this browser gets a compose box at all.
+     *
+     * Width alone is the wrong question. The box exists for on-screen
+     * keyboards, and a phone in landscape is 915-932 CSS px — wider than the
+     * 859px the rest of the tile's mobile machinery keys off. Gating on width
+     * would take the box away on rotation and hand the duplication straight
+     * back, on the same device, mid-sentence. A coarse pointer with no hover
+     * is what actually names the devices that autocorrect.
+     *
+     * Either condition is enough: the narrow arm keeps a desktop window
+     * dragged small behaving like the rest of the mobile layout, and the
+     * pointer arm covers the landscape phone the narrow arm misses.
+     *
+     * @param {Object} env  {narrow: boolean, coarsePointer: boolean}
+     * @returns {boolean}
+     */
+    function composeBoxWanted(env) {
+        var e = env || {};
+        return !!(e.narrow || e.coarsePointer);
+    }
+
+    /**
+     * Whether the box should refuse typing, given the tile's attach state.
+     *
+     * Only the two states where the conversation itself is gone: ended, and
+     * suspended. Not a connection state, and deliberately not standing down.
+     *
+     * `readOnly` on a focused textarea drops the soft keyboard, so locking is
+     * how a phone loses a half-typed message. Every connection state is a gap
+     * the tile closes by itself — and standing down, which follows ~25s of
+     * failed reattach, is the *longest* of them: a lift, a tunnel, a wifi
+     * handoff. Composing through an outage is the entire reason a buffer
+     * exists, so that is the last state that should take the keyboard away.
+     * A submit attempted there is refused and the words stay put.
+     *
+     * Read-only rather than disabled, deliberately. A session ended for good
+     * never re-enables, and iOS will not let a disabled textarea be selected
+     * or copied — the user's own unsent words would be visible, permanent and
+     * unrecoverable.
+     *
+     * @param {Object} state  {attachState: string}
+     * @returns {boolean}
+     */
+    function composeLocked(state) {
+        var s = state || {};
+        var name = String(s.attachState || "");
+        return name === "session ended" || name === "session suspended";
+    }
+
+    /**
      * How far one press of the tile's PgUp/PgDn moves the viewport.
      *
      * A whole screen at a time loses the reader's place, so two rows of
@@ -410,5 +510,9 @@
         contrastText: contrastText,
         pendingImeText: pendingImeText,
         shouldResetImeAccumulator: shouldResetImeAccumulator,
+        composeSubmitBytes: composeSubmitBytes,
+        composeIsSubmittable: composeIsSubmittable,
+        composeBoxWanted: composeBoxWanted,
+        composeLocked: composeLocked,
     };
 })(typeof globalThis !== "undefined" ? globalThis : this);

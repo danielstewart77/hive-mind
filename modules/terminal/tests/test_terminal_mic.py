@@ -472,9 +472,16 @@ def test_the_mic_is_not_shown_at_phone_width(live_app):
         page.set_viewport_size({"width": 859, "height": 780})
         page.wait_for_timeout(200)
         assert not page.is_visible(".term-panel-mic")
-        page.set_viewport_size({"width": 860, "height": 780})
+
+        # Turned sideways, this is still a phone: 915px, wider than the
+        # breakpoint, and still dictating into its own keyboard. It is also
+        # where the compose box appears, and the mic would type its transcript
+        # straight past that box to the pty — so width alone stopped being the
+        # question. Every other test in this file runs in the desktop `page`
+        # fixture and clicks the button, which is where it does still show.
+        page.set_viewport_size({"width": 915, "height": 412})
         page.wait_for_timeout(200)
-        assert page.is_visible(".term-panel-mic")
+        assert not page.is_visible(".term-panel-mic")
         browser.close()
 
 

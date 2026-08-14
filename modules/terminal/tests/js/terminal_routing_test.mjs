@@ -18,6 +18,7 @@ const {
     pickReattachTarget, isActive, retryDelayMs, socketIsStale, attemptsAfterSocket, attachExhausted, contrastText, pendingImeText, shouldResetImeAccumulator, pageScrollLines,
     pageScrollAction, wheelReport, dragWheelSteps, parseOpenFragment, formatOpenFragment,
     detachSocket, speakable,
+    composeIsSubmittable, composeSubmitBytes, composeLocked,
 } = globalThis.TerminalRouting;
 
 const tests = {
@@ -399,6 +400,38 @@ const tests = {
     "detaching nothing is a no-op, not a crash"() {
         assert.equal(detachSocket(null), false);
         assert.equal(detachSocket(undefined), false);
+    },
+
+    // ── mobile compose box ────────────────────────────────────────
+
+    // Reqs 16/17: trailing newlines are what a newline-on-return box collects
+    // on the way to the arrow, and a box of pure whitespace is not a message —
+    // submitting it would spend the user's only return key on a space.
+    "whitespace alone is not a message"() {
+        assert.equal(composeIsSubmittable("   "), false);
+        assert.equal(composeIsSubmittable("\n\n"), false);
+        assert.equal(composeIsSubmittable(""), false);
+        assert.equal(composeIsSubmittable(null), false);
+        assert.equal(composeIsSubmittable(" x "), true);
+        assert.equal(composeSubmitBytes("   ", true), "");
+        assert.equal(composeSubmitBytes("hi\n\n", true), "\x1b[200~hi\x1b[201~\r");
+    },
+
+    // Req 13/14: only a conversation that is gone. No connection state locks
+    // the box — read-only on a focused textarea drops the soft keyboard, and
+    // standing down is the *longest* outage (a lift, a tunnel), which is
+    // exactly when someone needs to keep typing.
+    "only a conversation that is gone locks the box"() {
+        assert.equal(composeLocked({attachState: "session ended"}), true);
+        assert.equal(composeLocked({attachState: "session suspended"}), true);
+        assert.equal(composeLocked({attachState: "attached", standingDown: true}), false);
+        assert.equal(composeLocked({attachState: "can't attach — tap to reconnect",
+                                    standingDown: true}), false);
+        assert.equal(composeLocked({attachState: "attached"}), false);
+        assert.equal(composeLocked({attachState: "reattaching…"}), false);
+        assert.equal(composeLocked({attachState: "disconnected"}), false);
+        assert.equal(composeLocked({attachState: "connecting…"}), false);
+        assert.equal(composeLocked(null), false);
     },
 };
 
