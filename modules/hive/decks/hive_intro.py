@@ -66,11 +66,10 @@ def slide2():
         text(S, 80, y + 52, sub, 13, DIM)
 
     # Gateway — one conversation behind all of them.
-    text(S, 400, 150, "GATEWAY", 13, GREY)
     box(S, 400, 175, 250, 270, GOLD)
-    text(S, 420, 210, "hive-comms", 22, GOLD)
-    text(S, 420, 245, "one conversation,", 14, DIM)
-    text(S, 420, 265, "many front doors", 14, DIM)
+    text(S, 420, 208, "the nervous system", 19, GOLD)
+    text(S, 420, 243, "one conversation,", 14, DIM)
+    text(S, 420, 264, "many front doors", 14, DIM)
     text(S, 420, 305, "· session + identity", 13, DIM)
     text(S, 420, 328, "· composes the prompt", 13, DIM)
     text(S, 420, 351, "· routes to the right mind", 13, DIM)
@@ -95,7 +94,7 @@ def slide2():
 
     # Memory — what outlives the process.
     box(S, 740, 500, 500, 80, GOLD)
-    text(S, 765, 535, "hive-lucent  —  memory", 20, GOLD)
+    text(S, 765, 535, "long-term memory", 20, GOLD)
     text(S, 765, 560, "knowledge graph + vectors. what survives the session.", 13, DIM)
     arrow(S, 990, 445, 990, 498)
     text(S, 1000, 470, "every turn", 12, GREY)
@@ -116,12 +115,12 @@ def slide3():
                     "between the agents that represent them", 15, DIM)
 
     # ── Daniel's bubble ───────────────────────────────────────────────────
-    box(S, 50, 150, 500, 330, TEAL)
+    box(S, 50, 150, 490, 330, TEAL)
     text(S, 75, 185, "DANIEL", 13, GREY)
     text(S, 75, 220, "the human", 20, TEAL)
     text(S, 75, 243, "asks in plain language, walks away", 13, DIM)
 
-    box(S, 75, 265, 450, 185, TEAL, 1)
+    box(S, 72, 265, 445, 185, TEAL, 1)
     text(S, 95, 302, "Skippy", 24, TEAL)
     text(S, 95, 332, "· knows his projects, his history, his preferences", 13, DIM)
     text(S, 95, 355, "· speaks with his authority, inside limits he set", 13, DIM)
@@ -130,12 +129,12 @@ def slide3():
     text(S, 95, 437, "when Daniel is not in the room", 13, GREY)
 
     # ── The other party's bubble ──────────────────────────────────────────
-    box(S, 710, 150, 500, 330, GOLD)
+    box(S, 720, 150, 490, 330, GOLD)
     text(S, 735, 185, "SOMEONE ELSE  —  a son, a household, a business", 13, GREY)
     text(S, 735, 220, "Aiden", 20, GOLD)
     text(S, 735, 243, "his own machine, his own rules", 13, DIM)
 
-    box(S, 735, 265, 450, 185, GOLD, 1)
+    box(S, 742, 265, 445, 185, GOLD, 1)
     text(S, 755, 302, "Zack", 24, GOLD)
     text(S, 755, 332, "· knows Aiden's box, his schedule, his voice", 13, DIM)
     text(S, 755, 355, "· answers for him when he is not there", 13, DIM)
@@ -143,13 +142,21 @@ def slide3():
     text(S, 755, 415, "represents Aiden", 14, GOLD)
     text(S, 755, 437, "and answers to Aiden, not to me", 13, GREY)
 
-    # ── The seam between them ─────────────────────────────────────────────
-    arrow(S, 552, 285, 706, 285)
-    text(S, 578, 273, "a request", 13, GREY)
-    arrow(S, 706, 345, 554, 345)
-    text(S, 578, 368, "an answer", 13, GREY)
-    text(S, 566, 415, "brokered", 12, GREY)
-    text(S, 566, 435, "by the hive", 12, GREY)
+    # ── The seam is the protocol, so draw the protocol ────────────────────
+    box(S, 560, 150, 140, 330, GOLD, 1)
+    text(S, 578, 182, "THE", 15, GOLD)
+    text(S, 578, 203, "NERVOUS", 15, GOLD)
+    text(S, 578, 224, "SYSTEM", 15, GOLD)
+    text(S, 578, 252, "one protocol,", 12, GREY)
+    text(S, 578, 270, "spoken by both", 12, GREY)
+
+    arrow(S, 552, 320, 708, 320)
+    text(S, 578, 308, "a request", 13, GREY)
+    arrow(S, 708, 380, 552, 380)
+    text(S, 578, 403, "an answer", 13, GREY)
+
+    text(S, 578, 440, "neither agent", 12, GREY)
+    text(S, 578, 458, "reaches past it", 12, GREY)
 
     # ── The point ─────────────────────────────────────────────────────────
     text(S, 60, 545, "What crosses the seam is a message. Nothing else.", 18, GOLD)
