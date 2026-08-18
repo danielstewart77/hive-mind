@@ -4,7 +4,8 @@
     python3 decks/hive_intro.py [slide ...]
 """
 import sys
-from deck import DIM, GOLD, GREY, TEAL, arrow, box, clear_slide, line, text
+from deck import (DIM, GOLD, GREY, TEAL, arrow, box, clear_slide, edge, line,
+                  node, text)
 
 
 def slide1():
@@ -233,57 +234,54 @@ def slide3():
     text(S, 60, 92, "the conversation is disposable — three stores underneath it are not", 15, DIM)
 
     # ── The graph ─────────────────────────────────────────────────────────
-    box(S, 50, 145, 380, 330, GOLD)
+    box(S, 50, 145, 430, 330, GOLD)
     text(S, 72, 182, "the graph", 22, GOLD)
     text(S, 72, 206, "things, and how they relate", 13, GREY)
 
-    text(S, 72, 250, "Daniel", 14, TEAL)
-    arrow(S, 130, 245, 190, 245, GREY, 1, 6)
-    text(S, 138, 236, "PARENT_OF", 11, GREY)
-    text(S, 198, 250, "Aiden", 14, TEAL)
-    text(S, 72, 290, "Aiden", 14, TEAL)
-    arrow(S, 126, 285, 186, 285, GREY, 1, 6)
-    text(S, 132, 276, "OWNS", 11, GREY)
-    text(S, 194, 290, "Zack (a mind)", 14, TEAL)
+    daniel = node(S, 150, 268, "Daniel", 36, TEAL, 13, "person")
+    aiden  = node(S, 370, 268, "Aiden", 34, TEAL, 13, "person")
+    skippy = node(S, 130, 390, "Skippy", 34, GOLD, 13, "mind")
+    zack   = node(S, 380, 390, "Zack", 32, GOLD, 13, "mind")
 
-    text(S, 72, 345, "answers questions you can name:", 13, DIM)
-    text(S, 72, 368, "who is this, what do they own,", 13, DIM)
-    text(S, 72, 390, "which mind belongs to which person", 13, DIM)
-    text(S, 72, 432, "you traverse it", 14, GOLD)
-    text(S, 72, 454, "one hop at a time, exactly", 13, GREY)
+    edge(S, daniel, aiden, "PARENT_OF")
+    edge(S, daniel, skippy, "OPERATES")
+    edge(S, aiden, zack, "OPERATES")
+    edge(S, skippy, zack, "TALKS_TO")
+
+    text(S, 72, 445, "you traverse it: one hop, exactly, no guessing", 13, DIM)
 
     # ── The vectors ───────────────────────────────────────────────────────
-    box(S, 450, 145, 380, 330, TEAL)
-    text(S, 472, 182, "semantic memory", 22, TEAL)
-    text(S, 472, 206, "meaning, not wording", 13, GREY)
+    box(S, 500, 145, 350, 330, TEAL)
+    text(S, 522, 182, "semantic memory", 22, TEAL)
+    text(S, 522, 206, "meaning, not wording", 13, GREY)
 
-    text(S, 472, 250, "every turn, the message you typed", 13, DIM)
-    text(S, 472, 272, "is turned into a vector, and the", 13, DIM)
-    text(S, 472, 294, "nearest memories come back —", 13, DIM)
-    text(S, 472, 316, "ranked by meaning, by wording,", 13, DIM)
-    text(S, 472, 338, "and by how recent they are", 13, DIM)
+    text(S, 522, 250, "every turn, the message you typed", 13, DIM)
+    text(S, 522, 272, "is turned into a vector, and the", 13, DIM)
+    text(S, 522, 294, "nearest memories come back —", 13, DIM)
+    text(S, 522, 316, "ranked by meaning, by wording,", 13, DIM)
+    text(S, 522, 338, "and by how recent they are", 13, DIM)
 
-    text(S, 472, 380, "answers the question you did not", 13, DIM)
-    text(S, 472, 402, "know to ask: a preference stated", 13, DIM)
-    text(S, 472, 424, "once, months ago, in other words", 13, DIM)
+    text(S, 522, 380, "answers the question you did not", 13, DIM)
+    text(S, 522, 402, "know to ask: a preference stated", 13, DIM)
+    text(S, 522, 424, "once, months ago, in other words", 13, DIM)
 
-    text(S, 472, 454, "it surfaces — you never search it", 14, TEAL)
+    text(S, 522, 454, "it surfaces — you never search it", 14, TEAL)
 
     # ── Standing rules ────────────────────────────────────────────────────
-    box(S, 850, 145, 360, 330, GOLD)
-    text(S, 872, 182, "standing rules", 22, GOLD)
-    text(S, 872, 206, "small, and always on", 13, GREY)
+    box(S, 870, 145, 340, 330, GOLD)
+    text(S, 892, 182, "standing rules", 22, GOLD)
+    text(S, 892, 206, "small, and always on", 13, GREY)
 
-    text(S, 872, 250, "\u00b7 defer the restart to Daniel", 13, DIM)
-    text(S, 872, 273, "\u00b7 one question per turn", 13, DIM)
-    text(S, 872, 296, "\u00b7 never guess someone's gender", 13, DIM)
+    text(S, 892, 250, "\u00b7 defer the restart to Daniel", 13, DIM)
+    text(S, 892, 273, "\u00b7 one question per turn", 13, DIM)
+    text(S, 892, 296, "\u00b7 never guess someone's gender", 13, DIM)
 
-    text(S, 872, 340, "never searched for, never ranked,", 13, DIM)
-    text(S, 872, 362, "never left out — injected into", 13, DIM)
-    text(S, 872, 384, "every single turn", 13, DIM)
+    text(S, 892, 340, "never searched for, never ranked,", 13, DIM)
+    text(S, 892, 362, "never left out — injected into", 13, DIM)
+    text(S, 892, 384, "every single turn", 13, DIM)
 
-    text(S, 872, 426, "the difference between", 14, GOLD)
-    text(S, 872, 448, "a tool and a colleague", 14, GOLD)
+    text(S, 892, 426, "the difference between", 14, GOLD)
+    text(S, 892, 448, "a tool and a colleague", 14, GOLD)
 
     # ── Where it comes from ───────────────────────────────────────────────
     text(S, 60, 540, "The session writes into all three as it goes.", 18, GOLD)
