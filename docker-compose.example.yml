@@ -24,6 +24,7 @@ services:
     build:
       context: ./nervous-system
     container_name: hive-lucent
+    init: true
     restart: unless-stopped
     networks:
       - hivemind
@@ -65,6 +66,7 @@ services:
       context: ./nervous-system
       dockerfile: comms/Dockerfile
     container_name: hive-comms
+    init: true
     restart: unless-stopped
     networks:
       - hivemind
@@ -96,6 +98,7 @@ services:
       context: .
       dockerfile: Dockerfile.voice
     container_name: hive-mind-voice
+    init: true
     working_dir: /usr/src/app
     restart: always
     ports:
@@ -130,6 +133,7 @@ services:
       context: .
       dockerfile: Dockerfile.voice.kokoro
     container_name: hive-mind-voice-kokoro
+    init: true
     working_dir: /usr/src/app
     restart: always
     ports:
@@ -168,6 +172,7 @@ services:
   telegram-bot:
     build: .
     container_name: hive-mind-telegram
+    init: true
     working_dir: /usr/src/app
     volumes:
       - ${HOST_PROJECT_DIR:-.}:/usr/src/app
@@ -206,6 +211,7 @@ services:
   discord-bot:
     build: .
     container_name: hive-mind-discord
+    init: true
     working_dir: /usr/src/app
     volumes:
       - ${HOST_PROJECT_DIR:-.}:/usr/src/app
