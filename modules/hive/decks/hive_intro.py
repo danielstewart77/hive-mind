@@ -107,71 +107,56 @@ def slide2():
 
 
 def slide3():
-    """Mind-to-mind: Skippy asks Zack, through the broker."""
+    """Agent-to-agent: my representative talks to yours."""
     S = 3
     clear_slide(S)
 
-    text(S, 60, 62, "Minds talk to each other through the broker", 30, GOLD)
-    text(S, 60, 92, "no mind holds a connection to another — it hands a message to the hive, "
-                    "and the hive wakes the other one", 15, DIM)
+    text(S, 60, 62, "My agent talks to your agent", 30, GOLD)
+    text(S, 60, 92, "two people who never opened a chat window — the conversation happens "
+                    "between the agents that represent them", 15, DIM)
 
-    # The caller.
-    box(S, 60, 165, 240, 140, TEAL)
-    text(S, 82, 202, "Skippy", 24, TEAL)
-    text(S, 82, 230, "elder mind", 13, DIM)
-    text(S, 82, 251, "this workstation", 13, DIM)
-    text(S, 82, 281, "asks, then walks away", 13, GREY)
+    # ── Daniel's bubble ───────────────────────────────────────────────────
+    box(S, 50, 150, 500, 330, TEAL)
+    text(S, 75, 185, "DANIEL", 13, GREY)
+    text(S, 75, 220, "the human", 20, TEAL)
+    text(S, 75, 243, "asks in plain language, walks away", 13, DIM)
 
-    # The switchboard.
-    box(S, 440, 150, 360, 230, GOLD)
-    text(S, 462, 190, "hive-comms  —  broker", 20, GOLD)
-    text(S, 462, 222, "the only party that knows", 13, DIM)
-    text(S, 462, 243, "where every mind lives", 13, DIM)
-    text(S, 462, 280, "· addresses minds by UUID", 13, DIM)
-    text(S, 462, 303, "· opens the session, kills it after", 13, DIM)
-    text(S, 462, 326, "· the conversation is a ledger,", 13, DIM)
-    text(S, 462, 347, "  not a live connection", 13, DIM)
+    box(S, 75, 265, 450, 185, TEAL, 1)
+    text(S, 95, 302, "Skippy", 24, TEAL)
+    text(S, 95, 332, "· knows his projects, his history, his preferences", 13, DIM)
+    text(S, 95, 355, "· speaks with his authority, inside limits he set", 13, DIM)
+    text(S, 95, 378, "· holds his memory — which never leaves this bubble", 13, DIM)
+    text(S, 95, 415, "represents Daniel", 14, TEAL)
+    text(S, 95, 437, "when Daniel is not in the room", 13, GREY)
 
-    # The callee — somewhere else entirely.
-    box(S, 940, 165, 260, 140, GOLD)
-    text(S, 962, 202, "Zack", 24, GOLD)
-    text(S, 962, 230, "Aiden's Windows box", 13, DIM)
-    text(S, 962, 251, "codex harness, own model", 13, DIM)
-    text(S, 962, 281, "wakes only when called", 13, GREY)
+    # ── The other party's bubble ──────────────────────────────────────────
+    box(S, 710, 150, 500, 330, GOLD)
+    text(S, 735, 185, "SOMEONE ELSE  —  a son, a household, a business", 13, GREY)
+    text(S, 735, 220, "Aiden", 20, GOLD)
+    text(S, 735, 243, "his own machine, his own rules", 13, DIM)
 
-    # Out along the top, back along the bottom. Numerals only — the legend
-    # below carries the words, so nothing crowds a box edge.
-    arrow(S, 300, 210, 438, 210)
-    text(S, 360, 198, "1", 16, GOLD)
-    arrow(S, 800, 210, 938, 210)
-    text(S, 862, 198, "2", 16, GOLD)
-    arrow(S, 938, 265, 802, 265)
-    text(S, 862, 255, "3", 16, GOLD)
-    arrow(S, 438, 265, 302, 265)
-    text(S, 360, 255, "4", 16, GOLD)
+    box(S, 735, 265, 450, 185, GOLD, 1)
+    text(S, 755, 302, "Zack", 24, GOLD)
+    text(S, 755, 332, "· knows Aiden's box, his schedule, his voice", 13, DIM)
+    text(S, 755, 355, "· answers for him when he is not there", 13, DIM)
+    text(S, 755, 378, "· holds his memory — which never leaves that bubble", 13, DIM)
+    text(S, 755, 415, "represents Aiden", 14, GOLD)
+    text(S, 755, 437, "and answers to Aiden, not to me", 13, GREY)
 
-    # Legend.
-    steps = [
-        ("1", "Skippy POSTs a message", "to and from are mind UUIDs, plus a conversation id"),
-        ("2", "the broker wakes Zack", "a brand-new session on his machine, his harness"),
-        ("3", "Zack answers into that session", "the broker collects it, with a backstop timeout"),
-        ("4", "the answer is written back", "as the next message on the same conversation"),
-        ("5", "Skippy polls and reads it", "nothing was held open in between"),
-    ]
-    y = 430
-    for num, headline, detail in steps:
-        text(S, 60, y, num, 14, GOLD)
-        text(S, 90, y, headline, 14, GOLD)
-        text(S, 400, y, detail, 13, DIM)
-        y += 28
+    # ── The seam between them ─────────────────────────────────────────────
+    arrow(S, 552, 285, 706, 285)
+    text(S, 578, 273, "a request", 13, GREY)
+    arrow(S, 706, 345, 554, 345)
+    text(S, 578, 368, "an answer", 13, GREY)
+    text(S, 566, 415, "brokered", 12, GREY)
+    text(S, 566, 435, "by the hive", 12, GREY)
 
-    text(S, 800, 445, "The callee wakes with", 16, GOLD)
-    text(S, 800, 468, "none of your context.", 16, GOLD)
-    text(S, 800, 500, "Your message and a rolling summary", 13, DIM)
-    text(S, 800, 521, "are all it gets — a request has to", 13, DIM)
-    text(S, 800, 542, "stand on its own.", 13, DIM)
-    text(S, 800, 578, "Different machine, different harness,", 13, GREY)
-    text(S, 800, 599, "different model. The broker doesn't care.", 13, GREY)
+    # ── The point ─────────────────────────────────────────────────────────
+    text(S, 60, 545, "What crosses the seam is a message. Nothing else.", 18, GOLD)
+    text(S, 60, 578, "Not my memory, not my credentials, not my transcript — his agent "
+                     "never reads my context,", 14, DIM)
+    text(S, 60, 600, "and mine never reads his. Two representatives, each accountable "
+                     "to a different person.", 14, DIM)
 
 
 SLIDES = {1: slide1, 2: slide2, 3: slide3}
