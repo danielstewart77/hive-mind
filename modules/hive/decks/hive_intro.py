@@ -8,12 +8,52 @@ from deck import DIM, GOLD, GREY, TEAL, arrow, box, clear_slide, line, text
 
 
 def slide1():
+    """The mind alone: a CLI agent with an HTTP server bolted to it."""
     S = 1
     clear_slide(S)
 
-    text(S, 60, 62, "Hive Mind: a coding harness, wrapped in an API", 30, GOLD)
-    text(S, 60, 92, "the CLI agent stops being a terminal app and becomes a service "
-                    "you can reach from anywhere", 15, DIM)
+    text(S, 60, 62, "First: wrap the harness in a web API", 30, GOLD)
+    text(S, 60, 92, "one python process — an HTTP server that spawns the coding CLI "
+                    "and streams it back", 15, DIM)
+
+    # Any client at all. The point is that it is no longer a keyboard.
+    box(S, 60, 250, 190, 90, GREY, 1)
+    text(S, 80, 285, "any client", 20, GREY)
+    text(S, 80, 308, "phone, browser,", 13, DIM)
+    text(S, 80, 328, "another mind", 13, DIM)
+    arrow(S, 250, 295, 328, 295)
+
+    text(S, 330, 158, "THE MIND — one python process", 13, GREY)
+    box(S, 330, 175, 640, 320, TEAL)
+
+    box(S, 360, 205, 580, 130, TEAL, 1)
+    text(S, 380, 240, "mind_server  —  FastAPI", 22, TEAL)
+    # Route and gloss are separate elements: SVG collapses runs of spaces, so
+    # a padded single string does not stay in columns.
+    for y, route, gloss in ((268, "POST /sessions", "spawn a conversation"),
+                            (291, "WS  /attach-pty", "a real terminal, in a browser tab"),
+                            (314, "DELETE /sessions/{id}", "end it")):
+        text(S, 380, y, route, 13, GOLD)
+        text(S, 610, y, gloss, 13, DIM)
+
+    arrow(S, 650, 335, 650, 363, GREY, 1, 7)
+
+    box(S, 360, 365, 580, 105, GOLD, 1)
+    text(S, 380, 400, "claude  /  codex   subprocess", 22, GOLD)
+    text(S, 380, 427, "the unmodified CLI — stream-json for chat,", 13, DIM)
+    text(S, 380, 449, "a pty when you want to watch it work", 13, DIM)
+
+    text(S, 60, 560, "No fork of the agent. No re-implementation of its API.", 18, GOLD)
+    text(S, 60, 590, "The same binary you type into by hand — just reachable over a socket.", 14, DIM)
+
+
+def slide2():
+    S = 2
+    clear_slide(S)
+
+    text(S, 60, 62, "Then: hang surfaces off it", 30, GOLD)
+    text(S, 60, 92, "one conversation, reachable from a phone, a browser tab or a "
+                    "team channel — and remembering across all of them", 15, DIM)
 
     # Surfaces — the front doors.
     text(S, 60, 150, "SURFACES", 13, GREY)
@@ -66,7 +106,7 @@ def slide1():
     text(S, 60, 632, "is the hive.", 14, DIM)
 
 
-SLIDES = {1: slide1}
+SLIDES = {1: slide1, 2: slide2}
 
 if __name__ == "__main__":
     wanted = [int(a) for a in sys.argv[1:]] or sorted(SLIDES)
