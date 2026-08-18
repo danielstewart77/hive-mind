@@ -773,3 +773,270 @@ def test_an_oversized_upload_is_refused_before_the_voice_server_sees_it(
 
     assert response.status_code == 413
     assert not reached
+
+
+# ── live transcription: the words appear while you are still speaking ──
+#
+# Whisper is a batch model, so a capture that closes only when the speaker
+# stops shows nothing until then. The recorder is cycled on the live stream
+# every MIC_SEGMENT_MS and each closed segment is transcribed on its own.
+#
+# Four seconds is a long time to wait in a test and the page holds the
+# interval in a closure, so it is scaled the same way the two-minute cap is:
+# a shim over setTimeout, narrow enough to catch that timer and nothing
+# else. Nothing else in the page schedules a timeout in this band — the
+# neighbouring values are 2000 (a setInterval, untouched) and 6000.
+SEGMENT_SCALE = 8
+SEGMENT_MS = 4000 / SEGMENT_SCALE
+SHORTEN_SEGMENT_TIMERS = """
+const realSetTimeout = window.setTimeout.bind(window);
+window.setTimeout = function (fn, ms) {
+    const scaled = (typeof ms === 'number' && ms >= 3000 && ms < 5000)
+        ? ms / %d : ms;
+    return realSetTimeout(fn, scaled);
+};
+""" % SEGMENT_SCALE
+
+# Both bands at once, for the test that has to reach the unattended cap
+# while still cycling segments under it.
+SHORTEN_SEGMENT_AND_LONG_TIMERS = """
+const realSetTimeout = window.setTimeout.bind(window);
+window.setTimeout = function (fn, ms) {
+    let scaled = ms;
+    if (typeof ms === 'number' && ms >= 3000 && ms < 5000) scaled = ms / %d;
+    else if (typeof ms === 'number' && ms >= 60000) scaled = ms / %d;
+    return realSetTimeout(fn, scaled);
+};
+""" % (SEGMENT_SCALE, TIMER_SCALE)
+
+# Playwright's own routing cannot answer two requests out of order — the
+# sync handler owns the greenlet for as long as it delays — and out-of-order
+# answers are the whole point of the ordering requirement. So the segment
+# tests script the responses in the page instead: one plan entry per
+# request, consumed in order, each with its own delay and outcome.
+STT_SHIM = """
+window.__stt = {calls: 0, plan: []};
+const realFetch = window.fetch.bind(window);
+window.fetch = function (url, opts) {
+    const u = typeof url === 'string' ? url : (url && url.url) || '';
+    if (u.indexOf('/api/terminal/stt') < 0) return realFetch(url, opts);
+    const n = window.__stt.calls++;
+    const step = window.__stt.plan.shift() || {};
+    return new Promise(function (resolve) {
+        setTimeout(function () {
+            if (step.fail) {
+                resolve(new Response('', {status: 500}));
+                return;
+            }
+            const text = step.text === undefined ? 'seg' + n : step.text;
+            resolve(new Response(JSON.stringify({text: text}), {
+                status: 200, headers: {'Content-Type': 'application/json'},
+            }));
+        }, step.delay || 0);
+    });
+};
+"""
+
+
+def _plan(page, steps):
+    page.evaluate("(s) => { window.__stt.plan = s; window.__stt.calls = 0; }", steps)
+
+
+# 18. Speech is typed into the pane while the recording is still running —
+#     no second tap anywhere in this test.
+def test_speech_is_typed_while_the_recording_is_still_running(page):
+    page, base = page
+    page.add_init_script(SHORTEN_SEGMENT_TIMERS)
+    page.add_init_script(STT_SHIM)
+    _stub_page(page)
+    sent = _open_tiles(page, base)
+    _plan(page, [{"text": "first piece"}, {"text": "second piece"}])
+
+    page.click(".term-panel-mic")
+    page.wait_for_timeout(SEGMENT_MS * 2 + 500)
+
+    typed = _typed(sent)
+    assert "first piece" in typed, typed
+    assert "second piece" in typed, typed
+    # Still going: this is speech typed mid-recording, not a capture that
+    # quietly ended and flushed.
+    assert "is-recording" in page.get_attribute(".term-panel-mic", "class")
+
+
+# 19. Segments are typed in the order they were spoken, whatever order the
+#     voice server answers in.
+def test_segments_are_typed_in_spoken_order_not_answered_order(page):
+    page, base = page
+    page.add_init_script(SHORTEN_SEGMENT_TIMERS)
+    page.add_init_script(STT_SHIM)
+    _stub_page(page)
+    sent = _open_tiles(page, base)
+    # The first segment's answer is held past the second's, so a pane that
+    # types whatever arrives shows them backwards.
+    _plan(page, [{"text": "alpha", "delay": SEGMENT_MS * 2}, {"text": "beta"}])
+
+    page.click(".term-panel-mic")
+    page.wait_for_timeout(SEGMENT_MS * 4 + 500)
+
+    typed = _typed(sent)
+    assert "alpha" in typed and "beta" in typed, typed
+    assert typed.index("alpha") < typed.index("beta"), typed
+
+
+# 20. The stopping tap sends the part-segment still being recorded.
+def test_the_stopping_tap_types_the_speech_recorded_since_the_last_segment(page):
+    page, base = page
+    page.add_init_script(SHORTEN_SEGMENT_TIMERS)
+    page.add_init_script(STT_SHIM)
+    _stub_page(page)
+    sent = _open_tiles(page, base)
+    _plan(page, [{"text": "one"}, {"text": "two"}, {"text": "three"}])
+
+    page.click(".term-panel-mic")
+    page.wait_for_timeout(SEGMENT_MS * 2 + 200)     # two whole segments
+    page.click(".term-panel-mic")                   # stops mid-third
+    page.wait_for_timeout(800)
+
+    typed = _typed(sent)
+    assert "three" in typed, typed
+    assert typed.index("one") < typed.index("two") < typed.index("three"), typed
+    assert page.get_attribute(".term-panel-mic", "aria-pressed") == "false"
+
+
+# 21. Text already typed is never rewritten — the pane only ever gains
+#     characters, and anything typed by hand between two segments stays put.
+def test_typed_speech_is_append_only_and_leaves_hand_typing_alone(page):
+    page, base = page
+    page.add_init_script(SHORTEN_SEGMENT_TIMERS)
+    page.add_init_script(STT_SHIM)
+    _stub_page(page)
+    sent = _open_tiles(page, base)
+    _plan(page, [{"text": "before"}, {"text": "after"}])
+
+    page.click(".term-panel-mic")
+    page.wait_for_timeout(SEGMENT_MS + 400)          # first segment typed
+    page.click(".term-panel .xterm-screen")
+    page.keyboard.type("X")
+    page.wait_for_timeout(SEGMENT_MS + 500)          # second segment typed
+    page.click(".term-panel-mic")
+    page.wait_for_timeout(600)
+
+    typed = _typed(sent)
+    # Nothing that erases: no backspace, no carriage return, no CSI sequence
+    # rubbing out what is already on the line.
+    assert "\b" not in typed, repr(typed)
+    assert "\r" not in typed, repr(typed)
+    assert "\x1b" not in typed, repr(typed)
+    assert typed.index("before") < typed.index("X") < typed.index("after"), typed
+
+
+# 22. A segment that fails to transcribe is dropped and the recording
+#     carries on; the error flash is for a capture that produced nothing.
+def test_a_failed_segment_is_dropped_and_the_recording_carries_on(page):
+    page, base = page
+    page.add_init_script(SHORTEN_SEGMENT_TIMERS)
+    page.add_init_script(STT_SHIM)
+    _stub_page(page)
+    sent = _open_tiles(page, base)
+    page.evaluate(WATCH_STATES)
+    _plan(page, [{"fail": True}, {"text": "survivor"}])
+
+    page.click(".term-panel-mic")
+    page.wait_for_timeout(SEGMENT_MS * 2 + 500)
+
+    typed = _typed(sent)
+    assert "survivor" in typed, typed
+    assert "is-recording" in page.get_attribute(".term-panel-mic", "class")
+    assert "is-error" not in page.get_attribute(".term-panel-mic", "class")
+
+    # …but a capture in which every segment failed ends in the flash.
+    _plan(page, [{"fail": True}, {"fail": True}, {"fail": True}])
+    page.click(".term-panel-mic")                    # stop the first capture
+    page.wait_for_timeout(600)
+    page.click(".term-panel-mic")                    # a second, doomed one
+    page.wait_for_timeout(SEGMENT_MS + 300)
+    page.click(".term-panel-mic")
+    page.wait_for_timeout(800)
+
+    _assert_error_shown(page)
+
+
+# 23. Speech goes to the tile it was spoken into, however the focus moves
+#     while segments are in flight.
+def test_segments_go_to_the_recording_tile_however_focus_moves(page):
+    page, base = page
+    page.add_init_script(SHORTEN_SEGMENT_TIMERS)
+    page.add_init_script(STT_SHIM)
+    _stub_page(page, sessions=SESSIONS)
+    sent = _open_tiles(page, base, count=2)
+    _plan(page, [{"text": "mine one"}, {"text": "mine two"}, {"text": "mine three"}])
+
+    mics = page.query_selector_all(".term-panel-mic")
+    mics[0].click()                                   # recording in tile A
+    page.wait_for_timeout(SEGMENT_MS + 300)
+    page.query_selector_all(".term-panel .xterm-screen")[1].click()   # focus B
+    page.wait_for_timeout(SEGMENT_MS + 300)
+    mics[0].click()
+    page.wait_for_timeout(800)
+
+    mine = _typed(sent, "sess-a")
+    theirs = _typed(sent, "sess-b")
+    assert "mine one" in mine and "mine three" in mine, mine
+    for word in ("mine one", "mine two", "mine three"):
+        assert word not in theirs, theirs
+
+
+# 24. The unattended cap still ends the recording, and everything captured
+#     up to it is typed.
+def test_the_unattended_cap_ends_the_recording_and_types_what_it_heard(page):
+    page, base = page
+    page.add_init_script(SHORTEN_SEGMENT_AND_LONG_TIMERS)
+    page.add_init_script(STT_SHIM)
+    _stub_page(page)
+    sent = _open_tiles(page, base)
+    _plan(page, [{"text": "capped one"}, {"text": "capped two"}])
+
+    page.click(".term-panel-mic")                     # never stopped by hand
+    page.wait_for_timeout(120000 / TIMER_SCALE + 1200)
+
+    typed = _typed(sent)
+    assert "capped one" in typed and "capped two" in typed, typed
+    assert page.get_attribute(".term-panel-mic", "aria-pressed") == "false"
+    assert "is-recording" not in page.get_attribute(".term-panel-mic", "class")
+    assert "is-working" not in page.get_attribute(".term-panel-mic", "class")
+
+
+# 25. The button reads as recording for the whole recording — uploads in
+#     flight and all — and as working only between the stopping tap and the
+#     last answer.
+def test_the_button_reads_as_recording_until_the_stopping_tap(page):
+    page, base = page
+    page.add_init_script(SHORTEN_SEGMENT_TIMERS)
+    page.add_init_script(STT_SHIM)
+    _stub_page(page)
+    _open_tiles(page, base)
+    page.evaluate(WATCH_STATES)
+    # Every answer is held long enough that a segment is always in flight,
+    # including at the moment of the stopping tap.
+    _plan(page, [{"text": "a", "delay": SEGMENT_MS * 2}] * 3)
+
+    page.click(".term-panel-mic")
+    page.wait_for_timeout(SEGMENT_MS * 2 + 200)
+    # The button is only interesting here if an upload really was in
+    # flight under it — otherwise "not working yet" is just "nothing has
+    # happened yet".
+    assert page.evaluate("() => window.__stt.calls") > 0
+    assert "is-recording" in page.get_attribute(".term-panel-mic", "class")
+    page.evaluate("() => window.__micStates.push({cls: 'TAP', sig: ''})")
+    page.click(".term-panel-mic")
+    page.wait_for_timeout(SEGMENT_MS * 4 + 800)
+
+    states = page.evaluate("() => window.__micStates")
+    tap = [i for i, s in enumerate(states) if s["cls"] == "TAP"]
+    assert tap, states
+    before, after = states[: tap[0]], states[tap[0] + 1:]
+    assert any("is-recording" in s["cls"] for s in before), states
+    assert all("is-working" not in s["cls"] for s in before), states
+    assert any("is-working" in s["cls"] for s in after), states
+    assert "is-working" not in page.get_attribute(".term-panel-mic", "class")
+    assert "is-recording" not in page.get_attribute(".term-panel-mic", "class")

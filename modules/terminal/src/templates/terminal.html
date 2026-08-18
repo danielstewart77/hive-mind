@@ -799,15 +799,25 @@
         // VAD gate and will happily return "Thank you." for a room's worth
         // of silence, so the last word on whether it heard you right is
         // always the user's own Enter.
-        const MIC_MAX_MS = 120000;   // an unattended recording ends itself
-        const MIC_ERROR_MS = 2000;   // how long the red flash sits
-        const MIC_STT_MS = 60000;    // a round trip that never answers still ends
+        const MIC_MAX_MS = 120000;    // an unattended recording ends itself
+        const MIC_ERROR_MS = 2000;    // how long the red flash sits
+        const MIC_STT_MS = 60000;     // a round trip that never answers still ends
+        // How much speech goes into one transcription. Whisper is a batch
+        // model: nothing comes back until a recording is closed, so a
+        // capture that closes only when the user stops talking shows
+        // nothing on screen for as long as they talk. The recorder is
+        // therefore cycled — closed and reopened on the same live stream —
+        // every interval, and each closed segment is transcribed on its
+        // own while the next one records. The interval is the visible lag,
+        // and also the width of the window whisper has to work out a word
+        // straddling a boundary, so it is seconds rather than milliseconds.
+        const MIC_SEGMENT_MS = 4000;
         let micState = "idle";       // idle | recording | working
         let micRecorder = null;
         let micStream = null;
-        let micChunks = [];
         let micCapTimer = null;
         let micErrTimer = null;
+        let micSegTimer = null;
         // One capture owns one generation. Every asynchronous continuation —
         // a resolving getUserMedia, a queued onstop, a fetch in flight —
         // carries the generation it started under and does nothing if a
@@ -815,6 +825,20 @@
         // cannot do this job: state returns to "idle" between captures, so a
         // stale continuation finds exactly the state it started in.
         let micRun = 0;
+        // Segments of the capture now running. `micSeqNext` numbers them as
+        // they are recorded and `micEmitNext` is the one the pane is waiting
+        // for, which is what keeps speech in spoken order: whisper answers a
+        // short segment faster than a long one, so the second half of a
+        // sentence routinely comes back first. `micPending` counts segments
+        // recorded but not yet answered, and is what tells a stopped capture
+        // it is finally finished.
+        let micSeqNext = 0;
+        let micEmitNext = 0;
+        let micPending = 0;
+        let micResults = {};
+        let micTypedAny = false;
+        let micStopping = false;
+        let micSpokenTo = null;
 
         function setMicState(next) {
             micState = next;
@@ -856,6 +880,7 @@
         // on an inactive recorder throws.
         function releaseMic() {
             if (micCapTimer) { clearTimeout(micCapTimer); micCapTimer = null; }
+            if (micSegTimer) { clearTimeout(micSegTimer); micSegTimer = null; }
             if (micRecorder) {
                 try { if (micRecorder.state !== "inactive") micRecorder.stop(); } catch (e) {}
                 micRecorder = null;
@@ -870,10 +895,17 @@
         // very call is about to queue transcribes nothing. Stopping a
         // recorder is not cancelling it — onstop still fires, and without
         // the bump the words of a recording the user cancelled arrive in
-        // the pane seconds later.
+        // the pane seconds later. Segments already answered but not yet
+        // typed go with it, for the same reason.
         function abandonMicCapture() {
             micRun += 1;
-            micChunks = [];
+            micResults = {};
+            micSeqNext = 0;
+            micEmitNext = 0;
+            micPending = 0;
+            micTypedAny = false;
+            micStopping = false;
+            micSpokenTo = null;
             releaseMic();
         }
         // The pane has stopped taking input — suspended from another surface,
@@ -888,6 +920,82 @@
             if (micState !== "recording") return;
             abandonMicCapture();
             setMicState("idle");
+        }
+        // Open a recorder on the live stream and claim the next sequence
+        // number for what it is about to capture. The number is taken here,
+        // at the start of the segment, because that is the order the words
+        // were spoken in — taking it when the audio is uploaded would order
+        // the pane by whichever segment the browser finished encoding first.
+        function startMicSegment(run) {
+            let rec;
+            try {
+                rec = new window.MediaRecorder(micStream);
+            } catch (e) {
+                return null;
+            }
+            const seq = micSeqNext++;
+            const spokenTo = micSpokenTo;
+            let chunks = [];
+            let handed = false;
+            // onstop can arrive twice — once for the cycle that closed this
+            // recorder, once for a release that stopped it again — and the
+            // second arrival would upload an emptied buffer and type a
+            // stray transcript of silence into the pane.
+            function hand() {
+                if (handed) return;
+                handed = true;
+                const captured = chunks;
+                chunks = [];
+                transcribeMicSegment(run, seq, captured, rec.mimeType, spokenTo);
+            }
+            rec.ondataavailable = function (ev) {
+                if (ev && ev.data) chunks.push(ev.data);
+            };
+            rec.onstop = hand;
+            // The recorder reporting its own failure is not an exception —
+            // it arrives here, with the device still held. The segment is
+            // still owed an answer, so it is handed on with whatever it
+            // managed to capture rather than left counted and unresolved.
+            rec.onerror = function () {
+                if (run !== micRun) return;
+                hand();
+            };
+            micPending += 1;
+            try {
+                rec.start();
+            } catch (e) {
+                // Nothing was captured and nothing will be. Give the
+                // sequence number straight back to the queue, or every
+                // later segment waits behind a number that never resolves.
+                deliverMicSegment(run, seq, "");
+                return null;
+            }
+            return rec;
+        }
+        // Close the segment now recording and open the next one on the same
+        // stream. The device is never released between the two, so the gap
+        // is the few milliseconds the browser takes to construct a recorder.
+        function cycleMicSegment() {
+            micSegTimer = null;
+            if (micState !== "recording") return;
+            const run = micRun;
+            const closing = micRecorder;
+            micRecorder = null;
+            try {
+                if (closing && closing.state !== "inactive") closing.stop();
+            } catch (e) {}
+            if (run !== micRun) return;
+            const next = startMicSegment(run);
+            if (!next) {
+                // The stream can no longer be recorded — unplugged, revoked.
+                // What is already captured is still owed to the pane, so
+                // this ends the capture the way the second tap does rather
+                // than throwing the answers away.
+                finishMicCapture();
+                return;
+            }
+            micRecorder = next;
+            micSegTimer = setTimeout(cycleMicSegment, MIC_SEGMENT_MS);
         }
         async function startMicCapture() {
             const media = navigator.mediaDevices;
@@ -910,79 +1018,106 @@
                 try { stream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
                 return;
             }
-            micChunks = [];
-            try {
-                micRecorder = new window.MediaRecorder(stream);
-            } catch (e) {
-                try { stream.getTracks().forEach(function (t) { t.stop(); }); } catch (e2) {}
-                micFailed();
-                return;
-            }
             micStream = stream;
-            micRecorder.ondataavailable = function (ev) {
-                if (ev && ev.data) micChunks.push(ev.data);
-            };
-            micRecorder.onstop = function () { transcribeMicCapture(run); };
-            // The recorder reporting its own failure is not an exception —
-            // it arrives here, with the device still held.
-            micRecorder.onerror = function () {
-                if (run !== micRun) return;
-                abandonMicCapture();
-                micFailed();
-            };
+            micResults = {};
+            micSeqNext = 0;
+            micEmitNext = 0;
+            micPending = 0;
+            micTypedAny = false;
+            micStopping = false;
+            // Which conversation this is being spoken to. A rotation
+            // mid-capture repoints the tile at a successor, and words meant
+            // for the old one must not land in a freshly seeded context.
+            micSpokenTo = sessionId;
             // start() throws in its own right — the device can disappear
             // between getUserMedia resolving and the recorder claiming it —
             // and an unwrapped throw here leaves the microphone live with
             // the button showing nothing at all.
-            try {
-                micRecorder.start();
-            } catch (e) {
+            const first = startMicSegment(run);
+            if (!first) {
                 abandonMicCapture();
                 micFailed();
                 return;
             }
+            micRecorder = first;
             setMicState("recording");
+            micSegTimer = setTimeout(cycleMicSegment, MIC_SEGMENT_MS);
             micCapTimer = setTimeout(function () {
                 micCapTimer = null;
-                if (micState === "recording") stopMicCapture();
+                if (micState === "recording") finishMicCapture();
             }, MIC_MAX_MS);
         }
-        function stopMicCapture() {
+        // End the capture: close the segment in progress, give the device
+        // back, and wait for the answers still owed. The button reads as
+        // working from here, which is the only stretch in which it does —
+        // during the recording the segments upload behind a button that
+        // goes on saying it is recording, because it is.
+        function finishMicCapture() {
             if (micState !== "recording") return;
+            micStopping = true;
             setMicState("working");
-            if (micCapTimer) { clearTimeout(micCapTimer); micCapTimer = null; }
-            const run = micRun;
-            try {
-                if (micRecorder && micRecorder.state !== "inactive") micRecorder.stop();
-                else transcribeMicCapture(run);
-            } catch (e) {
-                releaseMic();
-                micFailed();
+            // Closing the recorder hands its audio on; releaseMic would do
+            // that too, but it also drops the stream, and the order matters
+            // only in that both must happen before the drain check below.
+            releaseMic();
+            drainMicSegments(micRun);
+        }
+        // Type every answered segment that is next in line, and stop at the
+        // first gap. A segment answered out of order waits in `micResults`
+        // until the ones before it have been typed.
+        function drainMicSegments(run) {
+            if (run !== micRun) return;
+            while (Object.prototype.hasOwnProperty.call(micResults, micEmitNext)) {
+                const text = micResults[micEmitNext];
+                delete micResults[micEmitNext];
+                micEmitNext += 1;
+                if (!text) continue;
+                if (destroyed || sessionId !== micSpokenTo) {
+                    // The tile is gone or now holds a different conversation.
+                    // Everything still in flight is owed to a session that
+                    // is no longer here, so the capture is dropped whole.
+                    const hadTyped = micTypedAny;
+                    abandonMicCapture();
+                    if (!hadTyped) micFailed();
+                    return;
+                }
+                // sendRaw drops bytes when the socket isn't open — a stood-down
+                // tile looks entirely normal, so a silent drop reads as a flaky
+                // microphone rather than a dead terminal.
+                // A space between segments and none before the first: the
+                // pane is a command line, and a leading space is a character
+                // the user did not speak.
+                if (sendRaw(micTypedAny ? " " + text : text)) micTypedAny = true;
+            }
+            if (micStopping && micPending <= 0) {
+                micStopping = false;
+                // Nothing typed at all, from a capture that ran to its end:
+                // every segment failed, came back empty, or could not be
+                // delivered. That is the error the flash is for. A single
+                // segment lost mid-recording is not — the words around it
+                // still arrived, and a red flash over a live recording says
+                // the microphone stopped when it did not.
+                if (micTypedAny) {
+                    setMicState("idle");
+                    // Without this the button still holds the keyboard, and
+                    // the Enter meant to submit re-arms the mic instead.
+                    restoreMicFocus();
+                } else {
+                    micFailed();
+                }
             }
         }
-        async function transcribeMicCapture(run) {
-            // Stops the user did not ask for reach here too — a track ending,
-            // a device unplugged, a tab backgrounded — so this is where the
-            // working state is entered, not stopMicCapture. Consuming the
-            // generation is what stops a second stop event, or a tap landing
-            // in the gap, from transcribing the same emptied buffer twice.
+        function deliverMicSegment(run, seq, text) {
             if (run !== micRun) return;
-            const mine = ++micRun;
-            if (micState !== "working") setMicState("working");
-            const chunks = micChunks;
-            micChunks = [];
-            const type = (micRecorder && micRecorder.mimeType) || "audio/webm";
-            // The device goes back before the round trip, not after: whisper
-            // can take a while, and holding the mic through it is what makes
-            // the browser's indicator look stuck.
-            releaseMic();
-            if (destroyed) { setMicState("idle"); return; }
+            micResults[seq] = text;
+            micPending -= 1;
+            drainMicSegments(run);
+        }
+        async function transcribeMicSegment(run, seq, chunks, mimeType, spokenTo) {
+            if (run !== micRun) return;
+            const type = mimeType || "audio/webm";
             const blob = new Blob(chunks, {type: type});
-            if (!blob.size) { micFailed(); return; }
-            // Which conversation this was spoken to. A rotation mid-flight
-            // repoints the tile at a successor, and words meant for the old
-            // one must not land in a freshly seeded context.
-            const spokenTo = sessionId;
+            if (!blob.size) { deliverMicSegment(run, seq, ""); return; }
             const form = new FormData();
             // The voice server picks its decode path off the name as well as
             // the type, so a container named wrong is a container decoded
@@ -1005,11 +1140,11 @@
                     method: "POST", credentials: "same-origin", body: form,
                     signal: ctl ? ctl.signal : undefined,
                 });
-                if (!resp.ok) { micFailed(); return; }
+                if (!resp.ok) { deliverMicSegment(run, seq, ""); return; }
                 const data = await resp.json();
                 text = (data && data.text ? String(data.text) : "").trim();
             } catch (e) {
-                micFailed();
+                deliverMicSegment(run, seq, "");
                 return;
             } finally {
                 clearTimeout(sttTimer);
@@ -1017,19 +1152,11 @@
             // Abandoned mid-flight — the tile narrowed past the breakpoint,
             // or stood down. The user was already told the capture was over,
             // so this is silent rather than an error.
-            if (mine !== micRun) return;
-            if (destroyed || sessionId !== spokenTo) { micFailed(); return; }
-            // sendRaw drops bytes when the socket isn't open — a stood-down
-            // tile looks entirely normal, so a silent drop reads as a flaky
-            // microphone rather than a dead terminal.
-            if (!sendRaw(text)) { micFailed(); return; }
-            setMicState("idle");
-            // Without this the button still holds the keyboard, and the
-            // Enter meant to submit re-arms the mic instead.
-            restoreMicFocus();
+            if (run !== micRun || spokenTo !== micSpokenTo) return;
+            deliverMicSegment(run, seq, text);
         }
         micBtn.addEventListener("click", function () {
-            if (micState === "recording") stopMicCapture();
+            if (micState === "recording") finishMicCapture();
             else if (micState === "idle") startMicCapture();
             // working: a second recording here would race two transcripts
             // into the same line, in whichever order the GPU finished them.
