@@ -106,7 +106,75 @@ def slide2():
     text(S, 60, 632, "is the hive.", 14, DIM)
 
 
-SLIDES = {1: slide1, 2: slide2}
+def slide3():
+    """Mind-to-mind: Skippy asks Zack, through the broker."""
+    S = 3
+    clear_slide(S)
+
+    text(S, 60, 62, "Minds talk to each other through the broker", 30, GOLD)
+    text(S, 60, 92, "no mind holds a connection to another — it hands a message to the hive, "
+                    "and the hive wakes the other one", 15, DIM)
+
+    # The caller.
+    box(S, 60, 165, 240, 140, TEAL)
+    text(S, 82, 202, "Skippy", 24, TEAL)
+    text(S, 82, 230, "elder mind", 13, DIM)
+    text(S, 82, 251, "this workstation", 13, DIM)
+    text(S, 82, 281, "asks, then walks away", 13, GREY)
+
+    # The switchboard.
+    box(S, 440, 150, 360, 230, GOLD)
+    text(S, 462, 190, "hive-comms  —  broker", 20, GOLD)
+    text(S, 462, 222, "the only party that knows", 13, DIM)
+    text(S, 462, 243, "where every mind lives", 13, DIM)
+    text(S, 462, 280, "· addresses minds by UUID", 13, DIM)
+    text(S, 462, 303, "· opens the session, kills it after", 13, DIM)
+    text(S, 462, 326, "· the conversation is a ledger,", 13, DIM)
+    text(S, 462, 347, "  not a live connection", 13, DIM)
+
+    # The callee — somewhere else entirely.
+    box(S, 940, 165, 260, 140, GOLD)
+    text(S, 962, 202, "Zack", 24, GOLD)
+    text(S, 962, 230, "Aiden's Windows box", 13, DIM)
+    text(S, 962, 251, "codex harness, own model", 13, DIM)
+    text(S, 962, 281, "wakes only when called", 13, GREY)
+
+    # Out along the top, back along the bottom. Numerals only — the legend
+    # below carries the words, so nothing crowds a box edge.
+    arrow(S, 300, 210, 438, 210)
+    text(S, 360, 198, "1", 16, GOLD)
+    arrow(S, 800, 210, 938, 210)
+    text(S, 862, 198, "2", 16, GOLD)
+    arrow(S, 938, 265, 802, 265)
+    text(S, 862, 255, "3", 16, GOLD)
+    arrow(S, 438, 265, 302, 265)
+    text(S, 360, 255, "4", 16, GOLD)
+
+    # Legend.
+    steps = [
+        ("1", "Skippy POSTs a message", "to and from are mind UUIDs, plus a conversation id"),
+        ("2", "the broker wakes Zack", "a brand-new session on his machine, his harness"),
+        ("3", "Zack answers into that session", "the broker collects it, with a backstop timeout"),
+        ("4", "the answer is written back", "as the next message on the same conversation"),
+        ("5", "Skippy polls and reads it", "nothing was held open in between"),
+    ]
+    y = 430
+    for num, headline, detail in steps:
+        text(S, 60, y, num, 14, GOLD)
+        text(S, 90, y, headline, 14, GOLD)
+        text(S, 400, y, detail, 13, DIM)
+        y += 28
+
+    text(S, 800, 445, "The callee wakes with", 16, GOLD)
+    text(S, 800, 468, "none of your context.", 16, GOLD)
+    text(S, 800, 500, "Your message and a rolling summary", 13, DIM)
+    text(S, 800, 521, "are all it gets — a request has to", 13, DIM)
+    text(S, 800, 542, "stand on its own.", 13, DIM)
+    text(S, 800, 578, "Different machine, different harness,", 13, GREY)
+    text(S, 800, 599, "different model. The broker doesn't care.", 13, GREY)
+
+
+SLIDES = {1: slide1, 2: slide2, 3: slide3}
 
 if __name__ == "__main__":
     wanted = [int(a) for a in sys.argv[1:]] or sorted(SLIDES)
