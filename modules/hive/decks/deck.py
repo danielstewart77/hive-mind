@@ -65,3 +65,17 @@ def edge(slide, a, b, label, color=GREY, size=11):
     # Nudge the label off the line, on whichever side keeps it clear.
     off = -8 if abs(math.sin(ang)) < 0.5 else 0
     text(slide, _centered_x(mx, label, size), round(my + off, 1), label, size, color)
+
+
+def ring(slide, cx, cy, r, color=GREY, sw=1):
+    """A bare circle — a boundary, with nothing written in it."""
+    import math
+    pts = [(cx + r * math.cos(2 * math.pi * i / 28), cy + r * math.sin(2 * math.pi * i / 28))
+           for i in range(29)]
+    push({"type": "path", "slide": slide, "d": "M" + " L".join(f"{x:.1f},{y:.1f}" for x, y in pts),
+          "color": color, "sw": sw})
+
+
+def dot(slide, cx, cy, r=4, color=GREY):
+    """A filled-looking point: a tiny ring drawn thick enough to read as solid."""
+    ring(slide, cx, cy, r, color, sw=r)

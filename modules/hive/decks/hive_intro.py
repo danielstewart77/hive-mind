@@ -4,8 +4,8 @@
     python3 decks/hive_intro.py [slide ...]
 """
 import sys
-from deck import (DIM, GOLD, GREY, TEAL, arrow, box, clear_slide, edge, line,
-                  node, text)
+from deck import (DIM, GOLD, GREY, TEAL, arrow, box, clear_slide, dot, edge,
+                  line, node, ring, text)
 
 
 def slide1():
@@ -234,7 +234,7 @@ def slide3():
     text(S, 60, 92, "the conversation is disposable — three stores underneath it are not", 15, DIM)
 
     # ── The graph ─────────────────────────────────────────────────────────
-    box(S, 50, 145, 430, 330, GOLD)
+    box(S, 50, 145, 400, 330, GOLD)
     text(S, 72, 182, "the graph", 22, GOLD)
     text(S, 72, 206, "things, and how they relate", 13, GREY)
 
@@ -250,38 +250,48 @@ def slide3():
 
     text(S, 72, 445, "you traverse it: one hop, exactly, no guessing", 13, DIM)
 
-    # ── The vectors ───────────────────────────────────────────────────────
-    box(S, 500, 145, 350, 330, TEAL)
-    text(S, 522, 182, "semantic memory", 22, TEAL)
-    text(S, 522, 206, "meaning, not wording", 13, GREY)
+    # ── Semantic memory: a pull ───────────────────────────────────────────
+    box(S, 470, 145, 410, 330, TEAL)
+    text(S, 492, 182, "semantic memory", 22, TEAL)
+    text(S, 492, 206, "a pull — distance decides", 13, GREY)
 
-    text(S, 522, 250, "every turn, the message you typed", 13, DIM)
-    text(S, 522, 272, "is turned into a vector, and the", 13, DIM)
-    text(S, 522, 294, "nearest memories come back —", 13, DIM)
-    text(S, 522, 316, "ranked by meaning, by wording,", 13, DIM)
-    text(S, 522, 338, "and by how recent they are", 13, DIM)
+    cx, cy = 675, 330
+    ring(S, cx, cy, 96, GREY, 1)           # the relevance threshold
+    node(S, cx, cy, "this turn", 26, TEAL, 11)
 
-    text(S, 522, 380, "answers the question you did not", 13, DIM)
-    text(S, 522, 402, "know to ask: a preference stated", 13, DIM)
-    text(S, 522, 424, "once, months ago, in other words", 13, DIM)
+    # Inside the ring: carried into the prompt, unasked for.
+    for dx, dy, label, lx in ((-56, -50, "prefers a PR", -96),
+                              (56, -50, "green & silver", 2),
+                              (0, 62, "the backlog path", -46)):
+        dot(S, cx + dx, cy + dy, 5, TEAL)
+        text(S, cx + lx, cy + dy + 20, label, 11, TEAL)
 
-    text(S, 522, 454, "it surfaces — you never search it", 14, TEAL)
+    # Outside it: everything else, still there, not relevant now.
+    for dx, dy in ((-146, -66), (138, 60), (152, -26), (-132, 62),
+                   (-50, -114), (100, -108), (-162, 4), (30, 116)):
+        dot(S, cx + dx, cy + dy, 4, GREY)
 
-    # ── Standing rules ────────────────────────────────────────────────────
-    box(S, 870, 145, 340, 330, GOLD)
-    text(S, 892, 182, "standing rules", 22, GOLD)
-    text(S, 892, 206, "small, and always on", 13, GREY)
+    text(S, 492, 458, "thousands more sit outside it, unread", 12, GREY)
 
-    text(S, 892, 250, "\u00b7 defer the restart to Daniel", 13, DIM)
-    text(S, 892, 273, "\u00b7 one question per turn", 13, DIM)
-    text(S, 892, 296, "\u00b7 never guess someone's gender", 13, DIM)
+    # ── Standing rules: a push ────────────────────────────────────────────
+    box(S, 900, 145, 310, 330, GOLD)
+    text(S, 922, 182, "standing rules", 22, GOLD)
+    text(S, 922, 206, "a push — no turn is exempt", 13, GREY)
 
-    text(S, 892, 340, "never searched for, never ranked,", 13, DIM)
-    text(S, 892, 362, "never left out — injected into", 13, DIM)
-    text(S, 892, 384, "every single turn", 13, DIM)
+    box(S, 922, 222, 262, 96, GOLD, 1)
+    text(S, 938, 249, "· defer the restart", 12, GOLD)
+    text(S, 938, 272, "· one question per turn", 12, GOLD)
+    text(S, 938, 295, "· never speak markdown", 12, GOLD)
 
-    text(S, 892, 426, "the difference between", 14, GOLD)
-    text(S, 892, 448, "a tool and a colleague", 14, GOLD)
+    arrow(S, 1053, 322, 1053, 344, GOLD, 1, 6)
+    text(S, 1070, 338, "stamped onto", 11, GREY)
+
+    for i, label in enumerate(("turn 1", "turn 400", "turn 9,001")):
+        y = 350 + i * 34
+        box(S, 922, y, 140, 26, GREY, 1)
+        text(S, 936, y + 18, label, 12, GREY)
+
+    text(S, 922, 470, "identical, every time", 13, GOLD)
 
     # ── Where it comes from ───────────────────────────────────────────────
     text(S, 60, 540, "The session writes into all three as it goes.", 18, GOLD)
