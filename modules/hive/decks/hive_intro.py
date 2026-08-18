@@ -166,7 +166,65 @@ def slide3():
                      "to a different person.", 14, DIM)
 
 
-SLIDES = {1: slide1, 2: slide2, 3: slide3}
+def slide4():
+    """The agent is inside the site — and the slide proves it."""
+    S = 4
+    clear_slide(S)
+
+    text(S, 60, 62, "The agent lives inside the site", 30, GOLD)
+    text(S, 60, 92, "not a chat bubble bolted onto a page — a mind whose workspace "
+                    "is the page itself", 15, DIM)
+
+    # ── A browser window ──────────────────────────────────────────────────
+    box(S, 60, 145, 700, 400, GOLD)
+    box(S, 60, 145, 700, 36, GOLD, 1)
+    text(S, 80, 169, "hive.sparktobloom.com", 14, DIM)
+
+    # Its own navigation.
+    for i, (label, x) in enumerate((("graph", 90), ("memory", 200), ("rules", 320),
+                                    ("canvas", 420), ("settings", 545), ("minds", 680))):
+        text(S, x, 212, label, 13, GOLD if label == "canvas" else GREY)
+    line(S, 415, 222, 490, 222, GOLD, 2)
+
+    # The page currently open is this one.
+    box(S, 90, 245, 640, 275, TEAL, 1)
+    text(S, 110, 275, "the canvas — currently showing slide 4 of 4", 15, TEAL)
+
+    # A little deck inside the deck.
+    box(S, 130, 300, 170, 90, GREY, 1)
+    box(S, 330, 300, 170, 90, GREY, 1)
+    box(S, 530, 300, 170, 90, GOLD, 1)
+    text(S, 150, 335, "the mind", 13, GREY)
+    text(S, 350, 335, "the surfaces", 13, GREY)
+    text(S, 550, 335, "you are here", 13, GOLD)
+    text(S, 130, 425, "\u25c0", 20, GOLD)
+    text(S, 690, 425, "\u25b6", 20, GOLD)
+    text(S, 300, 425, "clicked by a human, drawn by an agent", 13, DIM)
+
+    text(S, 110, 495, "the agent writes here through the site's own API — "
+                      "same door a person uses", 12, GREY)
+
+    # ── What that buys ────────────────────────────────────────────────────
+    text(S, 800, 175, "SO IT CAN", 13, GREY)
+    items = [
+        ("generate the content", "draws into the page instead of describing what to draw", 215),
+        ("change the site itself", "this slideshow did not exist three hours ago", 300),
+        ("operate the pages", "reads and writes the graph, the memory, the settings", 385),
+        ("hold a conversation here", "the page is a surface, like a phone or a chat channel", 470),
+    ]
+    for headline, detail, y in items:
+        text(S, 800, y, headline, 17, GOLD)
+        text(S, 800, y + 24, detail, 13, DIM)
+        arrow(S, 790, y - 6, 764, y - 6, GREY, 1, 6)
+
+    # ── The closer ────────────────────────────────────────────────────────
+    text(S, 60, 590, "You are not looking at a diagram of this. "
+                     "You are looking at it.", 18, GOLD)
+    text(S, 60, 618, "This slide was drawn by the agent, on the page it is drawn on, "
+                     "while we were talking.", 14, DIM)
+
+
+SLIDES = {1: slide1, 2: slide2, 3: slide3, 4: slide4}
 
 if __name__ == "__main__":
     wanted = [int(a) for a in sys.argv[1:]] or sorted(SLIDES)

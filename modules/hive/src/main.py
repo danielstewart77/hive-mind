@@ -164,8 +164,13 @@ def _canvas_bounds(elements: list[dict]) -> tuple[float, float, float, float]:
             xs.extend(nums[0::2])
             ys.extend(nums[1::2])
         elif t == "text":
-            xs.append(float(el.get("x", 0)))
-            ys.append(float(el.get("y", 0)))
+            x, y = float(el.get("x", 0)), float(el.get("y", 0))
+            size = float(el.get("size", 14))
+            # Estimate the run's extent. The renderer is monospace, so a glyph
+            # is about 0.6em wide; without this a right-hand column of labels
+            # falls outside the viewBox and the snapshot silently crops it.
+            xs.extend([x, x + 0.6 * size * len(str(el.get("content", "")))])
+            ys.extend([y - size, y])
         elif t == "image":
             x, y = float(el.get("x", 0)), float(el.get("y", 0))
             xs.extend([x, x + float(el.get("w", 0))])
