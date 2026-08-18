@@ -105,9 +105,9 @@ def slide2():
     text(S, 60, 632, "is the hive.", 14, DIM)
 
 
-def slide3():
+def slide4():
     """Agent-to-agent: my representative talks to yours."""
-    S = 3
+    S = 4
     clear_slide(S)
 
     text(S, 60, 62, "My agent talks to your agent", 30, GOLD)
@@ -166,9 +166,9 @@ def slide3():
                      "to a different person.", 14, DIM)
 
 
-def slide4():
+def slide5():
     """The agent is inside the site — and the slide proves it."""
-    S = 4
+    S = 5
     clear_slide(S)
 
     text(S, 60, 62, "The agent lives inside the site", 30, GOLD)
@@ -188,7 +188,7 @@ def slide4():
 
     # The page currently open is this one.
     box(S, 90, 245, 640, 275, TEAL, 1)
-    text(S, 110, 275, "the canvas — currently showing slide 4 of 4", 15, TEAL)
+    text(S, 110, 275, "the canvas — currently showing slide 5 of 5", 15, TEAL)
 
     # A little deck inside the deck.
     box(S, 130, 300, 170, 90, GREY, 1)
@@ -224,7 +224,77 @@ def slide4():
                      "while we were talking.", 14, DIM)
 
 
-SLIDES = {1: slide1, 2: slide2, 3: slide3, 4: slide4}
+def slide3():
+    """What survives the session: three kinds of memory, used differently."""
+    S = 3
+    clear_slide(S)
+
+    text(S, 60, 62, "Memory is what survives the session", 30, GOLD)
+    text(S, 60, 92, "the conversation is disposable — three stores underneath it are not", 15, DIM)
+
+    # ── The graph ─────────────────────────────────────────────────────────
+    box(S, 50, 145, 380, 330, GOLD)
+    text(S, 72, 182, "the graph", 22, GOLD)
+    text(S, 72, 206, "things, and how they relate", 13, GREY)
+
+    text(S, 72, 250, "Daniel", 14, TEAL)
+    arrow(S, 130, 245, 190, 245, GREY, 1, 6)
+    text(S, 138, 236, "PARENT_OF", 11, GREY)
+    text(S, 198, 250, "Aiden", 14, TEAL)
+    text(S, 72, 290, "Aiden", 14, TEAL)
+    arrow(S, 126, 285, 186, 285, GREY, 1, 6)
+    text(S, 132, 276, "OWNS", 11, GREY)
+    text(S, 194, 290, "Zack (a mind)", 14, TEAL)
+
+    text(S, 72, 345, "answers questions you can name:", 13, DIM)
+    text(S, 72, 368, "who is this, what do they own,", 13, DIM)
+    text(S, 72, 390, "which mind belongs to which person", 13, DIM)
+    text(S, 72, 432, "you traverse it", 14, GOLD)
+    text(S, 72, 454, "one hop at a time, exactly", 13, GREY)
+
+    # ── The vectors ───────────────────────────────────────────────────────
+    box(S, 450, 145, 380, 330, TEAL)
+    text(S, 472, 182, "semantic memory", 22, TEAL)
+    text(S, 472, 206, "meaning, not wording", 13, GREY)
+
+    text(S, 472, 250, "every turn, the message you typed", 13, DIM)
+    text(S, 472, 272, "is turned into a vector, and the", 13, DIM)
+    text(S, 472, 294, "nearest memories come back —", 13, DIM)
+    text(S, 472, 316, "ranked by meaning, by wording,", 13, DIM)
+    text(S, 472, 338, "and by how recent they are", 13, DIM)
+
+    text(S, 472, 380, "answers the question you did not", 13, DIM)
+    text(S, 472, 402, "know to ask: a preference stated", 13, DIM)
+    text(S, 472, 424, "once, months ago, in other words", 13, DIM)
+
+    text(S, 472, 454, "it surfaces — you never search it", 14, TEAL)
+
+    # ── Standing rules ────────────────────────────────────────────────────
+    box(S, 850, 145, 360, 330, GOLD)
+    text(S, 872, 182, "standing rules", 22, GOLD)
+    text(S, 872, 206, "small, and always on", 13, GREY)
+
+    text(S, 872, 250, "\u00b7 defer the restart to Daniel", 13, DIM)
+    text(S, 872, 273, "\u00b7 one question per turn", 13, DIM)
+    text(S, 872, 296, "\u00b7 never guess someone's gender", 13, DIM)
+
+    text(S, 872, 340, "never searched for, never ranked,", 13, DIM)
+    text(S, 872, 362, "never left out — injected into", 13, DIM)
+    text(S, 872, 384, "every single turn", 13, DIM)
+
+    text(S, 872, 426, "the difference between", 14, GOLD)
+    text(S, 872, 448, "a tool and a colleague", 14, GOLD)
+
+    # ── Where it comes from ───────────────────────────────────────────────
+    text(S, 60, 540, "The session writes into all three as it goes.", 18, GOLD)
+    text(S, 60, 572, "A hook fires on every completed turn: worth keeping goes in, the "
+                     "rest is dropped. When the", 14, DIM)
+    text(S, 60, 594, "conversation is rotated out, nothing is lost that mattered — "
+                     "which is what makes a", 14, DIM)
+    text(S, 60, 616, "disposable session survivable.", 14, DIM)
+
+
+SLIDES = {1: slide1, 2: slide2, 3: slide3, 4: slide4, 5: slide5}
 
 if __name__ == "__main__":
     wanted = [int(a) for a in sys.argv[1:]] or sorted(SLIDES)
