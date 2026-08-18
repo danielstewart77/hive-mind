@@ -82,6 +82,40 @@
     background: #7a1a1a11;
   }
 
+  /* Slide navigation */
+  .draw-nav {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    margin-right: 0.4rem;
+  }
+  .draw-nav-arrow {
+    font-family: 'Fira Code', monospace;
+    font-size: 0.85rem;
+    line-height: 1;
+    padding: 0.22rem 0.5rem;
+    background: transparent;
+    border: 1px solid #c9a84c33;
+    color: #c9a84c99;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: color 0.12s, background 0.12s, border-color 0.12s;
+  }
+  .draw-nav-arrow:hover:not(:disabled) {
+    color: #f1d78a;
+    border-color: #c9a84c;
+    background: #c9a84c1f;
+  }
+  .draw-nav-arrow:disabled { opacity: 0.3; cursor: default; }
+  .draw-nav-count {
+    font-family: 'Fira Code', monospace;
+    font-size: 0.72rem;
+    color: #c9a84c88;
+    min-width: 6.5rem;
+    text-align: center;
+    user-select: none;
+  }
+
   .draw-conn-dot {
     width: 7px;
     height: 7px;
@@ -147,6 +181,13 @@
     <button class="draw-tool" data-tool="attach" title="Attach an image file">&#8853; attach</button>
     <input type="file" id="file-input" style="display:none" accept="image/*">
     <span class="draw-spacer"></span>
+    {% if current_user %}
+    <div class="draw-nav">
+      <button class="draw-nav-arrow" id="slide-prev" title="Previous slide">&#9664;</button>
+      <span class="draw-nav-count" id="slide-count">slide 1 of 1</span>
+      <button class="draw-nav-arrow" id="slide-next" title="Next slide">&#9654;</button>
+    </div>
+    {% endif %}
     <button class="draw-tool draw-tool-send" id="draw-submit" title="Send the board to Skippy for review">&#9993; send to Skippy</button>
     <button class="draw-btn-clear" id="draw-clear">clear</button>
     <span class="draw-conn-dot" id="draw-conn" title="disconnected"></span>
@@ -177,6 +218,9 @@
   const selRect    = document.getElementById('selection-rect');
   const connDot    = document.getElementById('draw-conn');
   const fileInput  = document.getElementById('file-input');
+  const navPrev    = document.getElementById('slide-prev');
+  const navNext    = document.getElementById('slide-next');
+  const navCount   = document.getElementById('slide-count');
 
   // ── State ─────────────────────────────────────────────────────────────────
   let tool       = 'pen';
@@ -184,6 +228,7 @@
   let wsReady    = false;
   let elementMap = new Map(); // id → { svgEl, data }
   let selectedId = null;
+  let currentSlide = 1;
 
   // Pen state
   let drawing    = false;
@@ -225,6 +270,57 @@
     d += ` L${l.x},${l.y}`;
     return d;
   }
+
+  // ── Slides ────────────────────────────────────────────────────────────────
+  // Every element carries a slide number; the board shows one slide at a time.
+  // Content that predates slides has none, and reads as slide one.
+  function slideOf(data) {
+    const n = parseInt(data && data.slide, 10);
+    return (isFinite(n) && n >= 1) ? n : 1;
+  }
+
+  function slideCount() {
+    let max = 1;
+    elementMap.forEach(entry => {
+      const n = slideOf(entry.data);
+      if (n > max) max = n;
+    });
+    return max;
+  }
+
+  function applyVisibility(entry) {
+    entry.svgEl.style.display = (slideOf(entry.data) === currentSlide) ? '' : 'none';
+  }
+
+  function refreshDeck() {
+    const total = slideCount();
+    if (currentSlide > total) currentSlide = total;
+    if (currentSlide < 1) currentSlide = 1;
+    elementMap.forEach(applyVisibility);
+    if (navCount) navCount.textContent = `slide ${currentSlide} of ${total}`;
+    if (navPrev) navPrev.disabled = currentSlide <= 1;
+    if (navNext) navNext.disabled = currentSlide >= total;
+  }
+
+  function clearSlideLocally(n) {
+    const doomed = [];
+    elementMap.forEach((entry, id) => {
+      if (slideOf(entry.data) === n) doomed.push(id);
+    });
+    doomed.forEach(applyDelete);
+  }
+
+  function goSlide(n) {
+    const total = slideCount();
+    const target = Math.min(Math.max(n, 1), total);
+    if (target === currentSlide) { refreshDeck(); return; }
+    currentSlide = target;
+    clearSelection();
+    refreshDeck();
+  }
+
+  if (navPrev) navPrev.addEventListener('click', () => goSlide(currentSlide - 1));
+  if (navNext) navNext.addEventListener('click', () => goSlide(currentSlide + 1));
 
   // ── Tool selection ────────────────────────────────────────────────────────
   document.querySelectorAll('.draw-tool').forEach(btn => {
@@ -286,16 +382,22 @@
         elementMap.clear();
         clearSelection();
         (msg.elements || []).forEach(applyElement);
+        refreshDeck();
         break;
-      case 'path':  applyElement(msg); break;
-      case 'text':  applyElement(msg); break;
-      case 'image': applyElement(msg); break;
+      case 'path':  applyElement(msg); refreshDeck(); break;
+      case 'text':  applyElement(msg); refreshDeck(); break;
+      case 'image': applyElement(msg); refreshDeck(); break;
       case 'move':  applyMove(msg); break;
-      case 'delete': applyDelete(msg.id); break;
+      case 'delete': applyDelete(msg.id); refreshDeck(); break;
       case 'clear':
-        elGroup.innerHTML = '';
-        elementMap.clear();
-        clearSelection();
+        if (msg.slide !== undefined && msg.slide !== null) {
+          clearSlideLocally(slideOf(msg));
+        } else {
+          elGroup.innerHTML = '';
+          elementMap.clear();
+          clearSelection();
+        }
+        refreshDeck();
         break;
     }
   }
@@ -322,6 +424,7 @@
     el.style.pointerEvents = 'stroke';
     elGroup.appendChild(el);
     elementMap.set(data.id, { svgEl: el, data: Object.assign({}, data) });
+    applyVisibility(elementMap.get(data.id));
     if (CAN_DRAW) el.addEventListener('click', e => { e.stopPropagation(); onElemClick(data.id); });
   }
 
@@ -338,6 +441,7 @@
     elGroup.appendChild(el);
     const stored = Object.assign({}, data);
     elementMap.set(data.id, { svgEl: el, data: stored });
+    applyVisibility(elementMap.get(data.id));
     if (CAN_DRAW) {
       el.addEventListener('click', e => { e.stopPropagation(); onElemClick(data.id); });
       el.addEventListener('mousedown', e => onElemMouseDown(e, data.id));
@@ -358,6 +462,7 @@
     elGroup.appendChild(g);
     const stored = Object.assign({}, data);
     elementMap.set(data.id, { svgEl: g, data: stored });
+    applyVisibility(elementMap.get(data.id));
     if (CAN_DRAW) {
       g.addEventListener('click', e => { e.stopPropagation(); onElemClick(data.id); });
       g.addEventListener('mousedown', e => onElemMouseDown(e, data.id));
@@ -478,6 +583,7 @@
       const id = selectedId;
       applyDelete(id);
       send({ type: 'delete', id });
+      refreshDeck();
     }
   });
 
@@ -509,9 +615,10 @@
     const d = smoothD(livePoints);
     liveGroup.innerHTML = '';
     if (d && livePoints.length >= 2) {
-      const data = { type: 'path', id: livePid, color: MY_COLOR, d, sw: 2 };
+      const data = { type: 'path', id: livePid, color: MY_COLOR, d, sw: 2, slide: currentSlide };
       addPathEl(data);
       send(data);
+      refreshDeck();
     }
     livePath = null; livePoints = []; livePid = null;
   }
@@ -537,9 +644,10 @@
       input.remove();
       if (!text) return;
       const id = uid();
-      const data = { type: 'text', id, x: pt.x, y: pt.y, content: text, color: MY_COLOR };
+      const data = { type: 'text', id, x: pt.x, y: pt.y, content: text, color: MY_COLOR, slide: currentSlide };
       addTextEl(data);
       send(data);
+      refreshDeck();
     }
 
     input.addEventListener('keydown', e => {
@@ -612,9 +720,10 @@
     const reader = new FileReader();
     reader.onload = () => {
       const id = uid();
-      const data = { type: 'image', id, x: pt.x - 100, y: pt.y - 75, w: 200, h: 150, src: reader.result };
+      const data = { type: 'image', id, x: pt.x - 100, y: pt.y - 75, w: 200, h: 150, src: reader.result, slide: currentSlide };
       addImageEl(data);
       send(data);
+      refreshDeck();
     };
     reader.readAsDataURL(file);
   }
@@ -636,11 +745,10 @@
   // ── Clear button ──────────────────────────────────────────────────────────
   document.getElementById('draw-clear').addEventListener('click', () => {
     if (!CAN_DRAW) return;
-    if (!confirm('Clear the canvas? This cannot be undone.')) return;
-    elGroup.innerHTML = '';
-    elementMap.clear();
-    clearSelection();
-    send({ type: 'clear' });
+    if (!confirm(`Clear slide ${currentSlide}? This cannot be undone.`)) return;
+    clearSlideLocally(currentSlide);
+    refreshDeck();
+    send({ type: 'clear', slide: currentSlide });
   });
 
   // ── Send to Skippy ────────────────────────────────────────────────────────
@@ -666,6 +774,7 @@
   }
 
   // ── Connect ───────────────────────────────────────────────────────────────
+  refreshDeck();
   connectWs();
 })();
 </script>

@@ -179,13 +179,16 @@ def _canvas_bounds(elements: list[dict]) -> tuple[float, float, float, float]:
     return (minx, miny, max(w, 1.0), max(h, 1.0))
 
 
-def _canvas_to_svg() -> str:
+def _canvas_to_svg(slide: int | None = None) -> str:
     """Compose the current board into a standalone dark-background SVG.
 
     This is the snapshot Skippy rasterizes (chrome --headless) so he can
     actually see what Daniel drew, since he cannot watch the live websocket.
     """
     elements = _canvas_elements
+    if slide is not None:
+        want = _slide_of(slide)
+        elements = [e for e in elements if _slide_of(e.get("slide")) == want]
     minx, miny, w, h = _canvas_bounds(elements)
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" '
@@ -1610,10 +1613,23 @@ async def api_rules_delete(rule_id: str, user: dict = Depends(require_auth)):
 # ── Canvas ─────────────────────────────────────────────────────────────
 
 _CANVAS_KEYS = {
-    "path": ("type", "id", "color", "d", "sw"),
-    "text": ("type", "id", "x", "y", "content", "color"),
-    "image": ("type", "id", "x", "y", "w", "h", "src"),
+    "path": ("type", "id", "color", "d", "sw", "slide"),
+    "text": ("type", "id", "x", "y", "content", "color", "slide"),
+    "image": ("type", "id", "x", "y", "w", "h", "src", "slide"),
 }
+
+
+def _slide_of(value: object) -> int:
+    """Slide number an element or message belongs to, 1-based.
+
+    Anything unnumbered or unparseable is slide one — the board predates
+    slides, and its existing content is the first slide of the deck.
+    """
+    try:
+        n = int(value)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return 1
+    return n if n >= 1 else 1
 
 
 def _apply_canvas_message(data: dict) -> bool:
@@ -1625,9 +1641,19 @@ def _apply_canvas_message(data: dict) -> bool:
     """
     msg_type = data.get("type")
     if msg_type == "clear":
-        _canvas_elements.clear()
+        if "slide" in data:
+            # Scoped clear: presenting a deck, wiping the whole board because
+            # one slide went wrong is not a recoverable mistake.
+            target = _slide_of(data.get("slide"))
+            data["slide"] = target
+            _canvas_elements[:] = [
+                e for e in _canvas_elements if _slide_of(e.get("slide")) != target
+            ]
+        else:
+            _canvas_elements.clear()
     elif msg_type in _CANVAS_KEYS:
         data.setdefault("id", str(uuid.uuid4()))
+        data["slide"] = _slide_of(data.get("slide"))
         _canvas_elements.append({k: data[k] for k in _CANVAS_KEYS[msg_type] if k in data})
     elif msg_type == "move":
         el_id = data.get("id")
@@ -1685,9 +1711,13 @@ async def canvas_push(request: Request):
 
 
 @app.get("/canvas/render.svg")
-async def canvas_render_svg():
-    """Standalone SVG snapshot of the board, for Skippy to rasterize and read."""
-    return Response(content=_canvas_to_svg(), media_type="image/svg+xml")
+async def canvas_render_svg(slide: int | None = None):
+    """Standalone SVG snapshot of the board, for Skippy to rasterize and read.
+
+    With ``?slide=N`` the snapshot is that slide alone — what an audience sees
+    at that point in the presentation. Without it, the whole board.
+    """
+    return Response(content=_canvas_to_svg(slide), media_type="image/svg+xml")
 
 
 @app.post("/canvas/submit")
