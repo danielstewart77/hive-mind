@@ -208,7 +208,7 @@ def _canvas_to_svg(slide: int | None = None) -> str:
         elif t == "text":
             parts.append(
                 f'<text x="{el.get("x", 0)}" y="{el.get("y", 0)}" fill="{color}" '
-                f'font-family="monospace" font-size="14">{_xml_escape(el.get("content", ""))}</text>'
+                f'font-family="monospace" font-size="{el.get("size", 14)}">{_xml_escape(el.get("content", ""))}</text>'
             )
         elif t == "image":
             parts.append(
@@ -1614,7 +1614,7 @@ async def api_rules_delete(rule_id: str, user: dict = Depends(require_auth)):
 
 _CANVAS_KEYS = {
     "path": ("type", "id", "color", "d", "sw", "slide"),
-    "text": ("type", "id", "x", "y", "content", "color", "slide"),
+    "text": ("type", "id", "x", "y", "content", "color", "size", "slide"),
     "image": ("type", "id", "x", "y", "w", "h", "src", "slide"),
 }
 

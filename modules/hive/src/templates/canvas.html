@@ -434,7 +434,7 @@
     el.setAttribute('y', data.y);
     el.setAttribute('fill', data.color || '#c9a84c');
     el.setAttribute('font-family', "'Fira Code', monospace");
-    el.setAttribute('font-size', '14');
+    el.setAttribute('font-size', data.size || 14);
     el.setAttribute('data-id', data.id);
     el.style.cursor = CAN_DRAW ? 'default' : 'default';
     el.textContent = data.content || '';
