@@ -3,6 +3,7 @@ services:
     build:
       context: ../../..
     container_name: hive-mind-example
+    init: true
     working_dir: /usr/src/app
     environment:
       - MIND_NAME=example
