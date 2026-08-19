@@ -109,125 +109,6 @@ def slide2():
     text(S, 60, 632, "is the hive.", 14, DIM)
 
 
-def slide4():
-    """Agent-to-agent: my representative talks to yours."""
-    S = 4
-    clear_slide(S)
-
-    text(S, 60, 62, "My agent talks to your agent", 30, GOLD)
-    text(S, 60, 92, "two people who never opened a chat window — the conversation happens "
-                    "between the agents that represent them", 15, DIM)
-
-    # ── Daniel's bubble ───────────────────────────────────────────────────
-    box(S, 50, 150, 490, 330, TEAL)
-    text(S, 75, 185, "DANIEL", 13, GREY)
-    text(S, 75, 220, "the human", 20, TEAL)
-    text(S, 75, 243, "asks in plain language, walks away", 13, DIM)
-
-    box(S, 72, 265, 445, 185, TEAL, 1)
-    text(S, 95, 302, "Skippy", 24, TEAL)
-    text(S, 95, 332, "· knows his projects, his history, his preferences", 13, DIM)
-    text(S, 95, 355, "· speaks with his authority, inside limits he set", 13, DIM)
-    text(S, 95, 378, "· holds his memory — which never leaves this bubble", 13, DIM)
-    text(S, 95, 415, "represents Daniel", 14, TEAL)
-    text(S, 95, 437, "when Daniel is not in the room", 13, GREY)
-
-    # ── The other party's bubble ──────────────────────────────────────────
-    box(S, 720, 150, 490, 330, GOLD)
-    text(S, 735, 185, "SOMEONE ELSE  —  a son, a household, a business", 13, GREY)
-    text(S, 735, 220, "Aiden", 20, GOLD)
-    text(S, 735, 243, "his own machine, his own rules", 13, DIM)
-
-    box(S, 742, 265, 445, 185, GOLD, 1)
-    text(S, 755, 302, "Zack", 24, GOLD)
-    text(S, 755, 332, "· knows Aiden's box, his schedule, his voice", 13, DIM)
-    text(S, 755, 355, "· answers for him when he is not there", 13, DIM)
-    text(S, 755, 378, "· holds his memory — which never leaves that bubble", 13, DIM)
-    text(S, 755, 415, "represents Aiden", 14, GOLD)
-    text(S, 755, 437, "and answers to Aiden, not to me", 13, GREY)
-
-    # ── The seam is the protocol, so draw the protocol ────────────────────
-    box(S, 560, 150, 140, 330, GOLD, 1)
-    text(S, 578, 182, "THE", 15, GOLD)
-    text(S, 578, 203, "NERVOUS", 15, GOLD)
-    text(S, 578, 224, "SYSTEM", 15, GOLD)
-    text(S, 578, 252, "one protocol,", 12, GREY)
-    text(S, 578, 270, "spoken by both", 12, GREY)
-
-    arrow(S, 552, 320, 708, 320)
-    text(S, 578, 308, "a request", 13, GREY)
-    arrow(S, 708, 380, 552, 380)
-    text(S, 578, 403, "an answer", 13, GREY)
-
-    text(S, 578, 440, "neither agent", 12, GREY)
-    text(S, 578, 458, "reaches past it", 12, GREY)
-
-    # ── The point ─────────────────────────────────────────────────────────
-    text(S, 60, 545, "What crosses the seam is a message. Nothing else.", 18, GOLD)
-    text(S, 60, 578, "Not my memory, not my credentials, not my transcript — his agent "
-                     "never reads my context,", 14, DIM)
-    text(S, 60, 600, "and mine never reads his. Two representatives, each accountable "
-                     "to a different person.", 14, DIM)
-
-
-def slide6():
-    """The agent is inside the site — and the slide proves it."""
-    S = 6
-    clear_slide(S)
-
-    text(S, 60, 62, "The agent lives inside the site", 30, GOLD)
-    text(S, 60, 92, "not a chat bubble bolted onto a page — a mind whose workspace "
-                    "is the page itself", 15, DIM)
-
-    # ── A browser window ──────────────────────────────────────────────────
-    box(S, 60, 145, 700, 400, GOLD)
-    box(S, 60, 145, 700, 36, GOLD, 1)
-    text(S, 80, 169, "hive.sparktobloom.com", 14, DIM)
-
-    # Its own navigation.
-    for i, (label, x) in enumerate((("graph", 90), ("memory", 200), ("rules", 320),
-                                    ("canvas", 420), ("settings", 545), ("minds", 680))):
-        text(S, x, 212, label, 13, GOLD if label == "canvas" else GREY)
-    line(S, 415, 222, 490, 222, GOLD, 2)
-
-    # The page currently open is this one.
-    box(S, 90, 245, 640, 275, TEAL, 1)
-    text(S, 110, 275, "the canvas — currently showing slide 6 of 6", 15, TEAL)
-
-    # A little deck inside the deck.
-    box(S, 130, 300, 170, 90, GREY, 1)
-    box(S, 330, 300, 170, 90, GREY, 1)
-    box(S, 530, 300, 170, 90, GOLD, 1)
-    text(S, 150, 335, "the mind", 13, GREY)
-    text(S, 350, 335, "the surfaces", 13, GREY)
-    text(S, 550, 335, "you are here", 13, GOLD)
-    text(S, 130, 425, "\u25c0", 20, GOLD)
-    text(S, 690, 425, "\u25b6", 20, GOLD)
-    text(S, 300, 425, "clicked by a human, drawn by an agent", 13, DIM)
-
-    text(S, 110, 495, "the agent writes here through the site's own API — "
-                      "same door a person uses", 12, GREY)
-
-    # ── What that buys ────────────────────────────────────────────────────
-    text(S, 800, 175, "SO IT CAN", 13, GREY)
-    items = [
-        ("generate the content", "draws into the page instead of describing what to draw", 215),
-        ("change the site itself", "this slideshow did not exist three hours ago", 300),
-        ("operate the pages", "reads and writes the graph, the memory, the settings", 385),
-        ("hold a conversation here", "the page is a surface, like a phone or a chat channel", 470),
-    ]
-    for headline, detail, y in items:
-        text(S, 800, y, headline, 17, GOLD)
-        text(S, 800, y + 24, detail, 13, DIM)
-        arrow(S, 790, y - 6, 764, y - 6, GREY, 1, 6)
-
-    # ── The closer ────────────────────────────────────────────────────────
-    text(S, 60, 590, "You are not looking at a diagram of this. "
-                     "You are looking at it.", 18, GOLD)
-    text(S, 60, 618, "This slide was drawn by the agent, on the page it is drawn on, "
-                     "while we were talking.", 14, DIM)
-
-
 def slide3():
     """What survives the session: three kinds of memory, used differently."""
     S = 3
@@ -305,33 +186,130 @@ def slide3():
     text(S, 60, 616, "disposable session survivable.", 14, DIM)
 
 
-def slide5():
-    """What it looks like when an agent actually does something."""
-    S = 5
+def slide4():
+    """Agent-to-agent: my representative talks to yours."""
+    S = 4
     clear_slide(S)
 
-    text(S, 60, 62, "And then it does something about it", 30, GOLD)
-    text(S, 60, 92, "a real screen, in my house, this week", 15, DIM)
+    text(S, 60, 62, "My agent talks to your agent", 30, GOLD)
+    text(S, 60, 92, "two people who never opened a chat window — the conversation happens "
+                    "between the agents that represent them", 15, DIM)
 
-    image(S, 60, 130, 375, 500, str(HERE / "assets" / "666.jpg"))
+    # ── Daniel's bubble ───────────────────────────────────────────────────
+    box(S, 50, 150, 490, 330, TEAL)
+    text(S, 75, 185, "DANIEL", 13, GREY)
+    text(S, 75, 220, "the human", 20, TEAL)
+    text(S, 75, 243, "asks in plain language, walks away", 13, DIM)
 
-    text(S, 500, 190, "I said it in passing.", 22, GOLD)
-    text(S, 500, 222, "No script, no scheduled job, no rule engine.", 14, DIM)
+    box(S, 72, 265, 445, 185, TEAL, 1)
+    text(S, 95, 302, "Skippy", 24, TEAL)
+    text(S, 95, 332, "· knows his projects, his history, his preferences", 13, DIM)
+    text(S, 95, 355, "· speaks with his authority, inside limits he set", 13, DIM)
+    text(S, 95, 378, "· holds his memory — which never leaves this bubble", 13, DIM)
+    text(S, 95, 415, "represents Daniel", 14, TEAL)
+    text(S, 95, 437, "when Daniel is not in the room", 13, GREY)
 
-    text(S, 500, 290, "The agent on his machine:", 17, TEAL)
-    for i, step in enumerate((
-            "saw what was on screen",
-            "decided it was worth acting on",
-            "took the display and said so, in my words",
-            "told me it had done it")):
-        text(S, 520, 325 + i * 30, "\u00b7 " + step, 14, DIM)
+    # ── The other party's bubble ──────────────────────────────────────────
+    box(S, 720, 150, 490, 330, GOLD)
+    text(S, 735, 185, "SOMEONE ELSE  —  a son, a household, a business", 13, GREY)
+    text(S, 735, 220, "Aiden", 20, GOLD)
+    text(S, 735, 243, "his own machine, his own rules", 13, DIM)
 
-    text(S, 500, 480, "The interesting part is not the message.", 18, GOLD)
-    text(S, 500, 512, "It is that nobody was at a keyboard when it went up —", 14, DIM)
-    text(S, 500, 534, "not me, and not the agent's owner.", 14, DIM)
+    box(S, 742, 265, 445, 185, GOLD, 1)
+    text(S, 755, 302, "Zack", 24, GOLD)
+    text(S, 755, 332, "· knows Aiden's box, his schedule, his voice", 13, DIM)
+    text(S, 755, 355, "· answers for him when he is not there", 13, DIM)
+    text(S, 755, 378, "· holds his memory — which never leaves that bubble", 13, DIM)
+    text(S, 755, 415, "represents Aiden", 14, GOLD)
+    text(S, 755, 437, "and answers to Aiden, not to me", 13, GREY)
 
-    text(S, 500, 590, "An agent that only answers questions is a search box.", 14, GREY)
-    text(S, 500, 612, "This one has hands.", 14, GREY)
+    # ── The seam is the protocol, so draw the protocol ────────────────────
+    box(S, 560, 150, 140, 330, GOLD, 1)
+    text(S, 578, 182, "THE", 15, GOLD)
+    text(S, 578, 203, "NERVOUS", 15, GOLD)
+    text(S, 578, 224, "SYSTEM", 15, GOLD)
+    text(S, 578, 252, "one protocol,", 12, GREY)
+    text(S, 578, 270, "spoken by both", 12, GREY)
+
+    arrow(S, 552, 320, 708, 320)
+    text(S, 578, 308, "a request", 13, GREY)
+    arrow(S, 708, 380, 552, 380)
+    text(S, 578, 403, "an answer", 13, GREY)
+
+    text(S, 578, 440, "neither agent", 12, GREY)
+    text(S, 578, 458, "reaches past it", 12, GREY)
+
+    # ── The point ─────────────────────────────────────────────────────────
+    text(S, 60, 545, "What crosses the seam is a message. Nothing else.", 18, GOLD)
+    text(S, 60, 578, "Not my memory, not my credentials, not my transcript — his agent "
+                     "never reads my context,", 14, DIM)
+    text(S, 60, 600, "and mine never reads his. Two representatives, each accountable "
+                     "to a different person.", 14, DIM)
+
+
+def slide5():
+    """The photo, and nothing else. It does not need a caption."""
+    S = 5
+    clear_slide(S)
+    image(S, 400, 20, 450, 600, str(HERE / "assets" / "666.jpg"), max_px=900)
+
+
+def slide6():
+    """The agent is inside the site — and the slide proves it."""
+    S = 6
+    clear_slide(S)
+
+    text(S, 60, 62, "The agent lives inside the site", 30, GOLD)
+    text(S, 60, 92, "not a chat bubble bolted onto a page — a mind whose workspace "
+                    "is the page itself", 15, DIM)
+
+    # ── A browser window ──────────────────────────────────────────────────
+    box(S, 60, 145, 700, 400, GOLD)
+    box(S, 60, 145, 700, 36, GOLD, 1)
+    text(S, 80, 169, "hive.sparktobloom.com", 14, DIM)
+
+    # Its own navigation.
+    for i, (label, x) in enumerate((("graph", 90), ("memory", 200), ("rules", 320),
+                                    ("canvas", 420), ("settings", 545), ("minds", 680))):
+        text(S, x, 212, label, 13, GOLD if label == "canvas" else GREY)
+    line(S, 415, 222, 490, 222, GOLD, 2)
+
+    # The page currently open is this one.
+    box(S, 90, 245, 640, 275, TEAL, 1)
+    text(S, 110, 275, "the canvas — currently showing slide 6 of 6", 15, TEAL)
+
+    # A little deck inside the deck.
+    box(S, 130, 300, 170, 90, GREY, 1)
+    box(S, 330, 300, 170, 90, GREY, 1)
+    box(S, 530, 300, 170, 90, GOLD, 1)
+    text(S, 150, 335, "the mind", 13, GREY)
+    text(S, 350, 335, "the surfaces", 13, GREY)
+    text(S, 550, 335, "you are here", 13, GOLD)
+    text(S, 130, 425, "\u25c0", 20, GOLD)
+    text(S, 690, 425, "\u25b6", 20, GOLD)
+    text(S, 300, 425, "clicked by a human, drawn by an agent", 13, DIM)
+
+    text(S, 110, 495, "the agent writes here through the site's own API — "
+                      "same door a person uses", 12, GREY)
+
+    # ── What that buys ────────────────────────────────────────────────────
+    text(S, 800, 175, "SO IT CAN", 13, GREY)
+    items = [
+        ("generate the content", "draws into the page instead of describing what to draw", 215),
+        ("change the site itself", "this slideshow did not exist three hours ago", 300),
+        ("operate the pages", "reads and writes the graph, the memory, the settings", 385),
+        ("hold a conversation here", "the page is a surface, like a phone or a chat channel", 470),
+    ]
+    for headline, detail, y in items:
+        text(S, 800, y, headline, 17, GOLD)
+        text(S, 800, y + 24, detail, 13, DIM)
+        arrow(S, 790, y - 6, 764, y - 6, GREY, 1, 6)
+
+    # ── The closer ────────────────────────────────────────────────────────
+    text(S, 60, 590, "You are not looking at a diagram of this. "
+                     "You are looking at it.", 18, GOLD)
+    text(S, 60, 618, "This slide was drawn by the agent, on the page it is drawn on, "
+                     "while we were talking.", 14, DIM)
 
 
 SLIDES = {1: slide1, 2: slide2, 3: slide3, 4: slide4, 5: slide5, 6: slide6}
