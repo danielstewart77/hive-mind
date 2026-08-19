@@ -255,8 +255,17 @@ def slide5():
 
 
 def slide6():
-    """The agent is inside the site — and the slide proves it."""
+    """The security dashboard, live off the sensor host. Same rule as slide 5:
+    the picture is the argument, so nothing is written over it."""
     S = 6
+    clear_slide(S)
+    image(S, 60, 40, 1080, 750, str(HERE / "assets" / "grafana-dashboard.png"),
+          max_px=1600, quality=80)
+
+
+def slide7():
+    """The agent is inside the site — and the slide proves it."""
+    S = 7
     clear_slide(S)
 
     text(S, 60, 62, "The agent lives inside the site", 30, GOLD)
@@ -276,7 +285,7 @@ def slide6():
 
     # The page currently open is this one.
     box(S, 90, 245, 640, 275, TEAL, 1)
-    text(S, 110, 275, "the canvas — currently showing slide 6 of 6", 15, TEAL)
+    text(S, 110, 275, "the canvas — currently showing slide 7 of 7", 15, TEAL)
 
     # A little deck inside the deck.
     box(S, 130, 300, 170, 90, GREY, 1)
@@ -312,7 +321,8 @@ def slide6():
                      "while we were talking.", 14, DIM)
 
 
-SLIDES = {1: slide1, 2: slide2, 3: slide3, 4: slide4, 5: slide5, 6: slide6}
+SLIDES = {1: slide1, 2: slide2, 3: slide3, 4: slide4, 5: slide5,
+          6: slide6, 7: slide7}
 
 if __name__ == "__main__":
     wanted = [int(a) for a in sys.argv[1:]] or sorted(SLIDES)
