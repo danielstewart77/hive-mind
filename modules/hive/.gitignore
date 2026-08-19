@@ -4,3 +4,6 @@ __pycache__/
 .pytest_cache/
 data/
 capabilities/
+
+# Deck photos are personal, not machinery.
+decks/assets/

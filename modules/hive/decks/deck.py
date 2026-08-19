@@ -79,3 +79,20 @@ def ring(slide, cx, cy, r, color=GREY, sw=1):
 def dot(slide, cx, cy, r=4, color=GREY):
     """A filled-looking point: a tiny ring drawn thick enough to read as solid."""
     ring(slide, cx, cy, r, color, sw=r)
+
+
+def image(slide, x, y, w, h, path, max_px=760, quality=72):
+    """Place a photo, downscaled first.
+
+    The canvas stores images as data URIs, so a phone-sized JPEG would ride
+    in the board state and in every websocket sync. Shrink to slide size.
+    """
+    import base64, io
+    from PIL import Image
+    im = Image.open(path)
+    im.thumbnail((max_px, max_px))
+    buf = io.BytesIO()
+    im.convert("RGB").save(buf, "JPEG", quality=quality, optimize=True)
+    src = "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+    push({"type": "image", "slide": slide, "x": x, "y": y, "w": w, "h": h, "src": src})
+    return len(src)

@@ -3,9 +3,12 @@
 
     python3 decks/hive_intro.py [slide ...]
 """
+import pathlib
 import sys
+HERE = pathlib.Path(__file__).resolve().parent
+
 from deck import (DIM, GOLD, GREY, TEAL, arrow, box, clear_slide, dot, edge,
-                  line, node, ring, text)
+                  image, line, node, ring, text)
 
 
 def slide1():
@@ -167,9 +170,9 @@ def slide4():
                      "to a different person.", 14, DIM)
 
 
-def slide5():
+def slide6():
     """The agent is inside the site — and the slide proves it."""
-    S = 5
+    S = 6
     clear_slide(S)
 
     text(S, 60, 62, "The agent lives inside the site", 30, GOLD)
@@ -189,7 +192,7 @@ def slide5():
 
     # The page currently open is this one.
     box(S, 90, 245, 640, 275, TEAL, 1)
-    text(S, 110, 275, "the canvas — currently showing slide 5 of 5", 15, TEAL)
+    text(S, 110, 275, "the canvas — currently showing slide 6 of 6", 15, TEAL)
 
     # A little deck inside the deck.
     box(S, 130, 300, 170, 90, GREY, 1)
@@ -302,7 +305,36 @@ def slide3():
     text(S, 60, 616, "disposable session survivable.", 14, DIM)
 
 
-SLIDES = {1: slide1, 2: slide2, 3: slide3, 4: slide4, 5: slide5}
+def slide5():
+    """What it looks like when an agent actually does something."""
+    S = 5
+    clear_slide(S)
+
+    text(S, 60, 62, "And then it does something about it", 30, GOLD)
+    text(S, 60, 92, "a real screen, in my house, this week", 15, DIM)
+
+    image(S, 60, 130, 375, 500, str(HERE / "assets" / "666.jpg"))
+
+    text(S, 500, 190, "I said it in passing.", 22, GOLD)
+    text(S, 500, 222, "No script, no scheduled job, no rule engine.", 14, DIM)
+
+    text(S, 500, 290, "The agent on his machine:", 17, TEAL)
+    for i, step in enumerate((
+            "saw what was on screen",
+            "decided it was worth acting on",
+            "took the display and said so, in my words",
+            "told me it had done it")):
+        text(S, 520, 325 + i * 30, "\u00b7 " + step, 14, DIM)
+
+    text(S, 500, 480, "The interesting part is not the message.", 18, GOLD)
+    text(S, 500, 512, "It is that nobody was at a keyboard when it went up —", 14, DIM)
+    text(S, 500, 534, "not me, and not the agent's owner.", 14, DIM)
+
+    text(S, 500, 590, "An agent that only answers questions is a search box.", 14, GREY)
+    text(S, 500, 612, "This one has hands.", 14, GREY)
+
+
+SLIDES = {1: slide1, 2: slide2, 3: slide3, 4: slide4, 5: slide5, 6: slide6}
 
 if __name__ == "__main__":
     wanted = [int(a) for a in sys.argv[1:]] or sorted(SLIDES)
