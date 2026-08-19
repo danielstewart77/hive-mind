@@ -25,6 +25,7 @@ import subprocess
 import tempfile
 
 from core.hive_logging import configure_logging, install_fastapi_logging, log_event
+from voice.stt_filters import TRANSCRIBE_OPTS, clean_transcript
 
 log = configure_logging("hive-mind.voice")
 
@@ -435,8 +436,8 @@ async def stt(file: UploadFile):
 
     try:
         try:
-            segments, _ = _whisper.transcribe(tmp_path, language="en")
-            text = " ".join(s.text for s in segments).strip()
+            segments, _ = _whisper.transcribe(tmp_path, **TRANSCRIBE_OPTS)
+            text = clean_transcript(s.text for s in segments)
         except RuntimeError as exc:
             # Whisper's GPU backend (ctranslate2) fails when a CUDA support
             # library is missing or unloadable. The message varies: a bare
@@ -450,8 +451,8 @@ async def stt(file: UploadFile):
             log.warning("GPU error in STT — reinitialising whisper on CPU: %s", exc)
             from faster_whisper import WhisperModel
             _whisper = WhisperModel(_WHISPER_MODEL, device="cpu", compute_type="int8")
-            segments, _ = _whisper.transcribe(tmp_path, language="en")
-            text = " ".join(s.text for s in segments).strip()
+            segments, _ = _whisper.transcribe(tmp_path, **TRANSCRIBE_OPTS)
+            text = clean_transcript(s.text for s in segments)
     finally:
         os.unlink(tmp_path)
 
