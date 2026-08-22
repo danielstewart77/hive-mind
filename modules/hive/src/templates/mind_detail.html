@@ -12,6 +12,7 @@
         <section class="surface"><div class="surface-header"><div><h2>Runtime configuration</h2><p>Secret values are removed before this reaches the browser.</p></div></div><div class="surface-body"><div class="code-wrap"><pre class="code-panel" id="mind-config">Loading…</pre><button class="icon-button" type="button" data-copy="#mind-config" aria-label="Copy configuration"><i data-lucide="copy"></i></button></div></div></section>
         <section class="surface" id="mind-editor" hidden><div class="surface-header"><div><h2>Default model</h2><p>Written to this Mind&#39;s runtime.yaml and its registry row. Applies to the next session it is asked for; conversations already running keep their model.</p></div></div><form class="surface-body overview-stack" id="mind-model-form"><div class="field"><label for="mind-provider">Provider</label><select id="mind-provider" name="provider" required></select><small>The upstream hosting the model. This Mind's own proxy key decides which appear.</small></div><div class="field"><label for="mind-default-model">Model</label><select id="mind-default-model" name="default_model" required></select><small>Every model this Mind is permitted to run on the chosen provider.</small></div><div class="form-actions"><button class="button" type="submit" id="mind-model-save">Save model</button><button class="button button-primary" id="mind-restart" type="button" hidden>Restart runtime</button></div><small id="mind-model-status"></small></form></section>
         <section class="surface" id="mind-skills" hidden><div class="surface-header"><div><h2>Skills</h2><p>The repo&#39;s copy against this Mind&#39;s. Applying copies the repo&#39;s directory into the one this Mind&#39;s harness loads skills from. When the harness picks it up is the harness&#39;s business.</p></div><span id="mind-skills-harness"></span></div><div class="surface-body"><div id="mind-skills-status"></div><table class="data-table" id="mind-skills-table" hidden><thead><tr><th>Skill</th><th>Repo</th><th>This Mind</th><th></th></tr></thead><tbody id="mind-skills-rows"></tbody></table></div></section>
+        <section class="surface" id="mind-files" hidden><div class="surface-header"><div><h2>Skill and hook files</h2><p>The directories this Mind&#39;s harness reads. Edits are written in place, on the Mind. A hook is re-read on every event, so an edit to one is live immediately; a skill is read when a harness process starts, so a running conversation keeps the copy it loaded.</p></div><div class="row-actions"><button class="button button-quiet" type="button" data-tree="skills">Skills</button><button class="button button-quiet" type="button" data-tree="hooks">Hooks</button></div></div><div class="surface-body overview-stack"><small id="mind-files-root"></small><div id="mind-files-status"></div><div class="field"><label for="mind-files-list">File</label><select id="mind-files-list" size="10"></select></div><form class="overview-stack" id="mind-files-form" hidden><div class="field"><label for="mind-files-text" id="mind-files-label">Contents</label><textarea id="mind-files-text" rows="22" spellcheck="false" wrap="off"></textarea></div><div class="form-actions"><button class="button" type="submit" id="mind-files-save">Save file</button><button class="button button-quiet" type="button" id="mind-files-reload">Discard and reload</button></div><small id="mind-files-save-status"></small></form></div></section>
         <section class="surface" id="mind-soul" hidden><div class="surface-header"><div><h2>Soul</h2><p>What this Mind is told it is, ahead of every turn on every surface. One line per line — this is read as instruction, not description. Edits from here are recorded as yours, distinct from what the Mind decided about itself.</p></div></div><form class="surface-body overview-stack" id="mind-soul-form"><div class="field"><label for="mind-soul-values">Soul</label><textarea id="mind-soul-values" name="soul_values" rows="14" spellcheck="false"></textarea><small>Blank lines are dropped. Removing a line removes it from the Mind.</small></div><div class="field"><label for="mind-soul-reason">Why this changed</label><input id="mind-soul-reason" name="reason" type="text" required placeholder="Stored with the edit — this is what answers &quot;who wrote this line&quot; in six weeks."></div><div class="form-actions"><button class="button" type="submit" id="mind-soul-save">Save soul</button></div><small id="mind-soul-status"></small></form><div class="surface-body" id="mind-soul-history"></div></section>
     </div>
 </main>
@@ -42,6 +43,16 @@ window.addEventListener("DOMContentLoaded", async function () {
     // A provider added to the proxy therefore appears here with no change on
     // this side, and nothing is offered that the proxy would refuse.
     let modelRows = [];
+
+    // Declared here, not beside the file-browser code below: the page-load
+    // block runs before those statements, and a `let` read from inside its
+    // own dead zone throws rather than reading undefined.
+    let filesTree = "skills";
+    let openFile = null;
+    // Increments on every navigation. A response for an older request is
+    // dropped rather than painted, so the list, the root path and the
+    // highlighted tab cannot end up describing different directories.
+    let filesRequest = 0;
 
     // `preferred` is the Mind's current model when the picker first renders,
     // and empty once the operator has changed provider. A current model the
@@ -94,6 +105,74 @@ window.addEventListener("DOMContentLoaded", async function () {
         }
         providerSelect.onchange = function () { renderModelOptions(providerSelect.value, ""); };
     }
+
+    document.getElementById("mind-files").addEventListener("click", function (event) {
+        const button = event.target.closest("button[data-tree]");
+        if (button) renderFiles(button.dataset.tree);
+    });
+    document.getElementById("mind-files-list").addEventListener("change", function () {
+        if (!this.value) return;
+        if (openFile && this.value !== openFile.path && !mayLeave()) {
+            this.value = openFile.path;
+            return;
+        }
+        openFileInEditor(this.value);
+    });
+    document.getElementById("mind-files-reload").addEventListener("click", function () {
+        if (openFile && mayLeave()) openFileInEditor(openFile.path);
+    });
+    document.getElementById("mind-files-form").addEventListener("submit", async function (event) {
+        event.preventDefault();
+        const status = document.getElementById("mind-files-save-status");
+        const button = document.getElementById("mind-files-save");
+        if (!openFile) { status.textContent = "Open a file first."; return; }
+        button.disabled = true;
+        status.textContent = "Saving…";
+        try {
+            const saved = await h.requestJson(filesBase(filesTree) + "/content", {
+                method: "PUT",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({
+                    path: openFile.path,
+                    text: document.getElementById("mind-files-text").value,
+                    revision: openFile.revision
+                })
+            });
+            openFile.revision = saved.revision;
+            openFile.text = document.getElementById("mind-files-text").value;
+            status.textContent = filesTree === "hooks"
+                ? "Saved. This hook is live on the Mind's next event."
+                : "Saved. A harness process already running keeps the copy it loaded.";
+            // The sync table above now disagrees with the repo about this
+            // skill, and its Apply button would discard what was just saved.
+            // Re-render it so that is on screen rather than one refresh away.
+            if (filesTree === "skills") await renderSkills(document.getElementById("mind-files").dataset.mindName);
+        } catch (error) {
+            // A refused save must not be a dead end. The typed text stays in
+            // the box; taking the file's current revision turns the next
+            // Save into a deliberate overwrite rather than a silent one,
+            // and "Discard and reload" is still there for the other choice.
+            if (/changed since you opened it/i.test(error.message)) {
+                try {
+                    const current = await h.requestJson(filesBase(filesTree) + "/content?path=" + encodeURIComponent(openFile.path));
+                    // Whatever replaced it may not be editable at all — an
+                    // "Apply repo copy" can land a binary here. A null
+                    // revision offered back as an overwrite would ship a
+                    // save the Mind performs no staleness check on.
+                    if (!current.revision) {
+                        status.textContent = "This file changed on the Mind and what replaced it cannot be edited here (" + (current.reason || "not a text file") + "). Copy your text out before reloading.";
+                        return;
+                    }
+                    openFile.revision = current.revision;
+                    status.textContent = "This file changed on the Mind since you opened it. Your text is still here — Save again to overwrite what changed it, or Discard and reload to see theirs first.";
+                    return;
+                } catch (ignored) { /* fall through to the plain message */ }
+            }
+            status.textContent = error.message;
+        } finally {
+            button.disabled = false;
+        }
+    });
 
     async function renderSkills(name) {
         const section = document.getElementById("mind-skills");
@@ -176,12 +255,123 @@ window.addEventListener("DOMContentLoaded", async function () {
             document.getElementById("mind-model-status").textContent = "Cannot reach this Mind to read its configuration: " + error.message;
         }
         await renderSkills(mind.name);
+        const filesSection = document.getElementById("mind-files");
+        filesSection.dataset.mindName = mind.name;
+        filesSection.hidden = false;
+        await renderFiles("skills");
         await renderSoul(mind.name);
         if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}});
     } catch (error) {
         document.getElementById("mind-content").hidden = true;
         const box = document.getElementById("mind-error"); box.hidden = false; box.textContent = error.message;
     }
+
+    // The two directories the harness actually reads, browsed and edited in
+    // place. This is not the sync table above it: that moves whole skill
+    // directories between the repo and the Mind, this changes the bytes of
+    // one file where the harness will find them.
+    //
+    // A save carries the revision the read handed back. The Mind refuses
+    // with 409 when it no longer describes the file, which is what stops a
+    // second tab — or an "Apply repo copy" pressed on the table above since
+    // this file was opened — from being silently undone.
+    function filesBase(tree) {
+        const name = document.getElementById("mind-files").dataset.mindName;
+        return "/api/minds/" + encodeURIComponent(name) + "/files/" + tree;
+    }
+
+    function dirty() {
+        return openFile && document.getElementById("mind-files-text").value !== openFile.text;
+    }
+
+    // Navigating away from an edited buffer throws it away. Twenty lines
+    // typed into a hook and one click on another row is not a mistake the
+    // operator should have to discover afterwards.
+    function mayLeave() {
+        return !dirty() || window.confirm("This file has unsaved changes. Leave them behind?");
+    }
+
+    async function renderFiles(tree) {
+        if (!mayLeave()) return;
+        const ticket = ++filesRequest;
+        filesTree = tree;
+        openFile = null;
+        const status = document.getElementById("mind-files-status");
+        const list = document.getElementById("mind-files-list");
+        const root = document.getElementById("mind-files-root");
+        document.getElementById("mind-files-form").hidden = true;
+        document.querySelectorAll("#mind-files [data-tree]").forEach(function (button) {
+            button.classList.toggle("button-primary", button.dataset.tree === tree);
+        });
+        status.textContent = "Loading " + tree + "…";
+        list.innerHTML = "";
+        root.textContent = "";
+        let payload;
+        try {
+            payload = await h.requestJson(filesBase(tree));
+        } catch (error) {
+            // Unreachable, refused, or a Mind without this API each say a
+            // different thing. None of them may read as "there is nothing here".
+            if (ticket !== filesRequest) return;
+            status.textContent = "Cannot read this Mind's " + tree + ": " + error.message;
+            return;
+        }
+        if (ticket !== filesRequest) return;
+        root.textContent = payload.root || "";
+        if (payload.exists === false) {
+            status.textContent = "This Mind has no " + tree + " directory at " + (payload.root || "that path") + ".";
+            return;
+        }
+        // Nothing is dropped quietly: a browser that hid things without
+        // saying so would be a browser nobody could trust about absence.
+        // These notes are composed before the empty check, or a directory
+        // holding nothing but a virtualenv would read as simply empty.
+        const rows = payload.files || [];
+        const notes = [];
+        if ((payload.omitted || []).length) notes.push("Not listed (installed dependencies, not the skill): " + payload.omitted.join(", ") + ".");
+        if ((payload.outside || []).length) notes.push("Links pointing outside this directory, which are not followed: " + payload.outside.join(", ") + ".");
+        if (payload.truncated) notes.push("This directory holds more files than the browser will list.");
+        if (!rows.length) notes.unshift("No editable files here.");
+        status.textContent = notes.join(" ");
+        if (!rows.length) return;
+        list.innerHTML = rows.map(function (row) {
+            return '<option value="' + h.escapeHtml(row.path) + '"' + (row.editable ? "" : " data-locked=\"1\"") + ">" + h.escapeHtml(row.path) + (row.editable ? "" : " — not editable here") + "</option>";
+        }).join("");
+    }
+
+    async function openFileInEditor(path) {
+        const ticket = ++filesRequest;
+        const form = document.getElementById("mind-files-form");
+        const status = document.getElementById("mind-files-save-status");
+        const area = document.getElementById("mind-files-text");
+        document.getElementById("mind-files-label").textContent = path;
+        status.textContent = "Loading…";
+        form.hidden = false;
+        try {
+            const payload = await h.requestJson(filesBase(filesTree) + "/content?path=" + encodeURIComponent(path));
+            if (ticket !== filesRequest) return;
+            if (!payload.editable) {
+                openFile = null;
+                area.value = "";
+                area.disabled = true;
+                document.getElementById("mind-files-save").disabled = true;
+                status.textContent = "Not editable here: " + (payload.reason || "this is not a text file") + ".";
+                return;
+            }
+            area.disabled = false;
+            document.getElementById("mind-files-save").disabled = false;
+            // Empty is a state, not a failure — a zero-byte file loads fine.
+            area.value = payload.text === null || payload.text === undefined ? "" : payload.text;
+            // `text` is kept so an unsaved edit can be recognised as one.
+            openFile = {path: path, revision: payload.revision, text: area.value};
+            status.textContent = "";
+        } catch (error) {
+            if (ticket !== filesRequest) return;
+            openFile = null;
+            status.textContent = error.message;
+        }
+    }
+
 
     // The soul is read from the graph rather than from the Mind: a Mind whose
     // soul is wrong is exactly the Mind you may have stopped, and routing the

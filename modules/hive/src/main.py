@@ -67,6 +67,7 @@ from configuration_data import (
 from graph_data import get_graph_data
 import mind_runtime
 import mind_soul
+import mind_files
 import mind_skills
 from hive_logging import configure_logging, install_fastapi_logging, log_event
 from credentials_data import list_credentials, rotate_credential, set_github_pat
@@ -2036,6 +2037,71 @@ async def api_mind_skill_remove(
     result = await mind_skills.remove(await _mind_gateway_url(name), skill)
     log_event(
         log, "mind.skill.removed", **_actor_fields(user), mind_name=name, skill=skill
+    )
+    return result
+
+
+@app.get("/api/minds/{name}/files/{tree}")
+async def api_mind_files(name: str, tree: str, user: dict = Depends(require_auth)):
+    """Every file under one of a Mind's two editable trees."""
+    del user
+    return await mind_files.fetch_tree(await _mind_gateway_url(name), tree)
+
+
+@app.get("/api/minds/{name}/files/{tree}/content")
+async def api_mind_file_content(
+    name: str, tree: str, path: str = "", user: dict = Depends(require_auth)
+):
+    """One file's text, or the Mind's reason it cannot be shown as text."""
+    del user
+    return await mind_files.fetch_file(await _mind_gateway_url(name), tree, path)
+
+
+@app.put("/api/minds/{name}/files/{tree}/content")
+async def api_mind_file_save(
+    name: str, tree: str, body: dict, user: dict = Depends(require_auth)
+):
+    """Save one file back to the Mind, in place.
+
+    `revision` is what the read handed back; the Mind refuses with 409 if it
+    no longer describes the file, which is what stops a stale tab from
+    silently undoing whatever changed it.
+    """
+    # Coerced rather than validated, `text` would turn a missing field, a
+    # null, or a dict into `""` or a Python repr — and the Mind's own
+    # "text required" guard would never be reached. This route writes
+    # executables that run every turn; truncating one to nothing on a
+    # 200 OK is not an acceptable reading of a malformed body.
+    path = body.get("path")
+    text = body.get("text")
+    revision = body.get("revision")
+    if not isinstance(path, str) or not path:
+        raise HTTPException(status_code=400, detail="path required")
+    if not isinstance(text, str):
+        raise HTTPException(status_code=400, detail="text required")
+    # Required, not optional: a staleness check the caller may omit is one
+    # a refactored fetch will omit, and then a save silently overwrites
+    # whatever landed since the file was read.
+    if not isinstance(revision, str) or not revision:
+        raise HTTPException(
+            status_code=400,
+            detail="revision required — reopen the file and save again",
+        )
+    result = await mind_files.save_file(
+        await _mind_gateway_url(name), tree, path, text, revision
+    )
+    log_event(
+        log,
+        "mind.file.saved",
+        **_actor_fields(user),
+        mind_name=name,
+        tree=tree,
+        path=path,
+        # The bytes, not just the name: this writes hooks that run every
+        # turn as the Mind's own user, and "a file changed" with no way to
+        # tell which change is not an audit trail.
+        size=result.get("size"),
+        revision=result.get("revision"),
     )
     return result
 
