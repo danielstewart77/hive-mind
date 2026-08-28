@@ -66,7 +66,13 @@ def test_run_writes_curator_state(tmp_path):
 def test_cli_runs_and_emits_json(tmp_path, capsys):
     cur = _curator()
     cfg = tmp_path / "cfg"
-    _seed_skill(cfg, "rusty", last_used_at=NOW - timedelta(days=31))
+    # Seeded against the real clock, not the frozen NOW: this test drives
+    # main(), which reads the wall clock, so a fixture pinned to NOW drifts
+    # further from it every day until the skill crosses the 90-day archive
+    # threshold and is archived instead of staled. Every other test here
+    # passes now=NOW explicitly and is unaffected.
+    seeded = datetime.now(timezone.utc) - timedelta(days=31)
+    _seed_skill(cfg, "rusty", last_used_at=seeded)
     rc = cur.main(["--config-dir", str(cfg), "--harness", "codex_cli"])
     assert rc == 0
     out = capsys.readouterr().out
