@@ -85,7 +85,13 @@ def test_unchanged_run_sends_no_notification(tmp_path, monkeypatch):
 def test_cli_notify_flag_is_accepted(tmp_path, monkeypatch, capsys):
     cur = _curator()
     cfg = tmp_path / "cfg"
-    _seed_skill(cfg, "rusty", last_used_at=NOW - timedelta(days=31))
+    # Seeded against the real clock, not the frozen NOW: this test drives
+    # main(), which reads the wall clock, so a fixture pinned to NOW drifts
+    # further from it every day until the skill crosses the 90-day archive
+    # threshold and is archived instead of staled. Every other test here
+    # passes now=NOW explicitly and is unaffected.
+    seeded = datetime.now(timezone.utc) - timedelta(days=31)
+    _seed_skill(cfg, "rusty", last_used_at=seeded)
     monkeypatch.setenv("HERMES_NOTIFY_TEST", "1")
     rc = cur.main(["--config-dir", str(cfg), "--notify"])
     assert rc == 0
