@@ -164,21 +164,19 @@ docs/financial/
 # Our minds are our own. The harness code they run is shared and tracked
 # (minds/harness/ + the minds/*.py support modules); each mind folder is
 # per-deployment configuration and stays out of the repo.
-minds/*
-!minds/.gitkeep
-!minds/__init__.py
-!minds/models_api.py
-!minds/proactive.py
-!minds/pty_attach.py
-!minds/pty_notice.py
-!minds/runtime_api.py
-!minds/files_api.py
-!minds/skills_api.py
+# Only directories. A mind's identity is a directory (minds/<name>/), and
+# that is where every credential lives — .claude/, .codex/, .env — so
+# ignoring directories ignores all of them by construction. The shared
+# harness modules are loose files at this level, and are tracked by
+# default. The old form was the inverse: deny everything, then re-admit
+# each shared module by name. A module added without its `!` line was
+# invisible to git, so the wiring that imported it committed and the module
+# did not, and every containerised mind failed to start on its next restart
+# from a PR whose tests all passed. That near-miss is what this replaces.
+minds/*/
 !minds/harness/
-!minds/harness/**
-minds/harness/__pycache__/
 !minds/example/
-!minds/example/**
+minds/harness/__pycache__/
 
 # Our art is our own
 img/*
