@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import re
+import secrets
 import sqlite3
 import time
 import urllib.error
@@ -470,8 +471,40 @@ def _labels_db() -> sqlite3.Connection:
 _LABEL_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{3,8}$")
 
 
+def require_auth_or_label_writer(request: Request) -> dict:
+    """A logged-in person, or whoever holds the label token.
+
+    Labels are the operator's, and the mind edits them on their behalf
+    when a rename arrives over Telegram. It has no browser, so it cannot
+    hold a session cookie — and minting it one would mean issuing a login
+    that never expires and belongs to nobody.
+
+    **Deliberately not ``COMMS_BEARER_TOKEN``.** That secret opens every
+    route on the mind, the one that types into a live pane included, and
+    a pane runs the harness with permissions skipped. Guarding the
+    smallest capability in the system with the largest key in it is
+    backwards: this token renames a conversation and does nothing else,
+    so a copy that escapes — into a log, a screenshot, a transcript — is
+    worth exactly one renamed conversation.
+
+    Unset means no bearer is accepted at all, rather than an empty string
+    matching an absent header.
+
+    Compared in constant time: a token checked with ``==`` leaks its own
+    length and prefix to anything that can time the answer.
+    """
+    token = os.getenv("TERMINAL_LABELS_TOKEN", "")
+    header = request.headers.get("authorization", "")
+    if token and header.startswith("Bearer "):
+        if secrets.compare_digest(header[len("Bearer ") :].strip(), token):
+            return {"username": "label-writer", "service": True}
+    # Not a label write, or not a token we know. Fall through to the
+    # cookie so a person is answered exactly as before, 401 included.
+    return require_auth(request)
+
+
 @app.get("/api/terminal/labels")
-async def api_terminal_labels(user: dict = Depends(require_auth)):
+async def api_terminal_labels(user: dict = Depends(require_auth_or_label_writer)):
     """Every label, for the tab that asked. Explicitly uncacheable.
 
     Without a directive a browser may cache a 200 GET heuristically, and a
@@ -494,7 +527,7 @@ async def api_terminal_labels(user: dict = Depends(require_auth)):
 
 @app.put("/api/terminal/labels/{session_id}")
 async def api_terminal_label_put(
-    session_id: str, request: Request, user: dict = Depends(require_auth)
+    session_id: str, request: Request, user: dict = Depends(require_auth_or_label_writer)
 ):
     del user
     body = await request.json()
