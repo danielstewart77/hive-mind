@@ -57,6 +57,14 @@ $env:GATEWAY_API_URL = "http://127.0.0.1:$mindPort"
 # the mind.
 $env:COMMS_BEARER_TOKEN = $mind['MIND_API_TOKEN']
 
+# What the mind proves itself with when it renames a conversation from
+# Telegram, and deliberately a *different* secret from the one above.
+# That one opens every route on the mind, including the attach that types
+# into a live pane; a rename should not be able to reach any of it. This
+# one writes label text and nothing else, so a copy that escapes is worth
+# exactly one renamed conversation.
+$env:TERMINAL_LABELS_TOKEN = $mind['TERMINAL_LABELS_TOKEN']
+
 $env:TERMINAL_HOST = if ($env:TERMINAL_HOST) { $env:TERMINAL_HOST } else { '127.0.0.1' }
 $env:TERMINAL_PORT = if ($env:TERMINAL_PORT) { $env:TERMINAL_PORT } else { '8432' }
 
