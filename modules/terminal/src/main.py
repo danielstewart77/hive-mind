@@ -393,7 +393,13 @@ async def api_terminal_sessions(user: dict = Depends(require_auth)):
             "rotated_from": s.get("rotated_from") or "",
         })
     rows.sort(key=lambda r: -float(r.get("last_active") or 0))
-    return rows
+    # Explicitly uncacheable, for the reason the labels route gives: with
+    # no directive a browser may cache a 200 GET heuristically, and a
+    # stale read of *this* list is worse than a stale label. It is what
+    # the tile re-reads the instant a session is suspended or ended, so a
+    # cached copy shows the session exactly where it was — the action
+    # having plainly succeeded, and nothing having visibly happened.
+    return JSONResponse(rows, headers={"Cache-Control": "no-store"})
 
 
 @app.post("/api/terminal/sessions")
@@ -443,10 +449,14 @@ async def _create_gateway_session(mind_id: str) -> dict:
         raise HTTPException(status_code=502, detail=f"Gateway unavailable: {exc}") from exc
 
 
+# Same reasoning as the session list: it changes when a mind comes or
+# goes, and a cached copy offers a mind that is not there.
 @app.get("/api/minds")
 async def api_minds(user: dict = Depends(require_auth)):
     del user
-    return await _gateway_json("/broker/minds")
+    return JSONResponse(
+        await _gateway_json("/broker/minds"), headers={"Cache-Control": "no-store"}
+    )
 
 
 def _labels_db() -> sqlite3.Connection:
