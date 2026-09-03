@@ -742,6 +742,46 @@ async def api_terminal_session_resume(
     )
 
 
+@app.delete("/api/terminal/sessions/{session_id}")
+async def api_terminal_session_end(
+    session_id: str, user: dict = Depends(require_auth)
+):
+    """End a conversation for good, and take its label with it.
+
+    Distinct from suspend, which puts a conversation down and keeps it,
+    and from the panel's close button, which only removes a tile from
+    this grid. This is the one that stops the harness -- a harness left
+    running has permission checks disabled and goes on editing files
+    after the conversation is gone from every list.
+
+    The label is dropped here rather than left behind: it is keyed by
+    session id, and a row nobody can reach again is a name nobody can
+    delete again.
+    """
+    del user
+
+    def _do_delete():
+        url = f"{_gateway_base_url().rstrip('/')}/sessions/{session_id}"
+        req = urllib.request.Request(url, headers=_gateway_headers(), method="DELETE")
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode("utf-8") or "{}")
+
+    try:
+        result = await asyncio.to_thread(_do_delete)
+    except urllib.error.HTTPError as exc:
+        raise HTTPException(status_code=exc.code, detail="Failed to end session") from exc
+    except OSError as exc:
+        raise HTTPException(status_code=502, detail=f"Gateway unavailable: {exc}") from exc
+
+    conn = _labels_db()
+    try:
+        conn.execute("DELETE FROM terminal_labels WHERE session_id = ?", (session_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    return result
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}

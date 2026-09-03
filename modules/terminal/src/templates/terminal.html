@@ -288,6 +288,8 @@
                 '<button class="term-panel-speaker term-action-btn" type="button" title="toggle voice playback" aria-pressed="false">speaker off</button>' +
                 '<button class="term-panel-suspend term-action-btn term-action-btn-danger" type="button" ' +
                     'title="suspend this session and keep its conversation">suspend</button>' +
+                '<button class="term-panel-end term-action-btn term-action-btn-danger" type="button" ' +
+                    'title="end this conversation for good">end</button>' +
                 '<button class="term-panel-close term-action-btn" type="button" title="remove from grid" aria-label="remove from grid">✕</button>' +
             '</header>' +
             '<div class="term-rename-pop" hidden>' +
@@ -342,6 +344,7 @@
         const micBtn = el.querySelector(".term-panel-mic");
         const speakerBtn = el.querySelector(".term-panel-speaker");
         const suspendBtn = el.querySelector(".term-panel-suspend");
+        const endBtn = el.querySelector(".term-panel-end");
         const closeBtn = el.querySelector(".term-panel-close");
         const backBtn = el.querySelector(".term-panel-back");
         const renameBtn = el.querySelector(".term-panel-rename");
@@ -1663,6 +1666,36 @@
         }
 
         // ── suspend / close / back ────────────────────────────────
+        endBtn.addEventListener("click", async function () {
+            if (!sessionId) return;
+            // Blunter than suspend's, because this one does not come
+            // back: the harness is stopped, the row leaves both tabs,
+            // and the name goes with it.
+            if (!confirm("End this conversation for good? This cannot be undone.")) return;
+            endBtn.disabled = true;
+            endBtn.textContent = "ending…";
+            try {
+                const resp = await fetch("/api/terminal/sessions/" + encodeURIComponent(sessionId), {
+                    method: "DELETE", credentials: "same-origin",
+                });
+                if (!resp.ok) {
+                    let msg = "HTTP " + resp.status;
+                    try { const d = await resp.json(); msg = d.detail || d.error || msg; } catch (e) {}
+                    setAttachState("end failed: " + msg);
+                    endBtn.disabled = false;
+                    endBtn.textContent = "end";
+                    return;
+                }
+                deliberateClose = true;
+                closePanel(panel);
+                await refreshSessions();
+            } catch (err) {
+                setAttachState("end error: " + err.message);
+                endBtn.disabled = false;
+                endBtn.textContent = "end";
+            }
+        });
+
         suspendBtn.addEventListener("click", async function () {
             if (!sessionId) return;
             if (!confirm("Suspend this session? You can resume it later.")) return;
