@@ -79,6 +79,19 @@ $env:HIVE_SEED_PASSWORD = $mind['HIVE_SEED_PASSWORD']
 # Host-only cookie: there is no sibling site to share it with here.
 $env:HIVE_COOKIE_DOMAIN = ''
 
-Write-Host "terminal: http://$($env:TERMINAL_HOST):$($env:TERMINAL_PORT) -> mind at $($env:GATEWAY_API_URL)"
-& $python (Join-Path $PSScriptRoot 'src\main.py')
+# Every request to a file as well as the console. Without this the
+# service is unobservable: a button that "does nothing" cannot be told
+# apart from a request that never arrived, and the only way to find out
+# is to guess.
+$logDir = Join-Path $env:USERPROFILE '.mini-boss'
+if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Force -Path $logDir | Out-Null }
+$logPath = Join-Path $logDir 'terminal.log'
+if ((Test-Path $logPath) -and ((Get-Item $logPath).Length -gt 8MB)) {
+    Move-Item -LiteralPath $logPath -Destination "$logPath.1" -Force
+}
+"=== $(Get-Date -Format o) starting terminal ===" | Add-Content -LiteralPath $logPath
+
+Write-Host "terminal: http://$($env:TERMINAL_HOST):$($env:TERMINAL_PORT) -> mind at $($env:GATEWAY_API_URL) log: $logPath"
+& $python (Join-Path $PSScriptRoot 'src\main.py') 2>&1 |
+    Tee-Object -FilePath $logPath -Append
 exit $LASTEXITCODE
