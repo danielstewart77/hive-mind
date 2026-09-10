@@ -26,6 +26,7 @@ from comms.auth import require_admin_bearer, require_bearer
 from comms.broker import check_secret_scope, get_secret_scopes, grant_secret_scope, revoke_secret_scope
 from comms.network_identity import resolve_container_name
 from comms.secrets import get_credential
+import comms.sessions as sessions
 from comms.sessions import SessionManager
 from hive_logging import configure_logging, install_fastapi_logging, log_event
 
@@ -422,6 +423,8 @@ async def suspend_session(session_id: str):
         return await session_mgr.suspend_session(session_id)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
+    except sessions.MindCallFailed as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
 
 
 @app.post("/sessions/{session_id}/resume")
@@ -577,7 +580,13 @@ async def list_models(mind_id: str):
     A mind is required: two minds hold different proxy keys, so there is no
     such thing as the hive's model list.
     """
-    return {"models": await session_mgr.mind_models(mind_id)}
+    try:
+        return {"models": await session_mgr.mind_models(mind_id)}
+    except sessions.MindCallFailed as exc:
+        # 502, not `{"models": []}`. The picker distinguishes a stale client
+        # from an empty catalog, and an empty list here would mean "this mind
+        # offers nothing" when the mind in fact said no.
+        return JSONResponse({"error": str(exc)}, status_code=502)
 
 
 # ---------------------------------------------------------------------------
@@ -812,12 +821,17 @@ async def ws_attach(ws: WebSocket, session_id: str):
         # That is permanent until the mind is rebuilt, and a client that
         # cannot tell it apart from a dropped connection will reconnect
         # forever — so it gets its own close code and no retry.
-        if exc.status == 401:
-            # Reachable, has the route, and rejected the credential. Telling
-            # the tile "no terminal attach route" here would send Daniel
-            # rebuilding an image over a token the broker never learned.
+        if exc.status in (401, 503):
+            # Reachable, has the route, and would not serve it. 401 is the
+            # wrong credential; 503 is a mind that cannot read its own and is
+            # refusing everything rather than falling open. Both are a
+            # credential problem, and telling the tile "no terminal attach
+            # route" for either would send the operator rebuilding an image.
+            # Every HTTP call site tests the same pair; this one is the same
+            # question asked over a handshake.
             log.warning(
-                "attach-pty proxy to %s refused the gateway's credential", attach_url
+                "attach-pty proxy to %s refused the gateway's credential (HTTP %s)",
+                attach_url, exc.status,
             )
             await ws.close(code=4416, reason="mind refused the gateway's credential")
             return
@@ -856,6 +870,13 @@ async def route_command(body: CommandRequest):
         return await _handle_command(cmd, parts, body)
     except ValueError as e:
         return {"error": str(e)}
+    except sessions.MindCallFailed as exc:
+        # Deliberately raised, and deliberately specific. Telegram is the
+        # primary conversational surface, and "Internal server error" is the
+        # least useful sentence available for the one failure this whole path
+        # exists to make legible.
+        log.error("Command %s could not reach the mind: %s", cmd, exc)
+        return {"error": str(exc)}
     except Exception:
         log.exception("Error handling command %s", cmd)
         return {"error": "Internal server error"}

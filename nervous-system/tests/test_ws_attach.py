@@ -306,15 +306,16 @@ class TestWsAttach:
             "Authorization": "Bearer ada-session-token"  # secret-guard: allow
         }
 
-    def test_a_refused_credential_does_not_look_like_a_missing_route(
-        self, app_client, monkeypatch
-    ):
-        """4415 sends the operator rebuilding an image. A mind that has the
-        route and rejected the token gets its own code."""
+    @pytest.mark.parametrize("status", [401, 503])
+    def test_either_refusal_status_closes_4416(self, app_client, monkeypatch, status):
+        """503 is the whole fail-closed state: a mind that cannot read its own
+        credential refuses everything rather than serving open. Every HTTP call
+        site tests the pair; this is the same question over a handshake, and
+        4415 here sends the operator rebuilding an image."""
         from starlette.websockets import WebSocketDisconnect
 
         client, server_module = app_client
-        _run(_seed_session_and_mind(server_module, session_id="sess-401"))
+        _run(_seed_session_and_mind(server_module, session_id=f"sess-{status}"))
 
         _FakeHttpSession.ws_to_return = None
         _FakeHttpSession.raise_on_connect = aiohttp.WSServerHandshakeError(
@@ -324,13 +325,13 @@ class TestWsAttach:
                 real_url="ws://mind.test:8420/attach-pty",
             ),
             (),
-            status=401,
-            message="unauthorized",
+            status=status,
+            message="refused",
         )
         monkeypatch.setattr(server_module.aiohttp, "ClientSession", _FakeHttpSession)
 
         with pytest.raises(WebSocketDisconnect) as excinfo:
-            with client.websocket_connect("/sessions/sess-401/attach") as ws:
+            with client.websocket_connect(f"/sessions/sess-{status}/attach") as ws:
                 ws.receive_bytes()
 
         assert excinfo.value.code == 4416

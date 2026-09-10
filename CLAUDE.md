@@ -220,12 +220,19 @@ with no risk to anything — a mind that does not check one ignores it. A mind
 cannot start requiring one before comms sends it. So comms first, then minds
 one at a time; deploying the code to a mind is the act that flips it.
 
-**Caveat, stated rather than papered over:** the five container minds all
-bind-mount the same tree read-write, so each can read `minds/<other>/session_token`.
-Per-mind isolation here is real between *hosts* — the kid boxes, Hex, Dragoman,
-this workstation — and not between containers sharing one mount, which already
-share far more than a token. Injecting `MIND_SESSION_TOKEN` per container from
-its own env file is the fix when that matters.
+**Two caveats, stated rather than papered over.** Per-mind isolation is real
+between *hosts* — the kid boxes, Hex, Dragoman, this workstation — and weaker
+than the phrase suggests in two places. The five container minds all
+bind-mount the same tree read-write, so each can read
+`minds/<other>/session_token`; injecting `MIND_SESSION_TOKEN` per container
+from its own env file fixes that. And the guard accepts the admin token as
+well as the session token, deliberately, so the console and the operator can
+reach a wedged pane — but on this hive that resolves to
+`COMMS_ADMIN_BEARER_TOKEN`, which every mind already holds. So a compromised
+mind can still reach another's session surface with a credential it had
+before; what it cannot do any more is reach one with nothing at all. A
+distinct `MIND_ADMIN_TOKEN` per mind closes that, and is the next thing worth
+doing if the boys' boxes stop being trusted.
 
 ### Which model a session runs on
 

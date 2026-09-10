@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 import pytest
 
+from comms import broker
 from comms.sessions import SessionManager
 
 
@@ -82,7 +83,15 @@ def _spawned_payload(owner_type: str | None, harness_sid: str | None = None) -> 
     async def scenario() -> dict:
         with tempfile.TemporaryDirectory() as tmp:
             mgr = await _make_manager(tmp)
-            mgr.broker_db = object()  # get_mind_by_id is patched; never touched
+            # get_mind_by_id is patched, but the spawn also reads the mind's
+            # session credential from the broker — and a read that fails now
+            # raises rather than quietly sending an uncredentialed call.
+            mgr.broker_db = await broker.init_db(os.path.join(tmp, "broker.db"))
+            await broker.register_mind(
+                mgr.broker_db, mind_id="ada", name="ada",
+                gateway_url="http://mind.test:8420", model="opus",
+                harness="claude_cli", session_token="ada-token",  # secret-guard: allow
+            )
             payloads: list[dict] = []
             try:
                 with patch("aiohttp.ClientSession", _capturing_session_class(payloads)), \
@@ -92,6 +101,7 @@ def _spawned_payload(owner_type: str | None, harness_sid: str | None = None) -> 
                         owner_type=owner_type, owner_ref="123", harness_sid=harness_sid,
                     )
             finally:
+                await mgr.broker_db.close()
                 await mgr.shutdown()
             assert len(payloads) == 1
             return payloads[0]

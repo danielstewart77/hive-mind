@@ -31,7 +31,16 @@ _TRANSCRIPT_DIR = Path.home() / ".claude" / "projects" / "-usr-src-app"
 log = logging.getLogger("hive-mind.sessions")
 
 
-class MindRefusedCredential(RuntimeError):
+class MindCallFailed(RuntimeError):
+    """A call to a mind did not complete, so its effect did not happen.
+
+    Distinct from a mind that answered. `release_on_mind` returning False means
+    there was nothing to release; this means nobody knows. A caller that reads
+    the two alike retargets ownership over a harness that may still be running.
+    """
+
+
+class MindRefusedCredential(MindCallFailed):
     """A mind answered, and rejected the credential this gateway presented.
 
     Its own failure, never folded into one of the shapes that mean something
@@ -631,11 +640,17 @@ class SessionManager:
                         )
                     body = await resp.json()
                     released = bool(body.get("released"))
-        except MindRefusedCredential:
+        except MindCallFailed:
             raise
-        except Exception:
+        except Exception as exc:
+            # Not False. False is "the mind has nothing to release", which a
+            # caller acts on by proceeding. This is "the release did not
+            # happen and the harness may still be running", which has the same
+            # two-processes-on-one-transcript ending as a refusal.
             log.exception("Failed to release %s for session %s", surface, session_id)
-            return False
+            raise MindCallFailed(
+                f"could not release {surface} for session {session_id}: {exc}"
+            ) from exc
         if released and surface == "terminal":
             await self._downgrade_staged_rotation(session_id)
         return released
@@ -974,14 +989,18 @@ class SessionManager:
                 owner_type=active.get("owner_type"),
                 owner_ref=active.get("owner_ref"),
             )
-        except MindRefusedCredential as exc:
+        except MindCallFailed as exc:
             # Staged either way, so the next typed turn retries rather than
             # paying another six minutes for a seed the row already holds.
             # What changes is the account of why: the pane is fine.
             log.error("fire-rotation: %s; staying staged", exc)
+            refused = isinstance(exc, MindRefusedCredential)
             return {
                 "ok": False,
-                "error": "mind refused the gateway's credential",
+                "error": (
+                    "mind refused the gateway's credential" if refused
+                    else "could not reach the mind to rotate its terminal"
+                ),
                 "session_id": session_id,
             }
         if not rotated:
@@ -1210,7 +1229,7 @@ class SessionManager:
             # Better a `/switch` that fails out loud.
             try:
                 await self.release_on_mind(session_id, "terminal")
-            except MindRefusedCredential as exc:
+            except MindCallFailed as exc:
                 log.error("Refusing to adopt session %s: %s", session_id, exc)
                 raise
             await self._db.execute(
@@ -1769,8 +1788,19 @@ class SessionManager:
 
         if session["status"] != "suspended":
             await self.kill_rc_process(session_id)
-            await self.release_on_mind(session_id, "terminal")
-            await self.release_on_mind(session_id, "stream")
+            for surface in ("terminal", "stream"):
+                # Suspending is not adopting: nothing is about to start a
+                # second harness on this conversation, and a release that
+                # could not be delivered must not leave the row in neither
+                # state. Both surfaces get asked, the row reaches 'suspended',
+                # and the failure is named.
+                try:
+                    await self.release_on_mind(session_id, surface)
+                except MindCallFailed as exc:
+                    log.error(
+                        "Suspending session %s with %s possibly still running: %s",
+                        session_id, surface, exc,
+                    )
         await self._db.execute(
             "UPDATE sessions SET status = 'suspended', rotation_armed = 0 WHERE id = ?",
             (session_id,),
@@ -1913,9 +1943,15 @@ class SessionManager:
             return {}
         try:
             token = await broker.get_mind_session_token(self.broker_db, mind_id)
-        except Exception:
-            log.warning("Could not read session token for mind %s", mind_id)
-            return {}
+        except Exception as exc:
+            # Not `{}`. An uncredentialed call gets a 401 whose handler tells
+            # the operator to re-register the mind — a remedy aimed at the
+            # mind for a fault entirely inside this process.
+            log.exception("Could not read session token for mind %s", mind_id)
+            raise MindCallFailed(
+                f"could not read mind {mind_id}'s credential from the broker: "
+                f"{exc}"
+            ) from exc
         return {"Authorization": f"Bearer {token}"} if token else {}
 
     async def _mind_auth_headers_for_session(
@@ -2088,11 +2124,14 @@ class SessionManager:
                         )
                         return False
                     data = await resp.json()
-        except MindRefusedCredential:
+        except MindCallFailed:
             raise
-        except Exception:
+        except Exception as exc:
             log.exception("rotate-pty on %s for session %s failed", mind_url, session_id)
-            return False
+            raise MindCallFailed(
+                f"rotate-pty on {mind_url} for session {session_id} did not "
+                f"complete: {exc}"
+            ) from exc
         return bool(data.get("rotated"))
 
     async def mind_models(self, mind_id: str) -> list[dict]:
@@ -2123,16 +2162,20 @@ class SessionManager:
                     timeout=aiohttp.ClientTimeout(total=10),
                 ) as resp:
                     if resp.status in (401, 503):
-                        log.error(
-                            "Mind %s refused the gateway's admin credential on "
-                            "/models (HTTP %s) — the empty catalog below is a "
-                            "refusal, not a mind that offers nothing",
-                            mind_id, resp.status,
+                        # Raised, not returned as []. An empty list reaches the
+                        # console as "this mind offers nothing" and makes
+                        # `mind_offers_model` refuse a model change with the
+                        # wrong reason entirely.
+                        await resp.read()
+                        raise MindRefusedCredential(
+                            f"mind {mind_id} refused the gateway's admin "
+                            f"credential on /models (HTTP {resp.status})"
                         )
-                        return []
                     if resp.status != 200:
                         return []
                     body = await resp.json()
+        except MindCallFailed:
+            raise
         except Exception:
             log.warning("Could not read models from mind %s", mind_id)
             return []
@@ -2214,7 +2257,14 @@ class SessionManager:
                                   status=resp.status)
                         return
         except Exception:
+            # The row closes regardless — the caller is past the point of
+            # keeping it — but the harness and its tmux session are still
+            # there. Falling through to "Killed session" is how that leak
+            # accumulates with nothing in the log disagreeing.
             log.exception("Failed to kill session %s on %s", session_id, mind_url)
+            log_event(log, "session.kill.failed", session_id=session_id,
+                      mind_id=mind_id, mind_url=mind_url)
+            return
         log.info("Killed session %s (mind=%s, url=%s)", session_id, mind_id, mind_url)
         log_event(log, "session.closed", session_id=session_id, mind_id=mind_id,
                   mind_url=mind_url)

@@ -17,7 +17,7 @@ import aiohttp
 import pytest
 
 from comms import broker
-from comms.sessions import MindRefusedCredential, SessionManager
+from comms.sessions import MindCallFailed, MindRefusedCredential, SessionManager
 
 MIND_A = "11111111-1111-4111-8111-111111111111"
 MIND_B = "22222222-2222-4222-8222-222222222222"
@@ -533,3 +533,120 @@ def test_a_503_from_a_mind_that_cannot_read_its_token_is_also_a_refusal() -> Non
         return False
 
     assert _with_refusing_mind(body, status=503) is True
+
+
+# ---------------------------------------------------------------------------
+# R11's other half — "or cannot reach it" is its own answer too
+# ---------------------------------------------------------------------------
+def _unreachable_session():
+    class _Unreachable(_RecordingSession):
+        def _record(self, method, url, **kwargs):
+            raise aiohttp.ClientConnectorError(
+                aiohttp.client_reqrep.ConnectionKey(
+                    "alpha", 8420, False, True, None, None, None
+                ),
+                OSError("no route"),
+            )
+
+    return _Unreachable
+
+
+def _with_unreachable_mind(body):
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            try:
+                sid = await _seed_session(mgr)
+                with patch("aiohttp.ClientSession", _unreachable_session()):
+                    return await body(mgr, sid)
+            finally:
+                await mgr.broker_db.close()
+                await mgr.shutdown()
+
+    return _run(scenario())
+
+
+def test_an_unreachable_release_is_not_nothing_to_release() -> None:
+    """False means the harness is already gone. Unreachable means nobody
+    knows — and the adoption path acts on False by proceeding."""
+    async def body(mgr, sid):
+        with pytest.raises(MindCallFailed):
+            await mgr.release_on_mind(sid, "terminal")
+        return True
+
+    assert _with_unreachable_mind(body) is True
+
+
+def test_an_unreachable_mind_stops_an_adoption_too() -> None:
+    async def body(mgr, sid):
+        with pytest.raises(MindCallFailed):
+            await mgr.activate_session(
+                sid, "telegram", "555",
+                owner_type="telegram", owner_ref="555",
+            )
+        row = await mgr._get_row(sid)
+        return row["owner_type"], row["owner_ref"]
+
+    assert _with_unreachable_mind(body) == ("telegram", "123")
+
+
+def test_suspending_still_reaches_suspended_when_a_release_fails() -> None:
+    """Suspending is not adopting — nothing is about to start a second harness
+    — so a release that could not be delivered must not leave the row in
+    neither state."""
+    async def body(mgr, sid):
+        await mgr.suspend_session(sid)
+        row = await mgr._get_row(sid)
+        return row["status"]
+
+    assert _with_unreachable_mind(body) == "suspended"
+
+
+def test_an_unreachable_kill_is_not_logged_as_a_kill(caplog) -> None:
+    async def body(mgr, sid):
+        await mgr._kill_process(sid)
+        return True
+
+    with caplog.at_level("INFO"):
+        assert _with_unreachable_mind(body) is True
+    assert not any("Killed session" in r.getMessage() for r in caplog.records)
+
+
+def test_an_unreachable_rotation_does_not_report_an_absent_terminal() -> None:
+    async def body(mgr, sid):
+        with pytest.raises(MindCallFailed):
+            await mgr._rotate_pty_on_mind(
+                session_id=sid, new_claude_sid="conv-2", model="sonnet",
+                mind_id=MIND_A, system_prompt="carry forward",
+            )
+        return True
+
+    assert _with_unreachable_mind(body) is True
+
+
+def test_a_refused_models_listing_is_not_an_empty_catalog() -> None:
+    """An empty list reaches the console as "this mind offers nothing" and
+    makes a model change fail with the wrong reason entirely."""
+    async def body(mgr, sid):
+        with pytest.raises(MindRefusedCredential):
+            await mgr.mind_models(MIND_A)
+        return True
+
+    assert _with_refusing_mind(body) is True
+
+
+def test_a_broker_read_failure_is_this_gateway_s_fault_not_the_mind_s() -> None:
+    """An uncredentialed call gets a 401 whose handler tells the operator to
+    re-register the mind — a remedy aimed at the mind for a fault in here."""
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            try:
+                await mgr.broker_db.close()
+                with pytest.raises(MindCallFailed):
+                    await mgr.mind_auth_headers(MIND_A)
+                return True
+            finally:
+                await mgr.shutdown()
+
+    assert _run(scenario()) is True
