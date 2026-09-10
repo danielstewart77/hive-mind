@@ -890,7 +890,12 @@ def install_pty_attach(
                 await runtime_api.refuse_session_websocket(websocket, denied)
                 return
 
-        await websocket.accept()
+        # Echo the subprotocol back when one was offered. A browser that
+        # offers subprotocols and gets a response carrying none fails the
+        # handshake in both Chrome and Firefox — so without this, the one
+        # channel a direct browser attach has for its credential is unusable.
+        offered = runtime_api.offered_protocols(websocket)
+        await websocket.accept(subprotocol=offered[0] if offered else None)
 
         # Attaching means attaching. Without the session's conversation id
         # there is nothing to attach TO, and opening a terminal anyway is how

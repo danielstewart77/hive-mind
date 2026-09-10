@@ -14,9 +14,10 @@ import time
 from unittest.mock import patch
 
 import aiohttp
+import pytest
 
 from comms import broker
-from comms.sessions import SessionManager
+from comms.sessions import MindRefusedCredential, SessionManager
 
 MIND_A = "11111111-1111-4111-8111-111111111111"
 MIND_B = "22222222-2222-4222-8222-222222222222"
@@ -420,3 +421,115 @@ def test_an_unreachable_mind_is_not_reported_as_a_refusal() -> None:
     events = _run(scenario())
     text = " ".join(str(e.get("result", "")) for e in events)
     assert "credential" not in text
+
+
+# ---------------------------------------------------------------------------
+# R11 — a refusal is never folded into a shape that means something else
+# ---------------------------------------------------------------------------
+def _refusing(status: int = 401):
+    class _Refusing(_RecordingSession):
+        def _record(self, method, url, **kwargs):
+            type(self).calls.append({"method": method, "url": url,
+                                     "headers": kwargs.get("headers") or {}})
+            return _Response(status, '{"error": "unauthorized"}')
+
+    return _Refusing
+
+
+def _with_refusing_mind(body, status: int = 401):
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            try:
+                sid = await _seed_session(mgr)
+                _RecordingSession.calls = []
+                with patch("aiohttp.ClientSession", _refusing(status)):
+                    return await body(mgr, sid)
+            finally:
+                await mgr.broker_db.close()
+                await mgr.shutdown()
+
+    return _run(scenario())
+
+
+def test_a_refused_release_is_not_reported_as_nothing_to_release() -> None:
+    """False means the harness is already gone. A refusal means it is still
+    running, and a caller reading the two alike respawns beside it."""
+    async def body(mgr, sid):
+        try:
+            await mgr.release_on_mind(sid, "terminal")
+        except MindRefusedCredential as exc:
+            return str(exc)
+        return None
+
+    message = _with_refusing_mind(body)
+    assert message is not None, "the refusal was swallowed and returned as False"
+    assert "credential" in message
+
+
+def test_an_adoption_stops_rather_than_running_two_harnesses() -> None:
+    """One live harness process per conversation. Retargeting ownership over a
+    terminal that is still running is two processes on one transcript."""
+    async def body(mgr, sid):
+        with pytest.raises(MindRefusedCredential):
+            await mgr.activate_session(
+                sid, "telegram", "555",
+                owner_type="telegram", owner_ref="555",
+            )
+        row = await mgr._get_row(sid)
+        return row["owner_type"], row["owner_ref"]
+
+    owner_type, owner_ref = _with_refusing_mind(body)
+    assert (owner_type, owner_ref) == ("telegram", "123"), (
+        "ownership was retargeted over a terminal that was never released"
+    )
+
+
+def test_a_refused_interrupt_is_not_returned_as_the_interrupt_s_result() -> None:
+    """`{"error": "unauthorized"}` is a dict, so it used to pass the result
+    guard and report a still-running turn as interrupted."""
+    async def body(mgr, sid):
+        mgr._procs[sid] = {"_mind_url": "http://alpha:8420"}
+        with pytest.raises(MindRefusedCredential):
+            await mgr.interrupt_session(sid)
+        return True
+
+    assert _with_refusing_mind(body) is True
+
+
+def test_a_refused_kill_says_the_harness_is_still_running(caplog) -> None:
+    """The row closes either way, but claiming the kill landed is how a tmux
+    session and its context leak once per ended conversation."""
+    async def body(mgr, sid):
+        await mgr._kill_process(sid)
+        return True
+
+    with caplog.at_level("ERROR"):
+        assert _with_refusing_mind(body) is True
+    assert any("still" in r.message or "refused" in r.message for r in caplog.records)
+    assert not any("Killed session" in r.getMessage() for r in caplog.records)
+
+
+def test_a_refused_rotation_does_not_blame_the_pane() -> None:
+    async def body(mgr, sid):
+        with pytest.raises(MindRefusedCredential):
+            await mgr._rotate_pty_on_mind(
+                session_id=sid, new_claude_sid="conv-2", model="sonnet",
+                mind_id=MIND_A, system_prompt="carry forward",
+            )
+        return True
+
+    assert _with_refusing_mind(body) is True
+
+
+def test_a_503_from_a_mind_that_cannot_read_its_token_is_also_a_refusal() -> None:
+    """A mind that cannot establish its own credential answers 503, and that
+    is the same kind of no — the gateway must not read it as a dead mind."""
+    async def body(mgr, sid):
+        try:
+            await mgr.release_on_mind(sid, "terminal")
+        except MindRefusedCredential:
+            return True
+        return False
+
+    assert _with_refusing_mind(body, status=503) is True

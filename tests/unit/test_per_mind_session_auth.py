@@ -32,6 +32,9 @@ default_model: sonnet
 @pytest.fixture()
 def mind_dir(tmp_path):
     (tmp_path / "runtime.yaml").write_text(RUNTIME)
+    # The token is cached per process, so a test inheriting the previous
+    # test's value would never touch the file it means to be asserting on.
+    runtime_api._token_cache.clear()
     return tmp_path
 
 
@@ -73,9 +76,63 @@ class TestMintingTheToken:
         with patch.dict(os.environ, {"MIND_SESSION_TOKEN": "from-the-env"}):
             assert runtime_api.session_token(mind_dir) == "from-the-env"
 
-    def test_an_unwritable_directory_yields_no_token_rather_than_raising(self, tmp_path):
+    def test_the_token_is_read_once_per_process(self, mind_dir):
+        """The guard asks on every request; the file is read on the first."""
+        token = runtime_api.session_token(mind_dir)
+        (mind_dir / "session_token").unlink()
+        assert runtime_api.session_token(mind_dir) == token
+
+    def test_an_unwritable_directory_refuses_rather_than_serving_open(self, tmp_path):
         missing = tmp_path / "nowhere" / "deeper"
-        assert runtime_api.session_token(missing) == ""
+        with pytest.raises(runtime_api.SessionTokenUnavailable):
+            runtime_api.session_token(missing)
+
+    def test_an_unreadable_file_is_not_treated_as_an_absent_one(self, mind_dir):
+        """Folding the two together is how a mind serves every session route
+        open because a migration chowned its own directory."""
+        runtime_api.session_token(mind_dir)
+        (mind_dir / "session_token").chmod(0o000)
+        runtime_api._token_cache.clear()
+        try:
+            with pytest.raises(runtime_api.SessionTokenUnavailable):
+                runtime_api.session_token(mind_dir)
+        finally:
+            (mind_dir / "session_token").chmod(0o600)
+
+    def test_a_file_holding_non_utf8_bytes_is_refused_not_crashed_through(
+        self, mind_dir
+    ):
+        (mind_dir / "session_token").write_bytes(b"\xff\xfe not text")
+        runtime_api._token_cache.clear()
+        with pytest.raises(runtime_api.SessionTokenUnavailable):
+            runtime_api.session_token(mind_dir)
+
+    def test_an_empty_file_left_by_a_lost_race_is_refused_not_overwritten(
+        self, mind_dir, monkeypatch
+    ):
+        """`O_EXCL` creates the file before its winner writes into it. Minting
+        a second token here would clobber a credential another process is
+        already enforcing."""
+        monkeypatch.setattr(runtime_api, "_RACE_READS", 2)
+        monkeypatch.setattr(runtime_api, "_RACE_PAUSE_S", 0)
+        path = mind_dir / "session_token"
+        path.touch(mode=0o600)
+        with pytest.raises(runtime_api.SessionTokenUnavailable):
+            runtime_api.session_token(mind_dir)
+        assert path.read_text() == "", "the empty file was overwritten"
+
+    def test_a_token_written_mid_race_is_adopted(self, mind_dir, monkeypatch):
+        path = mind_dir / "session_token"
+        path.touch(mode=0o600)
+        reads = {"n": 0}
+
+        def _late_writer(_pause):
+            reads["n"] += 1
+            if reads["n"] == 2:
+                path.write_text("the-winner-s-token\n")
+
+        monkeypatch.setattr(runtime_api.time, "sleep", _late_writer)
+        assert runtime_api.session_token(mind_dir) == "the-winner-s-token"
 
 
 class TestTheTokenIsNotServed:
@@ -132,12 +189,33 @@ class TestTheSessionGuard:
         headers = {"Sec-WebSocket-Protocol": f"bearer.{token}"}
         assert runtime_api.authorize_session(_request(headers), mind_dir) is None
 
-    def test_a_mind_holding_no_token_serves_as_it_always_did(self, tmp_path):
-        """The rollout: a mind that cannot write one is reachable, not dark."""
-        unwritable = tmp_path / "nowhere" / "deeper"
-        assert runtime_api.authorize_session(_request(), unwritable) is None
-        headers = {"Authorization": "Bearer anything-at-all"}
-        assert runtime_api.authorize_session(_request(headers), unwritable) is None
+    def test_a_bare_subprotocol_credential_is_admitted(self, mind_dir):
+        """The other minds in the hive accept the bare form; a console that
+        works against one must work against all of them."""
+        token = runtime_api.session_token(mind_dir)
+        headers = {"Sec-WebSocket-Protocol": token}
+        assert runtime_api.authorize_session(_request(headers), mind_dir) is None
+
+    def test_a_mind_that_cannot_read_its_own_token_refuses_rather_than_opens(
+        self, tmp_path
+    ):
+        """Serving open here would answer every caller on the LAN while the
+        gateway went on presenting a token nobody checked."""
+        denied = runtime_api.authorize_session(
+            _request(), tmp_path / "nowhere" / "deeper"
+        )
+        assert denied is not None
+        assert denied.status_code == 503
+
+    def test_a_non_ascii_credential_is_refused_rather_than_raising(self, mind_dir):
+        """On `str`, compare_digest raises TypeError — a 500 where a 401
+        belongs, which the gateway then reads as a missing terminal route."""
+        runtime_api.session_token(mind_dir)
+        denied = runtime_api.authorize_session(
+            _request({"Authorization": "Bearer \u00fc\u00e9"}), mind_dir
+        )
+        assert denied is not None
+        assert denied.status_code == 401
 
 
 class TestTheGuardOnRealRoutes:
@@ -179,6 +257,16 @@ class TestTheGuardOnRealRoutes:
             path, headers={"Authorization": f"Bearer {token}"}
         )
         assert response.status_code == 200
+
+    def test_a_host_header_cannot_move_a_route_out_of_the_guard_s_view(
+        self, client, mind_dir
+    ):
+        """Starlette builds `request.url` from the Host header, so a Host
+        carrying a "/" or "#" used to hide the path from the guard while the
+        router still matched it."""
+        runtime_api.session_token(mind_dir)
+        for host in ("mind.test/", "mind.test#", "mind.test?x"):
+            assert client.post("/sessions", headers={"Host": host}).status_code == 401
 
     def test_the_guard_leaves_the_config_surface_alone(self, client, mind_dir):
         """R10: /runtime answers to the admin guard, not to this one."""

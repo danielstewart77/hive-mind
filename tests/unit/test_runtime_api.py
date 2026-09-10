@@ -434,21 +434,36 @@ class TestRegistrationLoop:
 
         assert sleeps == [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0, 60.0, 60.0]
 
-    async def test_a_rejected_registration_stops_and_is_logged_once(
+    async def test_a_rejected_registration_keeps_retrying_slowly(
         self, runtime_file, caplog
     ):
-        """Req 3: a 4xx means the payload or token is wrong; retrying resends it."""
+        """This registration is the only channel by which the gateway learns
+        the credential this mind now demands back, so a loop that gave up on a
+        4xx would leave the mind refusing every gateway call until somebody
+        restarted it. It retries at the heartbeat cadence — slow, and loud
+        every time — which is also the only thing that heals a comms bearer
+        rotated while the mind was up."""
+        import asyncio
         import logging
 
-        caplog.set_level(logging.INFO, logger="test-rejected")
-        with patch("aiohttp.ClientSession", _session_returning([401])):
-            await runtime_api.registration_loop(
-                runtime_file, mind_name="example", mind_id="mind-1",
-                log=logging.getLogger("test-rejected"), sleep=None,
-            )  # returns rather than looping — a looping loop would hang here
+        caplog.set_level(logging.ERROR, logger="test-rejected")
+        sleeps = []
 
+        async def fake_sleep(seconds):
+            sleeps.append(seconds)
+            if len(sleeps) >= 3:
+                raise asyncio.CancelledError
+
+        with patch("aiohttp.ClientSession", _session_returning([401])):
+            with pytest.raises(asyncio.CancelledError):
+                await runtime_api.registration_loop(
+                    runtime_file, mind_name="example", mind_id="mind-1",
+                    log=logging.getLogger("test-rejected"), sleep=fake_sleep,
+                )
+
+        assert sleeps == [300.0, 300.0, 300.0], "a rejection must not back off fast"
         rejected = [r for r in caplog.records if "mind.register.rejected" in r.message]
-        assert len(rejected) == 1
+        assert len(rejected) == 3
 
     async def test_a_broker_server_error_is_retried(self, runtime_file):
         """Req 4: a 5xx is the broker's problem, not the payload's."""

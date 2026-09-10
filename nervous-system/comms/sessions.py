@@ -31,6 +31,16 @@ _TRANSCRIPT_DIR = Path.home() / ".claude" / "projects" / "-usr-src-app"
 log = logging.getLogger("hive-mind.sessions")
 
 
+class MindRefusedCredential(RuntimeError):
+    """A mind answered, and rejected the credential this gateway presented.
+
+    Its own failure, never folded into one of the shapes that mean something
+    else: a mind that is down, a mind with nothing to release, a mind holding
+    no live terminal, or a mind offering no models. Each of those has a
+    remedy, and three of them are remedies applied to the wrong machine.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Subprocess stderr drain — logs stderr lines at WARNING
 # ---------------------------------------------------------------------------
@@ -609,8 +619,20 @@ class SessionManager:
                     if resp.status == 404:
                         log.info("Mind at %s has no release route — nothing to hand over", mind_url)
                         return False
+                    if resp.status in (401, 503):
+                        # Not "nothing to release". The harness is still
+                        # running, and a caller that reads this as False
+                        # retargets ownership and respawns `--resume` beside
+                        # it — two processes writing one transcript.
+                        await resp.read()
+                        raise MindRefusedCredential(
+                            f"mind at {mind_url} refused the gateway's credential "
+                            f"on release (HTTP {resp.status})"
+                        )
                     body = await resp.json()
                     released = bool(body.get("released"))
+        except MindRefusedCredential:
+            raise
         except Exception:
             log.exception("Failed to release %s for session %s", surface, session_id)
             return False
@@ -941,16 +963,27 @@ class SessionManager:
         # belongs in the replay, and reading it earlier would show the user
         # an exchange older than the one they just had.
         last_exchange = await self._last_exchange(session_id)
-        rotated = await self._rotate_pty_on_mind(
-            session_id=session_id,
-            new_claude_sid=new_claude_sid,
-            model=active["model"],
-            mind_id=active["mind_id"],
-            user_prompt=delivered,
-            client_ref=client_ref,
-            owner_type=active.get("owner_type"),
-            owner_ref=active.get("owner_ref"),
-        )
+        try:
+            rotated = await self._rotate_pty_on_mind(
+                session_id=session_id,
+                new_claude_sid=new_claude_sid,
+                model=active["model"],
+                mind_id=active["mind_id"],
+                user_prompt=delivered,
+                client_ref=client_ref,
+                owner_type=active.get("owner_type"),
+                owner_ref=active.get("owner_ref"),
+            )
+        except MindRefusedCredential as exc:
+            # Staged either way, so the next typed turn retries rather than
+            # paying another six minutes for a seed the row already holds.
+            # What changes is the account of why: the pane is fine.
+            log.error("fire-rotation: %s; staying staged", exc)
+            return {
+                "ok": False,
+                "error": "mind refused the gateway's credential",
+                "session_id": session_id,
+            }
         if not rotated:
             log.warning(
                 "fire-rotation: session %s has no live terminal; staying staged",
@@ -1170,7 +1203,16 @@ class SessionManager:
             session["owner_ref"] != owner_ref or session["owner_type"] != owner_type
         )
         if adopting:
-            await self.release_on_mind(session_id, "terminal")
+            # A refusal here must stop the adoption. The rule underneath every
+            # handover is one live harness process per conversation, and
+            # retargeting ownership over a terminal that is still running puts
+            # a `--resume` process beside it, both appending to one transcript.
+            # Better a `/switch` that fails out loud.
+            try:
+                await self.release_on_mind(session_id, "terminal")
+            except MindRefusedCredential as exc:
+                log.error("Refusing to adopt session %s: %s", session_id, exc)
+                raise
             await self._db.execute(
                 "UPDATE sessions SET owner_type = ?, owner_ref = ?, status = 'idle' WHERE id = ?",
                 (owner_type, owner_ref, session_id),
@@ -1688,6 +1730,16 @@ class SessionManager:
                     headers=await self._mind_auth_headers_for_session(session_id),
                     timeout=aiohttp.ClientTimeout(total=5),
                 ) as resp:
+                    if resp.status in (401, 503):
+                        # `{"error": "unauthorized"}` is a dict, so without
+                        # this it passes the isinstance guard below and returns
+                        # as the interrupt's own result — a turn reported as
+                        # interrupted that is still running.
+                        await resp.read()
+                        raise MindRefusedCredential(
+                            f"mind refused the gateway's credential on interrupt "
+                            f"for session {session_id} (HTTP {resp.status})"
+                        )
                     result = await resp.json()
         except aiohttp.ClientError as exc:
             raise RuntimeError(
@@ -2018,6 +2070,17 @@ class SessionManager:
                     },
                     timeout=aiohttp.ClientTimeout(total=20),
                 ) as resp:
+                    if resp.status in (401, 503):
+                        # A refusal, reported as itself. Folded into the
+                        # generic non-200 it reaches the fire path as "this
+                        # mind has no live terminal", which is the one
+                        # diagnosis that sends somebody looking at the pane.
+                        await resp.read()
+                        raise MindRefusedCredential(
+                            f"mind at {mind_url} refused the gateway's credential "
+                            f"on rotate-pty for session {session_id} "
+                            f"(HTTP {resp.status})"
+                        )
                     if resp.status != 200:
                         log.warning(
                             "rotate-pty on %s for session %s returned %s",
@@ -2025,6 +2088,8 @@ class SessionManager:
                         )
                         return False
                     data = await resp.json()
+        except MindRefusedCredential:
+            raise
         except Exception:
             log.exception("rotate-pty on %s for session %s failed", mind_url, session_id)
             return False
@@ -2057,6 +2122,14 @@ class SessionManager:
                     headers={"Authorization": f"Bearer {admin}"} if admin else {},
                     timeout=aiohttp.ClientTimeout(total=10),
                 ) as resp:
+                    if resp.status in (401, 503):
+                        log.error(
+                            "Mind %s refused the gateway's admin credential on "
+                            "/models (HTTP %s) — the empty catalog below is a "
+                            "refusal, not a mind that offers nothing",
+                            mind_id, resp.status,
+                        )
+                        return []
                     if resp.status != 200:
                         return []
                     body = await resp.json()
@@ -2116,13 +2189,30 @@ class SessionManager:
         try:
             import aiohttp
             async with aiohttp.ClientSession() as http:
-                await http.delete(
+                async with http.delete(
                     f"{mind_url}/sessions/{session_id}",
                     headers=await self._mind_auth_headers_for_session(
                         session_id, mind_id
                     ),
                     timeout=aiohttp.ClientTimeout(total=5),
-                )
+                ) as resp:
+                    if resp.status in (401, 503):
+                        # The row closes either way — the caller is already
+                        # past the point of keeping it — but the harness and
+                        # its tmux session live on, holding a context and a
+                        # model slot until the box reboots. Saying "killed"
+                        # here is how that leak accumulates unseen, one per
+                        # ended session.
+                        log.error(
+                            "Mind %s refused the gateway's credential on kill: "
+                            "session %s is closed here but its harness is still "
+                            "running there (HTTP %s)",
+                            mind_id, session_id, resp.status,
+                        )
+                        log_event(log, "session.kill.refused", session_id=session_id,
+                                  mind_id=mind_id, mind_url=mind_url,
+                                  status=resp.status)
+                        return
         except Exception:
             log.exception("Failed to kill session %s on %s", session_id, mind_url)
         log.info("Killed session %s (mind=%s, url=%s)", session_id, mind_id, mind_url)
