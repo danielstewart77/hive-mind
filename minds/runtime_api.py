@@ -136,13 +136,152 @@ def registration_payload(path: Path, mind_name: str = "") -> dict[str, str]:
     ]
     if missing:
         raise ValueError(f"runtime.yaml is missing: {', '.join(missing)}")
-    return {
+    payload = {
         "mind_id": str(loaded["mind_id"]).strip(),
         "name": str(loaded.get("name") or mind_name).strip(),
         "gateway_url": str(loaded["gateway_url"]).strip(),
         "model": str(loaded["default_model"]).strip(),
         "harness": str(loaded["harness"]).strip(),
     }
+    # The admin-guarded registration this mind already performs every boot is
+    # the only channel by which the gateway learns the credential. Omitted
+    # when there is none, because a registration that sent an empty one would
+    # erase the gateway's working copy.
+    token = session_token(Path(path).parent)
+    if token:
+        payload["session_token"] = token
+    return payload
+
+
+# The credential the gateway must present on every call it makes to this
+# mind. Lives beside runtime.yaml rather than inside it: runtime.yaml is
+# served to the console through `public_runtime`, and a secret one allowlist
+# edit away from being published is a secret waiting to be published.
+SESSION_TOKEN_FILENAME = "session_token"
+
+log = logging.getLogger("hive-mind.runtime")
+
+
+def session_token(mind_dir: Path) -> str:
+    """This mind's own session credential, minted once and kept.
+
+    Minted rather than issued: a mind nobody provisioned still ends up with a
+    credential of its own, and one taken off it opens that mind and no other.
+    `MIND_SESSION_TOKEN` overrides the file for installs that inject secrets
+    instead of letting a container write them.
+
+    Returns "" when there is no token and none can be written — a read-only
+    mind directory must leave the mind serving as it did before, not brick it.
+    """
+    injected = os.environ.get("MIND_SESSION_TOKEN", "").strip()
+    if injected:
+        return injected
+
+    path = Path(mind_dir) / SESSION_TOKEN_FILENAME
+    existing = _read_token(path)
+    if existing:
+        return existing
+
+    minted = secrets.token_urlsafe(32)
+    try:
+        handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        # Another worker in this process group won the race, or left an empty
+        # file behind. Whatever is there now is the mind's token.
+        raced = _read_token(path)
+        if raced:
+            return raced
+        try:
+            path.write_text(minted + "\n")
+            path.chmod(0o600)
+        except OSError:
+            log.warning("Could not write session token at %s", path)
+            return ""
+        return minted
+    except OSError:
+        log.warning("Could not create session token at %s", path)
+        return ""
+    with os.fdopen(handle, "w") as stream:
+        stream.write(minted + "\n")
+    return minted
+
+
+def _read_token(path: Path) -> str:
+    try:
+        return path.read_text().strip()
+    except OSError:
+        return ""
+
+
+def presented_bearer(request: Request) -> str:
+    """The credential on a request, from either place a client can put it.
+
+    A browser cannot set headers on a WebSocket handshake, so the subprotocol
+    is the only channel a direct attach has; the gateway's proxy uses the
+    header.
+    """
+    header = request.headers.get("Authorization", "")
+    if header.startswith("Bearer "):
+        return header[7:]
+    offered = request.headers.get("Sec-WebSocket-Protocol", "")
+    for part in offered.split(","):
+        part = part.strip()
+        if part.startswith("bearer."):
+            return part[7:]
+    return ""
+
+
+def authorize_session(request: Request, mind_dir: Path) -> JSONResponse | None:
+    """Guard a session route. None means the caller may proceed.
+
+    Accepts the mind's session token — the gateway, which is the only real
+    caller — or the admin token, so the console or the operator can reach a
+    wedged session directly. A mind holding no token of its own serves as it
+    always did: that is what lets the fleet move one machine at a time.
+    """
+    expected = session_token(mind_dir)
+    if not expected:
+        return None
+    presented = presented_bearer(request)
+    if secrets.compare_digest(presented, expected):
+        return None
+    admin = admin_token()
+    if admin and secrets.compare_digest(presented, admin):
+        return None
+    return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+
+def install_session_guard(app: FastAPI, *, mind_dir: Path) -> None:
+    """Require this mind's credential on every `/sessions` HTTP route.
+
+    One middleware rather than a decorator per route: a session route added
+    later cannot ship open by being forgotten, and `DELETE /sessions/{id}`
+    matters as much as the message route. The config surface is untouched —
+    `/runtime`, `/skills`, `/files` and `/models` keep their admin guard.
+    """
+
+    @app.middleware("http")
+    async def _guard_session_routes(request: Request, call_next):
+        if request.url.path.startswith("/sessions"):
+            denied = authorize_session(request, mind_dir)
+            if denied is not None:
+                return denied
+        return await call_next(request)
+
+
+async def refuse_session_websocket(websocket, denial: JSONResponse) -> None:
+    """Refuse a WebSocket attach with a real HTTP status.
+
+    A pre-accept `close()` presents to the gateway as HTTP 403 — which is also
+    what a mind whose image predates the terminal routes answers — so the
+    denial response is what keeps "refused your credential" from being read as
+    "has no terminal".
+    """
+    try:
+        await websocket.send_denial_response(denial)
+    except (RuntimeError, AttributeError):
+        # The server does not implement the denial-response extension.
+        await websocket.close(code=4401, reason="unauthorized")
 
 
 def admin_token() -> str:

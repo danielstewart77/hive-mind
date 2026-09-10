@@ -67,7 +67,7 @@ def _capturing_session_class(payloads: list[dict]):
         async def __aexit__(self, *exc):
             return False
 
-        def post(self, url, json=None, timeout=None):
+        def post(self, url, json=None, timeout=None, headers=None):
             payloads.append(json)
             return _RequestCtx()
 

@@ -603,6 +603,7 @@ class SessionManager:
                 async with http.post(
                     f"{mind_url}/sessions/{session_id}/release",
                     params={"surface": surface},
+                    headers=await self._mind_auth_headers_for_session(session_id),
                     timeout=aiohttp.ClientTimeout(total=5),
                 ) as resp:
                     if resp.status == 404:
@@ -1352,6 +1353,9 @@ class SessionManager:
                         async with http.post(
                             f"{mind_url}/sessions/{session_id}/message",
                             json={"content": stamped_content, "images": images},
+                            headers=await self._mind_auth_headers_for_session(
+                                session_id, mind_id
+                            ),
                             # Long Claude turns (heavy thinking + tool use) can exceed 10 min.
                             # Cap on no-data-received instead of total elapsed so we don't
                             # truncate legitimate long turns (which the bot then sees as
@@ -1387,6 +1391,32 @@ class SessionManager:
                                     )
                                     continue
                                 raise ValueError(f"Session {session_id} not found after respawn")
+
+                            if resp.status == 401:
+                                # The mind is up and said no. Reported as
+                                # itself: a credential the broker never
+                                # learned, or one that has since rotated,
+                                # looks nothing like a mind that is down and
+                                # must not be diagnosed as one.
+                                await resp.read()
+                                log.error(
+                                    "Mind %s refused the gateway's credential "
+                                    "for session %s", mind_id, session_id,
+                                )
+                                err_event = {
+                                    "type": "result",
+                                    "subtype": "error",
+                                    "is_error": True,
+                                    "result": (
+                                        f"Mind '{mind_id}' refused this "
+                                        f"gateway's credential. Re-register "
+                                        f"the mind so the broker holds its "
+                                        f"current session token."
+                                    ),
+                                }
+                                await self._publish_session_event(session_id, err_event)
+                                yield err_event
+                                return
 
                             if resp.status != 200:
                                 # Any other error from the mind: surface the
@@ -1655,6 +1685,7 @@ class SessionManager:
             async with aiohttp.ClientSession() as http:
                 async with http.post(
                     f"{mind_url}/sessions/{session_id}/interrupt",
+                    headers=await self._mind_auth_headers_for_session(session_id),
                     timeout=aiohttp.ClientTimeout(total=5),
                 ) as resp:
                     result = await resp.json()
@@ -1813,6 +1844,45 @@ class SessionManager:
             raise ValueError(f"Mind '{mind_id}' not found in broker.minds")
         return row
 
+    async def mind_auth_headers(self, mind_id: str | None) -> dict[str, str]:
+        """The credential this gateway presents when it calls that mind.
+
+        Empty when the broker holds no token for the mind — one running a
+        build that predates this has nothing to check, which is what lets the
+        fleet move a machine at a time. The admin token is deliberately not a
+        fallback: it unlocks `PATCH /runtime`, the skills write-back and the
+        file editor, and putting it on the wire for every chat turn would make
+        a routine path carry the credential that owns the machine.
+        """
+        if not mind_id:
+            return {}
+        from comms import broker  # noqa: PLC0415
+        if self.broker_db is None:
+            return {}
+        try:
+            token = await broker.get_mind_session_token(self.broker_db, mind_id)
+        except Exception:
+            log.warning("Could not read session token for mind %s", mind_id)
+            return {}
+        return {"Authorization": f"Bearer {token}"} if token else {}
+
+    async def _mind_auth_headers_for_session(
+        self, session_id: str, mind_id: str | None = None
+    ) -> dict[str, str]:
+        """`mind_auth_headers` for a call that knows a session, not a mind.
+
+        The in-memory binding is empty for every session after a restart, and
+        for any session born in the browser terminal, so the row is the
+        fallback — a credential the gateway fails to look up is a mind it
+        cannot talk to.
+        """
+        if not mind_id:
+            mind_id = self._mind_ids.get(session_id)
+        if not mind_id:
+            row = await self._get_row(session_id)
+            mind_id = (row or {}).get("mind_id")
+        return await self.mind_auth_headers(mind_id)
+
     async def _spawn(
         self,
         session_id: str,
@@ -1874,8 +1944,16 @@ class SessionManager:
                     "surface": self._surface_label(owner_type or ""),
                     "system_prompt_blocks": system_prompt_blocks,
                 },
+                headers=await self.mind_auth_headers(mind_id),
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
+                if resp.status == 401:
+                    await resp.read()
+                    raise RuntimeError(
+                        f"Mind {mind_id} refused this gateway's credential on "
+                        f"spawn. Re-register the mind so the broker holds its "
+                        f"current session token."
+                    )
                 if resp.status != 200:
                     body = await resp.text()
                     raise RuntimeError(f"Mind container {mind_id} spawn failed: {body}")
@@ -1925,6 +2003,9 @@ class SessionManager:
                 # Holding the response open makes both paths release.
                 async with http.post(
                     f"{mind_url}/sessions/{session_id}/rotate-pty",
+                    headers=await self._mind_auth_headers_for_session(
+                        session_id, mind_id
+                    ),
                     json={
                         "new_claude_sid": new_claude_sid,
                         "model": model,
@@ -2037,6 +2118,9 @@ class SessionManager:
             async with aiohttp.ClientSession() as http:
                 await http.delete(
                     f"{mind_url}/sessions/{session_id}",
+                    headers=await self._mind_auth_headers_for_session(
+                        session_id, mind_id
+                    ),
                     timeout=aiohttp.ClientTimeout(total=5),
                 )
         except Exception:

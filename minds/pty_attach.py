@@ -43,6 +43,8 @@ from pathlib import Path
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
+from minds import runtime_api
+
 log = logging.getLogger("hive-mind.minds.pty")
 
 _PTY_CHUNK = 65536
@@ -773,6 +775,7 @@ def install_pty_attach(
     terminals: TmuxTerminals,
     spawn: Callable[..., tuple[subprocess.Popen, int]],
     rotate: Callable[..., bool] | None = None,
+    mind_dir: Path | None = None,
 ) -> None:
     """Mount the browser-terminal routes on a mind's app.
 
@@ -876,6 +879,17 @@ def install_pty_attach(
         carrying ``{"type":"resize","cols":N,"rows":M}`` retarget it live,
         and tmux redraws the pane for the new geometry.
         """
+        # The thing knocking is the gateway proxying a tile, not the browser.
+        # Either credential opens it: the session token for the proxy, the
+        # admin token so the console or the operator can attach directly to a
+        # wedged pane.
+        if mind_dir is not None:
+            denied = runtime_api.authorize_session(websocket, mind_dir)
+            if denied is not None:
+                log.warning("attach-pty for session %s refused", session_id)
+                await runtime_api.refuse_session_websocket(websocket, denied)
+                return
+
         await websocket.accept()
 
         # Attaching means attaching. Without the session's conversation id

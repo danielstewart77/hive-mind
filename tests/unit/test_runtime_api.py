@@ -105,7 +105,12 @@ class TestUpdateRuntimeFields:
 
 class TestRegistrationPayload:
     def test_describes_the_broker_row(self, runtime_file):
-        assert runtime_api.registration_payload(runtime_file) == {
+        payload = runtime_api.registration_payload(runtime_file)
+        # The session token rides along too — the registration is the only
+        # channel by which the gateway learns what to present back — and is
+        # asserted in ``test_per_mind_session_auth.py`` rather than pinned
+        # to a value here.
+        assert {k: v for k, v in payload.items() if k != "session_token"} == {
             "mind_id": "565e5a66-d20c-4266-872a-3268c4c894fc",
             "name": "example",
             "gateway_url": "http://example:8420",

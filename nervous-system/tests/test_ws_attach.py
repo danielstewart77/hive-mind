@@ -66,6 +66,7 @@ class _FakeMindWS:
 class _FakeHttpSession:
     ws_to_return: _FakeMindWS | None = None
     requested_url: str | None = None
+    requested_headers: dict = {}
     raise_on_connect: Exception | None = None
 
     def __init__(self, *a, **kw):
@@ -79,6 +80,7 @@ class _FakeHttpSession:
 
     def ws_connect(self, url, **kwargs):
         type(self).requested_url = url
+        type(self).requested_headers = dict(kwargs.get("headers") or {})
         if type(self).raise_on_connect:
             raise type(self).raise_on_connect
         return type(self).ws_to_return
@@ -277,6 +279,61 @@ class TestWsAttach:
                 ws.receive_bytes()
 
         assert excinfo.value.code == 4415
+
+    def test_proxy_carries_the_mind_s_session_token(self, app_client, monkeypatch):
+        """The thing knocking on the mind's door is this gateway, not the
+        browser, so the credential on the handshake is the mind's own."""
+        from comms import broker
+
+        client, server_module = app_client
+        _run(_seed_session_and_mind(server_module, session_id="sess-tok"))
+        _run(broker.register_mind(
+            server_module.session_mgr.broker_db, mind_id="ada", name="ada",
+            gateway_url="http://mind.test:8420", model="opus", harness="claude",
+            session_token="ada-session-token",  # secret-guard: allow
+        ))
+
+        fake_ws = _FakeMindWS(incoming=[b"up\r\n"])
+        _FakeHttpSession.ws_to_return = fake_ws
+        _FakeHttpSession.raise_on_connect = None
+        _FakeHttpSession.requested_headers = {}
+        monkeypatch.setattr(server_module.aiohttp, "ClientSession", _FakeHttpSession)
+
+        with client.websocket_connect("/sessions/sess-tok/attach") as ws:
+            assert ws.receive_bytes() == b"up\r\n"
+
+        assert _FakeHttpSession.requested_headers == {
+            "Authorization": "Bearer ada-session-token"  # secret-guard: allow
+        }
+
+    def test_a_refused_credential_does_not_look_like_a_missing_route(
+        self, app_client, monkeypatch
+    ):
+        """4415 sends the operator rebuilding an image. A mind that has the
+        route and rejected the token gets its own code."""
+        from starlette.websockets import WebSocketDisconnect
+
+        client, server_module = app_client
+        _run(_seed_session_and_mind(server_module, session_id="sess-401"))
+
+        _FakeHttpSession.ws_to_return = None
+        _FakeHttpSession.raise_on_connect = aiohttp.WSServerHandshakeError(
+            aiohttp.RequestInfo(
+                url="ws://mind.test:8420/attach-pty", method="GET",
+                headers=aiohttp.typedefs.CIMultiDict(),
+                real_url="ws://mind.test:8420/attach-pty",
+            ),
+            (),
+            status=401,
+            message="unauthorized",
+        )
+        monkeypatch.setattr(server_module.aiohttp, "ClientSession", _FakeHttpSession)
+
+        with pytest.raises(WebSocketDisconnect) as excinfo:
+            with client.websocket_connect("/sessions/sess-401/attach") as ws:
+                ws.receive_bytes()
+
+        assert excinfo.value.code == 4416
 
     def test_kill_session_tears_down_live_attach_with_4410(self, app_client, monkeypatch):
         """The attach pty is a separate process kill_session can't reach;

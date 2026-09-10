@@ -205,6 +205,9 @@ class RegisterMindRequest(BaseModel):
     gateway_url: str
     model: str
     harness: str
+    # The credential the gateway presents on every call it makes to this mind.
+    # Optional on the wire so a mind running an older build still registers.
+    session_token: str | None = None
 
 
 class UpdateMindRequest(BaseModel):
@@ -767,7 +770,13 @@ async def ws_attach(ws: WebSocket, session_id: str):
     try:
         async with (
             aiohttp.ClientSession() as http,
-            http.ws_connect(attach_url) as mind_ws,
+            http.ws_connect(
+                attach_url,
+                # The thing knocking on the mind's door is this gateway, not
+                # the browser — the tile never talks to the mind — so the
+                # credential on this handshake is the mind's session token.
+                headers=await session_mgr.mind_auth_headers(mind_row["id"]),
+            ) as mind_ws,
         ):
             pump = asyncio.ensure_future(_pump_attach_ws(ws, mind_ws))
             # A rotation does not end this bridge — the session, the socket
@@ -803,6 +812,15 @@ async def ws_attach(ws: WebSocket, session_id: str):
         # That is permanent until the mind is rebuilt, and a client that
         # cannot tell it apart from a dropped connection will reconnect
         # forever — so it gets its own close code and no retry.
+        if exc.status == 401:
+            # Reachable, has the route, and rejected the credential. Telling
+            # the tile "no terminal attach route" here would send Daniel
+            # rebuilding an image over a token the broker never learned.
+            log.warning(
+                "attach-pty proxy to %s refused the gateway's credential", attach_url
+            )
+            await ws.close(code=4416, reason="mind refused the gateway's credential")
+            return
         log.warning("attach-pty proxy to %s refused: %s", attach_url, exc)
         await ws.close(code=4415, reason="mind has no terminal attach route")
     except aiohttp.ClientError as exc:
@@ -989,6 +1007,7 @@ async def broker_register_mind(body: RegisterMindRequest):
         gateway_url=body.gateway_url,
         model=body.model,
         harness=body.harness,
+        session_token=body.session_token,
     )
     return await broker.get_mind_by_id(db, body.mind_id)
 
