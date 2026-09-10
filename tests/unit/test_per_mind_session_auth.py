@@ -90,13 +90,21 @@ class TestMintingTheToken:
 
     def test_an_unreadable_file_is_not_treated_as_an_absent_one(self, mind_dir):
         """Folding the two together is how a mind serves every session route
-        open because a migration chowned its own directory."""
+        open because a migration chowned its own directory.
+
+        The message is asserted, not just the raise: an unreadable file is also
+        unwritable, so a build that folded unreadable into absent would still
+        raise — from the reclaim path, a second later, having first decided the
+        file was abandoned and tried to mint over a credential that is sitting
+        right there.
+        """
         runtime_api.session_token(mind_dir)
         (mind_dir / "session_token").chmod(0o000)
         runtime_api._token_cache.clear()
         try:
-            with pytest.raises(runtime_api.SessionTokenUnavailable):
+            with pytest.raises(runtime_api.SessionTokenUnavailable) as refused:
                 runtime_api.session_token(mind_dir)
+            assert "cannot read" in str(refused.value)
         finally:
             (mind_dir / "session_token").chmod(0o600)
 
@@ -116,7 +124,10 @@ class TestMintingTheToken:
         the event loop on every request, forever, for something only `rm` could
         fix."""
         path = mind_dir / "session_token"
-        path.touch(mode=0o600)
+        # Created wide, the way an older build or a loose umask would leave it.
+        # Asserting 0600 against a file the test itself made 0600 asserts the
+        # fixture, since writing to an existing file preserves its mode.
+        path.touch(mode=0o644)
         stale = time.time() - 60
         os.utime(path, (stale, stale))
 
@@ -308,16 +319,6 @@ class TestTheGuardOnRealRoutes:
         )
         assert response.status_code == 200
 
-    def test_a_host_header_cannot_move_a_route_out_of_the_guard_s_view(
-        self, client, mind_dir
-    ):
-        """Starlette builds `request.url` from the Host header, so a Host
-        carrying a "/" or "#" used to hide the path from the guard while the
-        router still matched it."""
-        runtime_api.session_token(mind_dir)
-        for host in ("mind.test/", "mind.test#", "mind.test?x"):
-            assert client.post("/sessions", headers={"Host": host}).status_code == 401
-
     def test_the_guard_leaves_the_config_surface_alone(self, client, mind_dir):
         """R10: /runtime answers to the admin guard, not to this one."""
         runtime_api.session_token(mind_dir)
@@ -372,3 +373,135 @@ class TestRefusingAWebsocket:
             Socket(), JSONResponse({}, status_code=401)
         )
         assert closed["code"] == 4401
+
+
+# ---------------------------------------------------------------------------
+# R9 — the terminal attach, as the route rather than as the guard function
+# ---------------------------------------------------------------------------
+class TestTheAttachRouteIsGuarded:
+    """`install_pty_attach` takes `mind_dir` optionally, so a caller that
+    forgets it mounts an unguarded interactive shell. Nothing else in the suite
+    passes it — every other pty test installs without one — so without these
+    the guard block can be deleted outright and the suite stays green."""
+
+    @pytest.fixture()
+    def attach_client(self, mind_dir):
+        from minds import pty_attach
+
+        app = FastAPI()
+        pty_attach.install_pty_attach(
+            app, mind_name="testmind", terminals=_FakeTerminals(),
+            spawn=_refuse_to_spawn, mind_dir=mind_dir,
+        )
+        return TestClient(app)
+
+    def test_an_uncredentialed_attach_is_refused(self, attach_client, mind_dir):
+        from starlette.testclient import WebSocketDenialResponse
+
+        runtime_api.session_token(mind_dir)
+        with pytest.raises(WebSocketDenialResponse) as refused:
+            with attach_client.websocket_connect(
+                "/sessions/abc/attach-pty?resume_sid=conv-1&model=sonnet"
+            ):
+                pass
+        assert refused.value.status_code == 401
+
+    def test_a_wrong_credential_is_refused(self, attach_client, mind_dir):
+        from starlette.testclient import WebSocketDenialResponse
+
+        runtime_api.session_token(mind_dir)
+        with pytest.raises(WebSocketDenialResponse) as refused:
+            with attach_client.websocket_connect(
+                "/sessions/abc/attach-pty?resume_sid=conv-1&model=sonnet",
+                headers={"Authorization": "Bearer not-this-mind's-token"},
+            ):
+                pass
+        assert refused.value.status_code == 401
+
+    def test_the_mind_s_own_token_gets_past_the_guard(self, attach_client, mind_dir):
+        """Past the guard specifically: the spawn beyond it refuses on purpose,
+        so what this proves is that the credential is not what stopped it."""
+        from starlette.testclient import WebSocketDenialResponse
+
+        token = runtime_api.session_token(mind_dir)
+        with pytest.raises(Exception) as stopped:
+            with attach_client.websocket_connect(
+                "/sessions/abc/attach-pty?resume_sid=conv-1&model=sonnet",
+                headers={"Authorization": f"Bearer {token}"},
+            ) as socket:
+                socket.receive_bytes()
+        assert not isinstance(stopped.value, WebSocketDenialResponse), (
+            "the mind's own token was refused by the guard"
+        )
+
+    def test_the_handshake_echoes_a_non_credential_subprotocol(self, mind_dir):
+        """Asserted through the route, not just on the pure function: without
+        the wiring a browser offering subprotocols fails the handshake, and the
+        pure-function tests would not notice."""
+        from minds import pty_attach
+
+        token = runtime_api.session_token(mind_dir)
+        app = FastAPI()
+        pty_attach.install_pty_attach(
+            app, mind_name="testmind", terminals=_FakeTerminals(),
+            spawn=_refuse_to_spawn, mind_dir=mind_dir,
+        )
+        client = TestClient(app)
+        with pytest.raises(Exception):
+            with client.websocket_connect(
+                "/sessions/abc/attach-pty?resume_sid=conv-1&model=sonnet",
+                subprotocols=[f"bearer.{token}", "hive.terminal"],
+            ) as socket:
+                assert socket.accepted_subprotocol == "hive.terminal"
+                socket.receive_bytes()
+
+
+class _FakeTerminals:
+    def session_name(self, session_id):
+        return f"mind-{session_id}"
+
+    def is_live(self, session_id):
+        return False
+
+
+def _refuse_to_spawn(**kwargs):
+    from minds import pty_attach
+
+    raise pty_attach.PtyUnavailable("no tmux in this test")
+
+
+# ---------------------------------------------------------------------------
+# The guard on the apps that actually ship
+# ---------------------------------------------------------------------------
+class TestTheDeployedAppsAreGuarded:
+    """`install_session_guard` is one line in each harness server, and every
+    other test of those apps supplies the credential. Without these, both files
+    that *are* the deployed minds can lose the guard and nothing says so."""
+
+    @pytest.mark.parametrize("module", ["claude_cli", "codex_cli"])
+    def test_an_uncredentialed_spawn_is_refused(self, module):
+        import importlib
+
+        harness = importlib.import_module(f"minds.harness.{module}")
+        client = TestClient(harness.app)
+        response = client.post(
+            "/sessions",
+            json={"session_id": "s1", "resume_sid": "c1", "model": "sonnet"},
+        )
+        assert response.status_code == 401
+
+    @pytest.mark.parametrize("module", ["claude_cli", "codex_cli"])
+    def test_an_uncredentialed_kill_is_refused(self, module):
+        import importlib
+
+        harness = importlib.import_module(f"minds.harness.{module}")
+        assert TestClient(harness.app).delete("/sessions/s1").status_code == 401
+
+    @pytest.mark.parametrize("module", ["claude_cli", "codex_cli"])
+    def test_the_config_surface_is_still_reachable(self, module):
+        """The guard is scoped to /sessions and must not have swallowed the
+        routes the console reads."""
+        import importlib
+
+        harness = importlib.import_module(f"minds.harness.{module}")
+        assert TestClient(harness.app).get("/runtime").status_code == 200

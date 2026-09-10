@@ -504,9 +504,11 @@ def test_a_refused_kill_says_the_harness_is_still_running(caplog) -> None:
         await mgr._kill_process(sid)
         return True
 
-    with caplog.at_level("ERROR"):
+    # INFO, not ERROR: "Killed session" is logged at INFO, so a level that
+    # filters it out cannot see the fall-through this test exists to catch.
+    with caplog.at_level("INFO"):
         assert _with_refusing_mind(body) is True
-    assert any("still" in r.message or "refused" in r.message for r in caplog.records)
+    assert any("refused" in r.getMessage() for r in caplog.records)
     assert not any("Killed session" in r.getMessage() for r in caplog.records)
 
 

@@ -403,6 +403,11 @@ def install_session_guard(app: FastAPI, *, mind_dir: Path) -> None:
         # the router — which reads the scope — still matches it and runs the
         # handler. One character in a header the client controls, and every
         # session route on this mind answers unauthenticated.
+        #
+        # Untested here, deliberately and not by omission: this tree's
+        # starlette sanitises the host, so the two expressions are identical on
+        # it and no input can tell them apart. The edge repo pins a version
+        # that does not, and its suite catches the substitution.
         if request.scope.get("path", "").startswith("/sessions"):
             denied = authorize_session(request, mind_dir)
             if denied is not None:
