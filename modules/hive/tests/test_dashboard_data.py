@@ -761,17 +761,60 @@ class TestWatchableHosts:
 
         assert panel["without_route"] == ["ada", "bob"]
 
-    def test_a_refused_machine_keeps_its_card(self):
-        """Refused is up and holding a credential we do not have — the
-        remedy is real, and it must not be filed with the unwatchable."""
-        panel = dd.watchable_hosts([{"hostname": "zach", "status": "refused"}])
+    def test_a_machine_in_service_keeps_its_card_when_it_refuses(self):
+        """Refused is up and holding a credential we do not have. A mind
+        checking in minutes ago is an outage worth shouting about."""
+        panel = dd.watchable_hosts(
+            [{"hostname": "mordecai", "status": "refused", "last_seen": 1000.0}],
+            now=1060.0,
+        )
+
+        assert [h["hostname"] for h in panel["hosts"]] == ["mordecai"]
+
+    def test_a_machine_in_service_keeps_its_card_when_unreachable(self):
+        panel = dd.watchable_hosts(
+            [{"hostname": "mordecai", "status": "unreachable", "last_seen": 1000.0}],
+            now=1060.0,
+        )
+
+        assert [h["hostname"] for h in panel["hosts"]] == ["mordecai"]
+
+    def test_a_machine_silent_for_a_day_is_out_of_service_not_down(self):
+        """Two months of silence is a box nobody finished setting up, and
+        putting it beside a real outage teaches the reader to ignore both."""
+        panel = dd.watchable_hosts(
+            [{"hostname": "zach", "status": "unreachable", "last_seen": 0.0}],
+            now=24 * 60 * 60 + 1.0,
+        )
+
+        assert panel["hosts"] == []
+        assert panel["out_of_service"] == ["zach"]
+
+    def test_the_day_boundary_is_still_in_service(self):
+        """A box rebooted overnight is back inside a day."""
+        panel = dd.watchable_hosts(
+            [{"hostname": "zach", "status": "unreachable", "last_seen": 0.0}],
+            now=24 * 60 * 60,
+        )
 
         assert [h["hostname"] for h in panel["hosts"]] == ["zach"]
 
-    def test_an_unreachable_machine_keeps_its_card(self):
-        panel = dd.watchable_hosts([{"hostname": "zach", "status": "unreachable"}])
+    def test_a_mind_the_broker_never_saw_is_out_of_service(self):
+        panel = dd.watchable_hosts(
+            [{"hostname": "zach", "status": "unreachable", "last_seen": None}]
+        )
 
-        assert [h["hostname"] for h in panel["hosts"]] == ["zach"]
+        assert panel["out_of_service"] == ["zach"]
+
+    def test_a_reporting_machine_is_never_filed_out_of_service(self):
+        """It answered. Whatever the broker last wrote down, the machine is
+        in front of us right now."""
+        panel = dd.watchable_hosts(
+            [{"hostname": "workstation", "status": "reporting", "last_seen": 0.0}],
+            now=9e9,
+        )
+
+        assert [h["hostname"] for h in panel["hosts"]] == ["workstation"]
 
 
 class TestMachineDials:

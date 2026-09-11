@@ -718,7 +718,7 @@ async def _probe_mind_host(mind: dict) -> dict:
     name = mind.get("name") or ""
     gateway = (mind.get("gateway_url") or "").strip().rstrip("/")
     if not gateway:
-        return {"mind": name, "mind_id": mind.get("id"), "status": "unconfigured",
+        return {"mind": name, "mind_id": mind.get("id"), "last_seen": mind.get("last_seen"), "status": "unconfigured",
                 "reading": None, "error": "no gateway URL in the registry"}
     # Outside the try, and deliberately. `admin_headers()` raises when the
     # console has no admin token, and inside the try that exception would be
@@ -728,19 +728,19 @@ async def _probe_mind_host(mind: dict) -> dict:
     try:
         headers = mind_runtime.admin_headers()
     except HTTPException as exc:
-        return {"mind": name, "mind_id": mind.get("id"), "status": "unconfigured",
+        return {"mind": name, "mind_id": mind.get("id"), "last_seen": mind.get("last_seen"), "status": "unconfigured",
                 "reading": None, "error": str(exc.detail)}
     try:
         async with httpx.AsyncClient(timeout=dashboard_data.HOST_PROBE_TIMEOUT) as client:
             response = await client.get(f"{gateway}/host", headers=headers)
     except Exception as exc:  # noqa: BLE001 — unreachable is a state
-        return {"mind": name, "mind_id": mind.get("id"), "status": "unreachable",
+        return {"mind": name, "mind_id": mind.get("id"), "last_seen": mind.get("last_seen"), "status": "unreachable",
                 "reading": None, "error": str(exc)}
     status = dashboard_data.host_status_for(response.status_code)
     if status != "reporting":
-        return {"mind": name, "mind_id": mind.get("id"), "status": status,
+        return {"mind": name, "mind_id": mind.get("id"), "last_seen": mind.get("last_seen"), "status": status,
                 "reading": None, "error": response.text[:200]}
-    return {"mind": name, "mind_id": mind.get("id"), "status": "reporting",
+    return {"mind": name, "mind_id": mind.get("id"), "last_seen": mind.get("last_seen"), "status": "reporting",
             "reading": response.json(), "error": None}
 
 
@@ -762,6 +762,7 @@ async def _fetch_hosts() -> dict:
         # nameless one, and the second dead machine disappears behind the
         # first.
         else {"mind": mind.get("name") or "", "mind_id": mind.get("id"),
+              "last_seen": mind.get("last_seen"),
               "status": "unreachable", "reading": None, "error": str(report)}
         for mind, report in zip(minds, reports)
     ]

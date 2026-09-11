@@ -166,6 +166,7 @@ def merge_hosts(reports: list[dict]) -> list[dict]:
             "memory": figure_usage(reading.get("memory")),
             "disk": figure_usage(reading.get("disk")),
             "observed_at": reading.get("observed_at"),
+            "last_seen": report.get("last_seen"),
         }
         existing = hosts.get(key)
         if existing is None:
@@ -472,7 +473,27 @@ def annotate_providers(payload: dict) -> dict:
     return {**payload, "providers": providers}
 
 
-def watchable_hosts(hosts: list[dict]) -> dict:
+#: A mind the broker has not heard from in this long is not a machine that
+#: went down — it is one that was never brought into service, or has been
+#: out of it for so long that its silence is the status quo. A box rebooted
+#: overnight is back inside a day.
+IN_SERVICE_SECONDS = 24 * 60 * 60
+
+
+def in_service(last_seen: Optional[float], now: Optional[float] = None) -> bool:
+    """Whether the broker has heard from this mind recently enough to care.
+
+    A mind checking in minutes ago and refusing a probe right now is an
+    outage worth shouting about. One silent for two months is a machine
+    nobody has finished setting up, and putting it beside the first teaches
+    the reader to ignore both.
+    """
+    if not isinstance(last_seen, (int, float)) or isinstance(last_seen, bool):
+        return False
+    return (time.time() if now is None else now) - last_seen <= IN_SERVICE_SECONDS
+
+
+def watchable_hosts(hosts: list[dict], now: Optional[float] = None) -> dict:
     """The machines this page can actually watch, and a count of the rest.
 
     A mind running a build with no host route answers 404 forever. Its card
@@ -482,14 +503,22 @@ def watchable_hosts(hosts: list[dict]) -> dict:
     host route" is a fact worth one line, and a panel that quietly omitted
     them would teach its reader to distrust it about absence.
     """
-    watchable = [host for host in hosts if host.get("status") != "unsupported"]
+    watchable, no_route, out_of_service = [], [], []
+    for host in hosts:
+        status = host.get("status")
+        name = host.get("hostname") or ""
+        if status == "reporting":
+            watchable.append(host)
+        elif status == "unsupported":
+            no_route.append(name)
+        elif not in_service(host.get("last_seen"), now):
+            out_of_service.append(name)
+        else:
+            watchable.append(host)
     return {
         "hosts": watchable,
-        "without_route": [
-            host.get("hostname") or ""
-            for host in hosts
-            if host.get("status") == "unsupported"
-        ],
+        "without_route": no_route,
+        "out_of_service": out_of_service,
     }
 
 
