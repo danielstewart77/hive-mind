@@ -6,7 +6,9 @@ of a 200-slot queue that silently discards its oldest entry when full. None
 of that is safe for a page that renders many conversations at once behind a
 shared login, so the dashboard reads this instead:
 
-- text only, so tool traffic never leaves comms on this path (req 21)
+- typed, so a reader can tell a command from a sentence — the whole turn
+  reaches the dashboard, which is what the page is for (see
+  test_dashboard_activity.py)
 - sequenced, so a discarded run renders as a gap rather than as prose that
   reads perfectly and is missing its middle (req 22)
 - an explicit generating state with a start, an end, and an expiry, because
@@ -26,87 +28,21 @@ ASSISTANT_TEXT = {
     "type": "assistant",
     "message": {"role": "assistant", "content": [{"type": "text", "text": "hello"}]},
 }
-TOOL_USE = {
-    "type": "assistant",
-    "message": {
-        "role": "assistant",
-        "content": [
-            {"type": "tool_use", "name": "Bash", "input": {"command": "cat ~/.ssh/id_rsa"}}
-        ],
-    },
-}
-TOOL_RESULT = {
-    "type": "user",
-    "message": {
-        "role": "user",
-        "content": [{"type": "tool_result", "content": "ssh-rsa AAAAB3Nza..."}],
-    },
-}
-THINKING = {
-    "type": "assistant",
-    "message": {"role": "assistant", "content": [{"type": "thinking", "thinking": "hmm"}]},
-}
-
-
 @pytest.fixture()
 def feed():
     return LiveFeed()
 
 
-# --- Requirement 21: text only ---------------------------------------------
+# --- Requirement 21: assistant prose is carried -----------------------------
 
 
-class TestOnlyTextLeaves:
+class TestTextIsCarried:
     def test_assistant_text_is_carried(self, feed):
         feed.begin("s1", mind_id="skippy", now=1.0)
         feed.observe("s1", ASSISTANT_TEXT, now=1.0)
 
         assert [e["text"] for e in feed.since("s1", 0)] == ["hello"]
 
-    def test_a_tool_call_never_reaches_the_feed(self, feed):
-        """A bash command the mind ran is not assistant speech, and this page
-        answers to any logged-in console account."""
-        feed.begin("s1", mind_id="skippy", now=1.0)
-        feed.observe("s1", TOOL_USE, now=1.0)
-
-        assert feed.since("s1", 0) == []
-
-    def test_a_tool_result_never_reaches_the_feed(self, feed):
-        """Tool results carry file contents and command output verbatim."""
-        feed.begin("s1", mind_id="skippy", now=1.0)
-        feed.observe("s1", TOOL_RESULT, now=1.0)
-
-        assert feed.since("s1", 0) == []
-
-    def test_thinking_is_not_carried(self, feed):
-        feed.begin("s1", mind_id="skippy", now=1.0)
-        feed.observe("s1", THINKING, now=1.0)
-
-        assert feed.since("s1", 0) == []
-
-    def test_a_mixed_block_carries_its_text_and_drops_its_tool_call(self, feed):
-        """The usual shape of a real turn: the model says something, then
-        calls a tool. Dropping the whole event would lose the speech;
-        carrying it whole would leak the command."""
-        feed.begin("s1", mind_id="skippy", now=1.0)
-        feed.observe(
-            "s1",
-            {
-                "type": "assistant",
-                "message": {
-                    "role": "assistant",
-                    "content": [
-                        {"type": "text", "text": "Let me look."},
-                        {"type": "tool_use", "name": "Bash", "input": {"command": "ls /etc/shadow"}},
-                    ],
-                },
-            },
-            now=1.0,
-        )
-
-        carried = feed.since("s1", 0)
-        assert [e["text"] for e in carried] == ["Let me look."]
-        assert "shadow" not in str(carried)
 
     def test_a_whole_block_from_a_terminal_tailer_is_carried(self, feed):
         """`publish_pty_text` posts finished blocks in a different shape from

@@ -723,6 +723,50 @@ class SessionManager:
             return None
         return await self._session_dict(result["session_id"])
 
+    async def publish_pty_activity(self, session_id: str, blocks: list) -> dict:
+        """Put a terminal's work on the dashboard feed, opening its column.
+
+        A pty publishes no harness events, so nothing else in this process
+        ever learns that a terminal turn has started. The mind's tailer sees
+        the user's own submission in the transcript and posts it here, which
+        is what puts a column on screen the instant enter is pressed rather
+        than whenever the first sentence happens to land.
+
+        Opening is `begin`, which is rotation-aware: a terminal rotation
+        keeps the session row and swaps the conversation beneath it, and
+        without the id the replaced conversation's work stays on screen
+        under a context count that has just reset.
+        """
+        if not blocks:
+            return {"ok": False, "error": "no blocks"}
+        conversation_id = None
+        mind_id = self._mind_ids.get(session_id, "")
+        try:
+            row = await self._get_row(session_id)
+            if not row:
+                return {"ok": False, "error": "session not found"}
+            conversation_id = row["claude_sid"]
+        except Exception:  # noqa: BLE001 — a view, never the conversation
+            log.debug("activity feed could not read %s", session_id, exc_info=True)
+            row = None
+        # The same ownership guard `publish_pty_text` carries, and for the
+        # same reason. A tile can be open on a session Telegram is driving —
+        # `_mirror_turn_to_pty` exists for exactly that — and in that case
+        # `send_message` is already feeding this conversation from the very
+        # transcript the mind's tailer is reading. Accepting here too puts
+        # every sentence, command and result in the column twice, in order,
+        # with valid sequence numbers that nothing downstream can tell apart
+        # from the mind repeating itself.
+        if row is not None:
+            owner_type = (row["owner_type"] or "").split(":", 1)[0]
+            if owner_type not in self._ADOPTABLE_OWNER_TYPES:
+                return {"ok": False, "error": "not a terminal-owned session"}
+        self.dashboard.begin(
+            session_id, mind_id=mind_id, conversation_id=conversation_id
+        )
+        self.dashboard.observe_blocks(session_id, blocks)
+        return {"ok": True, "blocks": len(blocks)}
+
     async def publish_pty_text(self, session_id: str, text: str) -> dict:
         """Put one block of a terminal's prose on the session's event stream.
 
@@ -1391,8 +1435,11 @@ class SessionManager:
             # the shorter silence ceiling instead of lingering for a quarter
             # of an hour in a column somebody could be using.
             self.dashboard.frame(session_id)
-        else:
-            self.dashboard.observe(session_id, event)
+        # And then observed regardless of which branch opened it. Every
+        # harness `tool_result` rides on an entry of type `user`, so framing
+        # and returning showed a column full of commands going out with
+        # nothing ever coming back.
+        self.dashboard.observe(session_id, event)
 
     async def _publish_session_event(self, session_id: str, event: dict[str, Any]) -> None:
         """Fan out a session event to all passive observers."""
