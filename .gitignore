@@ -210,3 +210,7 @@ stories/
 reminders/
 .hermes-skills.project/
 .tmp_sshprobe/
+
+# A mind mints its own session credential beside its runtime.yaml. Per-host
+# secret: it never travels with the repo.
+minds/*/session_token

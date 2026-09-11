@@ -717,6 +717,13 @@ class TestClaudeCliWiring:
         assert claude._assistant_texts({"type": "result"}) == []
 
 
+def _session_auth() -> dict[str, str]:
+    """What the gateway presents on a mind's session routes."""
+    import os
+
+    return {"Authorization": f"Bearer {os.environ['MIND_SESSION_TOKEN']}"}
+
+
 class TestCodexCliThreads:
     """Codex will not adopt a conversation id it was handed, so the gateway's
     id and the codex thread are two different things and the mapping lives in
@@ -739,7 +746,7 @@ class TestCodexCliThreads:
         client = TestClient(codex.app)
         client.post("/sessions", json={
             "session_id": "n1", "resume_sid": "gateway-uuid", "model": "gpt-5",
-        })
+        }, headers=_session_auth())
         assert codex.SESSIONS["n1"]["thread_id"] is None
 
     def test_a_known_thread_is_rejoined_on_respawn(self, codex):
@@ -749,7 +756,7 @@ class TestCodexCliThreads:
         client = TestClient(codex.app)
         client.post("/sessions", json={
             "session_id": "n2", "resume_sid": "gateway-uuid", "model": "gpt-5",
-        })
+        }, headers=_session_auth())
         assert codex.SESSIONS["n2"]["thread_id"] == "codex-thread-7"
 
     @pytest.mark.asyncio
@@ -909,7 +916,7 @@ class TestCodexCliThreads:
         codex.SESSIONS.clear()
         codex.THREADS["n4"] = "codex-thread-9"
         client = TestClient(codex.app)
-        client.delete("/sessions/n4")
+        client.delete("/sessions/n4", headers=_session_auth())
         assert "n4" not in codex.THREADS
 
 

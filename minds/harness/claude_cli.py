@@ -429,7 +429,8 @@ def _rotate_pty(
 
 
 install_pty_attach(app, mind_name=NAME, terminals=TERMINALS,
-                   spawn=_spawn_pty, rotate=_rotate_pty)
+                   spawn=_spawn_pty, rotate=_rotate_pty, mind_dir=MIND_DIR)
+runtime_api.install_session_guard(app, mind_dir=MIND_DIR)
 runtime_api.install_runtime_routes(app, path=RUNTIME_PATH, mind_id=MIND_ID, log=log)
 skills_api.install_skills_routes(app, harness="claude_cli", mind_id=MIND_ID, log=log)
 files_api.install_files_routes(app, harness="claude_cli", mind_id=MIND_ID, log=log)

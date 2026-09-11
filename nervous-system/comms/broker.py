@@ -52,7 +52,8 @@ CREATE TABLE IF NOT EXISTS minds (
     model          TEXT NOT NULL,
     harness        TEXT NOT NULL,
     registered_at  REAL NOT NULL,
-    last_seen      REAL NOT NULL
+    last_seen      REAL NOT NULL,
+    session_token  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_minds_mind_id ON minds(mind_id);
 
@@ -102,9 +103,18 @@ async def init_db(db_path: str) -> aiosqlite.Connection:
     db = await aiosqlite.connect(db_path)
     db.row_factory = aiosqlite.Row
     await db.executescript(_SCHEMA)
+    await _migrate_minds(db)
     await db.commit()
     log.info("broker: db initialized at %s", db_path)
     return db
+
+
+async def _migrate_minds(db: aiosqlite.Connection) -> None:
+    """Add columns the schema grew after the first deployments."""
+    cur = await db.execute("PRAGMA table_info(minds)")
+    have = {r[1] for r in await cur.fetchall()}
+    if "session_token" not in have:
+        await db.execute("ALTER TABLE minds ADD COLUMN session_token TEXT")
 
 
 # ---------------------------------------------------------------------------
@@ -440,12 +450,18 @@ async def register_mind(
     gateway_url: str,
     model: str,
     harness: str,
+    session_token: str | None = None,
 ) -> None:
     """Register (or update) a mind in the broker database.
 
     If the mind already exists (matched by mind_id), updates the mutable
     fields and preserves registered_at. The UUID `mind_id` is the durable
     identity; `name` is a human-readable label that may be renamed.
+
+    `session_token` is the credential the gateway must present on every call
+    it makes to that mind. A registration that omits it leaves the stored one
+    in place: a mind re-registering from an older build, or one that failed to
+    read its own token file, must not silently lock the gateway out.
     """
     now = time.time()
     row = await db.execute(
@@ -454,20 +470,57 @@ async def register_mind(
     existing = await row.fetchone()
 
     if existing:
-        await db.execute(
-            "UPDATE minds SET name=?, gateway_url=?, model=?, harness=?, last_seen=? WHERE mind_id=?",
-            (name, gateway_url, model, harness, now, mind_id),
-        )
+        if session_token:
+            await db.execute(
+                "UPDATE minds SET name=?, gateway_url=?, model=?, harness=?, last_seen=?, "
+                "session_token=? WHERE mind_id=?",
+                (name, gateway_url, model, harness, now, session_token, mind_id),
+            )
+        else:
+            await db.execute(
+                "UPDATE minds SET name=?, gateway_url=?, model=?, harness=?, last_seen=? WHERE mind_id=?",
+                (name, gateway_url, model, harness, now, mind_id),
+            )
     else:
         await db.execute(
-            "INSERT INTO minds (mind_id, name, gateway_url, model, harness, registered_at, last_seen) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (mind_id, name, gateway_url, model, harness, now, now),
+            "INSERT INTO minds (mind_id, name, gateway_url, model, harness, registered_at, last_seen, "
+            "session_token) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (mind_id, name, gateway_url, model, harness, now, now, session_token or None),
         )
     await db.commit()
     log_event(log, "mind.registered" if not existing else "mind.updated",
               mind_id=mind_id, mind_name=name, gateway_url=gateway_url,
               model=model, harness=harness)
+
+
+def _public_mind(row) -> dict:
+    """A mind row as any caller may see it.
+
+    `session_token` is the credential that authenticates the gateway to that
+    mind, so it is stripped here rather than at each call site: every listing
+    answers to the service token every surface bot holds, and a `SELECT *`
+    reaching one of them would hand Arnold's token to Zack's bot.
+    """
+    d = dict(row)
+    d["id"] = d.pop("mind_id")
+    d.pop("session_token", None)
+    return d
+
+
+async def get_mind_session_token(
+    db: aiosqlite.Connection, mind_id: str
+) -> str | None:
+    """The credential this gateway must present when calling that mind.
+
+    The only path that returns it. No HTTP route exposes it.
+    """
+    row = await db.execute(
+        "SELECT session_token FROM minds WHERE mind_id = ?", (mind_id,)
+    )
+    result = await row.fetchone()
+    if not result:
+        return None
+    return result["session_token"] or None
 
 
 async def get_registered_minds(db: aiosqlite.Connection) -> list[dict]:
@@ -477,13 +530,7 @@ async def get_registered_minds(db: aiosqlite.Connection) -> list[dict]:
     UUID), `name` (display label), and `gateway_url` (where to dispatch).
     """
     rows = await db.execute("SELECT * FROM minds ORDER BY name")
-    result = []
-    for r in await rows.fetchall():
-        d = dict(r)
-        # Surface mind_id as `id` per the broker-minds API contract.
-        d["id"] = d.pop("mind_id")
-        result.append(d)
-    return result
+    return [_public_mind(r) for r in await rows.fetchall()]
 
 
 async def get_mind(db: aiosqlite.Connection, name: str) -> dict | None:
@@ -492,9 +539,7 @@ async def get_mind(db: aiosqlite.Connection, name: str) -> dict | None:
     result = await row.fetchone()
     if not result:
         return None
-    d = dict(result)
-    d["id"] = d.pop("mind_id")
-    return d
+    return _public_mind(result)
 
 
 async def get_mind_by_id(db: aiosqlite.Connection, mind_id: str) -> dict | None:
@@ -505,9 +550,7 @@ async def get_mind_by_id(db: aiosqlite.Connection, mind_id: str) -> dict | None:
     result = await row.fetchone()
     if not result:
         return None
-    d = dict(result)
-    d["id"] = d.pop("mind_id")
-    return d
+    return _public_mind(result)
 
 
 async def update_mind(db: aiosqlite.Connection, name: str, **fields) -> dict | None:

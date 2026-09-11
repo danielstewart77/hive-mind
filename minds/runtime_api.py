@@ -22,6 +22,7 @@ import os
 import re
 import secrets
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -136,13 +137,297 @@ def registration_payload(path: Path, mind_name: str = "") -> dict[str, str]:
     ]
     if missing:
         raise ValueError(f"runtime.yaml is missing: {', '.join(missing)}")
-    return {
+    payload = {
         "mind_id": str(loaded["mind_id"]).strip(),
         "name": str(loaded.get("name") or mind_name).strip(),
         "gateway_url": str(loaded["gateway_url"]).strip(),
         "model": str(loaded["default_model"]).strip(),
         "harness": str(loaded["harness"]).strip(),
     }
+    # The admin-guarded registration this mind already performs every boot is
+    # the only channel by which the gateway learns the credential. Omitted
+    # when there is none, because a registration that sent an empty one would
+    # erase the gateway's working copy.
+    token = session_token(Path(path).parent)
+    if token:
+        payload["session_token"] = token
+    return payload
+
+
+# The credential the gateway must present on every call it makes to this
+# mind. Lives beside runtime.yaml rather than inside it: runtime.yaml is
+# served to the console through `public_runtime`, and a secret one allowlist
+# edit away from being published is a secret waiting to be published.
+SESSION_TOKEN_FILENAME = "session_token"
+
+log = logging.getLogger("hive-mind.runtime")
+
+
+class SessionTokenUnavailable(ValueError):
+    """A mind cannot establish the credential its session routes require.
+
+    A `ValueError` so the boot registration loop treats it as a retryable
+    payload problem rather than a crash: the mind is still reachable, it just
+    refuses every session call until whatever is wrong with its own directory
+    is fixed.
+    """
+
+
+# How long an empty token file can plausibly be mid-write. Past this the
+# process that created it is gone and the file is reclaimed, rather than
+# stalling every later request on a write that will never land.
+_RACE_WINDOW_S = 1.0
+_RACE_PAUSE_S = 0.02
+
+# One read per process, not one per request. The middleware asks on every
+# `/sessions` call, and the broker only learns a token at boot anyway, so a
+# value that changed under a running mind could not be published to anyone.
+_token_cache: dict[str, str] = {}
+
+
+def session_token(mind_dir: Path) -> str:
+    """This mind's own session credential, minted once and kept.
+
+    Minted rather than issued: a mind nobody provisioned still ends up with a
+    credential of its own, and one taken off it opens that mind and no other.
+    `MIND_SESSION_TOKEN` overrides the file for installs that inject secrets
+    instead of letting a container write them.
+
+    Raises `SessionTokenUnavailable` when no credential can be established.
+    It never returns "" for that case: a mind that cannot read its own token
+    would otherwise serve its session routes — `attach-pty` among them — open
+    to the LAN, while the gateway went on presenting a credential nobody
+    checked and every surface stayed green.
+    """
+    injected = os.environ.get("MIND_SESSION_TOKEN", "").strip()
+    if injected:
+        return injected
+
+    key = str(mind_dir)
+    cached = _token_cache.get(key)
+    if cached:
+        return cached
+
+    token = _mint_or_read_token(Path(mind_dir) / SESSION_TOKEN_FILENAME)
+    _token_cache[key] = token
+    return token
+
+
+def _mint_or_read_token(path: Path) -> str:
+    existing = _read_token(path)
+    if existing:
+        return existing
+
+    try:
+        handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return _adopt_or_reclaim(path)
+    except OSError as exc:
+        raise SessionTokenUnavailable(f"cannot write {path}: {exc}") from exc
+
+    minted = secrets.token_urlsafe(32)
+    with os.fdopen(handle, "w") as stream:
+        stream.write(minted + "\n")
+    return minted
+
+
+def _adopt_or_reclaim(path: Path) -> str:
+    """Resolve an empty token file: someone mid-write, or someone who died.
+
+    `O_EXCL` creates the file before its winner writes into it, so an empty
+    file can mean a write still in flight — and minting a second token over
+    that would leave the winner enforcing a credential that exists nowhere.
+    It can equally mean a process that was killed in the microseconds between
+    the create and the write, which leaves a zero-byte file that no amount of
+    waiting will fill.
+
+    The file's own age separates them, and it always resolves: inside the
+    window this waits in short hops, and the moment the file is older than the
+    window the mint that made it is gone and the file is reclaimed. So the cost
+    is bounded by the window once — never the old behaviour, which was a full
+    second of the event loop (shared here with the surface bots and the pty
+    pumps) on *every* request, forever, for a file only `rm` could fix.
+    """
+    while True:
+        adopted = _read_token(path)
+        if adopted:
+            return adopted
+        try:
+            age = time.time() - path.stat().st_mtime
+        except OSError as exc:
+            raise SessionTokenUnavailable(f"cannot stat {path}: {exc}") from exc
+        if age > _RACE_WINDOW_S:
+            # Nobody is coming. Reclaim it in place, keeping the inode so a
+            # concurrent reader holding it open sees the token rather than a
+            # file that vanished under them.
+            minted = secrets.token_urlsafe(32)
+            try:
+                with open(path, "w", encoding="utf-8") as stream:
+                    stream.write(minted + "\n")
+                os.chmod(path, 0o600)
+            except OSError as exc:
+                raise SessionTokenUnavailable(
+                    f"cannot reclaim empty {path}: {exc}"
+                ) from exc
+            return minted
+        time.sleep(_RACE_PAUSE_S)
+
+
+def _read_token(path: Path) -> str:
+    """The credential on disk, or "" when the file is not there at all.
+
+    A file that exists and cannot be read is not an absent one. Folding the
+    two together is how a mind serves every session route open because a
+    migration chowned its own directory — so only genuine absence returns "".
+    """
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return ""
+    except (OSError, UnicodeDecodeError) as exc:
+        raise SessionTokenUnavailable(f"cannot read {path}: {exc}") from exc
+
+
+def tokens_match(presented: str, expected: str) -> bool:
+    """Constant-time compare of two credentials, on bytes.
+
+    `compare_digest` raises `TypeError` on a `str` holding anything outside
+    ASCII, and the presented value is a raw client-supplied header — so on
+    `str` a single stray byte is a 500 instead of a clean 401, and on the
+    WebSocket handshake the gateway reads that 500 as "this mind has no
+    terminal route" and sends the operator off to rebuild an image.
+    """
+    return secrets.compare_digest(
+        presented.encode("utf-8", "surrogateescape"),
+        expected.encode("utf-8", "surrogateescape"),
+    )
+
+
+def offered_protocols(request) -> list[str]:
+    """The subprotocols a WebSocket client offered, in order."""
+    return [
+        token.strip()
+        for token in request.headers.get("Sec-WebSocket-Protocol", "").split(",")
+        if token.strip()
+    ]
+
+
+def negotiated_protocol(request) -> str | None:
+    """Which subprotocol to echo back, preferring one that is not a secret.
+
+    The handshake needs *a* protocol echoed or a browser that offered any will
+    fail it outright. But whatever is echoed lands in the response headers and
+    in the reverse proxy's logs, so a client offering
+    `["bearer.<token>", "hive.terminal"]` gets the second one back and its
+    credential stays on the request side. A client offering only its credential
+    still gets that echoed — a usable terminal beats a tidy log — which is why
+    the gateway's proxy uses the header instead.
+    """
+    offered = offered_protocols(request)
+    for protocol in offered:
+        if not protocol.startswith("bearer."):
+            return protocol
+    return offered[0] if offered else None
+
+
+def presented_bearers(request) -> list[str]:
+    """Every credential a caller offered, header and subprotocol alike.
+
+    A browser cannot set headers on a WebSocket handshake, so the subprotocol
+    is the only channel a direct attach has; the gateway's proxy uses the
+    header. Both the bare token and a `bearer.`-prefixed one count, because
+    the other minds in the hive accept the bare form and a console that works
+    against one mind must work against all of them.
+    """
+    offered = offered_protocols(request)
+    header = request.headers.get("Authorization", "")
+    if header.startswith("Bearer "):
+        offered.insert(0, header[7:].strip())
+    return [
+        token[7:] if token.startswith("bearer.") else token for token in offered
+    ]
+
+
+def authorize_session(request, mind_dir: Path) -> JSONResponse | None:
+    """Guard a session route. None means the caller may proceed.
+
+    Accepts the mind's session token — the gateway, which is the only real
+    caller — or the admin token, so the console or the operator can reach a
+    wedged session directly.
+
+    A mind that cannot establish a credential of its own refuses with 503
+    rather than serving open. The transitional state the rollout needs is
+    supplied by minds still running code that has no notion of a credential,
+    not by a mind that has one and cannot read it.
+    """
+    try:
+        expected = session_token(mind_dir)
+    except SessionTokenUnavailable as exc:
+        log.error("Refusing session requests — %s", exc)
+        return JSONResponse(
+            {"error": f"this mind cannot establish its session credential: {exc}"},
+            status_code=503,
+        )
+    admin = admin_token()
+    accepted = [expected] + ([admin] if admin else [])
+    offered = presented_bearers(request)
+    for token in offered:
+        for candidate in accepted:
+            if tokens_match(token, candidate):
+                return None
+    # Logged here, because the guard is the outermost middleware and its
+    # refusal never reaches the request logger below it. Without this line a
+    # mind whose broker row holds a stale token refuses every gateway call and
+    # its own log shows nothing at all.
+    log.warning(
+        "Refused a session request with no valid credential (%s offered)",
+        len(offered),
+    )
+    return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+
+def install_session_guard(app: FastAPI, *, mind_dir: Path) -> None:
+    """Require this mind's credential on every `/sessions` HTTP route.
+
+    One middleware rather than a decorator per route: a session route added
+    later cannot ship open by being forgotten, and `DELETE /sessions/{id}`
+    matters as much as the message route. The config surface is untouched —
+    `/runtime`, `/skills`, `/files` and `/models` keep their admin guard.
+    """
+
+    @app.middleware("http")
+    async def _guard_session_routes(request: Request, call_next):
+        # `scope["path"]` and not `request.url.path`: Starlette builds that
+        # URL from the *Host header* plus the path and re-splits it, so a Host
+        # value carrying a "/" or a "#" moves the route out of `.path` while
+        # the router — which reads the scope — still matches it and runs the
+        # handler. One character in a header the client controls, and every
+        # session route on this mind answers unauthenticated.
+        #
+        # Untested here, deliberately and not by omission: this tree's
+        # starlette sanitises the host, so the two expressions are identical on
+        # it and no input can tell them apart. The edge repo pins a version
+        # that does not, and its suite catches the substitution.
+        if request.scope.get("path", "").startswith("/sessions"):
+            denied = authorize_session(request, mind_dir)
+            if denied is not None:
+                return denied
+        return await call_next(request)
+
+
+async def refuse_session_websocket(websocket, denial: JSONResponse) -> None:
+    """Refuse a WebSocket attach with a real HTTP status.
+
+    A pre-accept `close()` presents to the gateway as HTTP 403 — which is also
+    what a mind whose image predates the terminal routes answers — so the
+    denial response is what keeps "refused your credential" from being read as
+    "has no terminal".
+    """
+    try:
+        await websocket.send_denial_response(denial)
+    except (RuntimeError, AttributeError):
+        # The server does not implement the denial-response extension.
+        await websocket.close(code=4401, reason="unauthorized")
 
 
 def admin_token() -> str:
@@ -168,7 +453,7 @@ def authorize_admin(request: Request) -> JSONResponse | None:
         )
     header = request.headers.get("Authorization", "")
     presented = header[7:] if header.startswith("Bearer ") else ""
-    if not secrets.compare_digest(presented, expected):
+    if not tokens_match(presented, expected):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     return None
 
@@ -190,9 +475,20 @@ async def register_with_broker(path: Path, *, mind_name: str, mind_id: str, log)
     import aiohttp
 
     comms_url = os.environ.get("COMMS_URL", "").rstrip("/")
+    # `COMMS_ADMIN_BEARER_TOKEN` specifically, and not the guard's
+    # `admin_token()`: this bearer authenticates *to comms*, which knows
+    # nothing about a local `MIND_ADMIN_TOKEN`. An install holding only the
+    # local one cannot register, and since registration is now the only channel
+    # by which the gateway learns this mind's credential, that mind is
+    # unreachable — which is why the line below is an error rather than the
+    # note it used to be.
     token = os.environ.get("COMMS_ADMIN_BEARER_TOKEN", "")
     if not comms_url or not token:
-        log.info("No COMMS_URL/admin token — skipping broker self-registration")
+        log.error(
+            "No COMMS_URL/admin token: skipping broker self-registration, so "
+            "the gateway will never learn this mind's session credential and "
+            "every call it makes here will be refused"
+        )
         return "skipped"
     try:
         payload = registration_payload(path, mind_name)
@@ -255,9 +551,16 @@ async def registration_loop(
     A mind that boots before comms does must not stay off the registry until
     someone restarts it — that race is real on every reboot, since systemd
     wins against a compose stack. Unreachable or erroring comms is retried
-    with doubling delays capped at `max_delay`; an outright rejection stops
-    the loop, because resending an unacceptable payload forever is noise,
-    not persistence.
+    with doubling delays capped at `max_delay`. A rejection — comms refusing
+    the payload or the admin bearer — retries at the slow heartbeat cadence
+    rather than stopping: this registration is the only channel by which the
+    gateway learns the credential the mind now demands back, so a loop that
+    gives up leaves a mind that refuses every call the gateway makes, until
+    somebody restarts it. Retrying once every `heartbeat` is not noise, it is
+    the only thing that heals a comms bearer rotated while the mind was up.
+
+    `skipped` does stop it: no `COMMS_URL` or no admin token configured is not
+    a condition retrying can change.
 
     After a success the loop keeps going as a heartbeat: re-registering
     every `heartbeat` seconds converges a broker row that was rebuilt or
@@ -268,12 +571,21 @@ async def registration_loop(
         outcome = await register_with_broker(
             path, mind_name=mind_name, mind_id=mind_id, log=log
         )
-        if outcome in ("rejected", "skipped"):
+        if outcome == "skipped":
             log_event(
                 log, "mind.register.loop_stopped", level=logging.WARNING,
                 mind_id=mind_id, outcome=outcome,
             )
             return
+        if outcome == "rejected":
+            # The gateway cannot learn this mind's credential, so it cannot
+            # call this mind at all. Keep saying so, slowly.
+            log_event(
+                log, "mind.register.rejected", level=logging.ERROR,
+                mind_id=mind_id,
+            )
+            await sleep(heartbeat)
+            continue
         if outcome == "registered":
             delay = initial_delay
             await sleep(heartbeat)
