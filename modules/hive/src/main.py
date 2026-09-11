@@ -283,18 +283,23 @@ def _login_redirect_for(request: Request) -> RedirectResponse:
     return RedirectResponse(url=f"/login?next={next_path}", status_code=303)
 
 
-def _gateway_json_sync(path: str, params: dict | None = None) -> dict | list:
+def _gateway_json_sync(
+    path: str, params: dict | None = None, admin: bool = False
+) -> dict | list:
     query = f"?{urllib.parse.urlencode(params)}" if params else ""
     url = f"{_gateway_base_url().rstrip('/')}{path}{query}"
-    headers = {"Accept": "application/json", **_gateway_headers()}
+    auth = _admin_headers() if admin else _gateway_headers()
+    headers = {"Accept": "application/json", **auth}
     request = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(request, timeout=15) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
-async def _gateway_json(path: str, params: dict | None = None) -> dict | list:
+async def _gateway_json(
+    path: str, params: dict | None = None, admin: bool = False
+) -> dict | list:
     try:
-        return await asyncio.to_thread(_gateway_json_sync, path, params)
+        return await asyncio.to_thread(_gateway_json_sync, path, params, admin)
     except urllib.error.HTTPError as exc:
         raise HTTPException(status_code=exc.code, detail=f"Gateway request failed: {path}") from exc
     except OSError as exc:
@@ -776,7 +781,10 @@ _catalog_snapshot = dashboard_data.SharedSnapshot(
 
 async def _live_sessions() -> dict:
     """Which conversations are producing, asked of the only party that knows."""
-    payload = await _gateway_json("/sessions/live")
+    # Admin-guarded on the gateway: the body carries assistant prose from
+    # every conversation in the hive, which the service token every surface
+    # bot holds must not open.
+    payload = await _gateway_json("/sessions/live", admin=True)
     if not isinstance(payload, dict) or "sessions" not in payload:
         # A gateway too old to know this route answers 200 with the body of
         # GET /sessions/{id} for the id "live". Folding that into an empty
@@ -849,7 +857,9 @@ async def api_dashboard_text(
     """
     del user
     return await _gateway_json(
-        "/sessions/live/text", {"session_id": session_id, "since": since}
+        "/sessions/live/text",
+        {"session_id": session_id, "since": since},
+        admin=True,
     )
 
 

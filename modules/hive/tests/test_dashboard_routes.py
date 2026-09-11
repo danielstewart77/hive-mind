@@ -422,3 +422,22 @@ def test_a_gateway_answering_the_route_is_passed_through(monkeypatch):
     )
 
     assert asyncio.run(main_mod._live_sessions()) == {"sessions": [{"id": "a"}]}
+
+
+def test_the_dashboard_reads_the_gateway_as_admin(monkeypatch):
+    """Both live routes carry assistant prose from every conversation in the
+    hive, so the console must present the admin bearer and not the service
+    token every surface bot also holds."""
+    seen: list[dict] = []
+
+    def fake_sync(path, params=None, admin=False):
+        seen.append({"path": path, "admin": admin})
+        return {"sessions": []} if path == "/sessions/live" else {"blocks": []}
+
+    monkeypatch.setattr(main_mod, "_gateway_json_sync", fake_sync)
+
+    asyncio.run(main_mod._live_sessions())
+    asyncio.run(main_mod.api_dashboard_text(session_id="s1", since=0, user={}))
+
+    assert [call["path"] for call in seen] == ["/sessions/live", "/sessions/live/text"]
+    assert all(call["admin"] for call in seen)
