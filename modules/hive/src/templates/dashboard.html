@@ -22,10 +22,16 @@
 
     <div id="dash-error" class="error-state" hidden></div>
 
+    <div class="dash-top">
     <section class="surface dash-providers" aria-label="Provider allowance">
         <div class="surface-header"><div><h2>Token pressure</h2><p>How much of each provider's subscription allowance is spent, read off the responses the proxy already carried.</p></div></div>
         <div class="dash-provider-grid" id="dash-providers"></div>
     </section>
+    <section class="surface dash-hosts" aria-label="Machines">
+        <div class="surface-header"><div><h2>Machines</h2><p>One row per machine. Minds sharing a host collapse into a single row.</p></div></div>
+        <div class="dash-host-grid" id="dash-hosts"></div>
+    </section>
+    </div>
 
     <section aria-label="Live conversations">
         <div class="dash-section-head">
@@ -35,10 +41,6 @@
         <p class="dash-empty" id="dash-idle" hidden>No mind is producing output right now.</p>
     </section>
 
-    <section class="surface dash-hosts" aria-label="Machines">
-        <div class="surface-header"><div><h2>Machines</h2><p>One row per machine. Minds sharing a host collapse into a single row.</p></div></div>
-        <div class="dash-host-grid" id="dash-hosts"></div>
-    </section>
 </main>
 <script src="{{ request.url_for('static', path='dashboard.js') }}?v={{ asset_versions['dashboard.js'] }}" defer></script>
 {% endblock %}

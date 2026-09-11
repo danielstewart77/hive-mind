@@ -713,3 +713,15 @@ a { color: inherit; }
     color: var(--console-muted);
     font-variant-numeric: tabular-nums;
 }
+
+/* Pressure and machines read together: what the hive is spending, and what
+   it is spending it on. Conversations sit below them. */
+.dash-top {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 0.9rem;
+    align-items: start;
+}
+@media (max-width: 1100px) {
+    .dash-top { grid-template-columns: minmax(0, 1fr); }
+}
