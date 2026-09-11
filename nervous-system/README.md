@@ -92,6 +92,61 @@ All bearer-gated except `/health`.
 | `POST /graph/upsert` | write node + optional edge (with orphan/disambiguation guards) |
 | `POST /graph/upsert-direct` | write node directly (skips orphan/disambiguation guards; identity guard still applies) |
 
+## The live feed (comms)
+
+`comms/dashboard.py` is the hive-wide view a dashboard reads, and it exists
+because `stream_session_events` is the wrong shape for one. That stream is
+per-session; it publishes **every** harness event unfiltered, `tool_use`
+inputs and `tool_result` bodies included; and it drops the oldest entry from
+a full queue with no ordering to notice the hole by. A tile speaker gets away
+with all three — it filters on arrival and answers to one person. A console
+page answering to every account in the hive's user table does not.
+
+So the feed carries assistant **text** only, filtered before the bytes leave;
+sequences every block and reports the earliest it still holds, so a discarded
+run renders as a visible gap rather than as prose that reads perfectly and is
+missing its middle; and tracks *generating* explicitly. Nothing else could:
+`sessions.status` is written to 'running' at creation and on a model switch
+and never written back, so anything keyed on it reports every session that
+ever took a turn as busy. It is hooked into `_publish_session_event`, the one
+place the chat path and the terminal tailer meet.
+
+**Two liveness ceilings, because the paths give different evidence.** A chat
+turn is bracketed — `user` opens it, `result` closes it — so silence in the
+middle is a tool chain working. A terminal turn has no brackets at all:
+`publish_pty_text` emits bare assistant blocks and never a `result`, so
+silence is the only end-of-turn signal there is and has to be read as one. At
+the chat ceiling a pane quiet since breakfast would still be "generating" a
+quarter of an hour later, and since columns go to the longest-running
+conversations, stale terminals would hold every slot.
+
+`GET /sessions/live` and `GET /sessions/live/text` are **admin**-guarded, not
+service-token: they carry conversation prose from every mind, and the service
+token is held by every surface bot.
+
+## Context figures
+
+`sessions` carries `context_tokens`, `context_threshold`, `context_window`
+and `context_observed_at`, all nullable and all written by the reporting
+Mind. Nothing on this side can compute them: the count is summed from the
+harness transcript's `message.usage` on the machine running it, and the
+threshold is read off that Mind's spawn arguments — the same model caps in
+two different places depending on whether the long-context pin was on the
+command line, so a gateway deriving it from a model name would be wrong for
+half the hive.
+
+Null stays null. A zero draws a conversation sitting at 138k as having its
+whole window free, which is the one wrong answer that looks like good news.
+Every figure is returned with its age, because it is measured once per
+completed turn and is therefore never live.
+
+`POST /sessions/context` takes the Stop hook's own addressing — surface and
+conversation, as `/sessions/record-turn` already does — since the hook knows
+which conversation it is bound to, not which row the gateway filed it under.
+A rotation clears both the stored count and the feed's buffered text: they
+belong to a transcript that no longer exists, and left in place they render a
+fresh conversation as one already at its rotation point.
+
 ## Identity convention
 
 Every write must populate `mind_id` with the **canonical mind id** — for
