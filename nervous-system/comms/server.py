@@ -295,14 +295,17 @@ async def live_sessions():
 
 @app.get("/sessions/live/text", dependencies=[Depends(require_admin_bearer)])
 async def live_session_text(session_id: str, since: int = 0):
-    """The assistant prose one live conversation has produced after `since`.
+    """Everything one live conversation has done after `since`.
 
-    Text only. The per-session observer stream carries every harness event
-    unfiltered — tool inputs and tool results among them — and a page that
-    answers to any console account must not relay those. Blocks are
-    sequenced, and `first_available_seq` says where the buffer now starts,
-    so a reader that fell behind can render the gap rather than joining two
-    halves of different sentences into prose that reads perfectly.
+    Prose, thinking, the tool call with its input and the result with its
+    body, each block carrying its `kind` so a reader can tell them apart,
+    and its `agent` where a sub-mind did the work. Admin-guarded, because
+    what crosses here is command output and file contents.
+
+    Blocks are sequenced, and `first_available_seq` says where the buffer
+    now starts, so a reader that fell behind can render the gap rather than
+    joining two halves of different sentences into prose that reads
+    perfectly.
     """
     return {
         "session_id": session_id,
@@ -445,6 +448,25 @@ async def record_turn(body: RecordTurnRequest):
 
 class PtyTextRequest(BaseModel):
     text: str
+
+
+class PtyActivityRequest(BaseModel):
+    blocks: list[dict]
+
+
+@app.post(
+    "/sessions/{session_id}/pty-activity",
+    dependencies=[Depends(require_admin_bearer)],
+)
+async def publish_pty_activity(session_id: str, body: PtyActivityRequest):
+    """Everything a terminal turn is doing, for the dashboard alone.
+
+    Deliberately not `pty-text`. That route puts blocks on the session's
+    event stream, which is what the tile's speaker reads — a tool call
+    posted there would be read aloud, and the mind would spend a minute
+    reciting a diff. This one reaches the live feed and stops.
+    """
+    return await session_mgr.publish_pty_activity(session_id, body.blocks)
 
 
 @app.post(

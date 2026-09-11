@@ -4,12 +4,14 @@
 conversation, and it is the wrong shape for a page showing every mind at
 once in three specific ways:
 
-*It publishes everything.* Every harness event reaches observers unfiltered,
-which includes `tool_use` inputs and `tool_result` bodies — commands, file
-contents, API responses. A tile speaker gets away with that because it
-filters on arrival and answers to one person. A console page answers to any
-account in the hive's user table, so the filtering happens here, before the
-bytes leave: this feed carries assistant **text** and nothing else.
+*It is shaped for one reader.* The dashboard shows every mind at once and
+wants the whole turn — prose, the tool call, what came back, and the
+sub-mind turns underneath — because a conversation inside a ten-minute
+build is *doing* something and a column carrying only speech renders it as
+nothing at all. Blocks are therefore typed rather than filtered, so a
+reader can tell a command from a sentence. The route that serves them is
+admin-guarded for exactly this reason: what crosses it is command output
+and file contents.
 
 *It drops silently.* A full observer queue discards its oldest entry and the
 events carry no ordering, so a fast mind or a slow reader yields prose that
@@ -30,6 +32,7 @@ durable thing; this is what is happening right now.
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from collections import deque
@@ -55,6 +58,13 @@ UNFRAMED_TTL_SECONDS = 90.0
 #: and a column that vanished would say it was.
 QUIET_AFTER_SECONDS = 45.0
 
+#: One block's ceiling, in bytes. Before the feed carried tool traffic the
+#: largest thing it could hold was a sentence; now a single `tool_result`
+#: can be a whole file — measured at 1,267,087 bytes on this hive, and an
+#: image renders to hundreds of KB of base64. Four hundred of those per
+#: conversation, retained after the conversation ends, is the process.
+MAX_BLOCK_BYTES = 120_000
+
 #: Blocks kept per conversation. A page open for days cannot hold every
 #: block of every conversation, and the sequence numbers are what make the
 #: bound safe to have.
@@ -65,35 +75,106 @@ BUFFER_BLOCKS = 400
 RETAIN_AFTER_END_SECONDS = 600.0
 
 
-def _text_of(event: dict) -> str:
-    """The assistant prose in this event, and nothing else in it.
+def _blocks_of(event: dict) -> list[dict]:
+    """Everything this event did, one typed block at a time.
 
     Two shapes arrive. `send_message` yields harness events whose
-    `message.content` is a list of blocks; `publish_pty_text` yields whole
-    blocks with the prose directly on `content`. Both are read, because a
-    terminal conversation would otherwise render as an empty column while it
-    is visibly writing.
+    `message.content` is a list of blocks; a terminal's tailer yields blocks
+    already typed, which take `observe_blocks` instead and never come
+    through here.
 
-    Every other block type is dropped rather than stringified: `tool_use`
-    carries the command, `tool_result` carries its output, and `thinking` is
-    written empty to disk by the harness anyway.
+    A block carries its `kind` rather than being dropped for having one:
+    `tool_use` is the command, `tool_result` is what came back, and both are
+    the substance of a turn that is working rather than talking. `thinking`
+    is carried when it holds anything, which on disk it never does — the
+    harness writes the text empty beside its signature — so it costs a
+    branch and nothing else.
+
+    An event with no content at all yields nothing. `result` closes a turn
+    and says nothing; appending an empty block for it would put a blank row
+    in the column on every turn.
     """
-    if event.get("type") != "assistant":
-        return ""
+    kind = event.get("type")
+    if kind not in ("assistant", "user"):
+        return []
     message = event.get("message")
-    if isinstance(message, dict):
-        content = message.get("content")
-        if isinstance(content, list):
-            return "".join(
-                block.get("text", "")
-                for block in content
-                if isinstance(block, dict) and block.get("type") == "text"
+    content = message.get("content") if isinstance(message, dict) else None
+    if content is None:
+        # A terminal tailer's whole-block shape: prose directly on the event.
+        text = event.get("content")
+        if isinstance(text, str) and text.strip():
+            return [_block("text", text)]
+        return []
+    if isinstance(content, str):
+        return [_block("text", content)] if content.strip() else []
+    if not isinstance(content, list):
+        return []
+
+    out: list[dict] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type")
+        if block_type == "text":
+            text = block.get("text") or ""
+            if text.strip():
+                out.append(_block("text", text))
+        elif block_type == "thinking":
+            text = block.get("thinking") or ""
+            if text.strip():
+                out.append(_block("thinking", text))
+        elif block_type == "tool_use":
+            out.append(
+                _block("tool_use", _rendered(block.get("input")), name=block.get("name"))
             )
-        if isinstance(content, str):
-            return content
+        elif block_type == "tool_result":
+            out.append(_block("tool_result", _rendered(block.get("content"))))
+    return out
+
+
+def _rendered(value) -> str:
+    """A tool's input or result as one string, whatever shape it arrived in."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts = []
+        for item in value:
+            if isinstance(item, dict):
+                parts.append(item.get("text") or json.dumps(item, default=str))
+            else:
+                parts.append(str(item))
+        return "\n".join(parts)
+    if value is None:
         return ""
-    content = event.get("content")
-    return content if isinstance(content, str) else ""
+    try:
+        return json.dumps(value, indent=2, default=str)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _capped(text: str) -> tuple[str, bool]:
+    """One block's text, trimmed to something the buffer can hold.
+
+    The tail is kept rather than the head: the end of a command's output is
+    where the error is. A trim is reported rather than done silently, since
+    a reader who cannot tell truncation from a short result reads the wrong
+    conclusion off the screen.
+    """
+    raw = text.encode("utf-8", "replace")
+    if len(raw) <= MAX_BLOCK_BYTES:
+        return text, False
+    return raw[-MAX_BLOCK_BYTES:].decode("utf-8", "replace"), True
+
+
+def _block(kind: str, text: str, *, name=None, agent=None, trimmed: bool = False) -> dict:
+    """One block in the shape every reader of this feed expects."""
+    return {
+        "kind": kind,
+        "text": text,
+        "name": name,
+        "agent": agent,
+        "trimmed": trimmed,
+    }
 
 
 class _Conversation:
@@ -108,7 +189,8 @@ class _Conversation:
         "generating",
         "started_at",
         "last_event_at",
-        "last_text_at",
+        "last_block_at",
+        "awaiting_tool",
         "ended_at",
         "framed",
     )
@@ -122,7 +204,14 @@ class _Conversation:
         self.generating = True
         self.started_at = now
         self.last_event_at = now
-        self.last_text_at: Optional[float] = None
+        #: When this conversation last put *anything* on the feed — a
+        #: sentence, a command, a result. Quiet is measured from here, not
+        #: from the last thing said: a turn grinding through a build is
+        #: working, and a column that vanished would report it as finished.
+        self.last_block_at: Optional[float] = None
+        #: A tool call has gone out and nothing has come back. The turn is
+        #: working, however quiet the transcript is.
+        self.awaiting_tool = False
         self.ended_at: Optional[float] = None
         #: Whether this conversation's turns arrive bracketed by `user` and
         #: `result`. False for a pty-hosted conversation, whose prose arrives
@@ -200,30 +289,63 @@ class LiveFeed:
     def observe(
         self, session_id: str, event: dict[str, Any], now: Optional[float] = None
     ) -> None:
-        """Take whatever prose this event carries, and nothing else.
+        """Take everything this event did, typed.
 
-        An event with no text still counts as life — a tool call is the turn
-        working — so it pushes the expiry back without appending a block.
-        Otherwise a long build would time out of the live set at the very
-        moment it is busiest.
+        An event that produced no block still counts as life — `result`
+        closes a turn, `user` opens one — so it pushes the expiry back
+        without appending anything.
+        """
+        self.observe_blocks(session_id, _blocks_of(event), now=now)
+
+    def observe_blocks(
+        self, session_id: str, blocks: list[dict], now: Optional[float] = None
+    ) -> None:
+        """Append blocks a caller has already typed.
+
+        The terminal's path. A pty publishes no harness events — its
+        keystrokes are raw bytes — so the mind tails the harness transcript
+        and posts what it finds already shaped, rather than synthesising
+        events here for `observe` to take apart again.
+
+        A block for a conversation the feed never opened is dropped.
+        Opening one here would put a column on screen for a session comms
+        has no record of, which is a worse answer than a missing column.
         """
         moment = time.time() if now is None else now
-        text = _text_of(event)
         with self._lock:
             conversation = self._conversations.get(session_id)
             if conversation is None:
                 return
             conversation.last_event_at = moment
-            if not text:
-                return
-            conversation.next_seq += 1
-            conversation.blocks.append(
-                {"seq": conversation.next_seq, "text": text, "at": moment}
-            )
-            conversation.last_text_at = moment
-            while len(conversation.blocks) > self._buffer_blocks:
-                dropped = conversation.blocks.popleft()
-                conversation.first_available_seq = dropped["seq"] + 1
+            for block in blocks:
+                kind = block.get("kind") or "text"
+                text, cut = _capped(block.get("text") or "")
+                conversation.next_seq += 1
+                conversation.blocks.append(
+                    {
+                        "seq": conversation.next_seq,
+                        "kind": kind,
+                        "text": text,
+                        "name": block.get("name"),
+                        "agent": block.get("agent"),
+                        "trimmed": bool(block.get("trimmed")) or cut,
+                        "at": moment,
+                    }
+                )
+                conversation.last_block_at = moment
+                # A tool call with nothing back yet is the one silence a
+                # turn cannot help: the harness writes nothing between
+                # issuing it and its result, and a terminal has no `result`
+                # event to frame the turn. Without this an unframed
+                # conversation expires at 90s in the middle of a ten-minute
+                # build and the console drops the column.
+                if kind == "tool_use":
+                    conversation.awaiting_tool = True
+                elif kind == "tool_result":
+                    conversation.awaiting_tool = False
+                while len(conversation.blocks) > self._buffer_blocks:
+                    dropped = conversation.blocks.popleft()
+                    conversation.first_available_seq = dropped["seq"] + 1
 
     def frame(self, session_id: str) -> None:
         """This conversation's turns are bracketed — it will say when it ends.
@@ -285,7 +407,13 @@ class LiveFeed:
         """
         if not conversation.generating:
             return False
-        ceiling = self._generating_ttl if conversation.framed else self._unframed_ttl
+        # An unanswered tool call earns the generous ceiling whichever path
+        # this conversation arrived on. A pane that died mid-call then holds
+        # its column until the framed ceiling, which is the right way round:
+        # a stale column is a nuisance, and a column that vanishes while the
+        # work is running is the thing this page exists to prevent.
+        framed = conversation.framed or conversation.awaiting_tool
+        ceiling = self._generating_ttl if framed else self._unframed_ttl
         return (now - conversation.last_event_at) <= ceiling
 
     def since(self, session_id: str, seq: int) -> list[dict]:
@@ -313,7 +441,7 @@ class LiveFeed:
                     "known": False,
                 }
             generating = self._generating(conversation, moment)
-            reference = conversation.last_text_at or conversation.started_at
+            reference = conversation.last_block_at or conversation.started_at
             return {
                 "session_id": session_id,
                 "known": True,
@@ -328,7 +456,7 @@ class LiveFeed:
                 "latest_seq": conversation.next_seq,
                 "first_available_seq": conversation.first_available_seq,
                 "started_at": conversation.started_at,
-                "last_text_at": conversation.last_text_at,
+                "last_block_at": conversation.last_block_at,
             }
 
     def live(self, now: Optional[float] = None) -> list[dict]:
