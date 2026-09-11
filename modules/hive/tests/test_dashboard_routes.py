@@ -10,6 +10,7 @@ returning a shape that merely looks right.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import copy
@@ -397,3 +398,27 @@ def test_a_producing_mind_is_not_also_listed_as_idle(tmp_path, monkeypatch, wire
 
     assert body["idle_minds"] == []
     assert body["columns"]["shown"][0]["mind_id"] == "skippy"
+
+
+def test_a_gateway_too_old_for_the_route_is_named_not_read_as_quiet(monkeypatch):
+    """A 200 carrying the wrong body is a failure, not a hive with nothing
+    running — a gateway predating this route answers the single-session
+    route for the id "live", and reading that as an empty list renders a
+    working hive as a silent one."""
+    monkeypatch.setattr(
+        main_mod,
+        "_gateway_json",
+        AsyncMock(return_value=[{"error": "Session not found"}, 404]),
+    )
+
+    with pytest.raises(RuntimeError, match="unexpected shape"):
+        asyncio.run(main_mod._live_sessions())
+
+
+def test_a_gateway_answering_the_route_is_passed_through(monkeypatch):
+    """The well-formed answer reaches the page unaltered."""
+    monkeypatch.setattr(
+        main_mod, "_gateway_json", AsyncMock(return_value={"sessions": [{"id": "a"}]})
+    )
+
+    assert asyncio.run(main_mod._live_sessions()) == {"sessions": [{"id": "a"}]}

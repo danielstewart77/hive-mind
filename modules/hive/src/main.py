@@ -777,7 +777,16 @@ _catalog_snapshot = dashboard_data.SharedSnapshot(
 async def _live_sessions() -> dict:
     """Which conversations are producing, asked of the only party that knows."""
     payload = await _gateway_json("/sessions/live")
-    return payload if isinstance(payload, dict) else {"sessions": []}
+    if not isinstance(payload, dict) or "sessions" not in payload:
+        # A gateway too old to know this route answers 200 with the body of
+        # GET /sessions/{id} for the id "live". Folding that into an empty
+        # list renders a running hive as a silent one, which is the failure
+        # this page exists to catch.
+        raise RuntimeError(
+            "the gateway answered /sessions/live with an unexpected shape "
+            "(it may predate the route)"
+        )
+    return payload
 
 
 @app.get("/api/dashboard")
