@@ -494,32 +494,29 @@ def in_service(last_seen: Optional[float], now: Optional[float] = None) -> bool:
 
 
 def watchable_hosts(hosts: list[dict], now: Optional[float] = None) -> dict:
-    """The machines this page can actually watch, and a count of the rest.
+    """The machines this page can actually watch.
 
-    A mind running a build with no host route answers 404 forever. Its card
-    holds no reading, will never hold one, and is not a machine fault — so
-    a wall of them buries the one box that is genuinely refusing or down.
-    They are counted rather than dropped silently: "seven minds have no
-    host route" is a fact worth one line, and a panel that quietly omitted
-    them would teach its reader to distrust it about absence.
+    Two kinds are left out. A mind running a build with no host route
+    answers 404 forever and will never hold a reading — that is not a
+    machine fault. And a mind the broker has not heard from in a day is
+    not a box that went down, it is one that was never brought into
+    service. Either beside a genuine outage teaches the reader to ignore
+    both.
+
+    What stays is every machine that answered, plus every machine that is
+    checking in but would not answer this probe — refused or unreachable
+    while in service is the outage this panel exists to show.
     """
-    watchable, no_route, out_of_service = [], [], []
-    for host in hosts:
-        status = host.get("status")
-        name = host.get("hostname") or ""
-        if status == "reporting":
-            watchable.append(host)
-        elif status == "unsupported":
-            no_route.append(name)
-        elif not in_service(host.get("last_seen"), now):
-            out_of_service.append(name)
-        else:
-            watchable.append(host)
-    return {
-        "hosts": watchable,
-        "without_route": no_route,
-        "out_of_service": out_of_service,
-    }
+    watchable = [
+        host
+        for host in hosts
+        if host.get("status") == "reporting"
+        or (
+            host.get("status") != "unsupported"
+            and in_service(host.get("last_seen"), now)
+        )
+    ]
+    return {"hosts": watchable}
 
 
 def figure_usage(figure: Optional[dict]) -> Optional[dict]:

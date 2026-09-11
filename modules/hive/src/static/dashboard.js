@@ -418,25 +418,6 @@
     return line;
   }
 
-  function serviceNote(minds) {
-    // Named, not dropped: a machine silent for a day is one nobody has
-    // finished setting up, which is a different sentence from "down" and
-    // still a sentence worth reading.
-    const note = document.createElement("p");
-    note.className = "dash-empty";
-    note.textContent = `${minds.length} mind${minds.length === 1 ? "" : "s"} not in service: ${minds.join(", ")}`;
-    return note;
-  }
-
-  function routeNote(minds) {
-    // Counted, not silently omitted: a panel that quietly dropped these
-    // would teach its reader to distrust it about absence.
-    const note = document.createElement("p");
-    note.className = "dash-empty";
-    note.textContent = `${minds.length} mind${minds.length === 1 ? "" : "s"} run a build with no host route: ${minds.join(", ")}`;
-    return note;
-  }
-
   function renderHosts(payload) {
     hostsEl.replaceChildren();
     const rows = (payload && payload.hosts) || [];
@@ -451,8 +432,6 @@
       } — showing the last reading.`;
       hostsEl.appendChild(note);
     }
-    const withoutRoute = (payload && payload.without_route) || [];
-    const outOfService = (payload && payload.out_of_service) || [];
     if (!rows.length) {
       const note = document.createElement("p");
       note.className = "dash-empty";
@@ -460,8 +439,6 @@
         ? `Machines unavailable: ${payload.error}`
         : "No machine has reported.";
       hostsEl.appendChild(note);
-      if (withoutRoute.length) hostsEl.appendChild(routeNote(withoutRoute));
-      if (outOfService.length) hostsEl.appendChild(serviceNote(outOfService));
       return;
     }
     rows.forEach((host) => {
@@ -524,8 +501,6 @@
       }
       hostsEl.appendChild(card);
     });
-    if (withoutRoute.length) hostsEl.appendChild(routeNote(withoutRoute));
-    if (outOfService.length) hostsEl.appendChild(serviceNote(outOfService));
   }
 
   let snapshotInFlight = false;

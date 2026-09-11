@@ -749,18 +749,6 @@ class TestWatchableHosts:
 
         assert [h["hostname"] for h in panel["hosts"]] == ["workstation"]
 
-    def test_the_minds_without_a_route_are_counted_not_silently_dropped(self):
-        """A panel that quietly omitted them would teach its reader to
-        distrust it about absence."""
-        panel = dd.watchable_hosts(
-            [
-                {"hostname": "ada", "status": "unsupported"},
-                {"hostname": "bob", "status": "unsupported"},
-            ]
-        )
-
-        assert panel["without_route"] == ["ada", "bob"]
-
     def test_a_machine_in_service_keeps_its_card_when_it_refuses(self):
         """Refused is up and holding a credential we do not have. A mind
         checking in minutes ago is an outage worth shouting about."""
@@ -788,7 +776,6 @@ class TestWatchableHosts:
         )
 
         assert panel["hosts"] == []
-        assert panel["out_of_service"] == ["zach"]
 
     def test_the_day_boundary_is_still_in_service(self):
         """A box rebooted overnight is back inside a day."""
@@ -804,7 +791,7 @@ class TestWatchableHosts:
             [{"hostname": "zach", "status": "unreachable", "last_seen": None}]
         )
 
-        assert panel["out_of_service"] == ["zach"]
+        assert panel["hosts"] == []
 
     def test_a_reporting_machine_is_never_filed_out_of_service(self):
         """It answered. Whatever the broker last wrote down, the machine is

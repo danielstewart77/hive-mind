@@ -696,22 +696,37 @@ a { color: inherit; }
 
 /* Machine dials: the same ring the allowance panel uses, captioned. */
 
+/* One row, always. A long device name ("NVIDIA RTX A6000") was widening
+   its cell until the three dials wrapped onto separate lines, which reads
+   as three unrelated readings rather than one machine. */
 .dash-dial-row {
     display: flex;
-    flex-wrap: wrap;
-    gap: 0.9rem;
+    flex-wrap: nowrap;
+    gap: 0.8rem;
     margin: 0.7rem 0 0.4rem;
+    align-items: flex-start;
 }
-.dash-dial { text-align: center; min-width: 84px; }
+.dash-dial {
+    text-align: center;
+    flex: 1 1 0;
+    min-width: 0;
+}
+.dash-dial .dash-gauge { margin: 0 auto; }
 .dash-dial-label {
     margin-top: 0.3rem;
-    font-size: 0.78rem;
+    font-size: 0.76rem;
     color: var(--console-text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 .dash-dial-caption {
-    font-size: 0.72rem;
+    font-size: 0.7rem;
     color: var(--console-muted);
     font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 /* Pressure and machines read together: what the hive is spending, and what
