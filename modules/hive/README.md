@@ -62,6 +62,46 @@ A new default model is live for the next session that Mind is asked for.
 Conversations already running keep the model they started on, including
 across rotations.
 
+## Dashboard
+
+`/dashboard` is the live view: every conversation producing output right now
+in its own column, each with how full its context is, above the machines the
+minds run on and how much of each provider's subscription allowance is spent.
+
+Four things are decided server-side rather than in the browser, so they can
+be tested. **Which conversations hold columns** — four fit, the rest are
+named as waiting, ordered by start time so the set does not reshuffle a
+conversation out of view mid-sentence. **One machine, one row** — reports
+merge on the host id each Mind returns, and a reading from outside a
+container beats one from inside it, whose root filesystem is the image
+layer. **Four failure states** — reporting, refused (401/503), unsupported
+(404, a Mind without the route) and unreachable, because they are four
+different remedies applied to four different machines. **One shared
+snapshot** — every tab reads the same reading, or ten open tabs become ten
+`nvidia-smi` invocations per interval on somebody's laptop; failures hold
+the refresh window open too, since an erroring upstream polled by every tab
+is exactly when hammering is worst.
+
+Nothing unknown is drawn as zero. An absent token count, a provider that has
+taken no traffic and a host that never answered each render as themselves —
+a bar at zero for a conversation actually at 138k reads as room to spare. A
+conversation genuinely at zero still reports zero: that is a measurement,
+and only absence is unknown. A count past its rotation point is reported
+past it rather than clamped, because a rotation fires on the next typed
+message and that can be hours.
+
+The page says when it cannot see. A gateway that is down returns a perfectly
+good empty answer, which would otherwise render as a quiet hive; it is named
+instead, and idle Minds are listed so "nobody is talking" and "nothing is
+connected" stay distinguishable.
+
+Both `/dashboard` and the `/api/dashboard` JSON behind it are login-guarded:
+the JSON carries context counts, a machine inventory and subscription spend.
+`INFERENCE_PROXY_KEY` is the console's own proxy client key, used to read the
+model catalog (for each model's context window) and the provider allowance.
+Without it the page still renders and those two panels report themselves as
+not configured.
+
 ## Test
 
 ```
