@@ -55,15 +55,23 @@ HOST_PROBE_TIMEOUT = 3.0
 
 
 def ordered_columns(live: list[dict]) -> list[dict]:
-    """Every conversation that is generating, oldest first.
+    """Every conversation putting words on screen, oldest first.
 
     There is no cap and no waiting list. A mind that is producing output is
     the whole population this page is about, so holding one back behind a
     slot limit hides the thing the page exists to show; ordering by start
     time keeps the arrangement stable across polls rather than reshuffling
     whenever a re-sort surfaces a different row first.
+
+    A conversation marked quiet is generating but has emitted nothing for
+    a while — a long tool chain, a build. It is dropped: this page is a
+    wall of live prose, and a column holding a frozen paragraph under a
+    label nobody reads is the thing that makes the wall untrustworthy.
     """
-    return sorted(live, key=lambda row: (row.get("started_at") or 0, row["session_id"]))
+    producing = [row for row in live if not row.get("quiet")]
+    return sorted(
+        producing, key=lambda row: (row.get("started_at") or 0, row["session_id"])
+    )
 
 
 def name_columns(live: list[dict], registry: list[dict]) -> list[dict]:

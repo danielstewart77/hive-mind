@@ -601,30 +601,36 @@ a { color: inherit; }
 
 .dash-meter {
     position: relative;
-    height: 10px;
-    border-radius: 5px;
+    width: 14px;
+    flex: 0 0 14px;
+    border-radius: 7px;
     background: var(--console-surface-2);
     border: 1px solid var(--console-line);
     overflow: visible;
 }
+/* Fills from the bottom up: the tank reading, not a progress reading. */
 .dash-meter-fill {
-    height: 100%;
-    width: 0;
-    border-radius: 4px;
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 0;
+    border-radius: 6px;
     background: var(--console-cyan);
-    transition: width 0.4s ease;
+    transition: height 0.4s ease;
 }
 .dash-meter.is-over .dash-meter-fill { background: var(--console-red); }
 /* An absent measurement: bare track, no fill element drawn at all. */
 .dash-meter.is-unknown { background: repeating-linear-gradient(135deg, var(--console-surface-2) 0 6px, var(--console-surface) 6px 12px); }
 .dash-meter.is-unknown .dash-meter-fill { display: none; }
 
+/* The rotation point, drawn across the bar rather than along it. */
 .dash-meter-mark {
     position: absolute;
-    top: -3px;
-    bottom: -3px;
-    width: 2px;
-    margin-left: -1px;
+    left: -3px;
+    right: -3px;
+    height: 2px;
+    margin-bottom: -1px;
     background: var(--console-gold);
     border-radius: 1px;
 }
@@ -666,9 +672,23 @@ a { color: inherit; }
 /* A rotation point past the end of the window sits on the edge, where it
    would otherwise be indistinguishable from one landing exactly there. */
 .dash-meter-mark.is-beyond {
-    width: 4px;
+    height: 4px;
     background: var(--console-red);
     box-shadow: 0 0 0 1px var(--console-bg);
 }
 
 .dash-gauge.is-unknown .dash-gauge-fill { stroke: var(--console-line-strong); }
+
+/* The column body: the standing bar, then the prose it measures. */
+
+.dash-column-body { display: flex; gap: 0.7rem; align-items: stretch; min-height: 140px; }
+.dash-column-body .dash-stream { flex: 1 1 auto; margin-top: 0; min-width: 0; }
+
+.dash-context-gauge { display: flex; flex-direction: column; align-items: center; gap: 0.35rem; }
+.dash-context-gauge .dash-meter { flex: 1 1 auto; }
+.dash-context-pct {
+    font-size: 0.7rem;
+    color: var(--console-muted);
+    font-variant-numeric: tabular-nums;
+}
+.dash-context-pct.is-over { color: var(--console-red); }

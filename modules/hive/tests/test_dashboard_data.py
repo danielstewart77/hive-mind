@@ -713,3 +713,24 @@ class TestLocalProviders:
         )
 
         assert [p["name"] for p in annotated["providers"]] == ["anthropic"]
+
+
+class TestQuietConversations:
+    def test_a_conversation_emitting_nothing_is_not_given_a_column(self):
+        """Generating is not the bar; producing output is. A column holding
+        a frozen paragraph is what makes a wall of live prose untrustworthy."""
+        columns = dd.ordered_columns(
+            [
+                {"session_id": "a", "started_at": 1, "quiet": False},
+                {"session_id": "b", "started_at": 2, "quiet": True},
+            ]
+        )
+
+        assert [row["session_id"] for row in columns] == ["a"]
+
+    def test_a_conversation_that_says_nothing_about_quiet_is_kept(self):
+        """Absent is not quiet — a surface that never reports the flag must
+        not vanish from the page entirely."""
+        columns = dd.ordered_columns([{"session_id": "a", "started_at": 1}])
+
+        assert [row["session_id"] for row in columns] == ["a"]

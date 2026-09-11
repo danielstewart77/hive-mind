@@ -104,6 +104,9 @@
   }
 
   function contextBar(fraction, markFraction, over, markBeyondWindow) {
+    // Vertical: it stands beside the prose rather than above it, so the
+    // column reads as a tank filling while the mind talks. Height, not
+    // width, and the rotation point is a line drawn across it.
     // Scaled to the model's whole context window, with the rotation point
     // marked on the same track. Two fractions of one bar: how full it is,
     // and where it turns over. A mark that defaulted to zero would claim
@@ -115,7 +118,7 @@
     if (fraction === null || fraction === undefined) {
       wrap.classList.add("is-unknown");
     } else {
-      fill.style.width = `${Math.min(fraction, 1) * 100}%`;
+      fill.style.height = `${Math.min(fraction, 1) * 100}%`;
       // Decided server-side, against whichever denominator it found.
       if (over) wrap.classList.add("is-over");
     }
@@ -123,7 +126,7 @@
     if (markFraction !== null && markFraction !== undefined) {
       const mark = document.createElement("span");
       mark.className = "dash-meter-mark";
-      mark.style.left = `${Math.min(markFraction, 1) * 100}%`;
+      mark.style.bottom = `${Math.min(markFraction, 1) * 100}%`;
       if (markBeyondWindow) {
         // Sat flat on the edge it reads as "rotates right at the end",
         // which is the reassuring version of a dropped context pin.
@@ -137,18 +140,9 @@
     return wrap;
   }
 
-  function contextBlock(context) {
+  function contextGauge(context) {
     const box = document.createElement("div");
-    box.className = "dash-context";
-
-    const windowLine = document.createElement("div");
-    windowLine.className = "dash-context-window";
-    windowLine.textContent =
-      context.window === null || context.window === undefined
-        ? "context window unknown"
-        : `${tokens(context.window)} context window`;
-    box.appendChild(windowLine);
-
+    box.className = "dash-context-gauge";
     box.appendChild(
       contextBar(
         context.bar_fraction,
@@ -157,6 +151,20 @@
         context.mark_beyond_window
       )
     );
+    const pct = document.createElement("div");
+    pct.className = "dash-context-pct";
+    pct.textContent =
+      context.bar_fraction === null || context.bar_fraction === undefined
+        ? "—"
+        : `${Math.round(context.bar_fraction * 100)}%`;
+    if (context.over) pct.classList.add("is-over");
+    box.appendChild(pct);
+    return box;
+  }
+
+  function contextLines(context) {
+    const box = document.createElement("div");
+    box.className = "dash-context";
 
     const line = document.createElement("div");
     line.className = "dash-context-line";
@@ -198,22 +206,20 @@
     meta.className = "dash-column-meta";
     meta.textContent = session.model || "";
     head.appendChild(meta);
-    if (session.quiet) {
-      const quiet = document.createElement("span");
-      quiet.className = "dash-quiet";
-      // Said out loud rather than shown by removing the column: silence
-      // inside a long tool chain is the turn working, and a column that
-      // vanished would say it had finished.
-      quiet.textContent = "working quietly";
-      head.appendChild(quiet);
-    }
     column.appendChild(head);
-    column.appendChild(contextBlock(session.context || {}));
+    column.appendChild(contextLines(session.context || {}));
+
+    // The bar stands to the left of the prose, full height of it: a tank
+    // filling while the mind talks, rather than a rule above the text.
+    const body = document.createElement("div");
+    body.className = "dash-column-body";
+    body.appendChild(contextGauge(session.context || {}));
 
     const stream = document.createElement("div");
     stream.className = "dash-stream";
     stream.dataset.stream = session.session_id;
-    column.appendChild(stream);
+    body.appendChild(stream);
+    column.appendChild(body);
     return column;
   }
 
@@ -225,10 +231,14 @@
     const wanted = new Set(shown.map((row) => row.session_id));
     Array.from(columnsEl.children).forEach((child) => {
       if (!wanted.has(child.dataset.session)) {
-        // The cursor is kept. A chat conversation stops generating between
-        // turns, so its column comes and goes every turn — dropping the
-        // cursor makes the next one ask from zero and re-render the whole
-        // retained buffer as if the mind had said it all again.
+        // The cursor goes with it. A column comes and goes constantly now
+        // that a quiet conversation loses its column, and the stream
+        // element is destroyed along with it — so a cursor kept at block
+        // 24 brings the column back empty and refills it one new block at
+        // a time, while a page refresh shows the lot. That is the "I have
+        // to reload to see anything" bug: there is no existing stream left
+        // to double-append into.
+        cursors.delete(child.dataset.session);
         child.remove();
       }
     });
@@ -241,10 +251,16 @@
         column = columnFor(session);
         columnsEl.appendChild(column);
       } else {
-        const head = column.querySelector(".dash-column-head");
-        const context = column.querySelector(".dash-context");
-        head.replaceWith(columnFor(session).querySelector(".dash-column-head"));
-        context.replaceWith(contextBlock(session.context || {}));
+        const fresh = columnFor(session);
+        column
+          .querySelector(".dash-column-head")
+          .replaceWith(fresh.querySelector(".dash-column-head"));
+        column
+          .querySelector(".dash-context")
+          .replaceWith(contextLines(session.context || {}));
+        column
+          .querySelector(".dash-context-gauge")
+          .replaceWith(contextGauge(session.context || {}));
       }
     });
   }
