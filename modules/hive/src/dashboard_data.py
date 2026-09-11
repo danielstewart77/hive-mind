@@ -162,9 +162,9 @@ def merge_hosts(reports: list[dict]) -> list[dict]:
             "platform": identity.get("platform"),
             "status": report.get("status"),
             "error": report.get("error"),
-            "gpu": reading.get("gpu"),
-            "memory": reading.get("memory"),
-            "disk": reading.get("disk"),
+            "gpu": gpu_usage(reading.get("gpu")),
+            "memory": figure_usage(reading.get("memory")),
+            "disk": figure_usage(reading.get("disk")),
             "observed_at": reading.get("observed_at"),
         }
         existing = hosts.get(key)
@@ -491,3 +491,47 @@ def watchable_hosts(hosts: list[dict]) -> dict:
             if host.get("status") == "unsupported"
         ],
     }
+
+
+def figure_usage(figure: Optional[dict]) -> Optional[dict]:
+    """A memory or disk reading as a percentage of itself, plus its band.
+
+    Computed here rather than in the browser for the same reason the
+    allowance bands are: one place holds the two thresholds, and a dial
+    that changes colour at the wrong number is not something a test in
+    this repo could otherwise catch.
+
+    A figure that is not reporting, or whose total is zero, gets no
+    percentage at all — a dial drawn at zero on a machine nobody measured
+    reads as a machine with everything free.
+    """
+    if not isinstance(figure, dict) or figure.get("status") != "reporting":
+        return figure
+    used, total = figure.get("used_bytes"), figure.get("total_bytes")
+    if not isinstance(used, (int, float)) or not isinstance(total, (int, float)):
+        return figure
+    if total <= 0:
+        return figure
+    percent = used / total * 100
+    return {**figure, "usage_percent": percent, "band": pressure_band(percent)}
+
+
+def gpu_usage(gpu: Optional[dict]) -> Optional[dict]:
+    """Each device's utilisation banded, the probe's own states untouched.
+
+    Absent, tool-missing and probe-failed stay exactly as they arrived:
+    three different sentences about a machine, and collapsing any of them
+    into a dial at zero says the card is idle when nobody looked.
+    """
+    if not isinstance(gpu, dict) or gpu.get("status") != "reporting":
+        return gpu
+    devices = []
+    for device in gpu.get("devices") or []:
+        if not isinstance(device, dict):
+            continue
+        percent = device.get("utilization_percent")
+        if isinstance(percent, (int, float)) and not isinstance(percent, bool):
+            devices.append({**device, "band": pressure_band(float(percent))})
+        else:
+            devices.append(dict(device))
+    return {**gpu, "devices": devices}

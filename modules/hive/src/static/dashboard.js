@@ -357,6 +357,53 @@
     return line;
   }
 
+  function dialCell(label, percent, band, caption) {
+    const cell = document.createElement("div");
+    cell.className = "dash-dial";
+    const ring = gauge(percent, band);
+    if (!ring) return null;
+    cell.appendChild(ring);
+    const name = document.createElement("div");
+    name.className = "dash-dial-label";
+    name.textContent = label;
+    cell.appendChild(name);
+    if (caption) {
+      const sub = document.createElement("div");
+      sub.className = "dash-dial-caption";
+      sub.textContent = caption;
+      cell.appendChild(sub);
+    }
+    return cell;
+  }
+
+  function figureDial(label, figure, suffix) {
+    // No dial when there is nothing measured: an empty ring reads as a
+    // machine with everything free, which is the opposite of unknown.
+    if (!figure || figure.usage_percent === undefined) return null;
+    return dialCell(
+      label,
+      figure.usage_percent,
+      figure.band,
+      `${bytes(figure.used_bytes)} of ${bytes(figure.total_bytes)}${suffix || ""}`
+    );
+  }
+
+  function gpuDials(gpu) {
+    if (!gpu || gpu.status !== "reporting") return [];
+    return (gpu.devices || [])
+      .map((d) =>
+        d.utilization_percent === undefined || d.utilization_percent === null
+          ? null
+          : dialCell(
+              d.name || "GPU",
+              d.utilization_percent,
+              d.band,
+              `${d.memory_used_mb}/${d.memory_total_mb} MB`
+            )
+      )
+      .filter(Boolean);
+  }
+
   function figureLine(label, figure, suffix) {
     const line = document.createElement("div");
     line.className = "metric-detail";
@@ -432,23 +479,37 @@
         return;
       }
 
-      card.appendChild(gpuLine(host.gpu));
-      card.appendChild(figureLine("Memory", host.memory));
-      if (host.observed_at) {
-        const when = document.createElement("div");
-        when.className = "metric-detail";
-        when.textContent = `read ${ago(Date.now() / 1000 - host.observed_at)}`;
-        card.appendChild(when);
-      }
-      card.appendChild(
-        figureLine(
-          "Disk",
-          host.disk,
-          host.disk && host.disk.reflects_host === false
-            ? " (container filesystem, not the host)"
-            : ""
-        )
+      // Dials for what was measured; the probe's own absences stay as
+      // sentences, because "no GPU", "no probe tool" and "probe failed"
+      // are three different facts and a ring is none of them.
+      const dials = document.createElement("div");
+      dials.className = "dash-dial-row";
+      gpuDials(host.gpu).forEach((d) => dials.appendChild(d));
+      const memory = figureDial("Memory", host.memory);
+      if (memory) dials.appendChild(memory);
+      const disk = figureDial(
+        "Disk",
+        host.disk,
+        host.disk && host.disk.reflects_host === false ? " (container)" : ""
       );
+      if (disk) dials.appendChild(disk);
+      if (dials.childElementCount) card.appendChild(dials);
+
+      if (!host.gpu || host.gpu.status !== "reporting") {
+        card.appendChild(gpuLine(host.gpu));
+      }
+      if (!memory) card.appendChild(figureLine("Memory", host.memory));
+      if (!disk) {
+        card.appendChild(
+          figureLine(
+            "Disk",
+            host.disk,
+            host.disk && host.disk.reflects_host === false
+              ? " (container filesystem, not the host)"
+              : ""
+          )
+        );
+      }
       hostsEl.appendChild(card);
     });
     if (withoutRoute.length) hostsEl.appendChild(routeNote(withoutRoute));

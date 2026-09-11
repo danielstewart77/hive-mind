@@ -601,9 +601,9 @@ a { color: inherit; }
 
 .dash-meter {
     position: relative;
-    width: 14px;
-    flex: 0 0 14px;
-    border-radius: 7px;
+    width: 140px;
+    flex: 0 0 140px;
+    border-radius: 8px;
     background: var(--console-surface-2);
     border: 1px solid var(--console-line);
     overflow: visible;
@@ -615,7 +615,7 @@ a { color: inherit; }
     right: 0;
     bottom: 0;
     height: 0;
-    border-radius: 6px;
+    border-radius: 7px;
     background: var(--console-cyan);
     transition: height 0.4s ease;
 }
@@ -687,8 +687,29 @@ a { color: inherit; }
 .dash-context-gauge { display: flex; flex-direction: column; align-items: center; gap: 0.35rem; }
 .dash-context-gauge .dash-meter { flex: 1 1 auto; }
 .dash-context-pct {
-    font-size: 0.7rem;
+    font-size: 0.95rem;
+    font-weight: 600;
     color: var(--console-muted);
     font-variant-numeric: tabular-nums;
 }
 .dash-context-pct.is-over { color: var(--console-red); }
+
+/* Machine dials: the same ring the allowance panel uses, captioned. */
+
+.dash-dial-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.9rem;
+    margin: 0.7rem 0 0.4rem;
+}
+.dash-dial { text-align: center; min-width: 84px; }
+.dash-dial-label {
+    margin-top: 0.3rem;
+    font-size: 0.78rem;
+    color: var(--console-text);
+}
+.dash-dial-caption {
+    font-size: 0.72rem;
+    color: var(--console-muted);
+    font-variant-numeric: tabular-nums;
+}

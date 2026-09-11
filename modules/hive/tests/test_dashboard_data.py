@@ -772,3 +772,58 @@ class TestWatchableHosts:
         panel = dd.watchable_hosts([{"hostname": "zach", "status": "unreachable"}])
 
         assert [h["hostname"] for h in panel["hosts"]] == ["zach"]
+
+
+class TestMachineDials:
+    def test_a_reporting_figure_carries_its_percentage_and_band(self):
+        figure = dd.figure_usage(
+            {"status": "reporting", "used_bytes": 90, "total_bytes": 100}
+        )
+
+        assert figure["usage_percent"] == 90.0
+        assert figure["band"] == "hot"
+
+    def test_a_figure_at_the_warn_line_reads_warn(self):
+        figure = dd.figure_usage(
+            {"status": "reporting", "used_bytes": 60, "total_bytes": 100}
+        )
+
+        assert figure["band"] == "warn"
+
+    def test_a_figure_that_is_not_reporting_gets_no_percentage(self):
+        """A dial at zero on a machine nobody measured reads as a machine
+        with everything free."""
+        figure = dd.figure_usage({"status": "unavailable"})
+
+        assert "usage_percent" not in figure
+
+    def test_a_total_of_zero_does_not_divide(self):
+        figure = dd.figure_usage(
+            {"status": "reporting", "used_bytes": 0, "total_bytes": 0}
+        )
+
+        assert "usage_percent" not in figure
+
+    def test_each_gpu_device_carries_its_band(self):
+        gpu = dd.gpu_usage(
+            {"status": "reporting", "devices": [
+                {"name": "a", "utilization_percent": 12},
+                {"name": "b", "utilization_percent": 97},
+            ]}
+        )
+
+        assert [d["band"] for d in gpu["devices"]] == ["ok", "hot"]
+
+    def test_a_failed_probe_is_left_exactly_as_it_arrived(self):
+        """Absent, tool-missing and probe-failed are three different
+        sentences about a machine; a dial at zero is none of them."""
+        gpu = dd.gpu_usage({"status": "query_failed", "error": "boom"})
+
+        assert gpu == {"status": "query_failed", "error": "boom"}
+
+    def test_a_device_with_no_utilisation_figure_gets_no_band(self):
+        gpu = dd.gpu_usage(
+            {"status": "reporting", "devices": [{"name": "a"}]}
+        )
+
+        assert "band" not in gpu["devices"][0]
