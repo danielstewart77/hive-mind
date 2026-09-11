@@ -15,13 +15,53 @@ const here = dirname(fileURLToPath(import.meta.url));
 // <script> tag would, against globalThis.
 new Function(readFileSync(join(here, "..", "..", "src", "static", "terminal-routing.js"), "utf8"))();
 const {
-    pickReattachTarget, isActive, retryDelayMs, socketIsStale, attemptsAfterSocket, attachExhausted, contrastText, pendingImeText, shouldResetImeAccumulator, pageScrollLines,
+    pickReattachTarget, isActive, retryDelayMs, socketIsStale, permanentClose, attemptsAfterSocket, attachExhausted, contrastText, pendingImeText, shouldResetImeAccumulator, pageScrollLines,
     pageScrollAction, wheelReport, dragWheelSteps, parseOpenFragment, formatOpenFragment,
     detachSocket, speakable,
     composeIsSubmittable, composeSubmitBytes, composeLocked,
 } = globalThis.TerminalRouting;
 
 const tests = {
+    "a dropped socket is retried"() {
+        assert.equal(permanentClose(1006), null);
+        assert.equal(permanentClose(1000), null);
+        assert.equal(permanentClose(undefined), null);
+    },
+
+    "a mind with no pty route is not retried"() {
+        assert.equal(permanentClose(4415).message, "no terminal on this mind");
+    },
+
+    "a refused credential is its own answer, not a missing route"() {
+        // 4415 sends someone rebuilding an image; 4416 means the broker holds
+        // a token this mind no longer accepts. Falling through to the reattach
+        // loop instead shows "reattaching..." forever over a deliberate no.
+        const refused = permanentClose(4416);
+        assert.notEqual(refused, null);
+        assert.match(refused.message, /credential/);
+        assert.notEqual(refused.message, permanentClose(4415).message);
+    },
+
+    "the mind's own pre-accept refusal is not retried either"() {
+        // 4401 is what a mind closes with when its server cannot send a
+        // denial response. Falling through would reattach forever.
+        assert.match(permanentClose(4401).message, /credential/);
+    },
+
+    "a tile already open elsewhere stands down"() {
+        assert.equal(permanentClose(1012).message, "open in another window");
+    },
+
+    "a mind refusing the attach itself stands down"() {
+        assert.equal(permanentClose(1008).message, "mind refused the terminal");
+    },
+
+    "a rotation is not permanent — the tile hunts the successor"() {
+        assert.equal(permanentClose(4412), null);
+        assert.equal(permanentClose(4410), null);
+        assert.equal(permanentClose(4411), null);
+    },
+
     "a live session is retried, not replaced"() {
         const rows = [{id: "a", status: "running"}];
         assert.deepEqual(pickReattachTarget(rows, {deadId: "a", openIds: ["a"]}), {action: "retry"});

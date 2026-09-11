@@ -1265,25 +1265,14 @@
                     refreshSessions();
                     return;
                 }
-                // 1012 = another tab/tile attached to this same session and
-                // took the keyboard. Reconnecting would start a tug-of-war,
-                // so this tile stands down instead.
-                if (ev && ev.code === 1012) {
-                    stopWith("open in another window");
-                    return;
-                }
-                // 4415 = the mind is reachable but has no pty route (its
-                // image predates the terminal work). Retrying just spins,
-                // so say what's wrong and stop.
-                if (ev && ev.code === 4415) {
-                    stopWith("no terminal on this mind");
-                    return;
-                }
-                // 1008 = the mind took the attach and then refused it (no
-                // conversation to resume, a harness with no pty). That is a
-                // decision, not a blip: retrying just asks again forever.
-                if (ev && ev.code === 1008) {
-                    stopWith("mind refused the terminal");
+                // Codes that are a decision rather than a blip — a tile
+                // already open elsewhere, a mind with no pty route, a mind
+                // refusing the attach or the gateway's credential. The ladder
+                // lives in TerminalRouting.permanentClose so it can be tested
+                // against every code rather than grepped for in this file.
+                const permanent = TerminalRouting.permanentClose(ev && ev.code);
+                if (permanent) {
+                    stopWith(permanent.message);
                     return;
                 }
                 // 4412 = rotation retired this session for a successor and

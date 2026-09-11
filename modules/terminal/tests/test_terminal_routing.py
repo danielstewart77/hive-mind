@@ -97,18 +97,17 @@ def test_template_uses_the_routing_module():
     assert "r.mind_id === mindId" not in body
 
 
-def test_template_stops_retrying_a_mind_without_a_terminal():
-    """A mind whose image predates the pty route refuses the handshake, and
-    the gateway reports that as 4415. Treating it like a dropped socket span
-    the tile between connecting and reattaching several times a second."""
+def test_template_stops_retrying_a_mind_that_has_answered():
+    """Which codes are permanent, and what each one says, is asserted against
+    the function itself in tests/js/terminal_routing_test.mjs. What this checks
+    is that the template consults it rather than keeping a second ladder."""
     template = os.path.join(
         os.path.dirname(__file__), "..", "src", "templates", "terminal.html"
     )
     with open(template, encoding="utf-8") as fh:
         body = fh.read()
 
-    assert "4415" in body
-    assert "no terminal on this mind" in body
+    assert "TerminalRouting.permanentClose" in body
     # Retries to the same session go through the backoff, never straight
     # back into attach().
     assert "TerminalRouting.retryDelayMs" in body
