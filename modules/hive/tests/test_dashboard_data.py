@@ -28,62 +28,87 @@ def _live(*ids, started=None):
     ]
 
 
-# --- Requirement 6: the column cap -----------------------------------------
+# --- Requirements 1, 3: every generating mind, named -----------------------
 
 
-class TestColumnCap:
-    def test_fewer_conversations_than_slots_are_all_shown(self):
-        split = dd.split_columns(_live("a", "b", "c"), cap=4)
+class TestColumns:
+    def test_every_generating_conversation_gets_a_column(self):
+        """No cap. Six minds producing output are six columns — a slot limit
+        would hide the exact thing this page is for."""
+        columns = dd.ordered_columns(_live("a", "b", "c", "d", "e", "f"))
 
-        assert [row["session_id"] for row in split["shown"]] == ["a", "b", "c"]
-        assert split["waiting"] == []
+        assert [row["session_id"] for row in columns] == [
+            "a", "b", "c", "d", "e", "f",
+        ]
 
-    def test_exactly_the_cap_fills_every_slot_and_leaves_nobody_waiting(self):
-        """The boundary. One either side of it is where an off-by-one lives."""
-        split = dd.split_columns(_live("a", "b", "c", "d"), cap=4)
-
-        assert len(split["shown"]) == 4
-        assert split["waiting"] == []
-
-    def test_one_past_the_cap_leaves_exactly_one_waiting(self):
-        split = dd.split_columns(_live("a", "b", "c", "d", "e"), cap=4)
-
-        assert len(split["shown"]) == 4
-        assert [row["session_id"] for row in split["waiting"]] == ["e"]
-
-    def test_every_conversation_appears_somewhere(self):
-        """Requirement 2 as amended: a conversation past the cap is named in
-        the waiting list, never dropped. Six minds working and four columns
-        must not read as a hive where two of them stopped."""
-        split = dd.split_columns(_live("a", "b", "c", "d", "e", "f"), cap=4)
-
-        seen = [row["session_id"] for row in split["shown"] + split["waiting"]]
-        assert sorted(seen) == ["a", "b", "c", "d", "e", "f"]
-
-    def test_no_conversation_is_both_shown_and_waiting(self):
-        split = dd.split_columns(_live("a", "b", "c", "d", "e"), cap=4)
-
-        shown = {row["session_id"] for row in split["shown"]}
-        waiting = {row["session_id"] for row in split["waiting"]}
-        assert shown & waiting == set()
-
-    def test_the_longest_running_conversations_hold_the_columns(self):
-        """Stable by start time on purpose. A selection that reshuffled on
-        each poll would move a conversation out of view mid-sentence, and
-        the operator would never finish reading a line."""
+    def test_columns_are_ordered_oldest_first_and_stay_put(self):
+        """Stable by start time on purpose. An arrangement that reshuffled
+        each poll would move a conversation mid-sentence."""
         live = _live("new", "old", "middle", started={"old": 1, "middle": 5, "new": 9})
 
-        split = dd.split_columns(live, cap=2)
+        assert [row["session_id"] for row in dd.ordered_columns(live)] == [
+            "old", "middle", "new",
+        ]
 
-        assert [row["session_id"] for row in split["shown"]] == ["old", "middle"]
+    def test_a_column_is_headed_by_its_mind_name(self):
+        columns = dd.name_columns(
+            [{"session_id": "s1", "mind_id": "uuid-1"}],
+            [{"id": "uuid-1", "name": "skippy"}],
+        )
 
-    def test_a_freed_slot_goes_to_the_longest_waiting_not_to_a_reshuffle(self):
-        live = _live("a", "b", "c", started={"a": 1, "b": 2, "c": 3})
-        assert [r["session_id"] for r in dd.split_columns(live, cap=2)["shown"]] == ["a", "b"]
+        assert columns[0]["mind_name"] == "skippy"
 
-        live = [row for row in live if row["session_id"] != "a"]
+    def test_a_mind_the_registry_does_not_know_keeps_its_id(self):
+        """Blank is useless — the id is the only handle left on a live
+        conversation whose mind the broker has never registered."""
+        columns = dd.name_columns(
+            [{"session_id": "s1", "mind_id": "uuid-unregistered"}],
+            [{"id": "uuid-1", "name": "skippy"}],
+        )
 
-        assert [r["session_id"] for r in dd.split_columns(live, cap=2)["shown"]] == ["b", "c"]
+        assert columns[0]["mind_name"] == "uuid-unregistered"
+
+
+# --- Requirement 10: allowance bands ---------------------------------------
+
+
+class TestPressureBands:
+    def test_below_the_warn_line_reads_ok(self):
+        assert dd.pressure_band(59.0) == "ok"
+
+    def test_the_warn_line_itself_reads_warn(self):
+        assert dd.pressure_band(60.0) == "warn"
+
+    def test_the_top_of_the_warn_band_still_reads_warn(self):
+        assert dd.pressure_band(85.0) == "warn"
+
+    def test_past_the_hot_line_reads_hot(self):
+        assert dd.pressure_band(86.0) == "hot"
+
+    def test_an_unmeasured_figure_has_no_band(self):
+        assert dd.pressure_band(None) is None
+
+    def test_a_reporting_window_carries_its_band(self):
+        annotated = dd.annotate_providers(
+            {"providers": [
+                {"name": "anthropic", "reporting": True,
+                 "windows": [{"label": "5h", "used_percent": 91.0}]},
+            ]}
+        )
+
+        assert annotated["providers"][0]["windows"][0]["band"] == "hot"
+
+    def test_a_provider_reporting_nothing_carries_no_windows(self):
+        """Requirement 11: nothing to draw. An unfilled ring reads as
+        headroom, which is the opposite of nobody having measured."""
+        annotated = dd.annotate_providers(
+            {"providers": [
+                {"name": "openai", "reporting": False,
+                 "windows": [{"label": "5h", "used_percent": 0.0}]},
+            ]}
+        )
+
+        assert annotated["providers"][0]["windows"] == []
 
 
 # --- Requirement 25: one machine, one row ----------------------------------
@@ -390,7 +415,7 @@ class TestContextReading:
         reading = dd.context_reading({"tokens": 330_000, "threshold": 300_000})
 
         assert reading["fraction_of_threshold"] == pytest.approx(1.1)
-        assert reading["over_threshold"] is True
+        assert reading["over"] is True
 
     def test_the_window_is_carried_so_the_threshold_reads_against_it(self):
         reading = dd.context_reading(
@@ -543,3 +568,103 @@ class TestAFailingUpstreamIsThrottledToo:
         result = asyncio.run(scenario())
         assert result["value"] == 1
         assert result["stale"] is True
+
+
+# --- Requirement 7: an absent count is not a count of zero -----------------
+
+
+class TestUnmeasuredContext:
+    def test_a_conversation_with_no_count_reports_no_fill_at_all(self):
+        reading = dd.context_reading({"threshold": 300000, "window": 1000000})
+
+        assert reading["status"] == "unknown"
+        assert reading["bar_fraction"] is None
+        assert reading["fraction_of_window"] is None
+        assert reading["fraction_of_threshold"] is None
+
+
+# --- The bar always means something ----------------------------------------
+
+
+class TestBarBasis:
+    def test_the_bar_is_the_window_when_the_window_is_known(self):
+        reading = dd.context_reading(
+            {"tokens": 140000, "threshold": 300000, "window": 1000000}
+        )
+
+        assert reading["bar_basis"] == "window"
+        assert reading["bar_fraction"] == 0.14
+        assert reading["mark_fraction"] == 0.3
+
+    def test_an_unknown_window_falls_back_to_the_rotation_point(self):
+        """The proxy catalog is legitimately absent — an unreachable proxy,
+        or a deployment name it has never been told about. A conversation at
+        95% of rotation must not render as one nobody has measured."""
+        reading = dd.context_reading({"tokens": 190000, "threshold": 200000})
+
+        assert reading["bar_basis"] == "threshold"
+        assert reading["bar_fraction"] == 0.95
+
+    def test_with_neither_denominator_there_is_no_bar_at_all(self):
+        reading = dd.context_reading({"tokens": 190000})
+
+        assert reading["bar_basis"] is None
+        assert reading["bar_fraction"] is None
+
+    def test_a_rotation_point_of_zero_draws_no_mark(self):
+        """A mark at the left edge claims this conversation rotates
+        immediately, which is worse than no mark at all."""
+        reading = dd.context_reading(
+            {"tokens": 5000, "threshold": 0, "window": 1000000}
+        )
+
+        assert reading["mark_fraction"] is None
+
+    def test_a_rotation_point_past_the_window_is_flagged_not_clamped(self):
+        """A mind reporting a 200k window against a 300k rotation point is
+        the dropped [1m] pin. Squared away at the edge it reads as
+        'rotates right at the end', which is reassuring and wrong."""
+        reading = dd.context_reading(
+            {"tokens": 10000, "threshold": 300000, "window": 200000}
+        )
+
+        assert reading["mark_beyond_window"] is True
+
+    def test_a_rotation_point_inside_the_window_is_not_flagged(self):
+        reading = dd.context_reading(
+            {"tokens": 10000, "threshold": 300000, "window": 1000000}
+        )
+
+        assert reading["mark_beyond_window"] is False
+
+    def test_overflowing_the_window_with_no_rotation_point_still_reads_over(self):
+        """With nothing else to be past, the window is the line. A bar that
+        can never turn red is a bar that cannot warn."""
+        reading = dd.context_reading({"tokens": 250000, "window": 200000})
+
+        assert reading["over"] is True
+
+
+class TestProviderShapes:
+    def test_a_body_that_is_not_a_list_yields_no_providers(self):
+        """A 200 carrying the wrong body is a proxy answering, not a proxy
+        down — it must not raise out of the route and take the
+        conversations and the machines with it."""
+        assert dd.annotate_providers({"providers": None})["providers"] == []
+
+    def test_a_window_whose_figure_is_not_a_number_is_dropped(self):
+        annotated = dd.annotate_providers(
+            {"providers": [{"reporting": True, "windows": [
+                {"label": "5h", "used_percent": "91.0"},
+                {"label": "7d", "used_percent": 40.0},
+            ]}]}
+        )
+
+        assert [w["label"] for w in annotated["providers"][0]["windows"]] == ["7d"]
+
+    def test_a_window_with_no_figure_at_all_is_dropped(self):
+        annotated = dd.annotate_providers(
+            {"providers": [{"reporting": True, "windows": [{"label": "5h"}]}]}
+        )
+
+        assert annotated["providers"][0]["windows"] == []

@@ -151,7 +151,7 @@ def test_the_payload_splits_live_conversations_into_columns(tmp_path, monkeypatc
 
     body = client.get("/api/dashboard").json()
 
-    assert [row["session_id"] for row in body["columns"]["shown"]] == ["s1"]
+    assert [row["session_id"] for row in body["columns"]] == ["s1"]
 
 
 def test_a_session_without_a_reported_window_takes_it_from_the_model_map(
@@ -164,7 +164,7 @@ def test_a_session_without_a_reported_window_takes_it_from_the_model_map(
 
     body = client.get("/api/dashboard").json()
 
-    assert body["columns"]["shown"][0]["context"]["window"] == 1_000_000
+    assert body["columns"][0]["context"]["window"] == 1_000_000
 
 
 def test_the_context_is_rendered_as_progress_toward_the_rotation_point(
@@ -172,7 +172,7 @@ def test_the_context_is_rendered_as_progress_toward_the_rotation_point(
 ):
     client = _authed_client(tmp_path, monkeypatch)
 
-    context = client.get("/api/dashboard").json()["columns"]["shown"][0]["context"]
+    context = client.get("/api/dashboard").json()["columns"][0]["context"]
 
     assert context["fraction_of_threshold"] == 0.5
     assert context["threshold"] == 300_000
@@ -201,7 +201,7 @@ def test_a_gateway_that_is_down_does_not_take_the_page_with_it(
 
     body = client.get("/api/dashboard").json()
 
-    assert body["columns"]["shown"] == []
+    assert body["columns"] == []
     assert "comms down" in body["sessions_error"]
     assert body["hosts"]["hosts"][0]["hostname"] == "workstation"
 
@@ -217,7 +217,7 @@ def test_a_proxy_that_is_down_leaves_the_conversations_rendering(
 
     body = client.get("/api/dashboard").json()
 
-    assert body["columns"]["shown"][0]["session_id"] == "s1"
+    assert body["columns"][0]["session_id"] == "s1"
     assert body["providers"]["stale"] is True
 
 
@@ -230,7 +230,7 @@ def test_an_unreachable_proxy_leaves_the_window_unknown_rather_than_guessed(
     main_mod._catalog_snapshot._fetch = AsyncMock(side_effect=RuntimeError("proxy down"))
     client = _authed_client(tmp_path, monkeypatch)
 
-    context = client.get("/api/dashboard").json()["columns"]["shown"][0]["context"]
+    context = client.get("/api/dashboard").json()["columns"][0]["context"]
 
     assert context["window"] is None
     assert context["fraction_of_window"] is None
@@ -363,43 +363,6 @@ def test_a_mind_with_no_gateway_url_is_not_called_unreachable(monkeypatch):
     assert report["status"] == "unconfigured"
 
 
-# --- Requirement 5: idle minds are listed -----------------------------------
-
-
-def test_a_connected_mind_that_is_not_producing_is_listed_as_idle(
-    tmp_path, monkeypatch, wired
-):
-    """Otherwise a quiet hive and a hive whose minds have all gone render
-    identically — an empty page either way."""
-    monkeypatch.setattr(
-        main_mod,
-        "_broker_minds_safe",
-        AsyncMock(return_value=[
-            {"id": "skippy", "name": "skippy", "model": "claude-opus-5"},
-            {"id": "mordecai", "name": "mordecai", "model": "gpt-5.6"},
-        ]),
-    )
-    client = _authed_client(tmp_path, monkeypatch)
-
-    body = client.get("/api/dashboard").json()
-
-    assert [row["name"] for row in body["idle_minds"]] == ["mordecai"]
-
-
-def test_a_producing_mind_is_not_also_listed_as_idle(tmp_path, monkeypatch, wired):
-    monkeypatch.setattr(
-        main_mod,
-        "_broker_minds_safe",
-        AsyncMock(return_value=[{"id": "skippy", "name": "skippy"}]),
-    )
-    client = _authed_client(tmp_path, monkeypatch)
-
-    body = client.get("/api/dashboard").json()
-
-    assert body["idle_minds"] == []
-    assert body["columns"]["shown"][0]["mind_id"] == "skippy"
-
-
 def test_a_gateway_too_old_for_the_route_is_named_not_read_as_quiet(monkeypatch):
     """A 200 carrying the wrong body is a failure, not a hive with nothing
     running — a gateway predating this route answers the single-session
@@ -441,3 +404,49 @@ def test_the_dashboard_reads_the_gateway_as_admin(monkeypatch):
 
     assert [call["path"] for call in seen] == ["/sessions/live", "/sessions/live/text"]
     assert all(call["admin"] for call in seen)
+
+
+def test_a_column_reaches_the_page_headed_by_its_mind_name(
+    tmp_path, monkeypatch, wired
+):
+    """Requirement 3 at the layer it lands on: the registry is actually
+    consulted, not just available to be consulted."""
+    monkeypatch.setattr(
+        main_mod,
+        "_broker_minds_safe",
+        AsyncMock(return_value=[{"id": "skippy", "name": "Skippy"}]),
+    )
+    client = _authed_client(tmp_path, monkeypatch)
+
+    body = client.get("/api/dashboard").json()
+
+    assert body["columns"][0]["mind_name"] == "Skippy"
+
+
+def test_an_allowance_window_reaches_the_page_carrying_its_band(
+    tmp_path, monkeypatch, wired
+):
+    """Requirement 10 at the layer it lands on: the browser is handed the
+    band rather than re-deriving the two thresholds from the number."""
+    monkeypatch.setattr(
+        main_mod,
+        "_fetch_provider_limits",
+        AsyncMock(
+            return_value={
+                "providers": [
+                    {
+                        "name": "anthropic",
+                        "reporting": True,
+                        "windows": [{"label": "5h", "used_percent": 91.0}],
+                    }
+                ]
+            }
+        ),
+    )
+    main_mod._provider_snapshot._fetch = main_mod._fetch_provider_limits
+    main_mod._provider_snapshot.invalidate()
+    client = _authed_client(tmp_path, monkeypatch)
+
+    body = client.get("/api/dashboard").json()
+
+    assert body["providers"]["providers"][0]["windows"][0]["band"] == "hot"

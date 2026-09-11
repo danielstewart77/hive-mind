@@ -31,11 +31,6 @@ import asyncio
 import time
 from typing import Any, Awaitable, Callable, Optional
 
-#: How many conversations get a column. The rest are named as waiting, never
-#: dropped — six minds working and four columns must not read as a hive
-#: where two of them stopped.
-COLUMN_CAP = 4
-
 #: Host figures are cheap and change fast.
 HOST_TTL_SECONDS = 5.0
 
@@ -58,15 +53,34 @@ HOST_PROBE_TIMEOUT = 3.0
 # --------------------------------------------------------------------------
 
 
-def split_columns(live: list[dict], cap: int = COLUMN_CAP) -> dict:
-    """Which live conversations get columns, and which are named as waiting.
+def ordered_columns(live: list[dict]) -> list[dict]:
+    """Every conversation that is generating, oldest first.
 
-    Ordered by start time, so the selection is stable across polls and a
-    freed slot goes to the conversation that has been waiting longest rather
-    than to whichever one a re-sort happened to surface.
+    There is no cap and no waiting list. A mind that is producing output is
+    the whole population this page is about, so holding one back behind a
+    slot limit hides the thing the page exists to show; ordering by start
+    time keeps the arrangement stable across polls rather than reshuffling
+    whenever a re-sort surfaces a different row first.
     """
-    ordered = sorted(live, key=lambda row: (row.get("started_at") or 0, row["session_id"]))
-    return {"shown": ordered[:cap], "waiting": ordered[cap:], "cap": cap}
+    return sorted(live, key=lambda row: (row.get("started_at") or 0, row["session_id"]))
+
+
+def name_columns(live: list[dict], registry: list[dict]) -> list[dict]:
+    """A column is headed by a name, falling back to the id it was keyed on.
+
+    A mind the broker has not registered still has a live conversation, and
+    heading that column with an empty string loses the only handle anyone
+    has on it. The id is ugly; blank is useless.
+    """
+    names = {
+        mind.get("id"): mind.get("name")
+        for mind in registry
+        if mind.get("id") and mind.get("name")
+    }
+    for row in live:
+        mind_id = row.get("mind_id")
+        row["mind_name"] = names.get(mind_id) or mind_id or "unknown mind"
+    return live
 
 
 # --------------------------------------------------------------------------
@@ -203,6 +217,33 @@ def context_reading(context: dict) -> dict:
         return tokens / denominator
 
     fraction_of_threshold = _fraction(threshold)
+    # Where the rotation point sits on a window-scaled track. Both figures
+    # are tested for truth, not for None: a rotation point of zero is a
+    # misconfiguration, and a mark drawn hard at the left edge claims this
+    # conversation rotates immediately — the one reading worse than no mark.
+    mark_fraction = threshold / window if threshold and window else None
+
+    # Which measurement the bar is drawn against. The window is the wanted
+    # answer, but it comes from a proxy catalog that is legitimately absent
+    # — an unreachable proxy, or a deployment name the catalog has never
+    # been told about. Falling through to the rotation point keeps a bar
+    # that means something instead of hatching a conversation at 95% of
+    # rotation as though nobody had measured it.
+    if fraction_of_window := _fraction(window):
+        bar_fraction, bar_basis = fraction_of_window, "window"
+    elif fraction_of_threshold is not None:
+        bar_fraction, bar_basis = fraction_of_threshold, "threshold"
+    else:
+        bar_fraction, bar_basis = None, None
+
+    # Past the line however the line was found. With no rotation point
+    # reported at all, overflowing the window is the only "too full" there
+    # is, and a bar that can never turn red is a bar that cannot warn.
+    if threshold:
+        over = tokens is not None and tokens >= threshold
+    else:
+        over = bool(fraction_of_window and fraction_of_window > 1.0)
+
     return {
         "status": "unknown" if tokens is None else "reporting",
         "tokens": tokens,
@@ -210,13 +251,17 @@ def context_reading(context: dict) -> dict:
         "window": window,
         "fraction_of_threshold": fraction_of_threshold,
         "fraction_of_window": _fraction(window),
-        # Past the line is a real state that can last hours — a rotation
-        # fires on the next typed message, not on the crossing — so it is
-        # reported rather than clamped. Clamping hides the conversation that
-        # most needs attention behind a bar that looks merely full.
-        "over_threshold": bool(
-            fraction_of_threshold is not None and fraction_of_threshold > 1.0
-        ),
+        "mark_fraction": mark_fraction,
+        # A rotation point past the end of the window is a real reading —
+        # a mind reporting a 200k window against a 300k threshold, which is
+        # the dropped [1m] pin. Clamped to the edge it reads as "rotates
+        # right at the end", which is reassuring and wrong, so it is
+        # flagged rather than quietly squared away.
+        "mark_beyond_window": bool(mark_fraction and mark_fraction > 1.0),
+        "bar_fraction": bar_fraction,
+        "bar_basis": bar_basis,
+        "over": over,
+
         "observed_at": context.get("observed_at"),
         "age_seconds": context.get("age_seconds"),
     }
@@ -323,3 +368,70 @@ class SharedSnapshot:
         self._fetched = False
         self._error = None
         self._errored_at = 0.0
+
+
+# --------------------------------------------------------------------------
+# Provider allowance
+# --------------------------------------------------------------------------
+
+WARN_PERCENT = 60.0
+HOT_PERCENT = 85.0
+
+
+def _percent(value) -> Optional[float]:
+    """A spend figure as a number, or nothing.
+
+    A window whose figure is a string, absent or not finite is dropped
+    rather than drawn: the browser formats this with `toFixed`, which
+    throws on anything else and takes the whole panel — and the machines
+    panel rendered after it — down with one bad row.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if value == value and value not in (float("inf"), float("-inf")) else None
+
+
+def pressure_band(used_percent: Optional[float]) -> Optional[str]:
+    """Which band a spend figure falls in, decided once and server-side.
+
+    The gauge in the browser reads this rather than re-deriving it from the
+    number, so the two thresholds live in exactly one place and can be
+    asserted on without a browser.
+    """
+    if used_percent is None:
+        return None
+    if used_percent > HOT_PERCENT:
+        return "hot"
+    if used_percent >= WARN_PERCENT:
+        return "warn"
+    return "ok"
+
+
+def annotate_providers(payload: dict) -> dict:
+    """Each reporting window tagged with its band; the rest left untouched.
+
+    A provider that has reported nothing keeps no windows at all, so the
+    page has nothing it could draw as an empty gauge — an unfilled ring
+    reads as headroom, which is the opposite of "nobody has measured".
+    """
+    providers = []
+    rows = payload.get("providers")
+    # A 200 carrying the wrong body is a proxy answering, not a proxy down,
+    # so it must not raise out of the route and take the conversations and
+    # the machines with it. Everything unrecognisable is dropped here.
+    for provider in rows if isinstance(rows, list) else []:
+        if not isinstance(provider, dict):
+            continue
+        row = dict(provider)
+        if not row.get("reporting"):
+            row["windows"] = []
+            providers.append(row)
+            continue
+        windows = row.get("windows")
+        row["windows"] = [
+            {**window, "band": pressure_band(_percent(window.get("used_percent")))}
+            for window in (windows if isinstance(windows, list) else [])
+            if isinstance(window, dict) and _percent(window.get("used_percent")) is not None
+        ]
+        providers.append(row)
+    return {**payload, "providers": providers}

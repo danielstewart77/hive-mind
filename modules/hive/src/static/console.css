@@ -533,3 +533,142 @@ a { color: inherit; }
     word-break: break-word;
 }
 .training-log > small { display: block; margin-top: 8px; color: var(--console-muted); font-size: 12px; }
+
+/* --------------------------------------------------------------------------
+   Dashboard
+
+   Three things here are deliberately never drawn as a filled shape at zero:
+   a context bar with no count, a provider with no observed allowance, and a
+   host whose probe never answered. On each of them an empty shape reads as
+   headroom, which is the opposite of "nobody has measured this".
+   -------------------------------------------------------------------------- */
+
+.dash-clock { color: var(--console-faint); font-variant-numeric: tabular-nums; font-size: 0.85rem; }
+
+.dash-section-head { display: flex; align-items: baseline; gap: 0.75rem; margin: 1.75rem 0 0.75rem; }
+.dash-section-head h2 { margin: 0; font-size: 1rem; letter-spacing: 0.02em; }
+
+.dash-empty { color: var(--console-faint); font-style: italic; margin: 0.5rem 0; }
+
+/* Provider allowance ------------------------------------------------------ */
+
+.dash-provider-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    gap: 0.9rem;
+    padding: 0.9rem;
+}
+.dash-gauge-row { display: flex; gap: 1rem; justify-content: flex-start; margin-top: 0.6rem; }
+.dash-provider-window { text-align: center; }
+.dash-provider-window .metric-detail { margin-top: 0.3rem; color: var(--console-muted); font-size: 0.78rem; }
+
+.dash-gauge { width: 84px; height: 84px; display: block; }
+.dash-gauge-track { fill: none; stroke: var(--console-line); stroke-width: 9; }
+.dash-gauge-fill {
+    fill: none;
+    stroke-width: 9;
+    stroke-linecap: round;
+    stroke: var(--console-cyan);
+    transition: stroke-dashoffset 0.4s ease;
+}
+.dash-gauge-text { fill: var(--console-text); font-size: 22px; font-weight: 600; }
+.dash-gauge.is-ok .dash-gauge-fill { stroke: var(--console-green); }
+.dash-gauge.is-warn .dash-gauge-fill { stroke: var(--console-gold); }
+.dash-gauge.is-hot .dash-gauge-fill { stroke: var(--console-red); }
+.dash-gauge.is-hot .dash-gauge-text { fill: var(--console-red); }
+
+/* Live conversation columns ----------------------------------------------- */
+
+.dash-columns {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 0.9rem;
+    align-items: start;
+}
+.dash-column { display: flex; flex-direction: column; padding: 0.9rem; min-width: 0; }
+.dash-column-head { display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap; }
+.dash-column-head h3 { margin: 0; font-size: 0.95rem; }
+.dash-column-meta { color: var(--console-faint); font-size: 0.78rem; font-family: ui-monospace, monospace; }
+.dash-quiet { color: var(--console-gold); font-size: 0.75rem; margin-left: auto; }
+
+/* Context bar: the whole window, with the rotation point marked on it. */
+
+.dash-context { margin: 0.7rem 0 0.6rem; }
+.dash-context-window { color: var(--console-muted); font-size: 0.76rem; margin-bottom: 0.3rem; }
+.dash-context-line { color: var(--console-muted); font-size: 0.76rem; margin-top: 0.3rem; font-variant-numeric: tabular-nums; }
+.dash-context-line.is-over { color: var(--console-red); }
+.dash-context-line.is-unknown { color: var(--console-faint); font-style: italic; }
+
+.dash-meter {
+    position: relative;
+    height: 10px;
+    border-radius: 5px;
+    background: var(--console-surface-2);
+    border: 1px solid var(--console-line);
+    overflow: visible;
+}
+.dash-meter-fill {
+    height: 100%;
+    width: 0;
+    border-radius: 4px;
+    background: var(--console-cyan);
+    transition: width 0.4s ease;
+}
+.dash-meter.is-over .dash-meter-fill { background: var(--console-red); }
+/* An absent measurement: bare track, no fill element drawn at all. */
+.dash-meter.is-unknown { background: repeating-linear-gradient(135deg, var(--console-surface-2) 0 6px, var(--console-surface) 6px 12px); }
+.dash-meter.is-unknown .dash-meter-fill { display: none; }
+
+.dash-meter-mark {
+    position: absolute;
+    top: -3px;
+    bottom: -3px;
+    width: 2px;
+    margin-left: -1px;
+    background: var(--console-gold);
+    border-radius: 1px;
+}
+
+/* The stream ---------------------------------------------------------------*/
+
+.dash-stream {
+    margin-top: 0.5rem;
+    max-height: 320px;
+    overflow-y: auto;
+    font-size: 0.82rem;
+    line-height: 1.5;
+    color: var(--console-text);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+.dash-stream p { margin: 0 0 0.6rem; }
+.dash-gap { color: var(--console-gold); font-size: 0.74rem; font-style: italic; }
+
+/* Machines -----------------------------------------------------------------*/
+
+.dash-host-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 0.9rem;
+    padding: 0.9rem;
+}
+.dash-line { margin: 0 0 0.6rem; }
+
+/* Every "this is wrong" state must not be painted as every "this is fine"
+   state. Without these the refusal, the failed probe and the frozen
+   refresh all render in the same faint italic as "nothing to report". */
+
+.is-error { color: var(--console-red); }
+.dash-empty.is-error { color: var(--console-red); font-style: normal; }
+.metric-detail.is-error { color: var(--console-red); }
+.metric-detail.is-unknown { color: var(--console-faint); font-style: italic; }
+
+/* A rotation point past the end of the window sits on the edge, where it
+   would otherwise be indistinguishable from one landing exactly there. */
+.dash-meter-mark.is-beyond {
+    width: 4px;
+    background: var(--console-red);
+    box-shadow: 0 0 0 1px var(--console-bg);
+}
+
+.dash-gauge.is-unknown .dash-gauge-fill { stroke: var(--console-line-strong); }

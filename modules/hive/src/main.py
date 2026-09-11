@@ -821,24 +821,17 @@ async def api_dashboard(user: dict = Depends(require_auth)):
             context.get("window"), dashboard_data.window_for(session.get("model"), windows)
         )
         session["context"] = dashboard_data.context_reading(context)
-    # Requirement 5: a mind that is connected and silent is listed, not
-    # omitted. Without it the panel cannot distinguish a quiet hive from a
-    # hive whose minds have all gone.
     registry = await _broker_minds_safe()
-    producing = {row.get("mind_id") for row in sessions}
-    idle = [
-        {"mind_id": mind.get("id"), "name": mind.get("name"),
-         "model": mind.get("model"), "last_seen": mind.get("last_seen")}
-        for mind in registry
-        if mind.get("id") not in producing
-    ]
+    columns = dashboard_data.name_columns(
+        dashboard_data.ordered_columns(sessions), registry
+    )
     return {
-        "columns": dashboard_data.split_columns(sessions),
-        "idle_minds": idle,
+        "columns": columns,
         "hosts": hosts if isinstance(hosts, dict) else {"hosts": [], "stale": True,
                                                         "error": str(hosts)},
-        "providers": providers if isinstance(providers, dict) else {
-            "providers": [], "stale": True, "error": str(providers)},
+        "providers": dashboard_data.annotate_providers(providers)
+        if isinstance(providers, dict)
+        else {"providers": [], "stale": True, "error": str(providers)},
         "sessions_error": None if isinstance(live, dict) else str(live),
         "observed_at": time.time(),
     }

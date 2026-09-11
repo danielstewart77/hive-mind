@@ -16,15 +16,18 @@
   // Bounded per column: this page is meant to be left open for days, and an
   // unbounded transcript in the DOM is how it becomes unusable by Thursday.
   const MAX_LINES = 300;
+  // A socket that accepts and never answers rejects nothing, so without a
+  // deadline one hung column pins the in-flight guard and silences every
+  // column's text for good while the rest of the page keeps updating.
+  const FETCH_TIMEOUT_MS = 8000;
+  const STREAM_BATCH = 6;
 
   const columnsEl = document.getElementById("dash-columns");
   const providersEl = document.getElementById("dash-providers");
   const hostsEl = document.getElementById("dash-hosts");
-  const waitingEl = document.getElementById("dash-waiting");
   const idleEl = document.getElementById("dash-idle");
   const errorEl = document.getElementById("dash-error");
   const observedEl = document.getElementById("dash-observed");
-  const idleMindsEl = document.getElementById("dash-idle-minds");
 
   /** Per session: the last sequence rendered, so each poll asks for the rest. */
   const cursors = new Map();
@@ -51,20 +54,86 @@
     return `${Math.round(seconds / 3600)}h ago`;
   };
 
-  function meter(fraction, extraClass) {
+  const GAUGE_R = 42;
+  const GAUGE_C = 2 * Math.PI * GAUGE_R;
+
+  function gauge(percent, band) {
+    // The server drops any window whose figure is not a finite number, so
+    // this should never see one — but a throw here escapes renderProviders
+    // and takes the machines panel with it, leaving the last host reading
+    // on screen forever with no staleness banner. Cheap insurance.
+    if (typeof percent !== "number" || !Number.isFinite(percent)) return null;
+    // A ring, not a bar: two windows sit side by side per provider and the
+    // number belongs in the middle of the thing it describes. The band is
+    // handed down by the server so the two thresholds live in one place.
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 100 100");
+    svg.setAttribute("class", `dash-gauge is-${band || "unknown"}`);
+    svg.setAttribute("role", "img");
+    svg.setAttribute("aria-label", `${percent.toFixed(0)} per cent used`);
+
+    const track = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    track.setAttribute("class", "dash-gauge-track");
+    track.setAttribute("cx", "50");
+    track.setAttribute("cy", "50");
+    track.setAttribute("r", String(GAUGE_R));
+    svg.appendChild(track);
+
+    const fill = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    fill.setAttribute("class", "dash-gauge-fill");
+    fill.setAttribute("cx", "50");
+    fill.setAttribute("cy", "50");
+    fill.setAttribute("r", String(GAUGE_R));
+    // Drawn from the top, clockwise, and clamped at full: past 100% the ring
+    // cannot say more than "all of it", and the number beside it still does.
+    const shown = Math.max(0, Math.min(percent, 100)) / 100;
+    fill.setAttribute("stroke-dasharray", `${GAUGE_C}`);
+    fill.setAttribute("stroke-dashoffset", `${GAUGE_C * (1 - shown)}`);
+    fill.setAttribute("transform", "rotate(-90 50 50)");
+    svg.appendChild(fill);
+
+    const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    text.setAttribute("class", "dash-gauge-text");
+    text.setAttribute("x", "50");
+    text.setAttribute("y", "50");
+    text.setAttribute("text-anchor", "middle");
+    text.setAttribute("dominant-baseline", "central");
+    text.textContent = `${percent.toFixed(0)}%`;
+    svg.appendChild(text);
+    return svg;
+  }
+
+  function contextBar(fraction, markFraction, over, markBeyondWindow) {
+    // Scaled to the model's whole context window, with the rotation point
+    // marked on the same track. Two fractions of one bar: how full it is,
+    // and where it turns over. A mark that defaulted to zero would claim
+    // rotation fires immediately, so an absent one is simply not drawn.
     const wrap = document.createElement("div");
-    wrap.className = `dash-meter ${extraClass || ""}`.trim();
+    wrap.className = "dash-meter dash-context-bar";
     const fill = document.createElement("div");
     fill.className = "dash-meter-fill";
     if (fraction === null || fraction === undefined) {
-      // Not a zero-width bar: an empty track with no fill at all, so an
-      // absent measurement cannot be mistaken for a low one.
       wrap.classList.add("is-unknown");
     } else {
       fill.style.width = `${Math.min(fraction, 1) * 100}%`;
-      if (fraction > 1) wrap.classList.add("is-over");
+      // Decided server-side, against whichever denominator it found.
+      if (over) wrap.classList.add("is-over");
     }
     wrap.appendChild(fill);
+    if (markFraction !== null && markFraction !== undefined) {
+      const mark = document.createElement("span");
+      mark.className = "dash-meter-mark";
+      mark.style.left = `${Math.min(markFraction, 1) * 100}%`;
+      if (markBeyondWindow) {
+        // Sat flat on the edge it reads as "rotates right at the end",
+        // which is the reassuring version of a dropped context pin.
+        mark.classList.add("is-beyond");
+        mark.title = "rotation point is past the end of this window";
+      } else {
+        mark.title = "rotation point";
+      }
+      wrap.appendChild(mark);
+    }
     return wrap;
   }
 
@@ -80,7 +149,14 @@
         : `${tokens(context.window)} context window`;
     box.appendChild(windowLine);
 
-    box.appendChild(meter(context.fraction_of_threshold));
+    box.appendChild(
+      contextBar(
+        context.bar_fraction,
+        context.mark_fraction,
+        context.over,
+        context.mark_beyond_window
+      )
+    );
 
     const line = document.createElement("div");
     line.className = "dash-context-line";
@@ -91,11 +167,18 @@
       const threshold =
         context.threshold === null || context.threshold === undefined
           ? "no rotation point reported"
-          : `of ${tokens(context.threshold)} before rotation`;
-      line.textContent = `${tokens(context.tokens)} ${threshold} · measured ${ago(
+          : `rotates at ${tokens(context.threshold)}`;
+      const denominator =
+        context.window === null || context.window === undefined
+          ? "window unknown"
+          : `of ${tokens(context.window)}`;
+      line.textContent = `${tokens(context.tokens)} ${denominator} · ${threshold} · measured ${ago(
         context.age_seconds
       )}`;
-      if (context.over_threshold) line.classList.add("is-over");
+      if (context.bar_basis === "threshold") {
+        line.textContent += " · bar scaled to the rotation point (window unknown)";
+      }
+      if (context.over) line.classList.add("is-over");
     }
     box.appendChild(line);
     return box;
@@ -109,7 +192,7 @@
     const head = document.createElement("header");
     head.className = "dash-column-head";
     const name = document.createElement("h3");
-    name.textContent = session.mind_id || "unknown mind";
+    name.textContent = session.mind_name || session.mind_id || "unknown mind";
     head.appendChild(name);
     const meta = document.createElement("span");
     meta.className = "dash-column-meta";
@@ -135,16 +218,9 @@
   }
 
   function renderColumns(payload) {
-    const shown = payload.columns.shown || [];
-    const waiting = payload.columns.waiting || [];
+    const shown = payload.columns || [];
 
     idleEl.hidden = shown.length > 0;
-    renderIdle(payload.idle_minds || []);
-    waitingEl.textContent = waiting.length
-      ? `${waiting.length} more generating, waiting for a column: ${waiting
-          .map((row) => row.mind_id || row.session_id)
-          .join(", ")}`
-      : "";
 
     const wanted = new Set(shown.map((row) => row.session_id));
     Array.from(columnsEl.children).forEach((child) => {
@@ -173,24 +249,20 @@
     });
   }
 
-  function renderIdle(minds) {
-    // Requirement 5. Without this a quiet hive and a hive whose minds have
-    // all gone render identically, and the page cannot tell you which.
-    if (!idleMindsEl) return;
-    idleMindsEl.textContent = minds.length
-      ? `Connected and idle: ${minds.map((m) => m.name || m.mind_id).join(", ")}`
-      : "";
-  }
-
   function renderProviders(payload) {
     providersEl.replaceChildren();
     const rows = (payload && payload.providers) || [];
     if (payload && payload.error) {
+      // The note, then whatever the last good reading held — the same
+      // shape the machines panel uses. Returning here instead threw away
+      // every gauge on one timed-out refresh, which reads as a proxy that
+      // was never configured.
       const note = document.createElement("p");
-      note.className = "dash-empty";
-      note.textContent = `Allowance unavailable: ${payload.error}`;
+      note.className = "dash-empty is-error";
+      note.textContent = rows.length
+        ? `Allowance not refreshing: ${payload.error} — showing the last reading.`
+        : `Allowance unavailable: ${payload.error}`;
       providersEl.appendChild(note);
-      return;
     }
     rows.forEach((provider) => {
       const card = document.createElement("article");
@@ -211,16 +283,21 @@
         return;
       }
 
+      const gauges = document.createElement("div");
+      gauges.className = "dash-gauge-row";
       (provider.windows || []).forEach((window) => {
-        const row = document.createElement("div");
-        row.className = "dash-provider-window";
+        const cell = document.createElement("div");
+        cell.className = "dash-provider-window";
+        const ring = gauge(window.used_percent, window.band);
+        if (!ring) return;
+        cell.appendChild(ring);
         const heading = document.createElement("div");
         heading.className = "metric-detail";
-        heading.textContent = `${window.label} · ${window.used_percent.toFixed(0)}% used`;
-        row.appendChild(heading);
-        row.appendChild(meter(window.used_percent / 100));
-        card.appendChild(row);
+        heading.textContent = window.label;
+        cell.appendChild(heading);
+        gauges.appendChild(cell);
       });
+      card.appendChild(gauges);
 
       const age = document.createElement("div");
       age.className = "metric-detail";
@@ -359,7 +436,10 @@
     if (snapshotInFlight) return;
     snapshotInFlight = true;
     try {
-      const response = await fetch("/api/dashboard", { credentials: "same-origin" });
+      const response = await fetch("/api/dashboard", {
+        credentials: "same-origin",
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
       if (!response.ok) throw new Error(`dashboard responded ${response.status}`);
       const payload = await response.json();
       // A 200 whose sessions half failed is the dangerous case: the page
@@ -399,6 +479,16 @@
 
   async function readAllStreams() {
     const streams = Array.from(columnsEl.querySelectorAll("[data-stream]"));
+    // There is no cap on columns any more, and each one is a relay the
+    // console serves off a bounded thread pool shared with every other
+    // route. Forty at once from one tab starves the rest of the console,
+    // so they go in batches rather than in one fan-out.
+    for (let i = 0; i < streams.length; i += STREAM_BATCH) {
+      await readStreamBatch(streams.slice(i, i + STREAM_BATCH));
+    }
+  }
+
+  async function readStreamBatch(streams) {
     await Promise.all(
       streams.map(async (stream) => {
         const id = stream.dataset.stream;
@@ -406,10 +496,24 @@
         try {
           const response = await fetch(
             `/api/dashboard/text?session_id=${encodeURIComponent(id)}&since=${since}`,
-            { credentials: "same-origin" }
+            { credentials: "same-origin", signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) }
           );
           if (!response.ok) return;
           const payload = await response.json();
+
+          // The buffer starts again from zero when the conversation behind
+          // this session is replaced — a terminal rotation keeps the
+          // session id — and when comms itself restarts. A cursor left at
+          // 412 then asks for blocks past the end of a buffer holding 3,
+          // and the column goes silent for good with nothing on screen
+          // saying why. A latest_seq behind our cursor is that, and the
+          // only honest response is to read the new conversation from its
+          // start.
+          if (payload.latest_seq !== undefined && payload.latest_seq < since) {
+            cursors.set(id, 0);
+            stream.replaceChildren();
+            return;
+          }
 
           // A reader that fell behind the buffer has missed a run. The
           // sequence numbers make that detectable, and it is drawn as a
