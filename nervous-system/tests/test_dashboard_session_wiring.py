@@ -73,10 +73,14 @@ def test_publishing_an_assistant_event_puts_its_text_on_the_feed():
     assert [block["text"] for block in _run(scenario())] == ["working"]
 
 
-def test_a_tool_result_published_to_observers_never_reaches_the_dashboard():
-    """Observers get every harness event unfiltered — that is what the tile
-    speaker consumes. The dashboard answers to any console account, so the
-    filtering has to happen before the bytes leave, not in the browser."""
+def test_a_tool_result_reaches_the_dashboard_through_the_real_fan_out():
+    """R2, at the layer the requirement lands on rather than one below it.
+
+    Every harness `tool_result` arrives on an entry of type `user`, and the
+    fan-out used to treat `user` as "open the turn and return" — so a column
+    showed commands going out and nothing ever coming back. Asserting this
+    on `LiveFeed.observe` directly would pass while the only caller in
+    production still skipped it."""
 
     async def scenario():
         with tempfile.TemporaryDirectory() as tmp:
@@ -85,7 +89,8 @@ def test_a_tool_result_published_to_observers_never_reaches_the_dashboard():
             await mgr._publish_session_event("s1", TOOL_RESULT_EVENT)
             return mgr.dashboard.since("s1", 0)
 
-    assert _run(scenario()) == []
+    carried = _run(scenario())
+    assert [block["kind"] for block in carried] == ["tool_result"]
 
 
 def test_a_result_event_ends_the_conversations_turn():

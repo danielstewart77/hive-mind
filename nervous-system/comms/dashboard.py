@@ -58,6 +58,13 @@ UNFRAMED_TTL_SECONDS = 90.0
 #: and a column that vanished would say it was.
 QUIET_AFTER_SECONDS = 45.0
 
+#: One block's ceiling, in bytes. Before the feed carried tool traffic the
+#: largest thing it could hold was a sentence; now a single `tool_result`
+#: can be a whole file — measured at 1,267,087 bytes on this hive, and an
+#: image renders to hundreds of KB of base64. Four hundred of those per
+#: conversation, retained after the conversation ends, is the process.
+MAX_BLOCK_BYTES = 120_000
+
 #: Blocks kept per conversation. A page open for days cannot hold every
 #: block of every conversation, and the sequence numbers are what make the
 #: bound safe to have.
@@ -145,6 +152,20 @@ def _rendered(value) -> str:
         return str(value)
 
 
+def _capped(text: str) -> tuple[str, bool]:
+    """One block's text, trimmed to something the buffer can hold.
+
+    The tail is kept rather than the head: the end of a command's output is
+    where the error is. A trim is reported rather than done silently, since
+    a reader who cannot tell truncation from a short result reads the wrong
+    conclusion off the screen.
+    """
+    raw = text.encode("utf-8", "replace")
+    if len(raw) <= MAX_BLOCK_BYTES:
+        return text, False
+    return raw[-MAX_BLOCK_BYTES:].decode("utf-8", "replace"), True
+
+
 def _block(kind: str, text: str, *, name=None, agent=None, trimmed: bool = False) -> dict:
     """One block in the shape every reader of this feed expects."""
     return {
@@ -169,6 +190,7 @@ class _Conversation:
         "started_at",
         "last_event_at",
         "last_block_at",
+        "awaiting_tool",
         "ended_at",
         "framed",
     )
@@ -187,6 +209,9 @@ class _Conversation:
         #: from the last thing said: a turn grinding through a build is
         #: working, and a column that vanished would report it as finished.
         self.last_block_at: Optional[float] = None
+        #: A tool call has gone out and nothing has come back. The turn is
+        #: working, however quiet the transcript is.
+        self.awaiting_tool = False
         self.ended_at: Optional[float] = None
         #: Whether this conversation's turns arrive bracketed by `user` and
         #: `result`. False for a pty-hosted conversation, whose prose arrives
@@ -293,19 +318,31 @@ class LiveFeed:
                 return
             conversation.last_event_at = moment
             for block in blocks:
+                kind = block.get("kind") or "text"
+                text, cut = _capped(block.get("text") or "")
                 conversation.next_seq += 1
                 conversation.blocks.append(
                     {
                         "seq": conversation.next_seq,
-                        "kind": block.get("kind") or "text",
-                        "text": block.get("text") or "",
+                        "kind": kind,
+                        "text": text,
                         "name": block.get("name"),
                         "agent": block.get("agent"),
-                        "trimmed": bool(block.get("trimmed")),
+                        "trimmed": bool(block.get("trimmed")) or cut,
                         "at": moment,
                     }
                 )
                 conversation.last_block_at = moment
+                # A tool call with nothing back yet is the one silence a
+                # turn cannot help: the harness writes nothing between
+                # issuing it and its result, and a terminal has no `result`
+                # event to frame the turn. Without this an unframed
+                # conversation expires at 90s in the middle of a ten-minute
+                # build and the console drops the column.
+                if kind == "tool_use":
+                    conversation.awaiting_tool = True
+                elif kind == "tool_result":
+                    conversation.awaiting_tool = False
                 while len(conversation.blocks) > self._buffer_blocks:
                     dropped = conversation.blocks.popleft()
                     conversation.first_available_seq = dropped["seq"] + 1
@@ -370,7 +407,13 @@ class LiveFeed:
         """
         if not conversation.generating:
             return False
-        ceiling = self._generating_ttl if conversation.framed else self._unframed_ttl
+        # An unanswered tool call earns the generous ceiling whichever path
+        # this conversation arrived on. A pane that died mid-call then holds
+        # its column until the framed ceiling, which is the right way round:
+        # a stale column is a nuisance, and a column that vanishes while the
+        # work is running is the thing this page exists to prevent.
+        framed = conversation.framed or conversation.awaiting_tool
+        ceiling = self._generating_ttl if framed else self._unframed_ttl
         return (now - conversation.last_event_at) <= ceiling
 
     def since(self, session_id: str, seq: int) -> list[dict]:

@@ -748,6 +748,19 @@ class SessionManager:
             conversation_id = row["claude_sid"]
         except Exception:  # noqa: BLE001 — a view, never the conversation
             log.debug("activity feed could not read %s", session_id, exc_info=True)
+            row = None
+        # The same ownership guard `publish_pty_text` carries, and for the
+        # same reason. A tile can be open on a session Telegram is driving —
+        # `_mirror_turn_to_pty` exists for exactly that — and in that case
+        # `send_message` is already feeding this conversation from the very
+        # transcript the mind's tailer is reading. Accepting here too puts
+        # every sentence, command and result in the column twice, in order,
+        # with valid sequence numbers that nothing downstream can tell apart
+        # from the mind repeating itself.
+        if row is not None:
+            owner_type = (row["owner_type"] or "").split(":", 1)[0]
+            if owner_type not in self._ADOPTABLE_OWNER_TYPES:
+                return {"ok": False, "error": "not a terminal-owned session"}
         self.dashboard.begin(
             session_id, mind_id=mind_id, conversation_id=conversation_id
         )
@@ -1422,8 +1435,11 @@ class SessionManager:
             # the shorter silence ceiling instead of lingering for a quarter
             # of an hour in a column somebody could be using.
             self.dashboard.frame(session_id)
-        else:
-            self.dashboard.observe(session_id, event)
+        # And then observed regardless of which branch opened it. Every
+        # harness `tool_result` rides on an entry of type `user`, so framing
+        # and returning showed a column full of commands going out with
+        # nothing ever coming back.
+        self.dashboard.observe(session_id, event)
 
     async def _publish_session_event(self, session_id: str, event: dict[str, Any]) -> None:
         """Fan out a session event to all passive observers."""
