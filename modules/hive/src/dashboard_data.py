@@ -470,3 +470,24 @@ def annotate_providers(payload: dict) -> dict:
         ]
         providers.append(row)
     return {**payload, "providers": providers}
+
+
+def watchable_hosts(hosts: list[dict]) -> dict:
+    """The machines this page can actually watch, and a count of the rest.
+
+    A mind running a build with no host route answers 404 forever. Its card
+    holds no reading, will never hold one, and is not a machine fault — so
+    a wall of them buries the one box that is genuinely refusing or down.
+    They are counted rather than dropped silently: "seven minds have no
+    host route" is a fact worth one line, and a panel that quietly omitted
+    them would teach its reader to distrust it about absence.
+    """
+    watchable = [host for host in hosts if host.get("status") != "unsupported"]
+    return {
+        "hosts": watchable,
+        "without_route": [
+            host.get("hostname") or ""
+            for host in hosts
+            if host.get("status") == "unsupported"
+        ],
+    }

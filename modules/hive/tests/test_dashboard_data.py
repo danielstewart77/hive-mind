@@ -734,3 +734,41 @@ class TestQuietConversations:
         columns = dd.ordered_columns([{"session_id": "a", "started_at": 1}])
 
         assert [row["session_id"] for row in columns] == ["a"]
+
+
+class TestWatchableHosts:
+    def test_a_mind_with_no_host_route_is_not_given_a_machine_card(self):
+        """It answers 404 forever and holds no reading. A wall of them
+        buries the one box that is genuinely refusing or down."""
+        panel = dd.watchable_hosts(
+            [
+                {"hostname": "workstation", "status": "reporting"},
+                {"hostname": "ada", "status": "unsupported"},
+            ]
+        )
+
+        assert [h["hostname"] for h in panel["hosts"]] == ["workstation"]
+
+    def test_the_minds_without_a_route_are_counted_not_silently_dropped(self):
+        """A panel that quietly omitted them would teach its reader to
+        distrust it about absence."""
+        panel = dd.watchable_hosts(
+            [
+                {"hostname": "ada", "status": "unsupported"},
+                {"hostname": "bob", "status": "unsupported"},
+            ]
+        )
+
+        assert panel["without_route"] == ["ada", "bob"]
+
+    def test_a_refused_machine_keeps_its_card(self):
+        """Refused is up and holding a credential we do not have — the
+        remedy is real, and it must not be filed with the unwatchable."""
+        panel = dd.watchable_hosts([{"hostname": "zach", "status": "refused"}])
+
+        assert [h["hostname"] for h in panel["hosts"]] == ["zach"]
+
+    def test_an_unreachable_machine_keeps_its_card(self):
+        panel = dd.watchable_hosts([{"hostname": "zach", "status": "unreachable"}])
+
+        assert [h["hostname"] for h in panel["hosts"]] == ["zach"]

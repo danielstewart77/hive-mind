@@ -765,7 +765,8 @@ async def _fetch_hosts() -> dict:
               "status": "unreachable", "reading": None, "error": str(report)}
         for mind, report in zip(minds, reports)
     ]
-    return {"hosts": dashboard_data.merge_hosts(settled), "reports": settled}
+    merged = dashboard_data.merge_hosts(settled)
+    return {**dashboard_data.watchable_hosts(merged), "reports": settled}
 
 
 _host_snapshot = dashboard_data.SharedSnapshot(
