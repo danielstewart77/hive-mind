@@ -660,6 +660,46 @@ a { color: inherit; }
 }
 .dash-line { margin: 0 0 0.6rem; }
 
+/* A command, a file and a sentence read differently or they read as one
+   thing. Prose keeps the column's voice; everything the turn *did* sits in
+   a monospace rail so it can be skimmed past or stopped on. */
+.dash-line-tag {
+    display: inline-block;
+    margin-right: 0.45rem;
+    padding: 0 0.35rem;
+    border-radius: 3px;
+    background: var(--console-faint-bg, rgba(127, 127, 127, 0.16));
+    color: var(--console-faint);
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    vertical-align: 1px;
+}
+.dash-line-tool_use .dash-line-body,
+.dash-line-tool_result .dash-line-body,
+.dash-line-thinking .dash-line-body {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.72rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+.dash-line-tool_use .dash-line-body { color: var(--console-gold); }
+.dash-line-tool_result .dash-line-body { color: var(--console-faint); }
+.dash-line-thinking .dash-line-body { color: var(--console-faint); font-style: italic; }
+.dash-line-user {
+    border-left: 2px solid var(--console-gold);
+    padding-left: 0.5rem;
+}
+/* Delegated work is the sub-mind's, not this mind's, and a column that
+   blended them would credit one for the other's tool calls. */
+.dash-line.is-delegated { border-left: 2px solid var(--console-faint); padding-left: 0.5rem; }
+.dash-line-trimmed {
+    display: block;
+    color: var(--console-faint);
+    font-size: 0.68rem;
+    font-style: italic;
+}
+
 /* Every "this is wrong" state must not be painted as every "this is fine"
    state. Without these the refusal, the failed probe and the frozen
    refresh all render in the same faint italic as "nothing to report". */

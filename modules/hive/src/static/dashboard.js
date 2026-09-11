@@ -599,9 +599,43 @@
           }
 
           (payload.blocks || []).forEach((block) => {
+            // A command, a file and a sentence are three different things
+            // to read. Rendering them as one undifferentiated run of prose
+            // is how a column of tool output reads as the mind talking.
+            const kind = block.kind || "text";
             const line = document.createElement("p");
-            line.className = "dash-line";
-            line.textContent = block.text;
+            line.className = `dash-line dash-line-${kind}`;
+            if (block.agent) line.classList.add("is-delegated");
+
+            if (kind !== "text") {
+              const tag = document.createElement("span");
+              tag.className = "dash-line-tag";
+              tag.textContent = block.agent
+                ? `${block.agent} · ${block.name || kind}`
+                : block.name || kind;
+              line.appendChild(tag);
+            } else if (block.agent) {
+              const tag = document.createElement("span");
+              tag.className = "dash-line-tag";
+              tag.textContent = block.agent;
+              line.appendChild(tag);
+            }
+
+            const body = document.createElement("span");
+            body.className = "dash-line-body";
+            body.textContent = block.text;
+            line.appendChild(body);
+
+            if (block.trimmed) {
+              // Said rather than done silently: a reader who cannot tell a
+              // truncation from a short result reads the wrong conclusion
+              // off the screen.
+              const cut = document.createElement("span");
+              cut.className = "dash-line-trimmed";
+              cut.textContent = "… earlier output trimmed";
+              line.appendChild(cut);
+            }
+
             stream.appendChild(line);
             cursors.set(id, block.seq);
           });
