@@ -28,6 +28,7 @@ ten tabs is ten `nvidia-smi` invocations per interval on a child's laptop.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import time
 from typing import Any, Awaitable, Callable, Optional
 
@@ -407,6 +408,27 @@ def pressure_band(used_percent: Optional[float]) -> Optional[str]:
     return "ok"
 
 
+def is_local_provider(host: Optional[str]) -> bool:
+    """Whether a provider runs on this machine or this network.
+
+    Keyed on the host rather than on the provider's name: a locally-served
+    model has no subscription allowance to spend and never will, so it has
+    nothing this panel could meter. Matching "ollama" by name instead would
+    miss the next local runtime and would hide a hosted provider unlucky
+    enough to be called something similar.
+    """
+    if not host:
+        return False
+    bare = str(host).strip().lower().split("://")[-1].split("/")[0]
+    bare = bare.rsplit(":", 1)[0].strip("[]")
+    if bare in {"localhost", "::1"} or bare.endswith(".local"):
+        return True
+    try:
+        return ipaddress.ip_address(bare).is_private or ipaddress.ip_address(bare).is_loopback
+    except ValueError:
+        return False
+
+
 def annotate_providers(payload: dict) -> dict:
     """Each reporting window tagged with its band; the rest left untouched.
 
@@ -421,6 +443,11 @@ def annotate_providers(payload: dict) -> dict:
     # the machines with it. Everything unrecognisable is dropped here.
     for provider in rows if isinstance(rows, list) else []:
         if not isinstance(provider, dict):
+            continue
+        # Nothing to meter: not shown, rather than shown as an empty
+        # state. A provider with no allowance to spend is not a provider
+        # whose allowance nobody has measured.
+        if is_local_provider(provider.get("host")):
             continue
         row = dict(provider)
         if not row.get("reporting"):

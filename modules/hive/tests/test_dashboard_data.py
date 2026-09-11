@@ -668,3 +668,48 @@ class TestProviderShapes:
         )
 
         assert annotated["providers"][0]["windows"] == []
+
+
+class TestLocalProviders:
+    def test_a_provider_on_this_machine_is_not_metered(self):
+        """A locally-served model has no subscription allowance to spend, so
+        it has nothing this panel could show."""
+        annotated = dd.annotate_providers(
+            {"providers": [
+                {"name": "ollama", "host": "127.0.0.1", "reporting": False, "windows": []},
+                {"name": "anthropic", "host": "api.anthropic.com", "reporting": True,
+                 "windows": [{"label": "5h", "used_percent": 12.0}]},
+            ]}
+        )
+
+        assert [p["name"] for p in annotated["providers"]] == ["anthropic"]
+
+    def test_a_provider_on_the_lan_is_not_metered_either(self):
+        """The local runtime moves to another box on this network and is
+        still a local runtime."""
+        annotated = dd.annotate_providers(
+            {"providers": [{"name": "ollama", "host": "192.168.4.64:11434",
+                            "reporting": False, "windows": []}]}
+        )
+
+        assert annotated["providers"] == []
+
+    def test_a_hosted_provider_that_has_reported_nothing_is_still_shown(self):
+        """Requirement 11 stands: a subscription that stopped reporting is a
+        signal, and hiding it is how it goes unnoticed."""
+        annotated = dd.annotate_providers(
+            {"providers": [{"name": "openai", "host": "chatgpt.com",
+                            "reporting": False, "windows": []}]}
+        )
+
+        assert [p["name"] for p in annotated["providers"]] == ["openai"]
+
+    def test_a_provider_with_no_host_named_is_kept(self):
+        """Unknown is not local. Dropping it would hide a real subscription
+        because of a missing field."""
+        annotated = dd.annotate_providers(
+            {"providers": [{"name": "anthropic", "reporting": True,
+                            "windows": [{"label": "5h", "used_percent": 5.0}]}]}
+        )
+
+        assert [p["name"] for p in annotated["providers"]] == ["anthropic"]
