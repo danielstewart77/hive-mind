@@ -1,0 +1,46 @@
+{% extends "layout.html" %}
+{% block title %}Dashboard · Hive{% endblock %}
+{% block content %}
+{#
+  A wall view: every mind that is talking right now, side by side, with the
+  machines underneath them and the subscription allowances above.
+
+  Three things on this page are deliberately not drawn as zero when they are
+  unknown, because on every one of them a zero reads as good news:
+  a context bar with no count, a provider with no observed allowance, and a
+  host whose probe never answered. Each renders as its own state instead.
+#}
+<main class="page dashboard-page">
+    <header class="page-header">
+        <div class="page-header-copy">
+            <p class="page-eyebrow">Live</p>
+            <h1 class="page-title">Dashboard</h1>
+            <p class="page-description">Conversations producing output right now, what each one is holding in context, and the machines and allowances behind them. Figures name the moment they were taken; nothing is drawn as empty because it is unknown.</p>
+        </div>
+        <div class="page-actions"><span class="dash-clock" id="dash-observed">—</span></div>
+    </header>
+
+    <div id="dash-error" class="error-state" hidden></div>
+
+    <section class="surface dash-providers" aria-label="Provider allowance">
+        <div class="surface-header"><div><h2>Token pressure</h2><p>How much of each provider's subscription allowance is spent, read off the responses the proxy already carried.</p></div></div>
+        <div class="dash-provider-grid" id="dash-providers"></div>
+    </section>
+
+    <section aria-label="Live conversations">
+        <div class="dash-section-head">
+            <h2>Generating</h2>
+            <span class="dash-waiting" id="dash-waiting"></span>
+            <span class="dash-idle-minds" id="dash-idle-minds"></span>
+        </div>
+        <div class="dash-columns" id="dash-columns"></div>
+        <p class="dash-empty" id="dash-idle" hidden>No mind is producing output right now.</p>
+    </section>
+
+    <section class="surface dash-hosts" aria-label="Machines">
+        <div class="surface-header"><div><h2>Machines</h2><p>One row per machine. Minds sharing a host collapse into a single row.</p></div></div>
+        <div class="dash-host-grid" id="dash-hosts"></div>
+    </section>
+</main>
+<script src="{{ request.url_for('static', path='dashboard.js') }}?v={{ asset_versions['dashboard.js'] }}" defer></script>
+{% endblock %}

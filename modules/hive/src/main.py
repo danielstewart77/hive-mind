@@ -12,6 +12,7 @@ import os
 import re
 import shlex
 import sqlite3
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -65,6 +66,7 @@ from configuration_data import (
     set_edge_mind_metadata,
 )
 from graph_data import get_graph_data
+import dashboard_data
 import mind_runtime
 import mind_soul
 import mind_files
@@ -641,6 +643,205 @@ async def activity_page(request: Request):
 @app.get("/training", response_class=HTMLResponse)
 async def training_page(request: Request):
     return _console_page(request, "training.html")
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard_page(request: Request):
+    return _console_page(request, "dashboard.html")
+
+
+def _proxy_base_url() -> str:
+    return (
+        get_capability_endpoint("inference-proxy")
+        or os.getenv("INFERENCE_PROXY_URL")
+        or "http://inference-proxy:8888"
+    ).rstrip("/")
+
+
+def _proxy_headers() -> dict:
+    """The console's own proxy key.
+
+    Absent is a state, not a failure: the allowance panel reports "not
+    configured" and the rest of the page renders. A console that refused to
+    load because one key was unset would hide the minds, the hosts and the
+    conversations over a panel nobody had wired yet.
+    """
+    token = os.getenv("INFERENCE_PROXY_KEY", "")
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+async def _proxy_json(path: str) -> dict:
+    headers = _proxy_headers()
+    if not headers:
+        raise RuntimeError("INFERENCE_PROXY_KEY is not configured for this console")
+    async with httpx.AsyncClient(timeout=6.0) as client:
+        response = await client.get(f"{_proxy_base_url()}{path}", headers=headers)
+    response.raise_for_status()
+    return response.json()
+
+
+async def _fetch_provider_limits() -> dict:
+    return {"providers": (await _proxy_json("/v1/providers/limits")).get("providers", [])}
+
+
+async def _fetch_model_catalog() -> dict:
+    """Deployment name to declared context window, from the model map.
+
+    The proxy owns that map, so this is a relay rather than a table the
+    console keeps — a second copy would disagree the first time somebody
+    edited a row.
+    """
+    listing = await _proxy_json("/v1/models")
+    return {
+        "catalog": {
+            row["id"]: row.get("context_window")
+            for row in listing.get("data", [])
+            if isinstance(row, dict) and row.get("id")
+        }
+    }
+
+
+async def _probe_mind_host(mind: dict) -> dict:
+    """One mind's account of the machine it runs on.
+
+    Every failure keeps its own shape. A refused mind is up and holding a
+    token we do not have; one running an older build has no route yet; one
+    that never answered may be asleep, firewalled or off. Three remedies,
+    three machines — collapsing them is how an evening goes into rebooting
+    a box whose only problem was an environment variable.
+    """
+    name = mind.get("name") or ""
+    gateway = (mind.get("gateway_url") or "").strip().rstrip("/")
+    if not gateway:
+        return {"mind": name, "mind_id": mind.get("id"), "status": "unconfigured",
+                "reading": None, "error": "no gateway URL in the registry"}
+    # Outside the try, and deliberately. `admin_headers()` raises when the
+    # console has no admin token, and inside the try that exception would be
+    # caught by the unreachable arm — naming every machine in the hive as
+    # unreachable because of one unset variable on this box, which is the
+    # exact conflation `host_status_for` exists to prevent.
+    try:
+        headers = mind_runtime.admin_headers()
+    except HTTPException as exc:
+        return {"mind": name, "mind_id": mind.get("id"), "status": "unconfigured",
+                "reading": None, "error": str(exc.detail)}
+    try:
+        async with httpx.AsyncClient(timeout=dashboard_data.HOST_PROBE_TIMEOUT) as client:
+            response = await client.get(f"{gateway}/host", headers=headers)
+    except Exception as exc:  # noqa: BLE001 — unreachable is a state
+        return {"mind": name, "mind_id": mind.get("id"), "status": "unreachable",
+                "reading": None, "error": str(exc)}
+    status = dashboard_data.host_status_for(response.status_code)
+    if status != "reporting":
+        return {"mind": name, "mind_id": mind.get("id"), "status": status,
+                "reading": None, "error": response.text[:200]}
+    return {"mind": name, "mind_id": mind.get("id"), "status": "reporting",
+            "reading": response.json(), "error": None}
+
+
+async def _fetch_hosts() -> dict:
+    """Every mind's machine, asked all at once.
+
+    Concurrently and with a per-mind deadline, because one sleeping Windows
+    box DROPs rather than refuses: asked in sequence it would hold up every
+    other machine's figures, and the page would present them all as current.
+    """
+    minds = await _broker_minds_safe()
+    reports = await asyncio.gather(
+        *[_probe_mind_host(mind) for mind in minds], return_exceptions=True
+    )
+    settled = [
+        report
+        if isinstance(report, dict)
+        # Named, not blanked: a nameless failure row merges with every other
+        # nameless one, and the second dead machine disappears behind the
+        # first.
+        else {"mind": mind.get("name") or "", "mind_id": mind.get("id"),
+              "status": "unreachable", "reading": None, "error": str(report)}
+        for mind, report in zip(minds, reports)
+    ]
+    return {"hosts": dashboard_data.merge_hosts(settled), "reports": settled}
+
+
+_host_snapshot = dashboard_data.SharedSnapshot(
+    _fetch_hosts, ttl=dashboard_data.HOST_TTL_SECONDS
+)
+_provider_snapshot = dashboard_data.SharedSnapshot(
+    _fetch_provider_limits, ttl=dashboard_data.PROVIDER_TTL_SECONDS
+)
+_catalog_snapshot = dashboard_data.SharedSnapshot(
+    _fetch_model_catalog, ttl=dashboard_data.CATALOG_TTL_SECONDS
+)
+
+
+async def _live_sessions() -> dict:
+    """Which conversations are producing, asked of the only party that knows."""
+    payload = await _gateway_json("/sessions/live")
+    return payload if isinstance(payload, dict) else {"sessions": []}
+
+
+@app.get("/api/dashboard")
+async def api_dashboard(user: dict = Depends(require_auth)):
+    """One reading of the hive: who is talking, how full, and on what.
+
+    Guarded like every other console API. This one carries context counts,
+    host inventory and subscription spend — guarding only the HTML would
+    leave all of it on an unauthenticated JSON route.
+    """
+    del user
+    live, hosts, providers, catalog = await asyncio.gather(
+        _live_sessions(),
+        _host_snapshot.get(),
+        _provider_snapshot.get(),
+        _catalog_snapshot.get(),
+        return_exceptions=True,
+    )
+    windows = catalog.get("catalog", {}) if isinstance(catalog, dict) else {}
+    sessions = live.get("sessions", []) if isinstance(live, dict) else []
+    for session in sessions:
+        context = dict(session.get("context") or {})
+        context["window"] = dashboard_data.resolve_window(
+            context.get("window"), dashboard_data.window_for(session.get("model"), windows)
+        )
+        session["context"] = dashboard_data.context_reading(context)
+    # Requirement 5: a mind that is connected and silent is listed, not
+    # omitted. Without it the panel cannot distinguish a quiet hive from a
+    # hive whose minds have all gone.
+    registry = await _broker_minds_safe()
+    producing = {row.get("mind_id") for row in sessions}
+    idle = [
+        {"mind_id": mind.get("id"), "name": mind.get("name"),
+         "model": mind.get("model"), "last_seen": mind.get("last_seen")}
+        for mind in registry
+        if mind.get("id") not in producing
+    ]
+    return {
+        "columns": dashboard_data.split_columns(sessions),
+        "idle_minds": idle,
+        "hosts": hosts if isinstance(hosts, dict) else {"hosts": [], "stale": True,
+                                                        "error": str(hosts)},
+        "providers": providers if isinstance(providers, dict) else {
+            "providers": [], "stale": True, "error": str(providers)},
+        "sessions_error": None if isinstance(live, dict) else str(live),
+        "observed_at": time.time(),
+    }
+
+
+@app.get("/api/dashboard/text")
+async def api_dashboard_text(
+    session_id: str, since: int = 0, user: dict = Depends(require_auth)
+):
+    """The prose one live conversation has produced since `since`.
+
+    Relayed from comms, which filters to assistant text before it leaves —
+    the per-session observer stream carries tool inputs and tool results
+    unfiltered, and this page answers to any account in the console's user
+    table.
+    """
+    del user
+    return await _gateway_json(
+        "/sessions/live/text", {"session_id": session_id, "since": since}
+    )
 
 
 @app.get("/api/overview")
