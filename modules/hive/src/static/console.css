@@ -735,8 +735,14 @@ a { color: inherit; }
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: 0.9rem;
-    align-items: start;
+    /* Both panels are one band across the top. Sized to their own content
+       they stepped, and the machines side — carrying an extra caption per
+       dial — hung below the allowance rings beside it. */
+    align-items: stretch;
 }
+.dash-top > section { display: flex; flex-direction: column; }
+.dash-top .dash-provider-grid,
+.dash-top .dash-host-grid { flex: 1 1 auto; align-content: start; }
 @media (max-width: 1100px) {
     .dash-top { grid-template-columns: minmax(0, 1fr); }
 }

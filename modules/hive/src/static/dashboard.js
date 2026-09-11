@@ -449,11 +449,6 @@
       label.textContent = host.hostname;
       card.appendChild(label);
 
-      const minds = document.createElement("div");
-      minds.className = "metric-detail";
-      minds.textContent = (host.minds || []).filter(Boolean).join(", ");
-      card.appendChild(minds);
-
       if (host.status !== "reporting") {
         const state = document.createElement("div");
         state.className = "metric-detail is-error";
