@@ -723,6 +723,37 @@ class SessionManager:
             return None
         return await self._session_dict(result["session_id"])
 
+    async def publish_pty_activity(self, session_id: str, blocks: list) -> dict:
+        """Put a terminal's work on the dashboard feed, opening its column.
+
+        A pty publishes no harness events, so nothing else in this process
+        ever learns that a terminal turn has started. The mind's tailer sees
+        the user's own submission in the transcript and posts it here, which
+        is what puts a column on screen the instant enter is pressed rather
+        than whenever the first sentence happens to land.
+
+        Opening is `begin`, which is rotation-aware: a terminal rotation
+        keeps the session row and swaps the conversation beneath it, and
+        without the id the replaced conversation's work stays on screen
+        under a context count that has just reset.
+        """
+        if not blocks:
+            return {"ok": False, "error": "no blocks"}
+        conversation_id = None
+        mind_id = self._mind_ids.get(session_id, "")
+        try:
+            row = await self._get_row(session_id)
+            if not row:
+                return {"ok": False, "error": "session not found"}
+            conversation_id = row["claude_sid"]
+        except Exception:  # noqa: BLE001 — a view, never the conversation
+            log.debug("activity feed could not read %s", session_id, exc_info=True)
+        self.dashboard.begin(
+            session_id, mind_id=mind_id, conversation_id=conversation_id
+        )
+        self.dashboard.observe_blocks(session_id, blocks)
+        return {"ok": True, "blocks": len(blocks)}
+
     async def publish_pty_text(self, session_id: str, text: str) -> dict:
         """Put one block of a terminal's prose on the session's event stream.
 
