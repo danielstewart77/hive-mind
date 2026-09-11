@@ -167,6 +167,73 @@ providers:
 Secrets are stored in the system keyring (`keyrings.alt.file.PlaintextKeyring`).
 Use `get_credential()` from `core/secrets.py` to read them.
 
+### How the gateway authenticates itself to a mind
+
+Comms itself is gated on the way in — a bearer check on every HTTP route, an
+admin bearer on top for `/broker/minds` writes. On the way *out*, every call it
+makes to a mind carries that mind's own credential.
+
+| Layer | Owner | Lifetime |
+|---|---|---|
+| `minds/<name>/session_token` (0600) | the mind, on disk | durable truth |
+| `broker.minds.session_token` | comms | a cache of the above |
+
+The mind mints the token on first use and publishes it in the boot
+registration it already performs — the same admin-guarded upsert that carries
+its model and address. Comms reads it per call through
+`broker.get_mind_session_token`, the one accessor that returns it; every mind
+listing goes through `_public_mind`, which strips the column, because those
+listings answer to the service token every surface bot holds. One token taken
+off one mind opens that mind and no other, which matters most for the minds
+trusted least — the two Windows boxes the boys use.
+
+The admin token is deliberately *not* the credential on this path: it unlocks
+`PATCH /runtime`, the skills write-back and the file editor, and a routine chat
+turn must not carry the thing that owns the machine. A mind still accepts it,
+so the console or the operator can reach a wedged session directly.
+
+All seven outbound paths carry it — spawn, message, interrupt, release,
+rotate-pty, kill, and the terminal WebSocket proxy — and **a refusal is
+reported as a refusal on each**. A 401 or 503 is never folded into the shape
+that means something else: a mind that is down, a mind with nothing to
+release, a mind holding no live terminal, a mind offering no models. Three of
+those are remedies applied to the wrong machine. Two of them were worse than
+cosmetic: a refused release read as "nothing to release" let a cross-surface
+adoption retarget ownership over a harness that was still running — two
+processes on one transcript — and a refused kill read as success left a tmux
+session and its context alive until the box rebooted. The terminal tile closes
+on **4416** rather than the 4415 that means "no pty route in this image".
+
+On the mind side (`minds/runtime_api.py`, mounted by both harness servers) one
+middleware guards every `/sessions` route, reading `scope["path"]` and not
+`request.url.path` — Starlette builds that URL from the *Host header*, so a
+Host carrying a `/` moves the route out of `.path` while the router still
+matches it. Credentials compare as bytes, since `compare_digest` raises
+`TypeError` on non-ASCII `str` and that 500 reaches the gateway as "no
+terminal route". A mind that cannot establish its own credential answers
+**503**, never open: an unreadable token file is not an absent one, and
+treating it as absent serves the whole session surface to the LAN while the
+gateway keeps presenting a token nobody checks.
+
+**The rollout direction is one-way.** Comms can start sending a credential
+with no risk to anything — a mind that does not check one ignores it. A mind
+cannot start requiring one before comms sends it. So comms first, then minds
+one at a time; deploying the code to a mind is the act that flips it.
+
+**Two caveats, stated rather than papered over.** Per-mind isolation is real
+between *hosts* — the kid boxes, Hex, Dragoman, this workstation — and weaker
+than the phrase suggests in two places. The five container minds all
+bind-mount the same tree read-write, so each can read
+`minds/<other>/session_token`; injecting `MIND_SESSION_TOKEN` per container
+from its own env file fixes that. And the guard accepts the admin token as
+well as the session token, deliberately, so the console and the operator can
+reach a wedged pane — but on this hive that resolves to
+`COMMS_ADMIN_BEARER_TOKEN`, which every mind already holds. So a compromised
+mind can still reach another's session surface with a credential it had
+before; what it cannot do any more is reach one with nothing at all. A
+distinct `MIND_ADMIN_TOKEN` per mind closes that, and is the next thing worth
+doing if the boys' boxes stop being trusted.
+
 ### Which model a session runs on
 
 Three layers, each with one owner:
