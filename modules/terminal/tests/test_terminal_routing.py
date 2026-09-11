@@ -97,17 +97,32 @@ def test_template_uses_the_routing_module():
     assert "r.mind_id === mindId" not in body
 
 
-def test_template_stops_retrying_a_mind_that_has_answered():
-    """Which codes are permanent, and what each one says, is asserted against
-    the function itself in tests/js/terminal_routing_test.mjs. What this checks
-    is that the template consults it rather than keeping a second ladder."""
+def _template_code() -> str:
+    """The template with its JS comments stripped.
+
+    Asserting against the raw file lets a commented-out call satisfy every
+    check — which is how the previous version of this test went green against
+    a tile that reattached forever on all five permanent codes.
+    """
     template = os.path.join(
         os.path.dirname(__file__), "..", "src", "templates", "terminal.html"
     )
     with open(template, encoding="utf-8") as fh:
-        body = fh.read()
+        lines = fh.read().splitlines()
+    return "\n".join(
+        line for line in lines if not line.lstrip().startswith("//")
+    )
 
-    assert "TerminalRouting.permanentClose" in body
+
+def test_template_stops_retrying_a_mind_that_has_answered():
+    """Which codes are permanent, and what each one says, is asserted against
+    the function itself in tests/js/terminal_routing_test.mjs. What this checks
+    is that the template consults it rather than keeping a second ladder."""
+    body = _template_code()
+
+    # The call and the use of its result, both on live lines.
+    assert "TerminalRouting.permanentClose(" in body
+    assert "stopWith(permanent.message)" in body
     # Retries to the same session go through the backoff, never straight
     # back into attach().
     assert "TerminalRouting.retryDelayMs" in body
