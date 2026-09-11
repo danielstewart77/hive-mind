@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 
 import aiosqlite
 
+from comms.dashboard import LiveFeed
 from comms.config import PROJECT_DIR, config
 from hive_logging import log_event
 
@@ -131,7 +132,11 @@ CREATE TABLE IF NOT EXISTS sessions (
     rotated_from  TEXT,
     carry_forward TEXT,
     carry_forward_sid TEXT,
-    carry_forward_at REAL
+    carry_forward_at REAL,
+    context_tokens INTEGER,
+    context_threshold INTEGER,
+    context_window INTEGER,
+    context_observed_at REAL
 );
 
 CREATE TABLE IF NOT EXISTS active_sessions (
@@ -223,6 +228,10 @@ class SessionManager:
         self._rc_procs: dict[str, asyncio.subprocess.Process] = {}  # RC subprocesses
         self._locks: dict[str, asyncio.Lock] = {}
         self._observer_queues: dict[str, set[asyncio.Queue]] = {}
+        #: The hive-wide live view a dashboard reads. Text only, sequenced,
+        #: and with an explicit notion of which conversations are producing —
+        #: none of which the per-session observer stream provides.
+        self.dashboard = LiveFeed()
         self._reaper_task: asyncio.Task | None = None
         self.broker_db = None  # Set by server.py lifespan; broker.minds IS the mind registry
 
@@ -311,6 +320,22 @@ class SessionManager:
                 await self._db.commit()
             except Exception:
                 pass  # Column already exists
+        # How full this conversation's context is, as its own mind measured
+        # it. Nothing on this side can compute it: the count comes from the
+        # harness transcript's `message.usage` on the machine running it, and
+        # the threshold is that mind's own — read off the spawn arguments,
+        # not derivable from the model name, since an Opus conversation
+        # started without the 1M pin caps far below one that has it. All
+        # three stay null until a mind reports, and null renders as unknown:
+        # a zero here draws a conversation at 138k as having all its room
+        # left, which is the one wrong answer that looks reassuring.
+        for column in ("context_tokens INTEGER", "context_threshold INTEGER",
+                       "context_window INTEGER", "context_observed_at REAL"):
+            try:
+                await self._db.execute(f"ALTER TABLE sessions ADD COLUMN {column}")
+                await self._db.commit()
+            except Exception:
+                pass  # Column already exists
         # Backfill: every session owns a conversation id. Rows created before
         # the id was minted at session creation may still be blank — those are
         # sessions that never finished a turn, so there is no conversation on
@@ -354,6 +379,11 @@ class SessionManager:
         while True:
             try:
                 await self.reap_stale_sessions()
+                # The live feed holds a text buffer per conversation it has
+                # seen. `forget` covers the sessions somebody closed; this
+                # covers the far commoner case of one that simply finished,
+                # which otherwise accumulates for the life of the process.
+                self.dashboard.sweep()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -738,6 +768,137 @@ class SessionManager:
         )
         return {"ok": True, "published": True}
 
+    async def report_context(
+        self,
+        session_id: str,
+        *,
+        tokens: int | None = None,
+        threshold: int | None = None,
+        window: int | None = None,
+        now: float | None = None,
+    ) -> dict:
+        """Record how full a conversation's context is, as its mind measured it.
+
+        The mind is the only party that can. The count is summed from the
+        harness transcript's ``message.usage`` on the machine running it, and
+        the threshold is that mind's own — read off the spawn arguments
+        rather than derived from the model name, because the same model
+        caps in two different places depending on whether the conversation
+        was started with the long-context pin. A gateway recomputing either
+        would be guessing at numbers it cannot see.
+
+        Fields arrive independently and only what is given is written: a
+        reporter that knows the count but not the window must not blank a
+        window some other reporter established.
+        """
+        moment = time.time() if now is None else now
+        updates: list[str] = []
+        params: list[Any] = []
+        for column, value in (
+            ("context_tokens", tokens),
+            ("context_threshold", threshold),
+            ("context_window", window),
+        ):
+            if value is None:
+                continue
+            updates.append(f"{column} = ?")
+            params.append(int(value))
+        if not updates:
+            return {"ok": False, "error": "nothing to record"}
+        updates.append("context_observed_at = ?")
+        params.extend([moment, session_id])
+        cursor = await self._db.execute(
+            f"UPDATE sessions SET {', '.join(updates)} WHERE id = ?", params
+        )
+        await self._db.commit()
+        if not cursor.rowcount:
+            return {"ok": False, "error": "session not found"}
+        return {"ok": True, "session_id": session_id, "observed_at": moment}
+
+    async def report_context_for_client(
+        self,
+        client_type: str,
+        client_ref: str,
+        *,
+        tokens: int | None = None,
+        threshold: int | None = None,
+        window: int | None = None,
+    ) -> dict:
+        """As `report_context`, addressed the way a mind's hook can address it.
+
+        The reporter is a Stop hook on the mind's own machine. It knows the
+        surface it is running on and the conversation it is bound to, which
+        is what `record_turn` is already keyed by; it does not know the
+        gateway's session id. Resolving that here keeps the hook from having
+        to learn a second addressing scheme for the same conversation.
+        """
+        active = await self.get_active_session(client_type, client_ref)
+        if not active:
+            return {"ok": False, "error": "no active session"}
+        return await self.report_context(
+            active["id"], tokens=tokens, threshold=threshold, window=window
+        )
+
+    async def clear_context(self, session_id: str) -> None:
+        """Forget how full this conversation was — it is a different one now.
+
+        A rotation replaces the conversation while keeping the session row,
+        so the stored count belongs to a transcript that no longer exists.
+        Left in place it reads as a fresh conversation already at its
+        threshold, which is the wrong direction to be wrong in: it is the
+        reading that would have somebody rotating a session that just started.
+        """
+        await self._db.execute(
+            "UPDATE sessions SET context_tokens = NULL, context_threshold = NULL, "
+            "context_observed_at = NULL WHERE id = ?",
+            (session_id,),
+        )
+        await self._db.commit()
+
+    async def live_dashboard(self, now: float | None = None) -> dict:
+        """Every conversation producing right now, with its context figures.
+
+        The feed knows what is live; the table knows how full each one is.
+        Joining them here rather than in the console keeps the console from
+        needing a second round trip per column, and keeps "which sessions
+        are generating" answered by the only process that can see it.
+        """
+        moment = time.time() if now is None else now
+        live = self.dashboard.live(now=moment)
+        rows = []
+        for entry in live:
+            row = await self._get_row(entry["session_id"])
+            if not row:
+                # Live in the feed, gone from the table: the session was
+                # deleted mid-turn. Dropping it is right — there is nothing
+                # left to show a column for — but the feed should stop
+                # carrying it too.
+                self.dashboard.forget(entry["session_id"])
+                continue
+            observed_at = row["context_observed_at"]
+            rows.append(
+                {
+                    **entry,
+                    "mind_id": entry.get("mind_id") or row["mind_id"],
+                    "model": row["model"],
+                    "summary": row["summary"],
+                    "owner_type": row["owner_type"],
+                    "context": {
+                        "tokens": row["context_tokens"],
+                        "threshold": row["context_threshold"],
+                        "window": row["context_window"],
+                        "observed_at": observed_at,
+                        # The age is what stops a per-turn measurement being
+                        # read as a live one. It is never zero-filled: a
+                        # conversation whose mind has never reported has no
+                        # count, which is a different claim from a count of
+                        # nothing.
+                        "age_seconds": (moment - observed_at) if observed_at else None,
+                    },
+                }
+            )
+        return {"sessions": rows, "observed_at": moment}
+
     async def record_turn(
         self, client_type: str, client_ref: str, role: str, content: str,
         claude_sid: str | None = None,
@@ -1023,6 +1184,13 @@ class SessionManager:
             (new_claude_sid, delivered, new_claude_sid, _now, _now, session_id),
         )
         await self._db.commit()
+        # The conversation under this row is a different one now. Its stored
+        # fullness belongs to a transcript that no longer exists, and the
+        # feed is holding the replaced conversation's words — both would
+        # render as a fresh conversation that is somehow already at its
+        # rotation threshold.
+        await self.clear_context(session_id)
+        self.dashboard.forget(session_id)
         # The pane was respawned, so the tile's screen and scrollback went
         # with it — the conversation it was showing is gone from the display
         # even though nothing it tracks changed. This is the only account of
@@ -1174,8 +1342,66 @@ class SessionManager:
                 if not watchers:
                     self._observer_queues.pop(session_id, None)
 
+    async def _note_dashboard_event(self, session_id: str, event: dict[str, Any]) -> None:
+        """Keep the hive-wide live feed in step with this conversation.
+
+        Hooked here because this is the one place both publishers meet:
+        ``send_message`` for chat and ``publish_pty_text`` for a terminal's
+        tailer. Deriving liveness from the events themselves is also the
+        only honest source — ``sessions.status`` is written to 'running' at
+        creation and never written back, so anything keyed on it reports
+        every session that ever took a turn as working right now.
+
+        The turn's own boundaries are in the stream: ``user`` is the
+        dispatch, ``result`` is the end. A terminal has neither — its prose
+        arrives as bare assistant blocks — so an assistant block for a
+        conversation the feed has not seen opens one.
+        """
+        kind = event.get("type")
+        if kind not in ("user", "result", "assistant"):
+            return
+        mind_id = self._mind_ids.get(session_id, "")
+        if kind == "result":
+            self.dashboard.end(session_id)
+            return
+        if kind == "assistant" and self.dashboard.state(session_id).get("known"):
+            # The hot path: every block of a streaming turn lands here, and
+            # the conversation is already open. No row read.
+            self.dashboard.observe(session_id, event)
+            return
+        # Opening a conversation costs one row read, which happens once per
+        # turn rather than once per block. The conversation id is what makes
+        # a rotation visible: a terminal rotation keeps the session id and
+        # swaps the harness conversation underneath, so without it the
+        # replaced conversation's words stay on screen under a context count
+        # that has just reset to nearly nothing.
+        conversation_id = None
+        try:
+            row = await self._get_row(session_id)
+            if row:
+                conversation_id = row["claude_sid"]
+        except Exception:  # noqa: BLE001 — a view, never the conversation
+            log.debug("dashboard feed could not read %s", session_id, exc_info=True)
+        self.dashboard.begin(
+            session_id, mind_id=mind_id, conversation_id=conversation_id
+        )
+        if kind == "user":
+            # Only the chat path brackets its turns. Saying so is what lets a
+            # pty conversation — which never publishes a `result` — be held to
+            # the shorter silence ceiling instead of lingering for a quarter
+            # of an hour in a column somebody could be using.
+            self.dashboard.frame(session_id)
+        else:
+            self.dashboard.observe(session_id, event)
+
     async def _publish_session_event(self, session_id: str, event: dict[str, Any]) -> None:
         """Fan out a session event to all passive observers."""
+        # Never let a feed bookkeeping fault break the delivery it rides on:
+        # the observers below are a live conversation, the feed is a view of it.
+        try:
+            await self._note_dashboard_event(session_id, event)
+        except Exception:  # noqa: BLE001
+            log.debug("dashboard feed ignored an event for %s", session_id, exc_info=True)
         watchers = list(self._observer_queues.get(session_id, ()))
         for queue in watchers:
             if queue.full():
@@ -1902,6 +2128,11 @@ class SessionManager:
             session_id,
             event,
         )
+
+        # The conversation is over, so the live view of it goes rather than
+        # ageing out: the retention window exists for a tile reconnecting
+        # just after a turn ended, not for a session somebody closed.
+        self.dashboard.forget(session_id)
 
         uptime = time.time() - session["created_at"]
         return {
