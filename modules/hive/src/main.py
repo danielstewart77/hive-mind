@@ -843,12 +843,15 @@ async def api_dashboard(user: dict = Depends(require_auth)):
 async def api_dashboard_text(
     session_id: str, since: int = 0, user: dict = Depends(require_auth)
 ):
-    """The prose one live conversation has produced since `since`.
+    """Everything one live conversation has done since `since`.
 
-    Relayed from comms, which filters to assistant text before it leaves —
-    the per-session observer stream carries tool inputs and tool results
-    unfiltered, and this page answers to any account in the console's user
-    table.
+    Relayed from comms, which types each block rather than filtering it:
+    prose, thinking, the tool call with its input and the result with its
+    body. The console spends its admin bearer here on behalf of whoever is
+    logged in, so any account in the console's user table reads any mind's
+    command output and file contents. That is the page working as specified
+    — the dashboard exists to show the work — and it is the reason this
+    route is behind `require_auth` at all.
     """
     del user
     return await _gateway_json(
