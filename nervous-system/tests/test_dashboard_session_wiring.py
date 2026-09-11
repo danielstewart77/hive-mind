@@ -246,3 +246,125 @@ def test_a_session_deleted_mid_turn_leaves_the_listing_rather_than_erroring():
             return await mgr.live_dashboard(now=1.0)
 
     assert _run(scenario())["sessions"] == []
+
+
+# --- the conversation id reaches the feed -----------------------------------
+
+
+def test_the_feed_learns_which_conversation_a_session_is_running():
+    """Without this the rotation branch in `LiveFeed.begin` is unreachable:
+    a terminal rotation keeps the session id, so the conversation id is the
+    only thing that changes and the only signal the column must be cleared."""
+
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _make_manager(tmp)
+            await _session_row(mgr, "s1")
+            await mgr._publish_session_event("s1", TEXT_EVENT)
+            return mgr.dashboard.state("s1")["conversation_id"]
+
+    assert _run(scenario()) == "conv-s1"
+
+
+def test_a_rotated_conversation_drops_the_replaced_ones_words():
+    """The words on screen belong to a transcript that no longer exists, and
+    they would sit above a context count that has just reset to nearly
+    nothing — a fresh conversation rendered as one already at its limit."""
+
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _make_manager(tmp)
+            await _session_row(mgr, "s1")
+            await mgr._publish_session_event("s1", TEXT_EVENT)
+            await mgr._db.execute(
+                "UPDATE sessions SET claude_sid = 'conv-after' WHERE id = 's1'"
+            )
+            await mgr._db.commit()
+            await mgr._publish_session_event("s1", {"type": "user", "message": {}})
+            return mgr.dashboard.since("s1", 0)
+
+    assert _run(scenario()) == []
+
+
+def test_clearing_the_context_forgets_the_replaced_conversations_fullness():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _make_manager(tmp)
+            await _session_row(mgr, "s1")
+            await mgr._publish_session_event("s1", TEXT_EVENT)
+            await mgr.report_context("s1", tokens=290_000, threshold=300_000, now=1.0)
+            await mgr.clear_context("s1")
+            return await mgr.live_dashboard(now=1.0)
+
+    context = _run(scenario())["sessions"][0]["context"]
+    assert context["tokens"] is None
+    assert context["threshold"] is None
+
+
+# --- a chat turn is framed, a terminal turn is not --------------------------
+
+
+def test_a_chat_turn_is_framed_so_silence_inside_it_is_tolerated():
+    """`user` opens a chat turn, so a long tool chain in the middle of one is
+    the turn working rather than the turn ending."""
+
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _make_manager(tmp)
+            await _session_row(mgr, "s1")
+            await mgr._publish_session_event("s1", {"type": "user", "message": {}})
+            return mgr.dashboard._conversations["s1"].framed
+
+    assert _run(scenario()) is True
+
+
+def test_a_terminal_turn_is_unframed_because_it_never_says_when_it_ends():
+    """`publish_pty_text` emits bare assistant blocks and never a `result`.
+    Treating that like a chat turn leaves a pane quiet since breakfast
+    holding a column for a quarter of an hour."""
+
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _make_manager(tmp)
+            await _session_row(mgr, "s1")
+            await mgr._publish_session_event("s1", TEXT_EVENT)
+            return mgr.dashboard._conversations["s1"].framed
+
+    assert _run(scenario()) is False
+
+
+# --- the hook's own addressing ----------------------------------------------
+
+
+def test_a_mind_can_report_its_context_by_surface_and_conversation():
+    """The reporter is a Stop hook on the mind's machine. It knows which
+    conversation it is bound to, not which row the gateway filed it under —
+    the same addressing `record-turn` already takes."""
+
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _make_manager(tmp)
+            await _session_row(mgr, "s1")
+            await mgr._db.execute(
+                "INSERT INTO active_sessions (client_type, client_ref, session_id) "
+                "VALUES ('terminal', 'ref-1', 's1')"
+            )
+            await mgr._db.commit()
+            await mgr._publish_session_event("s1", TEXT_EVENT)
+            reported = await mgr.report_context_for_client(
+                "terminal", "ref-1", tokens=61_500, threshold=137_000
+            )
+            return reported, await mgr.live_dashboard(now=1.0)
+
+    reported, live = _run(scenario())
+    assert reported["ok"] is True
+    assert live["sessions"][0]["context"]["threshold"] == 137_000
+
+
+def test_reporting_for_a_client_with_no_active_session_is_refused():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _make_manager(tmp)
+            return await mgr.report_context_for_client("terminal", "nobody", tokens=1)
+
+    assert _run(scenario())["ok"] is False

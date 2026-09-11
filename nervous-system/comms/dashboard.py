@@ -35,10 +35,20 @@ import time
 from collections import deque
 from typing import Any, Optional
 
-#: How long a conversation stays "generating" with nothing heard from it.
-#: Long enough to cover a slow tool chain, short enough that a mind killed
-#: mid-turn does not hold a column forever.
+#: How long a *framed* conversation stays generating with nothing heard.
+#: The chat path brackets every turn — `user` opens it, `result` closes it —
+#: so silence in the middle is a tool chain working and the ceiling only has
+#: to catch the turns whose end never arrives: a mind killed mid-turn, or
+#: this process restarting.
 GENERATING_TTL_SECONDS = 900.0
+
+#: How long an *unframed* conversation stays generating. A terminal has no
+#: brackets at all — `publish_pty_text` emits bare assistant blocks and never
+#: a `result` — so silence is the only end-of-turn signal there is, and it
+#: has to be read as one. At the framed ceiling a pane that went quiet this
+#: morning would outrank four minds actually producing, because the column
+#: selection is oldest-first: stale terminals would hold every slot.
+UNFRAMED_TTL_SECONDS = 90.0
 
 #: No assistant text for this long, while still generating, is *quiet* —
 #: reported, not removed. Silence inside a long build is not the turn ending,
@@ -100,6 +110,7 @@ class _Conversation:
         "last_event_at",
         "last_text_at",
         "ended_at",
+        "framed",
     )
 
     def __init__(self, mind_id: str, conversation_id: Optional[str], now: float):
@@ -113,6 +124,10 @@ class _Conversation:
         self.last_event_at = now
         self.last_text_at: Optional[float] = None
         self.ended_at: Optional[float] = None
+        #: Whether this conversation's turns arrive bracketed by `user` and
+        #: `result`. False for a pty-hosted conversation, whose prose arrives
+        #: as bare assistant blocks with no end-of-turn event at all.
+        self.framed = False
 
 
 class LiveFeed:
@@ -128,11 +143,13 @@ class LiveFeed:
         self,
         *,
         generating_ttl: float = GENERATING_TTL_SECONDS,
+        unframed_ttl: float = UNFRAMED_TTL_SECONDS,
         quiet_after: float = QUIET_AFTER_SECONDS,
         buffer_blocks: int = BUFFER_BLOCKS,
         retain_after_end: float = RETAIN_AFTER_END_SECONDS,
     ):
         self._generating_ttl = generating_ttl
+        self._unframed_ttl = unframed_ttl
         self._quiet_after = quiet_after
         self._buffer_blocks = buffer_blocks
         self._retain_after_end = retain_after_end
@@ -208,6 +225,18 @@ class LiveFeed:
                 dropped = conversation.blocks.popleft()
                 conversation.first_available_seq = dropped["seq"] + 1
 
+    def frame(self, session_id: str) -> None:
+        """This conversation's turns are bracketed — it will say when it ends.
+
+        Set by the chat path, which publishes `user` and `result` around
+        every turn. Its absence is what marks a pty conversation, whose
+        liveness can only be inferred from silence.
+        """
+        with self._lock:
+            conversation = self._conversations.get(session_id)
+            if conversation is not None:
+                conversation.framed = True
+
     def end(self, session_id: str, now: Optional[float] = None) -> None:
         """This conversation has stopped producing."""
         moment = time.time() if now is None else now
@@ -245,9 +274,19 @@ class LiveFeed:
     # -- reads ---------------------------------------------------------
 
     def _generating(self, conversation: _Conversation, now: float) -> bool:
+        """Whether this conversation is still producing.
+
+        Two ceilings, because the two paths give different evidence. A chat
+        turn says when it ends, so silence inside one is the turn working and
+        the ceiling is generous. A terminal turn never says — there is no
+        `result` on the pty path — so silence is the only signal available
+        and has to be read as the end, or a pane quiet since breakfast holds
+        a column all day ahead of minds that are actually talking.
+        """
         if not conversation.generating:
             return False
-        return (now - conversation.last_event_at) <= self._generating_ttl
+        ceiling = self._generating_ttl if conversation.framed else self._unframed_ttl
+        return (now - conversation.last_event_at) <= ceiling
 
     def since(self, session_id: str, seq: int) -> list[dict]:
         """Every block after `seq`, oldest first.

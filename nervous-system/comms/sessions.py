@@ -379,6 +379,11 @@ class SessionManager:
         while True:
             try:
                 await self.reap_stale_sessions()
+                # The live feed holds a text buffer per conversation it has
+                # seen. `forget` covers the sessions somebody closed; this
+                # covers the far commoner case of one that simply finished,
+                # which otherwise accumulates for the life of the process.
+                self.dashboard.sweep()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -810,6 +815,46 @@ class SessionManager:
             return {"ok": False, "error": "session not found"}
         return {"ok": True, "session_id": session_id, "observed_at": moment}
 
+    async def report_context_for_client(
+        self,
+        client_type: str,
+        client_ref: str,
+        *,
+        tokens: int | None = None,
+        threshold: int | None = None,
+        window: int | None = None,
+    ) -> dict:
+        """As `report_context`, addressed the way a mind's hook can address it.
+
+        The reporter is a Stop hook on the mind's own machine. It knows the
+        surface it is running on and the conversation it is bound to, which
+        is what `record_turn` is already keyed by; it does not know the
+        gateway's session id. Resolving that here keeps the hook from having
+        to learn a second addressing scheme for the same conversation.
+        """
+        active = await self.get_active_session(client_type, client_ref)
+        if not active:
+            return {"ok": False, "error": "no active session"}
+        return await self.report_context(
+            active["id"], tokens=tokens, threshold=threshold, window=window
+        )
+
+    async def clear_context(self, session_id: str) -> None:
+        """Forget how full this conversation was — it is a different one now.
+
+        A rotation replaces the conversation while keeping the session row,
+        so the stored count belongs to a transcript that no longer exists.
+        Left in place it reads as a fresh conversation already at its
+        threshold, which is the wrong direction to be wrong in: it is the
+        reading that would have somebody rotating a session that just started.
+        """
+        await self._db.execute(
+            "UPDATE sessions SET context_tokens = NULL, context_threshold = NULL, "
+            "context_observed_at = NULL WHERE id = ?",
+            (session_id,),
+        )
+        await self._db.commit()
+
     async def live_dashboard(self, now: float | None = None) -> dict:
         """Every conversation producing right now, with its context figures.
 
@@ -1139,6 +1184,13 @@ class SessionManager:
             (new_claude_sid, delivered, new_claude_sid, _now, _now, session_id),
         )
         await self._db.commit()
+        # The conversation under this row is a different one now. Its stored
+        # fullness belongs to a transcript that no longer exists, and the
+        # feed is holding the replaced conversation's words — both would
+        # render as a fresh conversation that is somehow already at its
+        # rotation threshold.
+        await self.clear_context(session_id)
+        self.dashboard.forget(session_id)
         # The pane was respawned, so the tile's screen and scrollback went
         # with it — the conversation it was showing is gone from the display
         # even though nothing it tracks changed. This is the only account of
@@ -1290,7 +1342,7 @@ class SessionManager:
                 if not watchers:
                     self._observer_queues.pop(session_id, None)
 
-    def _note_dashboard_event(self, session_id: str, event: dict[str, Any]) -> None:
+    async def _note_dashboard_event(self, session_id: str, event: dict[str, Any]) -> None:
         """Keep the hive-wide live feed in step with this conversation.
 
         Hooked here because this is the one place both publishers meet:
@@ -1306,14 +1358,40 @@ class SessionManager:
         conversation the feed has not seen opens one.
         """
         kind = event.get("type")
+        if kind not in ("user", "result", "assistant"):
+            return
         mind_id = self._mind_ids.get(session_id, "")
-        if kind == "user":
-            self.dashboard.begin(session_id, mind_id=mind_id)
-        elif kind == "result":
+        if kind == "result":
             self.dashboard.end(session_id)
-        elif kind == "assistant":
-            if not self.dashboard.state(session_id).get("known"):
-                self.dashboard.begin(session_id, mind_id=mind_id)
+            return
+        if kind == "assistant" and self.dashboard.state(session_id).get("known"):
+            # The hot path: every block of a streaming turn lands here, and
+            # the conversation is already open. No row read.
+            self.dashboard.observe(session_id, event)
+            return
+        # Opening a conversation costs one row read, which happens once per
+        # turn rather than once per block. The conversation id is what makes
+        # a rotation visible: a terminal rotation keeps the session id and
+        # swaps the harness conversation underneath, so without it the
+        # replaced conversation's words stay on screen under a context count
+        # that has just reset to nearly nothing.
+        conversation_id = None
+        try:
+            row = await self._get_row(session_id)
+            if row:
+                conversation_id = row["claude_sid"]
+        except Exception:  # noqa: BLE001 — a view, never the conversation
+            log.debug("dashboard feed could not read %s", session_id, exc_info=True)
+        self.dashboard.begin(
+            session_id, mind_id=mind_id, conversation_id=conversation_id
+        )
+        if kind == "user":
+            # Only the chat path brackets its turns. Saying so is what lets a
+            # pty conversation — which never publishes a `result` — be held to
+            # the shorter silence ceiling instead of lingering for a quarter
+            # of an hour in a column somebody could be using.
+            self.dashboard.frame(session_id)
+        else:
             self.dashboard.observe(session_id, event)
 
     async def _publish_session_event(self, session_id: str, event: dict[str, Any]) -> None:
@@ -1321,7 +1399,7 @@ class SessionManager:
         # Never let a feed bookkeeping fault break the delivery it rides on:
         # the observers below are a live conversation, the feed is a view of it.
         try:
-            self._note_dashboard_event(session_id, event)
+            await self._note_dashboard_event(session_id, event)
         except Exception:  # noqa: BLE001
             log.debug("dashboard feed ignored an event for %s", session_id, exc_info=True)
         watchers = list(self._observer_queues.get(session_id, ()))

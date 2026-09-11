@@ -187,12 +187,13 @@ class TestGeneratingIsExplicit:
 
         assert feed.state("s1", now=2.0)["generating"] is False
 
-    def test_a_turn_that_never_reports_its_end_expires_on_its_own(self, feed):
+    def test_a_framed_turn_that_never_reports_its_end_expires_on_its_own(self, feed):
         """A mind killed mid-turn, or a comms restart, leaves no end event.
         Without the expiry the column stays on screen forever, and the page
         shows four minds working on a hive where nothing is running."""
         feed = LiveFeed(generating_ttl=600.0)
         feed.begin("s1", mind_id="skippy", now=1000.0)
+        feed.frame("s1")
 
         assert feed.state("s1", now=1599.0)["generating"] is True
         assert feed.state("s1", now=1601.0)["generating"] is False
@@ -202,6 +203,7 @@ class TestGeneratingIsExplicit:
         ceiling — the expiry exists to catch silence, not duration."""
         feed = LiveFeed(generating_ttl=600.0)
         feed.begin("s1", mind_id="skippy", now=1000.0)
+        feed.frame("s1")
         feed.observe("s1", ASSISTANT_TEXT, now=1500.0)
 
         assert feed.state("s1", now=2000.0)["generating"] is True
@@ -238,6 +240,7 @@ class TestQuietIsNotStopped:
         column would tell the operator the turn finished."""
         feed = LiveFeed(quiet_after=30.0, generating_ttl=3600.0)
         feed.begin("s1", mind_id="skippy", now=1000.0)
+        feed.frame("s1")
         feed.observe("s1", ASSISTANT_TEXT, now=1000.0)
 
         state = feed.state("s1", now=1600.0)
@@ -308,8 +311,74 @@ class TestForgetting:
     def test_the_sweep_leaves_a_conversation_that_is_still_generating(self, feed):
         feed = LiveFeed(generating_ttl=3600.0, retain_after_end=1.0)
         feed.begin("s1", mind_id="skippy", now=1000.0)
+        feed.frame("s1")
         feed.observe("s1", ASSISTANT_TEXT, now=1000.0)
 
         feed.sweep(now=1100.0)
 
         assert [e["text"] for e in feed.since("s1", 0)] == ["hello"]
+
+
+class TestATerminalHasNoEndEvent:
+    """A pty conversation never publishes a `result` — `publish_pty_text`
+    emits bare assistant blocks and nothing else. Silence is therefore the
+    only end-of-turn signal there is, and it has to be read as one."""
+
+    def test_an_unframed_conversation_stops_at_the_shorter_ceiling(self):
+        """At the framed ceiling a pane quiet since breakfast would still be
+        'generating' a quarter of an hour later — and since columns go to the
+        longest-running conversations, four stale terminals would hold every
+        slot while the minds actually talking sat in the waiting list."""
+        feed = LiveFeed(generating_ttl=900.0, unframed_ttl=90.0)
+        feed.begin("s1", mind_id="skippy", now=1000.0)
+        feed.observe("s1", ASSISTANT_TEXT, now=1000.0)
+
+        assert feed.state("s1", now=1080.0)["generating"] is True
+        assert feed.state("s1", now=1100.0)["generating"] is False
+
+    def test_a_framed_conversation_keeps_the_longer_ceiling(self):
+        """A chat turn says when it ends, so silence inside one is a tool
+        chain working — holding it to the terminal's ceiling would drop a
+        column in the middle of a long build."""
+        feed = LiveFeed(generating_ttl=900.0, unframed_ttl=90.0)
+        feed.begin("s1", mind_id="skippy", now=1000.0)
+        feed.frame("s1")
+        feed.observe("s1", ASSISTANT_TEXT, now=1000.0)
+
+        assert feed.state("s1", now=1500.0)["generating"] is True
+
+    def test_more_output_keeps_an_unframed_conversation_alive(self):
+        feed = LiveFeed(generating_ttl=900.0, unframed_ttl=90.0)
+        feed.begin("s1", mind_id="skippy", now=1000.0)
+        feed.observe("s1", ASSISTANT_TEXT, now=1000.0)
+        feed.observe("s1", ASSISTANT_TEXT, now=1080.0)
+
+        assert feed.state("s1", now=1160.0)["generating"] is True
+
+
+class TestQuietOnlyMeansSomethingWhileGenerating:
+    def test_a_finished_conversation_is_not_reported_as_quiet(self):
+        """Done and working-but-silent are different states. Reporting a
+        finished conversation as quiet puts it back in front of the operator
+        as something to wonder about."""
+        feed = LiveFeed(quiet_after=30.0, generating_ttl=3600.0)
+        feed.begin("s1", mind_id="skippy", now=1000.0)
+        feed.frame("s1")
+        feed.observe("s1", ASSISTANT_TEXT, now=1000.0)
+        feed.end("s1", now=1010.0)
+
+        assert feed.state("s1", now=2000.0)["quiet"] is False
+
+
+class TestTheLiveSetIsOrdered:
+    def test_the_longest_running_conversation_comes_first(self):
+        """The console shows a bounded number of columns and takes them from
+        the front of this list. An order that moved would take a conversation
+        off the screen mid-sentence."""
+        feed = LiveFeed(generating_ttl=3600.0)
+        feed.begin("newer", mind_id="b", now=2000.0)
+        feed.frame("newer")
+        feed.begin("older", mind_id="a", now=1000.0)
+        feed.frame("older")
+
+        assert [row["session_id"] for row in feed.live(now=2000.0)] == ["older", "newer"]

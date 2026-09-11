@@ -211,6 +211,16 @@ class RegisterMindRequest(BaseModel):
     session_token: str | None = None
 
 
+class ClientContextReportRequest(BaseModel):
+    """The Stop hook's form of a context report, keyed like `record-turn`."""
+
+    client_type: str
+    client_ref: str
+    tokens: int | None = None
+    threshold: int | None = None
+    window: int | None = None
+
+
 class ContextReportRequest(BaseModel):
     """How full a conversation's context is, as its own mind measured it.
 
@@ -270,7 +280,7 @@ async def list_sessions(
     )
 
 
-@app.get("/sessions/live")
+@app.get("/sessions/live", dependencies=[Depends(require_admin_bearer)])
 async def live_sessions():
     """Every conversation producing output right now, with its context figures.
 
@@ -283,7 +293,7 @@ async def live_sessions():
     return await session_mgr.live_dashboard()
 
 
-@app.get("/sessions/live/text")
+@app.get("/sessions/live/text", dependencies=[Depends(require_admin_bearer)])
 async def live_session_text(session_id: str, since: int = 0):
     """The assistant prose one live conversation has produced after `since`.
 
@@ -299,6 +309,25 @@ async def live_session_text(session_id: str, since: int = 0):
         "blocks": session_mgr.dashboard.since(session_id, since),
         **session_mgr.dashboard.state(session_id),
     }
+
+
+@app.post("/sessions/context")
+async def report_context_for_client(body: ClientContextReportRequest):
+    """A mind's Stop hook reporting how full the conversation it just ran is.
+
+    Addressed by surface and conversation rather than by session id, the way
+    ``/sessions/record-turn`` already is: the hook runs on the mind's machine
+    and knows which conversation it is bound to, not which row the gateway
+    filed it under. Declared before ``/sessions/{session_id}`` so the literal
+    path wins the match.
+    """
+    return await session_mgr.report_context_for_client(
+        body.client_type,
+        body.client_ref,
+        tokens=body.tokens,
+        threshold=body.threshold,
+        window=body.window,
+    )
 
 
 @app.post("/sessions/{session_id}/context")
