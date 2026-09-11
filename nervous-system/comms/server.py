@@ -211,6 +211,20 @@ class RegisterMindRequest(BaseModel):
     session_token: str | None = None
 
 
+class ContextReportRequest(BaseModel):
+    """How full a conversation's context is, as its own mind measured it.
+
+    Every field is optional and only what arrives is written. A reporter
+    that knows the token count but not the window must not blank a window
+    another reporter established, and a mind running an older hook that
+    sends only the count must not be refused.
+    """
+
+    tokens: int | None = None
+    threshold: int | None = None
+    window: int | None = None
+
+
 class UpdateMindRequest(BaseModel):
     gateway_url: str | None = None
     model: str | None = None
@@ -253,6 +267,53 @@ async def list_sessions(
         status=status,
         client_type=client_type,
         client_ref=client_ref,
+    )
+
+
+@app.get("/sessions/live")
+async def live_sessions():
+    """Every conversation producing output right now, with its context figures.
+
+    What a dashboard reads instead of `status`, which is written to
+    'running' at creation and never written back — anything keyed on that
+    column reports every session that has ever taken a turn as busy.
+
+    Declared before `/sessions/{session_id}` so the literal path wins.
+    """
+    return await session_mgr.live_dashboard()
+
+
+@app.get("/sessions/live/text")
+async def live_session_text(session_id: str, since: int = 0):
+    """The assistant prose one live conversation has produced after `since`.
+
+    Text only. The per-session observer stream carries every harness event
+    unfiltered — tool inputs and tool results among them — and a page that
+    answers to any console account must not relay those. Blocks are
+    sequenced, and `first_available_seq` says where the buffer now starts,
+    so a reader that fell behind can render the gap rather than joining two
+    halves of different sentences into prose that reads perfectly.
+    """
+    return {
+        "session_id": session_id,
+        "blocks": session_mgr.dashboard.since(session_id, since),
+        **session_mgr.dashboard.state(session_id),
+    }
+
+
+@app.post("/sessions/{session_id}/context")
+async def report_session_context(session_id: str, body: ContextReportRequest):
+    """A mind reporting how full one of its conversations is.
+
+    The mind is the only party that can measure it, and the only one that
+    knows its own rotation threshold — that figure is read off the spawn
+    arguments, not derived from the model name.
+    """
+    return await session_mgr.report_context(
+        session_id,
+        tokens=body.tokens,
+        threshold=body.threshold,
+        window=body.window,
     )
 
 

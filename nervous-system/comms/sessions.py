@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 
 import aiosqlite
 
+from comms.dashboard import LiveFeed
 from comms.config import PROJECT_DIR, config
 from hive_logging import log_event
 
@@ -131,7 +132,11 @@ CREATE TABLE IF NOT EXISTS sessions (
     rotated_from  TEXT,
     carry_forward TEXT,
     carry_forward_sid TEXT,
-    carry_forward_at REAL
+    carry_forward_at REAL,
+    context_tokens INTEGER,
+    context_threshold INTEGER,
+    context_window INTEGER,
+    context_observed_at REAL
 );
 
 CREATE TABLE IF NOT EXISTS active_sessions (
@@ -223,6 +228,10 @@ class SessionManager:
         self._rc_procs: dict[str, asyncio.subprocess.Process] = {}  # RC subprocesses
         self._locks: dict[str, asyncio.Lock] = {}
         self._observer_queues: dict[str, set[asyncio.Queue]] = {}
+        #: The hive-wide live view a dashboard reads. Text only, sequenced,
+        #: and with an explicit notion of which conversations are producing —
+        #: none of which the per-session observer stream provides.
+        self.dashboard = LiveFeed()
         self._reaper_task: asyncio.Task | None = None
         self.broker_db = None  # Set by server.py lifespan; broker.minds IS the mind registry
 
@@ -306,6 +315,22 @@ class SessionManager:
         # to recover it. The session row outlives every process bound to it.
         for column in ("carry_forward TEXT", "carry_forward_sid TEXT",
                        "carry_forward_at REAL"):
+            try:
+                await self._db.execute(f"ALTER TABLE sessions ADD COLUMN {column}")
+                await self._db.commit()
+            except Exception:
+                pass  # Column already exists
+        # How full this conversation's context is, as its own mind measured
+        # it. Nothing on this side can compute it: the count comes from the
+        # harness transcript's `message.usage` on the machine running it, and
+        # the threshold is that mind's own — read off the spawn arguments,
+        # not derivable from the model name, since an Opus conversation
+        # started without the 1M pin caps far below one that has it. All
+        # three stay null until a mind reports, and null renders as unknown:
+        # a zero here draws a conversation at 138k as having all its room
+        # left, which is the one wrong answer that looks reassuring.
+        for column in ("context_tokens INTEGER", "context_threshold INTEGER",
+                       "context_window INTEGER", "context_observed_at REAL"):
             try:
                 await self._db.execute(f"ALTER TABLE sessions ADD COLUMN {column}")
                 await self._db.commit()
@@ -737,6 +762,97 @@ class SessionManager:
             },
         )
         return {"ok": True, "published": True}
+
+    async def report_context(
+        self,
+        session_id: str,
+        *,
+        tokens: int | None = None,
+        threshold: int | None = None,
+        window: int | None = None,
+        now: float | None = None,
+    ) -> dict:
+        """Record how full a conversation's context is, as its mind measured it.
+
+        The mind is the only party that can. The count is summed from the
+        harness transcript's ``message.usage`` on the machine running it, and
+        the threshold is that mind's own — read off the spawn arguments
+        rather than derived from the model name, because the same model
+        caps in two different places depending on whether the conversation
+        was started with the long-context pin. A gateway recomputing either
+        would be guessing at numbers it cannot see.
+
+        Fields arrive independently and only what is given is written: a
+        reporter that knows the count but not the window must not blank a
+        window some other reporter established.
+        """
+        moment = time.time() if now is None else now
+        updates: list[str] = []
+        params: list[Any] = []
+        for column, value in (
+            ("context_tokens", tokens),
+            ("context_threshold", threshold),
+            ("context_window", window),
+        ):
+            if value is None:
+                continue
+            updates.append(f"{column} = ?")
+            params.append(int(value))
+        if not updates:
+            return {"ok": False, "error": "nothing to record"}
+        updates.append("context_observed_at = ?")
+        params.extend([moment, session_id])
+        cursor = await self._db.execute(
+            f"UPDATE sessions SET {', '.join(updates)} WHERE id = ?", params
+        )
+        await self._db.commit()
+        if not cursor.rowcount:
+            return {"ok": False, "error": "session not found"}
+        return {"ok": True, "session_id": session_id, "observed_at": moment}
+
+    async def live_dashboard(self, now: float | None = None) -> dict:
+        """Every conversation producing right now, with its context figures.
+
+        The feed knows what is live; the table knows how full each one is.
+        Joining them here rather than in the console keeps the console from
+        needing a second round trip per column, and keeps "which sessions
+        are generating" answered by the only process that can see it.
+        """
+        moment = time.time() if now is None else now
+        live = self.dashboard.live(now=moment)
+        rows = []
+        for entry in live:
+            row = await self._get_row(entry["session_id"])
+            if not row:
+                # Live in the feed, gone from the table: the session was
+                # deleted mid-turn. Dropping it is right — there is nothing
+                # left to show a column for — but the feed should stop
+                # carrying it too.
+                self.dashboard.forget(entry["session_id"])
+                continue
+            observed_at = row["context_observed_at"]
+            rows.append(
+                {
+                    **entry,
+                    "mind_id": entry.get("mind_id") or row["mind_id"],
+                    "model": row["model"],
+                    "summary": row["summary"],
+                    "owner_type": row["owner_type"],
+                    "context": {
+                        "tokens": row["context_tokens"],
+                        "threshold": row["context_threshold"],
+                        "window": row["context_window"],
+                        "observed_at": observed_at,
+                        # The age is what stops a per-turn measurement being
+                        # read as a live one. It is never zero-filled: a
+                        # conversation whose mind has never reported has no
+                        # count, which is a different claim from a count of
+                        # nothing.
+                        "age_seconds": (moment - observed_at) if observed_at else None,
+                    },
+                }
+            )
+        return {"sessions": rows, "observed_at": moment}
 
     async def record_turn(
         self, client_type: str, client_ref: str, role: str, content: str,
@@ -1174,8 +1290,40 @@ class SessionManager:
                 if not watchers:
                     self._observer_queues.pop(session_id, None)
 
+    def _note_dashboard_event(self, session_id: str, event: dict[str, Any]) -> None:
+        """Keep the hive-wide live feed in step with this conversation.
+
+        Hooked here because this is the one place both publishers meet:
+        ``send_message`` for chat and ``publish_pty_text`` for a terminal's
+        tailer. Deriving liveness from the events themselves is also the
+        only honest source — ``sessions.status`` is written to 'running' at
+        creation and never written back, so anything keyed on it reports
+        every session that ever took a turn as working right now.
+
+        The turn's own boundaries are in the stream: ``user`` is the
+        dispatch, ``result`` is the end. A terminal has neither — its prose
+        arrives as bare assistant blocks — so an assistant block for a
+        conversation the feed has not seen opens one.
+        """
+        kind = event.get("type")
+        mind_id = self._mind_ids.get(session_id, "")
+        if kind == "user":
+            self.dashboard.begin(session_id, mind_id=mind_id)
+        elif kind == "result":
+            self.dashboard.end(session_id)
+        elif kind == "assistant":
+            if not self.dashboard.state(session_id).get("known"):
+                self.dashboard.begin(session_id, mind_id=mind_id)
+            self.dashboard.observe(session_id, event)
+
     async def _publish_session_event(self, session_id: str, event: dict[str, Any]) -> None:
         """Fan out a session event to all passive observers."""
+        # Never let a feed bookkeeping fault break the delivery it rides on:
+        # the observers below are a live conversation, the feed is a view of it.
+        try:
+            self._note_dashboard_event(session_id, event)
+        except Exception:  # noqa: BLE001
+            log.debug("dashboard feed ignored an event for %s", session_id, exc_info=True)
         watchers = list(self._observer_queues.get(session_id, ()))
         for queue in watchers:
             if queue.full():
@@ -1902,6 +2050,11 @@ class SessionManager:
             session_id,
             event,
         )
+
+        # The conversation is over, so the live view of it goes rather than
+        # ageing out: the retention window exists for a tile reconnecting
+        # just after a turn ended, not for a session somebody closed.
+        self.dashboard.forget(session_id)
 
         uptime = time.time() - session["created_at"]
         return {
