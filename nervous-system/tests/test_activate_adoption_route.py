@@ -35,15 +35,19 @@ def test_the_owner_reaches_the_session_manager(client):
     with patch.object(server.session_mgr, "activate_session", activate):
         response = http.post(
             "/sessions/sess-1/activate",
+            # Deliberately different from the client pair. Identical values
+            # cannot tell a route that forwards the owner from one that
+            # forwards the client fields twice.
             json={
-                "client_type": "design",
-                "client_ref": "design-1",
+                "client_type": "browser",
+                "client_ref": "tab-7",
                 "owner_type": "design",
                 "owner_ref": "design-1",
             },
         )
 
     assert response.status_code == 200
+    assert activate.await_args.args[1:] == ("browser", "tab-7")
     assert activate.await_args.kwargs["owner_type"] == "design"
     assert activate.await_args.kwargs["owner_ref"] == "design-1"
 
