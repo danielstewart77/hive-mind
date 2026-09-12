@@ -1477,76 +1477,78 @@ class SessionManager:
         and the respawn below resumes it with everything the other surface
         said still in it.
         """
-        session = await self._get_row(session_id)
-        if not session:
-            raise ValueError(f"Session not found: {session_id}")
-        if session["status"] == "closed":
-            raise ValueError(f"Session {session_id} is closed")
-        if session["status"] == "suspended":
-            await self._db.execute(
-                "UPDATE sessions SET status = 'idle' WHERE id = ?", (session_id,)
-            )
-            await self._db.commit()
+        lock = self._locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
             session = await self._get_row(session_id)
-            if session is None:  # pragma: no cover - row cannot vanish in this transaction
+            if not session:
                 raise ValueError(f"Session not found: {session_id}")
+            if session["status"] == "closed":
+                raise ValueError(f"Session {session_id} is closed")
+            if session["status"] == "suspended":
+                await self._db.execute(
+                    "UPDATE sessions SET status = 'idle' WHERE id = ?", (session_id,)
+                )
+                await self._db.commit()
+                session = await self._get_row(session_id)
+                if session is None:  # pragma: no cover - row cannot vanish in this transaction
+                    raise ValueError(f"Session not found: {session_id}")
 
-        adopting = bool(owner_ref) and (
-            session["owner_ref"] != owner_ref or session["owner_type"] != owner_type
-        )
-        if adopting:
-            # A refusal here must stop the adoption. The rule underneath every
-            # handover is one live harness process per conversation, and
-            # retargeting ownership over a terminal that is still running puts
-            # a `--resume` process beside it, both appending to one transcript.
-            # Better a `/switch` that fails out loud.
-            try:
-                await self.release_on_mind(session_id, "terminal")
-            except MindCallFailed as exc:
-                log.error("Refusing to adopt session %s: %s", session_id, exc)
-                raise
-            await self._db.execute(
-                "UPDATE sessions SET owner_type = ?, owner_ref = ?, status = 'idle' WHERE id = ?",
-                (owner_type, owner_ref, session_id),
+            adopting = bool(owner_ref) and (
+                session["owner_ref"] != owner_ref or session["owner_type"] != owner_type
             )
-            await self._db.execute(
-                "DELETE FROM active_sessions WHERE session_id = ?", (session_id,)
-            )
-            await self._db.commit()
-            log.info("Session %s adopted by %s/%s (was %s/%s)", session_id,
-                     owner_type, owner_ref, session["owner_type"], session["owner_ref"])
-            log_event(
-                log, "session.adopted", session_id=session_id,
-                owner_type=owner_type, owner_ref=owner_ref,
-                previous_owner_type=session["owner_type"], previous_owner_ref=session["owner_ref"],
-            )
-            session = await self._get_row(session_id)
-            if session is None:  # pragma: no cover - row cannot vanish in this transaction
-                raise ValueError(f"Session not found: {session_id}")
+            if adopting:
+                # A refusal here must stop the adoption. The rule underneath every
+                # handover is one live harness process per conversation, and
+                # retargeting ownership over a terminal that is still running puts
+                # a `--resume` process beside it, both appending to one transcript.
+                # Better a `/switch` that fails out loud.
+                try:
+                    await self.release_on_mind(session_id, "terminal")
+                except MindCallFailed as exc:
+                    log.error("Refusing to adopt session %s: %s", session_id, exc)
+                    raise
+                await self._db.execute(
+                    "UPDATE sessions SET owner_type = ?, owner_ref = ?, status = 'idle' WHERE id = ?",
+                    (owner_type, owner_ref, session_id),
+                )
+                await self._db.execute(
+                    "DELETE FROM active_sessions WHERE session_id = ?", (session_id,)
+                )
+                await self._db.commit()
+                log.info("Session %s adopted by %s/%s (was %s/%s)", session_id,
+                         owner_type, owner_ref, session["owner_type"], session["owner_ref"])
+                log_event(
+                    log, "session.adopted", session_id=session_id,
+                    owner_type=owner_type, owner_ref=owner_ref,
+                    previous_owner_type=session["owner_type"], previous_owner_ref=session["owner_ref"],
+                )
+                session = await self._get_row(session_id)
+                if session is None:  # pragma: no cover - row cannot vanish in this transaction
+                    raise ValueError(f"Session not found: {session_id}")
 
-        await self._db.execute(
-            """INSERT OR REPLACE INTO active_sessions (client_type, client_ref, session_id)
-               VALUES (?, ?, ?)""",
-            (client_type, client_ref, session_id),
-        )
-        await self._db.commit()
-
-        if session["status"] == "idle" and session_id not in self._procs:
-            routing = await self._routing_for(session)
-            await self._spawn(
-                session_id,
-                session["model"],
-                autopilot=bool(session["autopilot"]),
-                resume_sid=session["claude_sid"],
-                mind_id=session["mind_id"],
-                **routing,
-            )
             await self._db.execute(
-                "UPDATE sessions SET status = 'running' WHERE id = ?", (session_id,)
+                """INSERT OR REPLACE INTO active_sessions (client_type, client_ref, session_id)
+                   VALUES (?, ?, ?)""",
+                (client_type, client_ref, session_id),
             )
             await self._db.commit()
 
-        return await self._session_dict(session_id)
+            if session["status"] == "idle" and session_id not in self._procs:
+                routing = await self._routing_for(session)
+                await self._spawn(
+                    session_id,
+                    session["model"],
+                    autopilot=bool(session["autopilot"]),
+                    resume_sid=session["claude_sid"],
+                    mind_id=session["mind_id"],
+                    **routing,
+                )
+                await self._db.execute(
+                    "UPDATE sessions SET status = 'running' WHERE id = ?", (session_id,)
+                )
+                await self._db.commit()
+
+            return await self._session_dict(session_id)
 
     # ------------------------------------------------------------------
     # Messaging
