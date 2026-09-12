@@ -125,3 +125,39 @@ def test_suspended_binding_is_not_an_active_session():
                 await mgr.shutdown()
 
     _run(scenario())
+
+
+def test_two_simultaneous_activations_spawn_one_harness():
+    """Double-tapping a suspended conversation must not start two processes.
+
+    Both callers pass the ``status == 'idle' and id not in _procs`` guard
+    while the first spawn is still awaiting the mind, so without a lock the
+    conversation ends up with two harness processes appending to one
+    transcript and the first orphaned where nothing can kill it.
+    """
+
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            spawned: list[str] = []
+
+            async def fake_spawn(session_id, model, **kwargs):
+                await asyncio.sleep(0.05)  # the real spawn is an HTTP call
+                spawned.append(session_id)
+                mgr._procs[session_id] = object()
+
+            mgr._spawn = fake_spawn
+            try:
+                await _seed(mgr, "sess-double", "suspended")
+
+                await asyncio.gather(
+                    mgr.activate_session("sess-double", "telegram", "chat-1"),
+                    mgr.activate_session("sess-double", "telegram", "chat-1"),
+                )
+
+                assert spawned == ["sess-double"]
+            finally:
+                mgr._procs.clear()
+                await mgr.shutdown()
+
+    _run(scenario())
