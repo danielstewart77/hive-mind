@@ -160,6 +160,14 @@ class ModelSwitchRequest(BaseModel):
 class ActivateRequest(BaseModel):
     client_type: str
     client_ref: str
+    # Passing an owner makes this an *adoption*: the surface that currently
+    # holds the conversation is released before this one takes it, which is
+    # the whole of "one live harness process per conversation". Without
+    # these forwarded, a surface reaching a conversation that lives in a
+    # tmux pane spawns a second `--resume` process beside it, both
+    # appending to one transcript.
+    owner_type: str | None = None
+    owner_ref: str | None = None
 
 
 class RemoteControlResponse(BaseModel):
@@ -593,7 +601,8 @@ async def get_session_history(session_id: str):
 @app.post("/sessions/{session_id}/activate")
 async def activate_session(session_id: str, body: ActivateRequest):
     return await session_mgr.activate_session(
-        session_id, body.client_type, body.client_ref
+        session_id, body.client_type, body.client_ref,
+        owner_type=body.owner_type, owner_ref=body.owner_ref,
     )
 
 
