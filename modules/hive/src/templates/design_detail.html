@@ -1,0 +1,28 @@
+{% extends "layout.html" %}
+{% block title %}Design · Hive{% endblock %}
+{% block content %}
+<main class="design-page" data-design-id="{{ design_id }}">
+    <div class="terminal-box">
+        <h2 id="design-title">design session</h2>
+        <p class="design-binding" id="design-binding"></p>
+        <div class="design-tabs">
+            <button type="button" class="design-tab is-active" data-page="requirements">1 · requirements</button>
+            <button type="button" class="design-tab" data-page="tests">2 · tests</button>
+            <button type="button" class="design-tab" data-page="functions">3 · functions</button>
+        </div>
+        <div id="design-error" class="events-error" style="display:none"></div>
+        <p id="design-stale" class="design-stale" style="display:none"></p>
+    </div>
+
+    <div class="terminal-box">
+        <div id="design-items"></div>
+        <p id="design-gate" class="event-hints"></p>
+        <div class="design-actions">
+            <button type="button" id="design-submit">submit feedback</button>
+            <button type="button" id="design-advance"></button>
+        </div>
+    </div>
+</main>
+<script src="{{ request.url_for('static', path='design.js') }}?v={{ asset_versions['design.js'] }}"></script>
+<script>designDetail();</script>
+{% endblock %}

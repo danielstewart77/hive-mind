@@ -20,6 +20,7 @@ services:
       # refusal on their own repository. Matching the mount point instead is
       # not enough: when the destination does not exist yet, Docker creates
       # the bind source root-owned, and there is nothing to match.
+      - DESIGN_PUSH_TOKEN=${DESIGN_PUSH_TOKEN:-}
       - HOST_UID=${HOST_UID:-1000}
       - HOST_GID=${HOST_GID:-1000}
     volumes:

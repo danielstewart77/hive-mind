@@ -102,6 +102,56 @@ model catalog (for each model's context window) and the provider allowance.
 Without it the page still renders and those two panels report themselves as
 not configured.
 
+## Design sessions
+
+`/design` holds the three pages a Mind fills in before writing code:
+requirements, tests, and the call graph of what it intends to change. A
+design session outlives the conversation that created it — the conversation
+is a pointer on the record, not its owner — so a rotation leaves the work
+intact and the next claim re-points it.
+
+Each page carries two buttons. **Submit feedback** stores Daniel's edited
+text and his per-item questions, then sends them into the bound
+conversation. **Accept** advances; on page three it is **Build**, the go
+signal.
+
+The design page is a *surface*, like Telegram or the browser terminal. A
+submission adopts the conversation through `activate_session` and arrives as
+an ordinary user turn — nothing types into a pane. A keystroke injected into
+a pty is indistinguishable from Daniel typing, which fires the pane's
+rotation hook and respawns the pane out from under the delivery it was
+carrying.
+
+Three rules are enforced in the store rather than left to a Mind's manners:
+
+- **Items are addressed by a stable id, never their number.** Inserting a
+  requirement renumbers nothing, so feedback cannot reattach itself to a
+  different item.
+- **A revision may only change what Daniel touched, and only on page one.**
+  An attempt to rewrite anything else is refused by name. It scopes to page
+  one because his edit is what marks the later pages stale, and those rows
+  carry no feedback of their own — enforcing it there would freeze a stale
+  page with no way back.
+- **Every write carries the revision it was read at.** A stale one is a 409.
+  A revision that is optional on the wire is not a check at all.
+
+Page two may not propose a test against a function nobody has looked at. An
+existing function is resolved off real disk by the Mind that owns it
+(`GET /symbols`, admin-guarded, same shape as `/skills` and `/files`) and the
+row carries its real source, path, line span and a fingerprint. A function
+that does not exist *yet* is marked planned and must name a row on page
+three — which is why page three is published before page two even though
+Daniel reads them the other way round. Anything else leaves the page
+unresolved, and an unresolved page cannot be accepted.
+
+`DESIGN_PUSH_TOKEN` is the credential a Mind publishes with. It has no
+fallback to `COMMS_BEARER_TOKEN` or `COMMS_ADMIN_BEARER_TOKEN` on purpose:
+every Mind in the hive already holds those, so either as a fallback would
+let any Mind rewrite Daniel's requirements and press Build. Unset means the
+design routes refuse with 503 rather than opening. Daniel's own browser
+login is accepted on the same routes, reads included — a design session
+carries source text pulled off his disks.
+
 ## Test
 
 ```

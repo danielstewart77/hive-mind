@@ -5,6 +5,7 @@ self-contained; the auth db and secret are shared with the terminal site.
 """
 
 import asyncio
+import hmac
 import ipaddress
 import json
 import logging
@@ -66,6 +67,10 @@ from configuration_data import (
     set_edge_mind_metadata,
 )
 from graph_data import get_graph_data
+import design_data
+import design_delivery
+import design_graph
+import mind_symbols
 import dashboard_data
 import mind_runtime
 import mind_soul
@@ -87,6 +92,11 @@ _canvas_elements: list[dict] = []
 log = configure_logging("hive-control-plane")
 
 
+# Live design-delivery tasks, held so the event loop's weak references
+# cannot collect one while it is waiting out a model turn.
+_DESIGN_DELIVERIES: set = set()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     del app
@@ -95,6 +105,13 @@ async def lifespan(app: FastAPI):
     global _canvas_elements
     _canvas_elements = _load_canvas_state()
     log_event(log, "service.started", component="hive-control-plane")
+    # Anything a design session was owed when this process last stopped. A
+    # console restarted between a submission being stored and its send is
+    # otherwise a submission nobody is ever told about, and the page shows
+    # it as saved with no error and nothing pending.
+    startup_delivery = asyncio.create_task(design_delivery.deliver_pending())
+    _DESIGN_DELIVERIES.add(startup_delivery)
+    startup_delivery.add_done_callback(_DESIGN_DELIVERIES.discard)
     try:
         yield
     finally:
@@ -3083,6 +3100,277 @@ async def api_settings_check_mind_name(name: str, user: dict = Depends(require_a
     normalized = name.strip().lower()
     taken = await _mind_name_is_taken(normalized)
     return {"name": normalized, "available": bool(normalized) and not taken}
+
+
+
+# ---------------------------------------------------------------------------
+# Design sessions
+# ---------------------------------------------------------------------------
+DESIGN_PREFIX = "/api/design"
+
+
+def _design_push_token() -> str:
+    """The credential a Mind publishes design pages with.
+
+    Deliberately its own, with no fallback to the house tokens. Every Mind
+    in the hive already holds `COMMS_ADMIN_BEARER_TOKEN` and
+    `COMMS_BEARER_TOKEN`, so either of those as the fallback would let any
+    Mind — a kid's Windows box included — rewrite Daniel's requirements and
+    press Build. Unset means the publish routes refuse rather than open.
+    """
+    return os.getenv("DESIGN_PUSH_TOKEN", "")
+
+
+def require_design_writer(request: Request) -> dict:
+    """Daniel's browser login, or the Mind's own bearer. Nothing else.
+
+    Applied to every design route including the reads: a design session
+    carries source text pulled off Daniel's disks.
+    """
+    header = request.headers.get("Authorization", "")
+    if header.startswith("Bearer "):
+        expected = _design_push_token()
+        presented = header[7:]
+        if not expected:
+            raise HTTPException(
+                status_code=503, detail="DESIGN_PUSH_TOKEN is not configured"
+            )
+        # Bytes, not str: compare_digest raises TypeError on a str holding
+        # anything outside ASCII, and that 500 would read to a Mind as a
+        # console that is down rather than a credential that was refused.
+        if not hmac.compare_digest(
+            presented.encode("utf-8", "surrogatepass"),
+            expected.encode("utf-8", "surrogatepass"),
+        ):
+            raise HTTPException(status_code=401, detail="unauthorized")
+        return {"sub": "mind", "via": "bearer"}
+    user = get_current_user_from_request(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return dict(user, via="cookie")
+
+
+def _design_error(exc: Exception) -> HTTPException:
+    """One mapping, so every design route refuses in the same shape."""
+    if isinstance(exc, design_data.DesignNotFound):
+        return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, design_data.DesignConflict):
+        return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, design_data.DesignRefused):
+        return HTTPException(status_code=409, detail=str(exc))
+    return HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/design", response_class=HTMLResponse)
+async def design_index(request: Request, user: dict = Depends(require_auth)):
+    del user
+    return _render_template(request, "design_list.html", path="/design")
+
+
+@app.get("/design/{design_id}", response_class=HTMLResponse)
+async def design_detail(
+    design_id: str, request: Request, user: dict = Depends(require_auth)
+):
+    del user
+    try:
+        design_data.get_design_session(design_id)
+    except design_data.DesignNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _render_template(
+        request, "design_detail.html", path="/design", design_id=design_id
+    )
+
+
+@app.get(f"{DESIGN_PREFIX}/sessions")
+async def api_design_list(actor: dict = Depends(require_design_writer)):
+    del actor
+    rows = []
+    for record in design_data.list_design_sessions():
+        rows.append(
+            {
+                "id": record["id"],
+                "title": record["title"],
+                "conversation_id": record["conversation_id"],
+                "surface": record["surface"],
+                "updated_at": record["updated_at"],
+                "counts": {page: len(record[page]) for page in design_data.PAGES},
+            }
+        )
+    return {"sessions": rows}
+
+
+@app.post(f"{DESIGN_PREFIX}/sessions")
+async def api_design_create(
+    payload: dict, actor: dict = Depends(require_design_writer)
+):
+    try:
+        record = design_data.create_design_session(
+            str(payload.get("title") or ""),
+            conversation_id=payload.get("conversation_id"),
+            surface=payload.get("surface"),
+            mind_id=payload.get("mind_id"),
+            repos=payload.get("repos") or [],
+        )
+    except design_data.DesignError as exc:
+        raise _design_error(exc) from exc
+    log_event(log, "design.created", **_actor_fields(actor), design_id=record["id"])
+    return record
+
+
+@app.get(f"{DESIGN_PREFIX}/sessions/{{design_id}}")
+async def api_design_get(design_id: str, actor: dict = Depends(require_design_writer)):
+    del actor
+    try:
+        record = design_data.get_design_session(design_id)
+    except design_data.DesignError as exc:
+        raise _design_error(exc) from exc
+    return dict(
+        record,
+        pages={page: design_data.ordered_items(record, page) for page in design_data.PAGES},
+        gates={page: design_data.can_advance(design_id, page) for page in design_data.PAGES},
+    )
+
+
+@app.delete(f"{DESIGN_PREFIX}/sessions/{{design_id}}")
+async def api_design_delete(
+    design_id: str, actor: dict = Depends(require_design_writer)
+):
+    try:
+        design_data.delete_design_session(design_id)
+    except design_data.DesignError as exc:
+        raise _design_error(exc) from exc
+    log_event(log, "design.deleted", **_actor_fields(actor), design_id=design_id)
+    return {"deleted": True, "id": design_id}
+
+
+@app.post(f"{DESIGN_PREFIX}/sessions/{{design_id}}/attach")
+async def api_design_attach(
+    design_id: str, payload: dict, actor: dict = Depends(require_design_writer)
+):
+    del actor
+    try:
+        record = design_data.attach_design_session(
+            design_id,
+            payload.get("conversation_id"),
+            surface=payload.get("surface"),
+            mind_id=payload.get("mind_id"),
+        )
+    except design_data.DesignError as exc:
+        raise _design_error(exc) from exc
+    # Anything submitted while nothing was attached is owed to this
+    # conversation. Without this, "stored and read when next attached" is a
+    # promise nothing keeps: re-attaching delivers none of it.
+    task = asyncio.create_task(design_delivery.deliver_pending())
+    _DESIGN_DELIVERIES.add(task)
+    task.add_done_callback(_DESIGN_DELIVERIES.discard)
+    return record
+
+
+@app.post(f"{DESIGN_PREFIX}/sessions/{{design_id}}/pages/{{page}}/publish")
+async def api_design_publish(
+    design_id: str, page: str, payload: dict,
+    actor: dict = Depends(require_design_writer),
+):
+    del actor
+    try:
+        return design_data.publish_page(
+            design_id,
+            page,
+            payload.get("items") or {},
+            revision=payload.get("revision"),
+        )
+    except design_data.DesignError as exc:
+        raise _design_error(exc) from exc
+
+
+@app.post(f"{DESIGN_PREFIX}/sessions/{{design_id}}/pages/{{page}}/submit")
+async def api_design_submit(
+    design_id: str, page: str, payload: dict,
+    actor: dict = Depends(require_design_writer),
+):
+    del actor
+    try:
+        record = design_data.submit_page(
+            design_id,
+            page,
+            items=payload.get("items") or {},
+            action=str(payload.get("action") or "feedback"),
+            revision=payload.get("revision"),
+        )
+    except design_data.DesignError as exc:
+        raise _design_error(exc) from exc
+    # Detached: the send adopts the conversation and waits out a whole model
+    # turn, and the browser must not sit on that. The submission is already
+    # stored, so a delivery that fails is retried rather than lost.
+    #
+    # The handle is kept until it finishes. A bare `create_task` holds no
+    # strong reference, and a task collected mid-send loses the submission
+    # exactly as silently as no task at all.
+    task = asyncio.create_task(design_delivery.deliver_pending())
+    _DESIGN_DELIVERIES.add(task)
+    task.add_done_callback(_DESIGN_DELIVERIES.discard)
+    return record
+
+
+@app.post(f"{DESIGN_PREFIX}/sessions/{{design_id}}/pages/{{page}}/accept")
+async def api_design_accept(
+    design_id: str, page: str, payload: dict,
+    actor: dict = Depends(require_design_writer),
+):
+    del actor
+    try:
+        return design_data.accept_page(
+            design_id, page, revision=payload.get("revision")
+        )
+    except design_data.DesignError as exc:
+        raise _design_error(exc) from exc
+
+
+@app.post(f"{DESIGN_PREFIX}/trim-graph")
+async def api_design_trim_graph(
+    payload: dict, actor: dict = Depends(require_design_writer)
+):
+    del actor
+    nodes = payload.get("nodes") or []
+    return {
+        "rows": design_graph.trim_call_graph(nodes),
+        "entry_points_without_callers": design_graph.entry_points_without_callers(nodes),
+    }
+
+
+@app.get(f"{DESIGN_PREFIX}/symbols")
+async def api_design_symbol(
+    mind: str, path: str, name: str, repo: str = "", design_id: str = "",
+    actor: dict = Depends(require_design_writer),
+):
+    """Resolve a function through the Mind whose disk it lives on.
+
+    The repository is named, never inferred. A Mind asked for a bare name
+    resolves against whichever checkout it happens to have declared first,
+    which on a host holding three of them returns real source from the wrong
+    one — with `resolved: true` and a line span that checks out.
+    """
+    del actor
+    if not repo and design_id:
+        targets = design_data.get_design_session(design_id)["repos"]
+        if len(targets) == 1:
+            repo = targets[0]
+    if not repo:
+        raise HTTPException(
+            status_code=400,
+            detail="Name the repository — this host holds more than one checkout",
+        )
+    gateway_url = await _mind_gateway_url(mind)
+    return await mind_symbols.resolve(gateway_url, repo, path, name)
+
+
+@app.get(f"{DESIGN_PREFIX}/symbol-roots")
+async def api_design_symbol_roots(
+    mind: str, actor: dict = Depends(require_design_writer)
+):
+    del actor
+    gateway_url = await _mind_gateway_url(mind)
+    return await mind_symbols.roots(gateway_url)
 
 
 @app.get("/health")
