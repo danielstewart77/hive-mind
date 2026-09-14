@@ -800,7 +800,22 @@ a { color: inherit; }
 .design-item-head { display: flex; gap: 0.5rem; align-items: center; }
 .design-number { font-weight: 600; }
 .design-tag { font-size: 0.75rem; opacity: 0.7; border: 1px solid currentColor; padding: 0 0.35rem; border-radius: 3px; }
-.design-text, .design-feedback { width: 100%; font: inherit; margin-top: 0.35rem; }
+.design-text, .design-feedback {
+    width: 100%;
+    font: inherit;
+    margin-top: 0.35rem;
+    padding: 8px 10px;
+    border: 1px solid var(--console-line-strong);
+    border-radius: 6px;
+    background: var(--console-surface-2);
+    color: var(--console-text);
+    resize: vertical;
+}
+.design-text:focus, .design-feedback:focus {
+    outline: 2px solid rgba(76, 201, 217, .2);
+    border-color: #397f87;
+}
+.design-text::placeholder, .design-feedback::placeholder { color: var(--console-muted, #8b979e); }
 .design-symbol { margin: 0.5rem 0; font-size: 0.85rem; }
 .design-symbol pre { overflow-x: auto; padding: 0.5rem; background: rgba(128,128,128,0.12); }
 .design-symbol.is-unresolved { color: #c0392b; }
