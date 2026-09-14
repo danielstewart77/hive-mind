@@ -1,0 +1,44 @@
+{% extends "layout.html" %}
+{% block content %}
+<main class="sentinel-page">
+    <div class="terminal-box">
+        <h2>sentinel triage review</h2>
+        <p>every class and rule nobody has looked at, newest first. a rule fires while it waits here — validating it clears the flag, overturning it changes or stops what it does. nothing was exempted on arrival, so the first load carries the whole history.</p>
+        {% if not sentinel_configured %}
+        <div class="events-error">SENTINEL_REVIEW_URL is not set on the console. Nothing can be read until it points at the sensor.</div>
+        {% endif %}
+        <div class="rules-filters">
+            <button id="sentinel-refresh" type="button">refresh</button>
+            <button id="sentinel-apply-queue" type="button">apply approved rules to the queue</button>
+        </div>
+        <div id="sentinel-error" class="events-error" style="display:none"></div>
+        <p id="sentinel-count" class="event-hints"></p>
+        <p id="sentinel-sweep" class="event-hints"></p>
+    </div>
+
+    <div class="terminal-box">
+        <h3>awaiting decision, by class</h3>
+        <table class="console-table" id="sentinel-queue">
+            <thead><tr><th>class</th><th>bucket</th><th>queued</th><th>rules</th><th>first seen</th><th>last seen</th></tr></thead>
+            <tbody></tbody>
+        </table>
+    </div>
+
+    <div class="terminal-box">
+        <h3>unreviewed rules</h3>
+        <table class="console-table" id="sentinel-rules">
+            <thead><tr><th>class</th><th>rule</th><th>written by</th><th>written</th><th>action</th><th>scope</th><th>applied to</th><th>latest line</th><th></th></tr></thead>
+            <tbody></tbody>
+        </table>
+    </div>
+
+    <div class="terminal-box">
+        <h3>unreviewed classes</h3>
+        <table class="console-table" id="sentinel-classes">
+            <thead><tr><th>class</th><th>bucket</th><th>created by</th><th>created</th><th>events</th><th>latest line</th><th></th></tr></thead>
+            <tbody></tbody>
+        </table>
+    </div>
+</main>
+<script src="{{ request.url_for('static', path='sentinel.js') }}"></script>
+{% endblock %}
