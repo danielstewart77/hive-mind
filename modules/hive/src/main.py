@@ -76,6 +76,7 @@ import mind_runtime
 import mind_soul
 import mind_files
 import mind_skills
+import sentinel_review
 from hive_logging import configure_logging, install_fastapi_logging, log_event
 from credentials_data import list_credentials, rotate_credential, set_github_pat
 from settings_data import (
@@ -1738,6 +1739,64 @@ async def _fetch_rules_for_mind(
                 break
             params["offset"] = fetched
     return out
+
+
+@app.get("/sentinel", response_class=HTMLResponse)
+async def sentinel_page(request: Request):
+    if not get_current_user_from_request(request):
+        return _login_redirect_for(request)
+    return _render_template(
+        request, "sentinel.html", sentinel_configured=bool(sentinel_review.base_url())
+    )
+
+
+@app.get("/api/sentinel/review")
+async def api_sentinel_review(user: dict = Depends(require_auth)):
+    del user
+    return await sentinel_review.fetch_review_queue()
+
+
+@app.get("/api/sentinel/queue")
+async def api_sentinel_queue(user: dict = Depends(require_auth)):
+    del user
+    return await sentinel_review.fetch_decision_queue()
+
+
+@app.post("/api/sentinel/review/mark")
+async def api_sentinel_mark(request: Request, user: dict = Depends(require_auth)):
+    del user
+    body = await request.json()
+    kind = (body.get("kind") or "").strip()
+    if kind not in {"rule", "class"}:
+        raise HTTPException(status_code=400, detail="kind must be rule or class")
+    try:
+        row_id = int(body.get("id"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="id must be an integer") from None
+    return await sentinel_review.mark_reviewed(kind, row_id, body.get("note"))
+
+
+@app.post("/api/sentinel/review/overturn")
+async def api_sentinel_overturn(request: Request, user: dict = Depends(require_auth)):
+    del user
+    body = await request.json()
+    try:
+        rule_id = int(body.get("rule_id"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="rule_id must be an integer") from None
+    return await sentinel_review.overturn_rule(
+        rule_id,
+        action_kind=body.get("action_kind"),
+        retire=bool(body.get("retire")),
+        note=body.get("note"),
+    )
+
+
+@app.post("/api/sentinel/queue/apply")
+async def api_sentinel_queue_apply(request: Request, user: dict = Depends(require_auth)):
+    del user
+    body = await request.json()
+    return await sentinel_review.apply_queue(body.get("class_slug"))
 
 
 @app.get("/rules", response_class=HTMLResponse)
