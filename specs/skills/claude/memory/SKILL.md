@@ -70,7 +70,9 @@ curl -s -H "$AUTH" "$LUCENT_URL_SELF/memory/list?offset=0&limit=10&mind_id=$MIND
 **Semantic search** (top-k by embedding similarity):
 
 ```bash
-curl -s -H "$AUTH" "$LUCENT_URL_SELF/memory/retrieve?query=cooking+ingredients&k=5&mind_id=$MIND_ID" | jq
+curl -s -X POST -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"query":"cooking ingredients","k":5,"mind_id":"'"$MIND_ID"'"}' \
+  "$LUCENT_URL_SELF/memory/retrieve" | jq
 ```
 
 **Store a new memory**:

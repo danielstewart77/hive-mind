@@ -76,7 +76,7 @@ All bearer-gated except `/health`.
 |---|---|
 | `GET /health` | open — `{"status":"ok","service":"lucent-api"}` |
 | `GET /memory/list?tier=<t>&offset=<n>&limit=<n>` | list entries; optional `tier=` server-side filter |
-| `GET /memory/retrieve?query=<q>&data_class=<c>&k=<n>&min_score=<s>` | semantic search |
+| `POST /memory/retrieve` body `{query, data_class, k, min_score}` | semantic search |
 | `GET /memory/recent-decayed?limit=<n>` | top-N by recency-decay score |
 | `POST /memory/store` | write — body `{content, data_class, tier, mind_id, source}` |
 | `PUT /memory/{id}` | update content / data_class / tags |
