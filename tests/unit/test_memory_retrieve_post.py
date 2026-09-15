@@ -100,6 +100,8 @@ def test_r1_vector_search_receives_the_filters_only_it_takes(client, vector_call
             "k": 3,
             "data_class": "feedback",
             "tag_filter": "recipe",
+            "mind_id": "14cb820b-4a42-4f04-a593-54f532fd1d2f",
+            "min_score": 0.55,
         },
     )
     assert vector_calls, "the vector search was never reached"
@@ -108,6 +110,8 @@ def test_r1_vector_search_receives_the_filters_only_it_takes(client, vector_call
     assert call["k"] == 3
     assert call["data_class"] == "feedback"
     assert call["tag_filter"] == "recipe"
+    assert call["mind_id"] == "14cb820b-4a42-4f04-a593-54f532fd1d2f"
+    assert call["min_score"] == 0.55
 
 
 # ---- R2: a query longer than a URL can carry ----
@@ -126,6 +130,17 @@ def test_r2_query_longer_than_a_url_reaches_the_search(client, hybrid_calls):
 
     assert resp.status_code == 200
     assert hybrid_calls[-1]["query"] == long_query
+    # A 200 alone is not enough. The search catches its own exceptions and
+    # returns {"error": ...} with a 200, which every caller reads as "no
+    # relevant memory" rather than as a failure — so an embedder that gives
+    # up on a long input is invisible unless the body is checked.
+    #
+    # The count is deliberately not asserted: the store this suite reaches is
+    # empty, so a non-empty assertion would fail on any clean checkout and
+    # would be measuring the fixture rather than the code.
+    body = resp.json()
+    assert "error" not in body, body
+    assert body.get("count") == 0 or body.get("memories") is not None
 
 
 # ---- R3: no query is a refusal, not an empty search ----
@@ -191,3 +206,42 @@ def test_r5_gateway_retrieval_puts_the_prompt_in_the_body(lucent_stub, monkeypat
     assert "?" not in req["path"], f"the prompt went into the address: {req['path'][:120]}"
     assert json.loads(req["body"])["query"] == prompt
     assert "never guess a pronoun" in out
+
+
+# ---- R2's ceiling: refused loudly rather than held in a shared embedder ----
+
+
+def test_r2_a_query_past_the_ceiling_is_refused_before_the_search(client, hybrid_calls):
+    from lucent_api.routers.memory import MAX_QUERY_BYTES
+
+    resp = client.post(
+        "/memory/retrieve",
+        json={"query": "x" * (MAX_QUERY_BYTES + 1), "k": 3, "mode": "hybrid"},
+    )
+
+    assert resp.status_code == 413
+    assert not hybrid_calls, "an oversized query reached the embedder anyway"
+
+
+def test_r2_the_ceiling_is_counted_in_bytes_not_characters(client, hybrid_calls):
+    from lucent_api.routers.memory import MAX_QUERY_BYTES
+
+    # Box-drawing from a quoted TUI transcript is 3 bytes per character, so a
+    # string comfortably under the limit in characters is over it in bytes.
+    query = "\u2500" * (MAX_QUERY_BYTES // 2)
+    assert len(query) < MAX_QUERY_BYTES < len(query.encode("utf-8"))
+
+    resp = client.post("/memory/retrieve", json={"query": query, "k": 3, "mode": "hybrid"})
+
+    assert resp.status_code == 413
+    assert not hybrid_calls
+
+
+def test_r3_an_empty_query_is_refused_rather_than_searched(client, hybrid_calls, vector_calls):
+    # Distinct from the missing-field case: the live route used to accept ""
+    # and answer 200 with {"error": "list index out of range"}, which every
+    # caller reads as "no relevant memory" rather than as a refusal.
+    resp = client.post("/memory/retrieve", json={"query": "", "k": 3, "mode": "hybrid"})
+
+    assert resp.status_code == 422
+    assert not hybrid_calls and not vector_calls

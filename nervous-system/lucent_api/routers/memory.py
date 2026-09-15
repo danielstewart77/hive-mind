@@ -10,7 +10,7 @@ import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 from hive_logging import log_event
 
@@ -42,6 +42,20 @@ class StoreBody(BaseModel):
     codebase_ref: str | None = None
 
 
+# The old query string was capped by uvicorn's request-line limit: a prompt
+# past ~68 KB was refused at the HTTP layer, instantly, before the embedder
+# was touched. A body has no such ceiling, and `_embed` is a synchronous call
+# to Ollama, which serialises. A 200 KB prompt holds the embedder for ~22
+# seconds, and every caller's timeout is 2 or 3 — so one oversized paste
+# starves contextual retrieval for every mind on the hive, silently, because
+# each hook swallows its timeout and injects nothing.
+#
+# So the ceiling is kept and made explicit. Well above any real prompt
+# (the largest carry-forward this hive composes is capped at 120 KB and does
+# not come through here), and a refusal rather than a slow success.
+MAX_QUERY_BYTES = 64 * 1024
+
+
 class RetrieveBody(BaseModel):
     """Body for ``POST /memory/retrieve``.
 
@@ -52,7 +66,7 @@ class RetrieveBody(BaseModel):
     network events.
     """
 
-    query: str
+    query: str = Field(min_length=1)
     mind_id: str | None = None
     k: int = Field(10, ge=1, le=50)
     tag_filter: str | None = None
@@ -132,6 +146,17 @@ def memory_retrieve(body: RetrieveBody) -> Any:
       debug      — when ``mode=hybrid``, include per-row debug block with
                    bucket label and component scores.
     """
+    # Bytes, not characters: what the embedder and the wire both count, and a
+    # prompt quoting a TUI transcript carries multi-byte box-drawing.
+    size = len(body.query.encode("utf-8"))
+    if size > MAX_QUERY_BYTES:
+        raise HTTPException(
+            413,
+            f"query is {size} bytes; the limit is {MAX_QUERY_BYTES}. "
+            "Refused here rather than held in the embedder, which is shared "
+            "and serialises: a slow answer starves every other mind's turn.",
+        )
+
     if body.mode == "hybrid":
         from lucent_api.lucent_memory import memory_retrieve_hybrid as _hybrid
         return _decode(
