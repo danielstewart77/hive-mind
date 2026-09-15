@@ -30,9 +30,11 @@ def format_injection(prompt: str) -> str:
     if not prompt or not prompt.strip():
         return ""
     try:
-        resp = requests.get(
+        # Body, never a query string: the prompt is a whole user turn and a
+        # URL carrying it is logged verbatim by Zeek, uvicorn and Loki.
+        resp = requests.post(
             f"{LUCENT_URL}/memory/retrieve",
-            params={
+            json={
                 "query": prompt,
                 "data_class": DATA_CLASS,
                 "k": TOP_K,

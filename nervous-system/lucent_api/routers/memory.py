@@ -11,7 +11,7 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from hive_logging import log_event
 
 log = logging.getLogger(__name__)
@@ -40,6 +40,26 @@ class StoreBody(BaseModel):
     expires_at: str | None = None
     recurring: bool | None = None
     codebase_ref: str | None = None
+
+
+class RetrieveBody(BaseModel):
+    """Body for ``POST /memory/retrieve``.
+
+    The query is a prompt — a mind's whole turn, sometimes its soul and
+    recent memory with it. It travels in the body because a URL carrying
+    that lands verbatim in Zeek's http.log, in uvicorn's access log and in
+    Loki, where the sentinel then reads a mind's own context back as
+    network events.
+    """
+
+    query: str
+    mind_id: str | None = None
+    k: int = Field(10, ge=1, le=50)
+    tag_filter: str | None = None
+    data_class: str | None = None
+    min_score: float | None = Field(None, ge=0.0, le=1.0)
+    mode: str = "vector"
+    debug: bool = True
 
 
 class UpdateBody(BaseModel):
@@ -98,17 +118,8 @@ def memory_recent_decayed(
     return _decode(query_decayed(limit=limit, mind_id=mind_id))
 
 
-@router.get("/retrieve")
-def memory_retrieve(
-    query: str = Query(...),
-    mind_id: str | None = Query(None),
-    k: int = Query(10, ge=1, le=50),
-    tag_filter: str | None = Query(None),
-    data_class: str | None = Query(None),
-    min_score: float | None = Query(None, ge=0.0, le=1.0),
-    mode: str = Query("vector"),
-    debug: bool = Query(True),
-) -> Any:
+@router.post("/retrieve")
+def memory_retrieve(body: RetrieveBody) -> Any:
     """Semantic search — return top-k memories most relevant to the query.
 
     Optional filters:
@@ -121,15 +132,15 @@ def memory_retrieve(
       debug      — when ``mode=hybrid``, include per-row debug block with
                    bucket label and component scores.
     """
-    if mode == "hybrid":
+    if body.mode == "hybrid":
         from lucent_api.lucent_memory import memory_retrieve_hybrid as _hybrid
         return _decode(
             _hybrid(
-                query=query,
-                k=k,
-                mind_id=mind_id,
-                min_score=min_score,
-                debug=debug,
+                query=body.query,
+                k=body.k,
+                mind_id=body.mind_id,
+                min_score=body.min_score,
+                debug=body.debug,
             )
         )
 
@@ -137,12 +148,12 @@ def memory_retrieve(
 
     return _decode(
         _memory_retrieve(
-            query=query,
-            k=k,
-            mind_id=mind_id,
-            tag_filter=tag_filter,
-            data_class=data_class,
-            min_score=min_score,
+            query=body.query,
+            k=body.k,
+            mind_id=body.mind_id,
+            tag_filter=body.tag_filter,
+            data_class=body.data_class,
+            min_score=body.min_score,
         )
     )
 
