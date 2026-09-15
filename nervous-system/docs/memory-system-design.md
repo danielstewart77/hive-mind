@@ -448,7 +448,7 @@ rules into the active context.
 ### Endpoint
 
 ```
-GET /memory/retrieve?query=<text>&k=3&data_class=feedback&min_score=0.65
+POST /memory/retrieve   body: {"query": "<text>", "k": 3, "data_class": "feedback", "min_score": 0.65}
 ```
 
 REST against `lucent-api`. The legacy `/memory/query` path does not

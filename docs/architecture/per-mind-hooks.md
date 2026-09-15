@@ -67,7 +67,7 @@ Below the threshold the child exits without writing anything.
 Pure bash + jq + curl. On every user prompt the hook:
 
 1. Reads the user prompt from the hook event.
-2. Issues `GET /memory/retrieve?query=<prompt>&data_class=feedback&k=3&min_score=0.65`
+2. Issues `POST /memory/retrieve` with body `{query: <prompt>, data_class: feedback, k: 3, min_score: 0.65}`
    against lucent.
 3. If any rows return, wraps them as bullets inside `<behavior-rules>…</behavior-rules>`
    and emits `{"systemMessage": "<block>"}` so the harness injects it as
