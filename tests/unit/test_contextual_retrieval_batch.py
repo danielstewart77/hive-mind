@@ -17,8 +17,13 @@ Requirements under test:
   R2   several names cost one request, and that request names all of them
   R1   the address the hook calls carries no query string
   R9   a person named twice in one prompt is rendered once
-  R5   a prompt full of capitalised words still yields a cue
+  R5   a prompt full of capitalised words still yields a cue, and says how
+       much of itself was not looked up
   R10  one unresolvable name does not suppress the names that resolved
+  R3   a name resolving to something that is not a person is not rendered as
+       one, which is what makes the capitalised-word heuristic safe
+  R5b  a question after a long paste still gets its names looked up
+  R10b a token too long to be a name is never sent
 """
 
 from __future__ import annotations
@@ -154,13 +159,18 @@ def test_r5_a_prompt_full_of_capitalised_words_still_yields_a_cue(hook):
         f"W{a}{b}"
         for a in string.ascii_lowercase
         for b in string.ascii_lowercase
-    ][:500]
+    ][:500]  # 500 fillers + "Maurice" = 501 distinct candidates
     prompt = "Maurice " + " ".join(filler)
     with _Lucent({"Maurice": _person("Maurice Westerdale")}) as lucent:
         block = hook._known_persons_block(lucent.url, {}, prompt)
     assert len(lucent.requests) == 1
-    assert len(lucent.requests[0]["body"]["names"]) == 200
+    assert len(lucent.requests[0]["body"]["names"]) == 256
     assert "Maurice Westerdale" in block
+    # 501 distinct words, less "Who" and "Why" which the stopword list drops
+    # before any of this, leaves 499 candidates. 256 are asked about, so 243
+    # go unlooked-up and the block says so rather than presenting a partial
+    # list as if it were the whole.
+    assert "243 further capitalised words" in block
 
 
 # ---- R10 ----
@@ -172,3 +182,43 @@ def test_r10_an_ambiguous_name_does_not_suppress_the_names_that_resolved(hook):
         block = hook._known_persons_block(lucent.url, {}, "Maurice knows Stewart")
     assert "Maurice Westerdale" in block
     assert "A Stewart" not in block
+
+
+def test_r3_a_name_that_is_not_a_person_is_not_rendered_as_one(hook):
+    church = {"properties": {"name": "Anchor Bend", "type": "Organization"},
+              "connections": []}
+    nodes = {"Maurice": _person("Maurice Westerdale"), "Anchor": church}
+    with _Lucent(nodes) as lucent:
+        block = hook._known_persons_block(lucent.url, {}, "Maurice at Anchor Bend")
+    assert "Maurice Westerdale" in block
+    assert "Anchor Bend" not in block
+
+
+def _filler(n: int) -> str:
+    import string
+
+    words = [f"W{a}{b}" for a in string.ascii_lowercase for b in string.ascii_lowercase]
+    return " ".join(words[:n])
+
+
+def test_r5b_a_question_after_a_long_paste_still_gets_its_names_looked_up(hook):
+    """Taking the first N candidates drops the ones the question carries.
+
+    Measured live before this: a pasted module followed by "what did Maurice
+    say" came back with Maurice missing and a name from inside the paste
+    present, which reads as "the graph was consulted" while being wrong.
+    """
+    prompt = _filler(500) + " . So what did Maurice say about it?"
+    with _Lucent({"Maurice": _person("Maurice Westerdale")}) as lucent:
+        block = hook._known_persons_block(lucent.url, {}, prompt)
+    assert "Maurice" in lucent.requests[0]["body"]["names"]
+    assert "Maurice Westerdale" in block
+
+
+def test_r10b_a_token_too_long_to_be_a_name_is_never_sent(hook):
+    prompt = "Ask Maurice about " + "X" + "x" * 200 + " today"  # 201 chars
+    with _Lucent({"Maurice": _person("Maurice Westerdale")}) as lucent:
+        block = hook._known_persons_block(lucent.url, {}, prompt)
+    asked = lucent.requests[0]["body"]["names"]
+    assert all(len(n) <= 200 for n in asked)
+    assert "Maurice Westerdale" in block

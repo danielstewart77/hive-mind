@@ -129,7 +129,8 @@ class EdgeBody(BaseModel):
 # treats every capitalised word as a candidate, and a pasted file yields
 # hundreds. 256 is well above any real sentence and below the point where one
 # request is doing a table scan per name for a paragraph nobody named anyone
-# in. A name past 200 characters is not a name.
+# in. A name past 200 characters is not a name, and is refused on its own
+# entry rather than taking the request down with it.
 MAX_QUERY_NAMES = 256
 MAX_NAME_CHARS = 200
 
@@ -151,11 +152,11 @@ class GraphQueryBody(BaseModel):
 def graph_query_batch(body: GraphQueryBody) -> Any:
     """Resolve every name in one request, answering each independently.
 
-    One name's failure is its own: a pattern the store refuses, or a row it
-    cannot read, comes back as that entry's ``error`` while its siblings
-    answer normally. Folding the batch into a single 5xx would cost a turn
-    every person it mentioned because one of them was spelled with a
-    wildcard.
+    One name's failure is its own: a row the store cannot read, or a name
+    past the length ceiling, comes back as that entry's ``error`` while its
+    siblings answer normally. Folding the batch into a single 5xx — or a
+    single 413 — would cost a turn every person it mentioned because one
+    token in the prompt was not a name.
 
     Names repeated within a request are answered once, in first-seen order.
     """
@@ -166,11 +167,6 @@ def graph_query_batch(body: GraphQueryBody) -> Any:
             413,
             f"{len(body.names)} names exceeds the {MAX_QUERY_NAMES}-name ceiling",
         )
-    for name in body.names:
-        if len(name) > MAX_NAME_CHARS:
-            raise HTTPException(
-                413, f"a name of {len(name)} characters exceeds {MAX_NAME_CHARS}"
-            )
 
     seen: set[str] = set()
     results: list[dict] = []
@@ -179,6 +175,15 @@ def graph_query_batch(body: GraphQueryBody) -> Any:
             continue
         seen.add(name)
         entry: dict[str, Any] = {"entity": name, "found": False, "count": 0, "matches": []}
+        if len(name) > MAX_NAME_CHARS:
+            # This name's refusal, not the request's. A prompt carrying one
+            # long alphabetic run — a pasted sequence, a generated
+            # identifier — tokenises into a candidate nobody typed, and a
+            # whole-request 413 would cost the turn every real person it
+            # mentioned alongside it.
+            entry["error"] = f"a name of {len(name)} characters exceeds {MAX_NAME_CHARS}"
+            results.append(entry)
+            continue
         try:
             answer = _decode(lucent_graph.graph_query(entity_name=name, depth=body.depth))
         except HTTPException:
