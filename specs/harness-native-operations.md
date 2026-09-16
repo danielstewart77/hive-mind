@@ -69,7 +69,7 @@ Because the harness has Bash, it has access to every CLI tool on the system. Com
 |---|---|
 | Make HTTP requests | `curl`, `httpx`, `wget` |
 | Query/modify SQL databases | `sqlite3`, `psql`, `mysql` |
-| Query/modify Lucent (graph/vector) | `curl` to hive-lucent (`/graph/query`, `/memory/retrieve`) with bearer token |
+| Query/modify Lucent (graph/vector) | `curl` to hive-lucent (`POST /graph/query`, `POST /memory/retrieve` — names and prompts travel in the body) with bearer token |
 | Parse JSON/YAML/XML | `jq`, `yq`, `python3 -c`, `xmllint` |
 | Transform data between formats | Pipe chains, `jq`, `python3 -c` |
 | Manage Docker containers | `docker`, `docker compose` |

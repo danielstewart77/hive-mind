@@ -226,7 +226,7 @@ Two distinct endpoints, two distinct contracts: identity lookup and mention sear
 ### `graph_query` — identity lookup
 
 ```
-GET /graph/query?entity_name=<name>
+POST /graph/query  body: {"names": [...], "depth": n}
 ```
 
 Matches only on identity fields, case-insensitive, exact value:

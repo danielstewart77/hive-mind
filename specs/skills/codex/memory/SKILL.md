@@ -32,7 +32,9 @@ AUTH="Authorization: Bearer $LUCENT_BEARER_TOKEN"
 **Query by name** (1-3 hops):
 
 ```bash
-curl -s -H "$AUTH" "$LUCENT_URL_SELF/graph/query?entity_name=Alex&mind_id=$MIND_ID&depth=1" | jq
+curl -s -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"names": ["Alex"], "depth": 1}' \
+  "$LUCENT_URL_SELF/graph/query" | jq '.results[0]'
 ```
 
 **Upsert a node**:

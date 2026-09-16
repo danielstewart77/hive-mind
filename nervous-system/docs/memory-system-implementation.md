@@ -81,7 +81,7 @@ All bearer-gated except `/health`.
 | `POST /memory/store` | write — body `{content, data_class, tier, mind_id, source}` |
 | `PUT /memory/{id}` | update content / data_class / tags |
 | `DELETE /memory/{id}` | delete |
-| `GET /graph/query?entity_name=<name>&mind_id=<id>&depth=<n>` | identity lookup |
+| `POST /graph/query` body `{names, depth}` | identity lookup, every name in one request |
 | `GET /graph/search?text=<q>&limit=<n>` | mention search |
 | `POST /graph/upsert` | write node + optional edge — **schema-validated** (`validate_node` / `validate_edge` from `schema_registry`) ahead of the orphan/disambiguation guards. Returns `{ok: bool, code?, detail?, ...}` |
 | `POST /graph/upsert-backup` | legacy un-validated handler, parked during the schema-enforcement cutover. Returns `{upserted: bool, reason?: ...}`. Delete once stable. |
@@ -210,7 +210,7 @@ does not gate reads, but it does identify which mind wrote each row.
 | Concept | Variable | Example | Purpose |
 |---|---|---|---|
 | Short name | `MIND_ID` | `ada`, `bob`, `bilby`, `nagatha` | Human-readable label for logs, hook output dirs, container names. **Never written to lucent.** |
-| Canonical id | `MIND_ID` | `565e5a66-d20c-4266-872a-3268c4c894fc` (a UUID for registry-managed minds) or a literal string for unmanaged minds (currently `"skippy"`) | The value used in every `mind_id` field — `/memory/store`, `/graph/upsert`, `/graph/query?mind_id=…`, all SQL provenance columns. |
+| Canonical id | `MIND_ID` | `565e5a66-d20c-4266-872a-3268c4c894fc` (a UUID for registry-managed minds) or a literal string for unmanaged minds (currently `"skippy"`) | The value used in every `mind_id` field — `/memory/store`, `/graph/upsert`, all SQL provenance columns. |
 
 Why two: `comms/sessions.py` issues a UUID when a session is created for a
 mind the registry knows about. The registry is the source of truth for
@@ -500,7 +500,7 @@ upfront for the next adopter.
 - Use `tier=<tier>` server-side filter to avoid client-side pagination across the full store. Both bootstrap (standing rules) and overflow audit rely on it.
 - `mind_id` query param is accepted for backwards compat but ignored — provenance only, not a query filter (REQ-018).
 
-### `lucent /graph/query`
+### `lucent POST /graph/query`
 
 - Identity lookup. Matches case-insensitive on `name`, `first_name`, `last_name`, plus alias substring within the JSON-list `aliases` field.
 - Soul values live at `.matches[0].properties.soul_values`, an **array of strings** (join with `\n\n` for display).

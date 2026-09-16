@@ -13,7 +13,7 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Depends, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from lucent_api.auth import require_admin_bearer
 from lucent_api.soul import soul_key_refusal
@@ -116,6 +116,90 @@ class EdgeBody(BaseModel):
 
 
 # ---- Read endpoints ----
+
+
+# A prompt's candidate names are a person's name repeated N times over the
+# wire. Sent as a query string each one landed verbatim in Zeek's http.log,
+# in uvicorn's access log and in Loki, where the sentinel read the hive's own
+# people back as network events. They travel in a body now, all of them at
+# once — a turn naming a dozen people cost a dozen serial round trips on the
+# hot path of every prompt.
+#
+# The ceiling is on the caller's behalf, not the store's: the retrieval hook
+# treats every capitalised word as a candidate, and a pasted file yields
+# hundreds. 256 is well above any real sentence and below the point where one
+# request is doing a table scan per name for a paragraph nobody named anyone
+# in. A name past 200 characters is not a name, and is refused on its own
+# entry rather than taking the request down with it.
+MAX_QUERY_NAMES = 256
+MAX_NAME_CHARS = 200
+
+
+class GraphQueryBody(BaseModel):
+    """Body for ``POST /graph/query``.
+
+    ``mind_id`` is accepted and ignored, as it was on the query string —
+    reads are not partitioned by mind. It stays on the schema so a caller
+    still sending it gets an answer rather than a 422.
+    """
+
+    names: list[str]
+    depth: int = Field(1, ge=1, le=3)
+    mind_id: str = ""
+
+
+@router.post("/query")
+def graph_query_batch(body: GraphQueryBody) -> Any:
+    """Resolve every name in one request, answering each independently.
+
+    One name's failure is its own: a row the store cannot read, or a name
+    past the length ceiling, comes back as that entry's ``error`` while its
+    siblings answer normally. Folding the batch into a single 5xx — or a
+    single 413 — would cost a turn every person it mentioned because one
+    token in the prompt was not a name.
+
+    Names repeated within a request are answered once, in first-seen order.
+    """
+    from lucent_api import lucent_graph
+
+    if len(body.names) > MAX_QUERY_NAMES:
+        raise HTTPException(
+            413,
+            f"{len(body.names)} names exceeds the {MAX_QUERY_NAMES}-name ceiling",
+        )
+
+    seen: set[str] = set()
+    results: list[dict] = []
+    for name in body.names:
+        if name in seen:
+            continue
+        seen.add(name)
+        entry: dict[str, Any] = {"entity": name, "found": False, "count": 0, "matches": []}
+        if len(name) > MAX_NAME_CHARS:
+            # This name's refusal, not the request's. A prompt carrying one
+            # long alphabetic run — a pasted sequence, a generated
+            # identifier — tokenises into a candidate nobody typed, and a
+            # whole-request 413 would cost the turn every real person it
+            # mentioned alongside it.
+            entry["error"] = f"a name of {len(name)} characters exceeds {MAX_NAME_CHARS}"
+            results.append(entry)
+            continue
+        try:
+            answer = _decode(lucent_graph.graph_query(entity_name=name, depth=body.depth))
+        except HTTPException:
+            raise
+        except Exception as e:
+            entry["error"] = str(e)
+            results.append(entry)
+            continue
+        if isinstance(answer, dict) and answer.get("error"):
+            entry["error"] = str(answer["error"])
+        elif isinstance(answer, dict) and answer.get("found"):
+            entry["found"] = True
+            entry["count"] = answer.get("count", 0)
+            entry["matches"] = answer.get("matches") or []
+        results.append(entry)
+    return {"results": results}
 
 
 @router.get("/query")

@@ -85,7 +85,7 @@ All bearer-gated except `/health`.
 | `POST /memory/store` | write — body `{content, data_class, tier, mind_id, source}` |
 | `PUT /memory/{id}` | update content / data_class / tags |
 | `DELETE /memory/{id}` | delete |
-| `GET /graph/query?entity_name=<name>&mind_id=<id>&depth=<n>` | identity lookup |
+| `POST /graph/query` body `{names, depth}` | identity lookup, every name in one request |
 | `GET /graph/search?text=<q>&limit=<n>` | mention search |
 | `GET /graph/raw-properties?name=<n>&mind_id=<a>` | unflattened properties blob (round-trip safe) |
 | `GET /graph/data?limit=<n>` | visualization export — flat nodes + edges |

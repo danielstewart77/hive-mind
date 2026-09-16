@@ -63,16 +63,34 @@ def _get(path: str, params: dict[str, Any]) -> Any | None:
         return None
 
 
+def _post(path: str, body: dict[str, Any]) -> Any | None:
+    """POST a body to lucent. Used where the payload is a name or a prompt.
+
+    A name on a query string lands verbatim in Zeek's http.log, in uvicorn's
+    access log and in Loki. The body is logged nowhere.
+    """
+    try:
+        resp = requests.post(
+            f"{LUCENT_URL}{path}",
+            json=body,
+            headers=_AUTH_HEADERS,
+            timeout=REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        log.exception("lucent %s failed", path)
+        return None
+
+
 def _fetch_soul(mind_id: str, mind_name: str) -> str:
     """Query the KG for the Mind node's soul_values; format as <soul> block."""
     entity_name = mind_name.capitalize()
-    body = _get(
-        "/graph/query",
-        {"entity_name": entity_name, "mind_id": mind_id, "depth": 1},
-    )
-    if not isinstance(body, dict) or not body.get("found"):
+    body = _post("/graph/query", {"names": [entity_name], "depth": 1})
+    results = (body or {}).get("results") or []
+    if not results or not results[0].get("found"):
         return ""
-    matches = body.get("matches") or []
+    matches = results[0].get("matches") or []
     if not matches:
         return ""
     soul_values = (matches[0].get("properties") or {}).get("soul_values") or []
