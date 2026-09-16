@@ -149,12 +149,16 @@ def test_r5_two_hundred_and_fifty_seven_names_are_refused(client):
     assert client.post("/graph/query", json={"names": names}).status_code == 413
 
 
-def test_r5_a_name_longer_than_two_hundred_characters_is_refused(client):
+def test_r10_a_name_longer_than_two_hundred_characters_is_refused_on_its_own(client):
     resp = client.post("/graph/query", json={"names": ["Maurice", "x" * 201]})
-    assert resp.status_code == 413
-    assert client.post(
-        "/graph/query", json={"names": ["x" * 200]}
-    ).status_code == 200
+    assert resp.status_code == 200
+    by_name = {r["entity"]: r for r in resp.json()["results"]}
+    assert by_name["Maurice"]["count"] == 1
+    assert "exceeds 200" in by_name["x" * 201]["error"]
+    assert by_name["x" * 201]["found"] is False
+    # 200 is the last length that is looked up at all.
+    at_the_line = client.post("/graph/query", json={"names": ["x" * 200]})
+    assert "error" not in at_the_line.json()["results"][0]
 
 
 # ---- R6: no names ----
