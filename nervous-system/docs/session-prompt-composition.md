@@ -36,7 +36,7 @@ separated by blank lines. Empty blocks are dropped.
 ### Soul
 
 The soul block is the mind's identity in its own voice. The composer
-issues `GET /graph/query?entity_name=<Mind.capitalize()>&mind_id=<uuid>&depth=1`
+issues `POST /graph/query` with `{"names": ["<Mind.capitalize()>"], "depth": 1}`
 against lucent, pulls `properties.soul_values` from the first matching
 node, and wraps each entry as a line inside `<soul>…</soul>`.
 

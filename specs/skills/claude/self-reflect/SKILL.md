@@ -27,8 +27,9 @@ Default to `--reflect` when called with no argument.
 Read the Mind node and everything attached to it:
 
 ```bash
-curl -s -H "$AUTH" \
-  "$LUCENT_URL_SELF/graph/query?entity_name=$MIND_NAME&mind_id=$MIND_ID&depth=1" | jq
+curl -s -H "$AUTH" -H 'Content-Type: application/json' \
+  -d "$(jq -nc --arg n "$MIND_NAME" '{names: [$n], depth: 1}')" \
+  "$LUCENT_URL_SELF/graph/query" | jq '.results[0]'
 ```
 
 Then the standing tier — the rules that apply every turn regardless of
