@@ -87,7 +87,7 @@ Verifiable requirements for the memory system. Source of truth:
 
 **REQ-031** | Every new session bootstraps with four layers, all concatenated into a single systemMessage: identity, standing rules, decay-weighted recent, carry-forward window. | Inspection of injected systemMessage.
 
-**REQ-032** | Identity is loaded from the mind's KG node (`soul_values` field, an array of strings) via `GET /graph/query`. | Trace test.
+**REQ-032** | Identity is loaded from the mind's KG node (`soul_values` field, an array of strings) via `POST /graph/query`. | Trace test.
 
 **REQ-033** | Standing rules are loaded from vector store entries with `tier: standing` (filtered client-side from `GET /memory/list`). Total injected ≤ ~500 tokens (~2000 chars). | Token-count check.
 
@@ -185,7 +185,7 @@ Verifiable requirements for the memory system. Source of truth:
 
 ## K. Graph query semantics
 
-**REQ-068** | `GET /graph/query?entity_name=<name>` matches only on identity fields: `name`, `first_name`, `last_name` (exact, case-insensitive); `aliases` (substring match within JSON-list entries). | SQL inspection; query test.
+**REQ-068** | `POST /graph/query` (body: `{"names": [...], "depth": n}`) matches each name only on identity fields: `name`, `first_name`, `last_name` (exact, case-insensitive); `aliases` (substring match within JSON-list entries). | SQL inspection; query test.
 
 **REQ-069** | `graph_query` does not include a `properties LIKE '%name%'` clause. Identity lookup is deterministic — same query, same result set. | SQL inspection.
 
