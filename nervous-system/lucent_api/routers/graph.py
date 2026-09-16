@@ -202,22 +202,6 @@ def graph_query_batch(body: GraphQueryBody) -> Any:
     return {"results": results}
 
 
-@router.get("/query")
-def graph_query(
-    entity_name: str = Query(...),
-    mind_id: str = Query(""),
-    depth: int = Query(1, ge=1, le=3),
-) -> Any:
-    """Retrieve graph node(s) and connected relationships.
-
-    `mind_id` is accepted for backward compatibility but ignored — reads
-    are not partitioned by mind. Every mind sees every node.
-    """
-    from lucent_api.lucent_graph import graph_query as _graph_query
-
-    return _decode(_graph_query(entity_name=entity_name, mind_id=mind_id, depth=depth))
-
-
 @router.get("/search")
 def graph_search(
     text: str = Query(...),
