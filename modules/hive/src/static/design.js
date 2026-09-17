@@ -80,6 +80,7 @@ function designDetail() {
     const designId = root.dataset.designId;
     let page = "requirements";
     let record = null;
+    let drawn = false;
     /* Everything typed and not yet submitted, keyed by page and item, kept
        across redraws and across tab switches. The poll rebuilds the DOM from
        the server record every few seconds; without this, a question longer
@@ -148,12 +149,43 @@ function designDetail() {
         return fallback;
     }
 
+    /* Which box the caret is in, and where in it. drawItems replaces every
+       textarea on the page, so without this a redraw lands the cursor on the
+       body and Daniel loses his place mid-sentence — every five seconds. */
+    function focusMark() {
+        const field = document.activeElement;
+        if (!field || !field.dataset) { return null; }
+        const key = field.dataset.key || field.dataset.feedback;
+        if (!key) { return null; }
+        return {
+            key: key,
+            kind: field.dataset.key ? "key" : "feedback",
+            start: field.selectionStart,
+            end: field.selectionEnd,
+            scroll: field.scrollTop,
+        };
+    }
+
+    function focusRestore(mark) {
+        if (!mark) { return; }
+        const attr = mark.kind === "key" ? "data-key" : "data-feedback";
+        const field = document.querySelector(
+            '#design-items [' + attr + '="' + (window.CSS && CSS.escape ? CSS.escape(mark.key) : mark.key) + '"]'
+        );
+        if (!field) { return; }
+        field.focus({ preventScroll: true });
+        /* Selection before scroll: setting it scrolls the box itself. */
+        try { field.setSelectionRange(mark.start, mark.end); } catch (e) {}
+        field.scrollTop = mark.scroll;
+    }
+
     function drawItems() {
         const host = document.getElementById("design-items");
         const items = record.pages[page];
         host.innerHTML = "";
         if (!items.length) {
             host.innerHTML = '<p class="event-hints">Nothing published to this page yet.</p>';
+            drawn = true;
             return;
         }
         items.forEach(function (item, index) {
@@ -180,6 +212,7 @@ function designDetail() {
         host.querySelectorAll("textarea").forEach(function (field) {
             field.addEventListener("input", stash);
         });
+        drawn = true;
     }
 
     function collect() {
@@ -231,8 +264,12 @@ function designDetail() {
                permanent, since every later write carries the old revision.
                What Daniel typed lives in the stash and survives the redraw. */
             record = next;
+            const mark = focusMark();
             drawChrome();
-            drawItems();
+            /* Only when the server record actually changed. A poll that found
+               nothing new has no business rebuilding the DOM Daniel is typing
+               into, and the redraw was costing him the caret on every tick. */
+            if (moved || !drawn) { drawItems(); focusRestore(mark); }
             designShowError(
                 moved
                     ? "This page was updated while you were typing. Your text is still here."
