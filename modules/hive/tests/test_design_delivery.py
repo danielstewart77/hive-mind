@@ -245,3 +245,63 @@ def test_the_build_message_carries_the_whole_agreed_specification(store):
     assert "src/design_data.py" in content
     assert "both returned" in content
     assert "calls: _connect" in content
+
+
+# ---------------------------------------------------------------------------
+# Requirement — accepting a page reaches the Mind. Acceptance was silent: the
+# page advanced in the browser and nothing was ever told, so a design session
+# stalled at an empty next page with both parties waiting on the other.
+# ---------------------------------------------------------------------------
+def _accepted_requirements(store, conversation_id="conv-1"):
+    record = store.create_design_session("Design", conversation_id=conversation_id)
+    record = store.publish_page(
+        record["id"],
+        "requirements",
+        {"r1": {"order": 1, "text": "Sessions are listed"}},
+        revision=record["revision"],
+    )
+    return record
+
+
+def test_accepting_a_page_queues_a_notice_for_the_mind(store):
+    """Breaks if accept_page stops writing a notice, or writes one under a
+    kind the delivery loop does not carry."""
+    record = _accepted_requirements(store)
+    assert store.pending_notices(record["id"]) == []
+
+    accepted = store.accept_page(
+        record["id"], "requirements", revision=record["revision"]
+    )
+
+    notices = store.pending_notices(accepted["id"])
+    assert [(n["kind"], n["page"]) for n in notices] == [("accept", "requirements")]
+
+
+def test_the_accepted_page_is_delivered_into_the_conversation(store, gateway):
+    """Breaks if the notice is queued but never sent, or sent without
+    adopting the conversation first."""
+    record = _accepted_requirements(store)
+    accepted = store.accept_page(
+        record["id"], "requirements", revision=record["revision"]
+    )
+    notice_id = store.pending_notices(accepted["id"])[0]["id"]
+
+    assert asyncio.run(design_delivery.deliver_notice(notice_id)) is True
+
+    assert gateway.paths == [
+        "/sessions/conv-1/activate",
+        "/sessions/conv-1/message",
+    ]
+
+
+def test_an_acceptance_carries_the_page_that_was_accepted(store):
+    """The feedback branch reports only flagged rows, so an acceptance
+    composed through it arrives saying nothing was changed or asked. Breaks
+    if accept falls back to that branch, or stops carrying the items."""
+    record = _accepted_requirements(store)
+
+    accepted_text = design_delivery.compose_message(record, "requirements", "accept")
+    feedback_text = design_delivery.compose_message(record, "requirements", "feedback")
+
+    assert "Sessions are listed" in accepted_text
+    assert "Sessions are listed" not in feedback_text

@@ -3378,11 +3378,18 @@ async def api_design_accept(
 ):
     del actor
     try:
-        return design_data.accept_page(
+        record = design_data.accept_page(
             design_id, page, revision=payload.get("revision")
         )
     except design_data.DesignError as exc:
         raise _design_error(exc) from exc
+    # Detached and handle-kept, for the reasons the submit route gives: the
+    # send adopts the conversation and waits out a whole model turn, and a
+    # bare create_task can be collected mid-send.
+    task = asyncio.create_task(design_delivery.deliver_pending())
+    _DESIGN_DELIVERIES.add(task)
+    task.add_done_callback(_DESIGN_DELIVERIES.discard)
+    return record
 
 
 @app.post(f"{DESIGN_PREFIX}/trim-graph")

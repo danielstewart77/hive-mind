@@ -601,7 +601,15 @@ def _built(store, **kwargs):
     record = store.accept_page(
         record["id"], "requirements", revision=record["revision"]
     )
-    return store.accept_page(record["id"], "tests", revision=record["revision"])
+    record = store.accept_page(record["id"], "tests", revision=record["revision"])
+    # Reaching this state sends two acceptances. They are arrangement, not
+    # the behaviour any test using this fixture is about, so they are marked
+    # delivered here — otherwise every assertion on the notice queue below
+    # is really an assertion about how the fixture got built.
+    for notice in store.pending_notices(record["id"]):
+        store.claim_notice(notice["id"])
+        store.mark_delivered(notice["id"])
+    return store.get_design_session(record["id"])
 
 
 def test_feedback_and_build_queue_different_notices(store):

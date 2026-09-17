@@ -44,7 +44,7 @@ from typing import Any
 from config import BASE_DIR
 
 PAGES = ("requirements", "tests", "functions")
-NOTICE_KINDS = ("feedback", "build")
+NOTICE_KINDS = ("feedback", "build", "accept")
 
 # The fields on an item the Mind owns. Everything else belongs to Daniel and
 # is never written by a publish.
@@ -538,6 +538,12 @@ def accept_page(
     Acceptance is state, not navigation: the tests page's gate reads it, and
     a later submission on the same page clears it, so a page cannot stay
     accepted while carrying feedback nobody has answered.
+
+    It also queues a notice, for the same reason a submission does. An
+    acceptance the Mind is never told about is a design session stalled at
+    an empty next page with both parties waiting on the other — Daniel has
+    signed the page off and moved on, and the only party who can write the
+    next one does not know it happened.
     """
     _check_page(page)
     record = get_design_session(design_id)
@@ -554,7 +560,7 @@ def accept_page(
     accepted[page] = True
     return _write_page(
         design_id, page, record[page], accepted=accepted, stale=record["stale"],
-        expected_revision=record["revision"],
+        expected_revision=record["revision"], notice=("accept", page),
     )
 
 

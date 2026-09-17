@@ -99,6 +99,25 @@ def compose_message(record: dict[str, Any], page: str, kind: str) -> str:
         lines.append("</design-session>")
         return "\n".join(lines)
 
+    if kind == "accept":
+        # An acceptance carries the page it accepted, whole. The feedback
+        # branch below reports only the rows Daniel flagged, so an empty
+        # acceptance composed through it arrives saying he changed nothing
+        # and asked nothing — true, and useless: what the Mind needs is the
+        # agreed wording it must now write the next page against.
+        lines.append(
+            f"Daniel accepted the {page} page as it stands. Write the next page."
+        )
+        lines.append("")
+        lines.append(f"## {page} (agreed)")
+        for position, item in enumerate(
+            design_data.ordered_items(record, page), start=1
+        ):
+            label = item.get("text") or item.get("sentence") or item.get("name") or ""
+            lines.append(f"{position}. {label}")
+        lines.append("</design-session>")
+        return "\n".join(lines)
+
     lines.append("Daniel submitted feedback on the design page.")
     lines.append("")
 
