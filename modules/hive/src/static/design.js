@@ -78,7 +78,15 @@ function designList() {
 function designDetail() {
     const root = document.querySelector("[data-design-id]");
     const designId = root.dataset.designId;
-    let page = "requirements";
+    /* Which page is open is in the URL, so a reload — or a link sent to
+       someone — lands where Daniel was rather than back on page one. An
+       unknown or absent value falls back to the first page; the query
+       string is user input and names a page or it does not. */
+    function pageFromUrl() {
+        const asked = new URLSearchParams(window.location.search).get("page");
+        return PAGES.indexOf(asked) === -1 ? PAGES[0] : asked;
+    }
+    let page = pageFromUrl();
     let record = null;
     let drawn = false;
     /* Everything typed and not yet submitted, keyed by page and item, kept
@@ -312,13 +320,21 @@ function designDetail() {
         }
     }
 
+    /* replaceState, not pushState: the tabs are one page's chrome, and
+       stacking history entries would make back walk the tabs instead of
+       leaving the session. */
+    function setPage(next) {
+        stash();
+        page = next;
+        const url = new URL(window.location.href);
+        url.searchParams.set("page", page);
+        window.history.replaceState({}, "", url);
+        drawChrome();
+        drawItems();
+    }
+
     document.querySelectorAll(".design-tab").forEach(function (tab) {
-        tab.addEventListener("click", function () {
-            stash();
-            page = tab.dataset.page;
-            drawChrome();
-            drawItems();
-        });
+        tab.addEventListener("click", function () { setPage(tab.dataset.page); });
     });
     document.getElementById("design-submit").addEventListener("click", function () {
         post("submit", { items: collect(), action: "feedback" });
@@ -331,14 +347,17 @@ function designDetail() {
                 /* Accept advances. Leaving Daniel on the page he just
                    accepted, with only the buttons flickering, reads as a
                    button that did nothing. */
-                stash();
-                page = page === "requirements" ? "tests" : "functions";
-                drawChrome();
-                drawItems();
+                setPage(page === "requirements" ? "tests" : "functions");
             });
         }
     });
 
+    /* The template marks page one active; the chrome is only redrawn once
+       the record lands, so without this the wrong tab is lit while the
+       fetch is in flight. */
+    document.querySelectorAll(".design-tab").forEach(function (tab) {
+        tab.classList.toggle("is-active", tab.dataset.page === page);
+    });
     load();
 
     /* No poll. The page is driven by button presses, and a timer firing into
