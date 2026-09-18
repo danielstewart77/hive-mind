@@ -61,6 +61,10 @@ _MIND_FIELDS: dict[str, tuple[str, ...]] = {
         "repo",
         "changed",
         "role",
+        # The body being proposed — a new function whole, an existing one as
+        # a diff of the edit. Without it page three is a list of names, and
+        # approving a call graph is not the same as approving the code.
+        "symbol",
         "calls",
         "called_by",
         "params",

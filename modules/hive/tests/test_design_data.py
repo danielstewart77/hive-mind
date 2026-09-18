@@ -1122,3 +1122,30 @@ def test_an_action_that_is_neither_feedback_nor_build_is_refused(store):
         )
 
     assert store.pending_notices(record["id"]) == []
+
+
+# ---------------------------------------------------------------------------
+# Requirement — page three shows the function bodies being proposed: a new
+# function whole, an existing one as a diff of the edit. The source travels
+# on the row's symbol, so a functions page that drops `symbol` renders every
+# row as a bare name and Daniel is asked to approve code he cannot see.
+# ---------------------------------------------------------------------------
+def test_a_function_row_keeps_the_body_it_was_published_with(store):
+    record = store.create_design_session("Design")
+
+    published = store.publish_page(
+        record["id"],
+        "functions",
+        {"f1": {"order": 1, "name": "_rotation_chain_targets", "changed": True,
+                "symbol": {"name": "_rotation_chain_targets", "kind": "planned",
+                           "resolved": False,
+                           "source": "def _rotation_chain_targets(sessions):\n    return {}\n"},
+                "note": "dropped: not a field the mind owns on this page"}},
+        revision=record["revision"],
+    )
+
+    row = published["functions"]["f1"]
+    assert row["symbol"]["source"] == (
+        "def _rotation_chain_targets(sessions):\n    return {}\n"
+    )
+    assert "note" not in row
