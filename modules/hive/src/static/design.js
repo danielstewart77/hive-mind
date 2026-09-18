@@ -326,5 +326,16 @@ function designDetail() {
     });
 
     load();
-    setInterval(load, 5000);
+
+    /* No poll. The page is driven by button presses, and a timer firing into
+       a box Daniel is typing in has exactly one job here: to take his cursor
+       away. What the poll was for is seeing an answer published while the tab
+       sat open, and that is the moment he comes back to the tab — so the read
+       happens then, when nothing is being typed, instead of twelve times a
+       minute on the chance that it was. */
+    function refreshIfVisible() {
+        if (document.visibilityState === "visible") { load(); }
+    }
+    document.addEventListener("visibilitychange", refreshIfVisible);
+    window.addEventListener("focus", refreshIfVisible);
 }
