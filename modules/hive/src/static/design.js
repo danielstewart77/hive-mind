@@ -104,7 +104,7 @@ function designDetail() {
                       : mark === "-" ? " class=\"is-removed\"" : "";
             return "<span" + cls + ">" + designEscape(line) + "</span>";
         });
-        return '<pre class="design-source">' + rows.join("\n") + "</pre>";
+        return '<pre class="design-source">' + rows.join("") + "</pre>";
     }
 
     function symbolBlock(item) {

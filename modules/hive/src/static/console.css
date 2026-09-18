@@ -818,9 +818,15 @@ a { color: inherit; }
 .design-text::placeholder, .design-feedback::placeholder { color: var(--console-muted, #8b979e); }
 .design-symbol { margin: 0.5rem 0; font-size: 0.85rem; }
 .design-symbol pre { overflow-x: auto; padding: 0.5rem; background: rgba(128,128,128,0.12); }
-.design-source span { display: block; }
-.design-source span.is-added { background: rgba(78,232,138,0.16); color: #9df0bd; }
-.design-source span.is-removed { background: rgba(224,92,138,0.16); color: #f0a8bd; }
+.design-source { line-height: 1.45; }
+/* Block spans, so a marked line is a full-width band rather than a tint
+   that stops at the last character and leaves the eye nothing to follow. */
+.design-source span { display: block; padding: 0 0.4rem; margin: 0 -0.5rem;
+    border-left: 3px solid transparent; }
+.design-source span.is-added { background: rgba(78,232,138,0.22);
+    border-left-color: #4ee88a; color: #c8f7db; }
+.design-source span.is-removed { background: rgba(224,92,138,0.22);
+    border-left-color: #e05c8a; color: #f7c8d6; }
 .design-symbol.is-unresolved { color: #c0392b; }
 .design-symbol.is-planned { color: #2e7bc0; }
 .design-cases { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin: 0.4rem 0; }
