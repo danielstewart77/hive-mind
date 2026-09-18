@@ -818,6 +818,9 @@ a { color: inherit; }
 .design-text::placeholder, .design-feedback::placeholder { color: var(--console-muted, #8b979e); }
 .design-symbol { margin: 0.5rem 0; font-size: 0.85rem; }
 .design-symbol pre { overflow-x: auto; padding: 0.5rem; background: rgba(128,128,128,0.12); }
+.design-source span { display: block; }
+.design-source span.is-added { background: rgba(78,232,138,0.16); color: #9df0bd; }
+.design-source span.is-removed { background: rgba(224,92,138,0.16); color: #f0a8bd; }
 .design-symbol.is-unresolved { color: #c0392b; }
 .design-symbol.is-planned { color: #2e7bc0; }
 .design-cases { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin: 0.4rem 0; }

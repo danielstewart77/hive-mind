@@ -93,6 +93,20 @@ function designDetail() {
         return item.name || "";
     }
 
+    /* A proposed edit arrives as a diff, and a diff rendered as one grey
+       block is a wall of code with the change hidden in it. Added and
+       removed lines are marked so the eye lands on them; a body with no
+       diff markers at all just renders as itself. */
+    function sourceBlock(source) {
+        const rows = String(source).split("\n").map(function (line) {
+            const mark = line.charAt(0);
+            const cls = mark === "+" ? " class=\"is-added\""
+                      : mark === "-" ? " class=\"is-removed\"" : "";
+            return "<span" + cls + ">" + designEscape(line) + "</span>";
+        });
+        return '<pre class="design-source">' + rows.join("\n") + "</pre>";
+    }
+
     function symbolBlock(item) {
         const symbol = item.symbol || {};
         if (!symbol.name) { return ""; }
@@ -102,7 +116,7 @@ function designDetail() {
         const state = symbol.resolved ? "is-resolved" : (symbol.kind === "planned" ? "is-planned" : "is-unresolved");
         return '<div class="design-symbol ' + state + '">' +
             "<strong>" + designEscape(symbol.name) + "</strong> <span>" + where + "</span>" +
-            (symbol.source ? "<pre>" + designEscape(symbol.source) + "</pre>" : "") +
+            (symbol.source ? sourceBlock(symbol.source) : "") +
             "</div>";
     }
 
