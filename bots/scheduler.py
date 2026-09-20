@@ -21,6 +21,7 @@ is posted into the channel rather than sent to Telegram.
 import asyncio
 import json
 import os
+import signal
 import uuid
 from pathlib import Path
 
@@ -110,6 +111,7 @@ async def run_gate(
             *argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
         )
     except (OSError, ValueError) as exc:
         return GATE_ERROR, f"could not run gate: {exc}"
@@ -120,9 +122,14 @@ async def run_gate(
         # The process outlives the await unless it is killed here, and a gate
         # that hangs every hour would otherwise accumulate one orphan per fire.
         try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
+            # The whole process group: a gate written as a shell wrapper
+            # leaves its children running otherwise, one set per fire.
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
         await proc.wait()
         return GATE_ERROR, f"gate timed out after {timeout:g}s"
 
@@ -457,6 +464,14 @@ async def _fire_command(skill: ScheduledSkill) -> None:
 
 async def fire_skill(skill: ScheduledSkill) -> None:
     """Fire a single scheduled skill: fresh session → run → kill → deliver."""
+    if skill.gate_error:
+        # Declared and unreadable. Every other failure here declines to fire;
+        # treating a typo as "no gate" would make it the one task that fires
+        # every hour instead of never.
+        await _report_gate_failure(
+            f"{skill.mind_name}/{skill.skill_name}", skill.gate_error,
+        )
+        return
     if skill.gate:
         label = f"{skill.mind_name}/{skill.skill_name}"
         outcome, reason = await run_gate(skill.gate)
@@ -555,7 +570,10 @@ def _skill_job_id(skill: ScheduledSkill) -> str:
     return (
         f"{SKILL_JOB_PREFIX}{skill.mind_name}/{skill.skill_name}|{skill.cron}"
         f"|{skill.timezone}|v={skill.voice}|n={skill.notify}|c={skill.discord_channel or ''}"
-        f"|g={' '.join(skill.gate) if skill.gate else ''}"
+        # Unit-separated, not space-joined: argv is a list precisely because
+        # a space is data, and two different gates sharing one job id means a
+        # gate edit reconciles to no change and the old command keeps running.
+        f"|g={chr(31).join(skill.gate) if skill.gate else ''}|ge={skill.gate_error or ''}"
     )
 
 

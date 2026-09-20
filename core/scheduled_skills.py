@@ -54,6 +54,11 @@ class ScheduledSkill:
     command: tuple[str, ...] | None = None  # when set, scheduler runs subprocess
                           # instead of dispatching a turn to a mind. Tasks
                           # with `command` set ignore mind / instructions_file.
+    gate_error: str | None = None  # a gate was declared and could not be read.
+                          # Distinct from no gate at all: every other failure
+                          # in this feature declines to fire, and a task whose
+                          # gate is a typo must not be the one that fires every
+                          # hour instead of never.
     gate: tuple[str, ...] | None = None  # when set, this argv runs on the cron
                           # before anything else, and the task only fires if it
                           # exits with the agreed signal code. No session is
@@ -77,7 +82,14 @@ def _parse_frontmatter(text: str) -> dict[str, str] | None:
         if ":" not in line:
             continue
         k, _, v = line.partition(":")
-        out[k.strip()] = v.strip().strip('"').strip("'")
+        value = v.strip()
+        # One matched pair, not every quote at either end. Stripping greedily
+        # eats the closing quote of an inner quoted argument — turning a
+        # perfectly good `gate: "python g.py --label \'deep value\'"` into an
+        # unbalanced string that then fails to parse.
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        out[k.strip()] = value
     return out
 
 
@@ -103,6 +115,17 @@ def _clean_channel(value: str | None) -> str | None:
     return cleaned if cleaned.isascii() and cleaned.isdigit() else None
 
 
+def _gate_error(declared: object, parsed: tuple[str, ...] | None) -> str | None:
+    """Whether a gate was asked for and could not be produced."""
+    if parsed is not None:
+        return None
+    if declared is None:
+        return None
+    if isinstance(declared, str) and declared.strip().lower() in {"null", "none"}:
+        return None
+    return f"unreadable gate declaration: {declared!r}"
+
+
 def _clean_gate(value: object) -> tuple[str, ...] | None:
     """Normalise a `gate` declaration into an argv tuple, or None.
 
@@ -118,6 +141,9 @@ def _clean_gate(value: object) -> tuple[str, ...] | None:
     if isinstance(value, str):
         text = value.strip()
         if not text or text.lower() in {"null", "none"}:
+            # An empty `gate:` is not an opt-out — that is spelled `none`. It
+            # is what a list written in flat frontmatter collapses to, and a
+            # task whose gate silently vanished is the task that fires hourly.
             return None
         try:
             parts = shlex.split(text)
@@ -210,6 +236,7 @@ def discover_scheduled_skills(minds_root: Path) -> list[ScheduledSkill]:
             notify=_coerce_bool(fm.get("notify"), default=True),
             discord_channel=_clean_channel(fm.get("discord_channel")),
             gate=_clean_gate(fm.get("gate")),
+            gate_error=_gate_error(fm.get("gate"), _clean_gate(fm.get("gate"))),
         ))
 
     return found
@@ -273,6 +300,7 @@ def discover_scheduler_tasks(tasks_yaml: Path, minds_root: Path) -> list[Schedul
                 notify=bool(entry.get("notify", False)),
                 command=command_tuple,
                 gate=_clean_gate(entry.get("gate")),
+                gate_error=_gate_error(entry.get("gate"), _clean_gate(entry.get("gate"))),
             ))
             continue
 
@@ -309,6 +337,7 @@ def discover_scheduler_tasks(tasks_yaml: Path, minds_root: Path) -> list[Schedul
             notify=bool(entry.get("notify", True)),
             instructions_path=str(instructions_path),
             gate=_clean_gate(entry.get("gate")),
+            gate_error=_gate_error(entry.get("gate"), _clean_gate(entry.get("gate"))),
         ))
 
     return found

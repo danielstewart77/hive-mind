@@ -6,11 +6,14 @@ to btc-ledger so the dashboard keeps a continuous record, and exits quiet.
 Only when the evaluator says a signal is present does it exit with the
 scheduler's fire code, and only then is Ada woken to look for herself.
 
-It deliberately does **not** touch the latch. The mind's own run is the
-authoritative one, so an alert that is decided here but never delivered —
-because the gateway was down, or the turn failed — is re-decided next hour
-rather than silently swallowed by a latch that moved without anybody
-hearing about it.
+It only ever moves the latch **down**. Raising it is the mind's own run's
+job, so an alert decided here but never delivered — the gateway was down,
+the turn failed — is re-decided next hour rather than swallowed by a latch
+that moved with nobody listening. Lowering has to happen here, because the
+mind is no longer woken on the hours when the market recovers: a latch that
+can only rise is a latch that pins at the deepest tier ever seen and goes
+silent for good. That is not hypothetical — it is how this alerter sat out
+a 35% drawdown between June and September 2026.
 
 Exit codes: 0 quiet, 10 fire, 1 broken. Anything but 0 and 10 is reported
 to Daniel by the scheduler.
@@ -64,6 +67,32 @@ def evaluate(state_file: str | None, fixture: str | None = None) -> dict:
     )
 
 
+def lower_latch_if_deescalated(state_file: str | None, result: dict) -> bool:
+    """Walk the latch down to the current tier when the market has recovered.
+
+    Never upward: that is the mind's run, and only a delivered alert should
+    raise it. Quiet hours are left alone so a buffered escalation survives
+    the night exactly as it did before.
+
+    Returns whether the latch was moved.
+    """
+    if not state_file or result.get("quiet_hours_active"):
+        return False
+    current = result.get("tier", "none")
+    previous = result.get("previous_tier", "none")
+    if btc_signals.tier_rank(current) >= btc_signals.tier_rank(previous):
+        return False
+    path = Path(state_file)
+    state = btc_signals.read_state(path)
+    btc_signals.write_state(path, {
+        "last_tier": current,
+        # The recovery is not an alert, so the last time Daniel was actually
+        # told something stays where it was.
+        "last_alert_at": state.get("last_alert_at", 0),
+    })
+    return True
+
+
 def exit_code_for(result: dict) -> int:
     """Fire only when the evaluator says an alert is warranted."""
     return FIRE_EXIT_CODE if result.get("should_alert") else QUIET_EXIT_CODE
@@ -115,6 +144,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Bitcoin alert gate")
     parser.add_argument("--state-file", help="Path to the latch state JSON (read only)")
     parser.add_argument("--test-fixture", help="Fixture JSON, skips the live APIs")
+    parser.add_argument("--ledger", action="store_true",
+                        help="Write to btc-ledger even when reading a fixture. "
+                             "Without it, a fixture run records nothing.")
     args = parser.parse_args()
 
     try:
@@ -124,6 +156,14 @@ def main() -> int:
         return BROKEN_EXIT_CODE
 
     code = exit_code_for(result)
+    lower_latch_if_deescalated(args.state_file, result)
+
+    if args.test_fixture and not args.ledger:
+        # Fabricated prices must never enter the ledger by accident: every row
+        # there is stamped `source: live`, so one hand-run fixture is a fake
+        # point on the dashboard no later reading can be told apart from.
+        print(json.dumps({"tier": result["tier"], "should_alert": result["should_alert"]}))
+        return code
 
     try:
         post_observation(result)
