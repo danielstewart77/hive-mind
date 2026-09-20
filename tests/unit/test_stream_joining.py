@@ -42,6 +42,14 @@ def _assistant(*texts: str) -> dict:
             "message": {"content": [{"type": "text", "text": t} for t in texts]}}
 
 
+def _assistant_blocks(*blocks: dict) -> dict:
+    return {"type": "assistant", "message": {"content": list(blocks)}}
+
+
+def _message_start() -> dict:
+    return {"type": "stream_event", "event": {"type": "message_start"}}
+
+
 @pytest.fixture()
 def gateway(monkeypatch):
     monkeypatch.delenv("COMMS_BEARER_TOKEN", raising=False)
@@ -105,6 +113,40 @@ class TestStreamCarriesTheMindsText:
         _serve(gateway, _sse(_assistant("First paragraph.", "Second one.")))
 
         assert "".join(await _collect(gateway)) == "First paragraph.\n\nSecond one."
+
+    @pytest.mark.asyncio
+    async def test_two_messages_reusing_block_index_zero_stay_separated(
+        self, gateway,
+    ):
+        """R2: a block index repeats across messages; the break still lands."""
+        _serve(gateway, _sse(
+            _message_start(), _block_start(0), _delta(0, "First."),
+            _message_start(), _block_start(0), _delta(0, "Second."),
+        ))
+
+        assert "".join(await _collect(gateway)) == "First.\n\nSecond."
+
+    @pytest.mark.asyncio
+    async def test_a_block_already_streamed_as_deltas_is_not_repeated(
+        self, gateway,
+    ):
+        """R1: a mind that streams and then buffers the same text sends it once."""
+        _serve(gateway, _sse(
+            _block_start(0), _delta(0, "Half a "), _delta(0, "sentence."),
+            _assistant("Half a sentence."),
+        ))
+
+        assert "".join(await _collect(gateway)) == "Half a sentence."
+
+    @pytest.mark.asyncio
+    async def test_only_text_blocks_reach_the_surface(self, gateway):
+        """R1: a tool_use block carrying a text key is not part of the reply."""
+        _serve(gateway, _sse(_assistant_blocks(
+            {"type": "tool_use", "name": "Bash", "text": "rm -rf /"},
+            {"type": "text", "text": "Done."},
+        )))
+
+        assert "".join(await _collect(gateway)) == "Done."
 
     @pytest.mark.asyncio
     async def test_query_returns_the_stream_concatenated(self, gateway):
