@@ -206,9 +206,18 @@ def read_state(path: Path) -> dict:
 
 
 def write_state(path: Path, state: dict) -> None:
+    """Replace the latch file atomically.
+
+    A reader that catches a half-written file falls back to "no alert has
+    ever been sent", which re-fires an alert already delivered. The gate
+    reads this file every hour while the mind writes it, so the window is
+    real rather than theoretical.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w") as f:
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    with tmp.open("w") as f:
         json.dump(state, f, indent=2)
+    os.replace(tmp, path)
 
 
 def decide_alert(
