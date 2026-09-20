@@ -318,7 +318,9 @@ async def _stream_to_message(
     last_edit = 0.0
 
     async for text_chunk in gateway.query_stream(user_id, channel_id, prompt):
-        accumulated += ("\n\n" if accumulated else "") + text_chunk
+        # Plain concatenation — the stream carries mid-word token deltas and
+        # emits its own block separators.
+        accumulated += text_chunk
         now = time.monotonic()
         if now - last_edit >= edit_interval:
             preview = _chunk_message(accumulated)[0]
