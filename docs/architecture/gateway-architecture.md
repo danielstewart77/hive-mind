@@ -10,9 +10,9 @@ The gateway (`hive-comms`, built from `nervous-system/comms/server.py`) is the s
 
 - Each session is a separate subprocess communicating via stdin/stdout NDJSON
 - Sessions are stored in SQLite (`nervous-system/data/sessions.db`)
-- Idle sessions are suspended (not killed) after seven days untouched
-  (`REAP_IDLE_AFTER_SECONDS`); one holding a live subprocess is skipped regardless
-- `last_active` is updated on every event yielded, preventing reaping during active work
+- Sessions are suspended or closed only on an explicit request; nothing ends
+  one for having been quiet
+- `last_active` is updated on every event yielded
 
 ## Streaming
 
