@@ -18,6 +18,12 @@ import aiohttp
 _locks: dict[int, asyncio.Lock] = {}
 _chat_queues: dict[int, asyncio.Queue] = {}
 
+# Emitted by query_stream between two content blocks, as its own piece, so
+# every caller can concatenate the stream plainly. A caller that supplies the
+# separator itself cannot: it sees token deltas and whole blocks on one
+# channel with nothing distinguishing them.
+BLOCK_SEPARATOR = "\n\n"
+
 
 # ---------------------------------------------------------------------------
 # Shared utilities
@@ -190,12 +196,18 @@ class GatewayClient:
         self, user_id: int, client_ref: int | str, prompt: str,
         images: list[dict] | None = None,
     ) -> AsyncGenerator[str, None]:
-        """Yield assistant text chunks from the gateway SSE response as they arrive.
+        """Yield assistant text pieces from the gateway SSE response as they arrive.
 
-        Yields each assistant message block as it comes in, enabling callers
-        to update a live message progressively rather than waiting for the full
-        response.  Falls back to the result event text if no assistant blocks
-        were received (e.g. tool-only turns).
+        **Concatenate what this yields with nothing between the pieces.** A
+        piece is whatever the stream carried — a whole message block when the
+        mind buffers, a single token\'s worth of text when it streams partials,
+        and those partials routinely split mid-word. Joining with a separator
+        shreds the reply into fragments. The break *between* blocks is emitted
+        by this generator as its own piece, so a plain concatenation reproduces
+        the mind\'s text exactly.
+
+        Falls back to the result event text if no assistant blocks were
+        received (e.g. tool-only turns).
         """
         session_id = await self.ensure_session(user_id, client_ref)
         yielded_any = False
@@ -234,6 +246,19 @@ class GatewayClient:
             # end of each content block. Prefer the deltas when present and
             # suppress the buffered text to avoid duplication.
             saw_partial_text = False
+            # Identity of the content block currently being streamed, so a
+            # move to a new block emits the paragraph break the mind meant
+            # and a continuation of the same block emits nothing.
+            current_block: tuple[int, object] | None = None
+            block_epoch = 0
+            # Trailing newlines already carried by the text yielded so far, so
+            # a block that ends with its own newline does not get a break on
+            # top of one.
+            tail_newlines = 0
+
+            def separator() -> str:
+                need = len(BLOCK_SEPARATOR) - tail_newlines
+                return "\n" * need if need > 0 else ""
             async for chunk in resp.content.iter_any():
                 buf += chunk.decode()
                 while "\n" in buf:
@@ -246,14 +271,39 @@ class GatewayClient:
                     except json.JSONDecodeError:
                         continue
                     etype = event.get("type")
+                    if event.get("parent_tool_use_id"):
+                        # A delegate's own turn, forwarded by the harness on
+                        # the same stream. It is not the mind speaking, and
+                        # relaying it puts a sub-agent's prose in the mind's
+                        # voice — the terminal speaker already refuses this.
+                        continue
                     if etype == "stream_event":
                         # Anthropic-shaped partial event. We care about
                         # text_delta payloads inside content_block_delta.
                         inner = event.get("event", {})
-                        if inner.get("type") == "content_block_delta":
+                        inner_type = inner.get("type")
+                        if inner_type in (
+                            "message_start", "content_block_start",
+                            "message_stop", "content_block_stop",
+                        ):
+                            # A block index is only unique within one message,
+                            # so count the frames around a block rather than
+                            # trusting the index alone to tell two apart. Both
+                            # ends are counted so losing either kind upstream
+                            # still leaves two blocks distinguishable.
+                            block_epoch += 1
+                        elif inner_type == "content_block_delta":
                             delta = inner.get("delta", {})
                             if delta.get("type") == "text_delta" and delta.get("text"):
-                                yield delta["text"]
+                                block = (block_epoch, inner.get("index"))
+                                if yielded_any and block != current_block:
+                                    gap = separator()
+                                    if gap:
+                                        yield gap
+                                current_block = block
+                                text = delta["text"]
+                                yield text
+                                tail_newlines = len(text) - len(text.rstrip("\n"))
                                 yielded_any = True
                                 saw_partial_text = True
                     elif etype == "assistant":
@@ -263,8 +313,14 @@ class GatewayClient:
                             continue
                         for block in event.get("message", {}).get("content", []):
                             if block.get("type") == "text" and block.get("text"):
-                                yield block["text"]
+                                if yielded_any:
+                                    gap = separator()
+                                    if gap:
+                                        yield gap
                                 yielded_any = True
+                                text = block["text"]
+                                yield text
+                                tail_newlines = len(text) - len(text.rstrip("\n"))
                     elif etype == "result":
                         result_fallback = event.get("result", "")
 
@@ -277,7 +333,9 @@ class GatewayClient:
         texts: list[str] = []
         async for text in self.query_stream(user_id, client_ref, prompt, images=images):
             texts.append(text)
-        combined = "\n\n".join(texts)
+        # Plain concatenation: query_stream emits its own block separators,
+        # and its pieces can split mid-word.
+        combined = "".join(texts)
         if not combined:
             raise RuntimeError(
                 f"Empty response from gateway for user={user_id} client_ref={client_ref}: "
