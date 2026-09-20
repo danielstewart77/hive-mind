@@ -251,6 +251,14 @@ class GatewayClient:
             # and a continuation of the same block emits nothing.
             current_block: tuple[int, object] | None = None
             block_epoch = 0
+            # Trailing newlines already carried by the text yielded so far, so
+            # a block that ends with its own newline does not get a break on
+            # top of one.
+            tail_newlines = 0
+
+            def separator() -> str:
+                need = len(BLOCK_SEPARATOR) - tail_newlines
+                return "\n" * need if need > 0 else ""
             async for chunk in resp.content.iter_any():
                 buf += chunk.decode()
                 while "\n" in buf:
@@ -263,24 +271,39 @@ class GatewayClient:
                     except json.JSONDecodeError:
                         continue
                     etype = event.get("type")
+                    if event.get("parent_tool_use_id"):
+                        # A delegate's own turn, forwarded by the harness on
+                        # the same stream. It is not the mind speaking, and
+                        # relaying it puts a sub-agent's prose in the mind's
+                        # voice — the terminal speaker already refuses this.
+                        continue
                     if etype == "stream_event":
                         # Anthropic-shaped partial event. We care about
                         # text_delta payloads inside content_block_delta.
                         inner = event.get("event", {})
                         inner_type = inner.get("type")
-                        if inner_type in ("message_start", "content_block_start"):
+                        if inner_type in (
+                            "message_start", "content_block_start",
+                            "message_stop", "content_block_stop",
+                        ):
                             # A block index is only unique within one message,
-                            # so count the starts as well rather than trusting
-                            # the index alone to tell two blocks apart.
+                            # so count the frames around a block rather than
+                            # trusting the index alone to tell two apart. Both
+                            # ends are counted so losing either kind upstream
+                            # still leaves two blocks distinguishable.
                             block_epoch += 1
                         elif inner_type == "content_block_delta":
                             delta = inner.get("delta", {})
                             if delta.get("type") == "text_delta" and delta.get("text"):
                                 block = (block_epoch, inner.get("index"))
                                 if yielded_any and block != current_block:
-                                    yield BLOCK_SEPARATOR
+                                    gap = separator()
+                                    if gap:
+                                        yield gap
                                 current_block = block
-                                yield delta["text"]
+                                text = delta["text"]
+                                yield text
+                                tail_newlines = len(text) - len(text.rstrip("\n"))
                                 yielded_any = True
                                 saw_partial_text = True
                     elif etype == "assistant":
@@ -291,9 +314,13 @@ class GatewayClient:
                         for block in event.get("message", {}).get("content", []):
                             if block.get("type") == "text" and block.get("text"):
                                 if yielded_any:
-                                    yield BLOCK_SEPARATOR
+                                    gap = separator()
+                                    if gap:
+                                        yield gap
                                 yielded_any = True
-                                yield block["text"]
+                                text = block["text"]
+                                yield text
+                                tail_newlines = len(text) - len(text.rstrip("\n"))
                     elif etype == "result":
                         result_fallback = event.get("result", "")
 

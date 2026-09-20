@@ -50,6 +50,15 @@ def _message_start() -> dict:
     return {"type": "stream_event", "event": {"type": "message_start"}}
 
 
+def _block_stop(index: int) -> dict:
+    return {"type": "stream_event",
+            "event": {"type": "content_block_stop", "index": index}}
+
+
+def _by_delegate(event: dict, tool_use_id: str = "toolu_1") -> dict:
+    return {**event, "parent_tool_use_id": tool_use_id}
+
+
 @pytest.fixture()
 def gateway(monkeypatch):
     monkeypatch.delenv("COMMS_BEARER_TOKEN", raising=False)
@@ -147,6 +156,46 @@ class TestStreamCarriesTheMindsText:
         )))
 
         assert "".join(await _collect(gateway)) == "Done."
+
+    @pytest.mark.asyncio
+    async def test_a_delegates_turn_is_not_relayed_as_the_minds_own(
+        self, gateway,
+    ):
+        """R1: a sub-agent's prose is not part of the reply the mind wrote."""
+        _serve(gateway, _sse(
+            _block_start(0), _delta(0, "I'll have a subagent look."),
+            _by_delegate(_block_start(0)),
+            _by_delegate(_delta(0, "Searching the repo now...")),
+            _by_delegate(_assistant("I found three call sites.")),
+            _block_start(1), _delta(1, "Here's the summary."),
+        ))
+
+        assert "".join(await _collect(gateway)) == (
+            "I'll have a subagent look.\n\nHere's the summary."
+        )
+
+    @pytest.mark.asyncio
+    async def test_blocks_stay_separated_when_only_stop_frames_arrive(
+        self, gateway,
+    ):
+        """R2: the break survives an upstream that forwards only block ends."""
+        _serve(gateway, _sse(
+            _delta(0, "First."), _block_stop(0),
+            _delta(0, "Second."), _block_stop(0),
+        ))
+
+        assert "".join(await _collect(gateway)) == "First.\n\nSecond."
+
+    @pytest.mark.asyncio
+    async def test_a_block_ending_in_a_newline_still_gets_one_blank_line(
+        self, gateway,
+    ):
+        """R2: the break is one blank line, not one plus whatever text carried."""
+        _serve(gateway, _sse(_assistant("First paragraph.\n", "Second one.")))
+
+        assert "".join(await _collect(gateway)) == (
+            "First paragraph.\n\nSecond one."
+        )
 
     @pytest.mark.asyncio
     async def test_query_returns_the_stream_concatenated(self, gateway):
