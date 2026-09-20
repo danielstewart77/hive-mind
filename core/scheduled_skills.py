@@ -46,6 +46,9 @@ class ScheduledSkill:
     timezone: str
     voice: bool
     notify: bool
+    discord_channel: str | None = None  # when set, the fire is a nudge into the
+                          # session bound to this Discord channel and the
+                          # response is posted there instead of Telegram
     instructions_path: str | None = None  # when set, scheduler reads at fire time
     command: tuple[str, ...] | None = None  # when set, scheduler runs subprocess
                           # instead of dispatching a turn to a mind. Tasks
@@ -77,6 +80,20 @@ def _coerce_bool(value: str | None, default: bool) -> bool:
     if value is None:
         return default
     return value.lower() in {"true", "yes", "1"}
+
+
+def _clean_channel(value: str | None) -> str | None:
+    """Normalise a frontmatter `discord_channel` into a channel id or None.
+
+    A channel id is all digits. Anything else — a placeholder left in the
+    file, a channel *name* somebody typed instead of the id — is not one,
+    and is dropped rather than carried forward as a destination that would
+    404 on the first fire.
+    """
+    if value is None:
+        return None
+    cleaned = value.strip()
+    return cleaned if cleaned.isdigit() else None
 
 
 def _validate_cron(cron: str) -> bool:
@@ -149,6 +166,7 @@ def discover_scheduled_skills(minds_root: Path) -> list[ScheduledSkill]:
             timezone=fm.get("schedule_timezone", DEFAULT_TIMEZONE),
             voice=_coerce_bool(fm.get("voice"), default=True),
             notify=_coerce_bool(fm.get("notify"), default=True),
+            discord_channel=_clean_channel(fm.get("discord_channel")),
         ))
 
     return found

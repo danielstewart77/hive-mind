@@ -12,12 +12,15 @@ import sys
 import tempfile
 import time
 
+from pathlib import Path
+
 import aiohttp
 import discord
 from discord import app_commands
 
 from config import config
 from core.gateway_client import GatewayClient, get_lock, get_skills, time_ago
+from core.scheduled_skills import discover_scheduled_skills
 from core.hive_logging import configure_logging, log_event
 
 log = configure_logging("hive-mind-discord")
@@ -27,6 +30,7 @@ log = configure_logging("hive-mind-discord")
 # ---------------------------------------------------------------------------
 DISCORD_MSG_LIMIT = 2000
 SERVER_URL = os.environ.get("HIVE_MIND_SERVER_URL", f"http://localhost:{config.server_port}")
+MINDS_ROOT = Path(os.environ.get("MINDS_ROOT", "/usr/src/app/minds"))
 VOICE_SERVER_URL = os.environ.get("VOICE_SERVER_URL", "http://localhost:8422")
 
 # Persistent HTTP session and gateway client (created in setup_hook)
@@ -50,6 +54,39 @@ def _is_allowed_channel(channel_id: int) -> bool:
     if not config.discord_allowed_channels:
         return True
     return channel_id in config.discord_allowed_channels
+
+
+def task_channels(minds_root: Path) -> set[int]:
+    """Channel ids claimed by a scheduled task, read off the skills.
+
+    The skill that posts into a channel is the only thing that knows which
+    channel it is, so the bot asks the same discovery the scheduler does
+    rather than keeping a second list that could disagree with it.
+    """
+    found: set[int] = set()
+    for skill in discover_scheduled_skills(minds_root):
+        if skill.discord_channel:
+            found.add(int(skill.discord_channel))
+    return found
+
+
+def should_handle_message(
+    *, is_dm: bool, mentioned: bool, channel_id: int, task_channel_ids: set[int]
+) -> bool:
+    """Whether an inbound message is addressed to this mind.
+
+    A DM always is. An ordinary guild channel needs an explicit mention,
+    because the bot is one member of a room full of people talking to each
+    other. A task channel is the opposite case: it exists for one
+    conversation with one mind, so requiring an at-mention on every reply
+    would make the continuity the channel was created for cost a keystroke
+    nobody would keep paying.
+    """
+    if is_dm:
+        return True
+    if channel_id in task_channel_ids:
+        return True
+    return mentioned
 
 
 # ---------------------------------------------------------------------------
@@ -546,7 +583,12 @@ async def on_message(message: discord.Message):
         return
 
     is_dm = isinstance(message.channel, discord.DMChannel)
-    if not is_dm and bot.user not in message.mentions:
+    if not should_handle_message(
+        is_dm=is_dm,
+        mentioned=bot.user in message.mentions,
+        channel_id=message.channel.id,
+        task_channel_ids=task_channels(MINDS_ROOT),
+    ):
         return
     if not is_dm and not _is_allowed_channel(message.channel.id):
         return

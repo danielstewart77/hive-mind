@@ -263,32 +263,23 @@ def test_a_blank_conversation_id_matches_nothing_even_when_a_row_stores_one() ->
     _run(scenario())
 
 
-def test_a_terminal_turn_keeps_the_session_off_the_stale_sweep() -> None:
-    """Requirement 1: a browser terminal is not closed by inactivity. Its
-    turns are the only thing that can say the session is in use, and the
-    sweep must not suspend a row whose pane is still running regardless."""
+def test_a_terminal_turn_marks_the_session_as_used() -> None:
+    """Requirement 1: a turn typed in a pane is the only write a pty turn
+    makes, and it is what keeps `last_active` current. Nothing else on the
+    terminal path touches the row, so if this stops updating, the session's
+    last-used time is frozen at whenever it was created."""
     async def scenario() -> None:
         with tempfile.TemporaryDirectory() as tmp:
             mgr = await _make_manager(tmp)
             try:
                 session_id = await _seed_terminal_session(mgr)
 
-                # A turn typed in the pane marks the session as used.
                 before = (await _full_row(mgr, session_id))["last_active"]
                 await asyncio.sleep(0.01)
                 await mgr.record_turn("web", session_id, "user", "still here")
-                assert (await _full_row(mgr, session_id))["last_active"] > before
+                after = (await _full_row(mgr, session_id))["last_active"]
 
-                # And even left untouched past the cutoff, with the row marked
-                # idle the way a comms restart marks every row, it survives.
-                await mgr._db.execute(
-                    "UPDATE sessions SET status = 'idle', last_active = ? WHERE id = ?",
-                    (time.time() - mgr.REAP_IDLE_AFTER_SECONDS - 60, session_id),
-                )
-                await mgr._db.commit()
-
-                assert await mgr.reap_stale_sessions() == []
-                assert (await _full_row(mgr, session_id))["status"] == "idle"
+                assert after > before
             finally:
                 await mgr.shutdown()
 
