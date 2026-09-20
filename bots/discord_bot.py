@@ -56,18 +56,60 @@ def _is_allowed_channel(channel_id: int) -> bool:
     return channel_id in config.discord_allowed_channels
 
 
-def task_channels(minds_root: Path) -> set[int]:
-    """Channel ids claimed by a scheduled task, read off the skills.
+# Discovery walks every mind's skill tree and reads every SKILL.md. That is
+# milliseconds, but it would run inside the event loop on every inbound
+# message, so the answer is held briefly. A channel added to a skill starts
+# working within the window rather than needing a restart.
+_TASK_CHANNEL_TTL_SECONDS = 60.0
+# Keyed on the arguments, not just the time: a cache that ignored them
+# would answer a question about one mind's channels with another's.
+_task_channel_cache: dict[tuple[str, str], tuple[float, set[int]]] = {}
+
+
+def task_channels(minds_root: Path, mind_id: str = "") -> set[int]:
+    """Channel ids claimed by a scheduled task of this mind.
 
     The skill that posts into a channel is the only thing that knows which
     channel it is, so the bot asks the same discovery the scheduler does
     rather than keeping a second list that could disagree with it.
+
+    Scoped to this mind when `MIND_ID` is set. Every mind's skills live
+    under one root, and a channel claimed by another mind would otherwise
+    become mention-free here — so this bot would be nudged into running a
+    skill it does not have, and would answer something plausible into that
+    channel daily.
     """
+    now = time.monotonic()
+    key = (str(minds_root), mind_id)
+    cached = _task_channel_cache.get(key)
+    if cached and now - cached[0] < _TASK_CHANNEL_TTL_SECONDS:
+        return cached[1]
+
     found: set[int] = set()
     for skill in discover_scheduled_skills(minds_root):
-        if skill.discord_channel:
-            found.add(int(skill.discord_channel))
+        if not skill.discord_channel:
+            continue
+        if mind_id and skill.mind_id != mind_id:
+            continue
+        found.add(int(skill.discord_channel))
+    _task_channel_cache[key] = (now, found)
     return found
+
+
+def conversation_channel_id(channel, task_channel_ids: set[int]) -> int:
+    """The channel whose conversation a message belongs to.
+
+    A thread has its own id, so a reply threaded under a briefing would
+    otherwise start a second conversation holding none of the history the
+    reply is about — and the mind would answer it coherently while having
+    no idea which briefing was meant. A thread hanging off a task channel
+    is folded into that channel; every other thread keeps its own id, since
+    a thread in an ordinary channel is genuinely its own topic.
+    """
+    parent_id = getattr(channel, "parent_id", None)
+    if parent_id is not None and parent_id in task_channel_ids:
+        return parent_id
+    return channel.id
 
 
 def should_handle_message(
@@ -81,6 +123,11 @@ def should_handle_message(
     conversation with one mind, so requiring an at-mention on every reply
     would make the continuity the channel was created for cost a keystroke
     nobody would keep paying.
+
+    A task channel also stands outside `discord_allowed_channels`. A skill
+    naming a channel it posts into is a stronger statement of intent than a
+    list somebody has to remember to update, and a channel receiving a
+    briefing nobody may answer is the worst of both.
     """
     if is_dm:
         return True
@@ -360,7 +407,12 @@ class HiveMindBot(discord.Client):
     async def setup_hook(self):
         global http, gateway
         http = aiohttp.ClientSession()
-        gateway = GatewayClient(http, SERVER_URL, "discord")
+        # MIND_ID is the broker's key. Without it the client falls back to
+        # the literal "ada", which is a display name and matches no row, so
+        # every session the bot tried to create 500'd on model resolution.
+        gateway = GatewayClient(
+            http, SERVER_URL, "discord", mind_id=os.getenv("MIND_ID", "") or "ada"
+        )
         await self.tree.sync()
         log.info("Slash commands synced")
 
@@ -583,14 +635,20 @@ async def on_message(message: discord.Message):
         return
 
     is_dm = isinstance(message.channel, discord.DMChannel)
+    task_channel_ids = task_channels(MINDS_ROOT, os.getenv("MIND_ID", ""))
+    channel_id = conversation_channel_id(message.channel, task_channel_ids)
     if not should_handle_message(
         is_dm=is_dm,
         mentioned=bot.user in message.mentions,
-        channel_id=message.channel.id,
-        task_channel_ids=task_channels(MINDS_ROOT),
+        channel_id=channel_id,
+        task_channel_ids=task_channel_ids,
     ):
         return
-    if not is_dm and not _is_allowed_channel(message.channel.id):
+    if (
+        not is_dm
+        and channel_id not in task_channel_ids
+        and not _is_allowed_channel(channel_id)
+    ):
         return
 
     content = message.content
@@ -601,7 +659,6 @@ async def on_message(message: discord.Message):
     if not content:
         return
 
-    channel_id = message.channel.id
     lock = get_lock(channel_id)
 
     if lock.locked():

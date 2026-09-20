@@ -185,6 +185,24 @@ Telegram's send API directly with the bot token, bypassing the bot process
 entirely. The Discord equivalent (`POST /channels/{id}/messages` with the
 bot token) is the same shape and is the obvious counterpart.
 
+## Requirements
+
+1. The day's briefing appears in a Discord channel at its scheduled time.
+2. It does not also arrive in Telegram.
+3. It lands in the conversation that already holds the previous briefings
+   and everything Daniel said back to them.
+4. Daniel can type in that channel without at-mentioning the mind, and the
+   answer lands in the same conversation.
+5. A voice rendering arrives in the channel as playable audio when it can be
+   produced, and its absence never costs the briefing.
+6. What appears in the channel is the briefing. The message that told the
+   session to run the skill does not.
+7. No session is ever ended by a timer. Only an explicit end ends one.
+8. A channel with no session yet gets one on the first fire, bound to it;
+   every later fire reuses that one.
+9. A refused post is reported as a failure and never as a completion.
+10. Every other scheduled task keeps behaving exactly as it does now.
+
 ## Sequencing
 
 The 7am schedule goes first, alone. It proves the whole chain — a session
@@ -219,6 +237,32 @@ Bitcoin alerts follow, one at a time, once it has run for a week.
   until something else prunes them. Accepted knowingly: the reaper's second
   job was keeping that set small, and killing conversations nobody asked it
   to kill was too high a price for it.
+
+- **A failed delivery still happened, as far as the conversation knows.**
+  The session is not killed, so the briefing is in the transcript whether
+  or not Discord accepted it. The next fire — which this design wants
+  reading back over the last few posts — can reference something Daniel
+  never saw. One dropped post becomes ongoing false context, which is the
+  accumulate decision's bill arriving.
+
+- **A binding that can no longer be resumed never resets itself.** The
+  reaper's suspend was also the only path that dropped an
+  `active_sessions` row automatically. If a channel's session becomes
+  unresumable — a mind rebuilt onto a fresh volume, its transcript gone —
+  the lookup keeps returning it, every fire fails on respawn, and the
+  channel goes quiet for good. Nothing validates that a resolved session is
+  usable, only that it is bound.
+
+- **Two creators can race for one channel's binding.** The lookup and the
+  create are not one transaction. A cron firing at the same second as
+  Daniel's first message in a channel with no session yet produces two
+  sessions; the last write wins the binding and the briefing lands in the
+  loser. The same applies if two skills ever share a channel.
+
+- **Adoption detaches the channel.** A `/switch` that picks the
+  conversation up in Telegram or the browser terminal rewrites `owner_type`
+  and drops the discord binding, so the next fire creates a fresh session
+  and the thread's history is stranded.
 
 - **The rotation threshold has a ceiling but no floor.** `_threshold_for_model`
   picks by family (300k Opus, 100k Sonnet) and falls back to

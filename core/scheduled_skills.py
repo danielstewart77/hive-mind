@@ -93,7 +93,9 @@ def _clean_channel(value: str | None) -> str | None:
     if value is None:
         return None
     cleaned = value.strip()
-    return cleaned if cleaned.isdigit() else None
+    # `isdigit` alone is true of superscripts and fullwidth forms, which
+    # either raise on int() or address a channel that does not exist.
+    return cleaned if cleaned.isascii() and cleaned.isdigit() else None
 
 
 def _validate_cron(cron: str) -> bool:
@@ -136,8 +138,13 @@ def discover_scheduled_skills(minds_root: Path) -> list[ScheduledSkill]:
             continue
 
         try:
-            text = skill_md.read_text()
-        except OSError as exc:
+            text = skill_md.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            # A decode error is not an OSError. One smart quote pasted in
+            # from a word processor would otherwise raise out of discovery
+            # — which runs on the Discord bot's inbound path, where it
+            # makes the bot silently deaf in every channel, and in the
+            # scheduler's boot, where it is a restart loop.
             log.warning("Could not read %s: %s", skill_md, exc)
             continue
 
