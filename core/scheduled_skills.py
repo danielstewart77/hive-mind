@@ -46,6 +46,9 @@ class ScheduledSkill:
     timezone: str
     voice: bool
     notify: bool
+    discord_channel: str | None = None  # when set, the fire is a nudge into the
+                          # session bound to this Discord channel and the
+                          # response is posted there instead of Telegram
     instructions_path: str | None = None  # when set, scheduler reads at fire time
     command: tuple[str, ...] | None = None  # when set, scheduler runs subprocess
                           # instead of dispatching a turn to a mind. Tasks
@@ -77,6 +80,22 @@ def _coerce_bool(value: str | None, default: bool) -> bool:
     if value is None:
         return default
     return value.lower() in {"true", "yes", "1"}
+
+
+def _clean_channel(value: str | None) -> str | None:
+    """Normalise a frontmatter `discord_channel` into a channel id or None.
+
+    A channel id is all digits. Anything else — a placeholder left in the
+    file, a channel *name* somebody typed instead of the id — is not one,
+    and is dropped rather than carried forward as a destination that would
+    404 on the first fire.
+    """
+    if value is None:
+        return None
+    cleaned = value.strip()
+    # `isdigit` alone is true of superscripts and fullwidth forms, which
+    # either raise on int() or address a channel that does not exist.
+    return cleaned if cleaned.isascii() and cleaned.isdigit() else None
 
 
 def _validate_cron(cron: str) -> bool:
@@ -119,8 +138,13 @@ def discover_scheduled_skills(minds_root: Path) -> list[ScheduledSkill]:
             continue
 
         try:
-            text = skill_md.read_text()
-        except OSError as exc:
+            text = skill_md.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            # A decode error is not an OSError. One smart quote pasted in
+            # from a word processor would otherwise raise out of discovery
+            # — which runs on the Discord bot's inbound path, where it
+            # makes the bot silently deaf in every channel, and in the
+            # scheduler's boot, where it is a restart loop.
             log.warning("Could not read %s: %s", skill_md, exc)
             continue
 
@@ -149,6 +173,7 @@ def discover_scheduled_skills(minds_root: Path) -> list[ScheduledSkill]:
             timezone=fm.get("schedule_timezone", DEFAULT_TIMEZONE),
             voice=_coerce_bool(fm.get("voice"), default=True),
             notify=_coerce_bool(fm.get("notify"), default=True),
+            discord_channel=_clean_channel(fm.get("discord_channel")),
         ))
 
     return found

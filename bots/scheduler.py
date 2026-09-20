@@ -5,10 +5,17 @@ or `.codex/skills/*/SKILL.md` (via frontmatter `schedule:` field), runs
 them on their cron, and delivers the result as a voice note (with text
 fallback) via Telegram.
 
-Each fire creates a fresh session, sends the skill invocation, reads the
-response, and kills the session. Sessions are not resumed across fires —
-cross-day continuity comes from the mind's persistent memory layer
-(knowledge graph, vector store), not from chat history.
+A task with no `discord_channel` creates a fresh session, sends the skill
+invocation, reads the response, kills the session, and delivers over
+Telegram. Continuity for those comes from the mind's persistent memory
+layer, not from chat history.
+
+A task that names a `discord_channel` works the other way round. The fire
+is a nudge into the session already bound to that channel — the same
+binding the Discord bot uses, `("discord", "<channel_id>")` in
+`active_sessions` — so the conversation holds every previous fire and
+everything Daniel said back. The session is never killed, and the response
+is posted into the channel rather than sent to Telegram.
 """
 
 import asyncio
@@ -22,6 +29,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from config import config
+from core import discord_delivery
 from core.hive_logging import configure_logging, log_event
 from core.scheduled_skills import (
     ScheduledSkill,
@@ -63,6 +71,13 @@ SCHEDULER_TASKS_YAML = Path(os.environ.get(
 COMMS_BEARER_TOKEN = os.environ.get("COMMS_BEARER_TOKEN", "")
 GATEWAY_AUTH_HEADERS = (
     {"Authorization": f"Bearer {COMMS_BEARER_TOKEN}"} if COMMS_BEARER_TOKEN else {}
+)
+
+# Longest silence a channel fire tolerates between stream events before it
+# gives up. Generous — a briefing calls two calendars and a reminder skill —
+# but finite, because the alternative is a job slot held for ever.
+CHANNEL_FIRE_READ_TIMEOUT_SECONDS = float(
+    os.environ.get("CHANNEL_FIRE_READ_TIMEOUT_SECONDS", "600")
 )
 
 VOICE_SURFACE_PROMPT = (
@@ -141,15 +156,147 @@ async def _create_session(http: aiohttp.ClientSession, skill: ScheduledSkill, su
     return data["id"]
 
 
-async def _send_message(http: aiohttp.ClientSession, session_id: str, content: str) -> str:
-    """Send a single message and consume the SSE stream into one combined string."""
+async def _ensure_channel_session(
+    http: aiohttp.ClientSession, skill: ScheduledSkill, channel_id: str
+) -> str:
+    """Resolve the session bound to a Discord channel, creating one if absent.
+
+    Deliberately the same two steps `GatewayClient.ensure_session` takes for
+    an inbound Discord message — look for the active binding on
+    ("discord", channel_id), create and bind only when there is none. Any
+    other addressing here would mint a second session for a channel that
+    already had one, and the reply Daniel types would land in whichever of
+    them the bot happened to resolve.
+    """
+    async with http.get(
+        f"{SERVER_URL}/sessions",
+        params={"client_type": "discord", "client_ref": channel_id},
+    ) as resp:
+        if resp.status != 200:
+            # Not "this channel has no session" — "I could not find out". A
+            # bad bearer, or comms restarting on the stroke of the cron,
+            # would otherwise fall through to creating one, and
+            # `INSERT OR REPLACE INTO active_sessions` hands the channel's
+            # binding to an empty conversation. The accumulated thread is
+            # orphaned, Daniel's replies follow the new row, and the fire
+            # reports success.
+            raise RuntimeError(
+                f"Could not resolve the session for channel {channel_id}: "
+                f"HTTP {resp.status}"
+            )
+        for session in await resp.json():
+            if session.get("is_active"):
+                return session["id"]
+
+    owner_ref = str(config.discord_allowed_users[0]) if config.discord_allowed_users else "scheduler"
+    payload = {
+        "owner_type": "discord",
+        "owner_ref": owner_ref,
+        "client_ref": channel_id,
+        "mind_id": skill.mind_id,
+        "surface_prompt": VOICE_SURFACE_PROMPT if skill.voice else DEV_SURFACE_PROMPT,
+    }
+    async with http.post(f"{SERVER_URL}/sessions", json=payload) as resp:
+        data = await resp.json()
+    if "id" not in data:
+        raise RuntimeError(f"Failed to create channel session: {data}")
+    return data["id"]
+
+
+def _nudge(skill: ScheduledSkill) -> str:
+    """The whole of what a channel fire says.
+
+    It names the skill and nothing else. The skill carries its own
+    instructions, so repeating them here would put a copy of them in the
+    conversation on every fire — which is the cost this design exists to
+    avoid, and it compounds daily in a thread that is never reset.
+    """
+    return f"Run your {skill.skill_name} skill now."
+
+
+async def _fire_into_channel(skill: ScheduledSkill, channel_id: str) -> None:
+    """Nudge the channel's session to run the skill and post what comes back.
+
+    The nudge itself never reaches Discord. It is a turn in the
+    conversation, not a message to Daniel — what he sees in the channel is
+    the briefing.
+    """
+    label = f"{skill.mind_name}/{skill.skill_name}"
+    token = discord_delivery.bot_token()
+    if not token:
+        log.error("Cannot deliver %s — no Discord bot token", label)
+        return
+
+    timeout = aiohttp.ClientTimeout(total=840)
+    async with aiohttp.ClientSession(timeout=timeout, headers=GATEWAY_AUTH_HEADERS) as http:
+        try:
+            session_id = await _ensure_channel_session(http, skill, channel_id)
+            response = await _send_message(
+                http, session_id, _nudge(skill),
+                read_timeout=CHANNEL_FIRE_READ_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            log.exception("Gateway failure for %s", label)
+            return
+
+    audio: bytes | None = None
+    if skill.voice:
+        try:
+            async with aiohttp.ClientSession() as voice_http:
+                audio = await _tts(voice_http, response, skill.mind_id)
+        except Exception:
+            # Text is the delivery; the voice note is an addition to it.
+            log.exception("TTS failed for %s — posting text only", label)
+
+    try:
+        async with aiohttp.ClientSession() as http:
+            await discord_delivery.post_to_channel(http, token, channel_id, response)
+    except Exception:
+        log.exception("Discord delivery failed for %s", label)
+        log_event(log, "scheduled_skill.delivery_failed", mind_id=skill.mind_id,
+                  mind_name=skill.mind_name, skill_name=skill.skill_name,
+                  channel_id=channel_id)
+        return
+
+    delivered_voice = False
+    if audio:
+        # A separate request, after the text has landed. Attach Files is its
+        # own per-channel permission and an ogg can be refused on size, so
+        # riding the audio on the briefing's last chunk means one 403 costs
+        # the tail of the briefing — or, on a single-chunk one, all of it.
+        try:
+            async with aiohttp.ClientSession() as http:
+                await discord_delivery.post_audio(http, token, channel_id, audio)
+            delivered_voice = True
+        except Exception:
+            log.exception("Voice delivery failed for %s (text already posted)", label)
+
+    log_event(log, "scheduled_skill.completed", mind_id=skill.mind_id,
+              mind_name=skill.mind_name, skill_name=skill.skill_name,
+              response_chars=len(response or ""), notified=True,
+              channel_id=channel_id, voice=delivered_voice)
+
+
+async def _send_message(
+    http: aiohttp.ClientSession, session_id: str, content: str,
+    read_timeout: float | None = None,
+) -> str:
+    """Send a single message and consume the SSE stream into one combined string.
+
+    `read_timeout` bounds the gap between events, not the turn. A channel
+    fire passes one because APScheduler runs a job at `max_instances=1`: a
+    turn that never ends holds the slot forever, so every later fire of that
+    skill is skipped — while comms holds the session lock and the bot holds
+    the channel lock, so Daniel typing gets "still processing" indefinitely.
+    The channel dies whole, and the only evidence is a log line.
+    """
     texts: list[str] = []
     result_fallback = ""
     events_seen = 0
     event_type_counts: dict[str, int] = {}
     last_event_type: str | None = None
     json_decode_errors = 0
-    sse_timeout = aiohttp.ClientTimeout(total=0, sock_read=0)
+    sse_timeout = aiohttp.ClientTimeout(total=0, sock_read=read_timeout or 0)
     async with http.post(
         f"{SERVER_URL}/sessions/{session_id}/message",
         json={"content": content},
@@ -181,7 +328,7 @@ async def _send_message(http: aiohttp.ClientSession, session_id: str, content: s
                 elif etype == "result":
                     result_fallback = event.get("result", "")
     combined = "\n\n".join(texts) or result_fallback
-    if not combined:
+    if not combined.strip():
         raise RuntimeError(
             f"Empty response from session {session_id}: "
             f"events_seen={events_seen}, types={event_type_counts}, "
@@ -234,6 +381,13 @@ async def fire_skill(skill: ScheduledSkill) -> None:
     """Fire a single scheduled skill: fresh session → run → kill → deliver."""
     if skill.command:
         await _fire_command(skill)
+        return
+    if skill.discord_channel:
+        log_event(log, "scheduled_skill.started", mind_id=skill.mind_id,
+                  mind_name=skill.mind_name, skill_name=skill.skill_name,
+                  notify=True, voice=skill.voice,
+                  channel_id=skill.discord_channel)
+        await _fire_into_channel(skill, skill.discord_channel)
         return
     label = f"{skill.mind_name}/{skill.skill_name}"
     log_event(log, "scheduled_skill.started", mind_id=skill.mind_id,
@@ -310,7 +464,10 @@ def _skill_job_id(skill: ScheduledSkill) -> str:
     """Encode skill identity + schedule into the job id, so any change to the
     schedule produces a different job id and triggers a clean replace.
     """
-    return f"{SKILL_JOB_PREFIX}{skill.mind_name}/{skill.skill_name}|{skill.cron}|{skill.timezone}|v={skill.voice}|n={skill.notify}"
+    return (
+        f"{SKILL_JOB_PREFIX}{skill.mind_name}/{skill.skill_name}|{skill.cron}"
+        f"|{skill.timezone}|v={skill.voice}|n={skill.notify}|c={skill.discord_channel or ''}"
+    )
 
 
 def _reconcile_skill_jobs(scheduler: AsyncIOScheduler) -> tuple[int, int, int]:

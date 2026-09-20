@@ -210,10 +210,10 @@ class SessionManager:
     # Idle interval after which the observer event stream emits a ping.
     # Must stay under intermediary idle timeouts (Cloudflare ~100s).
     EVENT_HEARTBEAT_SECONDS = 20.0
-    # Sessions idle longer than this are suspended. Rotation and explicit
-    # kills close their own sessions, while inactivity remains resumable.
-    REAP_IDLE_AFTER_SECONDS = 7 * 86400
-    REAP_INTERVAL_SECONDS = 3600.0
+    # How often the live feed drops its per-conversation text buffers for
+    # sessions that have finished. Nothing else runs on a timer here: a
+    # session ends when somebody ends it, never because it went quiet.
+    DASHBOARD_SWEEP_INTERVAL_SECONDS = 3600.0
     # How long a stored carry-forward stays applicable. Long enough that the
     # case it exists for — a pane that died before its first turn, recovered
     # whenever the user next opens a tile — is comfortably covered; short
@@ -232,7 +232,7 @@ class SessionManager:
         #: and with an explicit notion of which conversations are producing —
         #: none of which the per-session observer stream provides.
         self.dashboard = LiveFeed()
-        self._reaper_task: asyncio.Task | None = None
+        self._dashboard_sweep_task: asyncio.Task | None = None
         self.broker_db = None  # Set by server.py lifespan; broker.minds IS the mind registry
 
     # ------------------------------------------------------------------
@@ -353,14 +353,14 @@ class SessionManager:
             "UPDATE sessions SET status = 'idle' WHERE status = 'running'"
         )
         await self._db.commit()
-        self._reaper_task = asyncio.create_task(self._reap_loop())
+        self._dashboard_sweep_task = asyncio.create_task(self._dashboard_sweep_loop())
         log.info("Session manager started (db=%s)", db_path)
 
     async def shutdown(self):
         """Kill all subprocesses and close DB."""
-        if self._reaper_task:
-            self._reaper_task.cancel()
-            self._reaper_task = None
+        if self._dashboard_sweep_task:
+            self._dashboard_sweep_task.cancel()
+            self._dashboard_sweep_task = None
         # Kill RC subprocesses that may not have a corresponding main process
         for sid in list(self._rc_procs):
             await self.kill_rc_process(sid)
@@ -370,58 +370,21 @@ class SessionManager:
             await self._db.close()
         log.info("Session manager shut down")
 
-    async def _reap_loop(self):
-        """Periodically sweep abandoned sessions to 'suspended'.
+    async def _dashboard_sweep_loop(self):
+        """Periodically drop live-feed buffers for conversations that ended.
 
-        First sweep runs immediately so a restart clears any backlog of
-        ghosts without waiting an interval.
+        `forget` covers the sessions somebody closed; this covers the far
+        commoner case of one that simply finished, which otherwise
+        accumulates for the life of the process.
         """
         while True:
             try:
-                await self.reap_stale_sessions()
-                # The live feed holds a text buffer per conversation it has
-                # seen. `forget` covers the sessions somebody closed; this
-                # covers the far commoner case of one that simply finished,
-                # which otherwise accumulates for the life of the process.
                 self.dashboard.sweep()
             except asyncio.CancelledError:
                 raise
             except Exception:
-                log.exception("Session reaper sweep failed")
-            await asyncio.sleep(self.REAP_INTERVAL_SECONDS)
-
-    async def reap_stale_sessions(self) -> list[str]:
-        """Suspend idle sessions untouched for REAP_IDLE_AFTER_SECONDS.
-
-        A session with a live tracked subprocess is skipped no matter how
-        old its last_active is — liveness beats the timestamp.
-
-        Browser terminals are exempt outright. This process tracks no
-        subprocess for one — the harness lives in the mind's tmux, out of
-        reach of `self._procs` — so the liveness check above cannot see that
-        a pane is running, and suspending the row closes the next attach with
-        4411 while the conversation carries on behind it. A terminal ends when
-        it is explicitly closed, and nothing else gets to end it.
-        """
-        cutoff = time.time() - self.REAP_IDLE_AFTER_SECONDS
-        rows = await self._db.execute_fetchall(
-            "SELECT id FROM sessions WHERE status = 'idle' AND last_active < ? "
-            "AND owner_ref != 'terminal'",
-            (cutoff,),
-        )
-        stale = [r["id"] for r in rows if r["id"] not in self._procs]
-        for session_id in stale:
-            await self._db.execute(
-                "UPDATE sessions SET status = 'suspended' WHERE id = ?", (session_id,)
-            )
-            await self._db.execute(
-                "DELETE FROM active_sessions WHERE session_id = ?", (session_id,)
-            )
-        if stale:
-            await self._db.commit()
-            log.info("Reaped %d stale idle session(s): %s", len(stale),
-                     ", ".join(s[:8] for s in stale))
-        return stale
+                log.exception("Dashboard sweep failed")
+            await asyncio.sleep(self.DASHBOARD_SWEEP_INTERVAL_SECONDS)
 
     # ------------------------------------------------------------------
     # Session CRUD
@@ -1629,7 +1592,7 @@ class SessionManager:
             now_str = datetime.now(tz).strftime("%A, %B %-d, %Y at %-I:%M %p %Z")
             stamped_content = f"[{now_str}]\n{content}"
 
-            # Mark active NOW so the idle reaper doesn't kill us mid-response
+            # Mark this conversation active and running for the duration
             await self._db.execute(
                 "UPDATE sessions SET last_active = ?, status = 'running' WHERE id = ?",
                 (time.time(), session_id),

@@ -42,9 +42,9 @@ async def _make_manager(tmp: str) -> SessionManager:
     os.environ["SESSIONS_DB_PATH"] = os.path.join(tmp, "sessions.db")
     mgr = SessionManager()
     await mgr.start()
-    if mgr._reaper_task:
-        mgr._reaper_task.cancel()
-        mgr._reaper_task = None
+    if mgr._dashboard_sweep_task:
+        mgr._dashboard_sweep_task.cancel()
+        mgr._dashboard_sweep_task = None
     return mgr
 
 
