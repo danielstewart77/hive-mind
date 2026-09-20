@@ -13,6 +13,41 @@ GATEWAY_URL = os.environ.get("HIVE_MIND_SERVER_URL", os.environ.get("GATEWAY_URL
 logger = logging.getLogger(__name__)
 
 
+BLOCK_SEPARATOR = "\n\n"
+
+
+def collect_response(lines) -> str:
+    """Join a delegated mind's SSE reply into the text it actually wrote.
+
+    One assistant event carries several content blocks, and the break between
+    them is the mind's own paragraphing. Concatenating them bare runs the end
+    of one paragraph into the start of the next.
+    """
+    parts: list[str] = []
+    result_fallback = ""
+    for line in lines:
+        if not line or not line.startswith("data: "):
+            continue
+        try:
+            event = json.loads(line.removeprefix("data: "))
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("parent_tool_use_id"):
+            # A delegate of the delegate. Not the mind we asked.
+            continue
+        if event.get("type") == "assistant":
+            for block in event.get("message", {}).get("content", []):
+                if block.get("type") == "text" and block.get("text"):
+                    parts.append(block["text"])
+        elif event.get("type") == "result":
+            result_fallback = event.get("result", "")
+
+    joined = BLOCK_SEPARATOR.join(p.rstrip("\n") for p in parts)
+    return joined or result_fallback
+
+
 def delegate_to_mind(
     mind_id: str,
     message: str,
@@ -66,23 +101,9 @@ def delegate_to_mind(
         msg_resp.raise_for_status()
 
         # Collect response
-        response_text = ""
-        for line in msg_resp.iter_lines(decode_unicode=True):
-            if not line or not line.startswith("data: "):
-                continue
-            try:
-                event = json.loads(line.removeprefix("data: "))
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(event, dict):
-                continue
-            if event.get("type") == "assistant":
-                for block in event.get("message", {}).get("content", []):
-                    if block.get("type") == "text":
-                        response_text += block.get("text", "")
-            elif event.get("type") == "result":
-                if not response_text:
-                    response_text = event.get("result", "")
+        response_text = collect_response(
+            msg_resp.iter_lines(decode_unicode=True)
+        )
 
         return json.dumps({
             "mind_id": mind_id,
