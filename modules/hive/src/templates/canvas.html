@@ -62,6 +62,19 @@
   }
   .draw-tool-send:disabled { opacity: 0.5; cursor: default; }
 
+  .draw-btn-fit {
+    font-family: 'Fira Code', monospace;
+    font-size: 0.72rem;
+    padding: 0.18rem 0.55rem;
+    background: transparent;
+    border: 1px solid #c9a84c33;
+    color: #c9a84c77;
+    border-radius: 3px;
+    cursor: pointer;
+    line-height: 1.6;
+  }
+  .draw-btn-fit:hover { color: #c9a84c; border-color: #c9a84c66; background: #c9a84c0d; }
+
   .draw-spacer { flex: 1; }
 
   .draw-btn-clear {
@@ -146,6 +159,21 @@
     display: block;
   }
 
+  /* Zoomed far enough out that authored stroke widths fall below a device
+     pixel, which reads as a drawing with lines missing rather than a small
+     one. Hold the nominal widths in screen space instead. */
+  #draw-svg.hairline path,
+  #draw-svg.hairline #selection-rect { vector-effect: non-scaling-stroke; }
+
+  /* Phone: the toolbar is wider than the screen, and a row that cannot wrap
+     pushes the fit and send buttons off the edge where nothing can reach. */
+  @media (max-width: 660px) {
+    .draw-toolbar { height: auto; flex-wrap: wrap; gap: 0.3rem; padding: 0.3rem 0.5rem; }
+    .draw-spacer { flex: 0 0 auto; }
+    .draw-nav-count { min-width: 4.8rem; }
+    .draw-tool, .draw-btn-fit, .draw-btn-clear { font-size: 0.68rem; padding: 0.16rem 0.4rem; }
+  }
+
   /* Floating text input when placing a text box */
   .canvas-textbox-input {
     position: absolute;
@@ -188,13 +216,15 @@
       <button class="draw-nav-arrow" id="slide-next" title="Next slide">&#9654;</button>
     </div>
     {% endif %}
+    <button class="draw-btn-fit" id="draw-fit" title="Fit this slide to the screen">&#9635; fit</button>
     <button class="draw-tool draw-tool-send" id="draw-submit" title="Send the board to Skippy for review">&#9993; send to Skippy</button>
     <button class="draw-btn-clear" id="draw-clear">clear</button>
     <span class="draw-conn-dot" id="draw-conn" title="disconnected"></span>
   </div>
 
   <div class="draw-surface" id="draw-surface">
-    <svg id="draw-svg" xmlns="http://www.w3.org/2000/svg">
+    <svg id="draw-svg" xmlns="http://www.w3.org/2000/svg"
+         viewBox="0 0 1600 900" preserveAspectRatio="xMidYMid meet">
       <g id="draw-elements"></g>
       <rect id="selection-rect" x="0" y="0" width="0" height="0"/>
       <g id="draw-live"></g>
@@ -247,9 +277,97 @@
     return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
   }
 
+  // The board is authored in a fixed pixel space and the SVG now carries a
+  // viewBox, so client pixels and board units are no longer the same thing.
+  // Every pointer position has to come back through the screen CTM or a
+  // stroke lands somewhere the user did not touch.
   function svgPt(e) {
+    const m = svg.getScreenCTM();
+    if (!m) {
+      const r = svg.getBoundingClientRect();
+      return { x: e.clientX - r.left, y: e.clientY - r.top };
+    }
+    const p = svg.createSVGPoint();
+    p.x = e.clientX; p.y = e.clientY;
+    const u = p.matrixTransform(m.inverse());
+    return { x: u.x, y: u.y };
+  }
+
+  function userToClient(pt) {
+    const m = svg.getScreenCTM();
+    if (!m) return { x: pt.x, y: pt.y };
+    const p = svg.createSVGPoint();
+    p.x = pt.x; p.y = pt.y;
+    const c = p.matrixTransform(m);
+    return { x: c.x, y: c.y };
+  }
+
+  // ── View box ──────────────────────────────────────────────────────────────
+  // Without one the SVG renders the board 1:1, so a phone shows the top-left
+  // corner of it and no gesture reaches the rest.
+  const BOARD = { x: 0, y: 0, w: 1600, h: 900 };
+  let view = Object.assign({}, BOARD);
+  let viewPinned = false;       // the user has zoomed or panned by hand
+  let fitTimer = null;
+
+  function applyView() {
+    svg.setAttribute('viewBox', `${view.x} ${view.y} ${view.w} ${view.h}`);
     const r = svg.getBoundingClientRect();
-    return { x: e.clientX - r.left, y: e.clientY - r.top };
+    svg.classList.toggle('hairline', r.width > 0 && r.width / view.w < 0.55);
+  }
+
+  function contentBox() {
+    let b = null;
+    elementMap.forEach(entry => {
+      if (slideOf(entry.data) !== currentSlide) return;
+      let x;
+      try { x = entry.svgEl.getBBox(); } catch (err) { return; }
+      if (!x || (!x.width && !x.height)) return;
+      b = b ? {
+        x0: Math.min(b.x0, x.x), y0: Math.min(b.y0, x.y),
+        x1: Math.max(b.x1, x.x + x.width), y1: Math.max(b.y1, x.y + x.height)
+      } : { x0: x.x, y0: x.y, x1: x.x + x.width, y1: x.y + x.height };
+    });
+    return b;
+  }
+
+  function fitView(force) {
+    if (drawing) return;
+    if (viewPinned && !force) return;
+    viewPinned = false;
+    const b = contentBox();
+    if (!b) { view = Object.assign({}, BOARD); applyView(); return; }
+    const w = Math.max(b.x1 - b.x0, 40), h = Math.max(b.y1 - b.y0, 40);
+    const px = w * 0.03 + 12, py = h * 0.03 + 12;
+    view = { x: b.x0 - px, y: b.y0 - py, w: w + px * 2, h: h + py * 2 };
+    const r = svg.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0) {
+      const va = r.width / r.height;
+      if (view.w / view.h < va) {
+        const nw = view.h * va; view.x -= (nw - view.w) / 2; view.w = nw;
+      } else {
+        const nh = view.w / va; view.y -= (nh - view.h) / 2; view.h = nh;
+      }
+    }
+    applyView();
+  }
+
+  function scheduleFit() {
+    clearTimeout(fitTimer);
+    fitTimer = setTimeout(() => fitView(false), 180);
+  }
+
+  function zoomBy(clientX, clientY, factor) {
+    const before = svgPt({ clientX, clientY });
+    const nw = Math.min(BOARD.w * 60, Math.max(30, view.w * factor));
+    view.h *= nw / view.w;
+    view.w = nw;
+    applyView();
+    const after = svgPt({ clientX, clientY });
+    view.x += before.x - after.x;
+    view.y += before.y - after.y;
+    viewPinned = true;
+    applyView();
   }
 
   function touchSvgPt(e) {
@@ -300,6 +418,7 @@
     if (navCount) navCount.textContent = `slide ${currentSlide} of ${total}`;
     if (navPrev) navPrev.disabled = currentSlide <= 1;
     if (navNext) navNext.disabled = currentSlide >= total;
+    scheduleFit();
   }
 
   function clearSlideLocally(n) {
@@ -317,6 +436,7 @@
     currentSlide = target;
     clearSelection();
     refreshDeck();
+    fitView(true);
   }
 
   if (navPrev) navPrev.addEventListener('click', () => goSlide(currentSlide - 1));
@@ -326,6 +446,7 @@
   document.querySelectorAll('.draw-tool').forEach(btn => {
     btn.addEventListener('click', function () {
       const t = this.dataset.tool;
+      if (!t) return;            // send, fit: on the row, not tools
       if (!CAN_DRAW && t !== 'select') return;
       if (t === 'attach') {
         fileInput.click();
@@ -629,8 +750,10 @@
     const input = document.createElement('input');
     input.type = 'text';
     input.className = 'canvas-textbox-input';
-    input.style.left  = pt.x + 'px';
-    input.style.top   = (pt.y - 16) + 'px';
+    const sr = surface.getBoundingClientRect();
+    const cp = userToClient(pt);
+    input.style.left  = (cp.x - sr.left) + 'px';
+    input.style.top   = (cp.y - sr.top - 16) + 'px';
     input.style.color = MY_COLOR;
     input.style.borderColor = MY_COLOR;
     surface.appendChild(input);
@@ -682,8 +805,59 @@
     if (tool === 'pen' && drawing) penUp();
   });
 
+  // ── Zoom and pan ──────────────────────────────────────────────────────────
+  // A reader who cannot draw still has to be able to see, so none of this is
+  // behind CAN_DRAW.
+  let gesture = null;
+  let panFrom = null;
+
+  function pinchOf(e) {
+    const a = e.touches[0], b = e.touches[1];
+    return {
+      cx: (a.clientX + b.clientX) / 2,
+      cy: (a.clientY + b.clientY) / 2,
+      d: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY)
+    };
+  }
+
+  function abortStroke() {
+    if (!drawing) return;
+    drawing = false;
+    liveGroup.innerHTML = '';
+    livePath = null; livePoints = []; livePid = null;
+  }
+
+  surface.addEventListener('wheel', e => {
+    e.preventDefault();
+    zoomBy(e.clientX, e.clientY, e.deltaY > 0 ? 1.12 : 1 / 1.12);
+  }, { passive: false });
+
+  const fitBtn = document.getElementById('draw-fit');
+  if (fitBtn) fitBtn.addEventListener('click', () => fitView(true));
+
+  window.addEventListener('resize', () => {
+    if (viewPinned) applyView(); else fitView(false);
+  });
+  window.addEventListener('orientationchange', () => setTimeout(() => {
+    if (viewPinned) applyView(); else fitView(false);
+  }, 250));
+
   // ── Touch events ──────────────────────────────────────────────────────────
   surface.addEventListener('touchstart', e => {
+    // Two fingers is always the view, never the pen - and it cancels a stroke
+    // the first finger had already begun, so a pinch cannot leave a scribble.
+    if (e.touches.length >= 2) {
+      e.preventDefault();
+      abortStroke();
+      panFrom = null;
+      const t = pinchOf(e);
+      gesture = { d: t.d, anchor: svgPt({ clientX: t.cx, clientY: t.cy }) };
+      return;
+    }
+    if (tool === 'select') {
+      panFrom = { client: { x: e.touches[0].clientX, y: e.touches[0].clientY },
+                  view: { x: view.x, y: view.y } };
+    }
     if (!CAN_DRAW) return;
     if (tool === 'pen') {
       e.preventDefault();
@@ -701,16 +875,55 @@
   }, { passive: false });
 
   surface.addEventListener('touchmove', e => {
+    if (gesture && e.touches.length >= 2) {
+      e.preventDefault();
+      const t = pinchOf(e);
+      if (t.d > 0 && gesture.d > 0) {
+        const nw = Math.min(BOARD.w * 60, Math.max(30, view.w * (gesture.d / t.d)));
+        view.h *= nw / view.w;
+        view.w = nw;
+        gesture.d = t.d;
+      }
+      applyView();
+      const now = svgPt({ clientX: t.cx, clientY: t.cy });
+      view.x += gesture.anchor.x - now.x;
+      view.y += gesture.anchor.y - now.y;
+      viewPinned = true;
+      applyView();
+      return;
+    }
+    if (panFrom && e.touches.length === 1) {
+      e.preventDefault();
+      const r = svg.getBoundingClientRect();
+      if (r.width > 0) {
+        const k = view.w / r.width;
+        view.x = panFrom.view.x - (e.touches[0].clientX - panFrom.client.x) * k;
+        view.y = panFrom.view.y - (e.touches[0].clientY - panFrom.client.y) * k;
+        viewPinned = true;
+        applyView();
+      }
+      return;
+    }
     if (tool !== 'pen') return;
     e.preventDefault();
     penMove(touchSvgPt(e));
   }, { passive: false });
 
   surface.addEventListener('touchend', e => {
+    if (gesture) {
+      e.preventDefault();
+      if (e.touches.length < 2) gesture = null;
+      return;
+    }
+    if (panFrom) { panFrom = null; return; }
     if (tool !== 'pen') return;
     e.preventDefault();
     penUp();
   }, { passive: false });
+
+  surface.addEventListener('touchcancel', () => {
+    gesture = null; panFrom = null; abortStroke();
+  });
 
   // ── File drop ─────────────────────────────────────────────────────────────
   surface.addEventListener('dragover', e => e.preventDefault());
@@ -737,8 +950,7 @@
   fileInput.addEventListener('change', () => {
     if (!CAN_DRAW) { fileInput.value = ''; return; }
     const file = fileInput.files[0];
-    const r = svg.getBoundingClientRect();
-    handleImageFile(file, { x: r.width / 2, y: r.height / 2 });
+    handleImageFile(file, { x: view.x + view.w / 2, y: view.y + view.h / 2 });
     fileInput.value = '';
   });
 
