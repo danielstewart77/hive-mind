@@ -2083,7 +2083,14 @@ async def canvas_submit(request: Request):
 async def canvas(request: Request):
     if not get_current_user_from_request(request):
         return _login_redirect_for(request)
-    return _render_template(request, "canvas.html")
+    response = _render_template(request, "canvas.html")
+    # The page carries its own script inline, so a heuristically cached copy is
+    # a cached application. A phone that fetched this page before a fix keeps
+    # running the broken version across reloads, and there is no gesture on iOS
+    # that reliably bypasses it.
+    response.headers["Cache-Control"] = "no-store, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    return response
 
 
 @app.websocket("/ws/canvas")
