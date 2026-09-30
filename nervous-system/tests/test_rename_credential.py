@@ -141,3 +141,77 @@ def test_a_rename_addressed_to_a_retired_conversation_is_refused_by_the_route(
         json={"name": "Later"},
     )
     assert response.status_code == 409
+
+
+def test_a_hive_with_an_admin_token_but_no_rename_token_says_renaming_is_off(
+    monkeypatch, tmp_path
+) -> None:
+    """R8: the sentence naming the misconfiguration has to be reachable.
+
+    Every hive here has an admin token, so gating the 503 on both tokens being
+    absent made it unreachable: a deployment that simply never set the rename
+    token answered 401 to every surface, and all three of them reported a
+    network fault. Breaks if the guard goes back to requiring both to be unset.
+    """
+    db = str(tmp_path / "sessions.db")
+    monkeypatch.setenv("BROKER_DB_PATH", str(tmp_path / "broker.db"))
+    monkeypatch.setenv("SESSIONS_DB_PATH", db)
+    monkeypatch.setenv("COMMS_BEARER_TOKEN", "service-bearer")
+    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-bearer")
+    monkeypatch.delenv("COMMS_RENAME_TOKEN", raising=False)
+
+    from comms import server as server_module
+
+    importlib.reload(server_module)
+    with TestClient(server_module.app) as test_client:
+        _seed_live_session(db)
+        refused = test_client.put(
+            "/sessions/sess-1/name",
+            headers={**SERVICE, "X-Rename-Token": "some-other-secret"},
+            json={"name": "Health"},
+        )
+        # The operator still gets in with the admin token, which is why the
+        # admin check runs before this one.
+        allowed = test_client.put(
+            "/sessions/sess-1/name",
+            headers={**SERVICE, "X-Rename-Token": "admin-bearer"},
+            json={"name": "Health"},
+        )
+
+    assert refused.status_code == 503
+    assert allowed.status_code == 200
+
+
+def test_every_name_the_hive_holds_is_readable_in_one_call(client) -> None:
+    """The one read path the terminal, the picker and the coach tab all consume.
+
+    An empty answer draws every conversation on the hive unnamed, which is the
+    exact symptom this change exists to fix — and every consumer stubs the
+    gateway, so nothing else in any repo would notice. Breaks if the method
+    stops reading the columns, and breaks if the route is declared after
+    `/sessions/{session_id}`, where the wildcard swallows the literal and
+    `names` is read as a session id.
+    """
+    client.put(
+        "/sessions/sess-1/name",
+        headers={**SERVICE, "X-Rename-Token": "rename-only"},
+        json={"name": "Fittimus Maximus", "color": "#3481cc"},
+    )
+
+    response = client.get("/sessions/names", headers=SERVICE)
+
+    assert response.status_code == 200
+    assert response.json()["sess-1"] == {
+        "name": "Fittimus Maximus", "color": "#3481cc"
+    }
+
+
+def test_the_names_listing_answers_the_service_token(client) -> None:
+    """Reading a name is not the capability worth guarding; changing one is.
+
+    Every surface bot holds the service token and every one of them draws a
+    picker. Breaks if this route is put behind the rename or admin credential,
+    which would leave the picker with nothing to show.
+    """
+    assert client.get("/sessions/names", headers=SERVICE).status_code == 200
+    assert client.get("/sessions/names").status_code == 401

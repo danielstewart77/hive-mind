@@ -42,13 +42,13 @@ class MigrationReport:
     moved: dict[str, str] = field(default_factory=dict)      # old session id -> new
     kept: list[str] = field(default_factory=list)            # no live descendant
     skipped_named: dict[str, str] = field(default_factory=dict)  # target already named
-    ambiguous: list[str] = field(default_factory=list)       # lineage forks
+    forked: list[str] = field(default_factory=list)          # two successors: undecidable
 
     @property
     def total(self) -> int:
         return (
             len(self.moved) + len(self.kept)
-            + len(self.skipped_named) + len(self.ambiguous)
+            + len(self.skipped_named) + len(self.forked)
         )
 
 
@@ -62,19 +62,25 @@ def _descendant(
     session_id: str,
     children: dict[str, list[str]],
     status: dict[str, str],
-) -> str | None:
+) -> tuple[str | None, bool]:
     """The live conversation this one became, following rotation links forward.
 
-    Returns ``None`` when the chain forks, because a confident wrong answer
-    about which of two conversations inherited a name is worse than declining
-    to move it: the name is still in the report, and still on its original
-    row, for a person to place by hand.
+    Returns ``(target, forked)``. ``target`` is ``None`` when there is nowhere
+    live to move to; ``forked`` says whether that was because the lineage
+    genuinely splits in two.
 
-    A chain whose every descendant is closed also yields ``None`` — there is
-    nowhere live to move to. The visited set is not decoration: `rotated_from`
-    is written by code that cannot currently produce a cycle, and a migration
-    that loops forever on a database that acquires one is not a failure anybody
-    gets to read.
+    The two are reported separately because they are different sentences. Most
+    chains that yield no target are perfectly ordinary lineages three rotations
+    deep that simply end on a conversation somebody closed — on the real data,
+    every one of them — and calling that a fork sends the reader hunting a
+    branch the database has never contained.
+
+    A fork is declined rather than guessed: a confident wrong answer about which
+    of two conversations inherited a name is worse than leaving it where a person
+    can place it. The visited set is not decoration — `rotated_from` is written
+    by code that cannot currently produce a cycle, and a migration that loops
+    forever on a database which acquires one is not a failure anybody gets to
+    read.
     """
     seen = {session_id}
     current = session_id
@@ -83,15 +89,17 @@ def _descendant(
         if not next_ids:
             break
         if len(next_ids) > 1:
-            return None
+            return None, True
         nxt = next_ids[0]
         if nxt in seen:
-            return None
+            return None, False
         seen.add(nxt)
         current = nxt
     if current == session_id:
-        return None
-    return current if status.get(current) in LIVE_STATUSES else None
+        return None, False
+    if status.get(current) in LIVE_STATUSES:
+        return current, False
+    return None, False
 
 
 def migrate_terminal_labels(
@@ -118,6 +126,19 @@ def migrate_terminal_labels(
     labels = _open(labels_db_path)
     sessions = _open(sessions_db_path)
     try:
+        # The columns are created here as well as by comms at startup, so this
+        # can run *before* the gateway is restarted onto the new code. That
+        # order matters: a restarted comms answers `/sessions/names` with
+        # nothing until the move has happened, and the browser terminal replaces
+        # its local cache with whatever the server says — so a comms-first
+        # rollout wipes the last copy of every name outside this table during
+        # the gap.
+        for column in ("name TEXT", "color TEXT"):
+            try:
+                sessions.execute(f"ALTER TABLE sessions ADD COLUMN {column}")
+                sessions.commit()
+            except sqlite3.OperationalError:
+                pass  # Column already exists
         try:
             rows = labels.execute(
                 "SELECT session_id, name, color FROM terminal_labels "
@@ -149,12 +170,9 @@ def migrate_terminal_labels(
                 # conversation in every listing that has no transcript behind
                 # it.
                 continue
-            target = _descendant(origin, children, status)
+            target, forked = _descendant(origin, children, status)
             if target is None:
-                if origin in children:
-                    report.ambiguous.append(origin)
-                else:
-                    report.kept.append(origin)
+                (report.forked if forked else report.kept).append(origin)
                 target = origin
             elif target in named:
                 report.skipped_named[origin] = target
@@ -213,7 +231,7 @@ def main(argv: list[str] | None = None) -> int:
         "moved": report.moved,
         "kept": report.kept,
         "skipped_named": report.skipped_named,
-        "ambiguous": report.ambiguous,
+        "forked": report.forked,
     }, indent=2))
     return 0
 

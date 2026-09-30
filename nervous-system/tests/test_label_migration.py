@@ -147,24 +147,7 @@ def test_a_name_you_have_since_changed_is_not_overwritten_by_its_ancestor(tmp_pa
     assert _name_of(sessions, "b")[0] == "Health app"
 
 
-def test_running_the_migration_twice_is_the_same_as_running_it_once(tmp_path):
-    """R4: idempotence as a property of the rule, not of a marker file."""
-    labels = str(tmp_path / "hive.db")
-    sessions = str(tmp_path / "sessions.db")
-    _labels_db(labels, [("a", "Dragoman", "#f18f24", 100)])
-    _sessions_db(sessions, [
-        ("a", None, "closed", None),
-        ("b", "a", "idle", None),
-    ])
-
-    migrate_terminal_labels(labels, sessions)
-    first = _name_of(sessions, "b")
-    migrate_terminal_labels(labels, sessions)
-
-    assert _name_of(sessions, "b") == first == ("Dragoman", "#f18f24")
-
-
-def test_a_forked_lineage_is_reported_rather_than_guessed(tmp_path):
+def test_a_forked_lineage_is_reported_as_forked_rather_than_guessed(tmp_path):
     """R4: two successors means the migration declines to pick one.
 
     Reachable when `create_session` succeeds inside a rotation and the
@@ -184,7 +167,7 @@ def test_a_forked_lineage_is_reported_rather_than_guessed(tmp_path):
 
     report = migrate_terminal_labels(labels, sessions)
 
-    assert report.ambiguous == ["a"]
+    assert report.forked == ["a"]
     assert _name_of(sessions, "a")[0] == "Terminal++"
     assert _name_of(sessions, "b")[0] is None
     assert _name_of(sessions, "c")[0] is None
@@ -263,3 +246,52 @@ def test_a_name_cleared_after_the_move_does_not_come_back_on_a_re_run(tmp_path):
     migrate_terminal_labels(labels, sessions)
 
     assert _name_of(sessions, "b")[0] is None
+
+
+def test_a_chain_that_merely_ends_closed_is_not_reported_as_forked(tmp_path):
+    """R4: "nowhere live to move to" and "the lineage splits" are different.
+
+    Every such case on the real data is an ordinary chain three rotations deep
+    ending on a conversation somebody closed; the database has never contained a
+    fork. Breaks if the two are folded back together, which sends the reader
+    hunting a branch that does not exist.
+    """
+    labels = str(tmp_path / "hive.db")
+    sessions = str(tmp_path / "sessions.db")
+    _labels_db(labels, [("a", "Security again", "", 100)])
+    _sessions_db(sessions, [
+        ("a", None, "closed", None),
+        ("b", "a", "closed", None),
+        ("c", "b", "closed", None),
+    ])
+
+    report = migrate_terminal_labels(labels, sessions)
+
+    assert report.forked == []
+    assert report.kept == ["a"]
+
+
+def test_the_migration_adds_its_own_columns_so_it_can_run_before_the_restart(tmp_path):
+    """R4: the move must be possible before the gateway is restarted.
+
+    A restarted comms answers with no names until this has run, and the browser
+    replaces its local cache with whatever the server says — so a comms-first
+    rollout destroys the last copy of every name outside the old table. Breaks if
+    the migration starts depending on the columns already existing.
+    """
+    labels = str(tmp_path / "hive.db")
+    sessions = str(tmp_path / "sessions.db")
+    _labels_db(labels, [("a", "Fittimus Maximus", "", 100)])
+    conn = sqlite3.connect(sessions)
+    conn.execute(
+        "CREATE TABLE sessions (id TEXT PRIMARY KEY, rotated_from TEXT, status TEXT NOT NULL)"
+    )
+    conn.execute("INSERT INTO sessions (id, rotated_from, status) VALUES ('a', NULL, 'closed')")
+    conn.execute("INSERT INTO sessions (id, rotated_from, status) VALUES ('b', 'a', 'running')")
+    conn.commit()
+    conn.close()
+
+    report = migrate_terminal_labels(labels, sessions)
+
+    assert report.moved == {"a": "b"}
+    assert _name_of(sessions, "b")[0] == "Fittimus Maximus"

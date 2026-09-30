@@ -699,9 +699,26 @@ class SessionManager:
         # write that reports success and changes nothing, which is the shape
         # this route exists to refuse.
         session_id = row["id"]
-        clearing = (name is not None and not name.strip()) and not (color or "").strip()
-        if row["status"] == "closed" and not clearing:
-            raise PermissionError(f"Session is closed: {session_id}")
+        # Clearing means every field the caller sent is empty. Keyed on what was
+        # sent rather than on the name alone: a colour cleared by itself on an
+        # ended conversation is the same tidying act, and refusing it left the
+        # swatch with a button that answered 409 forever.
+        provided = [v for v in (name, color) if v is not None]
+        clearing = bool(provided) and not any(v.strip() for v in provided)
+        if not clearing:
+            if row["status"] == "closed":
+                raise PermissionError(f"Session is closed: {session_id}")
+            # A conversation with a successor has been rotated away even if its
+            # own row has not been marked closed yet: `_finalize_rotation`
+            # creates the successor and retires the predecessor two awaits
+            # later, and a rename landing in that gap would commit to the row
+            # being abandoned and report success. The successor was born
+            # carrying the old name, so the new one would simply vanish.
+            cur = await self._db.execute(
+                "SELECT id FROM sessions WHERE rotated_from = ? LIMIT 1", (session_id,)
+            )
+            if await cur.fetchone():
+                raise PermissionError(f"Session was rotated away: {session_id}")
 
         assignments, params = [], []
         if name is not None:
@@ -2275,6 +2292,14 @@ class SessionManager:
         return {
             "id": session_id,
             "summary": session["summary"],
+            # The name, so the surface reporting the kill calls the conversation
+            # what the button that killed it called it. Without it every caller
+            # falls back to the summary, which for a browser-terminal
+            # conversation is the literal "New session" forever — so the one
+            # command where naming the wrong conversation is most alarming was
+            # the one that named it wrongly.
+            "name": session.get("name"),
+            "color": session.get("color"),
             "model": session["model"],
             "autopilot": bool(session["autopilot"]),
             "uptime_seconds": uptime,

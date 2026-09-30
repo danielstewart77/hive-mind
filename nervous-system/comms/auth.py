@@ -75,11 +75,25 @@ def require_rename_bearer(
     """
     expected = os.environ.get("COMMS_RENAME_TOKEN", "")
     admin = os.environ.get("COMMS_ADMIN_BEARER_TOKEN", "")
-    if not expected and not admin:
+    offered = x_rename_token.strip()
+    # An admin caller is answered whatever else is configured: the console and
+    # the operator need a way in.
+    if admin and secrets.compare_digest(
+        (offered or authorization[7:].strip() if authorization.startswith("Bearer ")
+         else offered).encode("utf-8"),
+        admin.encode("utf-8"),
+    ):
+        return
+    # Nothing to check against means renaming is not configured, and that is
+    # what the answer has to say. Gating this on *both* tokens being absent
+    # made the sentence unreachable on any hive that has an admin token — which
+    # is all of them — so a deployment that simply never set the rename token
+    # answered 401 to every surface and sent the operator looking at the
+    # network instead of at one missing variable.
+    if not expected:
         raise HTTPException(
             503, "Renaming disabled: COMMS_RENAME_TOKEN unset"
         )
-    offered = x_rename_token.strip()
     if not offered and authorization.startswith("Bearer "):
         # A caller holding only the admin token may present it the usual way.
         offered = authorization[7:].strip()
