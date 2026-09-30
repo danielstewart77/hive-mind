@@ -11,7 +11,6 @@ import json
 import os
 import re
 import secrets
-import sqlite3
 import time
 import urllib.error
 import urllib.parse
@@ -459,26 +458,20 @@ async def api_minds(user: dict = Depends(require_auth)):
     )
 
 
-def _labels_db() -> sqlite3.Connection:
-    """Terminal session labels (name + color) live next to the auth tables.
+def _rename_headers() -> dict:
+    """The gateway headers plus the one credential that may change a name.
 
-    Server-side so they follow the user across devices — localStorage kept
-    them per-browser, which read as losing the session on the phone.
+    Two credentials on one request, deliberately. The service token gets past
+    the gateway's global gate; the rename token is what the name route itself
+    demands, and it is the same small secret this site used to check locally —
+    a copy of it escaping is worth exactly one renamed conversation, which is
+    why the capability was never guarded by the key that opens everything.
     """
-    conn = auth._connect()
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS terminal_labels (
-               session_id TEXT PRIMARY KEY,
-               name TEXT NOT NULL DEFAULT '',
-               color TEXT NOT NULL DEFAULT '',
-               updated_at INTEGER NOT NULL
-           )"""
-    )
-    conn.commit()
-    return conn
-
-
-_LABEL_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{3,8}$")
+    token = os.getenv("TERMINAL_LABELS_TOKEN", "")
+    headers = dict(_gateway_headers())
+    if token:
+        headers["X-Rename-Token"] = token
+    return headers
 
 
 def require_auth_or_label_writer(request: Request) -> dict:
@@ -515,22 +508,32 @@ def require_auth_or_label_writer(request: Request) -> dict:
 
 @app.get("/api/terminal/labels")
 async def api_terminal_labels(user: dict = Depends(require_auth_or_label_writer)):
-    """Every label, for the tab that asked. Explicitly uncacheable.
+    """Every name, read from the one row that holds it. Explicitly uncacheable.
 
-    Without a directive a browser may cache a 200 GET heuristically, and a
-    stale read here is indistinguishable from a current one — it reads as
-    the server having lost labels it still holds. The client asks with
-    ``no-store`` as well; both ends, because either alone is one deployment
-    away from being the only one.
+    This site kept its own `terminal_labels` table until the names moved onto
+    the gateway's session row. The shape of the answer is unchanged because it
+    has readers beyond this page — `mini-boss` reads it with a login cookie,
+    which is the reason the route survives the move at all rather than every
+    caller being pointed at the gateway.
+
+    Without a cache directive a browser may cache a 200 GET heuristically, and
+    a stale read here is indistinguishable from a current one: it reads as the
+    server having lost names it still holds. The client asks with ``no-store``
+    as well; both ends, because either alone is one deployment away from being
+    the only one.
     """
     del user
-    conn = _labels_db()
-    try:
-        rows = conn.execute("SELECT session_id, name, color FROM terminal_labels").fetchall()
-    finally:
-        conn.close()
+    names = await _gateway_json("/sessions/names")
+    if not isinstance(names, dict):
+        names = {}
     return JSONResponse(
-        {r["session_id"]: {"name": r["name"], "color": r["color"]} for r in rows},
+        {
+            session_id: {
+                "name": (value or {}).get("name") or "",
+                "color": (value or {}).get("color") or "",
+            }
+            for session_id, value in names.items()
+        },
         headers={"Cache-Control": "no-store"},
     )
 
@@ -539,29 +542,53 @@ async def api_terminal_labels(user: dict = Depends(require_auth_or_label_writer)
 async def api_terminal_label_put(
     session_id: str, request: Request, user: dict = Depends(require_auth_or_label_writer)
 ):
+    """Set a name, a colour, or both, on the gateway's session row.
+
+    Only the fields the caller actually sent are forwarded. Sending both
+    unconditionally is how a client that knew about names blanked a colour
+    picked at the tile, and how a tab working from a minutes-stale cache
+    overwrote the other tab's colour while changing only a name.
+
+    The gateway's refusals are passed through as themselves. A 409 means the
+    conversation has rotated away and the name landed nowhere — reported as a
+    refusal rather than the 200 that used to be indistinguishable from success.
+    """
     del user
     body = await request.json()
-    name = (body.get("name") or "").strip()[:40]
-    color = (body.get("color") or "").strip()
-    if color and not _LABEL_COLOR_RE.match(color):
-        raise HTTPException(status_code=400, detail="color must be a hex value")
-    conn = _labels_db()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="expected an object")
+    payload: dict[str, str] = {}
+    if "name" in body:
+        payload["name"] = (body.get("name") or "").strip()[:40]
+    if "color" in body:
+        payload["color"] = (body.get("color") or "").strip()
+    if not payload:
+        raise HTTPException(status_code=400, detail="nothing to set")
+
+    def _do_put():
+        request_ = urllib.request.Request(
+            f"{_gateway_base_url().rstrip('/')}/sessions/{urllib.parse.quote(session_id)}/name",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={**_rename_headers(), "Content-Type": "application/json"},
+            method="PUT",
+        )
+        with urllib.request.urlopen(request_, timeout=15) as resp:
+            return json.loads(resp.read().decode("utf-8") or "{}")
+
     try:
-        if not name and not color:
-            conn.execute("DELETE FROM terminal_labels WHERE session_id = ?", (session_id,))
-        else:
-            conn.execute(
-                """INSERT INTO terminal_labels (session_id, name, color, updated_at)
-                   VALUES (?, ?, ?, strftime('%s','now'))
-                   ON CONFLICT(session_id) DO UPDATE
-                   SET name = excluded.name, color = excluded.color,
-                       updated_at = excluded.updated_at""",
-                (session_id, name, color),
-            )
-        conn.commit()
-    finally:
-        conn.close()
-    return {"ok": True, "session_id": session_id, "name": name, "color": color}
+        row = await asyncio.to_thread(_do_put)
+    except urllib.error.HTTPError as exc:
+        raise HTTPException(
+            status_code=exc.code, detail="Could not set the name"
+        ) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=502, detail=f"Gateway unavailable: {exc}") from exc
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "name": row.get("name") or "",
+        "color": row.get("color") or "",
+    }
 
 
 def _gateway_ws_url(session_id: str, cols: str = "80", rows: str = "24") -> str:
@@ -783,12 +810,10 @@ async def api_terminal_session_end(
     except OSError as exc:
         raise HTTPException(status_code=502, detail=f"Gateway unavailable: {exc}") from exc
 
-    conn = _labels_db()
-    try:
-        conn.execute("DELETE FROM terminal_labels WHERE session_id = ?", (session_id,))
-        conn.commit()
-    finally:
-        conn.close()
+    # No name to clean up: it is a column on the session row the gateway just
+    # closed, so it goes where the row goes. The delete that stood here existed
+    # because the old store was a table with no lifecycle — rows outlived the
+    # sessions they named, and one of them outlived three rotations.
     return result
 
 

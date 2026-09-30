@@ -1,20 +1,89 @@
-"""Server-side terminal session labels (name + color).
+"""Conversation names, read and written through to the one row that holds them.
 
-Labels were localStorage-only, so a session renamed on the desktop showed
-up unnamed on the phone. They now live in the auth database and sync via
-/api/terminal/labels, with the browser cache as warm-start only.
+Names used to live in this site's own `terminal_labels` table, keyed to a
+session id and knowing nothing about a session's lifecycle: a chat rotation
+retires the row and mints a new id, so a name given weeks ago stayed behind on
+a closed session every picker hides. They are columns on the gateway's session
+row now. These routes survive the move because they have readers beyond this
+page — `mini-boss` reads them with a login cookie — so what is tested here is
+the pass-through: what it forwards, and whether a refusal arrives as one.
 """
 
 import json
 import os
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
+import pytest
 from starlette.testclient import TestClient
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import auth
 import main as main_mod
+
+
+class _Gateway:
+    """A stand-in for hive-comms: the input this route reads, not the subject.
+
+    It records the request bodies it is handed, which is the only way to prove
+    what the pass-through actually forwarded — a partial write that quietly
+    sends both fields looks identical from the outside until it blanks a
+    colour.
+    """
+
+    def __init__(self, names=None, status=200):
+        self.names = dict(names or {})
+        self.status = status
+        self.puts = []
+        self._server = None
+        self._thread = None
+
+    def __enter__(self):
+        gateway = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_a):
+                pass
+
+            def do_GET(self):  # noqa: N802
+                body = json.dumps(gateway.names).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_PUT(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length") or 0)
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                session_id = self.path.split("/")[2]
+                gateway.puts.append((session_id, payload, dict(self.headers)))
+                if gateway.status != 200:
+                    self.send_response(gateway.status)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                current = dict(gateway.names.get(session_id) or {})
+                current.update(payload)
+                gateway.names[session_id] = current
+                body = json.dumps(current).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self._server = HTTPServer(("127.0.0.1", 0), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+        self.url = f"http://127.0.0.1:{self._server.server_address[1]}"
+        return self
+
+    def __exit__(self, *_exc):
+        self._server.shutdown()
+        self._server.server_close()
 
 
 def _authed_client(tmp_path, monkeypatch):
@@ -26,47 +95,77 @@ def _authed_client(tmp_path, monkeypatch):
     return client
 
 
-def test_labels_roundtrip(tmp_path, monkeypatch):
+def test_names_come_from_the_gateway_not_from_a_local_table(tmp_path, monkeypatch):
+    """R1: this site holds no names of its own.
+
+    Breaks if a local store is reintroduced for this route to read — the read
+    would then answer from it and this gateway's name would never appear.
+    """
     client = _authed_client(tmp_path, monkeypatch)
+    with _Gateway({"sess-1": {"name": "Fittimus Maximus", "color": "#3481cc"}}) as gw:
+        monkeypatch.setenv("GATEWAY_API_URL", gw.url)
 
-    assert client.get("/api/terminal/labels").json() == {}
+        labels = client.get("/api/terminal/labels").json()
 
-    put = client.put(
-        "/api/terminal/labels/sess-1", json={"name": "deploy bot", "color": "#4ee8fc"}
-    )
-    assert put.status_code == 200
-
-    labels = client.get("/api/terminal/labels").json()
-    assert labels == {"sess-1": {"name": "deploy bot", "color": "#4ee8fc"}}
+    assert labels["sess-1"] == {"name": "Fittimus Maximus", "color": "#3481cc"}
+    assert "sess-unnamed" not in labels
 
 
-def test_label_update_overwrites(tmp_path, monkeypatch):
+def test_renaming_forwards_only_the_field_that_changed(tmp_path, monkeypatch):
+    """R2: a partial write, so a rename cannot blank a colour.
+
+    Breaks if the route goes back to sending a whole record — which is how the
+    health app blanked the colour picked at the tile on every rename, and how
+    one tab working from a stale cache overwrote another tab's colour.
+    """
     client = _authed_client(tmp_path, monkeypatch)
-    client.put("/api/terminal/labels/sess-1", json={"name": "old", "color": "#c9a84c"})
-    client.put("/api/terminal/labels/sess-1", json={"name": "new", "color": ""})
+    with _Gateway({"sess-1": {"name": "old", "color": "#5c913b"}}) as gw:
+        monkeypatch.setenv("GATEWAY_API_URL", gw.url)
 
-    labels = client.get("/api/terminal/labels").json()
-    assert labels["sess-1"] == {"name": "new", "color": ""}
+        response = client.put("/api/terminal/labels/sess-1", json={"name": "new"})
+
+    assert response.status_code == 200
+    assert gw.puts[0][1] == {"name": "new"}
+    assert gw.names["sess-1"]["color"] == "#5c913b"
 
 
-def test_empty_label_deletes_row(tmp_path, monkeypatch):
+@pytest.mark.parametrize("gateway_status", [400, 409])
+def test_a_refused_rename_is_reported_as_refused(tmp_path, monkeypatch, gateway_status):
+    """R7: a rename that did not land never answers 200.
+
+    400 is a colour the gateway rejected; 409 is a conversation that has
+    rotated away, whose row is still writable and read by nothing. Breaks if
+    the route swallows the upstream status — the browser would keep showing a
+    name the record does not hold, which is this whole change in miniature.
+    """
     client = _authed_client(tmp_path, monkeypatch)
-    client.put("/api/terminal/labels/sess-1", json={"name": "x", "color": ""})
-    client.put("/api/terminal/labels/sess-1", json={"name": "", "color": ""})
+    with _Gateway(status=gateway_status) as gw:
+        monkeypatch.setenv("GATEWAY_API_URL", gw.url)
 
-    assert client.get("/api/terminal/labels").json() == {}
+        response = client.put("/api/terminal/labels/sess-1", json={"name": "Health"})
+
+    assert response.status_code == gateway_status
 
 
-def test_rejects_non_hex_color(tmp_path, monkeypatch):
+def test_an_unreachable_gateway_is_reported_rather_than_answered_empty(
+    tmp_path, monkeypatch
+):
+    """R7: down and "no names" must not read the same.
+
+    This site used to hold the names itself, so it could always answer. Breaks
+    if the read starts returning an empty object on failure, which draws every
+    conversation unnamed and reads as the migration having lost the lot.
+    """
     client = _authed_client(tmp_path, monkeypatch)
-    resp = client.put(
-        "/api/terminal/labels/sess-1",
-        json={"name": "x", "color": "javascript:alert(1)"},
-    )
-    assert resp.status_code == 400
+    monkeypatch.setenv("GATEWAY_API_URL", "http://127.0.0.1:9")
+
+    response = client.get("/api/terminal/labels")
+
+    assert response.status_code >= 500
 
 
-def test_labels_require_auth(tmp_path, monkeypatch):
+def test_names_require_auth(tmp_path, monkeypatch):
+    """The cookie path is what `mini-boss` reads with; it stays guarded."""
     monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "stb.db"))
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
     client = TestClient(main_mod.app)
@@ -74,48 +173,127 @@ def test_labels_require_auth(tmp_path, monkeypatch):
     assert client.put("/api/terminal/labels/s", json={"name": "x"}).status_code == 401
 
 
-def test_labels_are_not_cacheable(tmp_path, monkeypatch):
-    """A heuristically-cached read is indistinguishable from a current one,
-    and reads as the server having lost labels it still holds."""
-    client = _authed_client(tmp_path, monkeypatch)
-
-    resp = client.get("/api/terminal/labels")
-
-    assert "no-store" in resp.headers.get("cache-control", "")
-
-
-def test_an_open_tab_picks_up_a_label_set_elsewhere(page):
-    """Labels are edited on whichever device is to hand, and a tile stays
-    open for days. The tab that is already open has to keep asking — before
-    this it read them once at boot and never again, so a name set on the
-    phone never reached the laptop until a reload."""
+def test_an_open_tab_picks_up_a_name_set_elsewhere(page, monkeypatch):
+    """Names are edited on whichever device is to hand, and a tile stays open
+    for days. The tab already open has to keep asking — before this it read
+    them once at boot, so a name set on the phone never reached the laptop
+    until a reload."""
     page, base = page
 
+    with _Gateway() as gw:
+        os.environ["GATEWAY_API_URL"] = gw.url
+        try:
+            page.route(
+                "**/api/terminal/sessions*",
+                lambda r: r.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps([{
+                        "id": "sess-live", "mind_id": "mind-uuid",
+                        "mind_name": "skippy", "status": "running",
+                        "short_id": "sess-live",
+                    }]),
+                ),
+            )
+            page.goto(base + "/terminal")
+            page.wait_for_selector(".term-card", timeout=15000)
+            assert "renamed elsewhere" not in page.inner_text(".term-card")
+
+            # Another client names it on the gateway. Same record, different
+            # caller — no reload here, and nothing tells this tab it happened.
+            gw.names["sess-live"] = {"name": "renamed elsewhere", "color": "#4ee88a"}
+
+            page.wait_for_function(
+                "() => document.querySelector('.term-card')"
+                " && document.querySelector('.term-card').innerText"
+                ".includes('renamed elsewhere')",
+                timeout=45000,
+            )
+        finally:
+            os.environ.pop("GATEWAY_API_URL", None)
+
+
+# ---------------------------------------------------------------------------
+# The browser half. The server's partial write is only worth having if the one
+# client that renames actually sends a partial body, and the tile's optimistic
+# repaint is only honest if a refused write takes the name back off the screen.
+# ---------------------------------------------------------------------------
+_TILE_SESSION = [{
+    "id": "sess-a", "mind_id": "mind-uuid", "mind_name": "skippy",
+    "status": "running", "short_id": "sess-a",
+}]
+
+
+def _tile(page, base, *, names, on_put):
+    """One open tile, with the names route stubbed at the browser boundary."""
     page.route(
         "**/api/terminal/sessions*",
-        lambda r: r.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps([{
-                "id": "sess-live", "mind_id": "mind-uuid", "mind_name": "skippy",
-                "status": "running", "short_id": "sess-live",
-            }]),
-        ),
+        lambda r: r.fulfill(status=200, content_type="application/json",
+                            body=json.dumps(_TILE_SESSION)),
     )
+    page.route(
+        "**/api/terminal/labels",
+        lambda r: r.fulfill(status=200, content_type="application/json",
+                            body=json.dumps(names)),
+    )
+    page.route("**/api/terminal/labels/*", on_put)
+    page.route_web_socket("**/api/terminal/attach/**", lambda ws: None)
     page.goto(base + "/terminal")
     page.wait_for_selector(".term-card", timeout=15000)
-    assert "renamed elsewhere" not in page.inner_text(".term-card")
+    page.query_selector_all(".term-card")[0].click()
+    page.wait_for_selector(".term-panel", timeout=15000)
+    page.wait_for_timeout(800)
 
-    # Another client writes the label. Same server, different caller — no
-    # reload here, and nothing tells this tab it happened.
-    written = page.request.put(
-        base + "/api/terminal/labels/sess-live",
-        data={"name": "renamed elsewhere", "color": "#4ee88a"},
-    )
-    assert written.ok
 
-    page.wait_for_function(
-        "() => document.querySelector('.term-card')"
-        " && document.querySelector('.term-card').innerText.includes('renamed elsewhere')",
-        timeout=45000,
-    )
+def test_renaming_at_a_tile_sends_the_name_alone(page):
+    """R2 at the only client that renames: the body carries what changed.
+
+    The dialog seeds its colour from the local cache, so sending both fields
+    every time means a phone that has not polled overwrites a colour set at
+    another device with a stale one — which is exactly what the server's partial
+    write exists to prevent, defeated by its own caller. Breaks if `commitRename`
+    goes back to sending the whole record.
+    """
+    page, base = page
+    bodies = []
+
+    def on_put(route):
+        bodies.append(json.loads(route.request.post_data or "{}"))
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, "name": "Renamed", "color": "#4ee88a"}))
+
+    _tile(page, base, names={"sess-a": {"name": "Before", "color": "#4ee88a"}},
+          on_put=on_put)
+
+    page.click(".term-panel-rename")
+    page.fill(".term-rename-input", "Renamed")
+    page.click(".term-rename-save")
+    page.wait_for_timeout(600)
+
+    assert bodies == [{"name": "Renamed"}]
+
+
+def test_a_rename_the_server_refused_comes_back_off_the_screen(page):
+    """R7 at the tile: an optimistic repaint that lied is corrected.
+
+    The write used to be fire-and-forget with an empty catch, so an unreachable
+    store left the new name on screen, stored nothing and said nothing — a tile
+    displaying a name the record does not hold, which is the whole class of bug
+    this change closes. Breaks if `pushLabel` stops reverting on failure.
+    """
+    page, base = page
+
+    def on_put(route):
+        route.fulfill(status=409, content_type="application/json",
+                      body=json.dumps({"detail": "rotated away"}))
+
+    _tile(page, base, names={"sess-a": {"name": "Before", "color": ""}},
+          on_put=on_put)
+
+    page.click(".term-panel-rename")
+    page.fill(".term-rename-input", "Never lands")
+    page.click(".term-rename-save")
+    page.wait_for_timeout(1200)
+
+    assert "Never lands" not in page.inner_text(".term-panel")
+    assert "Before" in page.inner_text(".term-panel")
