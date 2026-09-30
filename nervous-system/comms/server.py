@@ -22,7 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from comms.config import PROJECT_DIR, config
 import comms.broker as broker
-from comms.auth import require_admin_bearer, require_bearer
+from comms.auth import require_admin_bearer, require_bearer, require_rename_bearer
 from comms.broker import check_secret_scope, get_secret_scopes, grant_secret_scope, revoke_secret_scope
 from comms.network_identity import resolve_container_name
 from comms.secrets import get_credential
@@ -243,6 +243,17 @@ class ContextReportRequest(BaseModel):
     window: int | None = None
 
 
+class SetSessionNameRequest(BaseModel):
+    """A partial write: absent means unchanged, empty means cleared.
+
+    Both fields optional so a caller that only ever sets names — the health
+    app is one — cannot blank a colour it has never heard of.
+    """
+
+    name: str | None = None
+    color: str | None = None
+
+
 class UpdateMindRequest(BaseModel):
     gateway_url: str | None = None
     model: str | None = None
@@ -286,6 +297,43 @@ async def list_sessions(
         client_type=client_type,
         client_ref=client_ref,
     )
+
+
+@app.get("/sessions/names")
+async def session_names():
+    """Every conversation's name and colour, in one read.
+
+    Declared before `/sessions/{session_id}` so the literal path wins.
+
+    This answers to the service token every surface holds, which is a
+    deliberate widening: reading a name used to require a browser login at the
+    terminal. A name is a label on a conversation, not its contents — the
+    capability worth guarding is changing one, which `PUT .../name` does.
+    """
+    return await session_mgr.session_names()
+
+
+@app.put("/sessions/{session_id}/name", dependencies=[Depends(require_rename_bearer)])
+async def set_session_name(session_id: str, body: SetSessionNameRequest):
+    """Name a conversation, recolour it, or clear either.
+
+    A field omitted from the body is left alone; a field sent empty clears.
+    Whole-record writes are how a caller that only knew about names blanked
+    the colour picked at the tile on every rename.
+    """
+    try:
+        return await session_mgr.set_session_name(
+            session_id, name=body.name, color=body.color
+        )
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except PermissionError as exc:
+        # The row is still writable, so this would otherwise commit and report
+        # success on a conversation nothing reads. 409: the name is fine, the
+        # conversation it was addressed to has moved on.
+        raise HTTPException(409, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.get("/sessions/live", dependencies=[Depends(require_admin_bearer)])
