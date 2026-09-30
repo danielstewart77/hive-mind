@@ -258,13 +258,46 @@ session's own model explicitly, so a `/model` switch survives it and a
 changed default cannot reach into a live conversation — that default is for
 the next one.
 
+### What a conversation is called
+
+A conversation's name and colour are columns on its `sessions` row, and that
+row is the only place either lives. `summary` sits beside them and is a
+different thing: a preview generated once from the first chat message, used
+only when there is no name. A name is given; a preview is computed.
+
+The name follows the conversation across a rotation. `create_session` copies
+it off the predecessor when `rotated_from` is set, so a successor is born
+wearing it — copied at creation rather than read through the link, because the
+predecessor is retired moments later. The in-place terminal rotation keeps its
+row, so nothing to carry.
+
+`PUT /sessions/{id}/name` is a **partial** write: an absent field is unchanged,
+an empty one clears. A whole-record write is how a caller that only knew about
+names blanked the colour picked at a browser tile. A rename addressed to a
+closed session is refused with 409 rather than committing to a row nothing
+reads — the ids come from picker buttons and rename prompts that deliberately
+never expire.
+
+The route carries `X-Rename-Token` (`COMMS_RENAME_TOKEN`, or the admin token)
+on top of the service bearer, and **refuses when neither is configured**. The
+service token is held by every surface bot and every mind container on the
+hive; reading a name is not worth guarding, changing one is. Reads ride
+`GET /sessions` and `GET /sessions/names` on the service token alone.
+
+`comms/label_migration.py` is the one-time move from the browser terminal's
+old `terminal_labels` table, walking each rotation chain forward so a stranded
+name lands on the conversation that continued it. Idempotent by rule rather
+than by marker: a target already carrying a name is never written over.
+
 ## Gateway API
 
 | Method | Path | Purpose |
 |--------|------|---------|
 | `POST` | `/sessions` | Create session |
 | `GET` | `/sessions` | List sessions |
+| `GET` | `/sessions/names` | Every conversation's name and colour |
 | `GET` | `/sessions/{id}` | Get session detail |
+| `PUT` | `/sessions/{id}/name` | Name or recolour a conversation (rename token) |
 | `DELETE` | `/sessions/{id}` | Kill session |
 | `POST` | `/sessions/{id}/message` | Send message (SSE streaming) |
 | `POST` | `/sessions/{id}/activate` | Activate session on a surface |
