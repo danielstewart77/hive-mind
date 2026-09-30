@@ -295,3 +295,27 @@ def test_the_migration_adds_its_own_columns_so_it_can_run_before_the_restart(tmp
 
     assert report.moved == {"a": "b"}
     assert _name_of(sessions, "b")[0] == "Fittimus Maximus"
+
+
+def test_a_name_on_a_conversation_still_in_the_picker_does_not_move(tmp_path):
+    """R4: this rescues stranded names; it does not relocate reachable ones.
+
+    Found on the live data. "Skipway Health Services" sits on an idle session
+    Daniel can see and tap, and it has a successor on a surface his Telegram
+    picker does not list — so moving the name forward would have taken it off the
+    row in front of him and hidden it. Breaks if the walk runs regardless of
+    whether the origin is itself still live.
+    """
+    labels = str(tmp_path / "hive.db")
+    sessions = str(tmp_path / "sessions.db")
+    _labels_db(labels, [("a", "Skipway Health Services", "", 100)])
+    _sessions_db(sessions, [
+        ("a", None, "idle", None),
+        ("b", "a", "running", None),
+    ])
+
+    report = migrate_terminal_labels(labels, sessions)
+
+    assert report.moved == {}
+    assert _name_of(sessions, "a")[0] == "Skipway Health Services"
+    assert _name_of(sessions, "b")[0] is None
