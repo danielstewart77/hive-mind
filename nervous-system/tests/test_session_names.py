@@ -307,3 +307,59 @@ def test_a_name_for_a_session_that_does_not_exist_is_refused() -> None:
                 await mgr.shutdown()
 
     _run(scenario())
+
+
+def test_a_rename_by_short_id_lands_on_the_conversation_it_resolved() -> None:
+    """A write that reports success must have changed something.
+
+    Short ids resolve by prefix, and the update used to be addressed with the
+    argument rather than the id it resolved to — matching zero rows, committing,
+    and answering 200 with the row's old name. Breaks if the write goes back to
+    the raw argument.
+    """
+    async def scenario() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _make_manager(tmp)
+            try:
+                await _seed(mgr, "abcdef12-3456-7890-abcd-ef1234567890")
+
+                # The prefix is sourced from the id the store actually holds,
+                # so it is provably a resolvable short form rather than a
+                # hand-typed guess.
+                answered = await mgr.set_session_name("abcdef12", name="Health")
+
+                assert answered["name"] == "Health"
+                cur = await mgr._db.execute(
+                    "SELECT name FROM sessions WHERE id = "
+                    "'abcdef12-3456-7890-abcd-ef1234567890'"
+                )
+                assert (await cur.fetchone())["name"] == "Health"
+            finally:
+                await mgr.shutdown()
+
+    _run(scenario())
+
+
+def test_a_name_on_an_ended_conversation_can_still_be_cleared() -> None:
+    """Ended conversations keep their names, so the button that removes one works.
+
+    Nothing strips a name on close and surfaces showing history draw it, so
+    refusing every write to a closed row would leave a name on screen whose
+    clear button answered 409 forever. Naming one is still refused — the two
+    are not the same act. Breaks if the status check stops distinguishing them.
+    """
+    async def scenario() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _make_manager(tmp)
+            try:
+                await _seed(mgr, "sess-done", status="closed", name="Old work")
+
+                cleared = await mgr.set_session_name("sess-done", name="")
+                assert cleared["name"] is None
+
+                with pytest.raises(PermissionError):
+                    await mgr.set_session_name("sess-done", name="Named again")
+            finally:
+                await mgr.shutdown()
+
+    _run(scenario())

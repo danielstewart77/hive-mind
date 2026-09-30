@@ -673,13 +673,17 @@ class SessionManager:
         removed, and it leaves the conversation displaying whatever it
         displayed before it was ever named.
 
-        A closed session is refused. Its row stays writable and nothing reads
-        it, so a rename addressed to a conversation that has already rotated
-        away would commit, report success, and change nothing anybody can see
-        — which is the failure this whole change exists to stop, arriving one
-        layer further in. The ids come from buttons and prompts that
-        deliberately never expire, so this is reachable by hand, not in
-        theory.
+        Naming a closed session is refused. Its row stays writable and nothing
+        reads it, so a rename addressed to a conversation that has already
+        rotated away would commit, report success, and change nothing anybody
+        can see — which is the failure this whole change exists to stop,
+        arriving one layer further in. The ids come from buttons and prompts
+        that deliberately never expire, so this is reachable by hand.
+
+        *Clearing* a closed session is allowed. Ended conversations keep their
+        names — nothing strips them on close, and a surface showing history
+        draws them — so refusing here would leave a name on screen with the
+        button that removes it permanently answering 409.
         """
         if name is None and color is None:
             raise ValueError("nothing to set: give a name, a colour, or both")
@@ -689,7 +693,14 @@ class SessionManager:
         row = await self._get_row(session_id)
         if not row:
             raise LookupError(f"Session not found: {session_id}")
-        if row["status"] == "closed":
+        # `_get_row` resolves a short id by prefix; the write must use the id it
+        # resolved to. Addressing the update with the argument instead matched
+        # zero rows, committed, and answered 200 with the row's old name — a
+        # write that reports success and changes nothing, which is the shape
+        # this route exists to refuse.
+        session_id = row["id"]
+        clearing = (name is not None and not name.strip()) and not (color or "").strip()
+        if row["status"] == "closed" and not clearing:
             raise PermissionError(f"Session is closed: {session_id}")
 
         assignments, params = [], []

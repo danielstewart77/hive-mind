@@ -209,3 +209,57 @@ def test_a_name_for_a_session_that_no_longer_exists_is_not_resurrected(tmp_path)
         assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
     finally:
         conn.close()
+
+
+def test_the_most_recent_name_in_a_lineage_wins_the_descendant(tmp_path):
+    """R4: two names in one chain compete, and the newer one takes it.
+
+    A conversation named at its first tile and renamed three rotations later has
+    two rows in the old store, both walking forward to the same live session.
+    Breaks if the order is reversed — deterministic and wrong, leaving the live
+    conversation wearing the name the operator abandoned.
+    """
+    labels = str(tmp_path / "hive.db")
+    sessions = str(tmp_path / "sessions.db")
+    _labels_db(labels, [
+        ("a", "old work", "", 100),
+        ("b", "current work", "", 200),
+    ])
+    _sessions_db(sessions, [
+        ("a", None, "closed", None),
+        ("b", "a", "closed", None),
+        ("c", "b", "running", None),
+    ])
+
+    migrate_terminal_labels(labels, sessions)
+
+    assert _name_of(sessions, "c")[0] == "current work"
+
+
+def test_a_name_cleared_after_the_move_does_not_come_back_on_a_re_run(tmp_path):
+    """R5: clearing a name removes it, and stays removed.
+
+    A name moves rather than being copied, so the second run has nothing to
+    replay. Breaks if the source row survives the move and the guard is only
+    "don't overwrite a target that already has a name" — a cleared name is NULL,
+    so that guard would put the old one straight back.
+    """
+    labels = str(tmp_path / "hive.db")
+    sessions = str(tmp_path / "sessions.db")
+    _labels_db(labels, [("a", "Fittimus Maximus", "", 100)])
+    _sessions_db(sessions, [
+        ("a", None, "closed", None),
+        ("b", "a", "running", None),
+    ])
+
+    migrate_terminal_labels(labels, sessions)
+    conn = sqlite3.connect(sessions)
+    try:
+        conn.execute("UPDATE sessions SET name = NULL WHERE id = 'b'")
+        conn.commit()
+    finally:
+        conn.close()
+
+    migrate_terminal_labels(labels, sessions)
+
+    assert _name_of(sessions, "b")[0] is None
