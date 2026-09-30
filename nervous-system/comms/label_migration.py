@@ -102,16 +102,17 @@ def migrate_terminal_labels(
 ) -> MigrationReport:
     """Move every name in `terminal_labels` onto its live session row.
 
-    Safe to run twice, and that is a property of the rule rather than of a
-    marker somewhere: a target that already carries a name is never written
-    over. So the second run finds the first run's own work and declines — and
-    so does a run that happens after the operator has renamed the successor by
-    hand, which is the case a completion flag would have got wrong the first
-    time somebody re-ran this to check it.
+    A name **moves**: the source row is deleted as it lands. That is what makes
+    a second run a no-op rather than a replay, and it is the only version of
+    idempotence that holds up. Declining to overwrite a target that already has
+    a name looks equivalent and is not: a name the operator *cleared* after the
+    first run is `NULL`, so the second run would put the old one back and
+    requirement five would last exactly until somebody re-ran this to check it.
 
-    Names are processed oldest first so that when two names in one lineage
-    compete for a single descendant, the outcome does not depend on the order
-    sqlite felt like returning rows in.
+    Names are processed **newest first**, so when two names in one lineage
+    compete for a single descendant the most recent one wins. Oldest-first is
+    deterministic and wrong: a conversation named at its first tile, renamed
+    three rotations later, would end up wearing the name the operator abandoned.
     """
     report = MigrationReport()
     labels = _open(labels_db_path)
@@ -120,7 +121,7 @@ def migrate_terminal_labels(
         try:
             rows = labels.execute(
                 "SELECT session_id, name, color FROM terminal_labels "
-                "ORDER BY updated_at, session_id"
+                "ORDER BY updated_at DESC, session_id"
             ).fetchall()
         except sqlite3.OperationalError:
             # No table means the move already happened and the old store was
@@ -161,20 +162,61 @@ def migrate_terminal_labels(
             else:
                 report.moved[origin] = target
 
-            if origin in named and target == origin:
-                # Already carried across by an earlier run.
-                report.kept = [k for k in report.kept if k != origin]
-                report.skipped_named[origin] = origin
-                continue
             if not dry_run:
                 sessions.execute(
                     "UPDATE sessions SET name = ?, color = ? WHERE id = ?",
                     (row["name"] or None, row["color"] or None, target),
                 )
+                # The name moved. Deleting the source is what stops a second
+                # run replaying it over a name the operator has since changed
+                # or cleared.
+                labels.execute(
+                    "DELETE FROM terminal_labels WHERE session_id = ?", (origin,)
+                )
             named[target] = row["name"] or ""
         if not dry_run:
             sessions.commit()
+            labels.commit()
     finally:
         labels.close()
         sessions.close()
     return report
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the move from the command line, since nobody can import a module.
+
+    Both databases are files on the host: the browser terminal's is the hive
+    site's auth database, and the gateway's is comms' own. They live in
+    different containers, so this runs on the host against the two paths rather
+    than inside either one.
+
+    `--dry-run` reports what would move without writing, which is the first
+    thing to run: the answer names every conversation by id, and a name landing
+    somewhere surprising is far cheaper to see before the write than after.
+    """
+    import argparse
+    import json
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("labels_db", help="the browser terminal's database (terminal_labels)")
+    parser.add_argument("sessions_db", help="hive-comms' sessions database")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args(argv)
+
+    report = migrate_terminal_labels(
+        args.labels_db, args.sessions_db, dry_run=args.dry_run
+    )
+    print(json.dumps({
+        "dry_run": args.dry_run,
+        "total": report.total,
+        "moved": report.moved,
+        "kept": report.kept,
+        "skipped_named": report.skipped_named,
+        "ambiguous": report.ambiguous,
+    }, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
