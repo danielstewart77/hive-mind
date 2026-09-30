@@ -211,3 +211,89 @@ def test_an_open_tab_picks_up_a_name_set_elsewhere(page, monkeypatch):
             )
         finally:
             os.environ.pop("GATEWAY_API_URL", None)
+
+
+# ---------------------------------------------------------------------------
+# The browser half. The server's partial write is only worth having if the one
+# client that renames actually sends a partial body, and the tile's optimistic
+# repaint is only honest if a refused write takes the name back off the screen.
+# ---------------------------------------------------------------------------
+_TILE_SESSION = [{
+    "id": "sess-a", "mind_id": "mind-uuid", "mind_name": "skippy",
+    "status": "running", "short_id": "sess-a",
+}]
+
+
+def _tile(page, base, *, names, on_put):
+    """One open tile, with the names route stubbed at the browser boundary."""
+    page.route(
+        "**/api/terminal/sessions*",
+        lambda r: r.fulfill(status=200, content_type="application/json",
+                            body=json.dumps(_TILE_SESSION)),
+    )
+    page.route(
+        "**/api/terminal/labels",
+        lambda r: r.fulfill(status=200, content_type="application/json",
+                            body=json.dumps(names)),
+    )
+    page.route("**/api/terminal/labels/*", on_put)
+    page.route_web_socket("**/api/terminal/attach/**", lambda ws: None)
+    page.goto(base + "/terminal")
+    page.wait_for_selector(".term-card", timeout=15000)
+    page.query_selector_all(".term-card")[0].click()
+    page.wait_for_selector(".term-panel", timeout=15000)
+    page.wait_for_timeout(800)
+
+
+def test_renaming_at_a_tile_sends_the_name_alone(page):
+    """R2 at the only client that renames: the body carries what changed.
+
+    The dialog seeds its colour from the local cache, so sending both fields
+    every time means a phone that has not polled overwrites a colour set at
+    another device with a stale one — which is exactly what the server's partial
+    write exists to prevent, defeated by its own caller. Breaks if `commitRename`
+    goes back to sending the whole record.
+    """
+    page, base = page
+    bodies = []
+
+    def on_put(route):
+        bodies.append(json.loads(route.request.post_data or "{}"))
+        route.fulfill(status=200, content_type="application/json",
+                      body=json.dumps({"ok": True, "name": "Renamed", "color": "#4ee88a"}))
+
+    _tile(page, base, names={"sess-a": {"name": "Before", "color": "#4ee88a"}},
+          on_put=on_put)
+
+    page.click(".term-panel-rename")
+    page.fill(".term-rename-input", "Renamed")
+    page.click(".term-rename-save")
+    page.wait_for_timeout(600)
+
+    assert bodies == [{"name": "Renamed"}]
+
+
+def test_a_rename_the_server_refused_comes_back_off_the_screen(page):
+    """R7 at the tile: an optimistic repaint that lied is corrected.
+
+    The write used to be fire-and-forget with an empty catch, so an unreachable
+    store left the new name on screen, stored nothing and said nothing — a tile
+    displaying a name the record does not hold, which is the whole class of bug
+    this change closes. Breaks if `pushLabel` stops reverting on failure.
+    """
+    page, base = page
+
+    def on_put(route):
+        route.fulfill(status=409, content_type="application/json",
+                      body=json.dumps({"detail": "rotated away"}))
+
+    _tile(page, base, names={"sess-a": {"name": "Before", "color": ""}},
+          on_put=on_put)
+
+    page.click(".term-panel-rename")
+    page.fill(".term-rename-input", "Never lands")
+    page.click(".term-rename-save")
+    page.wait_for_timeout(1200)
+
+    assert "Never lands" not in page.inner_text(".term-panel")
+    assert "Before" in page.inner_text(".term-panel")
