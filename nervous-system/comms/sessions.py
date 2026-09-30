@@ -197,6 +197,18 @@ _PRIVATE_SESSION_COLUMNS = ("carry_forward", "carry_forward_sid", "carry_forward
 ROTATION_ARMED_CHAT = 1
 ROTATION_ARMED_TERMINAL = 2
 
+# A tile's name has to fit on a tab and in a Telegram button; the store this
+# replaced capped it at the same length, so no existing name is truncated by
+# the move.
+MAX_SESSION_NAME_CHARS = 40
+
+# A tile colour is a free hex value picked in the browser, and it is assigned
+# straight into a style attribute on the way back out. Validated here rather
+# than at the surface that happens to be asking: the check used to live in the
+# browser terminal's own route, which is the route this replaces, and a check
+# that dies with the code path it guarded was never guarding the value.
+_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{3,8}$")
+
 
 def _public_session_row(row) -> dict:
     """A session row as a plain dict, minus the columns no listing may leak."""
@@ -307,6 +319,23 @@ class SessionManager:
             await self._db.commit()
         except Exception:
             pass  # Column already exists
+        # The operator's own name for this conversation, and the colour they
+        # picked for its tile. They live here and only here: they were kept in
+        # a `terminal_labels` table in the browser terminal's database, in a
+        # different container, keyed to `sessions.id` — so a chat rotation,
+        # which retires the row and mints a new id, left the name behind on a
+        # closed session invisible to every picker. The conversation carried
+        # on under a new id wearing the first hundred characters of its own
+        # first message, which reads exactly like a name and is not one.
+        # `summary` is that derived preview and stays separate; a name is
+        # given, a preview is computed, and merging them is what made a
+        # named conversation indistinguishable from an unnamed one.
+        for column in ("name TEXT", "color TEXT"):
+            try:
+                await self._db.execute(f"ALTER TABLE sessions ADD COLUMN {column}")
+                await self._db.commit()
+            except Exception:
+                pass  # Column already exists
         # A terminal rotation's carry-forward, and the conversation it was
         # composed for. It used to exist only as a system prompt on the
         # respawned pane — deleted from disk the moment that process read it,
@@ -428,10 +457,24 @@ class SessionManager:
         claude_sid = str(uuid.uuid4())
         now = time.time()
 
+        # A rotation replaces the conversation, not the conversation. The name
+        # the operator gave it is theirs and outlives the harness context, so
+        # the successor is born wearing it — copied at creation rather than
+        # read through `rotated_from` on display, because the predecessor is
+        # retired moments later and a read-through would inherit from a row
+        # anything later cleaning up closed sessions is free to touch.
+        inherited_name, inherited_color = None, None
+        if rotated_from:
+            parent = await self._get_row(rotated_from)
+            if parent:
+                inherited_name = parent.get("name")
+                inherited_color = parent.get("color")
+
         await self._db.execute(
-            """INSERT INTO sessions (id, owner_type, owner_ref, model, claude_sid, created_at, last_active, status, mind_id, rotated_from)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)""",
-            (session_id, owner_type, owner_ref, model, claude_sid, now, now, mind_id, rotated_from),
+            """INSERT INTO sessions (id, owner_type, owner_ref, model, claude_sid, created_at, last_active, status, mind_id, rotated_from, name, color)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?)""",
+            (session_id, owner_type, owner_ref, model, claude_sid, now, now, mind_id, rotated_from,
+             inherited_name, inherited_color),
         )
         await self._db.execute(
             """INSERT OR REPLACE INTO active_sessions (client_type, client_ref, session_id)
@@ -591,6 +634,77 @@ class SessionManager:
             sessions.append(session)
 
         return sessions
+
+    async def session_names(self) -> dict[str, dict[str, str]]:
+        """Every conversation's name and colour, keyed by session id.
+
+        One read for a whole picker. Closed rows are included deliberately:
+        the callers that must not offer a dead conversation filter by status
+        already, and a surface showing history — the terminal's own rail
+        among them — would otherwise draw a named conversation as unnamed the
+        moment it ended.
+        """
+        rows = await self._db.execute(
+            "SELECT id, name, color FROM sessions WHERE name IS NOT NULL OR color IS NOT NULL"
+        )
+        return {
+            row["id"]: {"name": row["name"] or "", "color": row["color"] or ""}
+            for row in await rows.fetchall()
+        }
+
+    async def set_session_name(
+        self,
+        session_id: str,
+        *,
+        name: str | None = None,
+        color: str | None = None,
+    ) -> dict:
+        """Name a conversation, or recolour it, on the row that owns both.
+
+        A **partial** update: a field left as ``None`` is not touched. The
+        route this replaced took the whole record, so a caller that knew only
+        about names — the health app did exactly this — blanked the colour
+        chosen at the tile on every rename, and the only client that dodged it
+        did so by reading the record back first and rewriting both fields.
+        Absent means unchanged, and then no caller needs to know the other
+        field exists.
+
+        An empty string is not absent: it clears. That is how a name is
+        removed, and it leaves the conversation displaying whatever it
+        displayed before it was ever named.
+
+        A closed session is refused. Its row stays writable and nothing reads
+        it, so a rename addressed to a conversation that has already rotated
+        away would commit, report success, and change nothing anybody can see
+        — which is the failure this whole change exists to stop, arriving one
+        layer further in. The ids come from buttons and prompts that
+        deliberately never expire, so this is reachable by hand, not in
+        theory.
+        """
+        if name is None and color is None:
+            raise ValueError("nothing to set: give a name, a colour, or both")
+        if color:
+            if not _COLOR_RE.match(color):
+                raise ValueError("color must be a hex value")
+        row = await self._get_row(session_id)
+        if not row:
+            raise LookupError(f"Session not found: {session_id}")
+        if row["status"] == "closed":
+            raise PermissionError(f"Session is closed: {session_id}")
+
+        assignments, params = [], []
+        if name is not None:
+            assignments.append("name = ?")
+            params.append(name.strip()[:MAX_SESSION_NAME_CHARS] or None)
+        if color is not None:
+            assignments.append("color = ?")
+            params.append(color.strip() or None)
+        params.append(session_id)
+        await self._db.execute(
+            f"UPDATE sessions SET {', '.join(assignments)} WHERE id = ?", params
+        )
+        await self._db.commit()
+        return await self._session_dict(session_id)
 
     async def release_on_mind(self, session_id: str, surface: str) -> bool:
         """Ask the mind to end one surface's process, keeping the session.
@@ -2855,6 +2969,15 @@ class SessionManager:
             "owner_type": row["owner_type"],
             "owner_ref": row["owner_ref"],
             "summary": row["summary"],
+            # This allowlist is hand-written while the bulk listing is a
+            # `SELECT *` with a denylist, so a column added to the table shows
+            # up there for free and is silently absent here — and this is what
+            # every single-session answer reads: `GET /sessions/{id}`, the
+            # `/switch` reply, a tile's reattach. A name missing from here is a
+            # rename that landed, reads back correctly in the picker, and still
+            # reports "New session" the moment you switch to it.
+            "name": row.get("name"),
+            "color": row.get("color"),
             "model": row["model"],
             "autopilot": bool(row["autopilot"]),
             "created_at": row["created_at"],
