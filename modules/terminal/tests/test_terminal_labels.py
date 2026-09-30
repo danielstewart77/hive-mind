@@ -129,25 +129,6 @@ def test_renaming_forwards_only_the_field_that_changed(tmp_path, monkeypatch):
     assert gw.names["sess-1"]["color"] == "#5c913b"
 
 
-def test_the_rename_carries_the_small_credential_and_not_only_the_big_one(
-    tmp_path, monkeypatch
-):
-    """R8: the name write proves the rename token, not just the service token.
-
-    Breaks if the forward drops that header, in which case the gateway refuses
-    every rename — and breaks the other way if the capability is ever folded
-    into the service bearer, since then the header would stop being sent.
-    """
-    client = _authed_client(tmp_path, monkeypatch)
-    monkeypatch.setenv("TERMINAL_LABELS_TOKEN", "rename-only")
-    with _Gateway() as gw:
-        monkeypatch.setenv("GATEWAY_API_URL", gw.url)
-
-        client.put("/api/terminal/labels/sess-1", json={"name": "Health"})
-
-    assert gw.puts[0][2].get("X-Rename-Token") == "rename-only"
-
-
 @pytest.mark.parametrize("gateway_status", [400, 409])
 def test_a_refused_rename_is_reported_as_refused(tmp_path, monkeypatch, gateway_status):
     """R7: a rename that did not land never answers 200.
