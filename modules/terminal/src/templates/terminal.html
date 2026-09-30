@@ -686,10 +686,17 @@
             editSelectedColor = colorInput.value;
             markSwatches();
         });
+        // What the dialog opened holding, so commit can tell what the user
+        // actually touched. Sending both fields every time defeats the partial
+        // write: the colour it would send comes from `labelsCache`, which on a
+        // phone that has not polled recently is minutes old — so changing a name
+        // here would overwrite a colour set at another device with a stale one.
+        let renameOpenedWith = {name: "", color: ""};
         function openRename() {
             const label = getLabel(sessionId);
             renameInput.value = label.name || "";
             editSelectedColor = label.color || "";
+            renameOpenedWith = {name: label.name || "", color: label.color || ""};
             markSwatches();
             renamePop.hidden = false;
             renameInput.focus();
@@ -697,7 +704,11 @@
         }
         function closeRename() { renamePop.hidden = true; }
         function commitRename() {
-            setLabel(sessionId, {name: renameInput.value.trim(), color: editSelectedColor});
+            const patch = {};
+            const name = renameInput.value.trim();
+            if (name !== renameOpenedWith.name) patch.name = name;
+            if (editSelectedColor !== renameOpenedWith.color) patch.color = editSelectedColor;
+            if (Object.keys(patch).length) setLabel(sessionId, patch);
             closeRename();
             applyLabel();
         }
