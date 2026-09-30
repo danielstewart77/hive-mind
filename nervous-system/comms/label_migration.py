@@ -170,6 +170,24 @@ def migrate_terminal_labels(
                 # conversation in every listing that has no transcript behind
                 # it.
                 continue
+            if status.get(origin) in LIVE_STATUSES:
+                # Not stranded. This rescues names off rows every picker hides;
+                # a conversation the operator can still see and tap keeps its
+                # own name, even when a successor exists. Moving it forward
+                # would take a name off the row he is looking at and put it on
+                # one that may live on a surface he cannot reach — a loss
+                # dressed up as a repair.
+                report.kept.append(origin)
+                if not dry_run:
+                    sessions.execute(
+                        "UPDATE sessions SET name = ?, color = ? WHERE id = ?",
+                        (row["name"] or None, row["color"] or None, origin),
+                    )
+                    labels.execute(
+                        "DELETE FROM terminal_labels WHERE session_id = ?", (origin,)
+                    )
+                named[origin] = row["name"] or ""
+                continue
             target, forked = _descendant(origin, children, status)
             if target is None:
                 (report.forked if forked else report.kept).append(origin)
