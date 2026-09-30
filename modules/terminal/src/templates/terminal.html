@@ -131,12 +131,31 @@
     function cacheLabelsLocally() {
         try { localStorage.setItem("term-labels", JSON.stringify(labelsCache)); } catch (e) {}
     }
-    function pushLabel(id, label) {
-        fetch("/api/terminal/labels/" + encodeURIComponent(id), {
-            method: "PUT", credentials: "same-origin",
-            headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({name: label.name || "", color: label.color || ""}),
-        }).catch(function () {});
+    // Only the fields the user actually changed. Sending both every time means
+    // a tab working from a minutes-stale cache overwrites the colour another
+    // tab just set while the user was only editing a name.
+    //
+    // A failed write reverts the cache and repaints. This used to be
+    // fire-and-forget with an empty catch, so an unreachable store left the
+    // new name on screen, stored nothing, and said nothing — a tile showing a
+    // name the system of record does not hold, which is the entire class of
+    // bug this change exists to close.
+    async function pushLabel(id, patch, previous) {
+        let ok = false;
+        try {
+            const resp = await fetch("/api/terminal/labels/" + encodeURIComponent(id), {
+                method: "PUT", credentials: "same-origin",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify(patch),
+            });
+            ok = resp.ok;
+        } catch (e) { ok = false; }
+        if (ok) return;
+        if (previous && (previous.name || previous.color)) labelsCache[id] = previous;
+        else delete labelsCache[id];
+        cacheLabelsLocally();
+        renderCards(lastRows);
+        openPanels.forEach(function (p) { p.refreshLabel(); });
     }
     // The server's copy is the record; this browser's is a warm-start cache
     // so the first paint is not unlabelled. Read on every poll, not once at
@@ -180,7 +199,7 @@
         const next = Object.assign({}, cur, patch);
         if (!next.name && !next.color) delete labelsCache[id]; else labelsCache[id] = next;
         cacheLabelsLocally();
-        pushLabel(id, next);
+        pushLabel(id, patch, cur);
     }
     // ── compose drafts ────────────────────────────────────────────
     // One key per session, not one JSON blob for all of them. The labels
@@ -233,15 +252,21 @@
         });
     }
 
+    // A rotation successor is born carrying its predecessor's name: the
+    // gateway copies it when it mints the row. All this does is stop the
+    // local cache drawing the successor unnamed until the next poll.
+    //
+    // It deliberately writes nothing. It used to PUT the cached name onto the
+    // successor and clear the predecessor, which after the server took over
+    // meant a minutes-stale cache overwriting a name that was already correct
+    // — and a rename made on the phone thirty seconds earlier losing to a
+    // desktop tab that had not polled yet.
     function migrateLabel(oldId, newId) {
         if (!oldId || !newId || oldId === newId) return;
         const label = labelsCache[oldId];
         if (!label) return;
         labelsCache[newId] = label;
-        delete labelsCache[oldId];
         cacheLabelsLocally();
-        pushLabel(newId, label);
-        pushLabel(oldId, {});
     }
 
     // ── shared content helpers (assistant text out of console SSE) ──
