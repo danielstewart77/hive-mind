@@ -265,6 +265,11 @@ def _permission_mode() -> str:
     return str(RUNTIME.get("permission_mode") or DEFAULT_PERMISSION_MODE)
 
 
+# How often a turn in flight puts a byte on the gateway's socket. Comfortably
+# inside comms' own no-data cap, which is ten minutes.
+HEARTBEAT_SECONDS = 120.0
+
+
 def _goal_rounds() -> int:
     """How many goal rounds one dispatch to this mind may be driven for.
 
@@ -646,7 +651,27 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
         try:
             async with asyncio.timeout(TURN_TIMEOUT_SECONDS):
                 if proc.stdout is not None:
-                    async for raw_line in proc.stdout:
+                    # Read with a heartbeat rather than a plain async-for. This
+                    # harness writes nothing until a turn or a goal round ends,
+                    # and comms caps the response socket on time since the last
+                    # byte — so a turn that thinks for longer than that is read
+                    # as a mind that stopped answering, and aborting the response
+                    # kills this process group with the work still going. The
+                    # read task is awaited rather than cancelled on each tick,
+                    # because cancelling a readline mid-line loses the line.
+                    reading: asyncio.Task[bytes] | None = None
+                    while True:
+                        if reading is None:
+                            reading = asyncio.ensure_future(proc.stdout.readline())
+                        done, _ = await asyncio.wait({reading}, timeout=HEARTBEAT_SECONDS)
+                        if not done:
+                            yield {"type": "turn_heartbeat", "_observer_only": True,
+                                   "session_id": conversation_id}
+                            continue
+                        raw_line = reading.result()
+                        reading = None
+                        if not raw_line:
+                            break
                         decoded = raw_line.decode(errors="replace")
                         lines.append(decoded)
                         frame = _progress_frame(decoded)
