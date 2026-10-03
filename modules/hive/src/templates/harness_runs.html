@@ -153,14 +153,19 @@
             facts.append(item);
         };
         add('Rounds', run.turns ?? run.rounds_seen);
-        if (!run.live) {
-            add('Emitted', run.emitted ?? 0);
-            add('Served', run.succeeded ?? 0);
-            add('Refused', run.failed ?? 0);
-            if (run.unanswered) add('Unanswered', run.unanswered);
-            if (run.goal_phase) add('Goal', run.goal_phase);
+        add('Emitted', run.emitted ?? 0);
+        add('Served', run.succeeded ?? 0);
+        add('Refused', run.failed ?? 0);
+        if (run.unanswered) add('Unanswered', run.unanswered);
+        if (run.goal_phase) add('Goal', run.goal_phase);
+        if (run.work_token) {
+            add('Files', run.work_files ?? 0);
+            add('Lines of Python', run.work_python_lines ?? 0);
         }
         card.append(facts);
+        if (run.live && run.live_source) {
+            card.append(el('p', 'hr-empty', `Read live from the mind's own session log, not from a turn report — a run writes that only when it ends.${run.work_token ? ` Work on disk is in ${run.work_token}.` : ''}`));
+        }
 
         const emitted = run.emitted ?? 0;
         if (emitted > 0) {
@@ -184,7 +189,7 @@
             card.append(el('p', 'hr-empty', `${served} served and ${refused} refused of ${emitted} — ${share}% served`));
         }
 
-        if (!run.live) {
+        {
             const detail = el('div', 'hr-detail');
             const tools = Object.entries(run.calls_by_tool || {}).sort((a, b) => b[1] - a[1]);
             const codes = Object.entries(run.failures_by_code || {}).sort((a, b) => b[1] - a[1]);
@@ -194,7 +199,9 @@
             const unserved = run.unserved_calls || [];
             const list = el('ul', 'hr-unserved');
             if (!unserved.length) {
-                list.append(el('p', 'hr-empty', run.failed ? 'Not reported by this run' : 'None'));
+                list.append(el('p', 'hr-empty', run.live
+                    ? 'Not reported until the run ends'
+                    : (run.failed ? 'Not reported by this run' : 'None')));
             } else {
                 for (const entry of unserved) {
                     const item = document.createElement('li');
@@ -214,7 +221,7 @@
     function render(payload) {
         const runs = payload.runs || [];
         const finished = runs.filter(run => !run.live);
-        const sum = (key) => finished.reduce((total, run) => total + (run[key] || 0), 0);
+        const sum = (key) => runs.reduce((total, run) => total + (run[key] || 0), 0);
         document.getElementById('hr-runs').textContent = runs.length;
         document.getElementById('hr-runs-detail').textContent =
             `${finished.length} finished, ${runs.length - finished.length} running`;
