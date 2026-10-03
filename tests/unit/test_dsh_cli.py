@@ -226,6 +226,28 @@ async def test_the_turn_runs_in_the_conversation_the_gateway_minted(dsh, monkeyp
     assert spawn.argv[spawn.argv.index("--session-id") + 1] == "conv-xyz"
 
 
+async def test_a_mind_under_test_asks_the_harness_to_stop_at_a_refusal(
+    dsh, monkeypatch
+) -> None:
+    """The flag is per mind, not per turn: a chat mind must not end a
+    conversation because one tool call came back refused."""
+    _session(dsh)
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setitem(dsh.RUNTIME, "stop_on_failed_call", True)
+    await _drain(dsh)
+    assert "--stop-on-failed-call" in spawn.argv
+
+
+async def test_an_ordinary_mind_drives_through_a_refused_call(dsh, monkeypatch) -> None:
+    _session(dsh)
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.delitem(dsh.RUNTIME, "stop_on_failed_call", raising=False)
+    await _drain(dsh)
+    assert "--stop-on-failed-call" not in spawn.argv
+
+
 async def test_the_turn_runs_in_the_work_area_the_deployment_named(
     dsh, monkeypatch, tmp_path: Path
 ) -> None:
