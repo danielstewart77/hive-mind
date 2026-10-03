@@ -84,6 +84,18 @@ own profile bundle is reported as a package that does not exist. The
 container is the boundary for a mind, not the mount flag, so
 `tmpfs: - /tmp:exec,mode=1777`.
 
+**A non-interactive permission mode.** dsh's base bundle pins a fresh session
+to `workspace-write` with an `ask` approval policy, and a per-turn harness has
+nobody to ask — no pane, no prompt, no channel the request travels on. The
+escalation is refused, and what reaches the operator is `bash` failing
+`SANDBOX_UNAVAILABLE` and a write outside the spawn's own cwd failing
+`FS_SANDBOX_DENIED`: capabilities the model appears to lack, when they are
+walls the deployment put up. So every spawn carries
+`DSH_PERMISSION_MODE=danger-full-access`, the same decision the claude and
+codex minds already run under — the boundary is the container and the
+directories mounted into it. A mind that wants confinement anyway names
+`permission_mode` in its own `runtime.yaml`.
+
 The profile itself lives under the mind's `DSH_HOME`
 (`profiles/<dsh_profile>/`), with the hive surface package symlinked into its
 `node_modules/@hive/`. dsh resolves every in-box bundle from its own
