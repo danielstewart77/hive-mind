@@ -668,6 +668,33 @@ async def training_page(request: Request):
     return _console_page(request, "training.html")
 
 
+@app.get("/harness-runs", response_class=HTMLResponse)
+async def harness_runs_page(request: Request):
+    return _console_page(request, "harness_runs.html")
+
+
+# The run collector writes this file; the console only reads it. The model-testing
+# checkout is not mounted into this container, and the hive's own data directory
+# already is — so the measurement travels as one file rather than as a new mount.
+HARNESS_RUNS_FILE = Path("/data/harness-runs.json")
+
+
+@app.get("/api/harness-runs")
+async def api_harness_runs(user: dict = Depends(require_auth)):
+    """Every recorded harness run's tool traffic.
+
+    An absent file is reported as no runs rather than as an error: the collector
+    has simply not run yet on this host, which is a different sentence from the
+    console being broken, and the page says which.
+    """
+    try:
+        return json.loads(HARNESS_RUNS_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"generated": None, "source": str(HARNESS_RUNS_FILE), "runs": []}
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=502, detail=f"harness run file unreadable: {exc}") from exc
+
+
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard_page(request: Request):
     return _console_page(request, "dashboard.html")
