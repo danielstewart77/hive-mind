@@ -749,3 +749,83 @@ async def test_the_turn_count_and_goal_phase_reach_the_gateway(dsh, monkeypatch)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
     result = _result(await _drain(dsh))
     assert (result["turns"], result["goal_phase"]) == (17, "active")
+
+
+async def test_each_goal_round_crosses_the_socket_as_an_observer_frame(
+    dsh, monkeypatch
+) -> None:
+    """comms caps the response socket on time since the last byte, and a
+    goal-driven dispatch is one response lasting an hour — so a round that
+    writes nothing is a mind that looks like it stopped answering. Observer-only
+    because the chat surface wants the answer, not a running count."""
+    _session(dsh)
+    monkeypatch.setitem(dsh.RUNTIME, "goal_rounds", 40)
+    spawn = _Spawn([
+        json.dumps({"progress": {"round": 1, "turns": 2, "toolCalls": 30}}) + "\n",
+        json.dumps({"progress": {"round": 2, "turns": 3, "toolCalls": 51}}) + "\n",
+        _report(turns=3),
+    ])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    events = await _drain(dsh)
+    rounds = [e for e in events if e.get("type") == "goal_progress"]
+    assert [e["progress"]["round"] for e in rounds] == [1, 2]
+    assert all(e["_observer_only"] for e in rounds)
+
+
+async def test_a_progress_line_is_not_mistaken_for_the_turn_report(dsh, monkeypatch) -> None:
+    """The report is identified by `sessionId` and is scanned for from the end,
+    so a progress line carrying one would end the turn at the first round."""
+    _session(dsh)
+    monkeypatch.setitem(dsh.RUNTIME, "goal_rounds", 40)
+    spawn = _Spawn([
+        _report(turns=1, text="the real answer"),
+        json.dumps({"sessionId": "conv-1", "progress": {"round": 9}}) + "\n",
+    ])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    assert _assistant_text(await _drain(dsh)) == "the real answer"
+
+
+async def test_the_goal_objective_is_the_message_not_the_composed_prompt(
+    dsh, monkeypatch, tmp_path
+) -> None:
+    """The round driver quotes the objective into every round, so a goal armed
+    with a conversation's opening task would spend the context window on forty
+    copies of the soul and system prompt."""
+    _session(dsh)
+    monkeypatch.setitem(dsh.RUNTIME, "goal_rounds", 40)
+    seen: dict[str, str] = {}
+    spawn = _Spawn([_report()])
+
+    original = spawn.__call__
+
+    async def capture(*argv: str, **kwargs: Any):
+        objective = argv[argv.index("--goal-objective-file") + 1]
+        seen["objective"] = Path(objective).read_text(encoding="utf-8")
+        seen["task"] = Path(argv[argv.index("--task-file") + 1]).read_text(encoding="utf-8")
+        return await original(*argv, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", capture)
+    await _drain(dsh, content="build the app")
+    assert seen["objective"] == "build the app"
+    assert len(seen["task"]) > len(seen["objective"])
+
+
+async def test_the_objective_file_is_cleaned_up_with_the_task_file(
+    dsh, monkeypatch
+) -> None:
+    """One process owns both files; a turn that leaves them behind fills /tmp
+    with composed prompts."""
+    _session(dsh)
+    monkeypatch.setitem(dsh.RUNTIME, "goal_rounds", 40)
+    paths: list[str] = []
+    spawn = _Spawn([_report()])
+    original = spawn.__call__
+
+    async def capture(*argv: str, **kwargs: Any):
+        paths.append(argv[argv.index("--goal-objective-file") + 1])
+        paths.append(argv[argv.index("--task-file") + 1])
+        return await original(*argv, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", capture)
+    await _drain(dsh)
+    assert paths and not [p for p in paths if Path(p).exists()]
