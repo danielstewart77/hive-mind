@@ -50,6 +50,12 @@ MIND_NAME = os.environ.get("MIND_NAME", "example")
 MINDS_ROOT = Path(__file__).resolve().parent.parent
 MIND_DIR = MINDS_ROOT / MIND_NAME
 PROJECT_DIR = Path("/usr/src/app")
+#: The directory a harness turn runs in. The mind's own tree is the default and
+#: is wrong for a mind under test: a model writing a relative path lands in the
+#: hive's checkout rather than in its own work area, and the writes are
+#: scattered where its next turn will not find them. A deployment that mounts a
+#: work area names it here, and nothing else about the spawn changes.
+SPAWN_DIR = Path(os.environ.get("DSH_SPAWN_DIR", str(PROJECT_DIR)))
 
 log = configure_logging(f"hive-mind.minds.{MIND_NAME}")
 
@@ -204,12 +210,12 @@ def _session_persisted(conversation_id: str) -> bool:
 def _spawn_cwd() -> str:
     """The working directory a turn runs in, as dsh will record it."""
     try:
-        return str(PROJECT_DIR.resolve())
+        return str(SPAWN_DIR.resolve())
     except OSError:
         # A path that cannot be resolved is still the one we will hand the
         # spawn; dsh will record whatever it resolves to and the probe will
         # agree with itself either way.
-        return str(PROJECT_DIR)
+        return str(SPAWN_DIR)
 
 
 def _conversation_flags(session_id: str) -> list[str]:
@@ -616,7 +622,7 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
                 stderr=asyncio.subprocess.PIPE,
                 limit=10 * 1024 * 1024,
                 env=env,
-                cwd=str(PROJECT_DIR),
+                cwd=str(SPAWN_DIR),
                 start_new_session=True,
             )
         except OSError as exc:
