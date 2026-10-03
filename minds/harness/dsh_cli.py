@@ -265,6 +265,25 @@ def _permission_mode() -> str:
     return str(RUNTIME.get("permission_mode") or DEFAULT_PERMISSION_MODE)
 
 
+def _goal_rounds() -> int:
+    """How many goal rounds one dispatch to this mind may be driven for.
+
+    Declared per mind in ``runtime.yaml`` rather than guessed per turn, because
+    only the mind's own configuration knows what it is for. A chat mind leaves
+    it unset and every turn is one turn, which is what a person talking to it
+    expects. A mind whose job is a long build names a number, and then its own
+    decision to stop ends a round instead of the job — a small model treats the
+    first natural pause as the end of the work, and no prompt wording fixes
+    that reliably.
+    """
+    raw = RUNTIME.get("goal_rounds")
+    try:
+        rounds = int(raw)
+    except (TypeError, ValueError):
+        return 1
+    return rounds if rounds > 1 else 1
+
+
 def _first_env(names: tuple[str, ...]) -> str:
     """The first of these names this mind's env block or environment carries.
 
@@ -541,7 +560,10 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
         with os.fdopen(handle, "w", encoding="utf-8") as fh:
             fh.write(task)
 
-        cmd = [DSH_BIN, "--profile", DSH_PROFILE, *flags, "--task-file", task_path]
+        rounds = _goal_rounds()
+        goal_flags = ["--goal-rounds", str(rounds)] if rounds > 1 else []
+        cmd = [DSH_BIN, "--profile", DSH_PROFILE, *flags, *goal_flags,
+               "--task-file", task_path]
         log.info("%s session %s: spawning dsh turn (%s %s)",
                  NAME, sid, flags[0], conversation_id)
 
@@ -687,7 +709,8 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
               tools_emitted=traffic.get("emitted"),
               tools_succeeded=traffic.get("succeeded"),
               tools_failed=traffic.get("failed"),
-              tools_unanswered=traffic.get("unanswered"))
+              tools_unanswered=traffic.get("unanswered"),
+              turns=report.get("turns"), goal_phase=report.get("goalPhase"))
     result: dict[str, Any] = {
         "type": "result",
         "session_id": str(report.get("sessionId") or conversation_id),
@@ -695,6 +718,13 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
         "traffic": traffic,
         "is_error": outcome != "completed",
     }
+    # Reported beside the tally rather than folded into it: a build that stopped
+    # at round two of forty and one that burned all forty are different
+    # failures, and the tally alone cannot tell them apart.
+    if report.get("turns") is not None:
+        result["turns"] = report["turns"]
+    if report.get("goalPhase") is not None:
+        result["goal_phase"] = report["goalPhase"]
     if error:
         result["error_code"] = error.get("code")
         result["error"] = error.get("message")
