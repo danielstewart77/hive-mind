@@ -28,7 +28,7 @@
 
     <section class="surface">
         <div class="surface-header">
-            <div><h2>Runs</h2><p>Newest last. A run with no report either never reached the mind or died before writing one, and says which.</p></div>
+            <div><h2>Runs</h2><p>Newest first. A run with no report either never reached the mind or died before writing one, and says which.</p></div>
             <small class="hr-legend">
                 <span class="hr-key"><span class="hr-swatch hr-swatch-served" aria-hidden="true"></span>Served</span>
                 <span class="hr-key"><span class="hr-swatch hr-swatch-refused" aria-hidden="true"></span>Refused</span>
@@ -240,7 +240,8 @@
         if (!runs.length) {
             listEl.append(el('div', 'loading-state', 'No runs recorded yet.'));
         } else {
-            for (const run of runs) listEl.append(renderRun(run));
+            // Newest first: the run worth looking at is the one just dispatched.
+            for (const run of [...runs].reverse()) listEl.append(renderRun(run));
         }
         document.getElementById('hr-generated').textContent =
             `Collected ${payload.generated || 'unknown'} from ${payload.source || 'the run logs'}.`;
