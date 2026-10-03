@@ -228,9 +228,10 @@ def _conversation_flags(session_id: str) -> list[str]:
 #: The provider route the hive profile declares. A YAML mapping key cannot be
 #: computed, so this name is the profile's and the spawn matches it rather than
 #: naming a route the profile does not define — which fails the boot outright.
-#: ``runtime.yaml``'s own ``provider`` field selects which endpoint and
-#: credential of this mind's env block fill that route in, exactly as it
-#: selects codex's ``-c model_provider`` overrides.
+#: What fills that route in is the endpoint and credential this mind's own
+#: ``env`` block carries, found by name; ``runtime.yaml``'s ``provider`` field
+#: names the route for the broker row and the console, and chooses nothing here
+#: — one route, one env block, no second candidate to pick between.
 PROFILE_PROVIDER_ROUTE = "hive-proxy"
 
 #: What the profile's ``apiKeyEnv`` names. Every mind's env block spells its
