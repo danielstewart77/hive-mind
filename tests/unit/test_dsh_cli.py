@@ -377,6 +377,34 @@ async def test_the_model_and_endpoint_come_from_the_minds_own_configuration(
     assert spawn.env["DSH_PROVIDER"] == dsh.PROFILE_PROVIDER_ROUTE
 
 
+async def test_the_spawn_runs_under_a_mode_with_no_approval_wall_to_answer(
+    dsh, monkeypatch
+) -> None:
+    """dsh pins a fresh session to workspace-write and `ask`, and this harness
+    has nobody to ask — so a shell call comes back SANDBOX_UNAVAILABLE and a
+    write outside the spawn cwd comes back FS_SANDBOX_DENIED, both reported as
+    things the model cannot do rather than walls the deployment put up."""
+    _session(dsh)
+    monkeypatch.delitem(dsh.RUNTIME, "permission_mode", raising=False)
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh)
+    assert spawn.env["DSH_PERMISSION_MODE"] == dsh.DEFAULT_PERMISSION_MODE
+
+
+async def test_a_mind_that_wants_confinement_names_its_own_permission_mode(
+    dsh, monkeypatch
+) -> None:
+    """The container is the boundary by default, but a sandboxed mind on a
+    machine nobody wants it operating can say so in its own runtime.yaml."""
+    _session(dsh)
+    monkeypatch.setitem(dsh.RUNTIME, "permission_mode", "read-only")
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh)
+    assert spawn.env["DSH_PERMISSION_MODE"] == "read-only"
+
+
 async def test_the_proxy_credential_is_translated_to_the_name_the_route_resolves(
     dsh, monkeypatch
 ) -> None:

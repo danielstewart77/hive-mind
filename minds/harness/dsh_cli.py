@@ -234,6 +234,20 @@ def _conversation_flags(session_id: str) -> list[str]:
 #: — one route, one env block, no second candidate to pick between.
 PROFILE_PROVIDER_ROUTE = "hive-proxy"
 
+#: The permission mode every spawn runs under, unless the mind names another.
+#:
+#: dsh's base bundle pins a fresh session to ``workspace-write`` with an
+#: ``ask`` approval policy, and a per-turn harness has nobody to ask: there is
+#: no pane, no prompt and no channel the request could travel on. So the
+#: escalation is refused, and what reaches the operator is a shell call failing
+#: ``SANDBOX_UNAVAILABLE`` and a write outside the spawn's own cwd failing
+#: ``FS_SANDBOX_DENIED`` — reported as capabilities the model does not have,
+#: when they are walls the deployment put up. A mind's boundary is its
+#: container and the directories mounted into it, which is the same decision
+#: the claude and codex minds already run under. A mind that wants confinement
+#: anyway names ``permission_mode`` in its own ``runtime.yaml``.
+DEFAULT_PERMISSION_MODE = "danger-full-access"
+
 #: What the profile's ``apiKeyEnv`` names. Every mind's env block spells its
 #: proxy credential differently; the route resolves one name, so the adapter
 #: translates rather than asking every mind to be rewritten.
@@ -244,6 +258,11 @@ _PROXY_KEY_SOURCES = ("OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN", "DSH_API_KEY")
 
 #: And its endpoint.
 _PROXY_URL_SOURCES = ("OLLAMA_BASE_URL", "OPENAI_BASE_URL", "ANTHROPIC_BASE_URL")
+
+
+def _permission_mode() -> str:
+    """The sandbox and approval mode this mind's spawns run under."""
+    return str(RUNTIME.get("permission_mode") or DEFAULT_PERMISSION_MODE)
 
 
 def _first_env(names: tuple[str, ...]) -> str:
@@ -507,6 +526,7 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
     env.update({k: str(v) for k, v in RUNTIME_ENV.items()})
     env.update(_model_env(state["model"]))
     env["DSH_HOME"] = str(DSH_HOME)
+    env["DSH_PERMISSION_MODE"] = _permission_mode()
     for key, name in (("client_ref", "CLIENT_REF"), ("owner_type", "OWNER_TYPE"),
                       ("owner_ref", "OWNER_REF")):
         if state.get(key):
