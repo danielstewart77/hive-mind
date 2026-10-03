@@ -20,15 +20,30 @@ from minds.harness import dsh_cli
 
 
 class _FakeStdout:
-    """The spawned process's stdout, line by line."""
+    """The spawned process's stdout, line by line.
 
-    def __init__(self, lines: list[str]) -> None:
-        self._lines = lines
+    ``readline`` is what the adapter actually uses, so it can tick a heartbeat
+    between lines; ``line_delay`` is how long a line keeps it waiting.
+    """
+
+    def __init__(self, lines: list[str], line_delay: float = 0.0) -> None:
+        self._lines = list(lines)
+        self._delay = line_delay
+
+    async def readline(self) -> bytes:
+        if self._delay:
+            await asyncio.sleep(self._delay)
+        if not self._lines:
+            return b""
+        return self._lines.pop(0).encode()
 
     def __aiter__(self) -> Any:
         async def gen() -> Any:
-            for line in self._lines:
-                yield line.encode()
+            while True:
+                line = await self.readline()
+                if not line:
+                    return
+                yield line
         return gen()
 
 
@@ -41,8 +56,9 @@ class _FakeStderr:
 
 
 class _FakeProc:
-    def __init__(self, lines: list[str], stderr: str = "", returncode: int = 0) -> None:
-        self.stdout = _FakeStdout(lines)
+    def __init__(self, lines: list[str], stderr: str = "", returncode: int = 0,
+                 line_delay: float = 0.0) -> None:
+        self.stdout = _FakeStdout(lines, line_delay)
         self.stderr = _FakeStderr(stderr)
         self.returncode = returncode
         self.pid = 4242
@@ -55,18 +71,19 @@ class _Spawn:
     """Records the spawn and answers it with a scripted process."""
 
     def __init__(self, lines: list[str], stderr: str = "", returncode: int = 0,
-                 on_spawn: Any = None) -> None:
+                 on_spawn: Any = None, line_delay: float = 0.0) -> None:
         self.lines = lines
         self.stderr = stderr
         self.returncode = returncode
         self.on_spawn = on_spawn
+        self.line_delay = line_delay
         self.calls: list[dict] = []
 
     async def __call__(self, *argv: str, **kwargs: Any) -> _FakeProc:
         self.calls.append({"argv": list(argv), **kwargs})
         if self.on_spawn is not None:
             self.on_spawn()
-        return _FakeProc(self.lines, self.stderr, self.returncode)
+        return _FakeProc(self.lines, self.stderr, self.returncode, self.line_delay)
 
     @property
     def argv(self) -> list[str]:
@@ -611,11 +628,9 @@ async def test_a_turn_that_never_ends_is_stopped_and_reported(
             pass
 
     class _HangingStdout:
-        def __aiter__(self) -> Any:
-            async def gen() -> Any:
-                await asyncio.sleep(30)
-                yield b""
-            return gen()
+        async def readline(self) -> bytes:
+            await asyncio.sleep(30)
+            return b""
 
     async def spawn(*argv: str, **kwargs: Any) -> _FakeProc:
         proc = _FakeProc([])
@@ -639,11 +654,8 @@ async def test_output_the_adapter_cannot_read_is_reported_not_swallowed(
     _session(dsh)
 
     class _TooLong:
-        def __aiter__(self) -> Any:
-            async def gen() -> Any:
-                raise ValueError("Separator is not found, and chunk exceed the limit")
-                yield b""
-            return gen()
+        async def readline(self) -> bytes:
+            raise ValueError("Separator is not found, and chunk exceed the limit")
 
     async def spawn(*argv: str, **kwargs: Any) -> _FakeProc:
         proc = _FakeProc([])
@@ -829,3 +841,35 @@ async def test_the_objective_file_is_cleaned_up_with_the_task_file(
     monkeypatch.setattr(asyncio, "create_subprocess_exec", capture)
     await _drain(dsh)
     assert paths and not [p for p in paths if Path(p).exists()]
+
+
+async def test_a_quiet_turn_still_puts_a_byte_on_the_socket(dsh, monkeypatch) -> None:
+    """comms caps the mind response socket on time since the last byte. This
+    harness writes nothing until a turn ends, so a turn that thinks for longer
+    than that cap is read as a mind that stopped answering — and comms aborting
+    the response kills this process group while the work is still going."""
+    _session(dsh)
+    monkeypatch.setattr(dsh, "HEARTBEAT_SECONDS", 0.01)
+    spawn = _Spawn([_report()], line_delay=0.05)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    events = await _drain(dsh)
+    beats = [e for e in events if e.get("type") == "turn_heartbeat"]
+    assert beats and all(e["_observer_only"] for e in beats)
+    # And the turn still answers: a heartbeat is not a substitute for the report.
+    assert _assistant_text(events) == "the answer"
+
+
+async def test_a_line_is_not_lost_to_a_heartbeat_tick(dsh, monkeypatch) -> None:
+    """The read task is awaited across ticks rather than cancelled on each one;
+    cancelling a readline mid-line drops the line, and the dropped line would be
+    the turn report."""
+    _session(dsh)
+    monkeypatch.setattr(dsh, "HEARTBEAT_SECONDS", 0.01)
+    spawn = _Spawn([
+        json.dumps({"progress": {"round": 1, "turns": 2, "toolCalls": 9}}) + "\n",
+        _report(turns=2, text="finished"),
+    ], line_delay=0.03)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    events = await _drain(dsh)
+    assert [e["progress"]["round"] for e in events if e.get("type") == "goal_progress"] == [1]
+    assert _result(events)["turns"] == 2
