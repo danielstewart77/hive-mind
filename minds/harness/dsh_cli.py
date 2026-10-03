@@ -74,6 +74,13 @@ DSH_HOME = Path(
 #: mind with no runner rather than a mind with the wrong options.
 DSH_PROFILE = str(RUNTIME.get("dsh_profile") or "hive")
 
+#: How long one turn may run. There is no other bound: a dsh process whose
+#: model request hangs rather than fails would hold the conversation open
+#: forever, `in_flight` set and `/health` still reporting ok, until the
+#: gateway's own socket read expired and reported a stalled model as a mind
+#: that is unreachable — a remedy aimed at the network for a fault in neither.
+TURN_TIMEOUT_SECONDS = float(RUNTIME.get("turn_timeout_seconds") or 1800)
+
 #: The launcher. A container links the bind-mounted tree's own bin; a bare
 #: invocation can point at it directly.
 DSH_BIN = str(os.environ.get("DSH_BIN") or RUNTIME.get("dsh_bin") or "dsh")
@@ -389,15 +396,24 @@ async def create_session(req: Request) -> Any:
         full_prompt = f"{system_prompt_blocks}\n\n{surface_prompt}"
     else:
         full_prompt = surface_prompt or system_prompt_blocks
-    SESSIONS[sid] = {
+    # A re-POST of an existing session is ordinary: comms respawns on its own
+    # restart, mid-turn, because its process table is empty while this process
+    # and its running dsh turn are not. Assigning a fresh dict would clear
+    # `in_flight` and the process handle, and the next message would put a
+    # second dsh process on the same session log — whose colliding event
+    # sequence numbers make the log unloadable, at which point dsh refuses
+    # both resume and create and the conversation is dead for good. So the
+    # declared fields are updated and the turn's own state is left alone.
+    state = SESSIONS.setdefault(sid, {})
+    state.update({
         "system_prompt": full_prompt,
         "conversation_id": conversation_id,
         "model": model,
-        "proc": None,
         "client_ref": client_ref,
         "owner_type": owner_type,
         "owner_ref": owner_ref,
-    }
+    })
+    state.setdefault("proc", None)
     log.info("%s session %s initialised (model=%s conversation=%s persisted=%s)",
              NAME, sid, model, conversation_id, _session_persisted(conversation_id))
     log_event(log, "session.created", mind_id=MIND_ID, mind_name=NAME,
@@ -474,7 +490,17 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
     task = content if flags[0] == "--resume" else f"{state['system_prompt']}\n\n---\n\n{content}"
 
     if images:
+        # Said out loud rather than logged: a model answering the text as if
+        # nothing was attached looks like a model that ignored the picture.
         log.warning("%s session %s: image input not supported, ignoring", NAME, sid)
+        yield {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{
+                "type": "text",
+                "text": f"({len(images)} attached image(s) were not sent —"
+                        " this harness has no image input yet.)",
+            }]},
+        }
 
     env = os.environ.copy()
     env.update({k: str(v) for k, v in RUNTIME_ENV.items()})
@@ -535,14 +561,27 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
             pgid = None
 
         lines: list[str] = []
-        if proc.stdout is not None:
-            async for raw_line in proc.stdout:
-                lines.append(raw_line.decode(errors="replace"))
-
         stderr = b""
-        if proc.stderr is not None:
-            stderr = await proc.stderr.read()
-        returncode = await proc.wait()
+        timed_out = False
+        try:
+            async with asyncio.timeout(TURN_TIMEOUT_SECONDS):
+                if proc.stdout is not None:
+                    async for raw_line in proc.stdout:
+                        lines.append(raw_line.decode(errors="replace"))
+                if proc.stderr is not None:
+                    stderr = await proc.stderr.read()
+                returncode = await proc.wait()
+        except TimeoutError:
+            timed_out = True
+            log.error("%s session %s: dsh turn exceeded %ss, killing it",
+                      NAME, sid, TURN_TIMEOUT_SECONDS)
+        except ValueError as exc:
+            # A single stdout line past the stream limit. Raised after the SSE
+            # headers are already out, so an unhandled one ends the response
+            # with zero frames and the gateway reports a turn that produced
+            # nothing — total silence for the user.
+            log.error("%s session %s: unreadable dsh output: %s", NAME, sid, exc)
+            stderr = str(exc).encode()
         state["proc"] = None
         # Every turn, not only the abandoned ones. The launcher is a node
         # process that spawns tool and code-runtime children; the leader
@@ -561,7 +600,27 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
         except OSError:
             pass
 
+    if timed_out:
+        yield {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{
+                "type": "text",
+                "text": f"The turn was still running after {int(TURN_TIMEOUT_SECONDS)}"
+                        " seconds and was stopped.",
+            }]},
+        }
+        yield {"type": "result", "session_id": conversation_id,
+               "stop_reason": "timeout", "is_error": True,
+               "error_code": "TURN_TIMEOUT"}
+        return
+
     report = _parse_report(lines)
+    if report is None and state.get("killed"):
+        # Stopped on purpose — a kill, or a release to another surface. The
+        # crash sentence below would read as the harness falling over.
+        yield {"type": "result", "session_id": conversation_id,
+               "stop_reason": "stopped", "is_error": False}
+        return
     if report is None:
         # A process that wrote no report did not complete a turn, whatever its
         # exit status says. Reporting it as an empty success would make a
@@ -680,6 +739,7 @@ async def release_session(sid: str, surface: str) -> Any:
         return JSONResponse({"error": "surface must be stream"}, status_code=400)
     sess = SESSIONS.pop(sid, None)
     if sess is not None:
+        sess["killed"] = True
         await _reap_proc(sess.get("proc"))
     return {"session_id": sid, "surface": surface, "released": sess is not None}
 
@@ -702,6 +762,7 @@ async def attach_pty(websocket: WebSocket) -> None:
 async def kill_session(sid: str) -> dict:
     sess = SESSIONS.pop(sid, None)
     if sess is not None:
+        sess["killed"] = True
         await _reap_proc(sess.get("proc"))
     log.info("Killed %s session %s", NAME, sid)
     log_event(log, "session.closed", mind_id=MIND_ID, mind_name=NAME, session_id=sid)
@@ -712,6 +773,12 @@ async def kill_session(sid: str) -> dict:
 # read this mind's own runtime.yaml. The skills and files pages are not mounted
 # yet — this harness reads its skills from a third directory nobody has taught
 # skills_sync about, and a route reporting the wrong one is worse than no route.
+# One middleware over every `/sessions` route rather than a decorator per
+# route, so a route added later cannot ship open by being forgotten. Without
+# it the gateway goes on presenting a token nobody reads, registration keeps
+# publishing a credential nobody checks, and every surface stays green while
+# anything that can reach the port can open, drive and kill conversations.
+runtime_api.install_session_guard(app, mind_dir=MIND_DIR)
 runtime_api.install_runtime_routes(app, path=RUNTIME_PATH, mind_id=MIND_ID, log=log)
 models_api.install_models_route(app, path=RUNTIME_PATH, mind_id=MIND_ID, log=log)
 

@@ -549,6 +549,111 @@ async def test_a_terminal_release_is_refused_as_unsupported(dsh) -> None:
     assert "row-1" in dsh.SESSIONS
 
 
+async def test_respawning_a_session_mid_turn_does_not_erase_the_turn_guard(
+    dsh
+) -> None:
+    """comms respawns on its own restart, mid-turn, because its process table
+    is empty while this process and its running dsh turn are not. A fresh state
+    dict would put a second process on the same session log, and two writers
+    numbering events from the same prefix make that log unloadable — after
+    which dsh refuses both resume and create and the conversation is dead."""
+    _session(dsh)["in_flight"] = True
+    await dsh.create_session(_FakeRequest({
+        "session_id": "row-1", "resume_sid": "conv-1", "model": "qwen35-131k",
+    }))
+    assert dsh.SESSIONS["row-1"]["in_flight"] is True
+    response = await dsh.send_message("row-1", _FakeRequest({"content": "hello"}))
+    assert response.status_code == 409
+
+
+async def test_a_turn_that_never_ends_is_stopped_and_reported(
+    dsh, monkeypatch
+) -> None:
+    """A model request that hangs rather than fails would otherwise hold the
+    conversation open until the gateway's socket read expired and reported a
+    stalled model as a mind that cannot be reached."""
+    _session(dsh)
+    monkeypatch.setattr(dsh_cli, "TURN_TIMEOUT_SECONDS", 0.05)
+
+    class _Hangs(_FakeProc):
+        def __init__(self) -> None:
+            super().__init__([])
+
+        def __post_init__(self) -> None:  # pragma: no cover - not used
+            pass
+
+    class _HangingStdout:
+        def __aiter__(self) -> Any:
+            async def gen() -> Any:
+                await asyncio.sleep(30)
+                yield b""
+            return gen()
+
+    async def spawn(*argv: str, **kwargs: Any) -> _FakeProc:
+        proc = _FakeProc([])
+        proc.stdout = _HangingStdout()
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    events = await _drain(dsh)
+    result = _result(events)
+    assert result["stop_reason"] == "timeout"
+    assert result["error_code"] == "TURN_TIMEOUT"
+    assert "stopped" in _assistant_text(events)
+
+
+async def test_output_the_adapter_cannot_read_is_reported_not_swallowed(
+    dsh, monkeypatch
+) -> None:
+    """A single stdout line past the stream limit raises after the SSE headers
+    are already out. Unhandled, the response ends with no frames at all and the
+    gateway reports a turn that produced nothing — silence, for the user."""
+    _session(dsh)
+
+    class _TooLong:
+        def __aiter__(self) -> Any:
+            async def gen() -> Any:
+                raise ValueError("Separator is not found, and chunk exceed the limit")
+                yield b""
+            return gen()
+
+    async def spawn(*argv: str, **kwargs: Any) -> _FakeProc:
+        proc = _FakeProc([])
+        proc.stdout = _TooLong()
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    events = await _drain(dsh)
+    assert _result(events)["is_error"] is True
+    assert "exceed the limit" in _assistant_text(events)
+
+
+async def test_a_turn_stopped_on_purpose_is_not_reported_as_a_crash(
+    dsh, monkeypatch
+) -> None:
+    """A kill or a cross-surface release ends the process mid-turn. The
+    harness-exited-without-reporting sentence would read as a crash to the one
+    person who knows they asked for it."""
+    state = _session(dsh)
+    state["killed"] = True
+    monkeypatch.setattr(asyncio, "create_subprocess_exec",
+                        _Spawn([], stderr="", returncode=-9))
+    result = _result(await _drain(dsh))
+    assert result["stop_reason"] == "stopped"
+    assert result["is_error"] is False
+
+
+async def test_an_attached_image_is_reported_as_not_sent(dsh, monkeypatch) -> None:
+    """A model answering the text as if nothing was attached looks like a model
+    that ignored the picture."""
+    _session(dsh)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _Spawn([_report()]))
+    events = [e async for e in dsh._run_dsh_turn("row-1", "what is this?",
+                                                 [{"data": "x"}, {"data": "y"}])]
+    texts = [e["message"]["content"][0]["text"] for e in events if e["type"] == "assistant"]
+    assert any("2 attached image(s) were not sent" in t for t in texts)
+
+
 def test_a_terminal_attach_closes_on_its_own_code(dsh) -> None:
     """Driven through the real app, not by calling the handler: a handler whose
     socket parameter is not typed as a WebSocket is never handed one — FastAPI
