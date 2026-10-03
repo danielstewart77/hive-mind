@@ -696,3 +696,56 @@ def test_a_terminal_attach_closes_on_its_own_code(dsh) -> None:
             with pytest.raises(WebSocketDisconnect) as refused:
                 socket.receive_text()
     assert refused.value.code == 4417
+
+
+async def test_a_chat_minds_dispatch_is_one_turn_and_names_no_rounds(
+    dsh, monkeypatch
+) -> None:
+    """A person talking to a mind expects their message answered once. Driving
+    every chat turn as a goal would have the model carry on talking to itself
+    after it had already replied."""
+    _session(dsh)
+    monkeypatch.delitem(dsh.RUNTIME, "goal_rounds", raising=False)
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh)
+    assert "--goal-rounds" not in spawn.calls[0]["argv"]
+
+
+async def test_a_build_mind_drives_its_dispatch_for_the_rounds_it_declared(
+    dsh, monkeypatch
+) -> None:
+    """A mind whose job is a long build names a round cap in its own
+    runtime.yaml, and then its first natural pause ends a round rather than the
+    job — which is the only thing that reliably stops a small model quitting at
+    the two-minute mark."""
+    _session(dsh)
+    monkeypatch.setitem(dsh.RUNTIME, "goal_rounds", 40)
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh)
+    argv = spawn.calls[0]["argv"]
+    assert argv[argv.index("--goal-rounds") + 1] == "40"
+
+
+async def test_a_round_cap_that_cannot_be_read_is_one_turn_not_a_crash(
+    dsh, monkeypatch
+) -> None:
+    """A hand-edited runtime.yaml holding nonsense costs the long-running
+    behaviour, not the mind: every turn still answers."""
+    _session(dsh)
+    monkeypatch.setitem(dsh.RUNTIME, "goal_rounds", "lots")
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh)
+    assert "--goal-rounds" not in spawn.calls[0]["argv"]
+
+
+async def test_the_turn_count_and_goal_phase_reach_the_gateway(dsh, monkeypatch) -> None:
+    """A build that stopped at round two of forty and one that burned all forty
+    are different failures, and the tool tally alone cannot tell them apart."""
+    _session(dsh)
+    spawn = _Spawn([_report(turns=17, goalPhase="active")])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    result = _result(await _drain(dsh))
+    assert (result["turns"], result["goal_phase"]) == (17, "active")
