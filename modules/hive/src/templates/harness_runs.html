@@ -1,0 +1,260 @@
+{% extends "layout.html" %}
+{% block title %}Harness runs · Hive{% endblock %}
+{% block content %}
+{#
+  One row per dispatch against a harness mind, read off the turn report the
+  harness wrote about itself. Every state and every proportion is printed as a
+  number and a word beside its mark, so nothing on this page is carried by
+  colour alone.
+#}
+<main class="page">
+    <header class="page-header">
+        <div class="page-header-copy">
+            <p class="page-eyebrow">Harness measurement</p>
+            <h1 class="page-title">Harness runs</h1>
+            <p class="page-description">Each run is one dispatch driven as a goal: the harness re-enters the model at every idle checkpoint until the work is done or the round cap runs out. What is measured is the tool traffic — calls the model emitted, calls the harness could serve, and the names and argument spellings it refused. A refused call is the worklist: the harness grows a tool matching the call.</p>
+        </div>
+        <div class="page-actions"><button class="button button-quiet" id="hr-refresh" type="button"><i data-lucide="refresh-cw"></i>Refresh</button></div>
+    </header>
+
+    <section class="metric-grid" aria-label="Across all runs">
+        <article class="metric surface"><div class="metric-top"><span class="metric-label">Runs</span><span class="metric-icon"><i data-lucide="list-ordered"></i></span></div><div class="metric-value" id="hr-runs">—</div><div class="metric-detail" id="hr-runs-detail">Dispatches recorded</div></article>
+        <article class="metric surface"><div class="metric-top"><span class="metric-label">Calls emitted</span><span class="metric-icon"><i data-lucide="arrow-up-right"></i></span></div><div class="metric-value" id="hr-emitted">—</div><div class="metric-detail">Tool calls the models asked for</div></article>
+        <article class="metric surface"><div class="metric-top"><span class="metric-label">Served</span><span class="metric-icon"><i data-lucide="circle-check-big"></i></span></div><div class="metric-value" id="hr-served">—</div><div class="metric-detail" id="hr-served-detail">Calls the harness could run</div></article>
+        <article class="metric surface"><div class="metric-top"><span class="metric-label">Refused</span><span class="metric-icon"><i data-lucide="circle-x"></i></span></div><div class="metric-value" id="hr-refused">—</div><div class="metric-detail" id="hr-refused-detail">Each one is a tool to build</div></article>
+    </section>
+
+    <div id="hr-error" class="error-state" hidden></div>
+
+    <section class="surface">
+        <div class="surface-header">
+            <div><h2>Runs</h2><p>Newest last. A run with no report either never reached the mind or died before writing one, and says which.</p></div>
+            <small class="hr-legend">
+                <span class="hr-key"><span class="hr-swatch hr-swatch-served" aria-hidden="true"></span>Served</span>
+                <span class="hr-key"><span class="hr-swatch hr-swatch-refused" aria-hidden="true"></span>Refused</span>
+            </small>
+        </div>
+        <div id="hr-runs-list"><div class="loading-state">Loading runs…</div></div>
+    </section>
+
+    <p class="hr-generated" id="hr-generated"></p>
+</main>
+
+<style>
+    .hr-legend { display: flex; gap: 14px; color: var(--console-muted); font-size: 12px; }
+    .hr-key { display: inline-flex; align-items: center; gap: 6px; }
+    .hr-swatch { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+    .hr-swatch-served { background: var(--console-green); }
+    .hr-swatch-refused { background: var(--console-red); }
+
+    .hr-run { padding: 16px; border-bottom: 1px solid var(--console-line); }
+    .hr-run:last-child { border-bottom: 0; }
+    .hr-run-top { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+    .hr-run-name { color: var(--console-text); font-size: 15px; font-weight: 650; }
+    .hr-run-name small { color: var(--console-faint); font-weight: 400; margin-left: 8px; }
+    .hr-chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; border: 1px solid var(--console-line-strong); color: var(--console-muted); }
+    .hr-chip svg { width: 13px; height: 13px; }
+    .hr-chip-good { color: var(--console-green); background: var(--console-green-soft); border-color: transparent; }
+    .hr-chip-bad { color: var(--console-red); background: var(--console-red-soft); border-color: transparent; }
+    .hr-chip-live { color: var(--console-cyan); background: var(--console-cyan-soft); border-color: transparent; }
+
+    .hr-facts { display: flex; gap: 20px; flex-wrap: wrap; margin: 10px 0 0; color: var(--console-muted); font-size: 12px; }
+    .hr-facts b { color: var(--console-text); font-weight: 650; }
+
+    /* Two segments, each carrying its own printed count; a 2px surface gap
+       between them so the boundary reads without relying on hue. */
+    .hr-bar { display: flex; gap: 2px; height: 10px; margin: 12px 0 8px; }
+    .hr-bar-served { background: var(--console-green); border-radius: 4px 0 0 4px; }
+    .hr-bar-refused { background: var(--console-red); border-radius: 0 4px 4px 0; }
+    .hr-bar > span:only-child { border-radius: 4px; }
+
+    .hr-detail { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; margin-top: 12px; }
+    .hr-panel h4 { margin: 0 0 8px; color: var(--console-muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; }
+    .hr-rows { display: grid; gap: 5px; }
+    .hr-row { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 10px; font-size: 13px; color: var(--console-text); }
+    .hr-row-track { grid-column: 1 / -1; height: 4px; border-radius: 2px; background: var(--console-surface-2); }
+    .hr-row-fill { height: 4px; border-radius: 2px; background: var(--console-cyan); }
+    .hr-row-fill-bad { background: var(--console-red); }
+    .hr-count { color: var(--console-muted); font-variant-numeric: tabular-nums; }
+    .hr-unserved { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+    .hr-unserved li { font-size: 13px; color: var(--console-text); }
+    .hr-unserved code { color: var(--console-muted); font-size: 12px; }
+    .hr-empty { color: var(--console-faint); font-size: 13px; }
+    .hr-generated { color: var(--console-faint); font-size: 12px; margin: 16px 0 0; }
+</style>
+
+<script>
+(function () {
+    const listEl = document.getElementById('hr-runs-list');
+    const errorEl = document.getElementById('hr-error');
+
+    function text(value) { return document.createTextNode(String(value)); }
+
+    function el(tag, className, content) {
+        const node = document.createElement(tag);
+        if (className) node.className = className;
+        if (content !== undefined) node.append(text(content));
+        return node;
+    }
+
+    /** The run's state as a word plus an icon — never the colour on its own. */
+    function stateChip(run) {
+        if (run.live) return { label: 'Running', icon: 'loader', cls: 'hr-chip-live' };
+        if (run.stop_reason === 'completed') return { label: 'Completed', icon: 'circle-check-big', cls: 'hr-chip-good' };
+        if (run.stop_reason === 'max-tokens') return { label: 'Hit the context ceiling', icon: 'gauge', cls: 'hr-chip' };
+        if (run.stop_reason === 'no-report') return { label: 'No report written', icon: 'file-x', cls: 'hr-chip-bad' };
+        if (!run.stop_reason) return { label: run.errors.length ? run.errors[0] : 'Never reached the mind', icon: 'unplug', cls: 'hr-chip-bad' };
+        return { label: run.stop_reason, icon: 'circle-help', cls: 'hr-chip' };
+    }
+
+    function countRows(entries, total, bad) {
+        const wrap = el('div', 'hr-rows');
+        if (!entries.length) { wrap.append(el('p', 'hr-empty', 'None')); return wrap; }
+        for (const [name, count] of entries) {
+            const row = el('div', 'hr-row');
+            row.append(el('span', null, name), el('span', 'hr-count', count));
+            const track = el('div', 'hr-row-track');
+            const fill = el('div', bad ? 'hr-row-fill hr-row-fill-bad' : 'hr-row-fill');
+            fill.style.width = total > 0 ? `${Math.max(2, (count / total) * 100)}%` : '0';
+            fill.title = `${name}: ${count} of ${total}`;
+            track.append(fill);
+            row.append(track);
+            wrap.append(row);
+        }
+        return wrap;
+    }
+
+    function panel(title, body) {
+        const section = el('div', 'hr-panel');
+        section.append(el('h4', null, title), body);
+        return section;
+    }
+
+    function renderRun(run) {
+        const card = el('article', 'hr-run');
+        const top = el('div', 'hr-run-top');
+        const name = el('div', 'hr-run-name', `Run ${run.run}`);
+        if (run.session_id) {
+            const note = el('small', null, run.session_id);
+            name.append(note);
+        }
+        const state = stateChip(run);
+        const chip = el('span', `hr-chip ${state.cls}`);
+        const icon = document.createElement('i');
+        icon.setAttribute('data-lucide', state.icon);
+        chip.append(icon, text(state.label));
+        top.append(name, chip);
+        card.append(top);
+
+        const facts = el('div', 'hr-facts');
+        const add = (label, value) => {
+            const item = el('span', null, `${label} `);
+            item.append(el('b', null, value));
+            facts.append(item);
+        };
+        add('Rounds', run.turns ?? run.rounds_seen);
+        if (!run.live) {
+            add('Emitted', run.emitted ?? 0);
+            add('Served', run.succeeded ?? 0);
+            add('Refused', run.failed ?? 0);
+            if (run.unanswered) add('Unanswered', run.unanswered);
+            if (run.goal_phase) add('Goal', run.goal_phase);
+        }
+        card.append(facts);
+
+        const emitted = run.emitted ?? 0;
+        if (emitted > 0) {
+            const bar = el('div', 'hr-bar');
+            const served = run.succeeded ?? 0;
+            const refused = run.failed ?? 0;
+            if (served > 0) {
+                const segment = el('span', 'hr-bar-served');
+                segment.style.flex = String(served);
+                segment.title = `Served ${served} of ${emitted}`;
+                bar.append(segment);
+            }
+            if (refused > 0) {
+                const segment = el('span', 'hr-bar-refused');
+                segment.style.flex = String(refused);
+                segment.title = `Refused ${refused} of ${emitted}`;
+                bar.append(segment);
+            }
+            card.append(bar);
+            const share = emitted > 0 ? ((served / emitted) * 100).toFixed(1) : '0';
+            card.append(el('p', 'hr-empty', `${served} served and ${refused} refused of ${emitted} — ${share}% served`));
+        }
+
+        if (!run.live) {
+            const detail = el('div', 'hr-detail');
+            const tools = Object.entries(run.calls_by_tool || {}).sort((a, b) => b[1] - a[1]);
+            const codes = Object.entries(run.failures_by_code || {}).sort((a, b) => b[1] - a[1]);
+            detail.append(panel('Calls by tool', countRows(tools, emitted, false)));
+            detail.append(panel('Failures by code', countRows(codes, run.failed ?? 0, true)));
+
+            const unserved = run.unserved_calls || [];
+            const list = el('ul', 'hr-unserved');
+            if (!unserved.length) {
+                list.append(el('p', 'hr-empty', run.failed ? 'Not reported by this run' : 'None'));
+            } else {
+                for (const entry of unserved) {
+                    const item = document.createElement('li');
+                    item.append(el('b', null, entry.name));
+                    if (entry.count > 1) item.append(text(` ×${entry.count}`));
+                    item.append(document.createElement('br'));
+                    item.append(el('code', null, (entry.parameters || []).join(', ') || 'no arguments'));
+                    list.append(item);
+                }
+            }
+            detail.append(panel('Refused by name — the worklist', list));
+            card.append(detail);
+        }
+        return card;
+    }
+
+    function render(payload) {
+        const runs = payload.runs || [];
+        const finished = runs.filter(run => !run.live);
+        const sum = (key) => finished.reduce((total, run) => total + (run[key] || 0), 0);
+        document.getElementById('hr-runs').textContent = runs.length;
+        document.getElementById('hr-runs-detail').textContent =
+            `${finished.length} finished, ${runs.length - finished.length} running`;
+        document.getElementById('hr-emitted').textContent = sum('emitted');
+        document.getElementById('hr-served').textContent = sum('succeeded');
+        const emitted = sum('emitted');
+        document.getElementById('hr-served-detail').textContent = emitted
+            ? `${((sum('succeeded') / emitted) * 100).toFixed(1)}% of every call emitted`
+            : 'Calls the harness could run';
+        document.getElementById('hr-refused').textContent = sum('failed');
+        document.getElementById('hr-refused-detail').textContent = emitted
+            ? `${((sum('failed') / emitted) * 100).toFixed(1)}% of every call emitted`
+            : 'Each one is a tool to build';
+
+        listEl.textContent = '';
+        if (!runs.length) {
+            listEl.append(el('div', 'loading-state', 'No runs recorded yet.'));
+        } else {
+            for (const run of runs) listEl.append(renderRun(run));
+        }
+        document.getElementById('hr-generated').textContent =
+            `Collected ${payload.generated || 'unknown'} from ${payload.source || 'the run logs'}.`;
+        if (window.lucide) window.lucide.createIcons();
+    }
+
+    async function load() {
+        errorEl.hidden = true;
+        try {
+            const response = await fetch('/api/harness-runs', { headers: { Accept: 'application/json' } });
+            if (!response.ok) throw new Error(`the console answered ${response.status}`);
+            render(await response.json());
+        } catch (error) {
+            listEl.textContent = '';
+            errorEl.hidden = false;
+            errorEl.textContent = `Could not load the runs: ${error.message}`;
+        }
+    }
+
+    document.getElementById('hr-refresh').addEventListener('click', load);
+    load();
+})();
+</script>
+{% endblock %}
