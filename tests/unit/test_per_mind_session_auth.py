@@ -478,7 +478,7 @@ class TestTheDeployedAppsAreGuarded:
     other test of those apps supplies the credential. Without these, both files
     that *are* the deployed minds can lose the guard and nothing says so."""
 
-    @pytest.mark.parametrize("module", ["claude_cli", "codex_cli"])
+    @pytest.mark.parametrize("module", ["claude_cli", "codex_cli", "dsh_cli"])
     def test_an_uncredentialed_spawn_is_refused(self, module):
         import importlib
 
@@ -490,14 +490,14 @@ class TestTheDeployedAppsAreGuarded:
         )
         assert response.status_code == 401
 
-    @pytest.mark.parametrize("module", ["claude_cli", "codex_cli"])
+    @pytest.mark.parametrize("module", ["claude_cli", "codex_cli", "dsh_cli"])
     def test_an_uncredentialed_kill_is_refused(self, module):
         import importlib
 
         harness = importlib.import_module(f"minds.harness.{module}")
         assert TestClient(harness.app).delete("/sessions/s1").status_code == 401
 
-    @pytest.mark.parametrize("module", ["claude_cli", "codex_cli"])
+    @pytest.mark.parametrize("module", ["claude_cli", "codex_cli", "dsh_cli"])
     def test_the_config_surface_is_still_reachable(self, module):
         """The guard is scoped to /sessions and must not have swallowed the
         routes the console reads."""
