@@ -120,6 +120,7 @@ def dsh(monkeypatch, tmp_path: Path):
     """The adapter with its own DSH_HOME and an empty session table."""
     monkeypatch.setattr(dsh_cli, "DSH_HOME", tmp_path)
     monkeypatch.setattr(dsh_cli, "PROJECT_DIR", Path("/work/app"))
+    monkeypatch.setattr(dsh_cli, "SPAWN_DIR", Path("/work/app"))
     monkeypatch.setattr(dsh_cli, "SESSIONS", {})
     return dsh_cli
 
@@ -223,6 +224,23 @@ async def test_the_turn_runs_in_the_conversation_the_gateway_minted(dsh, monkeyp
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
     await _drain(dsh)
     assert spawn.argv[spawn.argv.index("--session-id") + 1] == "conv-xyz"
+
+
+async def test_the_turn_runs_in_the_work_area_the_deployment_named(
+    dsh, monkeypatch, tmp_path: Path
+) -> None:
+    """A model writing a relative path lands in the spawn's working directory.
+    The default is the mind's own tree, which is where an exam's output must
+    never go, so a deployment that mounts a work area names it and the spawn
+    runs there."""
+    work = tmp_path / "exam-work-area"
+    work.mkdir()
+    monkeypatch.setattr(dsh_cli, "SPAWN_DIR", work)
+    _session(dsh)
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh)
+    assert spawn.calls[-1]["cwd"] == str(work)
 
 
 async def test_the_conversations_first_turn_creates_under_the_gateways_id(
