@@ -60,6 +60,35 @@ model to upstream, so adding a provider is a row there rather than a change
 here, and one locally-hosted model can serve a claude harness and a codex
 harness both.
 
+### What a dsh mind needs that the other two do not
+
+`minds/harness/dsh_cli.py` drives our fork of the DeepSeek harness
+(`github.com/danielstewart77/dsh`), which is not an npm install: the tree is a
+built working copy, bind-mounted into the mind's container, and `dsh_bin` in
+`runtime.yaml` names the launcher inside it. Two container requirements follow
+from that and are easy to get wrong, because each fails as something else.
+
+**Node 22 or newer.** The harness imports `parseEnv` from `node:util`, which
+Ubuntu 24.04's apt `nodejs` (18.19) does not export, so the launcher dies on
+its first import before any turn exists. The image therefore installs Node
+from NodeSource rather than from apt; claude and codex both run on 22 as well,
+so one node serves every harness.
+
+**`/tmp` mounted exec.** Docker's tmpfs default is `noexec`. dsh's plugin
+loader reaches Node's internal ESM loader through a native addon, whose own
+prebuild loader copies the `.node` into a cache under `/tmp` and dlopens it
+from there — on a noexec mount that fails as "failed to map segment from
+shared object". The loader then silently falls back to a bare `import(name)`
+anchored at its own file rather than at the profile directory, and the mind's
+own profile bundle is reported as a package that does not exist. The
+container is the boundary for a mind, not the mount flag, so
+`tmpfs: - /tmp:exec,mode=1777`.
+
+The profile itself lives under the mind's `DSH_HOME`
+(`profiles/<dsh_profile>/`), with the hive surface package symlinked into its
+`node_modules/@hive/`. dsh resolves every in-box bundle from its own
+installation, so that one link is all a profile needs.
+
 Per-subprocess env isolation — no global env mutation.
 
 ## Quick Start
@@ -117,7 +146,7 @@ hive-mind/
 ├── data/                          # SQLite databases (Docker volume)
 │
 ├── minds/                         # Minds: shared harness code + per-deployment folders
-│   ├── harness/                  # Tracked in-container services: claude_cli.py, codex_cli.py
+│   ├── harness/                  # Tracked in-container services: claude_cli.py, codex_cli.py, dsh_cli.py
 │   ├── proactive.py              # Shared unsolicited-delivery plumbing
 │   ├── pty_attach.py             # Shared tmux-backed browser terminal (docs/architecture/browser-terminal.md)
 │   ├── example/                  # Tracked starter mind (runtime.yaml + compose fragment)
