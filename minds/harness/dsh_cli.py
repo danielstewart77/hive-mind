@@ -39,7 +39,7 @@ from typing import Any
 
 import aiohttp
 import yaml
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from minds.proactive import make_proactive_router
@@ -125,12 +125,24 @@ def _encode_segment(raw: str) -> str:
     if raw == "..":
         return "~002E~002E"
     out = []
-    for ch in raw:
+    for unit in _utf16_units(raw):
+        ch = chr(unit)
         if ch != "~" and _SAFE_SEGMENT_CHAR.fullmatch(ch):
             out.append(ch)
         else:
-            out.append("~" + format(ord(ch), "04X"))
+            out.append("~" + format(unit, "04X"))
     return "".join(out)
+
+
+def _utf16_units(raw: str) -> list[int]:
+    """The string as UTF-16 code units, which is what JavaScript iterates.
+
+    ``charCodeAt`` walks code units, so an astral character is two escapes
+    (``~D83D~DE00``) and not one (``~1F600``). A Python loop over characters
+    would spell the same id differently and look in a directory dsh never wrote.
+    """
+    encoded = raw.encode("utf-16-le", errors="surrogatepass")
+    return [encoded[i] | (encoded[i + 1] << 8) for i in range(0, len(encoded), 2)]
 
 
 def _project_key(cwd: str) -> str:
@@ -159,17 +171,38 @@ def _project_key(cwd: str) -> str:
     return f"--{slug[:251]}--"
 
 
-def _session_persisted(session_id: str) -> bool:
+def _session_persisted(conversation_id: str) -> bool:
     """Whether dsh holds this conversation on disk.
 
     On-disk truth, not in-process state: a mind restarted mid-conversation has
     an empty :data:`SESSIONS` and must still resume rather than create, and a
     volume restored without its sessions must create rather than resume.
+
+    The test is the **log**, not its directory, because that is dsh's own test
+    (``findLog``) and because the directory is created before the first log is
+    written. A turn killed in that window would otherwise leave an empty
+    directory that every later turn reads as "resumable", and dsh refuses a
+    resume it cannot load — permanently, since nothing cleans the directory up.
+
+    The project key is built from the *resolved* working directory: dsh records
+    ``process.cwd()``, which node returns with symlinks resolved, so a spawn cwd
+    naming a symlinked path would be filed under a key this probe never looks in.
     """
     directory = (
-        DSH_HOME / "sessions" / _project_key(str(PROJECT_DIR)) / _encode_segment(session_id)
+        DSH_HOME / "sessions" / _project_key(_spawn_cwd()) / _encode_segment(conversation_id)
     )
-    return directory.is_dir()
+    return (directory / "session.jsonl.zstd").exists() or (directory / "session.jsonl").exists()
+
+
+def _spawn_cwd() -> str:
+    """The working directory a turn runs in, as dsh will record it."""
+    try:
+        return str(PROJECT_DIR.resolve())
+    except OSError:
+        # A path that cannot be resolved is still the one we will hand the
+        # spawn; dsh will record whatever it resolves to and the probe will
+        # agree with itself either way.
+        return str(PROJECT_DIR)
 
 
 def _conversation_flags(session_id: str) -> list[str]:
@@ -185,24 +218,61 @@ def _conversation_flags(session_id: str) -> list[str]:
     return ["--session-id", session_id]
 
 
+#: The provider route the hive profile declares. A YAML mapping key cannot be
+#: computed, so this name is the profile's and the spawn matches it rather than
+#: naming a route the profile does not define — which fails the boot outright.
+#: ``runtime.yaml``'s own ``provider`` field selects which endpoint and
+#: credential of this mind's env block fill that route in, exactly as it
+#: selects codex's ``-c model_provider`` overrides.
+PROFILE_PROVIDER_ROUTE = "hive-proxy"
+
+#: What the profile's ``apiKeyEnv`` names. Every mind's env block spells its
+#: proxy credential differently; the route resolves one name, so the adapter
+#: translates rather than asking every mind to be rewritten.
+PROXY_KEY_ENV = "HIVE_PROXY_KEY"
+
+#: The env names a mind's own block may carry its proxy credential under.
+_PROXY_KEY_SOURCES = ("OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN", "DSH_API_KEY")
+
+#: And its endpoint.
+_PROXY_URL_SOURCES = ("OLLAMA_BASE_URL", "OPENAI_BASE_URL", "ANTHROPIC_BASE_URL")
+
+
+def _first_env(names: tuple[str, ...]) -> str:
+    """The first of these names this mind's env block or environment carries.
+
+    A container gets its key from compose; a bare-metal mind gets it from the
+    ``env:`` block its spawns already apply. Reading both means one adapter
+    serves either deployment.
+    """
+    for name in names:
+        value = str(RUNTIME_ENV.get(name) or os.environ.get(name) or "").strip()
+        if value:
+            return value
+    return ""
+
+
 def _model_env(model: str) -> dict[str, str]:
-    """The model, its provider route and that route's endpoint, for one spawn.
+    """The model, its provider route, that route's endpoint and its credential.
 
     The hive profile defaults nothing: these are what it reads. The model is
-    the one the gateway resolved for this session from the mind's broker row,
-    and the route and endpoint come from the mind's own ``runtime.yaml``.
+    the one the gateway resolved for this session from the mind's broker row;
+    the endpoint and credential come from the mind's own ``runtime.yaml``.
+
+    The credential is not optional. The inference proxy answers 401 without a
+    bearer key, and ``llm-pi-ai`` refuses outright rather than falling back
+    when a profile names a credential reference that resolves to nothing — so
+    an unmapped key is every turn of this mind failing at its first model
+    request.
     """
-    base_url = str(
-        RUNTIME_ENV.get("OLLAMA_BASE_URL")
-        or RUNTIME_ENV.get("OPENAI_BASE_URL")
-        or RUNTIME_ENV.get("ANTHROPIC_BASE_URL")
-        or ""
-    ).rstrip("/")
     env = {
         "DSH_MODEL": model,
-        "DSH_PROVIDER": str(RUNTIME.get("dsh_provider_route") or "hive-proxy"),
-        "DSH_PROXY_BASE_URL": base_url,
+        "DSH_PROVIDER": PROFILE_PROVIDER_ROUTE,
+        "DSH_PROXY_BASE_URL": _first_env(_PROXY_URL_SOURCES).rstrip("/"),
     }
+    key = _first_env(_PROXY_KEY_SOURCES)
+    if key:
+        env[PROXY_KEY_ENV] = key
     window = RUNTIME.get("context_window")
     if window:
         env["DSH_MODEL_CONTEXT_WINDOW"] = str(window)
@@ -291,9 +361,15 @@ async def create_session(req: Request) -> Any:
     # row; a mind inventing either has lost the one it was supposed to use,
     # and in dsh's case an invented id is a conversation nobody can find again.
     sid = str(body.get("session_id") or "").strip()
-    if not sid:
+    # The conversation id, minted by comms when it wrote the session row and
+    # carried on every spawn as `resume_sid`. It is not the row's own id: the
+    # row is permanent and a rotation replaces the conversation under it, so a
+    # harness running under the row id would resume the context a rotation
+    # exists to drop and would report an id the gateway does not recognise.
+    conversation_id = str(body.get("resume_sid") or "").strip()
+    if not sid or not conversation_id:
         return JSONResponse(
-            {"error": "session_id required — this mind does not mint conversation ids"},
+            {"error": "session_id and resume_sid required — this mind mints no conversation ids"},
             status_code=400,
         )
     model = str(body.get("model") or "").strip()
@@ -315,16 +391,17 @@ async def create_session(req: Request) -> Any:
         full_prompt = surface_prompt or system_prompt_blocks
     SESSIONS[sid] = {
         "system_prompt": full_prompt,
+        "conversation_id": conversation_id,
         "model": model,
         "proc": None,
         "client_ref": client_ref,
         "owner_type": owner_type,
         "owner_ref": owner_ref,
     }
-    log.info("%s session %s initialised (model=%s persisted=%s)",
-             NAME, sid, model, _session_persisted(sid))
+    log.info("%s session %s initialised (model=%s conversation=%s persisted=%s)",
+             NAME, sid, model, conversation_id, _session_persisted(conversation_id))
     log_event(log, "session.created", mind_id=MIND_ID, mind_name=NAME,
-              session_id=sid, model=model, conversation_id=sid)
+              session_id=sid, model=model, conversation_id=conversation_id)
     return {"session_id": sid, "mind_id": MIND_ID, "name": NAME,
             "status": "running", "model": model}
 
@@ -392,7 +469,8 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
     # The composed prompt rides in on the conversation's first turn, the way it
     # does for codex: the surface submits the task as a user message, and a
     # system prompt submitted to nothing reaches no transcript.
-    flags = _conversation_flags(sid)
+    conversation_id = state["conversation_id"]
+    flags = _conversation_flags(conversation_id)
     task = content if flags[0] == "--resume" else f"{state['system_prompt']}\n\n---\n\n{content}"
 
     if images:
@@ -410,24 +488,51 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
     # The task travels in a file: MAX_ARG_STRLEN caps one argv entry at 128 KiB
     # regardless of total command-line room, and a composed prompt plus a turn
     # goes past it. The surface deletes nothing, so this process owns the file.
-    handle, task_path = tempfile.mkstemp(prefix=f"dsh-turn-{sid}-", suffix=".txt")
+    handle, task_path = tempfile.mkstemp(prefix="dsh-turn-", suffix=".txt")
+    returncode: int | None = None
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as fh:
             fh.write(task)
 
         cmd = [DSH_BIN, "--profile", DSH_PROFILE, *flags, "--task-file", task_path]
-        log.info("%s session %s: spawning dsh turn (%s)", NAME, sid, flags[0])
+        log.info("%s session %s: spawning dsh turn (%s %s)",
+                 NAME, sid, flags[0], conversation_id)
 
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            limit=10 * 1024 * 1024,
-            env=env,
-            cwd=str(PROJECT_DIR),
-            start_new_session=True,
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                limit=10 * 1024 * 1024,
+                env=env,
+                cwd=str(PROJECT_DIR),
+                start_new_session=True,
+            )
+        except OSError as exc:
+            # The launcher is not on PATH, or the working directory is gone.
+            # A spawn that never started is its own failure and is reported as
+            # one: a stream that ends with no frames at all reaches the gateway
+            # as a turn that produced nothing, which is the remedy for a quiet
+            # model applied to a mind whose harness is not installed.
+            log.error("%s session %s: could not spawn %s: %s", NAME, sid, DSH_BIN, exc)
+            yield {
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [{
+                    "type": "text",
+                    "text": f"The harness could not be started: {exc}",
+                }]},
+            }
+            yield {"type": "result", "session_id": conversation_id,
+                   "stop_reason": "not-spawned", "is_error": True,
+                   "error_code": "HARNESS_NOT_SPAWNED", "error": str(exc)}
+            return
         state["proc"] = proc
+        # Captured while the leader is alive: once it is reaped its pgid cannot
+        # be looked up, and the group is what has to be signalled.
+        try:
+            pgid = os.getpgid(proc.pid)
+        except (ProcessLookupError, PermissionError):
+            pgid = None
 
         lines: list[str] = []
         if proc.stdout is not None:
@@ -437,8 +542,19 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
         stderr = b""
         if proc.stderr is not None:
             stderr = await proc.stderr.read()
-        await proc.wait()
+        returncode = await proc.wait()
         state["proc"] = None
+        # Every turn, not only the abandoned ones. The launcher is a node
+        # process that spawns tool and code-runtime children; the leader
+        # exiting does not take them with it, and anything still running
+        # reparents to PID 1 — which inside the mind's container is this
+        # process. codex's adapter kills the group on every turn end for the
+        # same reason.
+        if pgid is not None:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
     finally:
         try:
             os.unlink(task_path)
@@ -452,18 +568,18 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
         # crashed harness indistinguishable from a model with nothing to say.
         detail = stderr.decode(errors="replace").strip()[-2000:]
         log.error("%s session %s: dsh wrote no turn report (rc=%s) %s",
-                  NAME, sid, proc.returncode, detail)
+                  NAME, sid, returncode, detail)
         yield {
             "type": "assistant",
             "message": {"role": "assistant", "content": [{
                 "type": "text",
                 "text": "The harness exited without reporting a turn"
-                        f" (exit {proc.returncode})."
+                        f" (exit {returncode})."
                         + (f"\n\n{detail}" if detail else ""),
             }]},
         }
-        yield {"type": "result", "session_id": sid, "stop_reason": "no-report",
-               "is_error": True}
+        yield {"type": "result", "session_id": conversation_id,
+               "stop_reason": "no-report", "is_error": True}
         return
 
     yield {"type": "dsh_report", "session_id": sid, "report": report,
@@ -494,7 +610,7 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
               tools_unanswered=traffic.get("unanswered"))
     result: dict[str, Any] = {
         "type": "result",
-        "session_id": str(report.get("sessionId") or sid),
+        "session_id": str(report.get("sessionId") or conversation_id),
         "stop_reason": outcome,
         "traffic": traffic,
         "is_error": outcome != "completed",
@@ -569,7 +685,7 @@ async def release_session(sid: str, surface: str) -> Any:
 
 
 @app.websocket("/sessions/{sid}/attach-pty")
-async def attach_pty(websocket: Any) -> None:
+async def attach_pty(websocket: WebSocket) -> None:
     """Refuse a terminal attach as unsupported, with a code of its own.
 
     A pre-accept close presents to the gateway as HTTP 403, which is also what
