@@ -481,9 +481,32 @@ def _parse_report(lines: list[str]) -> dict | None:
             parsed = json.loads(text)
         except json.JSONDecodeError:
             continue
-        if isinstance(parsed, dict) and "sessionId" in parsed:
+        if isinstance(parsed, dict) and "sessionId" in parsed and "progress" not in parsed:
             return parsed
     return None
+
+
+def _progress_frame(line: str) -> dict | None:
+    """A goal-round progress line as an observer-only frame, or None.
+
+    Observer-only because a chat surface wants the answer, not a running count:
+    comms publishes the frame to the session event stream and does not pass it
+    to the bot. What it is really for is the socket. A goal-driven dispatch is
+    one HTTP response lasting an hour, and comms caps that socket on time since
+    the last byte — so without something crossing it per round, every long run
+    is read as a mind that stopped answering.
+    """
+    text = line.strip()
+    if not text.startswith("{"):
+        return None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    progress = parsed.get("progress") if isinstance(parsed, dict) else None
+    if not isinstance(progress, dict):
+        return None
+    return {"type": "goal_progress", "progress": progress, "_observer_only": True}
 
 
 def _no_text_diagnostic(report: dict) -> str:
@@ -555,13 +578,27 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
     # regardless of total command-line room, and a composed prompt plus a turn
     # goes past it. The surface deletes nothing, so this process owns the file.
     handle, task_path = tempfile.mkstemp(prefix="dsh-turn-", suffix=".txt")
+    objective_path: str | None = None
     returncode: int | None = None
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as fh:
             fh.write(task)
 
         rounds = _goal_rounds()
-        goal_flags = ["--goal-rounds", str(rounds)] if rounds > 1 else []
+        goal_flags: list[str] = []
+        if rounds > 1:
+            # The objective travels separately from the task. A conversation's
+            # first turn is the composed system prompt and the message together,
+            # and the round driver quotes the objective into every round — so a
+            # goal armed with the task would spend the context window on forty
+            # copies of a soul. It travels in a file for the same reason the task
+            # does: MAX_ARG_STRLEN caps one argv entry at 128 KiB.
+            obj_handle, objective_path = tempfile.mkstemp(
+                prefix="dsh-goal-", suffix=".txt")
+            with os.fdopen(obj_handle, "w", encoding="utf-8") as fh:
+                fh.write(content)
+            goal_flags = ["--goal-rounds", str(rounds),
+                          "--goal-objective-file", objective_path]
         cmd = [DSH_BIN, "--profile", DSH_PROFILE, *flags, *goal_flags,
                "--task-file", task_path]
         log.info("%s session %s: spawning dsh turn (%s %s)",
@@ -610,7 +647,11 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
             async with asyncio.timeout(TURN_TIMEOUT_SECONDS):
                 if proc.stdout is not None:
                     async for raw_line in proc.stdout:
-                        lines.append(raw_line.decode(errors="replace"))
+                        decoded = raw_line.decode(errors="replace")
+                        lines.append(decoded)
+                        frame = _progress_frame(decoded)
+                        if frame is not None:
+                            yield frame
                 if proc.stderr is not None:
                     stderr = await proc.stderr.read()
                 returncode = await proc.wait()
@@ -638,10 +679,13 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
             except (ProcessLookupError, PermissionError):
                 pass
     finally:
-        try:
-            os.unlink(task_path)
-        except OSError:
-            pass
+        for path in (task_path, objective_path):
+            if path is None:
+                continue
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
     if timed_out:
         yield {
