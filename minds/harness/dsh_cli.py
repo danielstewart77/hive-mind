@@ -337,6 +337,10 @@ def _parse_report(lines: list[str]) -> dict | None:
     over rather than mistaken for the report, and a process that wrote no
     report at all says so by returning None.
     """
+    # Scanned from the end: nothing else writes a report-shaped line, so this
+    # only ever matters if the surface someday writes more than one, and the
+    # last word is the right one then. No test distinguishes the two
+    # directions, because nothing available can produce a second report.
     for line in reversed(lines):
         text = line.strip()
         if not text.startswith("{"):

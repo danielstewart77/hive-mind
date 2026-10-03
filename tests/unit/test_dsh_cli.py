@@ -119,13 +119,15 @@ def dsh(monkeypatch, tmp_path: Path):
     return dsh_cli
 
 
-def _persist(module, session_id: str) -> Path:
-    """Create the on-disk session directory dsh would write for this id."""
-    directory = (
-        module.DSH_HOME / "sessions"
-        / module._project_key(str(module.PROJECT_DIR))
-        / module._encode_segment(session_id)
-    )
+def _persist(module, encoded_id: str) -> Path:
+    """Create the on-disk session directory dsh writes for an encoded id.
+
+    Spelled out as literals rather than built by calling the encoder: the
+    encoder is what the resume decision depends on, and a fixture that follows
+    its mutations cannot tell a correct encoding from a collapsed one. The
+    project segment is what dsh's own ``projectKey`` emits for ``/work/app``.
+    """
+    directory = module.DSH_HOME / "sessions" / "--work-app--" / encoded_id
     directory.mkdir(parents=True, exist_ok=True)
     return directory
 
@@ -153,6 +155,32 @@ def _result(events: list[dict]) -> dict:
 def _assistant_text(events: list[dict]) -> str:
     frame = next(e for e in events if e["type"] == "assistant")
     return frame["message"]["content"][0]["text"]
+
+
+def test_a_session_id_is_encoded_the_way_dshs_own_backend_encodes_it(dsh) -> None:
+    """The expected values are dsh's own, taken from running ``encodeSegment``
+    and ``projectKey`` in ``session-persistence-jsonl``. They are what decides
+    which directory a resume looks in, so a divergence here means every
+    conversation is created fresh forever and ``--resume`` never fires."""
+    assert dsh._encode_segment("abc-123") == "abc-123"
+    assert dsh._encode_segment("a~b/c") == "a~007Eb~002Fc"
+    assert dsh._encode_segment("Ünïcode id") == "~00DCn~00EFcode~0020id"
+    assert dsh._encode_segment("..") == "~002E~002E"
+    assert dsh._encode_segment(".") == "~002E"
+    assert dsh._project_key("/usr/src/app") == "--usr-src-app--"
+    assert dsh._project_key("/home/daniel//x") == "--home-daniel-x--"
+    assert dsh._project_key("C:\\work\\p") == "--C-work-p--"
+
+
+async def test_an_id_needing_escaping_is_found_under_its_escaped_directory(
+    dsh, monkeypatch
+) -> None:
+    _persist(dsh, "conv~007E1")
+    _session(dsh, sid="conv~1")
+    spawn = _Spawn([_report(sessionId="conv~1", mode="resume")])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh, "conv~1")
+    assert "--resume" in spawn.argv
 
 
 async def test_a_turn_with_no_model_is_refused(dsh) -> None:
@@ -293,11 +321,18 @@ async def test_a_process_that_wrote_no_report_is_reported_as_failed(
 
 
 async def test_the_stop_reason_is_recorded_verbatim(dsh, monkeypatch) -> None:
+    """Including a reason this harness has not grown yet. A pass-through is the
+    only implementation that survives: anything keyed off a known set turns an
+    unfamiliar reason into "unknown" and loses the measurement."""
     _session(dsh)
     monkeypatch.setattr(asyncio, "create_subprocess_exec",
                         _Spawn([_report(outcome="max-tokens")]))
+    assert _result(await _drain(dsh, "conv-1"))["stop_reason"] == "max-tokens"
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec",
+                        _Spawn([_report(outcome="halted-by-the-moon")]))
     result = _result(await _drain(dsh, "conv-1"))
-    assert result["stop_reason"] == "max-tokens"
+    assert result["stop_reason"] == "halted-by-the-moon"
     assert result["is_error"] is True
 
 
@@ -317,13 +352,115 @@ async def test_the_model_and_provider_come_from_the_minds_own_configuration(
 ) -> None:
     _session(dsh, model="gpt-oss:20b-32k")
     monkeypatch.setitem(dsh.RUNTIME_ENV, "OLLAMA_BASE_URL", "http://proxy:8899/v1/")
-    monkeypatch.setitem(dsh.RUNTIME, "dsh_provider_route", "hive-proxy")
+    # Deliberately not the code's own fallback: asserting "hive-proxy" against
+    # a default of "hive-proxy" is a constant against itself.
+    monkeypatch.setitem(dsh.RUNTIME, "dsh_provider_route", "some-other-route")
     spawn = _Spawn([_report()])
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
     await _drain(dsh, "conv-1")
     assert spawn.env["DSH_MODEL"] == "gpt-oss:20b-32k"
-    assert spawn.env["DSH_PROVIDER"] == "hive-proxy"
+    assert spawn.env["DSH_PROVIDER"] == "some-other-route"
     assert spawn.env["DSH_PROXY_BASE_URL"] == "http://proxy:8899/v1"
+
+
+async def test_the_composed_prompt_rides_in_on_the_conversations_first_turn(
+    dsh, monkeypatch
+) -> None:
+    """And on no other. The system prompt is comms' composition — soul, memory
+    and standing rules — and a mind whose first turn goes out without it is a
+    mind with no identity, which no assertion about tool traffic would catch."""
+    _session(dsh)
+    captured: list[str] = []
+    spawn = _Spawn([_report()])
+
+    def read_task_file() -> None:
+        path = spawn.argv[spawn.argv.index("--task-file") + 1]
+        captured.append(Path(path).read_text(encoding="utf-8"))
+
+    spawn.on_spawn = read_task_file
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh, "conv-1", "do the thing")
+    assert "SOUL AND MEMORY" in captured[0]
+    assert "do the thing" in captured[0]
+
+    _persist(dsh, "conv-1")
+    await _drain(dsh, "conv-1", "and the next thing")
+    assert "SOUL AND MEMORY" not in captured[1]
+    assert captured[1] == "and the next thing"
+
+
+async def test_the_task_never_travels_in_argv(dsh, monkeypatch) -> None:
+    """A composed prompt plus a turn runs past MAX_ARG_STRLEN, which caps one
+    argv entry at 128 KiB however much room the whole command line has."""
+    _session(dsh)["system_prompt"] = "S" * 200_000
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh, "conv-1", "T" * 200_000)
+    assert max(len(arg) for arg in spawn.argv) < 4096
+
+
+async def test_every_spawn_names_the_profile_that_mounts_the_runner(
+    dsh, monkeypatch
+) -> None:
+    """A profile is the only thing that composes a dsh process, so an unnamed
+    one is a mind with no runner rather than a mind with different options."""
+    _session(dsh)
+    monkeypatch.setattr(dsh_cli, "DSH_PROFILE", "hive")
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh, "conv-1")
+    assert "--profile" in spawn.argv
+    assert spawn.argv[spawn.argv.index("--profile") + 1] == "hive"
+
+
+async def test_the_report_is_told_apart_from_the_processs_other_stdout(
+    dsh, monkeypatch
+) -> None:
+    """Node warnings and plugin chatter share the stream with the one report
+    line. Reading the wrong line would report a turn that did not happen."""
+    _session(dsh)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _Spawn([
+        "booting the hive profile\n",
+        '{"level":"warn","msg":"experimental type stripping"}\n',
+        _report(outcome="max-tokens", text="the real answer"),
+        "flushed 3 events\n",
+    ]))
+    result = _result(await _drain(dsh, "conv-1"))
+    assert result["stop_reason"] == "max-tokens"
+
+
+async def test_the_rotation_hooks_own_metadata_reaches_the_spawn(
+    dsh, monkeypatch
+) -> None:
+    """The Stop hook reads these off the process env to attribute a rotation
+    summary to the right row. Unset, rotation silently never arms."""
+    state = _session(dsh)
+    state.update({"client_ref": "tg-123", "owner_type": "telegram", "owner_ref": "chat-9"})
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh, "conv-1")
+    assert spawn.env["CLIENT_REF"] == "tg-123"
+    assert spawn.env["OWNER_TYPE"] == "telegram"
+    assert spawn.env["OWNER_REF"] == "chat-9"
+
+
+async def test_a_second_turn_on_a_busy_conversation_is_refused(dsh) -> None:
+    """Two dsh processes resuming one session store is how a transcript ends up
+    holding two interleaved turns and neither one's history intact."""
+    _session(dsh)["in_flight"] = True
+    response = await dsh.send_message("conv-1", _FakeRequest({"content": "hello"}))
+    assert response.status_code == 409
+
+
+async def test_the_session_the_turn_reports_is_the_session_reported_upward(
+    dsh, monkeypatch
+) -> None:
+    """dsh runs in the id it was handed, so the report's own session id is the
+    one the gateway hears back — not a local copy that could drift from it."""
+    _session(dsh)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec",
+                        _Spawn([_report(sessionId="conv-1-as-dsh-saw-it")]))
+    assert _result(await _drain(dsh, "conv-1"))["session_id"] == "conv-1-as-dsh-saw-it"
 
 
 async def test_a_terminal_release_is_refused_as_unsupported(dsh) -> None:
