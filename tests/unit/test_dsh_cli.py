@@ -446,6 +446,21 @@ async def test_a_mind_that_never_sized_its_window_is_refused_rather_than_guessed
         dsh._model_env("qwen35-131k")
 
 
+async def test_a_misconfigured_mind_says_so_rather_than_answering_with_no_frames(
+    dsh, monkeypatch
+) -> None:
+    """The refusal reaches the operator. It fires before the first yield, and
+    an unhandled one would end the response with zero frames — which the
+    gateway reports as a turn that produced nothing, leaving the one person who
+    can fix the configuration with nothing to go on."""
+    _session(dsh)
+    monkeypatch.delitem(dsh.RUNTIME, "context_window", raising=False)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _Spawn([_report()]))
+    events = await _drain(dsh)
+    assert "context_window" in _assistant_text(events)
+    assert _result(events)["error_code"] == "MIND_MISCONFIGURED"
+
+
 async def test_the_spawn_runs_under_a_mode_with_no_approval_wall_to_answer(
     dsh, monkeypatch
 ) -> None:
