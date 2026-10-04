@@ -55,6 +55,21 @@ def _harness_family(harness: str) -> str:
     return "claude" if str(harness or "").startswith("claude") else "codex"
 
 
+def _proxy_root(base_url: str) -> str:
+    """The proxy's root, given whatever a harness variable happens to hold.
+
+    The listing paths above are absolute from the root, while the variables
+    these are read from are the ones a client SDK is handed — and an OpenAI
+    SDK's base URL includes the API prefix, so ``OPENAI_BASE_URL`` ends in
+    ``/v1``. Appending a listing path to it addresses ``/v1/v1/models``, which
+    the proxy answers 404, which this module reports as an empty list — and an
+    empty list is how the console says "this mind is offered nothing", a
+    sentence the operator acts on by editing credentials that were never wrong.
+    """
+    root = base_url.rstrip("/")
+    return root[: -len("/v1")] if root.endswith("/v1") else root
+
+
 def _first_env(names: tuple[str, ...], env: dict[str, str]) -> str:
     for name in names:
         value = str(env.get(name) or "").strip()
@@ -97,7 +112,7 @@ async def build_catalog(path: Path) -> list[dict]:
     if not base_url or not key:
         return []
     listing = _LISTING_PATH[_harness_family(str(runtime.get("harness") or ""))]
-    url = f"{base_url.rstrip('/')}{listing}"
+    url = f"{_proxy_root(base_url)}{listing}"
     try:
         async with aiohttp.ClientSession(
             headers={"Authorization": f"Bearer {key}"}
