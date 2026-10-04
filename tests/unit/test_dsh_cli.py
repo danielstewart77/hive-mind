@@ -122,6 +122,8 @@ def dsh(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(dsh_cli, "PROJECT_DIR", Path("/work/app"))
     monkeypatch.setattr(dsh_cli, "SPAWN_DIR", Path("/work/app"))
     monkeypatch.setattr(dsh_cli, "SESSIONS", {})
+    # Every real mind sizes its own window; the route serves no model without it.
+    monkeypatch.setitem(dsh_cli.RUNTIME, "context_window", 131072)
     return dsh_cli
 
 
@@ -429,9 +431,19 @@ async def test_the_model_and_endpoint_come_from_the_minds_own_configuration(
     assert spawn.env["DSH_MODEL"] == "gpt-oss:20b-32k"
     assert spawn.env["DSH_PROXY_BASE_URL"] == "http://proxy:8899/v1"
     assert spawn.env["DSH_MODEL_CONTEXT_WINDOW"] == "32768"
-    # The route is the profile's own, because a YAML mapping key cannot be
-    # computed and naming a route the profile does not declare fails the boot.
-    assert spawn.env["DSH_PROVIDER"] == dsh.PROFILE_PROVIDER_ROUTE
+
+
+async def test_a_mind_that_never_sized_its_window_is_refused_rather_than_guessed_for(
+    dsh, monkeypatch
+) -> None:
+    """The profile's one provider route lists no models, so this single number
+    sizes every model it serves and compaction reads it as the ceiling. A mind
+    that omits it is told which field in which file to set, instead of running
+    every model behind a capacity nobody picked."""
+    _session(dsh)
+    monkeypatch.delitem(dsh.RUNTIME, "context_window", raising=False)
+    with pytest.raises(RuntimeError, match="context_window"):
+        dsh._model_env("qwen35-131k")
 
 
 async def test_the_spawn_runs_under_a_mode_with_no_approval_wall_to_answer(
