@@ -231,15 +231,6 @@ def _conversation_flags(session_id: str) -> list[str]:
     return ["--session-id", session_id]
 
 
-#: The provider route the hive profile declares. A YAML mapping key cannot be
-#: computed, so this name is the profile's and the spawn matches it rather than
-#: naming a route the profile does not define — which fails the boot outright.
-#: What fills that route in is the endpoint and credential this mind's own
-#: ``env`` block carries, found by name; ``runtime.yaml``'s ``provider`` field
-#: names the route for the broker row and the console, and chooses nothing here
-#: — one route, one env block, no second candidate to pick between.
-PROFILE_PROVIDER_ROUTE = "hive-proxy"
-
 #: The permission mode every spawn runs under, unless the mind names another.
 #:
 #: dsh's base bundle pins a fresh session to ``workspace-write`` with an
@@ -343,15 +334,24 @@ def _model_env(model: str) -> dict[str, str]:
     """
     env = {
         "DSH_MODEL": model,
-        "DSH_PROVIDER": PROFILE_PROVIDER_ROUTE,
         "DSH_PROXY_BASE_URL": _first_env(_PROXY_URL_SOURCES).rstrip("/"),
     }
     key = _first_env(_PROXY_KEY_SOURCES)
     if key:
         env[PROXY_KEY_ENV] = key
+    # Not optional either. The profile's one provider route lists no models, so
+    # this single number sizes every model the route ever serves — including the
+    # ones a subagent names that nobody configured — and compaction reads it as
+    # the ceiling. Omitting it would hand the harness a fallback nobody picked,
+    # so the harness refuses the boot; refusing here instead names the field and
+    # the file the operator actually edits.
     window = RUNTIME.get("context_window")
-    if window:
-        env["DSH_MODEL_CONTEXT_WINDOW"] = str(window)
+    if not window:
+        raise RuntimeError(
+            "runtime.yaml needs context_window: it sizes every model this mind's "
+            "provider route serves, and compaction reads it as the ceiling"
+        )
+    env["DSH_MODEL_CONTEXT_WINDOW"] = str(window)
     return env
 
 
