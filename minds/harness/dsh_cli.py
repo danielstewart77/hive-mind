@@ -63,7 +63,6 @@ RUNTIME_PATH = MIND_DIR / "runtime.yaml"
 RUNTIME = yaml.safe_load(RUNTIME_PATH.read_text())
 NAME: str = RUNTIME["name"]
 MIND_ID: str = RUNTIME["mind_id"]
-PROVIDER: str = RUNTIME["provider"]
 RUNTIME_ENV: dict[str, Any] = RUNTIME.get("env", {}) or {}
 
 NS_URL = os.environ.get("HIVE_MIND_SERVER_URL", "http://server:8420")
@@ -596,7 +595,22 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
 
     env = os.environ.copy()
     env.update({k: str(v) for k, v in RUNTIME_ENV.items()})
-    env.update(_model_env(state["model"]))
+    try:
+        env.update(_model_env(state["model"]))
+    except RuntimeError as exc:
+        # Said out loud, like the spawn failures below. This raises on a mind
+        # whose own configuration cannot size a model request, and an unhandled
+        # one here ends the response with zero frames — the gateway reports a
+        # turn that produced nothing, which is total silence for the operator
+        # who is the only person able to fix it.
+        log.error("%s session %s: %s", NAME, sid, exc)
+        yield {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": f"Error: {exc}"}]},
+        }
+        yield {"type": "result", "session_id": conversation_id, "stop_reason": "error",
+               "is_error": True, "error_code": "MIND_MISCONFIGURED", "error": str(exc)}
+        return
     env["DSH_HOME"] = str(DSH_HOME)
     env["DSH_PERMISSION_MODE"] = _permission_mode()
     for key, name in (("client_ref", "CLIENT_REF"), ("owner_type", "OWNER_TYPE"),
