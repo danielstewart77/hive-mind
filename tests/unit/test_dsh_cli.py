@@ -234,18 +234,18 @@ async def test_a_mind_under_test_asks_the_harness_to_stop_at_a_refusal(
     _session(dsh)
     spawn = _Spawn([_report()])
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
-    monkeypatch.setitem(dsh.RUNTIME, "stop_on_dialect_gap", True)
+    monkeypatch.setitem(dsh.RUNTIME, "stop_on_failed_call", True)
     await _drain(dsh)
-    assert "--stop-on-dialect-gap" in spawn.argv
+    assert "--stop-on-failed-call" in spawn.argv
 
 
 async def test_an_ordinary_mind_drives_through_a_refused_call(dsh, monkeypatch) -> None:
     _session(dsh)
     spawn = _Spawn([_report()])
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
-    monkeypatch.delitem(dsh.RUNTIME, "stop_on_dialect_gap", raising=False)
+    monkeypatch.delitem(dsh.RUNTIME, "stop_on_failed_call", raising=False)
     await _drain(dsh)
-    assert "--stop-on-dialect-gap" not in spawn.argv
+    assert "--stop-on-failed-call" not in spawn.argv
 
 
 async def test_the_turn_runs_in_the_work_area_the_deployment_named(

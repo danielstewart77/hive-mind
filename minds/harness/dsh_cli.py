@@ -295,23 +295,23 @@ def _goal_rounds() -> int:
     return rounds if rounds > 1 else 1
 
 
-def _stop_on_dialect_gap() -> bool:
-    """Whether a call the harness refused should end this mind's dispatch.
+def _stop_on_failed_call() -> bool:
+    """Whether a failed tool call should end this mind's dispatch.
 
     A mind under test while the harness is still growing tools wants this on:
-    the first such refusal is the result, the rounds after it repeat it, and the
-    fix cannot reach a process that loaded its tool registry at spawn. Every
-    other mind wants it off, which is the default — a dialect gap
-    mid-conversation is something the model works around, not a reason to end
-    the turn.
+    the first failure is the result, the rounds after it are the same model
+    working around the same gap, and the fix cannot reach a process that loaded
+    its tool registry at spawn. Every other mind wants it off, which is the
+    default — a failed call mid-conversation is something the model works
+    around, not a reason to end the turn.
 
-    Only a refusal the harness owns counts: arguments it would not take, or a
-    tool it does not have. A tool that failed at its own job — a file that is
-    not there, an edit string that does not match — is an answer the model
-    recovers from, and ending forty rounds of work on one would throw the run
-    away to report something the harness handled correctly.
+    Every failure counts, not only the ones the harness refuses outright. A
+    `create` that wanted an empty file and a path spelled a second way both
+    arrive as a tool failing at its job, and both are tools we owe the model.
+    The report says which side turned the call away, so the run names where to
+    look without costing the rounds that would have found out.
     """
-    return bool(RUNTIME.get("stop_on_dialect_gap") is True)
+    return bool(RUNTIME.get("stop_on_failed_call") is True)
 
 
 def _first_env(names: tuple[str, ...]) -> str:
@@ -629,8 +629,8 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
                 fh.write(content)
             goal_flags = ["--goal-rounds", str(rounds),
                           "--goal-objective-file", objective_path]
-        if _stop_on_dialect_gap():
-            goal_flags.append("--stop-on-dialect-gap")
+        if _stop_on_failed_call():
+            goal_flags.append("--stop-on-failed-call")
         cmd = [DSH_BIN, "--profile", DSH_PROFILE, *flags, *goal_flags,
                "--task-file", task_path]
         log.info("%s session %s: spawning dsh turn (%s %s)",
