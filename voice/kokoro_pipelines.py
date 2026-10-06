@@ -19,16 +19,22 @@ reply at all.
 from __future__ import annotations
 
 import logging
+import threading
 
 from voice import kokoro_catalogue
 
 log = logging.getLogger(__name__)
 
 
-def _build(lang_code: str):  # pragma: no cover - loads a real model
+def _build(lang_code: str, model=None):  # pragma: no cover - loads a real model
     from kokoro import KPipeline
 
-    return KPipeline(lang_code=lang_code)
+    # The weights are the same for every language; only the front end differs.
+    # Letting each pipeline construct its own `KModel` puts a second copy on a
+    # GPU already holding whisper, for nothing.
+    if model is None:
+        return KPipeline(lang_code=lang_code)
+    return KPipeline(lang_code=lang_code, model=model)
 
 
 class KokoroPipelines:
@@ -38,15 +44,28 @@ class KokoroPipelines:
         self._default = (default_language or "a").strip().lower()[:1] or "a"
         self._factory = factory
         self._pipelines: dict[str, object] = {}
+        # Built under a lock: the sample route synthesises in a worker thread,
+        # so a Telegram turn can reach an unbuilt language while that thread is
+        # inside the factory. Unguarded, both build one — and each unshared
+        # build is another model resident on the GPU, surfacing much later as an
+        # out-of-memory error on an unrelated voice note.
+        self._lock = threading.Lock()
 
     @property
     def default_language(self) -> str:
         return self._default
 
     def language_for(self, voice_name: str) -> str:
-        """The language code `voice_name` should be spoken through."""
+        """The language code `voice_name` should be spoken through.
+
+        Clamped to the languages this hive offers. A non-English name reaching
+        here from an old `KOKORO_VOICE_MAP` or a hand-edited `runtime.yaml` would
+        otherwise build a pipeline needing a `misaki` language pack this image
+        does not install, raising inside the request on every turn for that Mind
+        — where it used to merely mispronounce.
+        """
         parsed = kokoro_catalogue.parse_voice_name((voice_name or "").strip())
-        if parsed is None:
+        if parsed is None or parsed.name[0] not in kokoro_catalogue.ENGLISH_CODES:
             return self._default
         return parsed.name[0]
 
@@ -54,16 +73,27 @@ class KokoroPipelines:
         """The pipeline for `voice_name`, building it on first use."""
         language = self.language_for(voice_name)
         pipeline = self._pipelines.get(language)
-        if pipeline is None:
-            log.info("Loading Kokoro pipeline (lang=%s)...", language)
-            pipeline = self._factory(language)
-            self._pipelines[language] = pipeline
+        if pipeline is not None:
+            return pipeline
+        with self._lock:
+            pipeline = self._pipelines.get(language)
+            if pipeline is None:
+                log.info("Loading Kokoro pipeline (lang=%s)...", language)
+                pipeline = self._factory(language, self._shared_model())
+                self._pipelines[language] = pipeline
         return pipeline
 
-    def warm(self, language: str | None = None):
-        """Build one pipeline up front so the first reply is not the slow one."""
-        code = (language or self._default).strip().lower()[:1] or self._default
-        return self.get(f"{code}f_warm")
+    def _shared_model(self):
+        """The model an already-built pipeline holds, for the next to reuse."""
+        for pipeline in self._pipelines.values():
+            model = getattr(pipeline, "model", None)
+            if model is not None:
+                return model
+        return None
+
+    def warm(self):
+        """Build the configured language up front, so no reply waits on a model."""
+        return self.get(f"{self._default}f_warm")
 
     def loaded_languages(self) -> list[str]:
         return sorted(self._pipelines)

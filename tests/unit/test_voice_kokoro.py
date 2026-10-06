@@ -13,6 +13,7 @@ test_voice_tts_logic.py.
 """
 
 import sys
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -249,6 +250,71 @@ class TestSamplingAVoice:
         assert refused.value.status_code == 400
         assert vs._KOKORO_PIPELINES.asked_for == []
 
+    def test_speaks_a_line_the_caller_supplied(self):
+        """The standard line is a default, not the only thing this will say."""
+        import asyncio
+
+        from voice import kokoro_catalogue
+
+        vs = self._server()
+        catalogue = kokoro_catalogue.build_catalogue(["voices/af_bella.pt"], "a")
+        with patch.object(vs, "_catalogue", side_effect=_async(catalogue)), \
+                patch.object(vs, "_wav_to_ogg", return_value=b"OggS-sample"), \
+                patch.object(vs, "_synthesize_kokoro", return_value=MagicMock()) as synth:
+            asyncio.run(
+                vs.voices_sample(
+                    vs.VoiceSampleRequest(voice="af_bella", text="**Say this** instead")
+                )
+            )
+
+        # Markdown reaches the speech engine as speech, never as asterisks.
+        assert synth.call_args.args == ("Say this instead", "af_bella")
+
+    def test_refuses_while_the_model_is_still_loading(self):
+        """503 rather than a 500 out of the synthesiser's own guard."""
+        import asyncio
+
+        from fastapi import HTTPException
+
+        vs = self._server()
+        vs._kokoro_loaded = False
+        with pytest.raises(HTTPException) as refused:
+            asyncio.run(vs.voices_sample(vs.VoiceSampleRequest(voice="af_bella")))
+
+        assert refused.value.status_code == 503
+
+    def test_refuses_on_an_engine_that_has_no_catalogue_to_sample(self):
+        """Chatterbox clones from a recording; it has no voices to offer."""
+        import asyncio
+
+        from fastapi import HTTPException
+
+        vs = self._server()
+        vs._TTS_ENGINE = "chatterbox"
+        try:
+            with pytest.raises(HTTPException) as refused:
+                asyncio.run(vs.voices_sample(vs.VoiceSampleRequest(voice="af_bella")))
+        finally:
+            vs._TTS_ENGINE = "kokoro"
+
+        assert refused.value.status_code == 400
+
+    def test_is_retimed_exactly_as_a_real_reply_is(self):
+        """Every reply is retimed before it reaches a surface and no caller
+        passes a speed, so a sample at any other tempo is a sample of a voice
+        the operator will never hear — while its own words promise otherwise."""
+        import asyncio
+
+        from voice import kokoro_catalogue
+
+        vs = self._server()
+        catalogue = kokoro_catalogue.build_catalogue(["voices/af_bella.pt"], "a")
+        with patch.object(vs, "_catalogue", side_effect=_async(catalogue)), \
+                patch.object(vs, "_wav_to_ogg", return_value=b"OggS") as encode:
+            asyncio.run(vs.voices_sample(vs.VoiceSampleRequest(voice="af_bella")))
+
+        assert encode.call_args.kwargs["speed"] == vs.TTSRequest(text="x").speed
+
     def test_speaks_the_standard_sample_line_when_none_is_given(self):
         import asyncio
 
@@ -271,3 +337,156 @@ def _async(value):
         return value
 
     return call
+
+
+class TestStartupWarmsAPipeline:
+    """Warming in isolation proves nothing if startup never calls it."""
+
+    @staticmethod
+    def _warmed(vs, language: str, default_voice: str) -> list[str]:
+        import asyncio
+
+        from voice.kokoro_pipelines import KokoroPipelines
+
+        built: list[str] = []
+        vs._KOKORO_DEFAULT_VOICE = default_voice
+        vs._KOKORO_PIPELINES = KokoroPipelines(
+            language,
+            factory=lambda code, model=None: built.append(code) or MagicMock(),
+        )
+        vs._kokoro_loaded = False
+        asyncio.run(vs.startup())
+        return built
+
+    def test_the_server_warms_its_configured_language_as_it_starts(self):
+        vs = _import_voice_server()
+        assert self._warmed(vs, "b", "bm_lewis") == ["b"]
+        assert vs._tts_ready() is True
+
+    def test_it_also_warms_the_language_the_default_voice_speaks(self):
+        """On this hive the default voice is British and the language American.
+
+        Warming only the configured one left the pipeline every reply actually
+        uses to load inside the first reply, on the event loop, while /health
+        already said ready.
+        """
+        vs = _import_voice_server()
+        assert self._warmed(vs, "a", "bm_lewis") == ["a", "b"]
+
+
+class TestTheCatalogueCache:
+    # time is imported here because the concurrency case needs a real sleep in
+    # the worker thread the fetch runs on.
+    """One fetch is two network round trips, and the picker asks on every load."""
+
+    @staticmethod
+    def _server():
+        vs = _import_voice_server()
+        vs._catalogue_cache = None
+        return vs
+
+    def test_a_readable_catalogue_is_reused_rather_than_refetched(self):
+        import asyncio
+
+        from voice import kokoro_catalogue
+
+        vs = self._server()
+        fetched = []
+
+        def fetch(language_code):
+            fetched.append(language_code)
+            return kokoro_catalogue.build_catalogue(["voices/af_bella.pt"], language_code)
+
+        with patch.object(kokoro_catalogue, "fetch_catalogue", fetch):
+            first = asyncio.run(vs._catalogue())
+            second = asyncio.run(vs._catalogue())
+
+        assert len(fetched) == 1
+        assert second is first
+
+    def test_a_catalogue_whose_card_failed_is_not_remembered(self):
+        """Every description empty must not be cached as the card's own silence."""
+        import asyncio
+
+        from voice import kokoro_catalogue
+
+        vs = self._server()
+        fetched = []
+
+        def fetch(language_code):
+            fetched.append(language_code)
+            return kokoro_catalogue.build_catalogue(
+                ["voices/af_bella.pt"], language_code, "", described=False
+            )
+
+        with patch.object(kokoro_catalogue, "fetch_catalogue", fetch):
+            asyncio.run(vs._catalogue())
+            asyncio.run(vs._catalogue())
+
+        assert len(fetched) == 2
+
+    def test_concurrent_first_readers_share_one_fetch(self):
+        """Each fetch is two Hugging Face round trips; the picker asks on load."""
+        import asyncio
+
+        from voice import kokoro_catalogue
+
+        vs = self._server()
+        fetched = []
+
+        def fetch(language_code):
+            fetched.append(language_code)
+            time.sleep(0.2)
+            return kokoro_catalogue.build_catalogue(["voices/af_bella.pt"], language_code)
+
+        async def scenario():
+            return await asyncio.gather(*[vs._catalogue() for _ in range(3)])
+
+        with patch.object(kokoro_catalogue, "fetch_catalogue", fetch):
+            answers = asyncio.run(scenario())
+
+        assert len(fetched) == 1
+        assert answers[0] is answers[1] is answers[2]
+
+    def test_an_unreadable_catalogue_is_not_remembered(self):
+        """The network is what failed; a five-minute memory outlives the blip."""
+        import asyncio
+
+        from voice import kokoro_catalogue
+
+        vs = self._server()
+        fetched = []
+
+        def fetch(language_code):
+            fetched.append(language_code)
+            return kokoro_catalogue.unreadable_catalogue(language_code, "refused")
+
+        with patch.object(kokoro_catalogue, "fetch_catalogue", fetch):
+            asyncio.run(vs._catalogue())
+            asyncio.run(vs._catalogue())
+
+        assert len(fetched) == 2
+
+    def test_a_stale_catalogue_is_refetched_once_its_life_is_up(self):
+        import asyncio
+
+        from voice import kokoro_catalogue
+
+        vs = self._server()
+        fetched = []
+
+        def fetch(language_code):
+            fetched.append(language_code)
+            return kokoro_catalogue.build_catalogue(["voices/af_bella.pt"], language_code)
+
+        clock = [1000.0]
+        with patch.object(kokoro_catalogue, "fetch_catalogue", fetch), \
+                patch.object(vs.time, "monotonic", lambda: clock[0]):
+            asyncio.run(vs._catalogue())
+            clock[0] += vs._CATALOGUE_TTL_SECONDS - 1
+            asyncio.run(vs._catalogue())
+            assert len(fetched) == 1
+            clock[0] += 2
+            asyncio.run(vs._catalogue())
+
+        assert len(fetched) == 2
