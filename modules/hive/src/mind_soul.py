@@ -103,6 +103,14 @@ async def push_soul(mind_name: str, soul_values: list[str], reason: str) -> dict
     that could name itself `mind` could launder an operator edit into the
     record as something the Mind decided, and the whole value of the column
     is that it cannot be talked into lying.
+
+    `allow_shrink` is sent because this page *is* the confirmation. The guard
+    exists for a caller that built its list from a read it never checked, and
+    that cannot be this one: the operator was shown every line and edited the
+    text in front of them. Withholding it put a refusal on the page whose only
+    remedy was a flag the page had no way to send, which is a dead end rather
+    than a safeguard. The guard still stands for every programmatic writer,
+    where an unchecked read actually happens.
     """
     reason = (reason or "").strip()
     if not reason:
@@ -118,6 +126,7 @@ async def push_soul(mind_name: str, soul_values: list[str], reason: str) -> dict
                 "soul_values": [str(v) for v in soul_values],
                 "actor": "console",
                 "reason": reason,
+                "allow_shrink": True,
             },
             headers=soul_headers(),
         )
