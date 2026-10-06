@@ -43,7 +43,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from minds.proactive import make_proactive_router
-from minds import models_api, runtime_api
+from minds import models_api, runtime_api, surface_token_api
 from minds.pty_attach import (
     PtyUnavailable,
     TmuxTerminals,
@@ -1050,6 +1050,7 @@ install_pty_attach(app, mind_name=NAME, terminals=TERMINALS,
 runtime_api.install_session_guard(app, mind_dir=MIND_DIR)
 runtime_api.install_runtime_routes(app, path=RUNTIME_PATH, mind_id=MIND_ID, log=log)
 models_api.install_models_route(app, path=RUNTIME_PATH, mind_id=MIND_ID, log=log)
+surface_token_api.install_surface_token_routes(app, mind_id=MIND_ID, log=log)
 
 
 def main() -> None:
