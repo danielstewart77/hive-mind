@@ -17,6 +17,11 @@ services:
       # POST /broker/minds is an admin route.
       - COMMS_ADMIN_BEARER_TOKEN=${COMMS_ADMIN_BEARER_TOKEN}
       - PYTHON_KEYRING_BACKEND=core.keyring_backend.HiveMindKeyring
+      # Which keyring entry holds this mind's Telegram token. The mind's own
+      # surface container names the same key; a backend that named none would
+      # read the ambient environment instead and report no token stored while
+      # its bot authenticated off the keyring beside it.
+      - TELEGRAM_BOT_TOKEN_KEYRING_KEY=EXAMPLE_TELEGRAM_BOT_TOKEN
       - PYTHONNOUSERSITE=1
       - PYTHONPATH=/usr/src/app/vendor
       - KEY_RING=/usr/src/app/data/keyring
