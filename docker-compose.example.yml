@@ -192,6 +192,9 @@ services:
       - /tmp
     environment:
       - HIVE_MIND_SERVER_URL=http://hive-comms:8424
+      # The name the surfaces core actually reads. Its default is
+      # 127.0.0.1:8426, which inside a container is nothing at all.
+      - COMMS_URL=http://hive-comms:8424
       - COMMS_BEARER_TOKEN=${COMMS_BEARER_TOKEN}
       - VOICE_SERVER_URL=http://voice-server:8422
       - PYTHON_KEYRING_BACKEND=core.keyring_backend.HiveMindKeyring
@@ -231,6 +234,9 @@ services:
       - /tmp
     environment:
       - HIVE_MIND_SERVER_URL=http://hive-comms:8424
+      # The name the surfaces core actually reads. Its default is
+      # 127.0.0.1:8426, which inside a container is nothing at all.
+      - COMMS_URL=http://hive-comms:8424
       - COMMS_BEARER_TOKEN=${COMMS_BEARER_TOKEN}
       - VOICE_SERVER_URL=http://voice-server:8422
       - PYTHON_KEYRING_BACKEND=core.keyring_backend.HiveMindKeyring
