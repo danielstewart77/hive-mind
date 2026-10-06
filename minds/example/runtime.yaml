@@ -14,6 +14,11 @@ default_model: claude-sonnet-5
 runtime_config_dir: /usr/src/app/minds/example/.claude
 resume_policy: always
 
+# Which voice this mind is spoken in. A Kokoro voice name; the voice server
+# reads it from the broker row, which this file is the truth for. Unset means
+# the voice server's own default.
+voice:
+
 # What the default model above actually holds. Required on a dsh_cli mind,
 # whose provider route lists no models and sizes every one of them from this:
 # compaction reads it as the ceiling, so a mind without it is refused rather
