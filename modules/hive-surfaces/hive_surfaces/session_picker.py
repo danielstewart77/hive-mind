@@ -37,6 +37,10 @@ CB_SEP = ":"
 # conversation missing from the picker beats no picker.
 CALLBACK_DATA_LIMIT = 64
 
+# What the picker's `CallbackQueryHandler` is registered with, so it stops
+# answering callbacks belonging to other features sharing the same channel.
+CALLBACK_PATTERN = rf"^({CB_SWITCH}{CB_SEP}|{CB_NEW}$)"
+
 
 def encode(action: str, session_id: str = "") -> str:
     """The payload a button carries. Ids travel whole, never as positions."""

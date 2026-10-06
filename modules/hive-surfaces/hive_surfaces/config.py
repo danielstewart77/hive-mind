@@ -46,6 +46,12 @@ class SurfaceConfig:
     # path to hand the mind.
     photo_dir: str = "data/telegram_photos"
 
+    # Where to poll for unsolicited turns, for a surface that does not share a
+    # process with its mind backend and so cannot be handed them in memory.
+    # Empty means in-process only, which is the edge layout.
+    proactive_poll_url: str = ""
+    proactive_poll_interval_s: float = 5.0
+
 
 class _ConfigProxy:
     """What `config` is, so a late `configure()` is seen by code that imported it.
@@ -98,7 +104,7 @@ def photo_root() -> "Path":
     """The directory inbound photos are written under, created on demand."""
     from pathlib import Path
 
-    root = Path(__file__).resolve().parent / "telegram_photos"
+    root = Path(config.photo_dir).expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
     return root
 

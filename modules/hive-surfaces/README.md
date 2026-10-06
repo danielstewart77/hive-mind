@@ -67,3 +67,24 @@ see.
 | `TELEGRAM_BOT_TOKEN` | Telegram surface; unset disables it |
 | `DISCORD_BOT_TOKEN` | Discord surface; unset disables it |
 | `MIND_ID` | The mind this surface is a surface of |
+| `HIVE_TOOLS_URL` | Where held decisions are reported; defaults to localhost |
+| `HIVE_TOOLS_TOKEN` | Bearer for that report; absent sends no header |
+
+## Unsolicited turns
+
+A turn the mind produced with nobody listening reaches the chat one of two
+ways, and both end at the same delivery path — same chunking, same backoff,
+same journalling of whatever is still pending at shutdown.
+
+A surface sharing a process with its mind backend is handed them in memory
+through `hive_surfaces.proactive`. A surface in its own container cannot be
+handed anything, so it polls: set `proactive_poll_url` to the backend and the
+poller puts what it finds on the same queue. Empty means in-process only.
+
+## Held decisions
+
+Some tools wait for a person. hive-tools mints a token, posts the question
+with two buttons, and this reports which one was tapped. It decides nothing —
+the message ends up saying what hive-tools said, status and all, because the
+question after a failed approval is always whether the thing actually
+happened.
