@@ -497,6 +497,8 @@ async def test_the_proxy_credential_is_translated_to_the_name_the_route_resolves
     untranslated credential is every turn of this mind failing at its first
     model request."""
     _session(dsh)
+    for name in dsh._PROXY_KEY_SOURCES:
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.delitem(dsh.RUNTIME_ENV, "OPENAI_API_KEY", raising=False)
     monkeypatch.setitem(dsh.RUNTIME_ENV, "ANTHROPIC_AUTH_TOKEN", "sk-the-minds-own-key")
     spawn = _Spawn([_report()])
@@ -653,11 +655,14 @@ async def test_the_session_the_turn_reports_is_the_session_reported_upward(
     assert _result(await _drain(dsh))["session_id"] == "conv-1-as-dsh-saw-it"
 
 
-async def test_a_terminal_release_is_refused_as_unsupported(dsh) -> None:
+async def test_a_terminal_release_ends_the_tmux_owned_process(dsh, monkeypatch) -> None:
     _session(dsh)
+    released: list[str] = []
+    monkeypatch.setattr(dsh, "teardown_pty", lambda sid: released.append(sid) or True)
     response = await dsh.release_session("row-1", surface="terminal")
-    assert response.status_code == 501
-    # The conversation is untouched: a refusal is not a release.
+    assert response["released"] is True
+    assert released == ["row-1"]
+    # Releasing a surface preserves the durable conversation and session row.
     assert "row-1" in dsh.SESSIONS
 
 
@@ -761,20 +766,100 @@ async def test_an_attached_image_is_reported_as_not_sent(dsh, monkeypatch) -> No
     assert any("2 attached image(s) were not sent" in t for t in texts)
 
 
-def test_a_terminal_attach_closes_on_its_own_code(dsh) -> None:
-    """Driven through the real app, not by calling the handler: a handler whose
-    socket parameter is not typed as a WebSocket is never handed one — FastAPI
-    reads it as a required query parameter and closes before accepting, which
-    presents to the gateway as HTTP 403, the same answer a mind with no pty
-    route gives. The close code is the whole point of the route."""
-    from starlette.testclient import TestClient
-    from starlette.websockets import WebSocketDisconnect
+class _FakeTerminals:
+    def __init__(self, alive: bool = False) -> None:
+        self.is_alive = alive
+        self.starts: list[dict[str, Any]] = []
+        self.attaches: list[dict[str, Any]] = []
+        self.respawns: list[dict[str, Any]] = []
 
-    with TestClient(dsh.app) as client:
-        with client.websocket_connect("/sessions/row-1/attach-pty") as socket:
-            with pytest.raises(WebSocketDisconnect) as refused:
-                socket.receive_text()
-    assert refused.value.code == 4417
+    def alive(self, session_id: str) -> bool:
+        return self.is_alive
+
+    def start(self, session_id: str, argv: list[str], **kwargs: Any) -> None:
+        self.starts.append({"session_id": session_id, "argv": argv, **kwargs})
+        self.is_alive = True
+
+    def attach(self, session_id: str, **kwargs: Any) -> tuple[Any, int]:
+        self.attaches.append({"session_id": session_id, **kwargs})
+        return type("Proc", (), {"pid": 9191})(), 17
+
+    def respawn(self, session_id: str, argv: list[str], **kwargs: Any) -> None:
+        self.respawns.append({"session_id": session_id, "argv": argv, **kwargs})
+
+
+def test_a_cold_terminal_opens_the_gateway_conversation_with_its_context(
+    dsh, monkeypatch
+) -> None:
+    _session(dsh)
+    terminals = _FakeTerminals()
+    monkeypatch.setattr(dsh, "TERMINALS", terminals)
+    proc, master_fd = dsh._spawn_pty(
+        session_id="row-1", model="qwen35-131k", conversation_id="conv-1",
+        cols=100, rows=30,
+    )
+    argv = terminals.starts[0]["argv"]
+    assert argv[:3] == [dsh.DSH_BIN, "--profile", dsh.DSH_PROFILE]
+    assert argv[argv.index("--session-id") + 1] == "conv-1"
+    assert "--interactive" in argv
+    context = Path(argv[argv.index("--context-file") + 1])
+    assert context.read_text(encoding="utf-8") == "SOUL AND MEMORY"
+    assert (proc.pid, master_fd) == (9191, 17)
+
+
+def test_the_pane_is_told_which_mind_it_speaks_for(dsh, monkeypatch) -> None:
+    """The dsh terminal prints its own prompt and banner from MIND_NAME."""
+    _session(dsh)
+    terminals = _FakeTerminals()
+    monkeypatch.setattr(dsh, "TERMINALS", terminals)
+    dsh._spawn_pty(
+        session_id="row-1", model="qwen35-131k", conversation_id="conv-1",
+        cols=100, rows=30,
+    )
+    assert terminals.starts[0]["env_overrides"]["MIND_NAME"] == dsh.NAME
+
+
+def test_a_persisted_terminal_resumes_without_reapplying_opening_context(
+    dsh, monkeypatch
+) -> None:
+    _session(dsh)
+    _persist(dsh, "conv-1")
+    terminals = _FakeTerminals()
+    monkeypatch.setattr(dsh, "TERMINALS", terminals)
+    dsh._spawn_pty(
+        session_id="row-1", model="qwen35-131k", conversation_id="conv-1",
+        cols=80, rows=24,
+    )
+    argv = terminals.starts[0]["argv"]
+    assert argv[argv.index("--resume") + 1] == "conv-1"
+    assert "--context-file" not in argv
+
+
+def test_a_terminal_cannot_join_while_a_chat_turn_writes_the_transcript(
+    dsh, monkeypatch
+) -> None:
+    _session(dsh)["in_flight"] = True
+    monkeypatch.setattr(dsh, "TERMINALS", _FakeTerminals())
+    with pytest.raises(dsh.PtyUnavailable, match="chat turn"):
+        dsh._spawn_pty(
+            session_id="row-1", model="qwen35-131k", conversation_id="conv-1",
+            cols=80, rows=24,
+        )
+
+
+def test_rotation_respawns_the_same_pane_on_the_new_conversation(
+    dsh, monkeypatch
+) -> None:
+    terminals = _FakeTerminals(alive=True)
+    monkeypatch.setattr(dsh, "TERMINALS", terminals)
+    assert dsh._rotate_pty(
+        session_id="row-1", new_claude_sid="conv-2", model="qwen35-131k",
+        system_prompt="carry forward",
+    ) is True
+    argv = terminals.respawns[0]["argv"]
+    assert argv[argv.index("--session-id") + 1] == "conv-2"
+    context = Path(argv[argv.index("--context-file") + 1])
+    assert context.read_text(encoding="utf-8") == "carry forward"
 
 
 async def test_a_chat_minds_dispatch_is_one_turn_and_names_no_rounds(
