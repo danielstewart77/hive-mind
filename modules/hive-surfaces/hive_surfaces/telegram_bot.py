@@ -1543,22 +1543,55 @@ async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_T
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
-def _get_bot_token() -> str:
-    """Load Telegram bot token — env first, keyring fallback (F10).
+KEYRING_SERVICE = "hive-mind"
+DEFAULT_TOKEN_KEY = "TELEGRAM_BOT_TOKEN"  # secret-guard: allow — a keyring key name, not a token
 
-    Precedence flipped 2026-05-05: previously keyring-first, env-fallback.
-    Env-first means a `.env`-provided token wins, with keyring kept as
-    a transitional fallback during F10 migration. Once every deployment
-    has the token in `.env`, the keyring branch can be removed.
 
-    TELEGRAM_BOT_TOKEN_KEYRING_KEY still overrides the keyring key lookup
-    when the fallback is exercised, allowing multiple bot instances to
-    run from the same image with different tokens.
+def _keyring_token(key: str) -> str:
+    """The token stored under `key`, or empty if there is no answer.
+
+    Never raises. A host with no keyring backend, an unreadable store and a
+    store that simply has nothing under this key all mean the same thing to
+    the caller — look somewhere else — and an exception here would take down
+    a surface whose token was in the environment all along.
     """
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    try:
+        import keyring
+
+        return keyring.get_password(KEYRING_SERVICE, key) or ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _get_bot_token() -> str:
+    """Load this surface's Telegram bot token.
+
+    Two deployments supply it two ways and both are right. An edge mind puts
+    it in its own `.env`, one mind per host, so the environment is the answer.
+    A stack runs several surfaces from one image on one machine, where the
+    environment cannot hold several different values under one name — so each
+    names its own `TELEGRAM_BOT_TOKEN_KEYRING_KEY` and the token lives in the
+    keyring.
+
+    A named key therefore wins over the environment, rather than the
+    environment winning as it does when no key is named. The only reason to
+    name one is that this surface's token is *not* the ambient one: a stack
+    where the root `.env` happens to export some mind's token would otherwise
+    start three bots polling Telegram as the same bot, each stealing the
+    others' updates, with nothing in any log to say so.
+    """
+    named = os.getenv("TELEGRAM_BOT_TOKEN_KEYRING_KEY", "")
+    if named:
+        token = _keyring_token(named) or os.getenv("TELEGRAM_BOT_TOKEN", "")
+        if token:
+            return token
+        log.error("No Telegram token under keyring key %s or in environment.", named)
+        sys.exit(1)
+
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "") or _keyring_token(DEFAULT_TOKEN_KEY)
     if token:
         return token
-    log.error("TELEGRAM_BOT_TOKEN not found in environment.")
+    log.error("TELEGRAM_BOT_TOKEN not found in environment or keyring.")
     sys.exit(1)
 
 
