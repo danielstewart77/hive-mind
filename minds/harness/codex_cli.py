@@ -44,7 +44,13 @@ from minds.pty_attach import (
     seeded_pane_command,
 )
 from minds.pty_attach import teardown as teardown_pty
-from minds import files_api, models_api, runtime_api, skills_api
+from minds import (
+    files_api,
+    models_api,
+    runtime_api,
+    skills_api,
+    surface_token_api,
+)
 from core.hive_logging import configure_logging, install_fastapi_logging, log_event
 
 MIND_NAME = os.environ.get("MIND_NAME", "example")
@@ -538,6 +544,7 @@ runtime_api.install_runtime_routes(app, path=RUNTIME_PATH, mind_id=MIND_ID, log=
 skills_api.install_skills_routes(app, harness="codex_cli", mind_id=MIND_ID, log=log)
 files_api.install_files_routes(app, harness="codex_cli", mind_id=MIND_ID, log=log)
 models_api.install_models_route(app, path=RUNTIME_PATH, mind_id=MIND_ID, log=log)
+surface_token_api.install_surface_token_routes(app, mind_id=MIND_ID, log=log)
 
 
 async def _run_codex_turn(sid: str, content: str, images: list[dict] | None) -> Any:
