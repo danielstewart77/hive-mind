@@ -10,10 +10,11 @@
     <div class="overview-stack" id="mind-content">
         <section class="surface"><div class="surface-header"><h2>Overview</h2><span id="mind-status"></span></div><div class="surface-body"><dl class="detail-grid" id="mind-details"></dl></div></section>
         <section class="surface"><div class="surface-header"><div><h2>Runtime configuration</h2><p>Secret values are removed before this reaches the browser.</p></div></div><div class="surface-body"><div class="code-wrap"><pre class="code-panel" id="mind-config">Loading…</pre><button class="icon-button" type="button" data-copy="#mind-config" aria-label="Copy configuration"><i data-lucide="copy"></i></button></div></div></section>
-        <section class="surface" id="mind-editor" hidden><div class="surface-header"><div><h2>Default model</h2><p>Written to this Mind&#39;s runtime.yaml and its registry row. Applies to the next session it is asked for; conversations already running keep their model.</p></div></div><form class="surface-body overview-stack" id="mind-model-form"><div class="field"><label for="mind-provider">Provider</label><select id="mind-provider" name="provider" required></select><small>The upstream hosting the model. This Mind's own proxy key decides which appear.</small></div><div class="field"><label for="mind-default-model">Model</label><select id="mind-default-model" name="default_model" required></select><small>Every model this Mind is permitted to run on the chosen provider.</small></div><div class="form-actions"><button class="button" type="submit" id="mind-model-save">Save model</button></div><small id="mind-model-status"></small></form></section>
+        <section class="surface" id="mind-editor" data-editable hidden><div class="surface-header"><div><h2>Default model</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-model-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-model-form"><p>Written to this Mind&#39;s runtime.yaml and its registry row. Applies to the next session it is asked for; conversations already running keep their model.</p><div class="field"><label for="mind-provider">Provider</label><select id="mind-provider" name="provider" required></select><small>The upstream hosting the model. This Mind's own proxy key decides which appear.</small></div><div class="field"><label for="mind-default-model">Model</label><select id="mind-default-model" name="default_model" required></select><small>Every model this Mind is permitted to run on the chosen provider.</small></div><div class="form-actions"><button class="button" type="submit" id="mind-model-save">Save model</button></div><small id="mind-model-status"></small></form></div></section>
+        <section class="surface" id="mind-surface-token" data-editable hidden><div class="surface-header"><div><h2>Surface token</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Set</button></div><dl class="detail-grid surface-body" data-summary id="mind-token-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-token-form"><p>Checked against the bot API before it is stored, so a token it refuses leaves the working one in place. Written on the Mind, into whichever of its own `.env` or keyring its surface reads. Never readable from here.</p><div class="field"><label for="mind-token-value">Bot token</label><input id="mind-token-value" name="token" type="password" autocomplete="off" spellcheck="false" required placeholder="123456789:AA…"><small>Issued by BotFather. Reaches the surface when it is next restarted.</small></div><div class="form-actions"><button class="button" type="submit" id="mind-token-save">Verify and store</button></div><small id="mind-token-status"></small></form></div></section>
         <section class="surface" id="mind-skills" hidden><div class="surface-header"><div><h2>Skills</h2><p>The repo&#39;s copy against this Mind&#39;s. Applying copies the repo&#39;s directory into the one this Mind&#39;s harness loads skills from. When the harness picks it up is the harness&#39;s business.</p></div><span id="mind-skills-harness"></span></div><div class="surface-body"><div id="mind-skills-status"></div><table class="data-table" id="mind-skills-table" hidden><thead><tr><th>Skill</th><th>Repo</th><th>This Mind</th><th></th></tr></thead><tbody id="mind-skills-rows"></tbody></table></div></section>
-        <section class="surface" id="mind-files" hidden><div class="surface-header"><div><h2>Skill and hook files</h2><p>The directories this Mind&#39;s harness reads. Edits are written in place, on the Mind. A hook is re-read on every event, so an edit to one is live immediately; a skill is read when a harness process starts, so a running conversation keeps the copy it loaded.</p></div><div class="row-actions"><button class="button button-quiet" type="button" data-tree="skills">Skills</button><button class="button button-quiet" type="button" data-tree="hooks">Hooks</button></div></div><div class="surface-body overview-stack"><small id="mind-files-root"></small><div id="mind-files-status"></div><div class="field"><label for="mind-files-list">File</label><select id="mind-files-list" size="10"></select></div><form class="overview-stack" id="mind-files-form" hidden><div class="field"><label for="mind-files-text" id="mind-files-label">Contents</label><textarea id="mind-files-text" rows="22" spellcheck="false" wrap="off"></textarea></div><div class="form-actions"><button class="button" type="submit" id="mind-files-save">Save file</button><button class="button button-quiet" type="button" id="mind-files-reload">Discard and reload</button></div><small id="mind-files-save-status"></small></form></div></section>
-        <section class="surface" id="mind-soul" hidden><div class="surface-header"><div><h2>Soul</h2><p>What this Mind is told it is, ahead of every turn on every surface. One line per line — this is read as instruction, not description. Edits from here are recorded as yours, distinct from what the Mind decided about itself.</p></div></div><form class="surface-body overview-stack" id="mind-soul-form"><div class="field"><label for="mind-soul-values">Soul</label><textarea id="mind-soul-values" name="soul_values" rows="14" spellcheck="false"></textarea><small>Blank lines are dropped. Removing a line removes it from the Mind.</small></div><div class="field"><label for="mind-soul-reason">Why this changed</label><input id="mind-soul-reason" name="reason" type="text" required placeholder="Stored with the edit — this is what answers &quot;who wrote this line&quot; in six weeks."></div><div class="form-actions"><button class="button" type="submit" id="mind-soul-save">Save soul</button></div><small id="mind-soul-status"></small></form><div class="surface-body" id="mind-soul-history"></div></section>
+        <section class="surface" id="mind-files" data-editable hidden><div class="surface-header"><div><h2>Skill and hook files</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-files-summary"></dl><div data-editor hidden><div class="surface-header"><div><p>The directories this Mind&#39;s harness reads. Edits are written in place, on the Mind. A hook is re-read on every event, so an edit to one is live immediately; a skill is read when a harness process starts, so a running conversation keeps the copy it loaded.</p></div><div class="row-actions"><button class="button button-quiet" type="button" data-tree="skills">Skills</button><button class="button button-quiet" type="button" data-tree="hooks">Hooks</button></div></div><div class="surface-body overview-stack"><small id="mind-files-root"></small><div id="mind-files-status"></div><div class="field"><label for="mind-files-list">File</label><select id="mind-files-list" size="10"></select></div><form class="overview-stack" id="mind-files-form" hidden><div class="field"><label for="mind-files-text" id="mind-files-label">Contents</label><textarea id="mind-files-text" rows="22" spellcheck="false" wrap="off"></textarea></div><div class="form-actions"><button class="button" type="submit" id="mind-files-save">Save file</button><button class="button button-quiet" type="button" id="mind-files-reload">Discard and reload</button></div><small id="mind-files-save-status"></small></form></div></div></section>
+        <section class="surface" id="mind-soul" data-editable hidden><div class="surface-header"><div><h2>Soul</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-soul-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-soul-form"><p>What this Mind is told it is, ahead of every turn on every surface. One line per line — this is read as instruction, not description. Edits from here are recorded as yours, distinct from what the Mind decided about itself.</p><div class="field"><label for="mind-soul-values">Soul</label><textarea id="mind-soul-values" name="soul_values" rows="14" spellcheck="false"></textarea><small>Blank lines are dropped. Removing a line removes it from the Mind.</small></div><div class="field"><label for="mind-soul-reason">Why this changed</label><input id="mind-soul-reason" name="reason" type="text" required placeholder="Stored with the edit — this is what answers &quot;who wrote this line&quot; in six weeks."></div><div class="form-actions"><button class="button" type="submit" id="mind-soul-save">Save soul</button></div><small id="mind-soul-status"></small></form></div><div class="surface-body" id="mind-soul-history"></div></section>
     </div>
 </main>
 <script>
@@ -27,6 +28,69 @@ window.addEventListener("DOMContentLoaded", async function () {
     // the repo ships the hive-native ones, the Mind accumulates its own. It
     // is not junk awaiting cleanup, and Remove deletes a directory that is
     // under no version control, so it asks first.
+    // One mechanism for every section, wired once from the markup rather
+    // than per section: a section that shipped with a summary and no toggle
+    // would read as a value nobody can change, and four copies of this is
+    // four places for that to happen.
+    //
+    // Opening replaces the summary rather than sitting under it. Two
+    // renderings of one setting on screen at once is how an operator edits
+    // the field while reading the old value above it.
+    function wireEditToggles() {
+        document.querySelectorAll("section[data-editable]").forEach(function (section) {
+            const toggle = section.querySelector("[data-edit-toggle]");
+            const editor = section.querySelector("[data-editor]");
+            const summary = section.querySelector("[data-summary]");
+            if (!toggle || !editor) return;
+            const opened = toggle.textContent.trim();
+            toggle.addEventListener("click", function () {
+                const opening = editor.hidden;
+                editor.hidden = !opening;
+                if (summary) summary.hidden = opening;
+                toggle.textContent = opening ? "Done" : opened;
+            });
+        });
+    }
+
+    // A summary is pairs of label and value, and never a sentence. The page
+    // exists to be scanned for what a Mind is currently set to; prose is
+    // what the opened editor is for.
+    function paintSummary(id, pairs) {
+        document.getElementById(id).innerHTML = pairs.map(function (item) {
+            return '<div class="detail-item"><dt>' + h.escapeHtml(item[0]) +
+                '</dt><dd>' + h.escapeHtml(item[1]) + '</dd></div>';
+        }).join("");
+    }
+
+    // Three states, not two, and each says what to do about it. "No token
+    // stored" is a token nobody has supplied; "not accepted" is one revoked
+    // or pasted wrong that is failing on every poll behind a surface that
+    // still looks up — and "could not be checked" is neither, because the
+    // remedy there is to go and look at the machine.
+    function tokenSummary(state) {
+        if (state.unreachable) return [["Token", "Could not be checked"], ["Reason", state.detail || "This Mind did not answer"]];
+        if (!state.stored) return [["Token", "None stored"], ["Reads from", state.where || "Unknown"]];
+        if (state.accepted === false) return [["Token", "Stored, not accepted"], ["Reason", state.detail || "The bot API refused it"], ["Reads from", state.where || "Unknown"]];
+        return [["Token", "Stored and accepted"], ["Authenticates as", state.bot_username ? "@" + state.bot_username : "Unknown bot"], ["Reads from", state.where || "Unknown"]];
+    }
+
+    async function renderSurfaceToken(name) {
+        const section = document.getElementById("mind-surface-token");
+        section.dataset.mindName = name;
+        section.hidden = false;
+        let state;
+        try {
+            state = await h.requestJson("/api/minds/" + encodeURIComponent(name) + "/surface-token");
+        } catch (error) {
+            // A Mind that is down, and a Mind too old for the route, both
+            // leave the field offered: the token is written on the next
+            // reachable attempt, and hiding the form would send the operator
+            // to a shell for a value this page exists to take.
+            state = {unreachable: true, detail: error.message};
+        }
+        paintSummary("mind-token-summary", tokenSummary(state));
+    }
+
     const SKILL_STATES = {
         same: {label: "In sync", actions: []},
         differs: {label: "Edited on this Mind", actions: ["diff", "install", "write-back"]},
@@ -250,16 +314,23 @@ window.addEventListener("DOMContentLoaded", async function () {
         try {
             const configuration = await h.requestJson("/api/minds/" + encodeURIComponent(mind.name) + "/configuration");
             populateModelPicker(configuration.models || [], configuration.configuration.default_model || cfg.default_model || mind.model || "", configuration.configuration.provider || cfg.provider || "");
+            paintSummary("mind-model-summary", [
+                ["Model", configuration.configuration.default_model || cfg.default_model || mind.model || "Unknown"],
+                ["Provider", configuration.configuration.provider || cfg.provider || "Not reported"]
+            ]);
         } catch (error) {
             document.getElementById("mind-model-form").hidden = true;
+            paintSummary("mind-model-summary", [["Model", "Could not be read"], ["Reason", error.message]]);
             document.getElementById("mind-model-status").textContent = "Cannot reach this Mind to read its configuration: " + error.message;
         }
+        await renderSurfaceToken(mind.name);
         await renderSkills(mind.name);
         const filesSection = document.getElementById("mind-files");
         filesSection.dataset.mindName = mind.name;
         filesSection.hidden = false;
         await renderFiles("skills");
         await renderSoul(mind.name);
+        wireEditToggles();
         if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}});
     } catch (error) {
         document.getElementById("mind-content").hidden = true;

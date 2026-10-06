@@ -2277,6 +2277,73 @@ async def api_mind_configuration_update(
     }
 
 
+@app.get("/api/minds/{name}/surface-token")
+async def api_mind_surface_token(name: str, user: dict = Depends(require_auth)):
+    """Whether this Mind's surface has a bot token the bot API accepts.
+
+    Relayed from the Mind, which is the only party that can see where its own
+    token lives. Never the token itself: a console that could read one would
+    put every bot in the hive one session cookie away from being
+    impersonated.
+    """
+    del user
+    gateway_url = await _mind_gateway_url(name)
+    state = await mind_runtime.fetch_surface_token(gateway_url)
+    return {
+        "stored": bool(state.get("stored")),
+        "accepted": state.get("accepted"),
+        "bot_username": str(state.get("bot_username") or ""),
+        "where": str(state.get("where") or ""),
+        "detail": str(state.get("detail") or ""),
+    }
+
+
+@app.put("/api/minds/{name}/surface-token")
+async def api_mind_surface_token_set(
+    name: str, request: Request, user: dict = Depends(require_auth)
+):
+    """Hand this Mind a new bot token for it to verify and store.
+
+    The Mind writes it, because the token has to land where that Mind's
+    surface reads it — its own `.env` on an edge install, a per-mind keyring
+    key in the stack — and this console can see neither.
+
+    The Mind verifies against the bot API before storing, so a token refused
+    there leaves the working one in place. The audit line records which Mind
+    and what came of it; the value never enters a log, a response, or an
+    exception message.
+    """
+    del user
+    body = await request.json()
+    token = str((body or {}).get("token") or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="A bot token is required")
+    gateway_url = await _mind_gateway_url(name)
+    try:
+        state = await mind_runtime.push_surface_token(gateway_url, token)
+    except HTTPException as exc:
+        log_event(
+            log, "mind.surface_token.refused", level=logging.WARNING,
+            mind=name, status=exc.status_code,
+        )
+        raise
+    log_event(
+        log, "mind.surface_token.updated", mind=name,
+        bot_username=str(state.get("bot_username") or ""),
+        where=str(state.get("where") or ""),
+    )
+    return {
+        "saved": True,
+        "stored": True,
+        "accepted": True,
+        "bot_username": str(state.get("bot_username") or ""),
+        "where": str(state.get("where") or ""),
+        # The surface read its token when it started and keeps it until it is
+        # recreated, which the page says rather than implying otherwise.
+        "restart_required": True,
+    }
+
+
 @app.get("/api/minds/{name}/soul")
 async def api_mind_soul(name: str, user: dict = Depends(require_auth)):
     """This Mind's soul, straight from the graph, with its change record.
