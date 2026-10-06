@@ -11,6 +11,7 @@
         <section class="surface"><div class="surface-header"><h2>Overview</h2><span id="mind-status"></span></div><div class="surface-body"><dl class="detail-grid" id="mind-details"></dl></div></section>
         <section class="surface"><div class="surface-header"><div><h2>Runtime configuration</h2><p>Secret values are removed before this reaches the browser.</p></div></div><div class="surface-body"><div class="code-wrap"><pre class="code-panel" id="mind-config">Loading…</pre><button class="icon-button" type="button" data-copy="#mind-config" aria-label="Copy configuration"><i data-lucide="copy"></i></button></div></div></section>
         <section class="surface" id="mind-editor" data-editable hidden><div class="surface-header"><div><h2>Default model</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-model-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-model-form"><p>Written to this Mind&#39;s runtime.yaml and its registry row. Applies to the next session it is asked for; conversations already running keep their model.</p><div class="field"><label for="mind-provider">Provider</label><select id="mind-provider" name="provider" required></select><small>The upstream hosting the model. This Mind's own proxy key decides which appear.</small></div><div class="field"><label for="mind-default-model">Model</label><select id="mind-default-model" name="default_model" required></select><small>Every model this Mind is permitted to run on the chosen provider.</small></div><div class="form-actions"><button class="button" type="submit" id="mind-model-save">Save model</button></div><small id="mind-model-status"></small></form></div></section>
+        <section class="surface" id="mind-voice" data-editable hidden><div class="surface-header"><div><h2>Voice</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-voice-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-voice-form"><p>Written to this Mind&#39;s runtime.yaml and its registry row. In effect on the next spoken reply.</p><div class="field"><label for="mind-voice-name">Voice</label><select id="mind-voice-name" name="voice" required></select><small id="mind-voice-help"></small></div><div class="form-actions"><button class="button" type="submit" id="mind-voice-save">Save voice</button></div><small id="mind-voice-status"></small></form></div></section>
         <section class="surface" id="mind-surface-token" data-editable hidden><div class="surface-header"><div><h2>Surface token</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Set</button></div><dl class="detail-grid surface-body" data-summary id="mind-token-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-token-form"><p>Checked against the bot API before it is stored, so a token it refuses leaves the working one in place. Written on the Mind, into whichever of its own `.env` or keyring its surface reads. Never readable from here.</p><div class="field"><label for="mind-token-value">Bot token</label><input id="mind-token-value" name="token" type="password" autocomplete="off" spellcheck="false" required placeholder="123456789:AA…"><small>Issued by BotFather. Reaches the surface when it is next restarted.</small></div><div class="form-actions"><button class="button" type="submit" id="mind-token-save">Verify and store</button></div><small id="mind-token-status"></small></form></div></section>
         <section class="surface" id="mind-skills" hidden><div class="surface-header"><div><h2>Skills</h2><p>The repo&#39;s copy against this Mind&#39;s. Applying copies the repo&#39;s directory into the one this Mind&#39;s harness loads skills from. When the harness picks it up is the harness&#39;s business.</p></div><span id="mind-skills-harness"></span></div><div class="surface-body"><div id="mind-skills-status"></div><table class="data-table" id="mind-skills-table" hidden><thead><tr><th>Skill</th><th>Repo</th><th>This Mind</th><th></th></tr></thead><tbody id="mind-skills-rows"></tbody></table></div></section>
         <section class="surface" id="mind-files" data-editable hidden><div class="surface-header"><div><h2>Skill and hook files</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-files-summary"></dl><div data-editor hidden><div class="surface-header"><div><p>The directories this Mind&#39;s harness reads. Edits are written in place, on the Mind. A hook is re-read on every event, so an edit to one is live immediately; a skill is read when a harness process starts, so a running conversation keeps the copy it loaded.</p></div><div class="row-actions"><button class="button button-quiet" type="button" data-tree="skills">Skills</button><button class="button button-quiet" type="button" data-tree="hooks">Hooks</button></div></div><div class="surface-body overview-stack"><small id="mind-files-root"></small><div id="mind-files-status"></div><div class="field"><label for="mind-files-list">File</label><select id="mind-files-list" size="10"></select></div><form class="overview-stack" id="mind-files-form" hidden><div class="field"><label for="mind-files-text" id="mind-files-label">Contents</label><textarea id="mind-files-text" rows="22" spellcheck="false" wrap="off"></textarea></div><div class="form-actions"><button class="button" type="submit" id="mind-files-save">Save file</button><button class="button button-quiet" type="button" id="mind-files-reload">Discard and reload</button></div><small id="mind-files-save-status"></small></form></div></div></section>
@@ -72,6 +73,68 @@ window.addEventListener("DOMContentLoaded", async function () {
         if (!state.stored) return [["Token", "None stored"], ["Reads from", state.where || "Unknown"]];
         if (state.accepted === false) return [["Token", "Stored, not accepted"], ["Reason", state.detail || "The bot API refused it"], ["Reads from", state.where || "Unknown"]];
         return [["Token", "Stored and accepted"], ["Authenticates as", state.bot_username ? "@" + state.bot_username : "Unknown bot"], ["Reads from", state.where || "Unknown"]];
+    }
+
+    // The catalogue is the speech engine's, not the Mind's: the pipeline is
+    // built for one language code and a voice outside it synthesises nothing,
+    // so the server offers only what it can actually say. "Could not read the
+    // catalogue" is kept distinct from "this engine has no voices" — the first
+    // is a network answer and the second is never true.
+    function voiceSummary(state) {
+        if (state.unreachable) return [["Voice", "Could not be read"], ["Reason", state.detail || "Unknown"]];
+        const chosen = state.voice ? state.voice : "";
+        const offered = (state.catalogue && state.catalogue.voices) || [];
+        const match = offered.filter(function (v) { return v.name === chosen; })[0];
+        const rows = [["Voice", chosen ? (match ? match.label : chosen) : ("Default (" + (state.default_voice || "unset") + ")")]];
+        rows.push(["Engine", state.engine || "Unknown"]);
+        if (state.catalogue && state.catalogue.readable === false) {
+            rows.push(["Catalogue", "Could not be read"]);
+            rows.push(["Reason", state.catalogue.detail || "Unknown"]);
+        } else {
+            rows.push(["Offered", String(offered.length) + " voices this engine can speak"]);
+        }
+        return rows;
+    }
+
+    function renderVoiceOptions(state) {
+        const select = document.getElementById("mind-voice-name");
+        const offered = (state.catalogue && state.catalogue.voices) || [];
+        const chosen = state.voice || "";
+        // A voice the Mind holds that the catalogue no longer offers is kept
+        // and selected rather than replaced with whatever sorts first: an
+        // operator who opened this page for another reason and pressed Save
+        // must not silently change the Mind's voice.
+        const names = offered.map(function (v) { return v.name; });
+        const rows = offered.slice();
+        if (chosen && names.indexOf(chosen) === -1) rows.unshift({name: chosen, label: chosen + " — not offered by this engine"});
+        select.innerHTML = rows.map(function (v) {
+            return '<option value="' + h.escapeHtml(v.name) + '"' + (v.name === chosen ? " selected" : "") + ">" + h.escapeHtml(v.label || v.name) + "</option>";
+        }).join("");
+        const help = document.getElementById("mind-voice-help");
+        if (state.catalogue && state.catalogue.readable === false) {
+            help.textContent = "The list of voices could not be read: " + (state.catalogue.detail || "unknown reason");
+        } else {
+            help.textContent = "Every voice this engine can speak in its configured language.";
+        }
+        document.getElementById("mind-voice-form").hidden = false;
+    }
+
+    async function renderVoice(name) {
+        const section = document.getElementById("mind-voice");
+        section.dataset.mindName = name;
+        section.hidden = false;
+        let state;
+        try {
+            state = await h.requestJson("/api/minds/" + encodeURIComponent(name) + "/voice");
+        } catch (error) {
+            state = {unreachable: true, detail: error.message};
+        }
+        paintSummary("mind-voice-summary", voiceSummary(state));
+        if (state.unreachable) {
+            document.getElementById("mind-voice-form").hidden = true;
+        } else {
+            renderVoiceOptions(state);
+        }
     }
 
     async function renderSurfaceToken(name) {
@@ -323,6 +386,7 @@ window.addEventListener("DOMContentLoaded", async function () {
             paintSummary("mind-model-summary", [["Model", "Could not be read"], ["Reason", error.message]]);
             document.getElementById("mind-model-status").textContent = "Cannot reach this Mind to read its configuration: " + error.message;
         }
+        await renderVoice(mind.name);
         await renderSurfaceToken(mind.name);
         await renderSkills(mind.name);
         const filesSection = document.getElementById("mind-files");
@@ -520,6 +584,34 @@ window.addEventListener("DOMContentLoaded", async function () {
         } finally {
             button.disabled = false;
         }
+    });
+
+    document.getElementById("mind-voice-form").addEventListener("submit", async function (event) {
+        event.preventDefault();
+        const section = document.getElementById("mind-voice"), status = document.getElementById("mind-voice-status");
+        status.textContent = "Saving…";
+        try {
+            const data = await h.requestJson("/api/minds/" + encodeURIComponent(section.dataset.mindName) + "/voice", {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({voice: event.target.elements.voice.value})});
+            status.textContent = "Saved. The next spoken reply uses " + (data.voice || "the new voice") + ".";
+            await renderVoice(section.dataset.mindName);
+        } catch (error) { status.textContent = error.message; }
+    });
+
+    document.getElementById("mind-token-form").addEventListener("submit", async function (event) {
+        event.preventDefault();
+        const section = document.getElementById("mind-surface-token"), status = document.getElementById("mind-token-status");
+        status.textContent = "Checking the token with the bot API…";
+        try {
+            const data = await h.requestJson("/api/minds/" + encodeURIComponent(section.dataset.mindName) + "/surface-token", {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({token: event.target.elements.token.value})});
+            // The field is cleared whatever happens next. It held a live
+            // credential, and leaving it populated in the DOM outlives the
+            // reason it was typed.
+            event.target.reset();
+            status.textContent = data.accepted === false
+                ? "The bot API refused that token. The working one is untouched."
+                : "Stored" + (data.bot_username ? " for @" + data.bot_username : "") + ". The surface reads it when it is next restarted.";
+            await renderSurfaceToken(section.dataset.mindName);
+        } catch (error) { event.target.reset(); status.textContent = error.message; }
     });
 
     document.getElementById("mind-model-form").addEventListener("submit", async function (event) {

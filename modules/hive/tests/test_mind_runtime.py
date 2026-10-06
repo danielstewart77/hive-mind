@@ -46,6 +46,9 @@ class _Client:
     async def patch(self, url, **kwargs):
         return await self._respond("PATCH", url, **kwargs)
 
+    async def put(self, url, **kwargs):
+        return await self._respond("PUT", url, **kwargs)
+
 
 def _response(status: int, json_body=None, text: str = "") -> httpx.Response:
     return httpx.Response(
@@ -208,3 +211,103 @@ def test_each_offered_row_carries_its_label_and_provider(monkeypatch):
     assert rows["claude-opus-5"]["label"] == "Opus 5"
     assert rows["qwen35-131k"]["provider"] == "ollama"
     assert rows["qwen35-131k"]["provider_label"] == "Ollama"
+
+
+# ---------------------------------------------------------------------------
+# The voice
+# ---------------------------------------------------------------------------
+def test_saving_a_voice_patches_the_mind_it_names(monkeypatch):
+    """The voice is written on the Mind, over its own runtime route.
+
+    A console that wrote a bind-mounted copy would reach a container in this
+    stack and nothing else, and the Mind re-registers from its own file on
+    every boot — so a write anywhere but the file is undone by a restart.
+    """
+
+    async def scenario():
+        calls = []
+        monkeypatch.setattr(
+            httpx,
+            "AsyncClient",
+            _Client(_response(200, {"configuration": {"voice": "bm_george"}}), calls=calls),
+        )
+
+        configuration = await mind_runtime.push_voice("http://cypher:8420", "bm_george")
+
+        assert configuration["voice"] == "bm_george"
+        method, url, kwargs = calls[0]
+        assert (method, url) == ("PATCH", "http://cypher:8420/runtime")
+        assert kwargs["json"] == {"voice": "bm_george"}
+        assert kwargs["headers"]["Authorization"] == "Bearer admin-token"
+
+    _run(scenario())
+
+
+def test_saving_a_voice_sends_only_the_voice(monkeypatch):
+    """Resending the model the page rendered would write a stale one back."""
+
+    async def scenario():
+        calls = []
+        monkeypatch.setattr(
+            httpx,
+            "AsyncClient",
+            _Client(_response(200, {"configuration": {"voice": "af_heart"}}), calls=calls),
+        )
+
+        await mind_runtime.push_voice("http://cypher:8420", "af_heart")
+
+        assert "default_model" not in calls[0][2]["json"]
+
+    _run(scenario())
+
+
+def test_a_mind_with_no_gateway_url_refuses_rather_than_guessing():
+    async def scenario():
+        with pytest.raises(HTTPException) as exc:
+            await mind_runtime.push_voice("", "af_heart")
+
+        assert exc.value.status_code == 400
+
+    _run(scenario())
+
+
+def test_an_unreachable_voice_server_reports_unreadable_not_empty(monkeypatch):
+    """Empty would say this engine has no voices, which is never true."""
+
+    async def scenario():
+        monkeypatch.setattr(
+            httpx, "AsyncClient", _Client(error=httpx.ConnectError("refused"))
+        )
+
+        body = await mind_runtime.fetch_voice_catalogue("http://voice:8422")
+
+        assert body["catalogue"]["readable"] is False
+        assert body["catalogue"]["voices"] == []
+        assert "could not be reached" in body["catalogue"]["detail"]
+
+    _run(scenario())
+
+
+def test_the_catalogue_is_relayed_as_the_voice_server_reported_it(monkeypatch):
+    async def scenario():
+        offered = {
+            "engine": "kokoro",
+            "default_voice": "af_heart",
+            "catalogue": {
+                "language_code": "b",
+                "readable": True,
+                "detail": "",
+                "voices": [
+                    {"name": "bm_george", "language": "British English",
+                     "gender": "male", "label": "George — British English, male"}
+                ],
+            },
+        }
+        monkeypatch.setattr(httpx, "AsyncClient", _Client(_response(200, offered)))
+
+        body = await mind_runtime.fetch_voice_catalogue("http://voice:8422")
+
+        assert body["catalogue"]["voices"][0]["label"] == "George — British English, male"
+        assert body["default_voice"] == "af_heart"
+
+    _run(scenario())
