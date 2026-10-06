@@ -88,6 +88,24 @@ the command in neither the menu nor the handler table — or in one and not the
 other — and the mind looks like it lost a feature for no reason anybody can
 see.
 
+## The surface's own token
+
+`_get_bot_token` reads `TELEGRAM_BOT_TOKEN` from the environment, unless
+`TELEGRAM_BOT_TOKEN_KEYRING_KEY` names a keyring key — in which case that key
+wins, because the only reason to name one is that this surface's token is not
+the ambient one. An edge mind runs one bot per host and puts it in `.env`; a
+stack runs several from one image on one machine, where the environment cannot
+hold several values under one name.
+
+`hive_surfaces.token_store` is the writing half of that same rule, used by a
+host's own admin-guarded route — a console cannot reach either place, and only
+the mind's filesystem can see both. `replace` verifies against the bot API
+before storing, so a refused token leaves the working one in place; `status`
+reports stored-and-accepted (named by the bot it authenticates as), stored-and-
+refused, or nothing stored, and never the token itself. Both live here rather
+than in a host, because a writer that disagreed with the reader would store a
+token where nothing consults it.
+
 ## Environment
 
 | Variable | Purpose |

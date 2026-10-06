@@ -1543,8 +1543,14 @@ async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_T
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
-KEYRING_SERVICE = "hive-mind"
-DEFAULT_TOKEN_KEY = "TELEGRAM_BOT_TOKEN"  # secret-guard: allow — a keyring key name, not a token
+# Re-exported from `token_store`, which owns them: the writer and this reader
+# must agree on both the service and the key, and two declarations is how a
+# token gets written under one spelling and read under another.
+from hive_surfaces.token_store import (  # noqa: E402
+    DEFAULT_TOKEN_KEY,
+    KEYRING_KEY_VAR,
+    KEYRING_SERVICE,
+)
 
 
 def _keyring_token(key: str) -> str:
@@ -1580,7 +1586,7 @@ def _get_bot_token() -> str:
     start three bots polling Telegram as the same bot, each stealing the
     others' updates, with nothing in any log to say so.
     """
-    named = os.getenv("TELEGRAM_BOT_TOKEN_KEYRING_KEY", "")
+    named = os.getenv(KEYRING_KEY_VAR, "")
     if named:
         token = _keyring_token(named) or os.getenv("TELEGRAM_BOT_TOKEN", "")
         if token:
