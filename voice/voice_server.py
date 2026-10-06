@@ -16,6 +16,7 @@ stacks never collide; this single module serves both via the toggle.
 Auto-detects CUDA; falls back to CPU gracefully.
 """
 
+import asyncio
 import io
 import json
 import logging
@@ -64,6 +65,9 @@ from fastapi import FastAPI, HTTPException, UploadFile  # noqa: E402
 from fastapi.responses import Response  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
+from voice import kokoro_catalogue  # noqa: E402
+from voice.mind_voices import MindVoiceResolver  # noqa: E402
+
 app = FastAPI(
     title="Hive Mind Voice Server",
     docs_url=None,
@@ -80,6 +84,13 @@ _TTS_ENGINE = os.getenv("TTS_ENGINE", "chatterbox").lower()
 _KOKORO_LANG = os.getenv("KOKORO_LANG", "a")  # 'a' = American English
 _KOKORO_DEFAULT_VOICE = os.getenv("KOKORO_DEFAULT_VOICE", "af_heart")
 _KOKORO_SR = 24000  # Kokoro's native output sample rate
+
+# Where a mind's chosen voice is read from. The broker row is a cache of the
+# mind's own runtime.yaml, so a voice set on the console is in effect on the
+# next spoken sentence without restarting this container.
+_COMMS_URL = os.getenv("COMMS_URL", "")
+_COMMS_TOKEN = os.getenv("COMMS_BEARER_TOKEN", "")
+_MIND_VOICES = MindVoiceResolver(_COMMS_URL, _COMMS_TOKEN)
 
 _whisper = None
 _chatterbox_model = None
@@ -172,11 +183,15 @@ def _load_kokoro_voice_map() -> dict[str, str]:
 def _resolve_kokoro_voice(voice_id: str) -> str:
     """Map a voice_id to a Kokoro voice name.
 
-    Falls back to KOKORO_DEFAULT_VOICE when unmapped. Unlike Chatterbox, Kokoro
-    takes an explicit voice string on every call, so there is no last-used-clip
-    cache and no cross-mind voice bleed to guard against -- a sane default is safe.
+    The mind's own record first, then the legacy KOKORO_VOICE_MAP for a mind
+    whose code predates the field, then KOKORO_DEFAULT_VOICE. Unlike
+    Chatterbox, Kokoro takes an explicit voice string on every call, so there is
+    no last-used-clip cache and no cross-mind voice bleed to guard against -- a
+    sane default is safe.
     """
-    return _KOKORO_VOICE_MAP.get(voice_id, _KOKORO_DEFAULT_VOICE)
+    return _MIND_VOICES.resolve(
+        voice_id, env_map=_KOKORO_VOICE_MAP, default=_KOKORO_DEFAULT_VOICE
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -512,6 +527,34 @@ async def tts(req: TTSRequest):
               text_chars=len(req.text), audio_bytes=len(ogg_bytes),
               voice_id=req.voice_id, device=_DEVICE)
     return Response(content=ogg_bytes, media_type="audio/ogg")
+
+
+# ---------------------------------------------------------------------------
+# What this server can speak
+# ---------------------------------------------------------------------------
+@app.get("/voices")
+async def voices():
+    """The voices a picker may offer for this server, labelled in full.
+
+    Only Kokoro has a catalogue: Chatterbox clones from a reference
+    recording, so what it can speak as is a question about which minds have
+    uploaded one, not about this server.
+    """
+    if _TTS_ENGINE != "kokoro":
+        return {
+            "engine": _TTS_ENGINE,
+            "catalogue": kokoro_catalogue.unreadable_catalogue(
+                "", f"{_TTS_ENGINE} has no voice catalogue"
+            ).as_dict(),
+        }
+    catalogue = await asyncio.to_thread(
+        kokoro_catalogue.fetch_catalogue, _KOKORO_LANG
+    )
+    return {
+        "engine": _TTS_ENGINE,
+        "default_voice": _KOKORO_DEFAULT_VOICE,
+        "catalogue": catalogue.as_dict(),
+    }
 
 
 # ---------------------------------------------------------------------------
