@@ -964,3 +964,74 @@ def test_service_health_accepts_successful_non_json_response():
         "content_type": "text/plain",
         "response": "pong",
     }
+
+
+def test_a_voice_sample_is_spoken_by_the_speech_engine_not_by_a_mind(
+    tmp_path, monkeypatch
+):
+    """The voices a sample can be spoken in belong to the engine, as the
+    catalogue already does, so the route names no Mind and asks the one
+    speech server every Mind on this hive reads from."""
+    client = _authed_client(tmp_path, monkeypatch)
+    monkeypatch.setenv("KOKORO_VOICE_URL", "http://voice-kokoro:8422")
+
+    with patch.object(
+        main_mod.mind_runtime, "sample_voice", new=AsyncMock(return_value=b"OggS-sample")
+    ) as sample:
+        response = client.post("/api/voices/sample", json={"voice": "bm_george"})
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "audio/ogg"
+    assert response.content == b"OggS-sample"
+    assert sample.await_args.args == ("http://voice-kokoro:8422", "bm_george")
+
+
+def test_a_voice_sample_refuses_an_unauthenticated_caller(tmp_path, monkeypatch):
+    """Synthesis is GPU work on a route that takes a body from the caller."""
+    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
+    monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
+
+    response = TestClient(main_mod.app).post(
+        "/api/voices/sample", json={"voice": "bm_george"}, follow_redirects=False
+    )
+
+    assert response.status_code in (401, 303)
+
+
+def test_a_voice_sample_refuses_a_body_naming_no_voice(tmp_path, monkeypatch):
+    """`str(body.get("voice"))` made an absent key the literal string "None",
+    which is truthy, matches the name pattern, and reaches the voice server as
+    a voice — or lands in a Mind's runtime.yaml on the save route."""
+    client = _authed_client(tmp_path, monkeypatch)
+
+    with patch.object(main_mod.mind_runtime, "sample_voice", new=AsyncMock()) as sample:
+        absent = client.post("/api/voices/sample", json={})
+        null = client.post("/api/voices/sample", json={"voice": None})
+        blank = client.post("/api/voices/sample", json={"voice": "   "})
+
+    assert [absent.status_code, null.status_code, blank.status_code] == [400, 400, 400]
+    assert sample.await_count == 0
+
+
+def test_a_voice_sample_refuses_a_body_that_is_not_json(tmp_path, monkeypatch):
+    """The caller's mistake answers 400, not a 500 out of the JSON decoder."""
+    client = _authed_client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/api/voices/sample",
+        content=b"not json at all",
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 400
+
+
+def test_saving_a_voice_refuses_a_body_naming_no_voice(tmp_path, monkeypatch):
+    """The same idiom on the save route wrote `voice: None` into runtime.yaml."""
+    client = _authed_client(tmp_path, monkeypatch)
+
+    with patch.object(main_mod.mind_runtime, "push_voice", new=AsyncMock()) as push:
+        response = client.put("/api/minds/skippy/voice", json={"voice": None})
+
+    assert response.status_code == 400
+    assert push.await_count == 0

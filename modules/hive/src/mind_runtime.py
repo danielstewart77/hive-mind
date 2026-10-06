@@ -252,6 +252,44 @@ async def push_voice(gateway_url: str, voice: str) -> dict:
     return _unwrap(response)
 
 
+#: Synthesising a sentence is slower than reading a config file, and the first
+#: sample in a second accent waits for that pipeline to load.
+_SAMPLE_TIMEOUT = 60.0
+
+
+async def sample_voice(voice_server_url: str, voice: str) -> bytes:
+    """A spoken sample of one voice, for the page to play.
+
+    The grades the picker shows describe how a voice was trained, not what it
+    sounds like, and nobody choosing the voice of a Mind they talk to daily
+    should have to choose from a letter. A voice must be named: sampling
+    "whatever the default is" answers a question nobody asked.
+    """
+    name = (voice or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="A voice is required")
+    url = (voice_server_url or "").strip().rstrip("/")
+    if not url:
+        raise HTTPException(
+            status_code=502, detail="No voice server is configured to speak it"
+        )
+    try:
+        async with httpx.AsyncClient(timeout=_SAMPLE_TIMEOUT) as client:
+            response = await client.post(f"{url}/voices/sample", json={"voice": name})
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"The voice server is unreachable: {exc}"
+        ) from exc
+    if response.status_code != 200:
+        # The server's own refusal, carried through rather than relabelled: it
+        # knows which voices it offers and this process does not.
+        raise HTTPException(
+            status_code=response.status_code if response.status_code < 500 else 502,
+            detail=f"The voice server would not speak {name}",
+        )
+    return response.content
+
+
 async def fetch_voice_catalogue(voice_server_url: str) -> dict:
     """What the voice server can speak, for the picker to offer.
 
