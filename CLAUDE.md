@@ -96,6 +96,34 @@ codex minds already run under — the boundary is the container and the
 directories mounted into it. A mind that wants confinement anyway names
 `permission_mode` in its own `runtime.yaml`.
 
+A mind's settings are a form on the console, not a file to open.
+`minds/runtime_settings.py` declares the vocabulary — one entry per control,
+with its label, kind, range and the comment written above a line it creates —
+and `GET`/`PATCH /runtime/settings` relay it. Which controls appear is decided
+by the **harness**: only dsh drives a dispatch as a goal and only dsh enforces
+a turn timeout, so a Claude or Codex mind is never offered a box its runner
+would ignore. A declared schema rather than the file's own keys, because the
+file carries identity, plumbing and an `env` block holding this mind's proxy
+key beside its settings — and because a setting the file has no line for yet
+would otherwise be unreachable. Values are rendered per kind before anything
+is written: `str(False)` is a string a YAML reader loads as truthy, and a
+description holding a bare colon splits its line into a nested mapping.
+
+`turn_timeout_seconds`, `goal_rounds` and `stop_on_failed_call` are re-read
+from the file on **every turn** (`dsh_cli.live_runtime`), so a value the
+console writes takes effect on the next turn rather than on the next container
+start — otherwise the panel would be a form whose every edit waited on a
+restart. A timeout of zero means no bound at all, which is why it is resolved
+through `turn_timeout` rather than `float(raw or 1800)`: that expression read
+zero as absent and handed back a tighter bound than the default it was trying
+to escape.
+
+`context_window` is reported beside the settings and is editable nowhere. The
+window belongs to the model, the inference proxy is the only thing that knows
+it, and `PATCH /runtime` writes it in the same write as the model — because
+what needs it is a per-turn hook sizing a rotation threshold from a
+percentage, and a hook that called the proxy would pay for it every turn.
+
 The profile itself lives under the mind's `DSH_HOME`
 (`profiles/<dsh_profile>/`), with the hive surface package symlinked into its
 `node_modules/@hive/`. dsh resolves every in-box bundle from its own

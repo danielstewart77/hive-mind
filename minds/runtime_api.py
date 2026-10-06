@@ -31,6 +31,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from core.hive_logging import log_event
+from minds import runtime_settings
 
 # An alias (`opus`), an Ollama tag (`qwen3:30b-a3b-instruct-2507-q4_K_M`),
 # or a vendor id (`gpt-5.4`). The console validates the same shape.
@@ -82,13 +83,17 @@ WRITABLE_FIELDS = {
     "default_model": _MODEL_NAME_RE,
     "provider": re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"),
     "voice": re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"),
+    # Not a setting anybody types: the window belongs to the model, and this
+    # is the cached copy written beside it so a per-turn hook can size a
+    # rotation threshold without a network call.
+    "context_window": re.compile(r"[1-9][0-9]{0,8}"),
 }
 
 #: Fields a mind may not have a line for yet. A missing `default_model` means a
 #: malformed file and is refused; a missing `voice` only means this mind was
 #: scaffolded before voices were pickable, and refusing that would make the
 #: field unsettable on every mind already installed.
-CREATABLE_FIELDS = ("voice",)
+CREATABLE_FIELDS = ("voice", "context_window")
 
 #: The comment written above a field created on a mind that had no line for it,
 #: so the next person to open the file is not reading a bare key.
@@ -96,6 +101,11 @@ _FIELD_COMMENTS = {
     "voice": (
         "# Which voice this mind is spoken in. A Kokoro voice name; the voice",
         "# server reads it from the broker row, which this file is the truth for.",
+    ),
+    "context_window": (
+        "# The chosen model's own context window, as the inference proxy reports",
+        "# it. Written here when the model is written, so the rotation threshold",
+        "# resolves from a percentage without a per-turn call to the proxy.",
     ),
 }
 
@@ -117,10 +127,24 @@ def update_runtime_fields(path: Path, fields: dict[str, str]) -> dict[str, Any]:
         if not WRITABLE_FIELDS[field].fullmatch(value or ""):
             raise ValueError(f"{field} contains unsupported characters")
 
+    return _substitute_lines(path, fields, CREATABLE_FIELDS, _FIELD_COMMENTS)
+
+
+def _substitute_lines(
+    path: Path,
+    rendered: dict[str, str],
+    creatable: tuple[str, ...],
+    comments: dict[str, tuple[str, ...]],
+) -> dict[str, Any]:
+    """Replace each field's line with the already-rendered scalar, atomically.
+
+    Every caller renders its own values: this knows how to put one line where
+    another was, and nothing about what a value means.
+    """
     path = Path(path)
     load_runtime(path)  # reject a malformed file before touching it
     updated = path.read_text()
-    for field, value in fields.items():
+    for field, value in rendered.items():
         updated, count = re.subn(
             rf"^{field}\s*:.*$",
             f"{field}: {value}",
@@ -129,9 +153,9 @@ def update_runtime_fields(path: Path, fields: dict[str, str]) -> dict[str, Any]:
             flags=re.MULTILINE,
         )
         if count != 1:
-            if field not in CREATABLE_FIELDS:
+            if field not in creatable:
                 raise ValueError(f"Runtime configuration has no {field} field")
-            block = [""] + list(_FIELD_COMMENTS.get(field, ())) + [f"{field}: {value}"]
+            block = [""] + list(comments.get(field, ())) + [f"{field}: {value}"]
             if not updated.endswith("\n"):
                 block.insert(0, "")
             updated = updated + "\n".join(block) + "\n"
@@ -147,6 +171,38 @@ def update_runtime_fields(path: Path, fields: dict[str, str]) -> dict[str, Any]:
         Path(temporary).unlink(missing_ok=True)
         raise
     return load_runtime(path)
+
+
+def update_settings(path: Path, values: dict[str, Any]) -> dict[str, Any]:
+    """Write the settings panel's values into this mind's file.
+
+    Every value is rendered and range-checked before anything is written, so
+    one bad field refuses the whole save rather than landing half of it. A
+    setting the file has no line for is created with its comment above it —
+    the alternative is a control the operator can see and cannot use on any
+    mind scaffolded before that setting existed.
+    """
+    if not values:
+        raise ValueError("Nothing to write")
+    loaded = load_runtime(path)
+    allowed = {
+        setting.key
+        for setting in runtime_settings.settings_for_harness(
+            str(loaded.get("harness") or "")
+        )
+    }
+    unknown = sorted(set(values) - allowed)
+    if unknown:
+        raise ValueError(
+            "This Mind's harness has no such setting: " + ", ".join(unknown)
+        )
+    rendered = {key: runtime_settings.render_value(key, values[key]) for key in values}
+    comments = {
+        setting.key: setting.comment
+        for setting in runtime_settings.SETTINGS
+        if setting.comment
+    }
+    return _substitute_lines(path, rendered, tuple(allowed), comments)
 
 
 def registration_payload(path: Path, mind_name: str = "") -> dict[str, str]:
@@ -623,6 +679,26 @@ async def registration_loop(
             delay = min(delay * 2, max_delay)
 
 
+
+async def _declared_context_window(path: Path, model: str) -> int | None:
+    """The chosen model's context window, as this mind's proxy reports it.
+
+    Imported at call time: `models_api` reads this module, and the catalog is
+    only ever needed on a write. An unreachable proxy yields nothing rather
+    than raising, because a model edit must not fail for a listing.
+    """
+    try:
+        from minds import models_api
+
+        for row in await models_api.build_catalog(path):
+            if str(row.get("name")) == model:
+                window = row.get("context_window")
+                return window if isinstance(window, int) and window > 0 else None
+    except Exception:
+        return None
+    return None
+
+
 def install_runtime_routes(app: FastAPI, *, path: Path, mind_id: str, log) -> None:
     """Mount GET/PATCH /runtime on a mind's FastAPI app."""
 
@@ -662,6 +738,16 @@ def install_runtime_routes(app: FastAPI, *, path: Path, mind_id: str, log) -> No
             )
         model = fields.get("default_model", "")
         provider = fields.get("provider", "")
+        # The window travels with the model, in the same write. Asked of the
+        # proxy here because this mind holds the key the proxy answers for,
+        # and cached in the file because the thing that needs it is a per-turn
+        # hook that must not make a network call to size a threshold. A model
+        # whose window nobody has declared leaves the cached value alone
+        # rather than writing a guess over it.
+        if model:
+            window = await _declared_context_window(path, model)
+            if window:
+                fields["context_window"] = str(window)
         try:
             configuration = update_runtime_fields(path, fields)
         except ValueError as exc:
@@ -681,3 +767,53 @@ def install_runtime_routes(app: FastAPI, *, path: Path, mind_id: str, log) -> No
                 k: configuration[k] for k in PUBLIC_FIELDS if k in configuration
             },
         }
+
+    @app.get("/runtime/settings")
+    async def get_runtime_settings(req: Request) -> Any:
+        """The settings panel: every control this mind's harness honours.
+
+        Admin-guarded like the write. The payload is built from the declared
+        schema rather than from the file's own keys, so a mind whose file
+        carries a proxy key in its `env` block hands back a payload that key
+        is not in.
+        """
+        denied = authorize_admin(req)
+        if denied is not None:
+            return denied
+        try:
+            loaded = load_runtime(path)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=500)
+        return runtime_settings.settings_view(loaded)
+
+    @app.patch("/runtime/settings")
+    async def patch_runtime_settings(req: Request) -> Any:
+        """Write the settings panel's values into this mind's runtime.yaml.
+
+        In effect on the next session or the next turn, depending on the
+        setting; nothing already running is disturbed.
+        """
+        denied = authorize_admin(req)
+        if denied is not None:
+            return denied
+        body = await req.json()
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "body must be an object"}, status_code=400)
+        values = body.get("settings")
+        if not isinstance(values, dict) or not values:
+            return JSONResponse(
+                {"error": "settings must be a non-empty object"}, status_code=400
+            )
+        try:
+            loaded = update_settings(path, values)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except OSError as exc:
+            return JSONResponse(
+                {"error": f"could not write runtime.yaml: {exc}"}, status_code=500
+            )
+        log_event(
+            log, "mind.settings.updated", mind_id=mind_id,
+            settings=sorted(values),
+        )
+        return {"saved": True, **runtime_settings.settings_view(loaded)}
