@@ -24,6 +24,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 
 from core.hive_logging import configure_logging, install_fastapi_logging, log_event
 from voice.stt_filters import TRANSCRIBE_OPTS, clean_transcript
@@ -66,6 +67,7 @@ from fastapi.responses import Response  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 from voice import kokoro_catalogue  # noqa: E402
+from voice.kokoro_pipelines import KokoroPipelines  # noqa: E402
 from voice.mind_voices import MindVoiceResolver  # noqa: E402
 
 app = FastAPI(
@@ -94,7 +96,9 @@ _MIND_VOICES = MindVoiceResolver(_COMMS_URL, _COMMS_TOKEN)
 
 _whisper = None
 _chatterbox_model = None
-_kokoro_pipeline = None
+#: One pipeline per language, built on first use. The voice decides which.
+_KOKORO_PIPELINES = KokoroPipelines(_KOKORO_LANG)
+_kokoro_loaded = False
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +203,7 @@ def _resolve_kokoro_voice(voice_id: str) -> str:
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
 async def startup():
-    global _whisper, _chatterbox_model, _kokoro_pipeline
+    global _whisper, _chatterbox_model, _kokoro_loaded
 
     log.info("Voice server starting on device: %s | TTS engine: %s", _DEVICE, _TTS_ENGINE)
 
@@ -209,9 +213,14 @@ async def startup():
     _whisper = WhisperModel(_WHISPER_MODEL, device=_DEVICE, compute_type=compute_type)
 
     if _TTS_ENGINE == "kokoro":
-        from kokoro import KPipeline
-        log.info("Loading Kokoro TTS (lang=%s)...", _KOKORO_LANG)
-        _kokoro_pipeline = KPipeline(lang_code=_KOKORO_LANG)
+        # The default voice's own language is warmed, not just the configured
+        # one: `KOKORO_DEFAULT_VOICE` is what every reply uses until a Mind
+        # names its own, and on this hive it is British while the configured
+        # language is American. Warming only the latter left the pipeline that
+        # actually speaks to load inside the first reply.
+        _KOKORO_PIPELINES.warm()
+        _KOKORO_PIPELINES.get(_KOKORO_DEFAULT_VOICE)
+        _kokoro_loaded = True
         _KOKORO_VOICE_MAP.update(_load_kokoro_voice_map())
         log.info(
             "Voice server ready. TTS: Kokoro | default voice: %s | voice map entries: %d",
@@ -228,7 +237,7 @@ async def startup():
 def _tts_ready() -> bool:
     """Whether the active TTS engine's model is loaded."""
     if _TTS_ENGINE == "kokoro":
-        return _kokoro_pipeline is not None
+        return _kokoro_loaded
     return _chatterbox_model is not None
 
 
@@ -346,13 +355,17 @@ def _synthesize_kokoro(text: str, voice: str):
     Kokoro does its own internal sentence chunking and yields one audio segment
     per chunk; we concatenate them into a single 1-D float array (24 kHz) that
     :func:`soundfile.write` can encode directly.
+
+    The pipeline comes from the voice, not from this server's configured
+    language: a British voice is spoken through a British front end.
     """
-    if _kokoro_pipeline is None:
+    if not _kokoro_loaded:
         raise RuntimeError("TTS model not loaded")
     import numpy as np
 
+    pipeline = _KOKORO_PIPELINES.get(voice)
     segments = []
-    for _, _, audio in _kokoro_pipeline(text, voice=voice):
+    for _, _, audio in pipeline(text, voice=voice):
         if torch.is_tensor(audio):
             audio = audio.detach().cpu().numpy()
         segments.append(np.asarray(audio).reshape(-1))
@@ -479,10 +492,16 @@ async def stt(file: UploadFile):
 # ---------------------------------------------------------------------------
 # TTS endpoint
 # ---------------------------------------------------------------------------
+#: Every spoken reply is retimed by this before it reaches a surface; no caller
+#: passes a speed. A sample played at any other tempo is a sample of a voice
+#: nobody will hear, while its own words promise this is how the Mind will sound.
+DEFAULT_SPEED = 0.9
+
+
 class TTSRequest(BaseModel):
     text: str
     voice_id: str = "default"
-    speed: float = 0.9
+    speed: float = DEFAULT_SPEED
 
 
 @app.post("/tts")
@@ -495,7 +514,7 @@ async def tts(req: TTSRequest):
 
     if _TTS_ENGINE == "kokoro":
         voice = _resolve_kokoro_voice(req.voice_id)
-        wav = _synthesize_kokoro(text, voice)
+        wav = await asyncio.to_thread(_synthesize_kokoro, text, voice)
         sample_rate = _KOKORO_SR
         engine_label = "Kokoro"
     else:
@@ -532,6 +551,51 @@ async def tts(req: TTSRequest):
 # ---------------------------------------------------------------------------
 # What this server can speak
 # ---------------------------------------------------------------------------
+#: What a sample says. Long enough to hear an accent and a cadence in.
+SAMPLE_TEXT = (
+    "Good afternoon. This is how I will sound when I read your messages back "
+    "to you, in the voice you are about to choose."
+)
+
+#: One catalogue fetch is two network round trips, and the picker asks for it
+#: on every page load and every sample. Short enough that a voice added to the
+#: repository shows up the same day.
+_CATALOGUE_TTL_SECONDS = 300.0
+_catalogue_cache: tuple[float, kokoro_catalogue.Catalogue] | None = None
+_catalogue_lock = asyncio.Lock()
+
+
+async def _catalogue() -> kokoro_catalogue.Catalogue:
+    """This server's catalogue, re-read when the cached one is stale."""
+    global _catalogue_cache
+    if _fresh_catalogue() is not None:
+        return _fresh_catalogue()
+    async with _catalogue_lock:
+        # Re-checked inside the lock: whoever held it may have just fetched.
+        fresh = _fresh_catalogue()
+        if fresh is not None:
+            return fresh
+        catalogue = await asyncio.to_thread(
+            kokoro_catalogue.fetch_catalogue, _KOKORO_LANG
+        )
+        # Neither failure is cached: the network is the thing that failed, and a
+        # five-minute memory of it outlives the blip. A card that failed while
+        # the listing succeeded is one of those — it leaves every description
+        # empty, which must not be remembered as the card's own silence.
+        if catalogue.readable and catalogue.described:
+            _catalogue_cache = (time.monotonic(), catalogue)
+        return catalogue
+
+
+def _fresh_catalogue() -> kokoro_catalogue.Catalogue | None:
+    """The cached catalogue if it is still within its life, else nothing."""
+    if _catalogue_cache is None:
+        return None
+    if time.monotonic() - _catalogue_cache[0] >= _CATALOGUE_TTL_SECONDS:
+        return None
+    return _catalogue_cache[1]
+
+
 @app.get("/voices")
 async def voices():
     """The voices a picker may offer for this server, labelled in full.
@@ -547,14 +611,58 @@ async def voices():
                 "", f"{_TTS_ENGINE} has no voice catalogue"
             ).as_dict(),
         }
-    catalogue = await asyncio.to_thread(
-        kokoro_catalogue.fetch_catalogue, _KOKORO_LANG
-    )
+    catalogue = await _catalogue()
     return {
         "engine": _TTS_ENGINE,
         "default_voice": _KOKORO_DEFAULT_VOICE,
         "catalogue": catalogue.as_dict(),
     }
+
+
+class VoiceSampleRequest(BaseModel):
+    voice: str
+    text: str = SAMPLE_TEXT
+    speed: float = DEFAULT_SPEED
+
+
+def _sample_bytes(text: str, voice: str, speed: float) -> bytes:
+    """Synthesise and encode a sample. All of it blocking, all off the loop."""
+    import soundfile as sf
+
+    wav = _synthesize_kokoro(text, voice)
+    wav_buf = io.BytesIO()
+    sf.write(wav_buf, wav, _KOKORO_SR, format="WAV")
+    return _wav_to_ogg(wav_buf.getvalue(), speed=speed)
+
+
+@app.post("/voices/sample")
+async def voices_sample(req: VoiceSampleRequest):
+    """Speak a sample line in one named voice, so it can be picked by ear.
+
+    Grades describe how a voice was trained, not what it sounds like, and
+    nobody choosing a voice for a mind they talk to every day should have to
+    choose from a letter. This route exists so the console can play one.
+
+    A voice the catalogue does not offer is refused rather than quietly
+    answered in the default: the operator asked to hear a particular voice, and
+    hearing a different one tells them the wrong thing about their own choice.
+    """
+    if _TTS_ENGINE != "kokoro":
+        raise HTTPException(
+            status_code=400, detail=f"{_TTS_ENGINE} has no voice catalogue to sample"
+        )
+    if not _tts_ready():
+        raise HTTPException(status_code=503, detail="TTS not ready")
+    voice = (req.voice or "").strip()
+    if not kokoro_catalogue.offers(await _catalogue(), voice):
+        raise HTTPException(
+            status_code=400, detail=f"this server does not offer the voice {voice!r}"
+        )
+    text = _strip_markdown(req.text) or SAMPLE_TEXT
+    ogg_bytes = await asyncio.to_thread(_sample_bytes, text, voice, req.speed)
+    log_event(log, "voice.sample.completed", voice=voice,
+              audio_bytes=len(ogg_bytes), device=_DEVICE)
+    return Response(content=ogg_bytes, media_type="audio/ogg")
 
 
 # ---------------------------------------------------------------------------

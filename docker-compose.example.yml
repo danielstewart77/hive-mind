@@ -152,7 +152,14 @@ services:
       - WHISPER_MODEL=medium
       - TTS_ENGINE=kokoro
       - KOKORO_DEFAULT_VOICE=${KOKORO_DEFAULT_VOICE:-af_heart}
-      # Optional per-mind voice overrides, JSON: {"ada":"af_bella","bob":"am_michael"}
+      # Where a Mind's chosen voice is read from. Without these the resolver
+      # answers nothing for every Mind and the console's picker writes a voice
+      # this server never consults — a Save that reports success and changes
+      # nothing audible.
+      - COMMS_URL=http://hive-comms:8424
+      - COMMS_BEARER_TOKEN=${COMMS_BEARER_TOKEN}
+      # Legacy per-mind overrides, JSON: {"ada":"af_bella"}. The Mind's own
+      # record wins over this; it remains only for a Mind that has chosen none.
       - KOKORO_VOICE_MAP=${KOKORO_VOICE_MAP:-}
     deploy:
       resources:
