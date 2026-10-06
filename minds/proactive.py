@@ -1,7 +1,7 @@
 """Proactive (unsolicited) delivery plumbing shared by CLI-Claude mind backends.
 
 In the containerised deployment the mind backend (``minds/<name>/implementation``)
-and the Telegram bot (``bots.telegram_bot``) run in **separate** containers, so
+and the Telegram surface (``surfaces.telegram``) run in **separate** containers, so
 they cannot share an in-process ``asyncio.Queue`` the way the single-process
 operator minds (Skippy, Mordecai) do.
 
