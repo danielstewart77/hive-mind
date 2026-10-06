@@ -98,7 +98,7 @@ def photo_root() -> "Path":
     """The directory inbound photos are written under, created on demand."""
     from pathlib import Path
 
-    root = Path(config.photo_dir).expanduser().resolve()
+    root = Path(__file__).resolve().parent / "telegram_photos"
     root.mkdir(parents=True, exist_ok=True)
     return root
 

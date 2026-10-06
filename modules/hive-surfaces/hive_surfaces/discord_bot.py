@@ -58,10 +58,31 @@ def _is_allowed_channel(channel_id: int) -> bool:
 def task_channels() -> set[int]:
     """Channel ids this mind answers in without an at-mention.
 
-    Read from this mind's own ``config.yaml``. Each mind has its own file,
-    so a channel claimed here cannot make another mind's bot answer in it.
+    The host supplies either the ids or a callable returning them, and the
+    callable is called per message rather than once at configure time: a
+    host deriving these from skills on disk wants a channel added to a skill
+    to start working inside its own cache window rather than at the next
+    restart.
+
+    A resolver that fails means this process cannot tell which channels are
+    resident, and the safe reading of that is none of them — the surface
+    falls back to requiring a mention, which is quiet, rather than treating
+    every channel as resident, which would have the mind answering strangers
+    in rooms it was never addressed in. Logged, never raised: this runs on
+    every inbound message, and a mind that stops answering because a listing
+    failed is a worse outcome than one that asks to be named.
     """
-    return {int(c) for c in config.discord_task_channels}
+    declared = config.discord_task_channels
+    if callable(declared):
+        try:
+            declared = declared()
+        except Exception as exc:  # noqa: BLE001
+            log_event(
+                log, "surface.resident_channels.unresolved", level=logging.WARNING,
+                surface="discord", error=str(exc), error_type=type(exc).__name__,
+            )
+            return set()
+    return {int(c) for c in declared}
 
 
 def conversation_channel_id(channel, task_channel_ids: set[int]) -> int:

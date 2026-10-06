@@ -37,6 +37,31 @@ class TestWhichChannelsAreResident:
 
         assert task_channels() == set()
 
+    def test_a_host_may_supply_a_resolver_instead_of_a_list(self) -> None:
+        """The stack derives these from the skills that post into them."""
+        configure(SurfaceConfig(discord_task_channels=lambda: {41, "42"}))
+
+        assert task_channels() == {41, 42}
+
+    def test_the_resolver_is_asked_again_on_every_message(self) -> None:
+        """A channel added to a skill must not wait for a restart."""
+        answers = iter([{1}, {1, 2}])
+        configure(SurfaceConfig(discord_task_channels=lambda: next(answers)))
+
+        first = task_channels()
+        second = task_channels()
+
+        assert (first, second) == ({1}, {1, 2})
+
+    def test_a_failing_resolver_reads_as_no_resident_channels(self) -> None:
+        """Quietly asking to be named beats answering strangers everywhere."""
+        def boom():
+            raise RuntimeError("skills root unreadable")
+
+        configure(SurfaceConfig(discord_task_channels=boom))
+
+        assert task_channels() == set()
+
 
 class TestWhetherTheMessageIsAddressedToThisMind:
     def test_a_dm_never_needs_a_mention(self) -> None:

@@ -29,6 +29,15 @@ configure(SurfaceConfig(
 await run_telegram_bot()
 ```
 
+`discord_task_channels` takes either the ids or a callable returning them.
+Two hosts answer "which channels is this mind resident in" differently and
+both are right: an edge mind names them in its own `config.yaml`, while the
+stack derives them from the scheduled skills that post into them. The callable
+is asked per message, so a channel added to a skill starts working without a
+restart, and a resolver that fails reads as no resident channels — asking to be
+named is quieter than answering strangers in rooms nobody addressed the mind
+in.
+
 An empty allow-list authorizes nobody. A host that forgets to call
 `configure` gets a surface that refuses every message rather than one that
 answers everyone.
