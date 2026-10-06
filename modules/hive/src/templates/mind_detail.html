@@ -10,7 +10,7 @@
     <div class="overview-stack" id="mind-content">
         <section class="surface"><div class="surface-header"><h2>Overview</h2><span id="mind-status"></span></div><div class="surface-body"><dl class="detail-grid" id="mind-details"></dl></div></section>
         <section class="surface"><div class="surface-header"><div><h2>Runtime configuration</h2><p>Secret values are removed before this reaches the browser.</p></div></div><div class="surface-body"><div class="code-wrap"><pre class="code-panel" id="mind-config">Loading…</pre><button class="icon-button" type="button" data-copy="#mind-config" aria-label="Copy configuration"><i data-lucide="copy"></i></button></div></div></section>
-        <section class="surface" id="mind-editor" hidden><div class="surface-header"><div><h2>Default model</h2><p>Written to this Mind&#39;s runtime.yaml and its registry row. Applies to the next session it is asked for; conversations already running keep their model.</p></div></div><form class="surface-body overview-stack" id="mind-model-form"><div class="field"><label for="mind-provider">Provider</label><select id="mind-provider" name="provider" required></select><small>The upstream hosting the model. This Mind's own proxy key decides which appear.</small></div><div class="field"><label for="mind-default-model">Model</label><select id="mind-default-model" name="default_model" required></select><small>Every model this Mind is permitted to run on the chosen provider.</small></div><div class="form-actions"><button class="button" type="submit" id="mind-model-save">Save model</button><button class="button button-primary" id="mind-restart" type="button" hidden>Restart runtime</button></div><small id="mind-model-status"></small></form></section>
+        <section class="surface" id="mind-editor" hidden><div class="surface-header"><div><h2>Default model</h2><p>Written to this Mind&#39;s runtime.yaml and its registry row. Applies to the next session it is asked for; conversations already running keep their model.</p></div></div><form class="surface-body overview-stack" id="mind-model-form"><div class="field"><label for="mind-provider">Provider</label><select id="mind-provider" name="provider" required></select><small>The upstream hosting the model. This Mind's own proxy key decides which appear.</small></div><div class="field"><label for="mind-default-model">Model</label><select id="mind-default-model" name="default_model" required></select><small>Every model this Mind is permitted to run on the chosen provider.</small></div><div class="form-actions"><button class="button" type="submit" id="mind-model-save">Save model</button></div><small id="mind-model-status"></small></form></section>
         <section class="surface" id="mind-skills" hidden><div class="surface-header"><div><h2>Skills</h2><p>The repo&#39;s copy against this Mind&#39;s. Applying copies the repo&#39;s directory into the one this Mind&#39;s harness loads skills from. When the harness picks it up is the harness&#39;s business.</p></div><span id="mind-skills-harness"></span></div><div class="surface-body"><div id="mind-skills-status"></div><table class="data-table" id="mind-skills-table" hidden><thead><tr><th>Skill</th><th>Repo</th><th>This Mind</th><th></th></tr></thead><tbody id="mind-skills-rows"></tbody></table></div></section>
         <section class="surface" id="mind-files" hidden><div class="surface-header"><div><h2>Skill and hook files</h2><p>The directories this Mind&#39;s harness reads. Edits are written in place, on the Mind. A hook is re-read on every event, so an edit to one is live immediately; a skill is read when a harness process starts, so a running conversation keeps the copy it loaded.</p></div><div class="row-actions"><button class="button button-quiet" type="button" data-tree="skills">Skills</button><button class="button button-quiet" type="button" data-tree="hooks">Hooks</button></div></div><div class="surface-body overview-stack"><small id="mind-files-root"></small><div id="mind-files-status"></div><div class="field"><label for="mind-files-list">File</label><select id="mind-files-list" size="10"></select></div><form class="overview-stack" id="mind-files-form" hidden><div class="field"><label for="mind-files-text" id="mind-files-label">Contents</label><textarea id="mind-files-text" rows="22" spellcheck="false" wrap="off"></textarea></div><div class="form-actions"><button class="button" type="submit" id="mind-files-save">Save file</button><button class="button button-quiet" type="button" id="mind-files-reload">Discard and reload</button></div><small id="mind-files-save-status"></small></form></div></section>
         <section class="surface" id="mind-soul" hidden><div class="surface-header"><div><h2>Soul</h2><p>What this Mind is told it is, ahead of every turn on every surface. One line per line — this is read as instruction, not description. Edits from here are recorded as yours, distinct from what the Mind decided about itself.</p></div></div><form class="surface-body overview-stack" id="mind-soul-form"><div class="field"><label for="mind-soul-values">Soul</label><textarea id="mind-soul-values" name="soul_values" rows="14" spellcheck="false"></textarea><small>Blank lines are dropped. Removing a line removes it from the Mind.</small></div><div class="field"><label for="mind-soul-reason">Why this changed</label><input id="mind-soul-reason" name="reason" type="text" required placeholder="Stored with the edit — this is what answers &quot;who wrote this line&quot; in six weeks."></div><div class="form-actions"><button class="button" type="submit" id="mind-soul-save">Save soul</button></div><small id="mind-soul-status"></small></form><div class="surface-body" id="mind-soul-history"></div></section>
@@ -453,29 +453,18 @@ window.addEventListener("DOMContentLoaded", async function () {
 
     document.getElementById("mind-model-form").addEventListener("submit", async function (event) {
         event.preventDefault();
-        const editor = document.getElementById("mind-editor"), status = document.getElementById("mind-model-status"), restart = document.getElementById("mind-restart");
+        const editor = document.getElementById("mind-editor"), status = document.getElementById("mind-model-status");
         status.textContent = "Saving…";
         try {
+            // No restart is offered here. The broker row the gateway reads at
+            // session creation is written along with the Mind's own file, so
+            // the next session starts on the new model with nothing bounced —
+            // which is what the save route reports as `restart_required`.
+            // Offering a restart anyway read as one being needed, and bouncing
+            // a container kills every conversation it is holding.
             const data = await h.requestJson("/api/minds/" + encodeURIComponent(editor.dataset.mindName) + "/configuration", {method: "PATCH", headers: {"Content-Type": "application/json"}, body: JSON.stringify({default_model: event.target.elements.default_model.value, provider: event.target.elements.provider.value})});
             status.textContent = "Saved. The next session this Mind is asked for starts on " + (data.configuration.default_model || "the new model") + ".";
-            restart.hidden = data.restartable === false;
         } catch (error) { status.textContent = error.message; }
-    });
-    document.getElementById("mind-restart").addEventListener("click", async function () {
-        const editor = document.getElementById("mind-editor"), status = document.getElementById("mind-model-status"), button = this;
-        button.disabled = true; status.textContent = "Requesting restart approval…";
-        try {
-            const operation = await h.requestJson("/api/minds/" + encodeURIComponent(editor.dataset.mindName) + "/restart", {method: "POST"});
-            const requestId = operation.hitl_request_id;
-            status.textContent = requestId ? "Restart approval sent. Waiting for a decision…" : "Restart requested.";
-            for (let attempt = 0; requestId && attempt < 90; attempt += 1) {
-                await new Promise(function (resolve) { window.setTimeout(resolve, 2000); });
-                const result = await h.requestJson("/api/operations/" + encodeURIComponent(requestId));
-                if (result.status !== "pending") { status.textContent = result.status === "approved" ? "Restart approved and applied." : "Restart " + result.status + "."; button.hidden = result.status === "approved"; return; }
-            }
-            if (requestId) status.textContent = "Restart approval is still pending.";
-        } catch (error) { status.textContent = error.message; }
-        finally { button.disabled = false; }
     });
 });
 </script>
