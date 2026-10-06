@@ -444,7 +444,15 @@ async def logout(request: Request):
 def _console_page(request: Request, template_name: str, **context):
     if not get_current_user_from_request(request):
         return _login_redirect_for(request)
-    return _render_template(request, template_name, **context)
+    response = _render_template(request, template_name, **context)
+    # Every console page carries its own script inline, so a heuristically
+    # cached copy is a cached application. A phone that fetched a page before
+    # a fix keeps running the broken version across reloads — and there is no
+    # gesture on iOS that reliably bypasses it, so the symptom is a control
+    # that silently sends nothing while the server shows no request at all.
+    response.headers["Cache-Control"] = "no-store, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    return response
 
 
 @app.get("/overview", response_class=HTMLResponse)
@@ -2108,16 +2116,7 @@ async def canvas_submit(request: Request):
 
 @app.get("/canvas", response_class=HTMLResponse)
 async def canvas(request: Request):
-    if not get_current_user_from_request(request):
-        return _login_redirect_for(request)
-    response = _render_template(request, "canvas.html")
-    # The page carries its own script inline, so a heuristically cached copy is
-    # a cached application. A phone that fetched this page before a fix keeps
-    # running the broken version across reloads, and there is no gesture on iOS
-    # that reliably bypasses it.
-    response.headers["Cache-Control"] = "no-store, must-revalidate"
-    response.headers["Pragma"] = "no-cache"
-    return response
+    return _console_page(request, "canvas.html")
 
 
 @app.websocket("/ws/canvas")
