@@ -96,7 +96,7 @@ def conversation_channel_id(channel, task_channel_ids: set[int]) -> int:
     since a thread in an ordinary channel is genuinely its own topic.
     """
     parent_id = getattr(channel, "parent_id", None)
-    if parent_id is not None and parent_id in task_channel_ids:
+    if parent_id in task_channel_ids:
         return parent_id
     return channel.id
 

@@ -31,7 +31,7 @@ from telegram.ext import (
 from hive_surfaces.config import config, photo_root
 from hive_surfaces.bot_utils import claim_picker, get_lock, get_queue, time_ago
 from hive_surfaces.gateway_client import GatewayClient
-from hive_surfaces import rename_prompt, session_picker
+from hive_surfaces import hitl, rename_prompt, session_picker
 from hive_surfaces.skills import get_skills
 from hive_surfaces.hive_logging import configure_logging, log_event
 
@@ -1651,6 +1651,57 @@ COMMANDS: tuple[tuple[str, str, object], ...] = (
 )
 
 # ---------------------------------------------------------------------------
+# Held decisions
+# ---------------------------------------------------------------------------
+async def handle_hitl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Report an approve or deny tap to whoever is holding the decision.
+
+    The buttons were posted by hive-tools against a token it minted, so this
+    reports and relays rather than deciding: the message ends up saying what
+    hive-tools said, including its status when the call failed, because the
+    operator's next question is always whether the thing actually happened.
+    """
+    query = update.callback_query
+
+    if not _is_allowed_user(query.from_user.id):
+        await query.answer("Not authorized.")
+        return
+
+    parsed = hitl.parse_callback(query.data or "")
+    if parsed is None:
+        await query.answer("Unknown action.")
+        return
+    action, token = parsed
+
+    await query.answer()
+
+    # The question stays on screen under the outcome; only the buttons go, so
+    # a second tap cannot report a decision twice.
+    original = query.message.text or ""
+    body = original.split("\n\n", 1)[-1] if "\n\n" in original else original
+    with contextlib.suppress(Exception):
+        await query.edit_message_text(f"Working\u2026\n\n{body}", reply_markup=None)
+
+    url, payload, headers = hitl.respond_request(token, action)
+    try:
+        async with http.post(url, json=payload, headers=headers) as resp:
+            label = hitl.outcome_label(action, resp.status, await resp.text())
+    except Exception as exc:  # noqa: BLE001
+        log_event(
+            log, "surface.hitl.unreachable", level=logging.WARNING, surface="telegram",
+            error=str(exc), error_type=type(exc).__name__,
+        )
+        label = f"Could not reach the approval service: {type(exc).__name__}"
+
+    log_event(
+        log, "surface.hitl.answered", surface="telegram",
+        user_id=query.from_user.id, client_ref=query.message.chat_id,
+    )
+    with contextlib.suppress(Exception):
+        await query.edit_message_text(f"{label}\n\n{body}", reply_markup=None)
+
+
+# ---------------------------------------------------------------------------
 # The extension seam
 # ---------------------------------------------------------------------------
 # A mind may carry a command no other mind has. It does not get its own bot to
@@ -1756,7 +1807,16 @@ def _build_application(token: str):
     _TABLE_SEALED = True
     for name, _description, handler in all_commands():
         app.add_handler(CommandHandler(name, handler))
-    app.add_handler(CallbackQueryHandler(on_session_button))
+    # Both patterned, and the held decision first. A handler registered with
+    # no pattern takes every callback the chat produces — which is how the
+    # picker ends up answering a button it knows nothing about, and how an
+    # approval tap gets read as a request to switch conversations.
+    app.add_handler(CallbackQueryHandler(
+        handle_hitl_callback, pattern=hitl.CALLBACK_PATTERN,
+    ))
+    app.add_handler(CallbackQueryHandler(
+        on_session_button, pattern=session_picker.CALLBACK_PATTERN,
+    ))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
@@ -1764,6 +1824,70 @@ def _build_application(token: str):
     app.add_handler(MessageHandler(filters.COMMAND, handle_unknown_command))
 
     return app
+
+
+async def _proactive_poll_source() -> None:
+    """Poll the mind backend for unsolicited turns and put them on the queue.
+
+    For a surface running in its own container: it shares no memory with its
+    mind, so the turns the harness produced with nobody listening sit behind
+    the backend's own endpoint instead. This only moves them onto the queue —
+    `_proactive_consumer` still does the delivering, so a polled turn gets the
+    same chunking, the same backoff and the same journalling at shutdown as
+    one handed over in process. Writing the sends here instead would be a
+    second delivery path, and the one feature these answers need is that
+    nothing loses them quietly.
+
+    Nothing kills the loop. An unreachable backend, a non-200, a body that is
+    not a list — each costs this cycle and nothing else, because the surface
+    goes on carrying conversations whether or not the proactive channel is
+    healthy.
+    """
+    url = f"{config.proactive_poll_url.rstrip('/')}/proactive"
+    headers = {"Authorization": f"Bearer {COMMS_BEARER_TOKEN}"} if COMMS_BEARER_TOKEN else {}
+    interval = config.proactive_poll_interval_s
+    log_event(
+        log, "surface.proactive.poll.started", surface="telegram",
+        url=url, interval_s=interval,
+    )
+
+    from hive_surfaces import proactive
+
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            async with http.get(
+                url, headers=headers, timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    log_event(
+                        log, "surface.proactive.poll.rejected", level=logging.WARNING,
+                        surface="telegram", url=url, status=resp.status,
+                    )
+                    continue
+                items = await resp.json()
+            for item in items or []:
+                chat_id = item.get("chat_id")
+                text = item.get("text")
+                # A turn with no destination cannot be delivered and must not
+                # be dropped silently — it is the only copy, the backend has
+                # already let go of it.
+                if not chat_id or not text:
+                    log_event(
+                        log, "surface.proactive.poll.unroutable", level=logging.WARNING,
+                        surface="telegram", client_ref=chat_id or 0,
+                        content_chars=len(text or ""),
+                    )
+                    continue
+                proactive.enqueue(int(chat_id), text)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log_event(
+                log, "surface.proactive.poll.failed", level=logging.WARNING,
+                surface="telegram", url=url, error=str(exc),
+                error_type=type(exc).__name__,
+            )
 
 
 async def _proactive_consumer(app) -> None:
@@ -1838,20 +1962,25 @@ async def run_telegram_bot() -> None:
     await app.start()
     await app.updater.start_polling()
 
-    # Background consumer for proactive (unsolicited) assistant turns pushed
-    # by mind_server via bots.proactive.
-    proactive_task = _asyncio.ensure_future(_proactive_consumer(app))
+    # One consumer, however the turns arrived. A surface sharing a process
+    # with its mind is handed them in memory; one in its own container polls
+    # the backend and puts them on the same queue.
+    background = [_asyncio.ensure_future(_proactive_consumer(app))]
+    if config.proactive_poll_url:
+        background.append(_asyncio.ensure_future(_proactive_poll_source()))
 
     try:
         await _asyncio.Event().wait()
     except _asyncio.CancelledError:
         pass
     finally:
-        proactive_task.cancel()
-        try:
-            await proactive_task
-        except _asyncio.CancelledError:
-            pass
+        for task in background:
+            task.cancel()
+        for task in background:
+            try:
+                await task
+            except _asyncio.CancelledError:
+                pass
         await app.updater.stop()
         await app.stop()
         await _on_shutdown(app)

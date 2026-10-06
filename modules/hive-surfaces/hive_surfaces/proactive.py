@@ -1,9 +1,12 @@
-"""Proactive delivery queue shared by ``mind_server`` and the Telegram bot.
+"""Proactive delivery queue: where unsolicited assistant turns wait.
 
-Both run in the same process/event loop (see
-``launch_mind_server_and_bots.py``), so unsolicited assistant output produced
-by the harness subprocess when no inbound request is draining stdout can be
-handed to the bot in-process via this module-level queue.
+An edge mind hosts its surfaces in the same process as its backend, so output
+the harness produced with no inbound request draining stdout is handed over
+in-process through this module-level queue. A mind whose surface runs in its
+own container cannot do that, and its backend holds the same turns behind an
+HTTP endpoint instead — so the surface polls (``_proactive_poll_source``) and
+enqueues here. Two sources, one queue, one delivery path: whichever way a turn
+arrived, it is chunked, retried and eventually journalled by the same code.
 
 It is also where an answer the bot could not deliver lands, which is what
 makes the scheduling here matter rather than being an implementation detail.
@@ -17,8 +20,8 @@ global, so one message with nowhere to go — the bot blocked, the chat deleted
 during an outage the whole queue sheds one attempt per interval rather than
 one per item.
 
-Kept free of imports from either side so it can be imported by ``mind_server``
-and ``bots.telegram_bot`` without a circular dependency.
+Kept free of imports from either side so a mind backend and a surface can
+both import it without a circular dependency.
 """
 
 import asyncio
