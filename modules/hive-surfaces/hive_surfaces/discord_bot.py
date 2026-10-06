@@ -16,6 +16,7 @@ import aiohttp
 import discord
 from discord import app_commands
 
+from hive_surfaces import token_store
 from hive_surfaces.config import config
 from hive_surfaces.gateway_client import GatewayClient
 from hive_surfaces.bot_utils import get_lock, time_ago
@@ -728,9 +729,19 @@ async def on_message(message: discord.Message):
 # Entry point
 # ---------------------------------------------------------------------------
 def _get_bot_token() -> str | None:
-    """Load Discord bot token from the environment. Returns None when unset
-    so the surface is simply skipped (a mind may run Telegram-only)."""
-    return os.getenv("DISCORD_BOT_TOKEN")
+    """Load this surface's Discord token. None when it has none.
+
+    By the same rule Telegram's reads by, out of the same table: the
+    environment unless `DISCORD_BOT_TOKEN_KEYRING_KEY` names a keyring key,
+    in which case that key wins, because the only reason to name one is that
+    this surface's token is not the ambient one. Reading only the environment
+    is how a mind whose token was in the keyring all along came up
+    crashlooping on a surface it was told it had no token for.
+
+    None rather than an exit, because a mind may legitimately run
+    Telegram-only.
+    """
+    return token_store.resolve_token("discord") or None
 
 
 async def run_discord_bot() -> None:

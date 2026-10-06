@@ -42,12 +42,55 @@ _TOKEN_PATTERN = re.compile(r"^\d{5,20}:[A-Za-z0-9_-]{30,}$")
 # because importing `telegram_bot` pulls the whole telegram dependency chain
 # into a mind server that only wants to write a file.
 KEYRING_SERVICE = "hive-mind"
-DEFAULT_TOKEN_KEY = "TELEGRAM_BOT_TOKEN"  # secret-guard: allow — a key name
-KEYRING_KEY_VAR = "TELEGRAM_BOT_TOKEN_KEYRING_KEY"  # secret-guard: allow — a variable name
+
+#: The two names each surface turns on, keyed by surface. One table rather
+#: than a pair of functions per surface: Discord was left reading only the
+#: environment when Telegram's keyring path was restored, and a mind whose
+#: Discord token lived in the keyring came up crashlooping on a token it had
+#: all along.
+TOKEN_NAMES = {
+    "telegram": (
+        "TELEGRAM_BOT_TOKEN",  # secret-guard: allow — a key name
+        "TELEGRAM_BOT_TOKEN_KEYRING_KEY",  # secret-guard: allow — a variable name
+    ),
+    "discord": (
+        "DISCORD_BOT_TOKEN",  # secret-guard: allow — a key name
+        "DISCORD_BOT_TOKEN_KEYRING_KEY",  # secret-guard: allow — a variable name
+    ),
+}
+
+DEFAULT_SURFACE = "telegram"
+DEFAULT_TOKEN_KEY, KEYRING_KEY_VAR = TOKEN_NAMES[DEFAULT_SURFACE]
 
 _ENV_VAR = DEFAULT_TOKEN_KEY
 _KEYRING_KEY_VAR = KEYRING_KEY_VAR
 _KEYRING_SERVICE = KEYRING_SERVICE
+
+
+def names(surface: str) -> tuple[str, str]:
+    """The environment variable and the keyring-key variable for `surface`."""
+    try:
+        return TOKEN_NAMES[surface]
+    except KeyError:
+        raise ValueError(f"no such surface: {surface!r}") from None
+
+
+def resolve_token(surface: str = DEFAULT_SURFACE) -> str:
+    """The token this surface should start on, or empty if it has none.
+
+    A named keyring key wins over the environment, because the only reason to
+    name one is that this surface's token is *not* the ambient one — a stack
+    where the root `.env` happens to export some mind's token would otherwise
+    start several bots polling as the same bot, each stealing the others'
+    updates, with nothing in any log to say so. With no key named the
+    environment wins and the default key is the fallback, which is the edge
+    layout: one bot per host, token in its own `.env`.
+    """
+    env_var, key_var = names(surface)
+    named = os.environ.get(key_var, "").strip()
+    if named:
+        return _keyring_get(named) or os.environ.get(env_var, "")
+    return os.environ.get(env_var, "") or _keyring_get(env_var)
 
 VERIFY_URL = "https://api.telegram.org/bot{token}/getMe"
 VERIFY_TIMEOUT_S = 15.0
@@ -76,7 +119,7 @@ class TokenStatus:
     detail: str = ""
 
 
-def storage_location() -> tuple[str, str]:
+def storage_location(surface: str = DEFAULT_SURFACE) -> tuple[str, str]:
     """Where this mind's surface reads its token from, as (kind, name).
 
     A named keyring key is the deliberate signal that this surface's token is
@@ -84,10 +127,11 @@ def storage_location() -> tuple[str, str]:
     because a writer that disagreed with the reader would store a token in a
     place nothing consults.
     """
-    named = os.environ.get(_KEYRING_KEY_VAR, "").strip()
+    env_var, key_var = names(surface)
+    named = os.environ.get(key_var, "").strip()
     if named:
         return "keyring", named
-    return "env", _ENV_VAR
+    return "env", env_var
 
 
 def _env_path() -> Path:
@@ -110,7 +154,7 @@ def _keyring_set(key: str, token: str) -> None:
     keyring.set_password(_KEYRING_SERVICE, key, token)
 
 
-def _env_get() -> str:
+def _env_get(env_var: str = _ENV_VAR) -> str:
     """The token currently in the `.env` file, not in this process.
 
     The process's own environment is a snapshot from boot: a token written an
@@ -130,12 +174,12 @@ def _env_get() -> str:
         return ""
     for line in text.splitlines():
         stripped = line.strip()
-        if stripped.startswith(f"{_ENV_VAR}="):
+        if stripped.startswith(f"{env_var}="):
             return stripped.split("=", 1)[1].strip().strip("'\"")
     return ""
 
 
-def _env_set(token: str) -> None:
+def _env_set(token: str, env_var: str = _ENV_VAR) -> None:
     """Replace the token line in `.env`, or add it, and nothing else.
 
     A line rewrite rather than a dump: the file carries comments and every
@@ -151,14 +195,14 @@ def _env_set(token: str) -> None:
     except OSError:
         original = ""
     lines = original.splitlines(keepends=True)
-    replacement = f"{_ENV_VAR}={token}\n"
+    replacement = f"{env_var}={token}\n"
     out: list[str] = []
     replaced = False
     for line in lines:
-        if line.strip().startswith(f"{_ENV_VAR}=") and not replaced:
+        if line.strip().startswith(f"{env_var}=") and not replaced:
             out.append(replacement)
             replaced = True
-        elif line.strip().startswith(f"{_ENV_VAR}="):
+        elif line.strip().startswith(f"{env_var}="):
             continue  # a second declaration is a file whose last word wins
         else:
             out.append(line)
@@ -177,10 +221,14 @@ def _env_set(token: str) -> None:
     os.replace(staging, path)
 
 
-def stored_token() -> str:
-    """Whatever this mind's surface would read right now."""
-    kind, name = storage_location()
-    return _keyring_get(name) if kind == "keyring" else _env_get()
+def stored_token(surface: str = DEFAULT_SURFACE) -> str:
+    """Whatever this surface would read right now, off disk.
+
+    Not `resolve_token`: that reads `os.environ`, which is a snapshot from
+    boot, so a token written an hour ago would read as never having landed.
+    """
+    kind, name = storage_location(surface)
+    return _keyring_get(name) if kind == "keyring" else _env_get(name)
 
 
 async def verify(token: str, session: aiohttp.ClientSession | None = None) -> str:
@@ -216,11 +264,13 @@ async def verify(token: str, session: aiohttp.ClientSession | None = None) -> st
             await session.close()
 
 
-async def status(session: aiohttp.ClientSession | None = None) -> TokenStatus:
-    """Whether this mind's surface has a token the bot API accepts."""
-    kind, name = storage_location()
+async def status(
+    session: aiohttp.ClientSession | None = None, surface: str = DEFAULT_SURFACE
+) -> TokenStatus:
+    """Whether this surface has a token the bot API accepts."""
+    kind, name = storage_location(surface)
     where = f"keyring:{name}" if kind == "keyring" else "env"
-    token = stored_token()
+    token = stored_token(surface)
     if not token:
         return TokenStatus(stored=False, accepted=None, where=where)
     try:
@@ -234,7 +284,11 @@ async def status(session: aiohttp.ClientSession | None = None) -> TokenStatus:
     )
 
 
-async def replace(token: str, session: aiohttp.ClientSession | None = None) -> TokenStatus:
+async def replace(
+    token: str,
+    session: aiohttp.ClientSession | None = None,
+    surface: str = DEFAULT_SURFACE,
+) -> TokenStatus:
     """Verify `token`, then store it where this mind's surface reads it.
 
     Verification first and storage only on success: a refused token must
@@ -242,11 +296,11 @@ async def replace(token: str, session: aiohttp.ClientSession | None = None) -> T
     not asked to take the surface down.
     """
     username = await verify(token, session=session)
-    kind, name = storage_location()
+    kind, name = storage_location(surface)
     if kind == "keyring":
         _keyring_set(name, token)
     else:
-        _env_set(token)
+        _env_set(token, name)
     return TokenStatus(
         stored=True,
         accepted=True,
