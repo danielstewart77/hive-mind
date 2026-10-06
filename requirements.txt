@@ -39,10 +39,16 @@ neo4j  # Retained for migration only -- remove after lucent_migrate.py completes
 py2neo  # Retained for migration only -- remove after lucent_migrate.py completes
 dateparser
 
-# Discord bot
-discord.py[voice]>=2.0
+# The Telegram and Discord surfaces, shared with every other mind in the hive.
+# Tracks `main` rather than a tag: a pinned version per install is the
+# per-instance fiddling this was consolidated to remove. `discord.py` arrives
+# with it and is deliberately not repeated — two declarations of one
+# dependency is how a surface ends up on a different discord than the core was
+# tested on.
+hive-surfaces @ git+https://github.com/danielstewart77/hive-surfaces.git@main
 
-# Telegram bot
+# The group-chat bot imports telegram directly, so it stays declared here
+# rather than relying on what the surfaces happen to pull in.
 python-telegram-bot[job-queue]>=21.0
 
 # Scheduler

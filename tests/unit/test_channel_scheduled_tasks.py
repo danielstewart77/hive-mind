@@ -10,20 +10,20 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-import discord
 
-from bots import discord_bot, scheduler
+from bots import scheduler
 from core import discord_delivery
 from core.scheduled_skills import ScheduledSkill, discover_scheduled_skills
+from surfaces import config as surface_wiring
 
 
 @pytest.fixture(autouse=True)
 def _fresh_task_channel_cache():
-    """The bot holds its discovery briefly so it is not walked per message.
+    """The wiring holds its discovery briefly so it is not walked per message.
     That cache is module state, so it outlives a test unless cleared."""
-    discord_bot._task_channel_cache.clear()
+    surface_wiring._task_channel_cache.clear()
     yield
-    discord_bot._task_channel_cache.clear()
+    surface_wiring._task_channel_cache.clear()
 
 
 class _AsyncCtx:
@@ -212,56 +212,8 @@ async def test_channel_with_no_session_gets_one_bound_to_it():
 
 
 # ---------------------------------------------------------------------------
-# R4 — a task channel needs no mention; an ordinary channel still does
+# R4 — which channels this mind is resident in, derived from its own skills
 # ---------------------------------------------------------------------------
-def test_task_channel_message_is_handled_without_a_mention():
-    assert discord_bot.should_handle_message(
-        is_dm=False, mentioned=False, channel_id=777, task_channel_ids={777}
-    ) is True
-
-
-def test_ordinary_channel_message_without_a_mention_is_ignored():
-    assert discord_bot.should_handle_message(
-        is_dm=False, mentioned=False, channel_id=888, task_channel_ids={777}
-    ) is False
-    assert discord_bot.should_handle_message(
-        is_dm=False, mentioned=True, channel_id=888, task_channel_ids={777}
-    ) is True
-
-
-@pytest.mark.asyncio
-async def test_a_task_channel_is_not_blocked_by_the_channel_allowlist():
-    """Requirement 4: the skill naming a channel is what admits it. A task
-    channel missing from `discord_allowed_channels` would otherwise receive
-    briefings nobody is allowed to answer."""
-    handled = {}
-
-    message = MagicMock()
-    message.author.id = 4242
-    message.channel = MagicMock(spec=discord.TextChannel)
-    message.channel.id = 777
-    message.content = "push that to tomorrow"
-    message.mentions = []
-
-    async def fake_stream(sent, user_id, channel_id, prompt):
-        handled["channel_id"] = channel_id
-        handled["prompt"] = prompt
-        return "ok"
-
-    with patch.object(discord_bot, "task_channels", return_value={777}), \
-         patch.object(discord_bot.config, "discord_allowed_users", [4242]), \
-         patch.object(discord_bot.config, "discord_allowed_channels", [999]), \
-         patch.object(discord_bot, "_stream_to_message", new=fake_stream), \
-         patch.object(discord_bot, "_play_tts_for_member", new=AsyncMock()), \
-         patch.object(discord_bot, "bot", MagicMock(user=MagicMock(id=1))):
-        discord_bot.bot.user.__eq__ = lambda self, other: False
-        message.reply = AsyncMock(return_value=MagicMock())
-        await discord_bot.on_message(message)
-
-    assert handled["channel_id"] == 777
-    assert handled["prompt"] == "push that to tomorrow"
-
-
 def test_a_channel_claimed_by_another_mind_is_not_this_mind_s(tmp_path):
     """Requirement 4: one skills root holds every mind. A channel another
     mind claims must not become mention-free here, or this bot answers into
@@ -270,8 +222,8 @@ def test_a_channel_claimed_by_another_mind_is_not_this_mind_s(tmp_path):
         '---\nname: 7am\nschedule: "0 7 * * *"\ndiscord_channel: "777"\n---\nbody\n'
     ))
 
-    assert discord_bot.task_channels(tmp_path, "ada-uuid") == {777}
-    assert discord_bot.task_channels(tmp_path, "someone-else") == set()
+    assert surface_wiring.resident_channels(tmp_path, "ada-uuid") == {777}
+    assert surface_wiring.resident_channels(tmp_path, "someone-else") == set()
 
 
 def test_a_whitespace_only_response_is_not_a_briefing():
@@ -294,25 +246,6 @@ def test_a_whitespace_only_response_is_not_a_briefing():
         asyncio.run(scheduler._send_message(http, "sid", "nudge"))
 
 
-def test_a_thread_under_a_task_channel_stays_in_that_conversation():
-    """Requirement 3: a threaded reply is about the briefing above it, so it
-    belongs to the channel's conversation rather than opening a second one
-    holding none of it."""
-    thread = MagicMock()
-    thread.id = 9001
-    thread.parent_id = 777
-
-    assert discord_bot.conversation_channel_id(thread, {777}) == 777
-
-
-def test_a_thread_in_an_ordinary_channel_keeps_its_own_conversation():
-    thread = MagicMock()
-    thread.id = 9001
-    thread.parent_id = 888
-
-    assert discord_bot.conversation_channel_id(thread, {777}) == 9001
-
-
 def test_a_skill_that_cannot_be_decoded_does_not_take_discovery_down(tmp_path):
     """Requirement 4: discovery runs on the bot's inbound path, so a single
     badly-encoded skill file raising there makes the bot deaf everywhere."""
@@ -325,7 +258,7 @@ def test_a_skill_that_cannot_be_decoded_does_not_take_discovery_down(tmp_path):
         b'---\nname: broken\nschedule: "0 8 * * *"\n---\nCaf\xe9\n'
     )
 
-    assert discord_bot.task_channels(tmp_path) == {777}
+    assert surface_wiring.resident_channels(tmp_path, "") == {777}
 
 
 def test_task_channels_are_read_from_the_skills(tmp_path):
@@ -336,7 +269,7 @@ def test_task_channels_are_read_from_the_skills(tmp_path):
         '---\nname: 1pm\nschedule: "0 13 * * *"\n---\nbody\n'
     ))
 
-    assert discord_bot.task_channels(tmp_path) == {777}
+    assert surface_wiring.resident_channels(tmp_path, "") == {777}
 
 
 def test_a_digit_that_is_not_an_ascii_digit_is_not_a_channel_id(tmp_path):

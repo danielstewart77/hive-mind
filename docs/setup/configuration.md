@@ -18,10 +18,10 @@ discord_allowed_channels: []
 
 | Field | Read by | Description |
 |---|---|---|
-| `telegram_allowed_users` | `bots/telegram_bot.py` | Allowlisted Telegram user IDs |
+| `telegram_allowed_users` | `surfaces/config.py` | Allowlisted Telegram user IDs |
 | `telegram_owner_chat_id` | `bots/scheduler.py` | DM chat ID for scheduler-fired notifications |
-| `discord_allowed_users` | `bots/discord_bot.py` | Allowlisted Discord user IDs |
-| `discord_allowed_channels` | `bots/discord_bot.py` | Allowlisted channels (empty = all channels + DMs) |
+| `discord_allowed_users` | `surfaces/config.py` | Allowlisted Discord user IDs |
+| `discord_allowed_channels` | `surfaces/config.py` | Allowlisted channels (empty = all channels + DMs) |
 
 ### Fields in `config.yaml.example` with no current reader
 

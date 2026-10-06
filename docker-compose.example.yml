@@ -203,7 +203,7 @@ services:
       # delivery. Point at the backend service on the hivemind network, e.g.
       # http://<mind>:8420. Requires COMMS_BEARER_TOKEN in this env to auth.
       # - MIND_BACKEND_URL=http://example:8420
-    command: ["/opt/venv/bin/python3", "-m", "bots.telegram_bot"]
+    command: ["/opt/venv/bin/python3", "-m", "surfaces.telegram"]
 
   # ─────────────────────────────────────────────────────────────
   # Example Discord bot.
@@ -237,7 +237,7 @@ services:
       - PYTHONNOUSERSITE=1
       - KEY_RING=/usr/src/app/data/keyring
       - MIND_ID=example
-    command: ["/opt/venv/bin/python3", "-m", "bots.discord_bot"]
+    command: ["/opt/venv/bin/python3", "-m", "surfaces.discord"]
 
 # Per-mind service definitions are pulled in via the `include:` block at the top of
 # this file. See minds/example/container/compose.yaml for a fragment template.
