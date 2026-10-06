@@ -1,10 +1,53 @@
-**/.vscode
+# What the build context carries. Every service that runs this image bind-mounts
+# the repository over /usr/src/app, so the baked copy is never read on this host
+# — it exists only for a container started without that mount. Anything here is
+# therefore either too large to bake, or something that must never be baked.
+#
+# Without this file the context was 44.8 GB and `COPY . .` plus the `chown -R`
+# after it wrote that twice, which is 89.6 GB of a 93 GB image: a Telegram
+# relay carrying the training sets, every mind's harness sessions, and the
+# root `.env`.
+
+# Harness and tooling caches
 **/__pycache__
+*.py[cod]
+**/.mypy_cache
+**/.pytest_cache
+**/.ruff_cache
 **/node_modules
-*.pyc
-*.pyo
-*.pyd
-.venv/
+**/.vscode
 .vscode/
-__pycache__/
+
+# Interpreters. A materialised venv in an image is a venv built for the host's
+# libc, and /opt/venv is the one this image actually runs.
+.venv/
 venv/
+.devvenv/
+.pylibs/
+.npm_packages/
+.local/
+
+# Secrets. The image holds no credential; every service is handed its own
+# through the environment and the keyring mount.
+.env
+.env.*
+!.env.example
+
+# Bulk state, all of it bind-mounted at runtime. data/ is 34 GB, almost all of
+# it data/training_sets.
+data/
+backups/
+nervous-system/
+img/
+.obsidian/
+.tmp_sshprobe/
+*.log
+
+# Per-mind harness homes: sessions, transcripts and harness credentials, each
+# mounted per mind by that mind's own compose fragment.
+minds/*/.claude/
+minds/*/.codex/
+minds/*/.dsh/
+
+# History
+.git
