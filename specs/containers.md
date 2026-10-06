@@ -51,6 +51,18 @@ Not listed individually here — each mind is `include:`-ed from its own `minds/
 
 **Environment:** `HIVE_MIND_SERVER_URL=http://hive-comms:8424`, `COMMS_BEARER_TOKEN`, `VOICE_SERVER_URL=http://voice-server:8422`, `MIND_ID`, `TELEGRAM_BOT_TOKEN_KEYRING_KEY`.
 
+Each surface names its own `TELEGRAM_BOT_TOKEN_KEYRING_KEY` and the token
+lives in the keyring, because several surfaces run from one image on one
+machine and the environment cannot hold several values under one name. A
+named key wins over an ambient `TELEGRAM_BOT_TOKEN` for exactly that reason:
+the only purpose of naming one is that this surface's token is not the
+ambient one. The console sets it through the *mind's* admin-guarded
+`PUT /surface-token` (`minds/surface_token_api.py`), never by reaching into
+the keyring itself — only the mind's own filesystem can see it, and a mind
+across the LAN offers no mount. Nothing reads a token back out; the status
+route reports stored-and-accepted, stored-and-refused, or nothing stored, and
+a stored token reaches the surface only when its container is recreated.
+
 **Security:** `no-new-privileges`, `cap_drop: ALL`, `read_only`, `tmpfs: /tmp`.
 
 ### discord-bot
