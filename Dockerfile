@@ -80,11 +80,14 @@ RUN /opt/venv/bin/pip install --no-cache-dir --force-reinstall --no-deps \
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
 RUN /opt/venv/bin/playwright install --with-deps chromium
 
-# App code (overridden by bind mount in dev, baked in for production)
-COPY . .
+# App code (overridden by bind mount in dev, baked in for production).
+# --chown rather than a `chown -R` afterwards: a recursive chown rewrites every
+# file it touches, so the layer it writes is a second full copy of everything
+# COPY just brought in. See .dockerignore for what the context does not carry.
+COPY --chown=hivemind:hivemind . .
 
 RUN mkdir -p /usr/src/app/data \
-    && chown -R hivemind:hivemind /usr/src/app
+    && chown hivemind:hivemind /usr/src/app /usr/src/app/data
 
 USER hivemind
 
