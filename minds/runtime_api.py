@@ -52,6 +52,7 @@ PUBLIC_FIELDS = (
     "remote",
     "surfaces",
     "resume_policy",
+    "voice",
 )
 
 
@@ -80,6 +81,22 @@ def public_runtime(path: Path) -> dict[str, Any]:
 WRITABLE_FIELDS = {
     "default_model": _MODEL_NAME_RE,
     "provider": re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"),
+    "voice": re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"),
+}
+
+#: Fields a mind may not have a line for yet. A missing `default_model` means a
+#: malformed file and is refused; a missing `voice` only means this mind was
+#: scaffolded before voices were pickable, and refusing that would make the
+#: field unsettable on every mind already installed.
+CREATABLE_FIELDS = ("voice",)
+
+#: The comment written above a field created on a mind that had no line for it,
+#: so the next person to open the file is not reading a bare key.
+_FIELD_COMMENTS = {
+    "voice": (
+        "# Which voice this mind is spoken in. A Kokoro voice name; the voice",
+        "# server reads it from the broker row, which this file is the truth for.",
+    ),
 }
 
 
@@ -112,7 +129,12 @@ def update_runtime_fields(path: Path, fields: dict[str, str]) -> dict[str, Any]:
             flags=re.MULTILINE,
         )
         if count != 1:
-            raise ValueError(f"Runtime configuration has no {field} field")
+            if field not in CREATABLE_FIELDS:
+                raise ValueError(f"Runtime configuration has no {field} field")
+            block = [""] + list(_FIELD_COMMENTS.get(field, ())) + [f"{field}: {value}"]
+            if not updated.endswith("\n"):
+                block.insert(0, "")
+            updated = updated + "\n".join(block) + "\n"
 
     fd, temporary = tempfile.mkstemp(prefix="runtime-", suffix=".yaml", dir=path.parent)
     try:
@@ -144,6 +166,13 @@ def registration_payload(path: Path, mind_name: str = "") -> dict[str, str]:
         "model": str(loaded["default_model"]).strip(),
         "harness": str(loaded["harness"]).strip(),
     }
+    # The voice travels the same path as the model: the file is the truth, the
+    # broker row is the cache the voice server reads. Omitted when unset, so a
+    # mind that has picked none leaves the gateway's copy alone rather than
+    # clearing it on every boot.
+    voice = str(loaded.get("voice") or "").strip()
+    if voice:
+        payload["voice"] = voice
     # The admin-guarded registration this mind already performs every boot is
     # the only channel by which the gateway learns the credential. Omitted
     # when there is none, because a registration that sent an empty one would
@@ -618,13 +647,21 @@ def install_runtime_routes(app: FastAPI, *, path: Path, mind_id: str, log) -> No
         body = await req.json()
         if not isinstance(body, dict):
             return JSONResponse({"error": "body must be an object"}, status_code=400)
-        model = str(body.get("default_model") or "").strip()
-        if not model:
-            return JSONResponse({"error": "default_model required"}, status_code=400)
-        fields = {"default_model": model}
-        provider = str(body.get("provider") or "").strip()
-        if provider:
-            fields["provider"] = provider
+        # Any subset of the writable fields, at least one. A voice is settable
+        # without restating the model, and a model still lands with its provider
+        # in one write so a mind never holds a provider that lacks it.
+        fields = {}
+        for field in WRITABLE_FIELDS:
+            value = str(body.get(field) or "").strip()
+            if value:
+                fields[field] = value
+        if not fields:
+            return JSONResponse(
+                {"error": f"one of {', '.join(sorted(WRITABLE_FIELDS))} required"},
+                status_code=400,
+            )
+        model = fields.get("default_model", "")
+        provider = fields.get("provider", "")
         try:
             configuration = update_runtime_fields(path, fields)
         except ValueError as exc:
@@ -635,7 +672,8 @@ def install_runtime_routes(app: FastAPI, *, path: Path, mind_id: str, log) -> No
             )
         log_event(
             log, "mind.runtime.updated", mind_id=mind_id,
-            default_model=model, provider=provider or None,
+            default_model=model or None, provider=provider or None,
+            voice=fields.get("voice") or None,
         )
         return {
             "saved": True,
