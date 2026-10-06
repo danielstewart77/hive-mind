@@ -215,6 +215,12 @@ def soul_write(
     produces an empty list that means "delete everything I am" and is
     indistinguishable from one that means it. Losing most of a soul is
     refused unless it was asked for on purpose.
+
+    What counts as losing it is the *size* of the list, not how many lines
+    survived verbatim. Rewording is the commonest edit a soul receives, and a
+    rewrite of four lines into four differently-worded lines retains none of
+    them while losing nothing — measured by survivors it was refused, and the
+    only remedy offered was a flag no editor had a way to send.
     """
     try:
         if actor not in VALID_ACTORS:
@@ -263,19 +269,17 @@ def soul_write(
                 "change_count": current_count,
             })
 
-        if before and not allow_shrink:
-            kept = [v for v in soul_values if v in before]
-            if len(kept) * 2 < len(before):
-                return json.dumps({
-                    "ok": False, "code": "shrink_refused",
-                    "detail": (
-                        f"this would drop {len(before) - len(kept)} of {len(before)} "
-                        "existing lines. If that is intended, send allow_shrink=true. "
-                        "If you did not intend it, your read of the current soul "
-                        "probably failed."
-                    ),
-                    "before_count": len(before),
-                })
+        if before and not allow_shrink and len(soul_values) * 2 < len(before):
+            return json.dumps({
+                "ok": False, "code": "shrink_refused",
+                "detail": (
+                    f"this would leave {len(soul_values)} lines where there are "
+                    f"{len(before)}. If the reduction is intended, send "
+                    "allow_shrink=true. If you did not intend it, your read of "
+                    "the current soul probably failed."
+                ),
+                "before_count": len(before),
+            })
 
         props[SOUL_KEY] = list(soul_values)
         now = time.time()
