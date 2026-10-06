@@ -220,3 +220,72 @@ async def push_surface_token(gateway_url: str, token: str) -> dict:
             status_code=502, detail=f"Mind is unreachable: {exc}"
         ) from exc
     return _unwrap_surface_token(response)
+
+
+# ---------------------------------------------------------------------------
+# The voice
+# ---------------------------------------------------------------------------
+# A Mind's voice lives in that Mind's own runtime.yaml, written the way its
+# model is, because the broker row the voice server reads is a cache of that
+# file. The catalogue of what is selectable comes from the voice server
+# instead: it is a property of the running speech engine and its language, not
+# of any one Mind.
+
+
+async def push_voice(gateway_url: str, voice: str) -> dict:
+    """Write this Mind's voice into its runtime.yaml.
+
+    On its own, without restating the model: a picker that resent the model it
+    rendered a minute ago would write a stale one back over a fresh edit.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            response = await client.patch(
+                _endpoint(gateway_url),
+                json={"voice": voice},
+                headers=admin_headers(),
+            )
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Mind is unreachable: {exc}"
+        ) from exc
+    return _unwrap(response)
+
+
+async def fetch_voice_catalogue(voice_server_url: str) -> dict:
+    """What the voice server can speak, for the picker to offer.
+
+    A server that cannot be reached, or whose own catalogue fetch failed,
+    comes back unreadable rather than empty — the page has to be able to say
+    "could not read the list of voices", which is a different sentence from
+    "this engine has no voices" and sends the operator somewhere else.
+    """
+    url = (voice_server_url or "").strip().rstrip("/")
+    unreadable = {
+        "engine": "",
+        "default_voice": "",
+        "catalogue": {
+            "language_code": "",
+            "readable": False,
+            "detail": "The voice server could not be reached",
+            "voices": [],
+        },
+    }
+    if not url:
+        return unreadable
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            response = await client.get(f"{url}/voices")
+    except httpx.HTTPError as exc:
+        unreadable["catalogue"]["detail"] = f"The voice server could not be reached: {exc}"
+        return unreadable
+    if response.status_code != 200:
+        unreadable["catalogue"]["detail"] = (
+            f"The voice server answered {response.status_code}"
+        )
+        return unreadable
+    body = response.json()
+    if not isinstance(body, dict) or not isinstance(body.get("catalogue"), dict):
+        unreadable["catalogue"]["detail"] = "The voice server returned no catalogue"
+        return unreadable
+    return body

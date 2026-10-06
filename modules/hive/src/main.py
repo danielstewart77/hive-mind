@@ -2215,6 +2215,55 @@ async def api_mind_configuration(name: str, user: dict = Depends(require_auth)):
     }
 
 
+@app.get("/api/minds/{name}/voice")
+async def api_mind_voice(name: str, user: dict = Depends(require_auth)):
+    """This Mind's voice, and the voices the speech engine can actually speak.
+
+    The current value comes from the Mind's own file; the catalogue comes from
+    the voice server, because what is selectable is a property of the running
+    engine and its language rather than of any one Mind. Only Kokoro has a
+    catalogue — Chatterbox clones from a reference recording, so for a Mind on
+    Chatterbox the question is which recording it has, not which voice it picked.
+    """
+    del user
+    gateway_url = await _mind_gateway_url(name)
+    configuration = await mind_runtime.fetch_configuration(gateway_url)
+    offered = await mind_runtime.fetch_voice_catalogue(_voice_server_urls()["kokoro"])
+    return {
+        "voice": str(configuration.get("voice") or ""),
+        "engine": offered.get("engine") or "",
+        "default_voice": offered.get("default_voice") or "",
+        "catalogue": offered.get("catalogue") or {},
+    }
+
+
+@app.put("/api/minds/{name}/voice")
+async def api_mind_voice_update(
+    name: str, request: Request, user: dict = Depends(require_auth)
+):
+    """Set this Mind's voice.
+
+    The Mind's own file first, then the broker row that caches it, in that
+    order for the same reason the model takes: the Mind re-registers from its
+    file on its next start, so a row written against a file that never took
+    would be undone anyway.
+    """
+    del user
+    body = await request.json()
+    voice = str(body.get("voice") if isinstance(body, dict) else "").strip()
+    if not voice:
+        raise HTTPException(status_code=400, detail="A voice is required")
+    gateway_url = await _mind_gateway_url(name)
+    configuration = await mind_runtime.push_voice(gateway_url, voice)
+    await _gateway_request(
+        "PUT",
+        f"/broker/minds/{urllib.parse.quote(name)}",
+        json_body={"voice": voice},
+        admin=True,
+    )
+    return {"saved": True, "voice": str(configuration.get("voice") or voice)}
+
+
 @app.patch("/api/minds/{name}/configuration")
 async def api_mind_configuration_update(
     name: str, request: Request, user: dict = Depends(require_auth)
