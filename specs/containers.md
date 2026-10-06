@@ -47,7 +47,7 @@ Not listed individually here — each mind is `include:`-ed from its own `minds/
 | Port | None (internal) |
 | Restart | `unless-stopped` |
 | Depends on | comms, voice-server |
-| Command | `/opt/venv/bin/python3 -m bots.telegram_bot` |
+| Command | `/opt/venv/bin/python3 -m surfaces.telegram` |
 
 **Environment:** `HIVE_MIND_SERVER_URL=http://hive-comms:8424`, `COMMS_BEARER_TOKEN`, `VOICE_SERVER_URL=http://voice-server:8422`, `MIND_ID`, `TELEGRAM_BOT_TOKEN_KEYRING_KEY`.
 
@@ -62,7 +62,7 @@ Not listed individually here — each mind is `include:`-ed from its own `minds/
 | Port | None (internal) |
 | Restart | `unless-stopped` |
 | Depends on | comms, voice-server |
-| Command | `/opt/venv/bin/python3 -m bots.discord_bot` |
+| Command | `/opt/venv/bin/python3 -m surfaces.discord` |
 
 Same environment shape and hardening as telegram-bot (minus the keyring-key var).
 
