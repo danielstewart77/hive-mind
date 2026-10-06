@@ -78,6 +78,17 @@ def test_console_pages_render_the_new_application_shell(tmp_path, monkeypatch):
         assert "console-sidebar" in response.text, path
 
 
+def test_a_console_page_is_never_served_from_cache(tmp_path, monkeypatch):
+    """Each page carries its script inline, so a cached page is a cached app —
+    and a stale tab's controls silently send nothing."""
+    client = _authed_client(tmp_path, monkeypatch)
+
+    for path in ("/minds", "/minds/ada", "/canvas", "/overview"):
+        headers = client.get(path).headers
+        assert headers["Cache-Control"] == "no-store, must-revalidate", path
+        assert headers["Pragma"] == "no-cache", path
+
+
 def test_configuration_surfaces_render_actionable_controls(tmp_path, monkeypatch):
     client = _authed_client(tmp_path, monkeypatch)
 
