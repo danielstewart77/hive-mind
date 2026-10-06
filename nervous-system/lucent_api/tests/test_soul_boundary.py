@@ -532,6 +532,46 @@ class SoulRecordTests(SoulBoundaryTests):
         self.assertTrue(deliberate.json()["ok"], deliberate.text)
         self.assertEqual(_soul_of(self.conn), [])
 
+    def test_rewording_every_line_is_not_mistaken_for_a_wipe(self):
+        """Rewording is the commonest edit a soul gets.
+
+        Measured by how many lines survived verbatim, a rewrite of every line
+        retains none and was refused as a wipe — while losing nothing. The
+        only remedy the refusal named was a flag the editor had no way to
+        send, so the edit was simply impossible from the page.
+        """
+        reworded = [line + " Truly." for line in ORIGINAL_SOUL]
+
+        response = self._write(soul_values=reworded, reason="reworded every line")
+
+        self.assertTrue(response.json()["ok"], response.text)
+        self.assertEqual(_soul_of(self.conn), reworded)
+
+    def test_a_rewrite_that_also_collapses_the_list_is_still_refused(self):
+        """Size is what the guard is for, and rewording does not change it."""
+        grown = [f"line {n} of who I am." for n in range(6)]
+        self._write(soul_values=grown, reason="grew the soul")
+
+        response = self._write(
+            soul_values=["one line where there were six, all new wording"],
+            reason="a read that failed",
+        )
+
+        self.assertFalse(response.json()["ok"], response.text)
+        self.assertEqual(response.json()["code"], "shrink_refused")
+        self.assertEqual(_soul_of(self.conn), grown)
+
+    def test_a_deliberate_collapse_is_applied_when_it_is_asked_for(self):
+        grown = [f"line {n} of who I am." for n in range(6)]
+        self._write(soul_values=grown, reason="grew the soul")
+
+        response = self._write(
+            soul_values=["all I am now."], reason="pruned hard", allow_shrink=True
+        )
+
+        self.assertTrue(response.json()["ok"], response.text)
+        self.assertEqual(_soul_of(self.conn), ["all I am now."])
+
     def test_removing_one_line_of_several_is_not_mistaken_for_a_wipe(self):
         """The guard has to leave ordinary editing alone.
 
