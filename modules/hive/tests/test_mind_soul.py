@@ -260,3 +260,21 @@ def test_the_page_reads_and_writes_the_same_mind(monkeypatch):
         "the soul route is addressed by Mind name, not by the UUID in the URL"
     )
     assert len(set(soul_calls)) == 1, f"read and write disagree: {soul_calls}"
+
+
+def test_the_page_is_the_confirmation_for_a_reduction(monkeypatch):
+    """The shrink guard is for a caller that did not check its read.
+
+    This caller cannot be that: the operator was shown every line and edited
+    the text in front of them. Withholding the flag put a refusal on the page
+    whose only stated remedy was something the page had no way to send.
+    """
+    async def scenario():
+        client = _Client([_response(200, {"ok": True, "after_count": 1})])
+        monkeypatch.setattr(httpx, "AsyncClient", client)
+
+        await mind_soul.push_soul("skippy", ["All I am now."], "Pruned hard.")
+
+        assert client.calls[0][2]["json"]["allow_shrink"] is True
+
+    _run(scenario())
