@@ -8,6 +8,7 @@ All Claude Code interaction flows through the gateway — no SDK dependency.
 
 import asyncio
 import contextlib
+import functools
 import io
 import json
 import logging
@@ -265,17 +266,30 @@ async def _deliver(bot, chat_id: int, text: str) -> bool:
 TYPING_REFRESH_S = 4.0
 
 
+async def _send_typing(bot, chat_id: int) -> None:
+    """One typing action, which never fails the turn it decorates."""
+    try:
+        await bot.send_chat_action(chat_id, ChatAction.TYPING)
+    except Exception:
+        pass  # a dropped action is cosmetic; never fail the turn for it
+
+
 @contextlib.asynccontextmanager
 async def _typing(bot, chat_id: int):
-    """Show "typing" in chat_id for as long as the block runs."""
+    """Show "typing" in chat_id for as long as the block runs.
+
+    The first action is sent inline, before the block is entered, rather than
+    left to the refresh task: a task only runs once the loop next idles, so a
+    handler that reaches its first await a second in would show nothing for
+    that second — and the whole point of holding the indicator from the
+    message's arrival is that there is no gap at the front.
+    """
+    await _send_typing(bot, chat_id)
 
     async def _loop() -> None:
         while True:
-            try:
-                await bot.send_chat_action(chat_id, ChatAction.TYPING)
-            except Exception:
-                pass  # a dropped action is cosmetic; never fail the turn for it
             await asyncio.sleep(TYPING_REFRESH_S)
+            await _send_typing(bot, chat_id)
 
     task = asyncio.create_task(_loop())
     try:
@@ -284,6 +298,30 @@ async def _typing(bot, chat_id: int):
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+
+
+
+def with_typing(handler):
+    """Hold the typing indicator for as long as `handler` runs.
+
+    Applied at registration rather than inside the streaming helper, because
+    the streaming helper is not where most of the waiting happens: a voice
+    note is downloaded and transcribed before a single token exists, a photo
+    is fetched at full resolution, and every slash command is a gateway round
+    trip of its own. Wrapping one of those and not the others is how the
+    indicator comes to mean "the mind is answering in prose" instead of "the
+    mind is working", which is the only thing the user is reading it for.
+    """
+
+    @functools.wraps(handler)
+    async def _wrapped(update, context):
+        chat = update.effective_chat
+        if chat is None:
+            return await handler(update, context)
+        async with _typing(update.get_bot(), chat.id):
+            return await handler(update, context)
+
+    return _wrapped
 
 
 async def _reply_chunked(update: Update, text: str) -> None:
@@ -324,22 +362,21 @@ async def _stream_to_message(
     accumulated = ""
     last_edit = 0.0
 
-    # Held for the whole stream, not just until the first token: the indicator
-    # is what says the mind is still working while the edits are still landing.
-    async with _typing(sent.get_bot(), chat_id):
-        async for text_chunk in gateway.query_stream(user_id, chat_id, prompt, images=images):
-            # Concatenate without separator. Per-token deltas (when the mind has
-            # --include-partial-messages enabled) include their own whitespace;
-            # buffered assistant text already has its own paragraph breaks.
-            accumulated += text_chunk
-            now = time.monotonic()
-            if now - last_edit >= edit_interval:
-                preview = _chunk_message(accumulated)[0]
-                try:
-                    await sent.edit_text(preview)
-                except Exception:
-                    pass  # MessageNotModified or rate limit — skip this update
-                last_edit = now
+    # The indicator is held by `with_typing` around the whole handler, which
+    # started before this stream and outlasts it.
+    async for text_chunk in gateway.query_stream(user_id, chat_id, prompt, images=images):
+        # Concatenate without separator. Per-token deltas (when the mind has
+        # --include-partial-messages enabled) include their own whitespace;
+        # buffered assistant text already has its own paragraph breaks.
+        accumulated += text_chunk
+        now = time.monotonic()
+        if now - last_edit >= edit_interval:
+            preview = _chunk_message(accumulated)[0]
+            try:
+                await sent.edit_text(preview)
+            except Exception:
+                pass  # MessageNotModified or rate limit — skip this update
+            last_edit = now
 
     if not accumulated:
         # The gateway forwards mind errors as a result event, which arrives
@@ -975,10 +1012,21 @@ async def cmd_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _auth_check(update):
         return
 
-    import models_api
+    # The catalog belongs to the host: it is relayed from whatever inference
+    # proxy this mind talks to, by a module a surface cannot declare as a
+    # dependency. A mind that hands over no resolver offers no list, and says
+    # so — the alternative was importing the host's module by name, which
+    # resolved on exactly one machine and raised everywhere else, outside the
+    # try below, so `/models` answered nothing at all.
+    resolver = config.models_catalog
+    if resolver is None:
+        await update.message.reply_text(
+            "This mind has no model list configured."
+        )
+        return
 
     try:
-        rows = await models_api.build_catalog(os.getenv("MIND_NAME", ""))
+        rows = await resolver()
     except Exception as exc:  # noqa: BLE001
         await update.message.reply_text(f"Could not read the model list: {exc}")
         return
@@ -1806,22 +1854,22 @@ def _build_application(token: str):
     global _TABLE_SEALED
     _TABLE_SEALED = True
     for name, _description, handler in all_commands():
-        app.add_handler(CommandHandler(name, handler))
+        app.add_handler(CommandHandler(name, with_typing(handler)))
     # Both patterned, and the held decision first. A handler registered with
     # no pattern takes every callback the chat produces — which is how the
     # picker ends up answering a button it knows nothing about, and how an
     # approval tap gets read as a request to switch conversations.
     app.add_handler(CallbackQueryHandler(
-        handle_hitl_callback, pattern=hitl.CALLBACK_PATTERN,
+        with_typing(handle_hitl_callback), pattern=hitl.CALLBACK_PATTERN,
     ))
     app.add_handler(CallbackQueryHandler(
-        on_session_button, pattern=session_picker.CALLBACK_PATTERN,
+        with_typing(on_session_button), pattern=session_picker.CALLBACK_PATTERN,
     ))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    app.add_handler(MessageHandler(filters.PHOTO, with_typing(handle_photo)))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, with_typing(handle_text)))
+    app.add_handler(MessageHandler(filters.VOICE, with_typing(handle_voice)))
     # Catch-all: any /command not matched above is routed as a prompt
-    app.add_handler(MessageHandler(filters.COMMAND, handle_unknown_command))
+    app.add_handler(MessageHandler(filters.COMMAND, with_typing(handle_unknown_command)))
 
     return app
 

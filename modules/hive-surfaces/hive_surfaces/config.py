@@ -14,6 +14,7 @@ to call `configure` must refuse every message rather than answer all of them.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 
 
@@ -51,6 +52,20 @@ class SurfaceConfig:
     # Empty means in-process only, which is the edge layout.
     proactive_poll_url: str = ""
     proactive_poll_interval_s: float = 5.0
+
+    # What `/models` lists. The catalog is relayed from whatever inference
+    # proxy this host talks to, through a module that belongs to the host and
+    # not to a surface — so the host hands over a coroutine returning the rows
+    # rather than the core importing a module it cannot declare. Unset means
+    # this mind offers no model list, which is reported as exactly that.
+    models_catalog: Callable[[], Awaitable[list[dict]]] | None = None
+
+    # Where unsolicited claims and other surface state are kept. Defaults
+    # under the host's working directory for the same reason `photo_dir`
+    # does: a path derived from the package's own location is inside
+    # site-packages, which a reinstall wipes — and the picker claims survive
+    # a restart precisely because the incident they prevent runs through one.
+    state_dir: str = "data"
 
 
 class _ConfigProxy:
@@ -92,12 +107,21 @@ def configure(cfg: SurfaceConfig | None = None, **overrides) -> SurfaceConfig:
     `SurfaceConfig` stays frozen and a new one is installed wholesale, so a
     surface reading a field mid-turn cannot find it changed halfway through.
 
+    Given a `cfg`, that object is the whole configuration — a host handing one
+    over is stating everything, and a field it left at the default is a field
+    it meant to leave at the default. Given only keywords, they are applied to
+    whatever is installed now rather than to a fresh default: a host that calls
+    this twice — once for the allow-lists at boot, once for a model the console
+    changed — would otherwise have its second call blank the allow-list back to
+    authorizing nobody, and the symptom is a bot that silently stops answering
+    its owner with nothing in the log.
+
     Returns what was installed, so a host can log exactly what it supplied.
     """
-    base = cfg if cfg is not None else SurfaceConfig()
-    installed = replace(base, **overrides) if overrides else base
-    config._install(installed)
-    return installed
+    base = cfg if cfg is not None else config._installed()
+    new = replace(base, **overrides) if overrides else base
+    config._install(new)
+    return new
 
 
 def photo_root() -> "Path":
@@ -105,6 +129,15 @@ def photo_root() -> "Path":
     from pathlib import Path
 
     root = Path(config.photo_dir).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def state_root() -> "Path":
+    """The directory surface state is kept in, created on demand."""
+    from pathlib import Path
+
+    root = Path(config.state_dir).expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
     return root
 
