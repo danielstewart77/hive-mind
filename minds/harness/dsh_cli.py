@@ -4,8 +4,8 @@ Runs as the sole process inside the mind's container. The mind is selected by
 the ``MIND_NAME`` env var (set in the mind's ``container/compose.yaml``);
 everything mind-specific comes from ``minds/<MIND_NAME>/runtime.yaml``.
 
-dsh runs one process per turn, like codex and unlike claude — but unlike
-codex it takes the conversation id it is handed, through the
+dsh runs one process per chat turn and one persistent process for a browser
+terminal. Unlike codex it takes the conversation id it is handed, through the
 ``@hive/dsh-headless-resumable`` surface in the harness tree. So the gateway's
 conversation id *is* the harness session's id here, there is no second
 provider-native id to carry, and the two spawn shapes are the same
@@ -39,11 +39,17 @@ from typing import Any
 
 import aiohttp
 import yaml
-from fastapi import FastAPI, Request, WebSocket
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from minds.proactive import make_proactive_router
 from minds import models_api, runtime_api
+from minds.pty_attach import (
+    PtyUnavailable,
+    TmuxTerminals,
+    install_pty_attach,
+    teardown as teardown_pty,
+)
 from core.hive_logging import configure_logging, install_fastapi_logging, log_event
 
 MIND_NAME = os.environ.get("MIND_NAME", "example")
@@ -89,6 +95,8 @@ TURN_TIMEOUT_SECONDS = float(RUNTIME.get("turn_timeout_seconds") or 1800)
 #: The launcher. A container links the bind-mounted tree's own bin; a bare
 #: invocation can point at it directly.
 DSH_BIN = str(os.environ.get("DSH_BIN") or RUNTIME.get("dsh_bin") or "dsh")
+
+TERMINALS = TmuxTerminals(NAME, SPAWN_DIR)
 
 app = FastAPI(title=f"Mind: {NAME}", docs_url=None, redoc_url=None, openapi_url=None)
 install_fastapi_logging(app, log, f"mind:{NAME}")
@@ -228,6 +236,126 @@ def _conversation_flags(session_id: str) -> list[str]:
     if _session_persisted(session_id):
         return ["--resume", session_id]
     return ["--session-id", session_id]
+
+
+def _terminal_context_file(context: str) -> Path | None:
+    """Write one process-owned opening context for the interactive runner."""
+    if not context:
+        return None
+    directory = DSH_HOME / "terminal-context"
+    directory.mkdir(parents=True, exist_ok=True)
+    handle, raw_path = tempfile.mkstemp(prefix="context-", suffix=".txt", dir=directory)
+    path = Path(raw_path)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(context)
+        path.chmod(0o600)
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+    return path
+
+
+def _terminal_argv(conversation_id: str, context_file: Path | None = None) -> list[str]:
+    """The persistent DSH prompt loop hosted by one tmux pane."""
+    cmd = [DSH_BIN, "--profile", DSH_PROFILE, *_conversation_flags(conversation_id),
+           "--interactive"]
+    if context_file is not None:
+        cmd.extend(["--context-file", str(context_file)])
+    return cmd
+
+
+def _pane_env(
+    model: str, client_ref: str | None, owner_type: str | None, owner_ref: str | None,
+) -> dict[str, str]:
+    """Environment the tmux pane needs for this conversation and model."""
+    env = {k: str(v) for k, v in RUNTIME_ENV.items()}
+    env.update(_model_env(model))
+    env["DSH_HOME"] = str(DSH_HOME)
+    env["DSH_PERMISSION_MODE"] = _permission_mode()
+    env["HIVE_SURFACE"] = "terminal"
+    # The pane prints its own prompt and banner, and the interactive surface
+    # ships to every dsh mind — so it reads the name from here rather than
+    # carrying one mind's name in code every other install would be lying with.
+    env["MIND_NAME"] = NAME
+    if client_ref:
+        env["CLIENT_REF"] = client_ref
+    if owner_type:
+        env["OWNER_TYPE"] = owner_type
+    if owner_ref:
+        env["OWNER_REF"] = owner_ref
+    return env
+
+
+def _spawn_pty(
+    *, session_id: str, model: str, conversation_id: str, cols: int, rows: int,
+    harness_sid: str | None = None, client_ref: str | None = None,
+    owner_type: str | None = None, owner_ref: str | None = None,
+    system_prompt: str = "",
+) -> tuple[Any, int]:
+    """Attach to this session's DSH terminal, starting its pane if absent."""
+    del harness_sid
+    state = SESSIONS.get(session_id)
+    if state is not None and state.get("in_flight"):
+        raise PtyUnavailable("a chat turn is still running for this conversation")
+
+    pane_env = _pane_env(model, client_ref, owner_type, owner_ref)
+    context_file: Path | None = None
+    if not TERMINALS.alive(session_id):
+        opening_context = system_prompt
+        if not opening_context and not _session_persisted(conversation_id) and state is not None:
+            opening_context = str(state.get("system_prompt") or "")
+        context_file = _terminal_context_file(opening_context)
+    try:
+        TERMINALS.start(
+            session_id,
+            _terminal_argv(conversation_id, context_file),
+            env_overrides=pane_env,
+            cols=cols,
+            rows=rows,
+        )
+    except Exception:
+        if context_file is not None:
+            context_file.unlink(missing_ok=True)
+        raise
+    proc, master_fd = TERMINALS.attach(
+        session_id, env_overrides=pane_env, cols=cols, rows=rows,
+    )
+    log.info("Attached %s terminal session=%s pid=%d model=%s conversation=%s",
+             NAME, session_id, proc.pid, model, conversation_id)
+    log_event(log, "session.pty.spawned", mind_id=MIND_ID, mind_name=NAME,
+              session_id=session_id, process_id=proc.pid, model=model,
+              conversation_id=conversation_id)
+    return proc, master_fd
+
+
+def _rotate_pty(
+    *, session_id: str, new_claude_sid: str, model: str = "", system_prompt: str = "",
+    client_ref: str | None = None, owner_type: str | None = None,
+    owner_ref: str | None = None,
+) -> bool:
+    """Respawn a live pane onto a fresh gateway-owned DSH conversation."""
+    if not TERMINALS.alive(session_id):
+        return False
+    if not model:
+        log.warning("Refusing to rotate session %s: no model to carry over", session_id)
+        return False
+
+    context_file = _terminal_context_file(system_prompt)
+    try:
+        TERMINALS.respawn(
+            session_id,
+            _terminal_argv(new_claude_sid, context_file),
+            env_overrides=_pane_env(model, client_ref, owner_type, owner_ref),
+        )
+    except Exception:
+        if context_file is not None:
+            context_file.unlink(missing_ok=True)
+        raise
+    log.info("Rotated DSH terminal %s onto %s", session_id, new_claude_sid)
+    log_event(log, "session.pty.rotated", mind_id=MIND_ID, mind_name=NAME,
+              session_id=session_id, conversation_id=new_claude_sid)
+    return True
 
 
 #: The permission mode every spawn runs under, unless the mind names another.
@@ -884,18 +1012,10 @@ async def interrupt_session(sid: str) -> Any:
 @app.post("/sessions/{sid}/release")
 async def release_session(sid: str, surface: str) -> Any:
     """Stop one live surface. dsh's session lives on disk, so nothing is lost.
-
-    A terminal release is refused as unsupported rather than reported as a
-    release of nothing: this harness ships no interactive CLI, and answering
-    "released: false" would send the operator looking for a pane that could
-    never have existed.
     """
     if surface == "terminal":
-        return JSONResponse(
-            {"error": "this harness has no interactive terminal",
-             "session_id": sid, "surface": surface, "supported": False},
-            status_code=501,
-        )
+        released = teardown_pty(sid)
+        return {"session_id": sid, "surface": surface, "released": released}
     if surface != "stream":
         return JSONResponse({"error": "surface must be stream"}, status_code=400)
     sess = SESSIONS.pop(sid, None)
@@ -904,27 +1024,13 @@ async def release_session(sid: str, surface: str) -> Any:
         await _reap_proc(sess.get("proc"))
     return {"session_id": sid, "surface": surface, "released": sess is not None}
 
-
-@app.websocket("/sessions/{sid}/attach-pty")
-async def attach_pty(websocket: WebSocket) -> None:
-    """Refuse a terminal attach as unsupported, with a code of its own.
-
-    A pre-accept close presents to the gateway as HTTP 403, which is also what
-    a mind with no pty route at all answers — so the gateway would read "this
-    harness cannot host a terminal" as "this mind's image is broken" and send
-    the operator off to rebuild it. The handshake is accepted and closed on
-    4417, distinct from 4415 (attach refused) and 4416 (credential refused).
-    """
-    await websocket.accept()
-    await websocket.close(code=4417, reason="this harness has no interactive terminal")
-
-
 @app.delete("/sessions/{sid}")
 async def kill_session(sid: str) -> dict:
     sess = SESSIONS.pop(sid, None)
     if sess is not None:
         sess["killed"] = True
         await _reap_proc(sess.get("proc"))
+    teardown_pty(sid)
     log.info("Killed %s session %s", NAME, sid)
     log_event(log, "session.closed", mind_id=MIND_ID, mind_name=NAME, session_id=sid)
     return {"session_id": sid, "status": "closed"}
@@ -939,6 +1045,8 @@ async def kill_session(sid: str) -> dict:
 # it the gateway goes on presenting a token nobody reads, registration keeps
 # publishing a credential nobody checks, and every surface stays green while
 # anything that can reach the port can open, drive and kill conversations.
+install_pty_attach(app, mind_name=NAME, terminals=TERMINALS,
+                   spawn=_spawn_pty, rotate=_rotate_pty, mind_dir=MIND_DIR)
 runtime_api.install_session_guard(app, mind_dir=MIND_DIR)
 runtime_api.install_runtime_routes(app, path=RUNTIME_PATH, mind_id=MIND_ID, log=log)
 models_api.install_models_route(app, path=RUNTIME_PATH, mind_id=MIND_ID, log=log)
