@@ -551,11 +551,8 @@ async def tts(req: TTSRequest):
 # ---------------------------------------------------------------------------
 # What this server can speak
 # ---------------------------------------------------------------------------
-#: What a sample says. Long enough to hear an accent and a cadence in.
-SAMPLE_TEXT = (
-    "Good afternoon. This is how I will sound when I read your messages back "
-    "to you, in the voice you are about to choose."
-)
+#: What a sample says.
+SAMPLE_TEXT = "Hey there, this is what I sound like."
 
 #: One catalogue fetch is two network round trips, and the picker asks for it
 #: on every page load and every sample. Short enough that a voice added to the
