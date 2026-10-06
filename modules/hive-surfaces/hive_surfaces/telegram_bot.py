@@ -1546,27 +1546,12 @@ async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_T
 # Re-exported from `token_store`, which owns them: the writer and this reader
 # must agree on both the service and the key, and two declarations is how a
 # token gets written under one spelling and read under another.
+from hive_surfaces import token_store  # noqa: E402
 from hive_surfaces.token_store import (  # noqa: E402
     DEFAULT_TOKEN_KEY,
     KEYRING_KEY_VAR,
     KEYRING_SERVICE,
 )
-
-
-def _keyring_token(key: str) -> str:
-    """The token stored under `key`, or empty if there is no answer.
-
-    Never raises. A host with no keyring backend, an unreadable store and a
-    store that simply has nothing under this key all mean the same thing to
-    the caller — look somewhere else — and an exception here would take down
-    a surface whose token was in the environment all along.
-    """
-    try:
-        import keyring
-
-        return keyring.get_password(KEYRING_SERVICE, key) or ""
-    except Exception:  # noqa: BLE001
-        return ""
 
 
 def _get_bot_token() -> str:
@@ -1586,18 +1571,13 @@ def _get_bot_token() -> str:
     start three bots polling Telegram as the same bot, each stealing the
     others' updates, with nothing in any log to say so.
     """
-    named = os.getenv(KEYRING_KEY_VAR, "")
-    if named:
-        token = _keyring_token(named) or os.getenv("TELEGRAM_BOT_TOKEN", "")
-        if token:
-            return token
-        log.error("No Telegram token under keyring key %s or in environment.", named)
-        sys.exit(1)
-
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "") or _keyring_token(DEFAULT_TOKEN_KEY)
+    token = token_store.resolve_token("telegram")
     if token:
         return token
-    log.error("TELEGRAM_BOT_TOKEN not found in environment or keyring.")
+    log.error(
+        "No Telegram token in the environment or under %s.",
+        token_store.names("telegram")[1],
+    )
     sys.exit(1)
 
 

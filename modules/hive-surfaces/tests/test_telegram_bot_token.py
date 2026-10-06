@@ -14,6 +14,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import hive_surfaces.telegram_bot as tb
+from hive_surfaces import token_store
 
 
 @pytest.fixture()
@@ -23,8 +24,13 @@ def vault(monkeypatch):
     fake = MagicMock()
     fake.get_password = lambda service, key: stored.get((service, key))
     monkeypatch.setitem(sys.modules, "keyring", fake)
-    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
-    monkeypatch.delenv("TELEGRAM_BOT_TOKEN_KEYRING_KEY", raising=False)
+    # Every name both surfaces read, cleared — not just Telegram's. The host
+    # running this suite is a host that runs minds, so its own environment
+    # holds real tokens, and a test that left one visible would assert
+    # against a live credential and print it on failure.
+    for surface in ("telegram", "discord"):
+        for name in token_store.names(surface):
+            monkeypatch.delenv(name, raising=False)
     return stored
 
 
@@ -91,3 +97,57 @@ class TestWhichTokenASurfaceStartsOn:
 
         with pytest.raises(SystemExit):
             tb._get_bot_token()
+
+
+class TestTheRuleCoversBothSurfaces:
+    """Discord was left reading only the environment when Telegram's keyring
+    path was restored, and a mind whose Discord token was in the keyring came
+    up crashlooping on a token it had all along. One table, both surfaces.
+    """
+
+    def test_discord_reads_the_keyring_under_its_own_default_key(
+        self, vault
+    ) -> None:
+        import hive_surfaces.discord_bot as db
+
+        vault[(tb.KEYRING_SERVICE, "DISCORD_BOT_TOKEN")] = "discord-token"
+
+        assert db._get_bot_token() == "discord-token"
+
+    def test_discord_honours_a_named_key_of_its_own(self, vault, monkeypatch) -> None:
+        import hive_surfaces.discord_bot as db
+
+        vault[(tb.KEYRING_SERVICE, "ADA_DISCORD_BOT_TOKEN")] = "ada-discord-token"
+        monkeypatch.setenv("DISCORD_BOT_TOKEN_KEYRING_KEY", "ADA_DISCORD_BOT_TOKEN")
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "some-other-minds-token")
+
+        assert db._get_bot_token() == "ada-discord-token"
+
+    def test_a_mind_with_no_discord_token_is_skipped_rather_than_stopped(
+        self, vault, monkeypatch
+    ) -> None:
+        """A mind may legitimately run Telegram-only."""
+        import hive_surfaces.discord_bot as db
+
+        monkeypatch.delenv("DISCORD_BOT_TOKEN", raising=False)
+        monkeypatch.delenv("DISCORD_BOT_TOKEN_KEYRING_KEY", raising=False)
+
+        assert db._get_bot_token() is None
+
+    def test_the_two_surfaces_do_not_read_each_other_s_token(
+        self, vault, monkeypatch
+    ) -> None:
+        import hive_surfaces.discord_bot as db
+
+        vault[(tb.KEYRING_SERVICE, "TELEGRAM_BOT_TOKEN")] = "telegram-token"
+        vault[(tb.KEYRING_SERVICE, "DISCORD_BOT_TOKEN")] = "discord-token"
+
+        assert tb._get_bot_token() == "telegram-token"
+        assert db._get_bot_token() == "discord-token"
+        assert token_store.names("telegram") != token_store.names("discord")
+
+    def test_an_unknown_surface_is_refused_rather_than_guessed(self, vault) -> None:
+        """A typo must not resolve to whichever surface sorts first and hand
+        one bot another's credential."""
+        with pytest.raises(ValueError):
+            token_store.resolve_token("slack")
