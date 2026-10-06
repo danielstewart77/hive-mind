@@ -2436,6 +2436,21 @@ async def api_mind_soul_update(
     }
 
 
+@app.post("/api/voices/sample")
+async def api_voice_sample(request: Request, user: dict = Depends(require_auth)):
+    """Speak a sample line in one voice, so it can be picked by ear.
+
+    Not per Mind: the voices a sample can be spoken in are a property of the
+    speech engine, exactly as the catalogue is, and every Mind on this hive
+    reads from the same one.
+    """
+    del user
+    body = await request.json()
+    voice = str(body.get("voice") if isinstance(body, dict) else "").strip()
+    audio = await mind_runtime.sample_voice(_voice_server_urls()["kokoro"], voice)
+    return Response(content=audio, media_type="audio/ogg")
+
+
 @app.get("/api/minds/{name}/skills")
 async def api_mind_skills(name: str, user: dict = Depends(require_auth)):
     """Every skill this Mind knows, repo side against installed side."""

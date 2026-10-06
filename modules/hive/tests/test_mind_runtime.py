@@ -49,6 +49,9 @@ class _Client:
     async def put(self, url, **kwargs):
         return await self._respond("PUT", url, **kwargs)
 
+    async def post(self, url, **kwargs):
+        return await self._respond("POST", url, **kwargs)
+
 
 def _response(status: int, json_body=None, text: str = "") -> httpx.Response:
     return httpx.Response(
@@ -309,5 +312,85 @@ def test_the_catalogue_is_relayed_as_the_voice_server_reported_it(monkeypatch):
 
         assert body["catalogue"]["voices"][0]["label"] == "George — British English, male"
         assert body["default_voice"] == "af_heart"
+
+    _run(scenario())
+
+
+def _audio_response(status: int, body: bytes = b"") -> httpx.Response:
+    return httpx.Response(
+        status_code=status,
+        content=body,
+        request=httpx.Request("POST", "http://voice:8422/voices/sample"),
+    )
+
+
+def test_a_sample_asks_the_voice_server_for_the_voice_it_names(monkeypatch):
+    """The Listen button. A letter grade is not what a voice sounds like."""
+
+    async def scenario():
+        calls = []
+        monkeypatch.setattr(
+            httpx,
+            "AsyncClient",
+            _Client(_audio_response(200, b"OggS-sample"), calls=calls),
+        )
+
+        audio = await mind_runtime.sample_voice("http://voice:8422/", "bm_george")
+
+        assert audio == b"OggS-sample"
+        method, url, kwargs = calls[0]
+        assert (method, url) == ("POST", "http://voice:8422/voices/sample")
+        assert kwargs["json"] == {"voice": "bm_george"}
+
+    _run(scenario())
+
+
+def test_a_sample_with_no_voice_named_is_refused(monkeypatch):
+    """Sampling "whatever the default is" answers a question nobody asked."""
+
+    async def scenario():
+        with pytest.raises(HTTPException) as refused:
+            await mind_runtime.sample_voice("http://voice:8422", "  ")
+
+        assert refused.value.status_code == 400
+
+    _run(scenario())
+
+
+def test_a_sample_with_no_voice_server_configured_is_refused(monkeypatch):
+    async def scenario():
+        with pytest.raises(HTTPException) as refused:
+            await mind_runtime.sample_voice("", "bm_george")
+
+        assert refused.value.status_code == 502
+
+    _run(scenario())
+
+
+def test_the_voice_servers_own_refusal_is_carried_through(monkeypatch):
+    """It knows which voices it offers; this process does not."""
+
+    async def scenario():
+        monkeypatch.setattr(httpx, "AsyncClient", _Client(_audio_response(400)))
+
+        with pytest.raises(HTTPException) as refused:
+            await mind_runtime.sample_voice("http://voice:8422", "zf_xiaobei")
+
+        assert refused.value.status_code == 400
+        assert "zf_xiaobei" in refused.value.detail
+
+    _run(scenario())
+
+
+def test_an_unreachable_voice_server_reports_a_gateway_failure(monkeypatch):
+    async def scenario():
+        monkeypatch.setattr(
+            httpx, "AsyncClient", _Client(error=httpx.ConnectError("refused"))
+        )
+
+        with pytest.raises(HTTPException) as refused:
+            await mind_runtime.sample_voice("http://voice:8422", "bm_george")
+
+        assert refused.value.status_code == 502
 
     _run(scenario())
