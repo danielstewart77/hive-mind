@@ -103,10 +103,25 @@ async def _stt(ogg_bytes: bytes) -> str:
         return (await resp.json())["text"]
 
 
+def _voice_id() -> str:
+    """Which mind the voice server is being asked to speak as.
+
+    The gateway client's `mind_id` first, which is the same identifier the
+    Discord surface sends and is always present in a process that has a
+    gateway. `MIND_NAME` was read alone before, and the containerised stack
+    runs each surface in its own container holding `MIND_ID` but no
+    `MIND_NAME` — so every reply asked for the voice of a mind called
+    "default", the voice server resolved nobody, and each mind spoke in the
+    server's fallback voice however carefully its own had been chosen.
+    """
+    if gateway is not None and gateway.mind_id:
+        return str(gateway.mind_id)
+    return os.getenv("MIND_NAME") or os.getenv("MIND_ID") or "default"
+
+
 async def _tts(text: str) -> bytes:
     """POST text to voice-server /tts, return OGG audio bytes."""
-    voice_id = os.getenv("MIND_NAME", "default")
-    async with http.post(f"{VOICE_SERVER_URL}/tts", json={"text": text, "voice_id": voice_id}) as resp:
+    async with http.post(f"{VOICE_SERVER_URL}/tts", json={"text": text, "voice_id": _voice_id()}) as resp:
         if resp.status != 200:
             raise RuntimeError(f"TTS error {resp.status}: {await resp.text()}")
         return await resp.read()
