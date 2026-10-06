@@ -357,12 +357,15 @@ def test_a_sample_with_no_voice_named_is_refused(monkeypatch):
     _run(scenario())
 
 
-def test_a_sample_with_no_voice_server_configured_is_refused(monkeypatch):
+def test_a_sample_with_no_voice_server_configured_says_so(monkeypatch):
+    """Not "unreachable": nothing was reached for, and the remedy differs."""
+
     async def scenario():
         with pytest.raises(HTTPException) as refused:
             await mind_runtime.sample_voice("", "bm_george")
 
         assert refused.value.status_code == 502
+        assert "No voice server is configured" in refused.value.detail
 
     _run(scenario())
 
@@ -387,6 +390,21 @@ def test_an_unreachable_voice_server_reports_a_gateway_failure(monkeypatch):
         monkeypatch.setattr(
             httpx, "AsyncClient", _Client(error=httpx.ConnectError("refused"))
         )
+
+        with pytest.raises(HTTPException) as refused:
+            await mind_runtime.sample_voice("http://voice:8422", "bm_george")
+
+        assert refused.value.status_code == 502
+        assert "unreachable" in refused.value.detail
+
+    _run(scenario())
+
+
+def test_a_voice_server_that_broke_reads_as_a_gateway_failure(monkeypatch):
+    """Its 500 is not the console's 500, and not the operator's fault either."""
+
+    async def scenario():
+        monkeypatch.setattr(httpx, "AsyncClient", _Client(_audio_response(500)))
 
         with pytest.raises(HTTPException) as refused:
             await mind_runtime.sample_voice("http://voice:8422", "bm_george")

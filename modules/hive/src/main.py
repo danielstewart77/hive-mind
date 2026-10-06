@@ -2249,10 +2249,7 @@ async def api_mind_voice_update(
     would be undone anyway.
     """
     del user
-    body = await request.json()
-    voice = str(body.get("voice") if isinstance(body, dict) else "").strip()
-    if not voice:
-        raise HTTPException(status_code=400, detail="A voice is required")
+    voice = await _named_voice(request)
     gateway_url = await _mind_gateway_url(name)
     configuration = await mind_runtime.push_voice(gateway_url, voice)
     await _gateway_request(
@@ -2436,6 +2433,27 @@ async def api_mind_soul_update(
     }
 
 
+async def _named_voice(request: Request) -> str:
+    """The voice named in a request body, refusing anything that is not one.
+
+    `str(body.get("voice"))` turns an absent key and a JSON null alike into the
+    literal string "None", which is truthy, matches the name pattern, and gets
+    written into a Mind's runtime.yaml as its voice. A body that is not JSON at
+    all is the caller's mistake and answers 400 rather than 500.
+    """
+    try:
+        body = await request.json()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Expected a JSON object") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object")
+    voice = body.get("voice")
+    voice = voice.strip() if isinstance(voice, str) else ""
+    if not voice:
+        raise HTTPException(status_code=400, detail="A voice is required")
+    return voice
+
+
 @app.post("/api/voices/sample")
 async def api_voice_sample(request: Request, user: dict = Depends(require_auth)):
     """Speak a sample line in one voice, so it can be picked by ear.
@@ -2445,8 +2463,7 @@ async def api_voice_sample(request: Request, user: dict = Depends(require_auth))
     reads from the same one.
     """
     del user
-    body = await request.json()
-    voice = str(body.get("voice") if isinstance(body, dict) else "").strip()
+    voice = await _named_voice(request)
     audio = await mind_runtime.sample_voice(_voice_server_urls()["kokoro"], voice)
     return Response(content=audio, media_type="audio/ogg")
 

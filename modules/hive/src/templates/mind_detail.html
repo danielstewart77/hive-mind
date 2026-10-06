@@ -113,6 +113,8 @@ window.addEventListener("DOMContentLoaded", async function () {
         const help = document.getElementById("mind-voice-help");
         if (state.catalogue && state.catalogue.readable === false) {
             help.textContent = "The list of voices could not be read: " + (state.catalogue.detail || "unknown reason");
+        } else if (state.catalogue && state.catalogue.described === false) {
+            help.textContent = "Every English voice this engine can speak, in both accents. The descriptions could not be read from the model repository — press Listen to hear one.";
         } else {
             help.textContent = "Every English voice this engine can speak, in both accents.";
         }
@@ -131,12 +133,19 @@ window.addEventListener("DOMContentLoaded", async function () {
         note.textContent = voiceDescriptions[select.value] || "";
     }
 
+    let voiceSample = null;
+
     async function playVoiceSample() {
         const select = document.getElementById("mind-voice-name");
         const status = document.getElementById("mind-voice-status");
         const button = document.getElementById("mind-voice-listen");
+        // Two voices playing over each other is two voices nobody can judge,
+        // and play() resolves when playback starts, not when it ends — so the
+        // button stays disabled until the audio actually finishes.
+        if (voiceSample) { voiceSample.pause(); URL.revokeObjectURL(voiceSample.src); voiceSample = null; }
         button.disabled = true;
         status.textContent = "Speaking a sample…";
+        let url = null;
         try {
             const response = await fetch("/api/voices/sample", {
                 method: "POST",
@@ -144,12 +153,20 @@ window.addEventListener("DOMContentLoaded", async function () {
                 body: JSON.stringify({voice: select.value})
             });
             if (!response.ok) throw new Error(await response.text() || response.statusText);
-            const audio = new Audio(URL.createObjectURL(await response.blob()));
-            await audio.play();
+            url = URL.createObjectURL(await response.blob());
+            const audio = new Audio(url);
+            voiceSample = audio;
+            await new Promise(function (resolve, reject) {
+                audio.addEventListener("ended", resolve, {once: true});
+                audio.addEventListener("error", function () { reject(new Error("the sample would not play")); }, {once: true});
+                audio.play().catch(reject);
+            });
             status.textContent = "";
         } catch (error) {
             status.textContent = "Could not speak a sample: " + error.message;
         } finally {
+            if (url) URL.revokeObjectURL(url);
+            voiceSample = null;
             button.disabled = false;
         }
     }
