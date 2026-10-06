@@ -529,3 +529,82 @@ class TestRegistrationLoop:
 
         assert registrations == 2
         assert sleeps[0] == 300.0
+
+
+class TestVoice:
+    """A mind's voice is a field on the mind, written like its model."""
+
+    def test_creates_the_field_on_a_mind_scaffolded_before_voices(self, runtime_file):
+        """Every installed mind predates the field; refusing would make it
+        unsettable on all of them."""
+        assert "voice" not in runtime_file.read_text()
+        loaded = runtime_api.update_runtime_fields(runtime_file, {"voice": "bm_george"})
+        assert loaded["voice"] == "bm_george"
+        assert "voice: bm_george" in runtime_file.read_text()
+
+    def test_a_second_write_replaces_rather_than_appends(self, runtime_file):
+        runtime_api.update_runtime_fields(runtime_file, {"voice": "bm_george"})
+        runtime_api.update_runtime_fields(runtime_file, {"voice": "am_michael"})
+        text = runtime_file.read_text()
+        assert text.count("voice:") == 1
+        assert "voice: am_michael" in text
+
+    def test_a_missing_model_line_is_still_refused(self, runtime_file):
+        """An absent voice means an old mind; an absent model means a broken
+        file, and the two must not share a remedy."""
+        runtime_file.write_text(RUNTIME.replace("default_model: sonnet", ""))
+        with pytest.raises(ValueError):
+            runtime_api.update_runtime_fields(runtime_file, {"default_model": "opus"})
+
+    def test_registration_carries_the_voice_for_the_voice_server(self, runtime_file):
+        """The broker row is the cache the voice server reads."""
+        runtime_api.update_runtime_fields(runtime_file, {"voice": "bm_george"})
+        assert runtime_api.registration_payload(runtime_file)["voice"] == "bm_george"
+
+    def test_registration_omits_an_unset_voice_rather_than_clearing_it(
+        self, runtime_file
+    ):
+        assert "voice" not in runtime_api.registration_payload(runtime_file)
+
+
+class TestVoiceRoute:
+    def test_patch_writes_a_voice_without_restating_the_model(
+        self, client, runtime_file
+    ):
+        """The picker sets one field; forcing it to resend the model invites
+        writing a stale one back over a fresh edit."""
+        response = client.patch(
+            "/runtime",
+            json={"voice": "bm_george"},
+            headers={"Authorization": "Bearer s3cret"},
+        )
+        assert response.status_code == 200
+        assert response.json()["configuration"]["voice"] == "bm_george"
+        assert runtime_api.load_runtime(runtime_file)["default_model"] == "sonnet"
+
+    def test_patch_writes_a_model_and_a_voice_in_one_write(self, client, runtime_file):
+        response = client.patch(
+            "/runtime",
+            json={"default_model": "opus", "voice": "am_michael"},
+            headers={"Authorization": "Bearer s3cret"},
+        )
+        assert response.status_code == 200
+        loaded = runtime_api.load_runtime(runtime_file)
+        assert (loaded["default_model"], loaded["voice"]) == ("opus", "am_michael")
+
+    def test_patch_with_nothing_writable_is_refused(self, client, runtime_file):
+        response = client.patch(
+            "/runtime",
+            json={"nonsense": "x"},
+            headers={"Authorization": "Bearer s3cret"},
+        )
+        assert response.status_code == 400
+        assert "voice" not in runtime_file.read_text()
+
+    def test_get_reports_the_voice_the_page_renders(self, client, runtime_file):
+        client.patch(
+            "/runtime",
+            json={"voice": "bm_george"},
+            headers={"Authorization": "Bearer s3cret"},
+        )
+        assert client.get("/runtime").json()["configuration"]["voice"] == "bm_george"
