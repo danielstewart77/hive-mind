@@ -213,10 +213,13 @@ async def startup():
     _whisper = WhisperModel(_WHISPER_MODEL, device=_DEVICE, compute_type=compute_type)
 
     if _TTS_ENGINE == "kokoro":
-        # The configured language is warmed now so the first reply is not the
-        # one that waits for a model; the other accent loads when a voice in it
-        # is first asked for.
+        # The default voice's own language is warmed, not just the configured
+        # one: `KOKORO_DEFAULT_VOICE` is what every reply uses until a Mind
+        # names its own, and on this hive it is British while the configured
+        # language is American. Warming only the latter left the pipeline that
+        # actually speaks to load inside the first reply.
         _KOKORO_PIPELINES.warm()
+        _KOKORO_PIPELINES.get(_KOKORO_DEFAULT_VOICE)
         _kokoro_loaded = True
         _KOKORO_VOICE_MAP.update(_load_kokoro_voice_map())
         log.info(
@@ -489,10 +492,16 @@ async def stt(file: UploadFile):
 # ---------------------------------------------------------------------------
 # TTS endpoint
 # ---------------------------------------------------------------------------
+#: Every spoken reply is retimed by this before it reaches a surface; no caller
+#: passes a speed. A sample played at any other tempo is a sample of a voice
+#: nobody will hear, while its own words promise this is how the Mind will sound.
+DEFAULT_SPEED = 0.9
+
+
 class TTSRequest(BaseModel):
     text: str
     voice_id: str = "default"
-    speed: float = 0.9
+    speed: float = DEFAULT_SPEED
 
 
 @app.post("/tts")
@@ -505,7 +514,7 @@ async def tts(req: TTSRequest):
 
     if _TTS_ENGINE == "kokoro":
         voice = _resolve_kokoro_voice(req.voice_id)
-        wav = _synthesize_kokoro(text, voice)
+        wav = await asyncio.to_thread(_synthesize_kokoro, text, voice)
         sample_rate = _KOKORO_SR
         engine_label = "Kokoro"
     else:
@@ -553,22 +562,38 @@ SAMPLE_TEXT = (
 #: repository shows up the same day.
 _CATALOGUE_TTL_SECONDS = 300.0
 _catalogue_cache: tuple[float, kokoro_catalogue.Catalogue] | None = None
+_catalogue_lock = asyncio.Lock()
 
 
 async def _catalogue() -> kokoro_catalogue.Catalogue:
     """This server's catalogue, re-read when the cached one is stale."""
     global _catalogue_cache
-    now = time.monotonic()
-    if _catalogue_cache is not None and now - _catalogue_cache[0] < _CATALOGUE_TTL_SECONDS:
-        return _catalogue_cache[1]
-    catalogue = await asyncio.to_thread(
-        kokoro_catalogue.fetch_catalogue, _KOKORO_LANG
-    )
-    # An unreadable catalogue is not cached: the network is the thing that
-    # failed, and a five-minute memory of that failure outlives the blip.
-    if catalogue.readable:
-        _catalogue_cache = (now, catalogue)
-    return catalogue
+    if _fresh_catalogue() is not None:
+        return _fresh_catalogue()
+    async with _catalogue_lock:
+        # Re-checked inside the lock: whoever held it may have just fetched.
+        fresh = _fresh_catalogue()
+        if fresh is not None:
+            return fresh
+        catalogue = await asyncio.to_thread(
+            kokoro_catalogue.fetch_catalogue, _KOKORO_LANG
+        )
+        # Neither failure is cached: the network is the thing that failed, and a
+        # five-minute memory of it outlives the blip. A card that failed while
+        # the listing succeeded is one of those — it leaves every description
+        # empty, which must not be remembered as the card's own silence.
+        if catalogue.readable and catalogue.described:
+            _catalogue_cache = (time.monotonic(), catalogue)
+        return catalogue
+
+
+def _fresh_catalogue() -> kokoro_catalogue.Catalogue | None:
+    """The cached catalogue if it is still within its life, else nothing."""
+    if _catalogue_cache is None:
+        return None
+    if time.monotonic() - _catalogue_cache[0] >= _CATALOGUE_TTL_SECONDS:
+        return None
+    return _catalogue_cache[1]
 
 
 @app.get("/voices")
@@ -597,6 +622,17 @@ async def voices():
 class VoiceSampleRequest(BaseModel):
     voice: str
     text: str = SAMPLE_TEXT
+    speed: float = DEFAULT_SPEED
+
+
+def _sample_bytes(text: str, voice: str, speed: float) -> bytes:
+    """Synthesise and encode a sample. All of it blocking, all off the loop."""
+    import soundfile as sf
+
+    wav = _synthesize_kokoro(text, voice)
+    wav_buf = io.BytesIO()
+    sf.write(wav_buf, wav, _KOKORO_SR, format="WAV")
+    return _wav_to_ogg(wav_buf.getvalue(), speed=speed)
 
 
 @app.post("/voices/sample")
@@ -623,12 +659,7 @@ async def voices_sample(req: VoiceSampleRequest):
             status_code=400, detail=f"this server does not offer the voice {voice!r}"
         )
     text = _strip_markdown(req.text) or SAMPLE_TEXT
-    wav = await asyncio.to_thread(_synthesize_kokoro, text, voice)
-    import soundfile as sf
-
-    wav_buf = io.BytesIO()
-    sf.write(wav_buf, wav, _KOKORO_SR, format="WAV")
-    ogg_bytes = _wav_to_ogg(wav_buf.getvalue())
+    ogg_bytes = await asyncio.to_thread(_sample_bytes, text, voice, req.speed)
     log_event(log, "voice.sample.completed", voice=voice,
               audio_bytes=len(ogg_bytes), device=_DEVICE)
     return Response(content=ogg_bytes, media_type="audio/ogg")

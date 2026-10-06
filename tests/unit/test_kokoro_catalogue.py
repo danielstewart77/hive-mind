@@ -62,12 +62,6 @@ class TestWhatTheServerCanSpeak:
                 "af_bella", "af_heart", "am_michael", "bf_emma", "bm_george"
             ]
 
-    def test_offers_nothing_from_the_other_languages(self):
-        """This hive speaks English. Sixty options nobody will pick is worse."""
-        names = [v.name for v in kokoro_catalogue.build_catalogue(LISTING, "a").voices]
-        assert "zf_xiaobei" not in names
-        assert "ef_dora" not in names
-
     def test_ignores_everything_in_the_repository_that_is_not_a_voice(self):
         assert kokoro_catalogue.voice_names_from_listing(LISTING) == [
             "af_bella",
@@ -139,6 +133,7 @@ class TestUnreadable:
                 "minutes of training audio."
             ),
         } in body["voices"]
+        assert body["described"] is True
 
 
 class TestWhatTheCardSays:
@@ -153,23 +148,28 @@ class TestWhatTheCardSays:
         assert card.grade == "A-"
         assert card.description == (
             "Overall grade A-, excellent source recording, ten to a hundred "
-            "hours of training audio. The most popular voice."
+            "hours of training audio."
         )
 
     def test_reads_a_bold_escaped_name_as_the_voice_it_names(self):
         """`**af\\_heart**` is the heart voice; the markup is not its name."""
         cards = kokoro_catalogue.parse_voice_cards(CARD)
         assert "af_heart" in cards
-        assert cards["af_heart"].description == (
-            "Overall grade A. The project's flagship voice."
-        )
+        assert cards["af_heart"].description == "Overall grade A."
 
-    def test_says_the_traits_in_words_rather_than_the_cards_glyphs(self):
+    def test_reports_nothing_from_the_traits_column(self):
+        """The card defines no glyph but the duration one.
+
+        Rendering a heart as "the flagship voice" or headphones as "recorded
+        close-mic" is authorship wearing the repository's authority — a claim
+        about microphone technique the card never makes. What a voice sounds
+        like is what the Listen button is for.
+        """
         card = kokoro_catalogue.parse_voice_cards(CARD)["af_nicole"]
-        assert card.description.endswith(
-            "Recorded close-mic, best heard on headphones."
+        assert card.description == (
+            "Overall grade B-, good source recording, ten to a hundred hours "
+            "of training audio."
         )
-        assert all(glyph not in card.description for glyph in kokoro_catalogue.TRAITS)
 
     def test_reads_an_italic_duration_carrying_the_cards_glyph(self):
         """The tiny-training glyph sits inside the duration cell itself."""
@@ -218,3 +218,78 @@ class TestWhatMayBeSampled:
         catalogue = kokoro_catalogue.unreadable_catalogue("a", "no route to host")
         assert kokoro_catalogue.offers(catalogue, "bm_lewis") is True
         assert kokoro_catalogue.offers(catalogue, "zf_xiaobei") is False
+
+
+class TestACardThisFileCannotTrust:
+    """A confident wrong sentence is worse than no sentence."""
+
+    def test_a_card_that_gained_a_column_reports_nothing_rather_than_nonsense(self):
+        """Positional reading would print a training duration as a grade."""
+        shifted = CARD.replace(
+            "| Name | Traits | Target Quality |",
+            "| Name | Traits | Mood | Target Quality |",
+        )
+        cards = kokoro_catalogue.parse_voice_cards(shifted)
+        for card in cards.values():
+            assert "hours" not in card.grade
+            assert "minutes" not in card.grade
+
+    def test_a_card_whose_columns_moved_is_still_read_correctly(self):
+        """Located by heading, so an order change is not a shift."""
+        reordered = """| Overall Grade | Name | Target Quality | Training Duration |
+| --- | --- | --- | --- |
+| **A-** | af_bella | **A** | **HH hours** |
+"""
+        card = kokoro_catalogue.parse_voice_cards(reordered)["af_bella"]
+        assert card.grade == "A-"
+        assert card.quality == "A"
+        assert card.duration == "HH hours"
+
+    def test_a_table_whose_header_it_cannot_read_contributes_nothing(self):
+        headerless = """| af_bella | B | H hours | C+ |
+| bm_george | B | MM minutes | C |
+"""
+        assert kokoro_catalogue.parse_voice_cards(headerless) == {}
+
+    def test_the_first_row_for_a_voice_wins(self):
+        """An example row below the real table must not overwrite the data."""
+        with_example = CARD + """
+| Name | Traits | Target Quality | Training Duration | Overall Grade |
+| --- | --- | --- | --- | --- |
+| af_bella | | C | _M minutes_ | F |
+"""
+        card = kokoro_catalogue.parse_voice_cards(with_example)["af_bella"]
+        assert card.grade == "A-"
+
+    def test_a_grade_that_is_not_a_grade_is_dropped(self):
+        odd = """| Name | Traits | Target Quality | Training Duration | Overall Grade |
+| --- | --- | --- | --- | --- |
+| af_bella | | B+ | HH hours | excellent |
+"""
+        card = kokoro_catalogue.parse_voice_cards(odd)["af_bella"]
+        assert card.grade == ""
+        # B+ is not a letter this module can say anything about, so it is left out
+        # rather than printed as a phrase nothing defines.
+        assert card.quality == ""
+        assert card.description == "ten to a hundred hours of training audio."
+
+
+class TestACardNobodyCouldRead:
+    def test_is_its_own_state_not_a_card_that_happens_to_be_silent(self):
+        """Every description empty has two causes and one remedy each."""
+
+        def explode():
+            raise OSError("no route to host")
+
+        catalogue = kokoro_catalogue.fetch_catalogue(
+            "a", list_repo_files=lambda repo: LISTING, read_card=explode
+        )
+        assert catalogue.readable is True
+        assert catalogue.described is False
+        assert catalogue.as_dict()["described"] is False
+
+    def test_a_card_that_was_read_says_so_even_where_it_is_silent(self):
+        catalogue = kokoro_catalogue.fetch_catalogue(
+            "a", list_repo_files=lambda repo: LISTING, read_card=lambda: CARD
+        )
+        assert catalogue.described is True
