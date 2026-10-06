@@ -17,7 +17,7 @@ changed. Daniel has a separate idea for it and will raise it himself.
 
 The routing Daniel described is already the system's shape, not new work:
 
-- `bots/discord_bot.py` passes `channel_id` as `client_ref` on every inbound
+- The Discord surface (`hive-surfaces`) passes `channel_id` as `client_ref` on every inbound
   message and server command.
 - `active_sessions` in `nervous-system/comms/sessions.py` is
   `PRIMARY KEY (client_type, client_ref)` — so `("discord", "<channel_id>")`
@@ -178,7 +178,7 @@ tells it to run.
 ## What the fire has to solve
 
 **Nothing can currently push text into a Discord channel unsolicited.**
-`bots/discord_bot.py` sends only in reply to a message or a slash-command
+The Discord surface sends only in reply to a message or a slash-command
 interaction it received — there is no `get_channel(...).send(...)` path
 anywhere in it. The scheduler's Telegram delivery works because it calls
 Telegram's send API directly with the bot token, bypassing the bot process
