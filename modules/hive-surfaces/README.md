@@ -17,6 +17,19 @@ red, because `main` is what every surface in the hive is running.
 pip install git+https://github.com/danielstewart77/hive-surfaces.git
 ```
 
+Upgrading needs `--force-reinstall --no-deps`. Every mind tracks `main`, so the
+version never changes — and pip, having cloned the repo and resolved `main` to
+a new commit, compares that unchanged version against what is installed and
+installs nothing. `--upgrade` alone does not help for the same reason. So a
+mind that re-ran its install would stay on whatever commit it first got, with
+no error and nothing in the output to say so:
+
+```
+pip install --force-reinstall --no-deps \
+    "hive-surfaces @ git+https://github.com/danielstewart77/hive-surfaces.git@main"
+pip install -r requirements.txt   # resolve anything the new core now needs
+```
+
 ## Use
 
 ```python
@@ -41,6 +54,22 @@ in.
 An empty allow-list authorizes nobody. A host that forgets to call
 `configure` gets a surface that refuses every message rather than one that
 answers everyone.
+
+`configure` called with a `SurfaceConfig` installs that object whole — a host
+handing one over is stating all of it. Called with keywords alone, it changes
+only the fields it names: a host that configures its allow-lists at boot and
+later names a new default model would otherwise have the second call blank the
+allow-list back to nobody.
+
+`photo_dir` and `state_dir` are the host's to give. Their defaults sit under
+the working directory rather than beside this package, because installed the
+package lives in site-packages — unwritable in some deployments, and wiped by
+the next reinstall, which would forget every single-use claim the session
+picker holds and let a tap Telegram redelivers act a second time.
+
+`models_catalog` is an async callable returning the rows `/models` lists,
+because the catalog is relayed from whatever inference proxy the host talks
+to. A mind that supplies none reports that it offers no model list.
 
 ## A mind's own commands
 

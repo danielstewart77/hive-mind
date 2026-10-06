@@ -31,7 +31,6 @@ _chat_queues: dict[int, asyncio.Queue] = {}
 # the claims in memory only, both taps claim successfully and the second ends
 # the conversation the first just created, which is exactly 2026-09-17.
 _MAX_REMEMBERED_PICKERS = 512
-_DEFAULT_STATE_PATH = Path(__file__).resolve().parent.parent / "data" / "spent_pickers.json"
 
 
 def _state_path() -> Path:
@@ -41,8 +40,19 @@ def _state_path() -> Path:
     outside the checkout — and resolving it each time is what lets a test aim
     it at a temp directory without depending on when this module happened to
     be imported.
+
+    Otherwise it is the host's configured `state_dir`, never a path derived
+    from this module's own location: installed as a package that is inside
+    site-packages, which the next reinstall wipes — so every claim the file
+    held is forgotten and a tap Telegram redelivers across a restart claims
+    successfully a second time, which is the whole incident above.
     """
-    return Path(os.environ.get("PICKER_STATE_PATH") or _DEFAULT_STATE_PATH)
+    override = os.environ.get("PICKER_STATE_PATH")
+    if override:
+        return Path(override)
+    from hive_surfaces.config import state_root
+
+    return state_root() / "spent_pickers.json"
 _spent_pickers: "OrderedDict[tuple[int, int], None]" = OrderedDict()
 _loaded = False
 
