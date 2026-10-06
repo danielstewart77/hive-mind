@@ -22,9 +22,13 @@ A mind with a command of its own registers it before starting the surface:
 """
 
 from hive_surfaces.config import SurfaceConfig, config, configure, installed
+from hive_surfaces.token_store import TokenRefused, TokenStatus
 
 __all__ = [
     "SurfaceConfig",
+    "TokenRefused",
+    "TokenStatus",
+    "token_store",
     "config",
     "configure",
     "installed",
