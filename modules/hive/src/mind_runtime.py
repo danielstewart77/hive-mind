@@ -126,3 +126,97 @@ async def fetch_models(gateway_url: str) -> list[dict]:
     body = response.json()
     rows = body.get("models") if isinstance(body, dict) else None
     return [r for r in rows if isinstance(r, dict) and r.get("name")] if isinstance(rows, list) else []
+
+
+# ---------------------------------------------------------------------------
+# The surface token
+# ---------------------------------------------------------------------------
+# Set through the Mind, never from here. The token has to land where *that*
+# Mind's surface reads it — its own `.env` on an edge install, a per-mind
+# keyring key in the containerised stack — and this console can see neither:
+# it holds no mount, and a Mind on another machine has none to offer. So the
+# Mind writes, and what travels is one PUT.
+#
+# Nothing ever comes back. The Mind's read route reports whether it has a
+# token the bot API accepts and which bot that is, and this relays exactly
+# that — a console that could read tokens would put every bot in the hive one
+# session cookie away from being impersonated.
+
+
+def _surface_token_endpoint(gateway_url: str) -> str:
+    url = (gateway_url or "").strip().rstrip("/")
+    if not url:
+        raise HTTPException(
+            status_code=400, detail="This Mind has no gateway URL in the registry"
+        )
+    return f"{url}/surface-token"
+
+
+def _unwrap_surface_token(response: httpx.Response) -> dict:
+    """What the Mind said, with its own refusal preserved.
+
+    A 400 from the Mind means the *token* was refused, not the credential
+    this console presented, and flattening the two would tell the operator to
+    go and check a console setting that is working.
+    """
+    if response.status_code == 404:
+        raise HTTPException(
+            status_code=501,
+            detail="This Mind is running a version without the surface-token API",
+        )
+    if response.status_code >= 400:
+        detail = response.text
+        try:
+            body = response.json()
+            if isinstance(body, dict) and body.get("error"):
+                detail = str(body["error"])
+        except ValueError:
+            pass
+        raise HTTPException(status_code=response.status_code, detail=detail)
+    body = response.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=502, detail="Mind returned no token state")
+    return body
+
+
+async def fetch_surface_token(gateway_url: str) -> dict:
+    """Whether this Mind's surface has a token the bot API accepts.
+
+    Three states reach the page, because they have different remedies:
+    nothing stored, stored and accepted, or stored and refused. A Mind that
+    is unreachable, or too old to serve the route, reports as unknown rather
+    than as a Mind with no token — the remedy for the first is to go and look
+    at the machine, and for the second to paste a token that was never
+    missing.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            response = await client.get(
+                _surface_token_endpoint(gateway_url), headers=admin_headers()
+            )
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Mind is unreachable: {exc}"
+        ) from exc
+    return _unwrap_surface_token(response)
+
+
+async def push_surface_token(gateway_url: str, token: str) -> dict:
+    """Hand a Mind a new bot token for it to verify and store.
+
+    The Mind checks it against the bot API before storing, so a refusal
+    leaves the working token in place. What comes back names the bot the
+    token authenticates as, and never the token.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT + 12.0) as client:
+            response = await client.put(
+                _surface_token_endpoint(gateway_url),
+                json={"token": token},
+                headers=admin_headers(),
+            )
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Mind is unreachable: {exc}"
+        ) from exc
+    return _unwrap_surface_token(response)

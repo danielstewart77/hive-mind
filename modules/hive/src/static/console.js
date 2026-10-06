@@ -114,6 +114,23 @@
         });
     }
 
+    /* A table row whose only hit target is the name text reads as broken: the
+       row highlights on hover, so the whole row is what a reader aims at, and a
+       click landing two pixels off the six characters of a Mind's name does
+       nothing at all — repeatably, and with no way to tell that from a dead
+       page. Rows carrying data-row-href navigate as a whole. The anchor inside
+       stays, because it is what middle-click, keyboard focus and copy-link-
+       address need, and interactive descendants keep their own clicks. */
+    document.addEventListener("click", function (event) {
+        if (event.defaultPrevented || event.button !== 0) return;
+        if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        if (event.target.closest("a, button, input, select, textarea, label, summary, [data-copy]")) return;
+        if (window.getSelection && String(window.getSelection()).length) return;
+        const row = event.target.closest("[data-row-href]");
+        if (!row) return;
+        window.location.assign(row.dataset.rowHref);
+    });
+
     document.addEventListener("click", async function (event) {
         const button = event.target.closest("[data-copy]");
         if (!button) return;

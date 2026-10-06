@@ -54,7 +54,8 @@ window.addEventListener("DOMContentLoaded", async function () {
             const cfg = mind.local_config && mind.local_config.config || {};
             const model = mind.model || cfg.default_model || "Not reported";
             const harness = mind.harness || cfg.harness || "Unknown runtime";
-            return '<tr><td><div class="entity-cell"><span class="entity-avatar">' + h.escapeHtml((mind.name || "?").slice(0, 2)) + '</span><span class="entity-copy"><a href="/minds/' + encodeURIComponent(mind.id || mind.name) + '">' + h.escapeHtml(mind.name) + '</a></span></div></td><td>' + h.statusPill(mind.activity_status === "active", "Active session", "Registered") + '</td><td><span>' + h.escapeHtml(model) + '</span><br><small class="faint">' + h.escapeHtml(harness) + '</small></td><td class="muted">' + h.escapeHtml(h.formatTime(mind.last_activity)) + '</td></tr>';
+            const href = '/minds/' + encodeURIComponent(mind.id || mind.name);
+            return '<tr data-row-href="' + h.escapeHtml(href) + '"><td><div class="entity-cell"><span class="entity-avatar">' + h.escapeHtml((mind.name || "?").slice(0, 2)) + '</span><span class="entity-copy"><a href="/minds/' + encodeURIComponent(mind.id || mind.name) + '">' + h.escapeHtml(mind.name) + '</a></span></div></td><td>' + h.statusPill(mind.activity_status === "active", "Active session", "Registered") + '</td><td><span>' + h.escapeHtml(model) + '</span><br><small class="faint">' + h.escapeHtml(harness) + '</small></td><td class="muted">' + h.escapeHtml(h.formatTime(mind.last_activity)) + '</td></tr>';
         }).join("") : '<tr><td colspan="4"><div class="empty-state"><h3>No minds registered</h3><p>Use the setup guide to connect the first mind.</p><a class="button button-primary" href="/setup">Open setup</a></div></td></tr>';
 
         const services = [

@@ -183,6 +183,7 @@ a { color: inherit; }
 .data-table td { padding: 12px 14px; color: #cbd2d6; border-bottom: 1px solid #252c31; vertical-align: middle; }
 .data-table tbody tr:last-child td { border-bottom: 0; }
 .data-table tbody tr:hover td { background: #1a1f23; }
+[data-row-href] { cursor: pointer; }
 .entity-cell { display: flex; align-items: center; gap: 10px; min-width: 150px; }
 .entity-avatar { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 7px; background: var(--console-cyan-soft); color: #8ad9e2; font-weight: 700; text-transform: uppercase; }
 .entity-copy { display: flex; flex-direction: column; min-width: 0; }
