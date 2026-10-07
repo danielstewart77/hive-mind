@@ -716,6 +716,38 @@ def _progress_frame(line: str) -> dict | None:
     return {"type": "goal_progress", "progress": progress, "_observer_only": True}
 
 
+def _delta_frame(line: str) -> dict | None:
+    """An assistant delta line as a streaming frame, or None.
+
+    The runner writes one line per piece of assistant output as the model
+    produces it. Translated into the Anthropic-shaped partial event the
+    surfaces already read, because one vocabulary across the harnesses is what
+    lets a surface render a streamed turn without knowing which harness is
+    behind it — claude's own stdout already speaks this shape.
+
+    Not observer-only: the whole point is that it reaches the chat surface.
+    """
+    text = line.strip()
+    if not text.startswith("{"):
+        return None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    delta = parsed.get("delta") if isinstance(parsed, dict) else None
+    if not isinstance(delta, dict):
+        return None
+    body = delta.get("text")
+    if not isinstance(body, str) or not body:
+        return None
+    if delta.get("kind") == "reasoning":
+        inner = {"type": "thinking_delta", "thinking": body}
+    else:
+        inner = {"type": "text_delta", "text": body}
+    return {"type": "stream_event", "event": {
+        "type": "content_block_delta", "index": 0, "delta": inner}}
+
+
 def _no_text_diagnostic(report: dict) -> str:
     """What to show for a turn that completed without assistant text.
 
@@ -870,6 +902,10 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
             pgid = None
 
         lines: list[str] = []
+        # Whether any prose reached the surface while the turn ran. What it
+        # gates is the buffered copy at the end: the report carries the whole
+        # answer, and yielding it after the deltas would show the answer twice.
+        streamed_prose = False
         stderr = b""
         timed_out = False
         # Resolved now rather than at import: the console writes this value
@@ -902,6 +938,13 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
                             break
                         decoded = raw_line.decode(errors="replace")
                         lines.append(decoded)
+                        delta = _delta_frame(decoded)
+                        if delta is not None:
+                            inner = delta["event"]["delta"]
+                            if inner["type"] == "text_delta":
+                                streamed_prose = True
+                            yield delta
+                            continue
                         frame = _progress_frame(decoded)
                         if frame is not None:
                             yield frame
@@ -985,12 +1028,17 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
            "_observer_only": True}
 
     text = str(report.get("text") or "")
-    yield {
-        "type": "assistant",
-        "message": {"role": "assistant", "content": [
-            {"type": "text", "text": text if text else _no_text_diagnostic(report)}
-        ]},
-    }
+    # The diagnostic is still written when a turn produced no prose at all,
+    # streamed or buffered: a blank reply reads as a broken mind, and what the
+    # turn actually did is the thing worth showing. Reasoning alone does not
+    # count as an answer, which is why this is gated on prose.
+    if not streamed_prose:
+        yield {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [
+                {"type": "text", "text": text if text else _no_text_diagnostic(report)}
+            ]},
+        }
 
     outcome = str(report.get("outcome") or "unknown")
     traffic = report.get("traffic") or {}

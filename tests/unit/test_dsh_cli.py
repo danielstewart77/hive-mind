@@ -1174,3 +1174,76 @@ async def test_the_profile_is_read_per_turn_so_an_edit_does_not_wait_on_a_restar
     await _drain(dsh)
     command = list(argv[0])
     assert command[command.index("--profile") + 1] == "exam"
+
+
+def _delta_line(kind: str, text: str) -> str:
+    """One assistant delta the way the resumable runner writes it."""
+    return json.dumps({"delta": {"kind": kind, "text": text}}) + "\n"
+
+
+def _streamed(events: list[dict], inner_type: str) -> list[str]:
+    """The streamed pieces of one kind, in the order a surface receives them."""
+    field = "thinking" if inner_type == "thinking_delta" else "text"
+    return [
+        event["event"]["delta"][field]
+        for event in events
+        if event.get("type") == "stream_event"
+        and event["event"].get("type") == "content_block_delta"
+        and event["event"]["delta"].get("type") == inner_type
+    ]
+
+
+async def test_prose_reaches_the_surface_as_the_model_writes_it(dsh, monkeypatch) -> None:
+    _session(dsh)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _Spawn([
+        _delta_line("text", "half "),
+        _delta_line("text", "an answer"),
+        _report(text="half an answer"),
+    ]))
+    events = await _drain(dsh)
+    assert _streamed(events, "text_delta") == ["half ", "an answer"]
+    # Reaching the surface is the point: an observer-only frame is published to
+    # the session event stream and never handed to the bot.
+    assert all(not event.get("_observer_only")
+               for event in events if event.get("type") == "stream_event")
+
+
+async def test_the_models_reasoning_is_streamed_apart_from_its_answer(
+    dsh, monkeypatch
+) -> None:
+    _session(dsh)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _Spawn([
+        _delta_line("reasoning", "weighing it"),
+        _delta_line("text", "the answer"),
+        _report(text="the answer"),
+    ]))
+    events = await _drain(dsh)
+    assert _streamed(events, "thinking_delta") == ["weighing it"]
+    assert _streamed(events, "text_delta") == ["the answer"]
+
+
+async def test_a_streamed_answer_is_not_repeated_when_the_turn_ends(
+    dsh, monkeypatch
+) -> None:
+    _session(dsh)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _Spawn([
+        _delta_line("text", "the answer"),
+        _report(text="the answer"),
+    ]))
+    events = await _drain(dsh)
+    assert [event for event in events if event["type"] == "assistant"] == []
+
+
+async def test_a_turn_that_streamed_only_reasoning_still_says_what_it_did(
+    dsh, monkeypatch
+) -> None:
+    _session(dsh)
+    traffic = {"emitted": 2, "answered": 2, "succeeded": 2, "failed": 0,
+               "unanswered": 0, "failuresByCode": {}, "callsByTool": {"read": 2}}
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _Spawn([
+        _delta_line("reasoning", "thinking about it"),
+        _report(text="", outcome="max-tokens", traffic=traffic),
+    ]))
+    text = _assistant_text(await _drain(dsh))
+    assert "max-tokens" in text
+    assert "2 tool call" in text
