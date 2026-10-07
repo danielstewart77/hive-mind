@@ -320,7 +320,7 @@ class GatewayClient:
             # Identity of the content block currently being streamed, so a
             # move to a new block emits the paragraph break the mind meant
             # and a continuation of the same block emits nothing.
-            current_block: tuple[int, object] | None = None
+            current_block: tuple[int, object, str] | None = None
             block_epoch = 0
             # Trailing newlines already carried by the text yielded so far, so
             # a block that ends with its own newline does not get a break on
@@ -376,14 +376,12 @@ class GatewayClient:
                                     gap = separator()
                                     if gap:
                                         yield gap
-                                        tail_newlines = len(gap)
                                 if kind == "reasoning" and (
                                     current_block is None or current_block[2] != "reasoning"
                                 ):
                                     # Once per run of reasoning, not per delta.
                                     yield THINKING_LABEL
                                     yielded_any = True
-                                    tail_newlines = 0
                                 current_block = block
                                 yield text
                                 tail_newlines = len(text) - len(text.rstrip("\n"))
@@ -402,7 +400,14 @@ class GatewayClient:
                                 continue
                             if kind == "text" and saw_partial_text:
                                 continue
-                            if kind == "reasoning" and saw_partial_thinking:
+                            if kind == "reasoning" and (
+                                saw_partial_thinking or saw_partial_text or yielded_any
+                            ):
+                                # Reasoning that arrives after the answer is
+                                # worse than absent: the operator reads the
+                                # conclusion and then the deliberation behind
+                                # it, and a voice surface speaks them in that
+                                # order. Thinking leads or it is dropped.
                                 continue
                             if yielded_any:
                                 gap = separator()

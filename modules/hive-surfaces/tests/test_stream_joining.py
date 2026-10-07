@@ -311,3 +311,78 @@ class TestReasoningIsShownOnlyWhenItIsReadable:
         assert "".join(await _collect(gateway)) == (
             "(thinking) weighing it\n\nthe answer"
         )
+
+
+def _dsh_delta(kind: str, text: str) -> dict:
+    """A delta shaped the way the dsh adapter emits one.
+
+    It differs from the claude path in the two ways that matter here: every
+    delta claims block index 0, and no `content_block_start` ever arrives. So
+    the epoch never moves and the index never changes, and the kind is the only
+    thing that can separate reasoning from the answer.
+    """
+    inner = ({"type": "thinking_delta", "thinking": text} if kind == "reasoning"
+             else {"type": "text_delta", "text": text})
+    return {"type": "stream_event",
+            "event": {"type": "content_block_delta", "index": 0, "delta": inner}}
+
+
+class TestReasoningAndAnswerStaySeparate:
+
+    @pytest.mark.asyncio
+    async def test_the_dsh_shape_still_breaks_between_reasoning_and_answer(
+        self, gateway,
+    ):
+        """A harness that numbers every delta zero still gets the break."""
+        _serve(gateway, _sse(
+            _dsh_delta("reasoning", "weighing "), _dsh_delta("reasoning", "it"),
+            _dsh_delta("text", "the "), _dsh_delta("text", "answer"),
+        ))
+
+        assert "".join(await _collect(gateway)) == (
+            "(thinking) weighing it\n\nthe answer"
+        )
+
+    @pytest.mark.asyncio
+    async def test_reasoning_resumed_after_an_answer_is_labelled_again(
+        self, gateway,
+    ):
+        """A second run of reasoning says so rather than reading as more answer."""
+        _serve(gateway, _sse(
+            _dsh_delta("text", "first thought"),
+            _dsh_delta("reasoning", "reconsidering"),
+            _dsh_delta("text", "second thought"),
+        ))
+
+        assert "".join(await _collect(gateway)) == (
+            "first thought\n\n(thinking) reconsidering\n\nsecond thought"
+        )
+
+
+class TestWhatStreamedAndWhatDidNotAreJudgedApart:
+
+    @pytest.mark.asyncio
+    async def test_a_buffered_answer_survives_reasoning_that_streamed(
+        self, gateway,
+    ):
+        """Reasoning arriving as deltas must not suppress an answer that did not."""
+        _serve(gateway, _sse(
+            _dsh_delta("reasoning", "weighing it"),
+            _assistant_blocks({"type": "text", "text": "the answer"}),
+        ))
+
+        assert "".join(await _collect(gateway)) == (
+            "(thinking) weighing it\n\nthe answer"
+        )
+
+    @pytest.mark.asyncio
+    async def test_reasoning_that_would_land_after_the_answer_is_dropped(
+        self, gateway,
+    ):
+        """Thinking leads or it is not shown — never appended to its own conclusion."""
+        _serve(gateway, _sse(
+            _dsh_delta("text", "the answer"),
+            _assistant_blocks({"type": "thinking", "thinking": "weighing it"}),
+        ))
+
+        assert "".join(await _collect(gateway)) == "the answer"
