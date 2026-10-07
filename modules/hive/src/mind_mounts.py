@@ -21,6 +21,7 @@ host, so what the kernel would mount is what decides.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -91,15 +92,31 @@ def declared_roots() -> list[MountRoot]:
         entries = parsed
     roots: list[MountRoot] = []
     for entry in entries:
+        # Every field is named, including `container_root`: defaulting it
+        # would silently mount a second root over Dev's own path inside every
+        # Mind, and a typo in one field must refuse the configuration rather
+        # than raise past the routes as a 500 that reads like a Mind which is
+        # not a container.
+        missing = [
+            field
+            for field in ("key", "compose_var", "console_path", "container_root")
+            if not str(entry.get(field) or "").strip()
+        ]
+        if missing:
+            raise ValueError(
+                "MIND_MOUNT_ROOTS is missing " + ", ".join(missing) + " on a root"
+            )
         roots.append(
             MountRoot(
                 key=str(entry["key"]),
                 label=str(entry.get("label") or entry["key"]),
                 compose_var=str(entry["compose_var"]),
                 console_path=Path(str(entry["console_path"])),
-                container_root=str(entry.get("container_root") or "/mnt/dev").rstrip("/"),
+                container_root=str(entry["container_root"]).rstrip("/"),
             )
         )
+    if len({root.key for root in roots}) != len(roots):
+        raise ValueError("MIND_MOUNT_ROOTS names one key twice")
     return roots
 
 
@@ -129,20 +146,48 @@ def resolve_folder(root: MountRoot, relative: str) -> str:
     absolute path, a symlink pointing out of it. The check is on the resolved
     path because that is what the kernel would bind.
     """
-    relative = (relative or "").strip().strip("/")
+    relative = (relative or "").strip()
     base = root.console_path.resolve()
     if not base.is_dir():
         raise ValueError(f"{root.label} is not readable from the console")
+    # Judged before the separators are trimmed. Stripping first turns `/etc`
+    # into `etc`, which is then resolved under the root and accepted whenever
+    # a folder of that name happens to exist there — an absolute path quietly
+    # answered with a different folder.
+    if relative.startswith(("/", "\\")) or Path(relative).is_absolute():
+        raise ValueError("A folder is named relative to its root")
+    relative = relative.strip("/")
     if relative in {"", "."}:
         return ""
-    if Path(relative).is_absolute():
-        raise ValueError("A folder is named relative to its root")
+    # A name this control cannot write is refused on the way in, not just on
+    # the way out of `create_folder`. A folder holding a `$` would be read by
+    # the compose parser as a variable and mounted from somewhere else
+    # entirely, while the panel went on showing the name that was picked.
+    for segment in relative.split("/"):
+        if not _SEGMENT_RE.fullmatch(segment):
+            raise ValueError(
+                f"{segment} is not a name this control can write into a compose file"
+            )
     target = (base / relative).resolve()
     if target != base and base not in target.parents:
         raise ValueError(f"{relative} is outside {root.label}")
     if not target.is_dir():
         raise ValueError(f"{relative} is not a folder")
     return target.relative_to(base).as_posix()
+
+
+def folder_exists(root: MountRoot, relative: str) -> bool:
+    """Whether a folder a fragment already names is still there.
+
+    A folder removed on the host leaves a mount declared for a path that no
+    longer exists; the page says so rather than offering a row whose every
+    save is refused for a reason nothing on screen explains.
+    """
+    try:
+        resolve_folder(root, relative)
+    except ValueError:
+        return False
+    return True
 
 
 def list_folders(root_key: str, relative: str = "") -> dict[str, Any]:
@@ -177,7 +222,12 @@ def create_folder(root_key: str, parent: str, name: str) -> dict[str, Any]:
     resolved_parent = resolve_folder(root, parent)
     base = root.console_path.resolve()
     target = (base / resolved_parent / name) if resolved_parent else (base / name)
-    target.mkdir(exist_ok=True)
+    try:
+        target.mkdir()
+    except FileExistsError as exc:
+        # Reporting a creation that did not happen would also chown a folder
+        # this control never made. It is already in the list to be added.
+        raise ValueError(f"{name} already exists here — add it instead") from exc
     # Judged after the fact as well: the parent resolving inside the root is
     # not on its own a promise about the child.
     path = resolve_folder(root, f"{resolved_parent}/{name}" if resolved_parent else name)
@@ -199,14 +249,96 @@ def create_folder(root_key: str, parent: str, name: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def fragment_path(name: str) -> Path:
+@dataclass(frozen=True)
+class ComposeTarget:
+    """Where a Mind's mounts are written, and what recreates it from them."""
+
+    fragment: Path
+    project_path: str
+    service: str
+    env_file: Path
+
+
+def compose_target(name: str) -> ComposeTarget:
+    """This Mind's compose file, as this console can reach it.
+
+    A Mind in the hive's own stack keeps a fragment under hive_mind's
+    `minds/`, recreated by that project. A containerised edge Mind has its own
+    compose project in its own checkout, so it is named in
+    `MIND_COMPOSE_TARGETS` rather than assumed — the alternative is a control
+    that writes nothing and a recreate aimed at a service the named project
+    does not contain.
+    """
     if not _MIND_NAME_RE.fullmatch(name or ""):
         raise ValueError("Invalid Mind name")
-    return configuration_data.HIVE_MIND_MINDS_CONFIG_DIR / name / "container" / "compose.yaml"
+    raw = os.getenv("MIND_COMPOSE_TARGETS", "").strip()
+    if raw:
+        try:
+            targets = json.loads(raw)
+        except ValueError as exc:
+            raise ValueError(f"MIND_COMPOSE_TARGETS is not valid JSON: {exc}") from exc
+        if not isinstance(targets, dict):
+            raise ValueError("MIND_COMPOSE_TARGETS must be an object keyed by Mind name")
+        entry = targets.get(name)
+        if isinstance(entry, dict):
+            missing = [
+                field
+                for field in ("fragment", "project_path")
+                if not str(entry.get(field) or "").strip()
+            ]
+            if missing:
+                raise ValueError(
+                    f"MIND_COMPOSE_TARGETS is missing {', '.join(missing)} for {name}"
+                )
+            return ComposeTarget(
+                fragment=Path(str(entry["fragment"])),
+                project_path=str(entry["project_path"]),
+                service=str(entry.get("service") or name),
+                env_file=Path(str(entry.get("env_file") or "/env_hive_mind/.env")),
+            )
+    return ComposeTarget(
+        fragment=configuration_data.HIVE_MIND_MINDS_CONFIG_DIR
+        / name
+        / "container"
+        / "compose.yaml",
+        project_path=os.getenv(
+            "HIVE_MIND_PROJECT_PATH", "/home/daniel/Storage/Dev/hive_mind"
+        ),
+        service=name,
+        env_file=Path("/env_hive_mind/.env"),
+    )
 
 
-def _split_spec(spec: str) -> tuple[str, str, str] | None:
-    """A bind spec as (source, target, mode).
+def fragment_path(name: str) -> Path:
+    return compose_target(name).fragment
+
+
+def compose_variables(env_file: Path) -> set[str] | None:
+    """The variable names that compose file's project defines.
+
+    None when the file cannot be read, which is not the same as a file that
+    defines nothing: an undefined variable in a bind source expands to the
+    empty string, so `${HOST_NOTES_DIR}/journal` becomes `/journal` — created
+    at the host filesystem root, root-owned and empty, while the panel goes on
+    showing the folder that was picked.
+    """
+    try:
+        text = env_file.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    names = set()
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        if value.strip():
+            names.add(key.strip())
+    return names
+
+
+def _spec_fields(spec: str) -> list[str]:
+    """A bind spec's colon-separated fields.
 
     Split on the colons that separate the three fields, which is not every
     colon in the string: `${VAR:-default}` carries one of its own, and
@@ -227,6 +359,11 @@ def _split_spec(spec: str) -> tuple[str, str, str] | None:
             continue
         current.append(char)
     fields.append("".join(current))
+    return fields
+
+
+def _split_spec(spec: str) -> tuple[str, str, str] | None:
+    fields = _spec_fields(spec)
     if len(fields) < 2:
         return None
     return fields[0], fields[1], fields[2] if len(fields) > 2 else "rw"
@@ -238,6 +375,12 @@ def _project_row(spec: str) -> dict[str, Any] | None:
     if not parts:
         return None
     source, target, mode = parts
+    # Only the three-field spec with a plain mode is ours. A spec carrying a
+    # SELinux label or a propagation flag (`ro,z`, `rw,rslave`) reads as
+    # writable under a naive check and is flattened by a save that rewrites
+    # three fields from a boolean — so it is left alone instead.
+    if mode not in {"ro", "rw"} or len(_spec_fields(spec)) != 3:
+        return None
     match = _SOURCE_RE.fullmatch(source)
     if not match:
         return None
@@ -269,6 +412,21 @@ def mount_spec(root: MountRoot, relative: str, writable: bool) -> str:
     )
 
 
+class StaleFragment(Exception):
+    """The fragment changed since the page that is saving read it."""
+
+
+class NoComposeFile(Exception):
+    """This Mind's container is not defined by a file this console can reach.
+
+    Distinct from a file that cannot be read: nothing is wrong, the folders
+    are simply not this console's to set — Mordecai holds the whole host
+    filesystem through one mount declared in his own checkout's compose
+    project. Reported as a control that does not apply rather than as an
+    error to go and fix.
+    """
+
+
 def _service_volumes(document: Any, name: str) -> list[str]:
     services = document.get("services") if isinstance(document, dict) else None
     service = services.get(name) if isinstance(services, dict) else None
@@ -278,21 +436,58 @@ def _service_volumes(document: Any, name: str) -> list[str]:
     if volumes is None:
         return []
     if not isinstance(volumes, list) or not all(isinstance(v, str) for v in volumes):
-        raise ValueError("This Mind's volumes are not a list of bind specs")
+        raise ValueError(
+            "This Mind's volumes are written in a form this control cannot "
+            "rewrite (a long-syntax or merged list) — edit the fragment by hand"
+        )
     return list(volumes)
+
+
+def _entry_spec(line: str) -> str | None:
+    """The bind spec a volumes-block line declares, or None if it is not one.
+
+    A quoted spec is the same spec; an anchored or aliased entry is not one
+    this control will rewrite, because the text on the line is not what the
+    parsed document holds.
+    """
+    stripped = line.lstrip()
+    if not stripped.startswith("-"):
+        return None
+    spec = stripped[1:].strip()
+    if spec.startswith(("&", "*", "<<", "{", "[")):
+        return None
+    if len(spec) >= 2 and spec[0] == spec[-1] and spec[0] in {'"', "'"}:
+        spec = spec[1:-1]
+    return spec
+
+
+def revision_of(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def read_mounts(name: str) -> dict[str, Any]:
     """The project folders this Mind's fragment declares, and what it may not edit."""
-    source = fragment_path(name)
+    target = compose_target(name)
+    source = target.fragment
     if not source.is_file():
-        raise ValueError("This Mind has no compose fragment on this host")
-    document = yaml.safe_load(source.read_text(encoding="utf-8"))
-    specs = _service_volumes(document, name)
+        raise NoComposeFile(
+            "This Mind's container is not defined by a compose file this console "
+            "can reach, so its folders are set where that file lives"
+        )
+    original = source.read_text(encoding="utf-8")
+    document = yaml.safe_load(original)
+    specs = _service_volumes(document, target.service)
+    roots = declared_roots()
+    by_key = {root.key: root for root in roots}
     mounts, infrastructure = [], []
     for spec in specs:
         row = _project_row(spec)
         if row is not None:
+            root = by_key.get(row["root"])
+            # A folder removed on the host is still declared here. Saying so is
+            # the difference between a row the operator knows to drop and a
+            # save refused for a reason nothing on screen explains.
+            row["missing"] = not (root and folder_exists(root, row["path"]))
             mounts.append(row)
             continue
         parts = _split_spec(spec)
@@ -303,18 +498,49 @@ def read_mounts(name: str) -> dict[str, Any]:
                 "writable": bool(parts) and parts[2] != "ro",
             }
         )
+    rewritable, detail = True, ""
+    try:
+        _volume_block(original.splitlines(keepends=True), target.service)
+    except ValueError as exc:
+        # Found out now rather than when the operator presses Save: the panel
+        # can list what is mounted and still say it cannot write this file.
+        rewritable, detail = False, str(exc)
     return {
         "mounts": mounts,
         "infrastructure": infrastructure,
-        "roots": [root.as_json() for root in declared_roots()],
+        "roots": [root.as_json() for root in roots],
+        "revision": revision_of(original),
+        "rewritable": rewritable,
+        "detail": detail,
     }
 
 
 def _volume_block(lines: list[str], name: str) -> tuple[int, int, str]:
     """The half-open line range of the service's volumes entries, and their indent."""
-    service_at = None
+    services_at = None
     for index, line in enumerate(lines):
-        if re.fullmatch(rf"\s+{re.escape(name)}:\s*", line):
+        if re.fullmatch(r"services:\s*", line.rstrip("\n")):
+            services_at = index
+            break
+    service_at = None
+    # Matched as a service key — a direct child of `services:`, at the indent
+    # its siblings sit at. The same text appears as a top-level named volume
+    # and as a `depends_on` entry inside another service, and taking the first
+    # line anywhere that matches picks one of those instead.
+    child_indent = None
+    for index in range(0 if services_at is None else services_at + 1, len(lines)):
+        line = lines[index]
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if services_at is not None:
+            if child_indent is None:
+                child_indent = indent
+            if indent == 0:
+                break
+            if indent != child_indent:
+                continue
+        if re.fullmatch(rf"\s+{re.escape(name)}:\s*", line.rstrip("\n")):
             service_at = index
             break
     if service_at is None:
@@ -329,11 +555,15 @@ def _volume_block(lines: list[str], name: str) -> tuple[int, int, str]:
         indent = len(line) - len(line.lstrip())
         if indent <= service_indent:
             break
-        if re.fullmatch(r"\s*volumes:\s*", line):
+        if re.fullmatch(r"\s*volumes:\s*", line.rstrip("\n")):
             volumes_at = index
             break
     if volumes_at is None:
-        raise ValueError("This Mind's compose fragment declares no volumes block")
+        raise ValueError(
+            "This Mind's volumes are not written as a block list under the "
+            "service, which is the only shape this control can rewrite — edit "
+            "the fragment by hand"
+        )
     volumes_indent = len(lines[volumes_at]) - len(lines[volumes_at].lstrip())
 
     end = volumes_at + 1
@@ -352,7 +582,9 @@ def _volume_block(lines: list[str], name: str) -> tuple[int, int, str]:
     return volumes_at + 1, end, entry_indent or " " * (volumes_indent + 2)
 
 
-def save_mounts(name: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+def save_mounts(
+    name: str, rows: list[dict[str, Any]], revision: str
+) -> dict[str, Any]:
     """Write the chosen folders into this Mind's fragment.
 
     Every other line and every comment is left exactly as it was: only the
@@ -360,44 +592,74 @@ def save_mounts(name: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
     against what was asked for before it replaces the file, so a save that
     would leave the fragment unreadable, or drop a mount the Mind needs to
     boot, refuses whole rather than landing.
-    """
-    source = fragment_path(name)
-    if not source.is_file():
-        raise ValueError("This Mind has no compose fragment on this host")
 
+    The save carries the revision the page read. Two tabs editing one Mind
+    otherwise overwrite each other with no sign of it: the second save's
+    response lists exactly what that tab intended, and the mount the first one
+    added is gone from the file and from the recreated container.
+    """
+    target = compose_target(name)
+    source = target.fragment
+    if not source.is_file():
+        raise NoComposeFile(
+            "This Mind's container is not defined by a compose file this console "
+            "can reach, so its folders are set where that file lives"
+        )
+    if not revision:
+        raise ValueError("A save must carry the revision the page read")
+
+    defined = compose_variables(target.env_file)
     wanted: list[str] = []
     seen_targets: set[str] = set()
     for row in rows:
         if not isinstance(row, dict):
             raise ValueError("Each mount is an object")
         root = _root(str(row.get("root") or ""))
-        relative = resolve_folder(root, str(row.get("path") or ""))
-        spec = mount_spec(root, relative, bool(row.get("writable", True)))
-        target = _split_spec(spec)[1]
-        if target in seen_targets:
+        if "writable" not in row:
+            raise ValueError("Each mount says whether it is writable")
+        if defined is not None and root.compose_var not in defined:
+            # An undefined variable expands to nothing, so the bind source
+            # becomes an absolute path at the filesystem root: a folder Docker
+            # creates empty and root-owned, while the panel shows the one that
+            # was picked.
             raise ValueError(
-                f"Two folders would both mount at {target} — rename one or drop it"
+                f"{root.label} is mounted through ${{{root.compose_var}}}, which "
+                f"{target.env_file} does not define — set it there first"
             )
-        seen_targets.add(target)
+        relative = resolve_folder(root, str(row.get("path") or ""))
+        spec = mount_spec(root, relative, bool(row["writable"]))
+        bind_target = _split_spec(spec)[1]
+        if bind_target in seen_targets:
+            raise ValueError(
+                f"Two folders would both mount at {bind_target} — rename one or drop it"
+            )
+        seen_targets.add(bind_target)
         wanted.append(spec)
 
     original = source.read_text(encoding="utf-8")
+    if revision_of(original) != revision:
+        raise StaleFragment(
+            "This Mind's compose file changed since this page read it. Reload "
+            "and make the change again — saving now would drop whatever else "
+            "was written."
+        )
     document = yaml.safe_load(original)
-    before = _service_volumes(document, name)
+    before = _service_volumes(document, target.service)
     infrastructure = [spec for spec in before if _project_row(spec) is None]
 
     lines = original.splitlines(keepends=True)
-    start, end, indent = _volume_block(lines, name)
+    # A file whose last line has no newline would otherwise have an appended
+    # entry glued onto it, which parses as something else entirely and is
+    # then reported as a save that would drop an infrastructure mount.
+    if lines and not lines[-1].endswith(("\n", "\r")):
+        lines[-1] = lines[-1] + "\n"
+    start, end, indent = _volume_block(lines, target.service)
     newline = "\n"
     rewritten: list[str] = []
     remaining = list(wanted)
     for line in lines[start:end]:
-        stripped = line.lstrip()
-        if not stripped.startswith("-"):
-            rewritten.append(line)
-            continue
-        spec = stripped[1:].strip()
-        if _project_row(spec) is None:
+        spec = _entry_spec(line)
+        if spec is None or _project_row(spec) is None:
             rewritten.append(line)
             continue
         if remaining:
@@ -414,18 +676,26 @@ def save_mounts(name: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
 
     try:
         parsed = yaml.safe_load(candidate)
-        after = _service_volumes(parsed, name)
+        after = _service_volumes(parsed, target.service)
     except (yaml.YAMLError, ValueError) as exc:
         raise ValueError(f"That save would leave the fragment unreadable: {exc}") from exc
-    missing = [spec for spec in infrastructure if spec not in after]
-    if missing:
+    dropped = [spec for spec in infrastructure if spec not in after]
+    if dropped:
         raise ValueError(
-            "That save would drop a mount this Mind needs to boot: " + ", ".join(missing)
+            "That save would drop a mount this Mind needs to boot: " + ", ".join(dropped)
         )
     if [spec for spec in after if _project_row(spec) is not None] != wanted:
-        raise ValueError("That save did not write the folders that were chosen")
+        raise ValueError(
+            "That save did not write the folders that were chosen, so nothing "
+            "was written at all — this fragment's volumes are in a shape this "
+            "control cannot rewrite"
+        )
 
-    mode = source.stat().st_mode
+    # Written through a symlink rather than over it: replacing the link leaves
+    # whatever else reads the real path on the old content with nothing to say
+    # it diverged.
+    source = source.resolve()
+    stat = source.stat()
     handle = tempfile.NamedTemporaryFile(
         "w", encoding="utf-8", newline="", dir=str(source.parent),
         prefix=".compose-", suffix=".tmp", delete=False,
@@ -433,7 +703,14 @@ def save_mounts(name: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
     try:
         with handle as stream:
             stream.write(candidate)
-        os.chmod(handle.name, mode & 0o7777)
+        os.chmod(handle.name, stat.st_mode & 0o7777)
+        # This console runs as root inside its container and the fragment is
+        # in Daniel's own checkout. A new inode owned by root is a file he can
+        # no longer edit, and a `git checkout` touching that path fails.
+        try:
+            os.chown(handle.name, stat.st_uid, stat.st_gid)
+        except (OSError, AttributeError):
+            pass
         os.replace(handle.name, source)
     except BaseException:
         Path(handle.name).unlink(missing_ok=True)

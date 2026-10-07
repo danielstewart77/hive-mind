@@ -22,6 +22,7 @@ from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 import httpx
+import yaml
 from fastapi import (
     Depends,
     FastAPI,
@@ -2289,7 +2290,19 @@ async def api_mind_mounts(name: str, user: dict = Depends(require_auth)):
         }
     try:
         return {"editable": True, "deployment": deployment, **mind_mounts.read_mounts(name)}
-    except ValueError as exc:
+    except mind_mounts.NoComposeFile as exc:
+        return {
+            "editable": False,
+            "deployment": deployment,
+            "detail": str(exc),
+            "mounts": [],
+            "infrastructure": [],
+            "roots": [],
+        }
+    except (ValueError, OSError, yaml.YAMLError) as exc:
+        # A fragment this console cannot read or parse is a containerised Mind
+        # with a problem, not a Mind that runs under something else. Folding
+        # the two together sends the operator to the wrong machine.
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
@@ -2301,7 +2314,7 @@ async def api_mind_mount_folders(
     del user, name
     try:
         return mind_mounts.list_folders(root, path)
-    except ValueError as exc:
+    except (ValueError, OSError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
@@ -2344,6 +2357,7 @@ async def api_mind_mounts_update(
     """
     body = await request.json()
     rows = body.get("mounts") if isinstance(body, dict) else None
+    revision = str((body or {}).get("revision") or "") if isinstance(body, dict) else ""
     if not isinstance(rows, list):
         raise HTTPException(status_code=400, detail="mounts must be a list")
     deployment = _mount_deployment(name)
@@ -2356,24 +2370,35 @@ async def api_mind_mounts_update(
             ),
         )
     try:
-        state = mind_mounts.save_mounts(name, rows)
-    except ValueError as exc:
+        target = mind_mounts.compose_target(name)
+        state = mind_mounts.save_mounts(name, rows, revision)
+    except mind_mounts.StaleFragment as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except mind_mounts.NoComposeFile as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (ValueError, OSError, yaml.YAMLError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     log_event(
         log, "mind.mounts.updated", **_actor_fields(user), mind_name=name,
         mounts=[row["container_path"] for row in state["mounts"]],
     )
-    recreate = await _hive_tools_request(
-        "POST",
-        "/docker/up",
-        params={
-            "path": os.getenv(
-                "HIVE_MIND_PROJECT_PATH", "/home/daniel/Storage/Dev/hive_mind"
-            ),
-            "service": name,
-        },
-        timeout=600.0,
+    # Every way this call can fail from here is a fragment that was written
+    # and a container that was not replaced. Saying only "Hive Tools request
+    # failed" reads as nothing having happened, and the next `up` for any
+    # reason then applies an edit the operator believes was refused.
+    written = (
+        "The folders were written to this Mind's compose file, but recreating "
+        "its container did not happen, so nothing inside it has changed yet: "
     )
+    try:
+        recreate = await _hive_tools_request(
+            "POST",
+            "/docker/up",
+            params={"path": target.project_path, "service": target.service},
+            timeout=310.0,
+        )
+    except HTTPException as exc:
+        raise HTTPException(status_code=502, detail=written + str(exc.detail)) from exc
     if recreate.get("hitl_request_id"):
         return {
             "saved": True,
@@ -2389,12 +2414,8 @@ async def api_mind_mounts_update(
     if recreate.get("error") or recreate.get("status") == "error":
         raise HTTPException(
             status_code=502,
-            detail=(
-                "The folders were written to this Mind's compose fragment, but "
-                "recreating its container failed, so nothing inside it has "
-                "changed yet: "
-                + str(recreate.get("error") or recreate.get("stderr") or "no detail")
-            ),
+            detail=written
+            + str(recreate.get("error") or recreate.get("stderr") or "no detail"),
         )
     return {"saved": True, "recreated": True, **state}
 

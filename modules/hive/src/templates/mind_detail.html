@@ -290,12 +290,17 @@ window.addEventListener("DOMContentLoaded", async function () {
     let mountBrowse = {root: "", path: ""};
 
     function mountsSummary(state) {
-        if (!state.editable) return [["Project folders", "Not editable here"], ["Reason", state.detail || ""]];
+        // A Mind this console cannot read is a different sentence from a Mind
+        // whose folders are set somewhere else — one sends the operator to a
+        // file, the other to another machine.
+        if (state.failed) return [["Project folders", "Could not be read"], ["Reason", state.detail || ""]];
         const rows = (state.mounts || []).map(function (row) {
-            return [row.name, row.container_path + (row.writable ? "" : " (read-only)")];
+            return [row.name, row.container_path + (row.writable ? "" : " (read-only)") +
+                (row.missing ? " — this folder is no longer on the host" : "")];
         });
         if (!rows.length) rows.push(["Project folders", "None"]);
         rows.push(["Mounts it boots from", String((state.infrastructure || []).length)]);
+        if (!state.rewritable) rows.push(["Editing", state.detail || "This compose file cannot be rewritten from here"]);
         return rows;
     }
 
@@ -365,21 +370,27 @@ window.addEventListener("DOMContentLoaded", async function () {
     async function renderMounts(name) {
         const section = document.getElementById("mind-mounts");
         section.dataset.mindName = name;
-        section.hidden = false;
         let state;
         try {
             state = await h.requestJson("/api/minds/" + encodeURIComponent(name) + "/mounts");
         } catch (error) {
-            state = {editable: false, detail: error.message};
+            state = {editable: false, failed: true, detail: error.message};
         }
         state.name = name;
         mountsState = state;
-        paintSummary("mind-mounts-summary", mountsSummary(state));
         const editor = section.querySelector("[data-editor]");
         const toggle = section.querySelector("[data-edit-toggle]");
-        // A Mind that is not a container is offered no control at all, the
-        // same way the restart action is refused for one.
+        // A Mind that is not a container is offered no control at all — not a
+        // panel saying it cannot be edited — the same way the restart action
+        // is suppressed for one. A container whose compose file could not be
+        // read does get the panel, because that is a problem to go and fix.
+        if (!state.editable && !state.failed) { section.hidden = true; return; }
+        section.hidden = false;
+        paintSummary("mind-mounts-summary", mountsSummary(state));
         if (!state.editable) { editor.hidden = true; if (toggle) toggle.hidden = true; return; }
+        // Listed, and not editable: the volumes are in a shape the writer
+        // would have to guess at.
+        document.getElementById("mind-mounts-save").disabled = !state.rewritable;
         const picker = document.getElementById("mind-mounts-root");
         picker.innerHTML = (state.roots || []).map(function (root) {
             return '<option value="' + h.escapeHtml(root.key) + '">' + h.escapeHtml(root.label) + '</option>';
@@ -915,9 +926,10 @@ window.addEventListener("DOMContentLoaded", async function () {
             const saved = await h.requestJson("/api/minds/" +
                 encodeURIComponent(mountsState.name) + "/mounts", {
                 method: "PUT", headers: {"Content-Type": "application/json"},
-                body: JSON.stringify({mounts: (mountsState.mounts || []).map(function (row) {
-                    return {root: row.root, path: row.path, writable: row.writable};
-                })})
+                body: JSON.stringify({revision: mountsState.revision,
+                    mounts: (mountsState.mounts || []).map(function (row) {
+                        return {root: row.root, path: row.path, writable: row.writable};
+                    })})
             });
             status.textContent = saved.detail ||
                 (saved.recreated ? "Saved. The container was recreated with these folders."
