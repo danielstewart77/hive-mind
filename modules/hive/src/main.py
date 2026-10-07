@@ -22,6 +22,7 @@ from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 import httpx
+import yaml
 from fastapi import (
     Depends,
     FastAPI,
@@ -75,6 +76,7 @@ import dashboard_data
 import mind_runtime
 import mind_soul
 import mind_files
+import mind_mounts
 import mind_skills
 import sentinel_review
 from hive_logging import configure_logging, install_fastapi_logging, log_event
@@ -2245,6 +2247,177 @@ async def api_mind_settings_update(
         settings=sorted(settings),
     )
     return {"saved": True, **saved}
+
+
+# ---------------------------------------------------------------------------
+# The project folders a Mind can reach
+#
+# Written into the Mind's own compose fragment, which is the durable truth,
+# and applied by recreating the container: a restart replays the config the
+# container was created with and cannot add a mount.
+# ---------------------------------------------------------------------------
+
+
+def _mount_deployment(name: str) -> str:
+    try:
+        configuration = local_runtime_configuration(name)
+    except ValueError:
+        return ""
+    return str(configuration.get("deployment") or "container")
+
+
+@app.get("/api/minds/{name}/mounts")
+async def api_mind_mounts(name: str, user: dict = Depends(require_auth)):
+    """The project folders this Mind's compose fragment declares.
+
+    A Mind that is not a container reports them as not editable rather than
+    rendering a control that would write a file nothing reads — the same way
+    the restart action is refused for one.
+    """
+    del user
+    deployment = _mount_deployment(name)
+    if deployment != "container":
+        return {
+            "editable": False,
+            "deployment": deployment,
+            "detail": (
+                f"This Mind runs as {deployment or 'something this console cannot see'}, "
+                "not a container in this stack, so its mounts are not editable from here."
+            ),
+            "mounts": [],
+            "infrastructure": [],
+            "roots": [],
+        }
+    try:
+        return {"editable": True, "deployment": deployment, **mind_mounts.read_mounts(name)}
+    except mind_mounts.NoComposeFile as exc:
+        return {
+            "editable": False,
+            "deployment": deployment,
+            "detail": str(exc),
+            "mounts": [],
+            "infrastructure": [],
+            "roots": [],
+        }
+    except (ValueError, OSError, yaml.YAMLError) as exc:
+        # A fragment this console cannot read or parse is a containerised Mind
+        # with a problem, not a Mind that runs under something else. Folding
+        # the two together sends the operator to the wrong machine.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/minds/{name}/mounts/folders")
+async def api_mind_mount_folders(
+    name: str, root: str, path: str = "", user: dict = Depends(require_auth)
+):
+    """The folders directly under one place in a declared root."""
+    del user, name
+    try:
+        return mind_mounts.list_folders(root, path)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/minds/{name}/mounts/folders")
+async def api_mind_mount_folder_create(
+    name: str, request: Request, user: dict = Depends(require_auth)
+):
+    """Create a folder under a declared root, for mounting in the same action."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="A folder is named in an object")
+    try:
+        created = mind_mounts.create_folder(
+            str(body.get("root") or ""),
+            str(body.get("parent") or ""),
+            str(body.get("name") or ""),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"Could not create that folder: {exc}") from exc
+    log_event(
+        log, "mind.mounts.folder_created", **_actor_fields(user), mind_name=name,
+        root=created["root"], path=created["path"],
+    )
+    return created
+
+
+@app.put("/api/minds/{name}/mounts")
+async def api_mind_mounts_update(
+    name: str, request: Request, user: dict = Depends(require_auth)
+):
+    """Write these folders into the Mind's fragment, then recreate it from it.
+
+    The write comes first and the recreate second, because the fragment is
+    what the next `up` reads however this call ends. A recreate that fails or
+    is still waiting on approval is reported as such rather than as a save
+    that worked — the folders are on disk, but nothing inside the Mind can
+    see them until its container is replaced.
+    """
+    body = await request.json()
+    rows = body.get("mounts") if isinstance(body, dict) else None
+    revision = str((body or {}).get("revision") or "") if isinstance(body, dict) else ""
+    if not isinstance(rows, list):
+        raise HTTPException(status_code=400, detail="mounts must be a list")
+    deployment = _mount_deployment(name)
+    if deployment != "container":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"This Mind runs as {deployment or 'something this console cannot see'}, "
+                "not a container in this stack. Its mounts are set on its own host."
+            ),
+        )
+    try:
+        target = mind_mounts.compose_target(name)
+        state = mind_mounts.save_mounts(name, rows, revision)
+    except mind_mounts.StaleFragment as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except mind_mounts.NoComposeFile as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (ValueError, OSError, yaml.YAMLError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_event(
+        log, "mind.mounts.updated", **_actor_fields(user), mind_name=name,
+        mounts=[row["container_path"] for row in state["mounts"]],
+    )
+    # Every way this call can fail from here is a fragment that was written
+    # and a container that was not replaced. Saying only "Hive Tools request
+    # failed" reads as nothing having happened, and the next `up` for any
+    # reason then applies an edit the operator believes was refused.
+    written = (
+        "The folders were written to this Mind's compose file, but recreating "
+        "its container did not happen, so nothing inside it has changed yet: "
+    )
+    try:
+        recreate = await _hive_tools_request(
+            "POST",
+            "/docker/up",
+            params={"path": target.project_path, "service": target.service},
+            timeout=310.0,
+        )
+    except HTTPException as exc:
+        raise HTTPException(status_code=502, detail=written + str(exc.detail)) from exc
+    if recreate.get("hitl_request_id"):
+        return {
+            "saved": True,
+            "recreated": False,
+            "operation_id": str(recreate["hitl_request_id"]),
+            "detail": (
+                "Saved. Recreating this Mind's container is waiting on your "
+                "approval in Hive Tools; the new folders appear inside it once "
+                "that goes through."
+            ),
+            **state,
+        }
+    if recreate.get("error") or recreate.get("status") == "error":
+        raise HTTPException(
+            status_code=502,
+            detail=written
+            + str(recreate.get("error") or recreate.get("stderr") or "no detail"),
+        )
+    return {"saved": True, "recreated": True, **state}
 
 
 @app.get("/api/minds/{name}/voice")
