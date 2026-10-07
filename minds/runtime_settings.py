@@ -175,12 +175,19 @@ SETTINGS_BY_KEY: dict[str, Setting] = {s.key: s for s in SETTINGS}
 #: to the model, is read from the inference proxy, and is written into the
 #: file when the model is saved so a per-turn hook can multiply it by the
 #: rotation percentage without making a network call.
-CONTEXT_WINDOW_FIELD = "context_window"
+#:
+#: Not `context_window`. That key is dsh's own serving ceiling, declared by a
+#: profile and required at its boot; one key carrying both meanings is how a
+#: model save stops a mind starting.
+CONTEXT_WINDOW_FIELD = "model_context_window"
 
 #: A text setting's value. Newlines are refused outright rather than escaped:
 #: this writer substitutes one line, and a value carrying a line break would
-#: append arbitrary YAML to the file.
-_TEXT_RE = re.compile(r"[^\n\r]{0,500}")
+#: append arbitrary YAML to the file. Every other control character goes with
+#: them — an escape sequence pasted out of a coloured terminal log is the
+#: ordinary way one arrives, and YAML refuses to parse a document holding
+#: one, so it would make the file unreadable rather than merely ugly.
+_TEXT_RE = re.compile(r"[^\x00-\x1f\x7f-\x9f]{0,500}")
 
 #: Characters that make a bare YAML scalar mean something else. A description
 #: holding a colon is the ordinary case — "Cypher: the dsh mind" — and a bare
@@ -225,10 +232,13 @@ def settings_view(loaded: dict[str, Any], harness: str = "") -> dict[str, Any]:
             }
         )
     window = loaded.get(CONTEXT_WINDOW_FIELD)
+    usable = isinstance(window, int) and not isinstance(window, bool) and window > 0
     return {
         "harness": which,
         "settings": entries,
-        "context_window": window if isinstance(window, int) else None,
+        # Zero is the proxy declaring none for this mind's model, reported as
+        # nothing rather than as a window of no tokens.
+        "context_window": window if usable else None,
     }
 
 

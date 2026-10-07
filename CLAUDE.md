@@ -118,11 +118,30 @@ through `turn_timeout` rather than `float(raw or 1800)`: that expression read
 zero as absent and handed back a tighter bound than the default it was trying
 to escape.
 
-`context_window` is reported beside the settings and is editable nowhere. The
-window belongs to the model, the inference proxy is the only thing that knows
-it, and `PATCH /runtime` writes it in the same write as the model — because
-what needs it is a per-turn hook sizing a rotation threshold from a
-percentage, and a hook that called the proxy would pay for it every turn.
+`model_context_window` is reported beside the settings and is editable
+nowhere. The window belongs to the model, the inference proxy is the only
+thing that knows it, and `PATCH /runtime` writes it in the same write as the
+model — because what needs it is a per-turn hook sizing a rotation threshold
+from a percentage, and a hook that called the proxy would pay for it every
+turn. A model the proxy has not measured writes zero rather than leaving the
+previous model's figure to be multiplied by that percentage, and no request
+body may name the field: a window taken off a request is a number nobody
+measured.
+
+It is deliberately **not** `context_window`. That key is dsh's own — the
+serving ceiling its profile declares, required at the adapter's boot and read
+by its compaction — and it is a different number from a different source.
+Writing a model's nominal window over it is how a model save stops a mind
+starting.
+
+A write reads the document back before it replaces the file, and compares each
+value against what was asked for. One-line substitution cannot express every
+way YAML states a value, and the dangerous cases parse cleanly: a folded or
+multi-line value keeps its continuation lines, which attach to the new scalar,
+and a file carrying a key twice has its first occurrence replaced and its last
+one read — a save reporting success over a change that never took. The
+original's mode is carried across the replace, since a config going 0600
+is a read from another account failing with no edit to explain it.
 
 The profile itself lives under the mind's `DSH_HOME`
 (`profiles/<dsh_profile>/`), with the hive surface package symlinked into its

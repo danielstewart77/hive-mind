@@ -83,17 +83,30 @@ WRITABLE_FIELDS = {
     "default_model": _MODEL_NAME_RE,
     "provider": re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"),
     "voice": re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"),
-    # Not a setting anybody types: the window belongs to the model, and this
-    # is the cached copy written beside it so a per-turn hook can size a
-    # rotation threshold without a network call.
-    "context_window": re.compile(r"[1-9][0-9]{0,8}"),
+    # Not a setting anybody types: the chosen model's own window, as the
+    # proxy reports it, cached so a per-turn hook can size a rotation
+    # threshold without a network call. Zero means the proxy declared none,
+    # which is how a stale window is cleared rather than left to be
+    # multiplied by a percentage.
+    #
+    # Deliberately not `context_window`. That key is dsh's own — the serving
+    # ceiling its profile declares, required at boot and read by compaction —
+    # and writing a model's nominal window over it is how a model save breaks
+    # a mind's next start.
+    "model_context_window": re.compile(r"[0-9]{1,9}"),
 }
+
+#: The subset a `PATCH /runtime` body may name. `context_window` is writable
+#: by the route — it writes it beside the model it belongs to — but never by
+#: its caller: a window taken off a request is a number nobody measured, and
+#: the rotation threshold is derived from it.
+CONSOLE_FIELDS: tuple[str, ...] = ("default_model", "provider", "voice")
 
 #: Fields a mind may not have a line for yet. A missing `default_model` means a
 #: malformed file and is refused; a missing `voice` only means this mind was
 #: scaffolded before voices were pickable, and refusing that would make the
 #: field unsettable on every mind already installed.
-CREATABLE_FIELDS = ("voice", "context_window")
+CREATABLE_FIELDS = ("voice", "model_context_window")
 
 #: The comment written above a field created on a mind that had no line for it,
 #: so the next person to open the file is not reading a bare key.
@@ -102,10 +115,11 @@ _FIELD_COMMENTS = {
         "# Which voice this mind is spoken in. A Kokoro voice name; the voice",
         "# server reads it from the broker row, which this file is the truth for.",
     ),
-    "context_window": (
+    "model_context_window": (
         "# The chosen model's own context window, as the inference proxy reports",
-        "# it. Written here when the model is written, so the rotation threshold",
+        "# it. Written when the model is written, so the rotation threshold",
         "# resolves from a percentage without a per-turn call to the proxy.",
+        "# Distinct from `context_window`, which is dsh's own serving ceiling.",
     ),
 }
 
@@ -160,8 +174,44 @@ def _substitute_lines(
                 block.insert(0, "")
             updated = updated + "\n".join(block) + "\n"
 
+    # Read back before it lands, not after. Substitution is one line, and the
+    # document it produces is not always the document intended:
+    #
+    #   - a value rendered into something YAML cannot read leaves a mind whose
+    #     every boot and config read fails on a file nobody edited, reported
+    #     as a refused write by a route that already replaced it;
+    #   - a folded or multi-line value (`description: >` over two lines) keeps
+    #     its continuation lines, which attach to the new scalar — valid YAML
+    #     saying something else;
+    #   - a file carrying the same key twice has its first occurrence replaced
+    #     and its last one read, so the save reports success and changes
+    #     nothing.
+    #
+    # Comparing what the reparsed document says against what was asked for
+    # catches all three without needing to anticipate which.
+    try:
+        reparsed = yaml.safe_load(updated)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"That would make runtime.yaml unreadable: {exc}") from None
+    if not isinstance(reparsed, dict):
+        raise ValueError("That would make runtime.yaml unreadable")
+    for field, value in rendered.items():
+        if not _scalars_agree(reparsed.get(field), value):
+            raise ValueError(
+                f"{field} could not be rewritten in place: this file states it in"
+                " a form one-line substitution cannot replace. Edit it on the"
+                " mind's own disk."
+            )
+
     fd, temporary = tempfile.mkstemp(prefix="runtime-", suffix=".yaml", dir=path.parent)
     try:
+        # The original's mode, not the temporary file's 0600. A mind's config
+        # going unreadable to everyone but its owner is how a read from
+        # another account starts failing with no edit to explain it.
+        try:
+            os.chmod(temporary, path.stat().st_mode & 0o7777)
+        except OSError:
+            pass
         with os.fdopen(fd, "w") as handle:
             handle.write(updated)
             handle.flush()
@@ -171,6 +221,21 @@ def _substitute_lines(
         Path(temporary).unlink(missing_ok=True)
         raise
     return load_runtime(path)
+
+
+def _scalars_agree(parsed: Any, rendered: str) -> bool:
+    """Whether a reparsed value is the scalar that was rendered for it.
+
+    Compared as YAML rather than as text: the renderer writes `true`, `3600`
+    and `"a: b"`, and the parser hands back a bool, an int and a str. Loading
+    the rendered scalar on its own is what makes the two comparable without a
+    branch per kind.
+    """
+    try:
+        intended = yaml.safe_load(rendered)
+    except yaml.YAMLError:
+        return False
+    return parsed == intended
 
 
 def update_settings(path: Path, values: dict[str, Any]) -> dict[str, Any]:
@@ -727,13 +792,13 @@ def install_runtime_routes(app: FastAPI, *, path: Path, mind_id: str, log) -> No
         # without restating the model, and a model still lands with its provider
         # in one write so a mind never holds a provider that lacks it.
         fields = {}
-        for field in WRITABLE_FIELDS:
+        for field in CONSOLE_FIELDS:
             value = str(body.get(field) or "").strip()
             if value:
                 fields[field] = value
         if not fields:
             return JSONResponse(
-                {"error": f"one of {', '.join(sorted(WRITABLE_FIELDS))} required"},
+                {"error": f"one of {', '.join(sorted(CONSOLE_FIELDS))} required"},
                 status_code=400,
             )
         model = fields.get("default_model", "")
@@ -746,8 +811,12 @@ def install_runtime_routes(app: FastAPI, *, path: Path, mind_id: str, log) -> No
         # rather than writing a guess over it.
         if model:
             window = await _declared_context_window(path, model)
-            if window:
-                fields["context_window"] = str(window)
+            # Zero when the proxy declares none. Leaving the previous model's
+            # window in place is worse than having none: the rotation hook
+            # multiplies a percentage by it, so a move from a 1M model to one
+            # nobody has measured would rotate at seven times the room this
+            # conversation actually has.
+            fields["model_context_window"] = str(window or 0)
         try:
             configuration = update_runtime_fields(path, fields)
         except ValueError as exc:

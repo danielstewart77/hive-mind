@@ -1171,3 +1171,23 @@ class TestInterrupt:
         events = await _drain(dsh)
         assert _result(events)["stop_reason"] == "completed"
         assert session["killed"] is False
+
+
+async def test_the_profile_is_read_per_turn_so_an_edit_does_not_wait_on_a_restart(
+    dsh, monkeypatch
+) -> None:
+    """The settings panel offers it, and a profile read once at import is a
+    box whose value does nothing until somebody bounces the container —
+    where a profile that is not installed fails far from the edit."""
+    _session(dsh)
+    _set_live(monkeypatch, dsh, "dsh_profile", "exam")
+    argv: list[tuple] = []
+
+    async def spawn(*args: str, **kwargs: Any) -> _FakeProc:
+        argv.append(args)
+        return _FakeProc([_report()])
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh)
+    command = list(argv[0])
+    assert command[command.index("--profile") + 1] == "exam"

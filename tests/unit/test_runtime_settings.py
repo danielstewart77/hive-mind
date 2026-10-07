@@ -27,6 +27,9 @@ provider: ollama
 # The model every new conversation starts on.
 default_model: glm-5.3:cloud
 
+# dsh's own serving ceiling, required at its boot — not the model's window.
+context_window: 131072
+
 # What a turn may not exceed.
 turn_timeout_seconds: 14400
 goal_rounds: 40
@@ -235,7 +238,7 @@ class TestTheCachedContextWindow:
         assert runtime_settings.CONTEXT_WINDOW_FIELD not in offered
 
     def test_the_panel_reports_it_beside_the_settings(self, dsh_file):
-        runtime_api.update_runtime_fields(dsh_file, {"context_window": "131072"})
+        runtime_api.update_runtime_fields(dsh_file, {"model_context_window": "131072"})
         view = runtime_settings.settings_view(runtime_api.load_runtime(dsh_file))
         assert view["context_window"] == 131072
 
@@ -257,12 +260,15 @@ class TestTheCachedContextWindow:
             headers={"Authorization": "Bearer s3cret"},
         )
         assert response.status_code == 200
-        assert runtime_api.load_runtime(dsh_file)["context_window"] == 1_048_576
+        assert runtime_api.load_runtime(dsh_file)["model_context_window"] == 1_048_576
 
-    def test_a_model_whose_window_nobody_declared_leaves_the_cache_alone(
+    def test_a_model_whose_window_nobody_declared_clears_the_previous_one(
         self, client, dsh_file, monkeypatch
     ):
-        runtime_api.update_runtime_fields(dsh_file, {"context_window": "131072"})
+        """A stale window is worse than none. The rotation hook multiplies a
+        percentage by it, so keeping the old model's figure after a move to an
+        unmeasured one rotates the conversation at room it does not have."""
+        runtime_api.update_runtime_fields(dsh_file, {"model_context_window": "131072"})
 
         async def catalog(_path):
             return [{"name": "mystery", "context_window": None}]
@@ -276,4 +282,158 @@ class TestTheCachedContextWindow:
             headers={"Authorization": "Bearer s3cret"},
         )
         assert response.status_code == 200
-        assert runtime_api.load_runtime(dsh_file)["context_window"] == 131072
+        assert runtime_api.load_runtime(dsh_file)["model_context_window"] == 0
+        view = runtime_settings.settings_view(runtime_api.load_runtime(dsh_file))
+        assert view["context_window"] is None
+
+    def test_a_caller_cannot_write_a_window_of_its_own(self, client, dsh_file):
+        """The window is a measurement the proxy makes, and the rotation
+        threshold is derived from it. One taken off a request body is a number
+        nobody measured."""
+        runtime_api.update_runtime_fields(dsh_file, {"model_context_window": "131072"})
+        response = client.patch(
+            "/runtime",
+            json={"model_context_window": "4096"},
+            headers={"Authorization": "Bearer s3cret"},
+        )
+        assert response.status_code == 400
+        assert runtime_api.load_runtime(dsh_file)["model_context_window"] == 131072
+
+
+class TestAValueThatWouldBreakTheFile:
+    def test_an_escape_sequence_in_a_description_is_refused(self, dsh_file):
+        """Pasted out of a coloured terminal log is how one arrives, and YAML
+        refuses to parse a document holding one — so a write that let it
+        through would leave a mind whose every boot and turn fails on a file
+        nobody edited."""
+        before = dsh_file.read_text()
+        with pytest.raises(ValueError):
+            runtime_api.update_settings(
+                dsh_file, {"description": "Cypher \x1b[31mred\x1b[0m mind"}
+            )
+        assert dsh_file.read_text() == before
+        assert runtime_api.load_runtime(dsh_file)["name"] == "cypher"
+
+    def test_a_document_that_would_not_parse_never_replaces_the_file(
+        self, dsh_file, monkeypatch
+    ):
+        """The guard is before `os.replace`, not after. Validating afterwards
+        reports a refused write from a route that has already committed the
+        breakage."""
+        monkeypatch.setattr(
+            runtime_settings, "render_value", lambda key, value: '"unterminated'
+        )
+        before = dsh_file.read_text()
+        with pytest.raises(ValueError):
+            runtime_api.update_settings(dsh_file, {"goal_rounds": 4})
+        assert dsh_file.read_text() == before
+
+
+class TestAMindMissingALine:
+    """Most minds declare only some of these settings, so the partial save is
+    the ordinary case rather than the edge one.
+
+    Bob's file has no `dsh_profile` line and no `description`. A save that
+    carried every control's value would carry two empty strings with it, a
+    blank text value is refused, and the refusal is the whole write — so he
+    would be unable to change any setting at all from the panel that exists to
+    replace editing his file by hand.
+    """
+
+    @pytest.fixture()
+    def sparse_file(self, tmp_path):
+        path = tmp_path / "sparse.yaml"
+        path.write_text(
+            "name: bob\n"
+            "mind_id: b9f2dc0c-e0c5-466f-b6ab-30ed1c0f0001\n"
+            "harness: dsh_cli\n"
+            "provider: ollama\n"
+            "default_model: nemotron-3-super:cloud\n"
+        )
+        return path
+
+    def test_one_setting_saves_on_a_file_declaring_none_of_them(self, sparse_file):
+        loaded = runtime_api.update_settings(sparse_file, {"goal_rounds": 5})
+        assert loaded["goal_rounds"] == 5
+        assert loaded["default_model"] == "nemotron-3-super:cloud"
+
+    def test_a_blank_text_value_is_refused_rather_than_written(self, sparse_file):
+        """Which is why the page must not send a control it never filled in."""
+        with pytest.raises(ValueError):
+            runtime_api.update_settings(sparse_file, {"description": ""})
+        assert "description" not in runtime_api.load_runtime(sparse_file)
+
+
+class TestASubstitutionThatWouldNotMeanWhatItSays:
+    """One-line substitution cannot express every way YAML states a value, and
+    the dangerous cases parse cleanly — so the written document is read back
+    and compared against what was asked for."""
+
+    def test_a_folded_description_is_refused_rather_than_half_replaced(
+        self, tmp_path
+    ):
+        """A `>` block keeps its continuation lines, which attach to the new
+        scalar. Valid YAML, saying something nobody typed."""
+        path = tmp_path / "folded.yaml"
+        path.write_text(
+            "name: cypher\n"
+            "harness: dsh_cli\n"
+            "description: >\n"
+            "  a long thing\n"
+            "  over two lines\n"
+        )
+        before = path.read_text()
+        with pytest.raises(ValueError):
+            runtime_api.update_settings(path, {"description": "replaced"})
+        assert path.read_text() == before
+
+    def test_a_duplicated_key_is_refused_rather_than_reported_saved(self, tmp_path):
+        """Substitution replaces the first occurrence and YAML reads the last,
+        so the save would report success and change nothing."""
+        path = tmp_path / "dupe.yaml"
+        path.write_text(
+            "name: cypher\nharness: dsh_cli\ngoal_rounds: 1\ngoal_rounds: 40\n"
+        )
+        with pytest.raises(ValueError):
+            runtime_api.update_settings(path, {"goal_rounds": 9})
+        assert runtime_api.load_runtime(path)["goal_rounds"] == 40
+
+    def test_a_save_keeps_the_files_own_mode(self, dsh_file):
+        """A temp file is 0600. A mind's config going unreadable to everyone
+        but its owner is a read that starts failing with no edit to explain
+        it."""
+        dsh_file.chmod(0o644)
+        runtime_api.update_settings(dsh_file, {"goal_rounds": 7})
+        assert dsh_file.stat().st_mode & 0o777 == 0o644
+
+
+class TestTheDshServingCeilingIsNotTheModelsWindow:
+    """`context_window` is dsh's own: the ceiling its profile declares, which
+    its adapter requires at boot and its compaction reads. The model's own
+    window is a different number from a different source, and one key holding
+    both is how a model save stops a mind starting."""
+
+    def test_the_cached_window_does_not_touch_the_dsh_ceiling(
+        self, client, dsh_file, monkeypatch
+    ):
+        async def catalog(_path):
+            return [{"name": "glm-5.3:cloud", "context_window": 1_048_576}]
+
+        from minds import models_api
+
+        monkeypatch.setattr(models_api, "build_catalog", catalog)
+        client.patch(
+            "/runtime",
+            json={"default_model": "glm-5.3:cloud"},
+            headers={"Authorization": "Bearer s3cret"},
+        )
+        loaded = runtime_api.load_runtime(dsh_file)
+        assert loaded["context_window"] == 131072
+        assert loaded["model_context_window"] == 1_048_576
+
+    def test_the_ceiling_is_not_offered_as_a_setting(self, dsh_file):
+        """It is read once at the adapter's import and required to be
+        non-zero; a control implying otherwise would be a box whose value
+        does nothing until a restart, and breaks the mind if it is wrong."""
+        view = runtime_settings.settings_view(runtime_api.load_runtime(dsh_file))
+        assert "context_window" not in {e["key"] for e in view["settings"]}

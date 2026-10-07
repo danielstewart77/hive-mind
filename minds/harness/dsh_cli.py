@@ -83,6 +83,12 @@ DSH_HOME = Path(
 #: The profile whose bundle layers mount the resumable surface. A profile is
 #: the only thing that composes a dsh process, so naming the wrong one is a
 #: mind with no runner rather than a mind with the wrong options.
+#:
+#: The boot value is kept for the pty pane, which caches its argv; the chat
+#: path resolves it per turn through `dsh_profile()` so an edit from the
+#: settings panel takes effect when the next turn spawns rather than at the
+#: next container start — a profile that is not installed must fail where the
+#: operator can still see what they typed.
 DSH_PROFILE = str(RUNTIME.get("dsh_profile") or "hive")
 
 #: The default when a mind's file names none.
@@ -430,6 +436,12 @@ def _permission_mode() -> str:
 # How often a turn in flight puts a byte on the gateway's socket. Comfortably
 # inside comms' own no-data cap, which is ten minutes.
 HEARTBEAT_SECONDS = 120.0
+
+
+
+def dsh_profile() -> str:
+    """The profile this turn's spawn composes itself from, read per turn."""
+    return str(live_runtime().get("dsh_profile") or "hive")
 
 
 def _goal_rounds() -> int:
@@ -816,7 +828,7 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
                           "--goal-objective-file", objective_path]
         if _stop_on_failed_call():
             goal_flags.append("--stop-on-failed-call")
-        cmd = [DSH_BIN, "--profile", DSH_PROFILE, *flags, *goal_flags,
+        cmd = [DSH_BIN, "--profile", dsh_profile(), *flags, *goal_flags,
                "--task-file", task_path]
         log.info("%s session %s: spawning dsh turn (%s %s)",
                  NAME, sid, flags[0], conversation_id)
