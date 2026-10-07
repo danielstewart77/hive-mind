@@ -22,6 +22,40 @@ log = logging.getLogger("hive-mind.gateway-client")
 # channel with nothing distinguishing them.
 BLOCK_SEPARATOR = "\n\n"
 
+# What marks a run of the mind's own reasoning on a chat surface. A surface has
+# only text to work with, so the two are told apart by a word rather than by
+# styling — which also survives being read aloud. Reasoning is shown at all
+# only when the provider sends it as readable text: a thinking block that
+# carries none, redacted or encrypted, yields nothing and is never announced.
+THINKING_LABEL = "(thinking) "
+
+
+def _delta_prose(delta: dict) -> tuple[str | None, str]:
+    """What a partial event carries for a reader, and which kind it is.
+
+    Prose and reasoning are the two kinds a chat surface shows. Anything else a
+    harness streams — a tool call being assembled, a signature, a redacted
+    thinking payload with no text in it — answers ``(None, "")``, which is the
+    rule stated once rather than per harness: readable text is shown, and what
+    is not readable is not announced either.
+    """
+    kind = delta.get("type")
+    if kind == "text_delta":
+        return "text", str(delta.get("text") or "")
+    if kind == "thinking_delta":
+        return "reasoning", str(delta.get("thinking") or "")
+    return None, ""
+
+
+def _block_prose(block: dict) -> tuple[str | None, str]:
+    """The same judgement for a whole buffered content block."""
+    kind = block.get("type")
+    if kind == "text":
+        return "text", str(block.get("text") or "")
+    if kind == "thinking":
+        return "reasoning", str(block.get("thinking") or "")
+    return None, ""
+
 
 class GatewayClient:
     """HTTP client for the Hive Mind gateway server."""
@@ -279,10 +313,14 @@ class GatewayClient:
             # end of each content block. Prefer the deltas when present and
             # suppress the buffered text to avoid duplication.
             saw_partial_text = False
+            # Tracked apart from prose: a turn whose reasoning streamed but
+            # whose answer did not still needs the buffered answer, and one
+            # whose answer streamed must not get its reasoning twice.
+            saw_partial_thinking = False
             # Identity of the content block currently being streamed, so a
             # move to a new block emits the paragraph break the mind meant
             # and a continuation of the same block emits nothing.
-            current_block: tuple[int, object] | None = None
+            current_block: tuple[int, object, str] | None = None
             block_epoch = 0
             # Trailing newlines already carried by the text yielded so far, so
             # a block that ends with its own newline does not get a break on
@@ -328,33 +366,58 @@ class GatewayClient:
                             block_epoch += 1
                         elif inner_type == "content_block_delta":
                             delta = inner.get("delta", {})
-                            if delta.get("type") == "text_delta" and delta.get("text"):
-                                block = (block_epoch, inner.get("index"))
+                            kind, text = _delta_prose(delta)
+                            if kind is not None and text:
+                                # The kind is part of the block identity, so a
+                                # move between reasoning and answer breaks the
+                                # paragraph even inside one block index.
+                                block = (block_epoch, inner.get("index"), kind)
                                 if yielded_any and block != current_block:
                                     gap = separator()
                                     if gap:
                                         yield gap
+                                if kind == "reasoning" and (
+                                    current_block is None or current_block[2] != "reasoning"
+                                ):
+                                    # Once per run of reasoning, not per delta.
+                                    yield THINKING_LABEL
+                                    yielded_any = True
                                 current_block = block
-                                text = delta["text"]
                                 yield text
                                 tail_newlines = len(text) - len(text.rstrip("\n"))
                                 yielded_any = True
-                                saw_partial_text = True
+                                if kind == "reasoning":
+                                    saw_partial_thinking = True
+                                else:
+                                    saw_partial_text = True
                     elif etype == "assistant":
-                        if saw_partial_text:
-                            # Already streamed via deltas; skip the buffered
-                            # text to avoid duplication.
-                            continue
+                        # Per block rather than per event: a harness that
+                        # streamed its answer but buffered its reasoning, or
+                        # the reverse, has one of the two still to deliver.
                         for block in event.get("message", {}).get("content", []):
-                            if block.get("type") == "text" and block.get("text"):
-                                if yielded_any:
-                                    gap = separator()
-                                    if gap:
-                                        yield gap
-                                yielded_any = True
-                                text = block["text"]
-                                yield text
-                                tail_newlines = len(text) - len(text.rstrip("\n"))
+                            kind, text = _block_prose(block)
+                            if kind is None or not text:
+                                continue
+                            if kind == "text" and saw_partial_text:
+                                continue
+                            if kind == "reasoning" and (
+                                saw_partial_thinking or saw_partial_text or yielded_any
+                            ):
+                                # Reasoning that arrives after the answer is
+                                # worse than absent: the operator reads the
+                                # conclusion and then the deliberation behind
+                                # it, and a voice surface speaks them in that
+                                # order. Thinking leads or it is dropped.
+                                continue
+                            if yielded_any:
+                                gap = separator()
+                                if gap:
+                                    yield gap
+                            if kind == "reasoning":
+                                yield THINKING_LABEL
+                            yielded_any = True
+                            yield text
+                            tail_newlines = len(text) - len(text.rstrip("\n"))
                     elif etype == "result":
                         result_fallback = event.get("result", "")
 

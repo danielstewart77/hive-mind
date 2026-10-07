@@ -376,6 +376,12 @@ async def _stream_to_message(
     """
     accumulated = ""
     last_edit = 0.0
+    # The messages this reply occupies, in order, the first being the
+    # placeholder we were handed. A long answer outgrows one: Telegram caps a
+    # message, so previewing chunk zero forever means the text visibly stops
+    # moving partway through — identical on screen to a mind that wedged, which
+    # is the one thing a progress display must never look like.
+    bubbles = [sent]
 
     # The indicator is held by `with_typing` around the whole handler, which
     # started before this stream and outlasts it.
@@ -386,9 +392,17 @@ async def _stream_to_message(
         accumulated += text_chunk
         now = time.monotonic()
         if now - last_edit >= edit_interval:
-            preview = _chunk_message(accumulated)[0]
+            pieces = _chunk_message(accumulated)
             try:
-                await sent.edit_text(preview)
+                # Earlier bubbles are finished text and are written once, so a
+                # rolled-over answer does not re-edit the whole reply each tick.
+                for index in range(len(bubbles) - 1, len(pieces) - 1):
+                    await bubbles[index].edit_text(pieces[index])
+                while len(bubbles) < len(pieces):
+                    bubbles.append(
+                        await bubbles[-1].reply_text(pieces[len(bubbles)])
+                    )
+                await bubbles[-1].edit_text(pieces[-1])
             except Exception:
                 pass  # MessageNotModified or rate limit — skip this update
             last_edit = now
@@ -403,10 +417,17 @@ async def _stream_to_message(
         )
 
     final_chunks = [_sanitize_response(c) for c in _chunk_message(accumulated)]
-    try:
-        await sent.edit_text(final_chunks[0])
-    except Exception:
-        pass
+    # Every bubble gets its sanitized final text, and any the stream never
+    # reached is sent now. Each edit is attempted independently: one message
+    # refused for being unchanged must not cost the rest their final copy.
+    for index, piece in enumerate(final_chunks):
+        try:
+            if index < len(bubbles):
+                await bubbles[index].edit_text(piece)
+            else:
+                bubbles.append(await bubbles[-1].reply_text(piece))
+        except Exception:
+            log.debug("Final edit of bubble %s failed", index, exc_info=True)
 
     # Send one voice message with the complete response — detached so it
     # doesn't hold the chat lock while TTS round-trips. The text response is
@@ -1190,8 +1211,6 @@ async def cmd_skill(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sent, update.effective_user.id, chat_id, prompt,
             voice=ALWAYS_VOICE, chat=update.effective_chat,
         )
-        for extra in final_chunks[1:]:
-            await update.effective_chat.send_message(extra)
 
 
 # ---------------------------------------------------------------------------
@@ -1286,8 +1305,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 sent, update.effective_user.id, chat_id, content,
                 voice=ALWAYS_VOICE, chat=update.effective_chat,
             )
-            for extra in final_chunks[1:]:
-                await update.effective_chat.send_message(extra)
         except Exception:
             log.exception("Error processing message in chat %s", chat_id)
             err = f"⚠ {type(_exc:=sys.exc_info()[1]).__name__}: {_exc}"[:3500]
@@ -1306,8 +1323,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     sent2, update.effective_user.id, chat_id, batch,
                     voice=ALWAYS_VOICE, chat=update.effective_chat,
                 )
-                for extra in final_chunks2[1:]:
-                    await update.effective_chat.send_message(extra)
             except Exception:
                 log.exception("Error processing queued batch in chat %s", chat_id)
                 err = f"⚠ queued-batch {type(_exc:=sys.exc_info()[1]).__name__}: {_exc}"[:3500]
@@ -1387,8 +1402,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 sent, update.effective_user.id, chat_id, content_with_path, images=images,
                 voice=ALWAYS_VOICE, chat=update.effective_chat,
             )
-            for extra in final_chunks[1:]:
-                await update.effective_chat.send_message(extra)
         except Exception:
             log.exception("Error processing photo in chat %s", chat_id)
             await update.message.reply_text(
@@ -1458,8 +1471,6 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 sent, update.effective_user.id, chat_id, text,
                 voice=True, chat=update.effective_chat,
             )
-            for extra in final_chunks[1:]:
-                await update.effective_chat.send_message(extra)
         except Exception:
             log.exception("Unexpected error in voice handler for chat %s", chat_id)
             err = f"⚠ voice {type(_exc:=sys.exc_info()[1]).__name__}: {_exc}"[:3500]
@@ -1478,8 +1489,6 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     sent2, update.effective_user.id, chat_id, batch,
                     voice=ALWAYS_VOICE, chat=update.effective_chat,
                 )
-                for extra in final_chunks2[1:]:
-                    await update.effective_chat.send_message(extra)
             except Exception:
                 log.exception("Error processing queued batch in chat %s", chat_id)
                 err = f"⚠ queued-batch {type(_exc:=sys.exc_info()[1]).__name__}: {_exc}"[:3500]
@@ -1527,8 +1536,6 @@ async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_T
                 sent, update.effective_user.id, chat_id, content,
                 voice=ALWAYS_VOICE, chat=update.effective_chat,
             )
-            for extra in final_chunks[1:]:
-                await update.effective_chat.send_message(extra)
         except Exception:
             log.exception("Error processing unknown command in chat %s", chat_id)
             err = f"⚠ {type(_exc:=sys.exc_info()[1]).__name__}: {_exc}"[:3500]
@@ -1547,8 +1554,6 @@ async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_T
                     sent2, update.effective_user.id, chat_id, batch,
                     voice=ALWAYS_VOICE, chat=update.effective_chat,
                 )
-                for extra in final_chunks2[1:]:
-                    await update.effective_chat.send_message(extra)
             except Exception:
                 log.exception("Error processing queued batch in chat %s", chat_id)
                 err = f"⚠ queued-batch {type(_exc:=sys.exc_info()[1]).__name__}: {_exc}"[:3500]
