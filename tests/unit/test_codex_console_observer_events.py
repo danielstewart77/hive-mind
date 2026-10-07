@@ -83,3 +83,51 @@ async def test_codex_send_emits_observer_only_codex_events():
     assert events[-1]["session_id"] == "thread-123"
 
     codex_impl.SESSIONS.clear()
+
+
+@pytest.mark.asyncio
+async def test_codex_reasoning_reaches_the_surface_as_readable_thinking():
+    """Codex's reasoning is plain text, so it travels under the same rule as dsh's.
+
+    Before this it was captured only to compose the empty-turn diagnostic, so a
+    turn that reasoned at length and then answered showed the operator none of
+    the thinking — on a harness whose reasoning is perfectly readable.
+    """
+    from minds.harness import codex_cli as codex_impl
+
+    codex_impl.SESSIONS.clear()
+    codex_impl.SESSIONS["sess-2"] = {
+        "system_prompt": "system",
+        "thread_id": None,
+        "model": "gpt-5",
+    }
+
+    lines = [
+        json.dumps({"type": "thread.started", "thread_id": "thread-9"}).encode() + b"\n",
+        json.dumps({
+            "type": "item.completed",
+            "item": {"type": "agent_reasoning", "text": "weighing it"},
+        }).encode() + b"\n",
+        json.dumps({
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "the answer"},
+        }).encode() + b"\n",
+        json.dumps({"type": "turn.completed"}).encode() + b"\n",
+    ]
+
+    with patch("minds.harness.codex_cli.asyncio.create_subprocess_exec",
+               return_value=_FakeProcess(lines)):
+        events = [event async for event in codex_impl._run_codex_turn("sess-2", "hi", None)]
+
+    thinking = [
+        event["event"]["delta"]["thinking"]
+        for event in events
+        if event.get("type") == "stream_event"
+        and event["event"].get("type") == "content_block_delta"
+        and event["event"]["delta"].get("type") == "thinking_delta"
+    ]
+    assert thinking == ["weighing it"]
+    # Ahead of the answer, so the operator reads the deliberation first and a
+    # voice surface speaks it in that order.
+    kinds = [event.get("type") for event in events]
+    assert kinds.index("stream_event") < kinds.index("assistant")
