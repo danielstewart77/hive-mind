@@ -900,10 +900,24 @@ async def ws_attach(ws: WebSocket, session_id: str):
         await ws.close(code=4409, reason="session has no model")
         return
 
-    # Same (owner_type, owner_ref, client_ref) resolution the stream-json
-    # respawn paths use — without it the mind's Stop hook finds no CLIENT_REF
-    # in the tmux pane's env and the session never rotates.
-    routing = await session_mgr._routing_for(session)
+    # The tile takes the conversation. Nothing else binds a pane-hosted
+    # conversation to a surface, so without this the pane carries no
+    # CLIENT_REF and the Stop hook's liveness pre-flight answers no on every
+    # fire — the session never rotates and grows until the model refuses the
+    # next message. An adoption rather than a second binding because one
+    # conversation cannot have two live harness processes, and a refused
+    # release means the chat-side process is still running: fail the attach
+    # instead of opening a pane beside it.
+    try:
+        routing = await session_mgr.adopt_into_terminal(session_id)
+    except sessions.MindRefusedCredential as exc:
+        log.error("session %s: mind refused the release, not attaching: %s", session_id, exc)
+        await ws.close(code=4416, reason="mind refused the gateway credential")
+        return
+    except sessions.MindCallFailed as exc:
+        log.error("session %s: could not release the chat-side harness: %s", session_id, exc)
+        await ws.close(code=4409, reason="could not hand the conversation to the terminal")
+        return
 
     mind_ws_url = mind_row["gateway_url"].replace("http://", "ws://").replace("https://", "wss://")
     params = urlencode({

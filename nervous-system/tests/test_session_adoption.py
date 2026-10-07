@@ -268,3 +268,55 @@ def test_switching_between_your_own_sessions_releases_nothing():
                 await mgr.shutdown()
 
     _run(scenario())
+
+
+def test_a_refused_release_leaves_the_session_where_it_was():
+    """A handover that cannot end the outgoing process must not retarget.
+
+    Retargeting over a terminal that is still running puts a `--resume`
+    process beside it and both append to one transcript. Caught an ordering
+    slip no other test sees: the binding swap moved above the release.
+    """
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _make_manager(tmp)
+            try:
+                await _seed(mgr, "term-1")
+                await mgr._db.execute(
+                    """INSERT INTO active_sessions (client_type, client_ref, session_id)
+                       VALUES ('web', 'terminal-tile-1', 'term-1')"""
+                )
+                await mgr._db.commit()
+
+                from comms import sessions as sessions_mod
+
+                async def _release(session_id, surface):
+                    raise sessions_mod.MindCallFailed("the mind refused")
+
+                spawned: list[str] = []
+
+                async def _spawn(session_id, *a, **kw):
+                    spawned.append(session_id)
+                    return {}
+
+                mgr.release_on_mind = _release
+                mgr._spawn = _spawn
+
+                raised = False
+                try:
+                    await mgr.activate_session(
+                        "term-1", TELEGRAM, CHAT, owner_type=TELEGRAM, owner_ref=CHAT
+                    )
+                except sessions_mod.MindCallFailed:
+                    raised = True
+
+                assert raised
+                row = await _row(mgr, "term-1")
+                assert row["owner_type"] == "web"
+                assert row["owner_ref"] == "terminal"
+                assert spawned == []
+                assert await _bindings(mgr, "term-1") == [("web", "terminal-tile-1")]
+            finally:
+                await mgr.shutdown()
+
+    _run(scenario())
