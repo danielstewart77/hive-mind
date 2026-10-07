@@ -160,8 +160,14 @@ class TestWritingASetting:
         assert runtime_api.load_runtime(dsh_file)["goal_rounds"] == 40
 
     def test_a_setting_this_harness_does_not_honour_is_refused(self, claude_file):
-        with pytest.raises(ValueError):
+        """Named by the harness check, not by whatever happens to refuse it
+        further down: a claude mind whose file already carried a `goal_rounds`
+        line would otherwise have it written, since the line it needs is
+        already there to substitute."""
+        claude_file.write_text(claude_file.read_text() + "goal_rounds: 40\n")
+        with pytest.raises(ValueError, match="has no such setting"):
             runtime_api.update_settings(claude_file, {"goal_rounds": 4})
+        assert runtime_api.load_runtime(claude_file)["goal_rounds"] == 40
 
     def test_a_description_cannot_smuggle_a_second_line(self, dsh_file):
         with pytest.raises(ValueError):
@@ -313,6 +319,13 @@ class TestAValueThatWouldBreakTheFile:
             )
         assert dsh_file.read_text() == before
         assert runtime_api.load_runtime(dsh_file)["name"] == "cypher"
+
+    def test_the_renderer_itself_refuses_a_control_character(self):
+        """The first of two guards. Satisfied only by the reparse, this case
+        would reach the file and be caught after the replace on any value the
+        quoting rules happened to render into something parseable."""
+        with pytest.raises(ValueError):
+            runtime_settings.render_value("description", "Cypher \x1b[31mred")
 
     def test_a_document_that_would_not_parse_never_replaces_the_file(
         self, dsh_file, monkeypatch

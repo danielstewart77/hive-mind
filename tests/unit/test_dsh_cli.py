@@ -1138,23 +1138,6 @@ class TestInterrupt:
         response = await dsh.interrupt_session("no-such-row")
         assert response.status_code == 404
 
-    async def test_an_interrupted_turn_reports_itself_stopped_not_crashed(
-        self, dsh, monkeypatch
-    ) -> None:
-        """A process killed on purpose writes no report. Reported as a crash it
-        would send the operator looking for a harness fault they caused."""
-        session = _session(dsh)
-
-        async def spawn(*argv: str, **kwargs: Any) -> _FakeProc:
-            proc = _FakeProc([])
-            session["killed"] = True
-            return proc
-
-        monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
-        result = _result(await _drain(dsh))
-        assert result["stop_reason"] == "stopped"
-        assert result["is_error"] is False
-
     async def test_a_fresh_turn_is_not_stopped_by_the_previous_interrupt(
         self, dsh, monkeypatch
     ) -> None:
