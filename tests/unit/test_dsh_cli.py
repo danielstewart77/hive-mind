@@ -1176,6 +1176,11 @@ async def test_the_profile_is_read_per_turn_so_an_edit_does_not_wait_on_a_restar
     assert command[command.index("--profile") + 1] == "exam"
 
 
+async def _answer_with(proc: _FakeProc) -> _FakeProc:
+    """Spawn one prepared process, so a test can read how far its stdout got."""
+    return proc
+
+
 def _delta_line(kind: str, text: str) -> str:
     """One assistant delta the way the resumable runner writes it."""
     return json.dumps({"delta": {"kind": kind, "text": text}}) + "\n"
@@ -1194,14 +1199,34 @@ def _streamed(events: list[dict], inner_type: str) -> list[str]:
 
 
 async def test_prose_reaches_the_surface_as_the_model_writes_it(dsh, monkeypatch) -> None:
+    """The frame is handed over while the process is still running.
+
+    Collecting the frames and asserting their order proves nothing here: an
+    adapter that buffered every delta and flushed them in order just before the
+    report would produce the identical list, and the operator would be back to
+    staring at a frozen chat for the whole turn. So this reads how much of the
+    process's stdout had been consumed at the moment each frame arrived.
+    """
     _session(dsh)
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _Spawn([
+    lines = [
         _delta_line("text", "half "),
         _delta_line("text", "an answer"),
         _report(text="half an answer"),
-    ]))
-    events = await _drain(dsh)
+    ]
+    proc = _FakeProc(lines)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec",
+                        lambda *a, **k: _answer_with(proc))
+    unread_at_first_frame = None
+    events = []
+    async for event in dsh._run_dsh_turn("row-1", "do the thing", None):
+        if unread_at_first_frame is None and event.get("type") == "stream_event":
+            unread_at_first_frame = len(proc.stdout._lines)
+        events.append(event)
+
     assert _streamed(events, "text_delta") == ["half ", "an answer"]
+    # Two lines still unread: the second delta and the report. A buffered
+    # adapter would have drained all three before yielding anything.
+    assert unread_at_first_frame == 2
     # Reaching the surface is the point: an observer-only frame is published to
     # the session event stream and never handed to the bot.
     assert all(not event.get("_observer_only")
@@ -1222,19 +1247,26 @@ async def test_the_models_reasoning_is_streamed_apart_from_its_answer(
     assert _streamed(events, "text_delta") == ["the answer"]
 
 
-async def test_a_streamed_answer_is_not_repeated_when_the_turn_ends(
+async def test_a_streamed_answer_still_reaches_the_turn_ledger(
     dsh, monkeypatch
 ) -> None:
+    """The buffered frame is what comms accumulates into `session_turns`.
+
+    Dropping it because the surface had already shown every word left the
+    session holding the question and no reply, which is what `/history`, the
+    rotation carry-forward and the late-turn merge all read. Showing it twice is
+    the chat surfaces' problem and they already solve it.
+    """
     _session(dsh)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _Spawn([
         _delta_line("text", "the answer"),
         _report(text="the answer"),
     ]))
     events = await _drain(dsh)
-    assert [event for event in events if event["type"] == "assistant"] == []
+    assert _assistant_text(events) == "the answer"
 
 
-async def test_a_turn_that_streamed_only_reasoning_still_says_what_it_did(
+async def test_a_turn_that_only_reasoned_still_says_what_it_did(
     dsh, monkeypatch
 ) -> None:
     _session(dsh)
@@ -1247,3 +1279,17 @@ async def test_a_turn_that_streamed_only_reasoning_still_says_what_it_did(
     text = _assistant_text(await _drain(dsh))
     assert "max-tokens" in text
     assert "2 tool call" in text
+
+
+async def test_a_kind_this_adapter_does_not_know_is_not_relayed_as_the_answer(
+    dsh, monkeypatch
+) -> None:
+    """Anything but prose and reasoning is dropped rather than shown as prose."""
+    _session(dsh)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _Spawn([
+        json.dumps({"delta": {"kind": "tool", "text": '{"path": "a'}}) + "\n",
+        _delta_line("text", "the answer"),
+        _report(text="the answer"),
+    ]))
+    events = await _drain(dsh)
+    assert _streamed(events, "text_delta") == ["the answer"]

@@ -740,10 +740,16 @@ def _delta_frame(line: str) -> dict | None:
     body = delta.get("text")
     if not isinstance(body, str) or not body:
         return None
-    if delta.get("kind") == "reasoning":
+    kind = delta.get("kind")
+    if kind == "reasoning":
         inner = {"type": "thinking_delta", "thinking": body}
-    else:
+    elif kind == "text":
         inner = {"type": "text_delta", "text": body}
+    else:
+        # A kind this adapter has not grown yet. Relaying it as prose is how a
+        # fragment of a tool call ends up spoken in the mind's voice; the
+        # runner deliberately writes only the two kinds a reader wants.
+        return None
     return {"type": "stream_event", "event": {
         "type": "content_block_delta", "index": 0, "delta": inner}}
 
@@ -902,10 +908,6 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
             pgid = None
 
         lines: list[str] = []
-        # Whether any prose reached the surface while the turn ran. What it
-        # gates is the buffered copy at the end: the report carries the whole
-        # answer, and yielding it after the deltas would show the answer twice.
-        streamed_prose = False
         stderr = b""
         timed_out = False
         # Resolved now rather than at import: the console writes this value
@@ -940,9 +942,6 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
                         lines.append(decoded)
                         delta = _delta_frame(decoded)
                         if delta is not None:
-                            inner = delta["event"]["delta"]
-                            if inner["type"] == "text_delta":
-                                streamed_prose = True
                             yield delta
                             continue
                         frame = _progress_frame(decoded)
@@ -1028,17 +1027,19 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
            "_observer_only": True}
 
     text = str(report.get("text") or "")
-    # The diagnostic is still written when a turn produced no prose at all,
-    # streamed or buffered: a blank reply reads as a broken mind, and what the
-    # turn actually did is the thing worth showing. Reasoning alone does not
-    # count as an answer, which is why this is gated on prose.
-    if not streamed_prose:
-        yield {
-            "type": "assistant",
-            "message": {"role": "assistant", "content": [
-                {"type": "text", "text": text if text else _no_text_diagnostic(report)}
-            ]},
-        }
+    # Still written when the turn already streamed every word of it. The chat
+    # surfaces drop a buffered copy of prose they have already shown — that
+    # mechanism predates this harness and claude relies on it — and the frame is
+    # the only thing comms accumulates into the turn ledger. Withholding it put
+    # the answer on the screen and left the session's own history holding the
+    # question and no reply, which `/history`, the rotation carry-forward and
+    # the late-turn merge all read.
+    yield {
+        "type": "assistant",
+        "message": {"role": "assistant", "content": [
+            {"type": "text", "text": text if text else _no_text_diagnostic(report)}
+        ]},
+    }
 
     outcome = str(report.get("outcome") or "unknown")
     traffic = report.get("traffic") or {}
