@@ -68,6 +68,8 @@ class _FakeHttpSession:
     requested_url: str | None = None
     requested_headers: dict = {}
     raise_on_connect: Exception | None = None
+    release_status: int = 200
+    posted_urls: list = []
 
     def __init__(self, *a, **kw):
         pass
@@ -84,6 +86,29 @@ class _FakeHttpSession:
         if type(self).raise_on_connect:
             raise type(self).raise_on_connect
         return type(self).ws_to_return
+
+    def post(self, url, **kwargs):
+        # The attach hands the conversation to the terminal, which releases
+        # the chat-side harness over HTTP before the pane opens.
+        type(self).posted_urls = [*getattr(type(self), "posted_urls", []), url]
+        return _FakeReleaseResponse(type(self).release_status)
+
+
+class _FakeReleaseResponse:
+    def __init__(self, status: int):
+        self.status = status
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def json(self):
+        return {"released": True}
+
+    async def read(self):
+        return b""
 
 
 @pytest.fixture
@@ -190,15 +215,22 @@ class TestWsAttach:
         assert "ws://mind.test:8420/sessions/sess-attach/attach-pty" in _FakeHttpSession.requested_url
         assert "resume_sid=claude-abc" in _FakeHttpSession.requested_url
         assert "model=opus" in _FakeHttpSession.requested_url
-        assert "owner_type=web" in _FakeHttpSession.requested_url
-        assert "owner_ref=u1" in _FakeHttpSession.requested_url
+        # The tile takes the conversation, so the pane carries the terminal
+        # surface's own key rather than whatever the chat was holding.
+        assert "owner_type=terminal" in _FakeHttpSession.requested_url
+        assert "owner_ref=terminal-sess-attach" in _FakeHttpSession.requested_url
 
     def test_relays_client_ref_so_the_mind_can_arm_rotation(self, app_client, monkeypatch):
         """Without client_ref in the pane env, the mind's Stop hook bails on
         every fire and a terminal session never rotates — it just grows
-        until Claude's own native compaction is the only thing left."""
+        until Claude's own native compaction is the only thing left.
+
+        The conversation is seeded bound to nothing, which is how a tile
+        always found it: one such pane ran eight days to 1834 messages and
+        `Prompt is too long`.
+        """
         client, server_module = app_client
-        _run(_seed_session_and_mind(server_module, client_ref="terminal-abc"))
+        _run(_seed_session_and_mind(server_module))
 
         fake_ws = _FakeMindWS(incoming=[b"hi\r\n"])
         _FakeHttpSession.ws_to_return = fake_ws
@@ -208,7 +240,15 @@ class TestWsAttach:
         with client.websocket_connect("/sessions/sess-attach/attach") as ws:
             ws.receive_bytes()
 
-        assert "client_ref=terminal-abc" in _FakeHttpSession.requested_url
+        assert "client_ref=terminal-sess-attach" in _FakeHttpSession.requested_url
+        mgr = server_module.session_mgr
+        bound = _run(mgr._db.execute_fetchall(
+            "SELECT client_type, client_ref FROM active_sessions WHERE session_id = ?",
+            ("sess-attach",),
+        ))
+        assert [(r["client_type"], r["client_ref"]) for r in bound] == [
+            ("terminal", "terminal-sess-attach")
+        ]
 
     def test_relays_persisted_provider_thread_to_the_mind(self, app_client, monkeypatch):
         client, server_module = app_client
@@ -480,9 +520,7 @@ class TestRotationReachesTheTile:
         self, app_client, monkeypatch
     ):
         client, server_module = app_client
-        _run(_seed_session_and_mind(
-            server_module, session_id="sess-rot", client_ref="terminal-abc",
-        ))
+        _run(_seed_session_and_mind(server_module, session_id="sess-rot"))
         mgr = server_module.session_mgr
 
         async def _seed_turns() -> None:
@@ -490,7 +528,8 @@ class TestRotationReachesTheTile:
             # screen, and only a terminal's rotation stages rather than
             # retiring the session.
             await mgr._db.execute(
-                "UPDATE sessions SET owner_ref = 'terminal' WHERE id = 'sess-rot'"
+                "UPDATE sessions SET owner_type = 'terminal', "
+                "owner_ref = 'terminal-sess-rot' WHERE id = 'sess-rot'"
             )
             now = time.time()
             for i, (role, content) in enumerate(
@@ -526,9 +565,11 @@ class TestRotationReachesTheTile:
 
             # Staged at the threshold, fired by the pane's own typed turn —
             # which is the moment the screen is actually replaced.
-            _run(mgr.arm_rotation("web", "terminal-abc", surface="terminal"))
+            _run(mgr.arm_rotation(
+                "terminal", "terminal-sess-rot", surface="terminal"
+            ))
             _run(mgr.fire_rotation(
-                "web", "terminal-abc",
+                "terminal", "terminal-sess-rot",
                 claude_sid="claude-abc", prompt="why did it go blank?",
             ))
 
