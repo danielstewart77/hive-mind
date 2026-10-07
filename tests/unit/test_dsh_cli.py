@@ -763,11 +763,20 @@ async def test_a_turn_stopped_on_purpose_is_not_reported_as_a_crash(
 ) -> None:
     """A kill or a cross-surface release ends the process mid-turn. The
     harness-exited-without-reporting sentence would read as a crash to the one
-    person who knows they asked for it."""
+    person who knows they asked for it.
+
+    The flag is set *during* the turn, which is the only way it is ever set:
+    one left over from a previous turn is cleared when this one starts, so a
+    stale flag cannot make an unrelated failure look deliberate."""
     state = _session(dsh)
-    state["killed"] = True
-    monkeypatch.setattr(asyncio, "create_subprocess_exec",
-                        _Spawn([], stderr="", returncode=-9))
+    spawn = _Spawn([], stderr="", returncode=-9)
+
+    async def kill_mid_turn(*argv, **kwargs):
+        proc = await spawn(*argv, **kwargs)
+        state["killed"] = True
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", kill_mid_turn)
     result = _result(await _drain(dsh))
     assert result["stop_reason"] == "stopped"
     assert result["is_error"] is False
@@ -1088,3 +1097,77 @@ async def test_a_turn_the_console_unbounded_is_not_killed(dsh, monkeypatch) -> N
     events = await _drain(dsh)
     assert _result(events)["stop_reason"] == "completed"
     assert "done" in _assistant_text(events)
+
+
+class TestInterrupt:
+    """`/stop` on a surface reaches this route, and it has to actually stop.
+
+    A per-turn harness has no interrupt of its own, so the process is the only
+    thing there is to stop. The route used to answer `ok` without touching it,
+    which told the operator the work had been interrupted while a forty-round
+    dispatch carried on behind the message.
+    """
+
+    async def test_it_kills_the_process_group_of_the_turn_in_flight(
+        self, dsh, monkeypatch
+    ) -> None:
+        session = _session(dsh)
+        killed: list[Any] = []
+
+        async def reap(proc: Any) -> None:
+            killed.append(proc)
+
+        monkeypatch.setattr(dsh, "_reap_proc", reap)
+        running = _FakeProc([])
+        running.returncode = None
+        session["proc"] = running
+
+        body = await dsh.interrupt_session("row-1")
+        assert body["message"] == "interrupted"
+        assert killed == [running]
+        assert session["killed"] is True
+        assert session["proc"] is None
+
+    async def test_a_session_with_nothing_running_says_so(self, dsh) -> None:
+        """"Interrupted" over an idle session is a lie the operator acts on."""
+        _session(dsh)
+        body = await dsh.interrupt_session("row-1")
+        assert body["message"] == "nothing_running"
+
+    async def test_an_unknown_session_is_a_404(self, dsh) -> None:
+        response = await dsh.interrupt_session("no-such-row")
+        assert response.status_code == 404
+
+    async def test_an_interrupted_turn_reports_itself_stopped_not_crashed(
+        self, dsh, monkeypatch
+    ) -> None:
+        """A process killed on purpose writes no report. Reported as a crash it
+        would send the operator looking for a harness fault they caused."""
+        session = _session(dsh)
+
+        async def spawn(*argv: str, **kwargs: Any) -> _FakeProc:
+            proc = _FakeProc([])
+            session["killed"] = True
+            return proc
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+        result = _result(await _drain(dsh))
+        assert result["stop_reason"] == "stopped"
+        assert result["is_error"] is False
+
+    async def test_a_fresh_turn_is_not_stopped_by_the_previous_interrupt(
+        self, dsh, monkeypatch
+    ) -> None:
+        """The flag is the last turn's verdict. Left standing, the next turn
+        whose output is unreadable reports itself as deliberately stopped."""
+        session = _session(dsh)
+        session["killed"] = True
+        report = {"sessionId": "conv-1", "text": "back at it", "outcome": "completed"}
+
+        async def spawn(*argv: str, **kwargs: Any) -> _FakeProc:
+            return _FakeProc([json.dumps(report) + "\n"])
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+        events = await _drain(dsh)
+        assert _result(events)["stop_reason"] == "completed"
+        assert session["killed"] is False

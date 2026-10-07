@@ -739,6 +739,11 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
         yield {"type": "result", "is_error": True}
         return
 
+    # Cleared per turn: the flag is the *previous* turn's verdict, and a fresh
+    # turn nobody has interrupted must not report itself as stopped on purpose
+    # the moment its own output is unreadable.
+    state["killed"] = False
+
     # The composed prompt rides in on the conversation's first turn, the way it
     # does for codex: the surface submits the task as a user message, and a
     # system prompt submitted to nothing reaches no transcript.
@@ -1046,9 +1051,32 @@ async def send_message(sid: str, req: Request) -> Any:
 
 @app.post("/sessions/{sid}/interrupt")
 async def interrupt_session(sid: str) -> Any:
-    if sid not in SESSIONS:
+    """Stop the turn in flight and leave the conversation standing.
+
+    A per-turn harness has no interrupt of its own: the only thing to stop is
+    the process, and the conversation lives in dsh's session store on disk, so
+    killing one turn costs the turn and nothing else. The session row, its
+    resume id and every completed turn survive — which is what separates this
+    from `DELETE`.
+
+    It used to answer `ok` and do nothing, which is the shape that matters:
+    the surface told the operator the work had been interrupted while forty
+    goal rounds carried on behind it, and the only remedy left was bouncing
+    the container. A refusal reported as a success is worse than a refusal.
+    """
+    sess = SESSIONS.get(sid)
+    if sess is None:
         return JSONResponse({"error": f"Session {sid} not found"}, status_code=404)
-    return {"ok": True, "session_id": sid, "message": "dsh_per_turn"}
+    proc = sess.get("proc")
+    if proc is None or proc.returncode is not None:
+        return {"ok": True, "session_id": sid, "message": "nothing_running"}
+    # Read by the turn generator, which reports a process that wrote no report
+    # as stopped on purpose rather than as a harness that fell over.
+    sess["killed"] = True
+    await _reap_proc(proc)
+    sess["proc"] = None
+    log_event(log, "turn.interrupted", mind_id=MIND_ID, mind_name=NAME, session_id=sid)
+    return {"ok": True, "session_id": sid, "message": "interrupted"}
 
 
 @app.post("/sessions/{sid}/release")
