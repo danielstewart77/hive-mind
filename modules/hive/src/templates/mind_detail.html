@@ -12,6 +12,7 @@
         <section class="surface"><div class="surface-header"><div><h2>Runtime configuration</h2><p>Secret values are removed before this reaches the browser.</p></div></div><div class="surface-body"><div class="code-wrap"><pre class="code-panel" id="mind-config">Loading…</pre><button class="icon-button" type="button" data-copy="#mind-config" aria-label="Copy configuration"><i data-lucide="copy"></i></button></div></div></section>
         <section class="surface" id="mind-editor" data-editable hidden><div class="surface-header"><div><h2>Default model</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-model-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-model-form"><p>Written to this Mind&#39;s runtime.yaml and its registry row. Applies to the next session it is asked for; conversations already running keep their model.</p><div class="field"><label for="mind-provider">Provider</label><select id="mind-provider" name="provider" required></select><small>The upstream hosting the model. This Mind's own proxy key decides which appear.</small></div><div class="field"><label for="mind-default-model">Model</label><select id="mind-default-model" name="default_model" required></select><small>Every model this Mind is permitted to run on the chosen provider.</small></div><div class="form-actions"><button class="button" type="submit" id="mind-model-save">Save model</button></div><small id="mind-model-status"></small></form></div></section>
         <section class="surface" id="mind-voice" data-editable hidden><div class="surface-header"><div><h2>Voice</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-voice-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-voice-form"><p>Written to this Mind&#39;s runtime.yaml and its registry row. In effect on the next spoken reply.</p><div class="field"><label for="mind-voice-name">Voice</label><select id="mind-voice-name" name="voice" required></select><small id="mind-voice-description"></small><small id="mind-voice-help"></small></div><div class="form-actions"><button class="button" type="submit" id="mind-voice-save">Save voice</button><button class="button button-quiet" type="button" id="mind-voice-listen">Listen</button></div><small id="mind-voice-status"></small></form></div></section>
+        <section class="surface" id="mind-settings" data-editable hidden><div class="surface-header"><div><h2>Settings</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-settings-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-settings-form"><p>Written to this Mind&#39;s runtime.yaml. Which controls appear is decided by its harness.</p><div id="mind-settings-fields"></div><div class="form-actions"><button class="button" type="submit" id="mind-settings-save">Save settings</button></div><small id="mind-settings-status"></small></form></div></section>
         <section class="surface" id="mind-surface-token" data-editable hidden><div class="surface-header"><div><h2>Surface token</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Set</button></div><dl class="detail-grid surface-body" data-summary id="mind-token-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-token-form"><p>Checked against the bot API before it is stored, so a token it refuses leaves the working one in place. Written on the Mind, into whichever of its own `.env` or keyring its surface reads. Never readable from here.</p><div class="field"><label for="mind-token-value">Bot token</label><input id="mind-token-value" name="token" type="password" autocomplete="off" spellcheck="false" required placeholder="123456789:AA…"><small>Issued by BotFather. Reaches the surface when it is next restarted.</small></div><div class="form-actions"><button class="button" type="submit" id="mind-token-save">Verify and store</button></div><small id="mind-token-status"></small></form></div></section>
         <section class="surface" id="mind-skills" hidden><div class="surface-header"><div><h2>Skills</h2><p>The repo&#39;s copy against this Mind&#39;s. Applying copies the repo&#39;s directory into the one this Mind&#39;s harness loads skills from. When the harness picks it up is the harness&#39;s business.</p></div><span id="mind-skills-harness"></span></div><div class="surface-body"><div id="mind-skills-status"></div><table class="data-table" id="mind-skills-table" hidden><thead><tr><th>Skill</th><th>Repo</th><th>This Mind</th><th></th></tr></thead><tbody id="mind-skills-rows"></tbody></table></div></section>
         <section class="surface" id="mind-files" data-editable hidden><div class="surface-header"><div><h2>Skill and hook files</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-files-summary"></dl><div data-editor hidden><div class="surface-header"><div><p>The directories this Mind&#39;s harness reads. Edits are written in place, on the Mind. A hook is re-read on every event, so an edit to one is live immediately; a skill is read when a harness process starts, so a running conversation keeps the copy it loaded.</p></div><div class="row-actions"><button class="button button-quiet" type="button" data-tree="skills">Skills</button><button class="button button-quiet" type="button" data-tree="hooks">Hooks</button></div></div><div class="surface-body overview-stack"><small id="mind-files-root"></small><div id="mind-files-status"></div><div class="field"><label for="mind-files-list">File</label><select id="mind-files-list" size="10"></select></div><form class="overview-stack" id="mind-files-form" hidden><div class="field"><label for="mind-files-text" id="mind-files-label">Contents</label><textarea id="mind-files-text" rows="22" spellcheck="false" wrap="off"></textarea></div><div class="form-actions"><button class="button" type="submit" id="mind-files-save">Save file</button><button class="button button-quiet" type="button" id="mind-files-reload">Discard and reload</button></div><small id="mind-files-save-status"></small></form></div></div></section>
@@ -187,6 +188,92 @@ window.addEventListener("DOMContentLoaded", async function () {
         } else {
             renderVoiceOptions(state);
         }
+    }
+
+    // The settings panel. The controls are the Mind's answer, not this
+    // page's: only the Mind knows which harness it runs, and a box whose
+    // value its runner would ignore is worse than no box, because nothing on
+    // screen could tell the operator it did nothing.
+    //
+    // A setting the Mind's file has no line for is still offered. It is shown
+    // as unset rather than pre-filled with whatever the code falls back to,
+    // because a default displayed as a value reads as a decision somebody
+    // made.
+    let settingsState = null;
+
+    function settingsSummary(state) {
+        if (state.unreachable) return [["Settings", "Could not be read"], ["Reason", state.detail || "This Mind did not answer"]];
+        const rows = (state.settings || []).map(function (entry) {
+            return [entry.label, entry.present ? String(entry.value) : "Not set"];
+        });
+        // The window belongs to the model and is read from the proxy, so it
+        // is reported here and editable nowhere.
+        rows.push(["Context window", state.context_window ? String(state.context_window) + " tokens" : "Not reported"]);
+        // The rotation threshold is a percentage of that window, so without
+        // one it resolves to nothing and the Mind falls back to its
+        // model-family default. Said here because the alternative is a
+        // setting that saves, displays the value it was given, and is ignored
+        // — with only an adjacent row reading "Not reported" to hint at it.
+        const threshold = (state.settings || []).find(function (entry) {
+            return entry.key === "rotation_threshold_percent";
+        });
+        if (threshold && threshold.present && !state.context_window) {
+            rows.push(["Rotation threshold", String(threshold.value) +
+                "% — not in effect until this Mind's model is saved, which is what caches the window"]);
+        }
+        return rows;
+    }
+
+    function settingsControl(entry) {
+        const id = "mind-setting-" + entry.key;
+        const value = entry.present ? entry.value : "";
+        let control;
+        // A setting the Mind has no line for gets an explicit "Not set" entry,
+        // selected. Without one a browser selects the first option of every
+        // select, so a save of one unrelated field would write Yes into every
+        // switch the file happened not to declare — turning on a thing the
+        // operator never looked at.
+        const unset = entry.present ? "" : '<option value="" selected>Not set</option>';
+        if (entry.kind === "boolean") {
+            control = '<select id="' + id + '" data-setting="' + h.escapeHtml(entry.key) + '">' + unset +
+                '<option value="true"' + (value === true ? " selected" : "") + '>Yes</option>' +
+                '<option value="false"' + (value === false ? " selected" : "") + '>No</option></select>';
+        } else if (entry.kind === "choice") {
+            control = '<select id="' + id + '" data-setting="' + h.escapeHtml(entry.key) + '">' + unset +
+                (entry.choices || []).map(function (choice) {
+                    return '<option value="' + h.escapeHtml(choice) + '"' +
+                        (String(value) === choice ? " selected" : "") + '>' + h.escapeHtml(choice) + '</option>';
+                }).join("") + '</select>';
+        } else if (entry.kind === "number") {
+            control = '<input id="' + id + '" type="number" step="1"' +
+                (entry.minimum === null ? "" : ' min="' + entry.minimum + '"') +
+                (entry.maximum === null ? "" : ' max="' + entry.maximum + '"') +
+                ' value="' + h.escapeHtml(String(value)) + '" data-setting="' + h.escapeHtml(entry.key) + '">';
+        } else {
+            control = '<input id="' + id + '" type="text" spellcheck="false" value="' +
+                h.escapeHtml(String(value)) + '" data-setting="' + h.escapeHtml(entry.key) + '">';
+        }
+        return '<div class="field"><label for="' + id + '">' + h.escapeHtml(entry.label) + '</label>' +
+            control + '<small>' + h.escapeHtml(entry.help || "") + '</small></div>';
+    }
+
+    async function renderSettings(name) {
+        const section = document.getElementById("mind-settings");
+        section.dataset.mindName = name;
+        section.hidden = false;
+        let state;
+        try {
+            state = await h.requestJson("/api/minds/" + encodeURIComponent(name) + "/settings");
+        } catch (error) {
+            state = {unreachable: true, detail: error.message};
+        }
+        settingsState = state;
+        paintSummary("mind-settings-summary", settingsSummary(state));
+        const form = document.getElementById("mind-settings-form");
+        if (state.unreachable) { form.hidden = true; return; }
+        form.hidden = false;
+        document.getElementById("mind-settings-fields").innerHTML =
+            (state.settings || []).map(settingsControl).join("");
     }
 
     async function renderSurfaceToken(name) {
@@ -439,6 +526,7 @@ window.addEventListener("DOMContentLoaded", async function () {
             document.getElementById("mind-model-status").textContent = "Cannot reach this Mind to read its configuration: " + error.message;
         }
         await renderVoice(mind.name);
+        await renderSettings(mind.name);
         await renderSurfaceToken(mind.name);
         await renderSkills(mind.name);
         const filesSection = document.getElementById("mind-files");
@@ -649,6 +737,44 @@ window.addEventListener("DOMContentLoaded", async function () {
             const data = await h.requestJson("/api/minds/" + encodeURIComponent(section.dataset.mindName) + "/voice", {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({voice: event.target.elements.voice.value})});
             status.textContent = "Saved. The next spoken reply uses " + (data.voice || "the new voice") + ".";
             await renderVoice(section.dataset.mindName);
+        } catch (error) { status.textContent = error.message; }
+    });
+
+    document.getElementById("mind-settings-form").addEventListener("submit", async function (event) {
+        event.preventDefault();
+        const section = document.getElementById("mind-settings"), status = document.getElementById("mind-settings-status");
+        // Only what the operator actually changed. A form that resent every
+        // field would write values nobody touched back over an edit made
+        // elsewhere since this page was opened.
+        const changed = {};
+        (settingsState && settingsState.settings || []).forEach(function (entry) {
+            const control = document.querySelector('[data-setting="' + entry.key + '"]');
+            if (!control) return;
+            const raw = control.value;
+            // A control left as it was found sends nothing, and that includes
+            // one found with nothing in it. Sending every unset field would
+            // make a Mind missing one text line unable to save any setting at
+            // all — a blank description is refused, and the refusal is the
+            // whole write.
+            if (raw === "") return;
+            if (entry.kind === "boolean") {
+                const now = raw === "true";
+                if (!entry.present || entry.value !== now) changed[entry.key] = now;
+                return;
+            }
+            if (entry.kind === "number") {
+                const now = Number(raw);
+                if (!entry.present || Number(entry.value) !== now) changed[entry.key] = now;
+                return;
+            }
+            if (!entry.present || String(entry.value) !== raw) changed[entry.key] = raw;
+        });
+        if (!Object.keys(changed).length) { status.textContent = "Nothing changed."; return; }
+        status.textContent = "Saving…";
+        try {
+            await h.requestJson("/api/minds/" + encodeURIComponent(section.dataset.mindName) + "/settings", {method: "PATCH", headers: {"Content-Type": "application/json"}, body: JSON.stringify({settings: changed})});
+            status.textContent = "Saved to this Mind's runtime.yaml.";
+            await renderSettings(section.dataset.mindName);
         } catch (error) { status.textContent = error.message; }
     });
 

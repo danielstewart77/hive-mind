@@ -327,3 +327,75 @@ async def fetch_voice_catalogue(voice_server_url: str) -> dict:
         unreadable["catalogue"]["detail"] = "The voice server returned no catalogue"
         return unreadable
     return body
+
+
+# ---------------------------------------------------------------------------
+# The settings panel
+#
+# One form in front of every Mind, whatever its harness. The shape of the
+# form is not decided here: the Mind reports which controls its own runner
+# honours, so a Claude Mind is not offered a goal-rounds box that nothing
+# would read. This module relays and nothing more.
+# ---------------------------------------------------------------------------
+
+
+def _settings_endpoint(gateway_url: str) -> str:
+    return f"{_endpoint(gateway_url)}/settings"
+
+
+def _unwrap_settings(response: httpx.Response) -> dict:
+    if response.status_code == 404:
+        raise HTTPException(
+            status_code=501,
+            detail="This Mind is running a version without the settings API",
+        )
+    if response.status_code >= 400:
+        detail = response.text
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        if isinstance(body, dict) and body.get("error"):
+            detail = str(body["error"])
+        raise HTTPException(status_code=response.status_code, detail=detail)
+    body = response.json()
+    if not isinstance(body, dict) or not isinstance(body.get("settings"), list):
+        raise HTTPException(status_code=502, detail="Mind returned no settings")
+    return body
+
+
+async def fetch_settings(gateway_url: str) -> dict:
+    """The controls this Mind's harness honours, with their current values."""
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            response = await client.get(
+                _settings_endpoint(gateway_url), headers=admin_headers()
+            )
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Mind is unreachable: {exc}"
+        ) from exc
+    return _unwrap_settings(response)
+
+
+async def push_settings(gateway_url: str, settings: dict) -> dict:
+    """Write the settings the operator changed into this Mind's runtime.yaml.
+
+    Only the changed ones travel: a form that resent every field would write a
+    value the operator never touched back over an edit made elsewhere since
+    the page was opened.
+    """
+    if not settings:
+        raise HTTPException(status_code=400, detail="Nothing was changed")
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            response = await client.patch(
+                _settings_endpoint(gateway_url),
+                json={"settings": settings},
+                headers=admin_headers(),
+            )
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Mind is unreachable: {exc}"
+        ) from exc
+    return _unwrap_settings(response)

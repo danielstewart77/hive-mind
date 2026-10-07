@@ -412,3 +412,186 @@ def test_a_voice_server_that_broke_reads_as_a_gateway_failure(monkeypatch):
         assert refused.value.status_code == 502
 
     _run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# The settings panel
+# ---------------------------------------------------------------------------
+
+_SETTINGS_BODY = {
+    "harness": "dsh_cli",
+    "context_window": 131072,
+    "settings": [
+        {
+            "key": "goal_rounds",
+            "label": "Goal rounds",
+            "kind": "number",
+            "help": "",
+            "choices": [],
+            "minimum": 1,
+            "maximum": 200,
+            "present": True,
+            "value": 40,
+        }
+    ],
+}
+
+
+def test_the_settings_read_asks_the_mind_and_carries_the_admin_bearer(monkeypatch):
+    async def scenario():
+        calls = []
+        monkeypatch.setattr(
+            mind_runtime.httpx,
+            "AsyncClient",
+            _Client(_response(200, _SETTINGS_BODY), calls=calls),
+        )
+        body = await mind_runtime.fetch_settings("http://mind:8420")
+        assert body["settings"][0]["value"] == 40
+        method, url, kwargs = calls[0]
+        assert (method, url) == ("GET", "http://mind:8420/runtime/settings")
+        assert kwargs["headers"]["Authorization"] == "Bearer admin-token"
+
+    _run(scenario())
+
+
+def test_a_save_sends_only_the_settings_that_changed(monkeypatch):
+    """A form that resent every field would write a value the operator never
+    touched back over an edit made elsewhere since the page was opened."""
+
+    async def scenario():
+        calls = []
+        monkeypatch.setattr(
+            mind_runtime.httpx,
+            "AsyncClient",
+            _Client(_response(200, _SETTINGS_BODY), calls=calls),
+        )
+        await mind_runtime.push_settings("http://mind:8420", {"goal_rounds": 1})
+        method, url, kwargs = calls[0]
+        assert (method, url) == ("PATCH", "http://mind:8420/runtime/settings")
+        assert kwargs["json"] == {"settings": {"goal_rounds": 1}}
+
+    _run(scenario())
+
+
+def test_a_refused_setting_is_reported_as_a_refusal_with_the_minds_reason(monkeypatch):
+    """Painting the panel green over a refusal is how an operator believes a
+    value landed that never did."""
+
+    async def scenario():
+        monkeypatch.setattr(
+            mind_runtime.httpx,
+            "AsyncClient",
+            _Client(_response(400, {"error": "Goal rounds must be a whole number"})),
+        )
+        with pytest.raises(HTTPException) as refused:
+            await mind_runtime.push_settings("http://mind:8420", {"goal_rounds": "x"})
+        assert refused.value.status_code == 400
+        # The sentence itself, not a substring of the raw body: the raw JSON
+        # also contains those words, so a looser assertion holds while the
+        # operator is shown a serialized envelope.
+        assert refused.value.detail == "Goal rounds must be a whole number"
+
+    _run(scenario())
+
+
+def test_a_mind_without_the_settings_api_is_not_reported_as_a_bad_request(monkeypatch):
+    """A 404 means this Mind predates the route, and the remedy is a deploy —
+    not a different value in the form."""
+
+    async def scenario():
+        monkeypatch.setattr(
+            mind_runtime.httpx, "AsyncClient", _Client(_response(404, text="nope"))
+        )
+        with pytest.raises(HTTPException) as refused:
+            await mind_runtime.fetch_settings("http://mind:8420")
+        assert refused.value.status_code == 501
+
+    _run(scenario())
+
+
+def test_an_unreachable_mind_is_reported_as_unreachable(monkeypatch):
+    async def scenario():
+        monkeypatch.setattr(
+            mind_runtime.httpx,
+            "AsyncClient",
+            _Client(error=httpx.ConnectError("refused")),
+        )
+        with pytest.raises(HTTPException) as refused:
+            await mind_runtime.push_settings("http://mind:8420", {"goal_rounds": 1})
+        assert refused.value.status_code == 502
+
+    _run(scenario())
+
+
+def test_a_save_carries_the_admin_bearer_the_mind_demands(monkeypatch):
+    """The Mind's settings route is admin-guarded, so a save that forgot the
+    credential would 401 on every attempt in production with the shape of the
+    request still perfectly correct."""
+
+    async def scenario():
+        calls = []
+        monkeypatch.setattr(
+            mind_runtime.httpx,
+            "AsyncClient",
+            _Client(_response(200, _SETTINGS_BODY), calls=calls),
+        )
+        await mind_runtime.push_settings("http://mind:8420", {"goal_rounds": 1})
+        assert calls[0][2]["headers"]["Authorization"] == "Bearer admin-token"
+
+    _run(scenario())
+
+
+def test_a_minds_own_refusal_keeps_its_status_rather_than_becoming_a_bad_value(
+    monkeypatch,
+):
+    """A mind with no admin token configured answers 503. Flattened to 400 it
+    reaches the operator as a complaint about the value they typed, and they
+    go looking at the form instead of at the mind."""
+
+    async def scenario():
+        monkeypatch.setattr(
+            mind_runtime.httpx,
+            "AsyncClient",
+            _Client(_response(503, {"error": "no admin token configured"})),
+        )
+        with pytest.raises(HTTPException) as refused:
+            await mind_runtime.push_settings("http://mind:8420", {"goal_rounds": 1})
+        assert refused.value.status_code == 503
+
+    _run(scenario())
+
+
+def test_a_mind_answering_something_other_than_settings_is_not_passed_through(
+    monkeypatch,
+):
+    """A reverse proxy's own 200 page, or a mind answering a different route,
+    would otherwise reach the panel as a settings payload with no settings in
+    it."""
+
+    async def scenario():
+        monkeypatch.setattr(
+            mind_runtime.httpx, "AsyncClient", _Client(_response(200, {"ok": True}))
+        )
+        with pytest.raises(HTTPException) as refused:
+            await mind_runtime.fetch_settings("http://mind:8420")
+        assert refused.value.status_code == 502
+
+    _run(scenario())
+
+
+def test_a_save_with_nothing_in_it_never_reaches_the_mind(monkeypatch):
+    """An empty save is a write the mind would have to refuse, and a round
+    trip to be told so."""
+
+    async def scenario():
+        calls = []
+        monkeypatch.setattr(
+            mind_runtime.httpx,
+            "AsyncClient",
+            _Client(_response(200, _SETTINGS_BODY), calls=calls),
+        )
+        with pytest.raises(HTTPException):
+            await mind_runtime.push_settings("http://mind:8420", {})
+        assert calls == []
+
+    _run(scenario())

@@ -2215,6 +2215,38 @@ async def api_mind_configuration(name: str, user: dict = Depends(require_auth)):
     }
 
 
+@app.get("/api/minds/{name}/settings")
+async def api_mind_settings(name: str, user: dict = Depends(require_auth)):
+    """The settings panel for one Mind.
+
+    Which controls come back is the Mind's answer, not this console's: only
+    the Mind knows which harness it runs, and a control its runner ignores is
+    worse than an absent one because nothing on screen could tell the
+    operator it did nothing.
+    """
+    del user
+    gateway_url = await _mind_gateway_url(name)
+    return await mind_runtime.fetch_settings(gateway_url)
+
+
+@app.patch("/api/minds/{name}/settings")
+async def api_mind_settings_update(
+    name: str, request: Request, user: dict = Depends(require_auth)
+):
+    """Write the changed settings into this Mind's own runtime.yaml."""
+    body = await request.json()
+    settings = body.get("settings") if isinstance(body, dict) else None
+    if not isinstance(settings, dict) or not settings:
+        raise HTTPException(status_code=400, detail="Nothing was changed")
+    gateway_url = await _mind_gateway_url(name)
+    saved = await mind_runtime.push_settings(gateway_url, settings)
+    log_event(
+        log, "mind.settings.updated", **_actor_fields(user), mind_name=name,
+        settings=sorted(settings),
+    )
+    return {"saved": True, **saved}
+
+
 @app.get("/api/minds/{name}/voice")
 async def api_mind_voice(name: str, user: dict = Depends(require_auth)):
     """This Mind's voice, and the voices the speech engine can actually speak.
