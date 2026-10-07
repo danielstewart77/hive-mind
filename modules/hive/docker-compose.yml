@@ -50,6 +50,11 @@ services:
       # blast radius of "settings can write files" stays legible in code.
       - ${HIVE_MIND_DIR:-/home/daniel/Storage/Dev/hive_mind}/minds:/minds_hive_mind_voice:rw
       - ${HIVE_MIND_DIR:-/home/daniel/Storage/Dev/hive_mind}/minds:/minds_hive_mind_config:rw
+      # The mountable roots for the per-Mind project folders control
+      # (mind_mounts.py). Read-write because the control creates a folder and
+      # mounts it in one action; what it may reach is this mount, so a root
+      # added to MIND_MOUNT_ROOTS needs its own mount here and a recreate.
+      - ${HOST_DEV_DIR:-/home/daniel/Storage/Dev}:/dev_roots:rw
       # (see the HOST_UID/HOST_GID note in the environment block above)
       # Hive-tools repo. Read-write because the Capability Nodes clone action
       # installs into it; a missing host path is auto-created empty by

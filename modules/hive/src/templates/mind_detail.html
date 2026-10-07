@@ -13,6 +13,7 @@
         <section class="surface" id="mind-editor" data-editable hidden><div class="surface-header"><div><h2>Default model</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-model-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-model-form"><p>Written to this Mind&#39;s runtime.yaml and its registry row. Applies to the next session it is asked for; conversations already running keep their model.</p><div class="field"><label for="mind-provider">Provider</label><select id="mind-provider" name="provider" required></select><small>The upstream hosting the model. This Mind's own proxy key decides which appear.</small></div><div class="field"><label for="mind-default-model">Model</label><select id="mind-default-model" name="default_model" required></select><small>Every model this Mind is permitted to run on the chosen provider.</small></div><div class="form-actions"><button class="button" type="submit" id="mind-model-save">Save model</button></div><small id="mind-model-status"></small></form></div></section>
         <section class="surface" id="mind-voice" data-editable hidden><div class="surface-header"><div><h2>Voice</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-voice-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-voice-form"><p>Written to this Mind&#39;s runtime.yaml and its registry row. In effect on the next spoken reply.</p><div class="field"><label for="mind-voice-name">Voice</label><select id="mind-voice-name" name="voice" required></select><small id="mind-voice-description"></small><small id="mind-voice-help"></small></div><div class="form-actions"><button class="button" type="submit" id="mind-voice-save">Save voice</button><button class="button button-quiet" type="button" id="mind-voice-listen">Listen</button></div><small id="mind-voice-status"></small></form></div></section>
         <section class="surface" id="mind-settings" data-editable hidden><div class="surface-header"><div><h2>Settings</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-settings-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-settings-form"><p>Written to this Mind&#39;s runtime.yaml. Which controls appear is decided by its harness.</p><div id="mind-settings-fields"></div><div class="form-actions"><button class="button" type="submit" id="mind-settings-save">Save settings</button></div><small id="mind-settings-status"></small></form></div></section>
+        <section class="surface" id="mind-mounts" data-editable hidden><div class="surface-header"><div><h2>Project folders</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-mounts-summary"></dl><div data-editor hidden><div class="surface-body overview-stack"><p>Saving writes this Mind&#39;s compose fragment and then recreates its container. Recreating ends every process the Mind had running inside it, including a harness turn in flight.</p><table class="data-table" id="mind-mounts-table"><thead><tr><th>Folder</th><th>Inside the Mind</th><th>Access</th><th></th></tr></thead><tbody id="mind-mounts-rows"></tbody></table><div class="field"><label for="mind-mounts-root">Add a folder</label><select id="mind-mounts-root"></select><small id="mind-mounts-here"></small></div><div id="mind-mounts-browser"></div><div class="field"><label for="mind-mounts-new">New folder here</label><input id="mind-mounts-new" type="text" spellcheck="false" placeholder="name"><div class="form-actions"><button class="button button-quiet" type="button" id="mind-mounts-create">Create and add</button></div></div><div class="form-actions"><button class="button" type="button" id="mind-mounts-save">Save and recreate</button></div><small id="mind-mounts-status"></small><div id="mind-mounts-infrastructure"></div></div></div></section>
         <section class="surface" id="mind-surface-token" data-editable hidden><div class="surface-header"><div><h2>Surface token</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Set</button></div><dl class="detail-grid surface-body" data-summary id="mind-token-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-token-form"><p>Checked against the bot API before it is stored, so a token it refuses leaves the working one in place. Written on the Mind, into whichever of its own `.env` or keyring its surface reads. Never readable from here.</p><div class="field"><label for="mind-token-value">Bot token</label><input id="mind-token-value" name="token" type="password" autocomplete="off" spellcheck="false" required placeholder="123456789:AA…"><small>Issued by BotFather. Reaches the surface when it is next restarted.</small></div><div class="form-actions"><button class="button" type="submit" id="mind-token-save">Verify and store</button></div><small id="mind-token-status"></small></form></div></section>
         <section class="surface" id="mind-skills" hidden><div class="surface-header"><div><h2>Skills</h2><p>The repo&#39;s copy against this Mind&#39;s. Applying copies the repo&#39;s directory into the one this Mind&#39;s harness loads skills from. When the harness picks it up is the harness&#39;s business.</p></div><span id="mind-skills-harness"></span></div><div class="surface-body"><div id="mind-skills-status"></div><table class="data-table" id="mind-skills-table" hidden><thead><tr><th>Skill</th><th>Repo</th><th>This Mind</th><th></th></tr></thead><tbody id="mind-skills-rows"></tbody></table></div></section>
         <section class="surface" id="mind-files" data-editable hidden><div class="surface-header"><div><h2>Skill and hook files</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-files-summary"></dl><div data-editor hidden><div class="surface-header"><div><p>The directories this Mind&#39;s harness reads. Edits are written in place, on the Mind. A hook is re-read on every event, so an edit to one is live immediately; a skill is read when a harness process starts, so a running conversation keeps the copy it loaded.</p></div><div class="row-actions"><button class="button button-quiet" type="button" data-tree="skills">Skills</button><button class="button button-quiet" type="button" data-tree="hooks">Hooks</button></div></div><div class="surface-body overview-stack"><small id="mind-files-root"></small><div id="mind-files-status"></div><div class="field"><label for="mind-files-list">File</label><select id="mind-files-list" size="10"></select></div><form class="overview-stack" id="mind-files-form" hidden><div class="field"><label for="mind-files-text" id="mind-files-label">Contents</label><textarea id="mind-files-text" rows="22" spellcheck="false" wrap="off"></textarea></div><div class="form-actions"><button class="button" type="submit" id="mind-files-save">Save file</button><button class="button button-quiet" type="button" id="mind-files-reload">Discard and reload</button></div><small id="mind-files-save-status"></small></form></div></div></section>
@@ -276,6 +277,118 @@ window.addEventListener("DOMContentLoaded", async function () {
             (state.settings || []).map(settingsControl).join("");
     }
 
+
+    // The project folders this Mind can reach. They live in its own compose
+    // fragment, which is why saving recreates the container rather than
+    // restarting it: a restart replays the config the container was created
+    // with and cannot add a mount.
+    //
+    // Only the folders this control wrote are editable. The mounts the Mind
+    // boots from are listed and left alone — a Mind that lost one does not
+    // start.
+    let mountsState = null;
+    let mountBrowse = {root: "", path: ""};
+
+    function mountsSummary(state) {
+        if (!state.editable) return [["Project folders", "Not editable here"], ["Reason", state.detail || ""]];
+        const rows = (state.mounts || []).map(function (row) {
+            return [row.name, row.container_path + (row.writable ? "" : " (read-only)")];
+        });
+        if (!rows.length) rows.push(["Project folders", "None"]);
+        rows.push(["Mounts it boots from", String((state.infrastructure || []).length)]);
+        return rows;
+    }
+
+    function paintMountRows() {
+        document.getElementById("mind-mounts-rows").innerHTML =
+            (mountsState.mounts || []).map(function (row, index) {
+                return '<tr><td>' + h.escapeHtml((row.root_label || "") + "/" + (row.path || "")) +
+                    '</td><td>' + h.escapeHtml(row.container_path) +
+                    '</td><td><select data-mount-access="' + index + '">' +
+                    '<option value="rw"' + (row.writable ? " selected" : "") + '>Writable</option>' +
+                    '<option value="ro"' + (row.writable ? "" : " selected") + '>Read-only</option>' +
+                    '</select></td><td><button class="button button-quiet" type="button" data-mount-remove="' +
+                    index + '">Remove</button></td></tr>';
+            }).join("") || '<tr><td colspan="4">No project folders yet.</td></tr>';
+        document.getElementById("mind-mounts-infrastructure").innerHTML =
+            '<small>Mounts this Mind boots from, not editable here: ' +
+            h.escapeHtml((mountsState.infrastructure || []).map(function (row) {
+                return row.container_path + (row.writable ? "" : " (read-only)");
+            }).join(", ") || "none") + '</small>';
+    }
+
+    async function paintMountBrowser() {
+        const box = document.getElementById("mind-mounts-browser");
+        const here = document.getElementById("mind-mounts-here");
+        let listing;
+        try {
+            listing = await h.requestJson("/api/minds/" + encodeURIComponent(mountsState.name) +
+                "/mounts/folders?root=" + encodeURIComponent(mountBrowse.root) +
+                "&path=" + encodeURIComponent(mountBrowse.path));
+        } catch (error) {
+            box.innerHTML = "";
+            here.textContent = error.message;
+            return;
+        }
+        const root = (mountsState.roots || []).find(function (r) { return r.key === mountBrowse.root; });
+        here.textContent = ((root && root.label) || mountBrowse.root) + "/" + listing.path;
+        box.innerHTML =
+            (mountBrowse.path ? '<button class="button button-quiet" type="button" data-mount-up>Up one level</button>' : '') +
+            '<button class="button button-quiet" type="button" data-mount-add="">Add this folder</button>' +
+            (listing.folders || []).map(function (folder) {
+                if (!folder.mountable) {
+                    return '<div><small>' + h.escapeHtml(folder.name) +
+                        ' — points outside this root, so it is not offered</small></div>';
+                }
+                return '<div><button class="button button-quiet" type="button" data-mount-open="' +
+                    h.escapeHtml(folder.path) + '">' + h.escapeHtml(folder.name) + '</button>' +
+                    '<button class="button button-quiet" type="button" data-mount-add="' +
+                    h.escapeHtml(folder.path) + '">Add</button></div>';
+            }).join("");
+    }
+
+    function addMountRow(path) {
+        const root = (mountsState.roots || []).find(function (r) { return r.key === mountBrowse.root; }) || {};
+        const name = path ? path.split("/").pop() : (root.label || mountBrowse.root);
+        const target = (root.container_root || "/mnt/dev") + (path ? "/" + name : "");
+        if ((mountsState.mounts || []).some(function (row) { return row.container_path === target; })) {
+            document.getElementById("mind-mounts-status").textContent =
+                "Something is already mounted at " + target + ".";
+            return;
+        }
+        mountsState.mounts.push({root: mountBrowse.root, root_label: root.label || mountBrowse.root,
+            path: path, name: name, container_path: target, writable: true});
+        document.getElementById("mind-mounts-status").textContent = "";
+        paintMountRows();
+    }
+
+    async function renderMounts(name) {
+        const section = document.getElementById("mind-mounts");
+        section.dataset.mindName = name;
+        section.hidden = false;
+        let state;
+        try {
+            state = await h.requestJson("/api/minds/" + encodeURIComponent(name) + "/mounts");
+        } catch (error) {
+            state = {editable: false, detail: error.message};
+        }
+        state.name = name;
+        mountsState = state;
+        paintSummary("mind-mounts-summary", mountsSummary(state));
+        const editor = section.querySelector("[data-editor]");
+        const toggle = section.querySelector("[data-edit-toggle]");
+        // A Mind that is not a container is offered no control at all, the
+        // same way the restart action is refused for one.
+        if (!state.editable) { editor.hidden = true; if (toggle) toggle.hidden = true; return; }
+        const picker = document.getElementById("mind-mounts-root");
+        picker.innerHTML = (state.roots || []).map(function (root) {
+            return '<option value="' + h.escapeHtml(root.key) + '">' + h.escapeHtml(root.label) + '</option>';
+        }).join("");
+        mountBrowse = {root: (state.roots || [{}])[0].key || "", path: ""};
+        paintMountRows();
+        await paintMountBrowser();
+    }
+
     async function renderSurfaceToken(name) {
         const section = document.getElementById("mind-surface-token");
         section.dataset.mindName = name;
@@ -527,6 +640,7 @@ window.addEventListener("DOMContentLoaded", async function () {
         }
         await renderVoice(mind.name);
         await renderSettings(mind.name);
+        await renderMounts(mind.name);
         await renderSurfaceToken(mind.name);
         await renderSkills(mind.name);
         const filesSection = document.getElementById("mind-files");
@@ -738,6 +852,82 @@ window.addEventListener("DOMContentLoaded", async function () {
             status.textContent = "Saved. The next spoken reply uses " + (data.voice || "the new voice") + ".";
             await renderVoice(section.dataset.mindName);
         } catch (error) { status.textContent = error.message; }
+    });
+
+
+    // The mount control's own events, delegated: the rows and the browser are
+    // both repainted from state, so a listener per button would be rebound on
+    // every repaint.
+    document.getElementById("mind-mounts").addEventListener("click", async function (event) {
+        const target = event.target.closest("button");
+        if (!target || !mountsState || !mountsState.editable) return;
+        if (target.dataset.mountRemove !== undefined) {
+            mountsState.mounts.splice(Number(target.dataset.mountRemove), 1);
+            paintMountRows();
+        } else if (target.dataset.mountOpen !== undefined) {
+            mountBrowse.path = target.dataset.mountOpen;
+            await paintMountBrowser();
+        } else if (target.dataset.mountUp !== undefined) {
+            mountBrowse.path = mountBrowse.path.split("/").slice(0, -1).join("/");
+            await paintMountBrowser();
+        } else if (target.dataset.mountAdd !== undefined) {
+            addMountRow(target.dataset.mountAdd);
+        }
+    });
+
+    document.getElementById("mind-mounts").addEventListener("change", function (event) {
+        const index = event.target.dataset && event.target.dataset.mountAccess;
+        if (index === undefined || index === null) return;
+        mountsState.mounts[Number(index)].writable = event.target.value === "rw";
+    });
+
+    document.getElementById("mind-mounts-root").addEventListener("change", async function (event) {
+        mountBrowse = {root: event.target.value, path: ""};
+        await paintMountBrowser();
+    });
+
+    document.getElementById("mind-mounts-create").addEventListener("click", async function () {
+        const field = document.getElementById("mind-mounts-new");
+        const status = document.getElementById("mind-mounts-status");
+        if (!field.value.trim()) { status.textContent = "Name the folder first."; return; }
+        status.textContent = "Creating…";
+        try {
+            const made = await h.requestJson("/api/minds/" +
+                encodeURIComponent(mountsState.name) + "/mounts/folders", {
+                method: "POST", headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({root: mountBrowse.root, parent: mountBrowse.path, name: field.value.trim()})
+            });
+            field.value = "";
+            status.textContent = "";
+            await paintMountBrowser();
+            addMountRow(made.path);
+        } catch (error) {
+            status.textContent = error.message;
+        }
+    });
+
+    document.getElementById("mind-mounts-save").addEventListener("click", async function () {
+        const status = document.getElementById("mind-mounts-status");
+        const button = document.getElementById("mind-mounts-save");
+        button.disabled = true;
+        status.textContent = "Writing the fragment and recreating the container…";
+        try {
+            const saved = await h.requestJson("/api/minds/" +
+                encodeURIComponent(mountsState.name) + "/mounts", {
+                method: "PUT", headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({mounts: (mountsState.mounts || []).map(function (row) {
+                    return {root: row.root, path: row.path, writable: row.writable};
+                })})
+            });
+            status.textContent = saved.detail ||
+                (saved.recreated ? "Saved. The container was recreated with these folders."
+                                 : "Saved.");
+            await renderMounts(mountsState.name);
+        } catch (error) {
+            status.textContent = error.message;
+        } finally {
+            button.disabled = false;
+        }
     });
 
     document.getElementById("mind-settings-form").addEventListener("submit", async function (event) {
