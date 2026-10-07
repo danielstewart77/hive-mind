@@ -230,3 +230,84 @@ class TestDiscordPostsWhatItWasStreamed:
 
         assert result == "I'm looking into the bot's code"
         assert sent.edit.await_args.kwargs["content"] == "I'm looking into the bot's code"
+
+
+def _thinking_delta(index: int, text: str) -> dict:
+    return {
+        "type": "stream_event",
+        "event": {
+            "type": "content_block_delta",
+            "index": index,
+            "delta": {"type": "thinking_delta", "thinking": text},
+        },
+    }
+
+
+def _redacted_thinking_delta(index: int) -> dict:
+    """What a provider that encrypts its reasoning sends: no readable text."""
+    return {
+        "type": "stream_event",
+        "event": {
+            "type": "content_block_delta",
+            "index": index,
+            "delta": {"type": "signature_delta", "signature": "EqoBCkYIBBgCKkBc9"},
+        },
+    }
+
+
+class TestReasoningIsShownOnlyWhenItIsReadable:
+
+    @pytest.mark.asyncio
+    async def test_readable_reasoning_reaches_the_surface_labelled(self, gateway):
+        """Reasoning the provider sends as text is shown, told apart from the answer."""
+        _serve(gateway, _sse(
+            _block_start(0), _thinking_delta(0, "weighing "), _thinking_delta(0, "it"),
+            _block_start(1), _delta(1, "the answer"),
+        ))
+
+        assert "".join(await _collect(gateway)) == (
+            "(thinking) weighing it\n\nthe answer"
+        )
+
+    @pytest.mark.asyncio
+    async def test_reasoning_that_carries_no_text_is_never_announced(self, gateway):
+        """An encrypted or redacted thinking block yields nothing, not an empty label."""
+        _serve(gateway, _sse(
+            _block_start(0), _redacted_thinking_delta(0),
+            _block_start(1), _delta(1, "the answer"),
+        ))
+
+        assert "".join(await _collect(gateway)) == "the answer"
+
+    @pytest.mark.asyncio
+    async def test_buffered_reasoning_is_shown_and_an_encrypted_one_is_not(
+        self, gateway,
+    ):
+        """A harness that buffers instead of streaming obeys the same rule."""
+        _serve(gateway, _sse(_assistant_blocks(
+            {"type": "redacted_thinking", "data": "EroBCkYIBBgCKkBc9"},
+            {"type": "thinking", "thinking": "weighing it"},
+            {"type": "text", "text": "the answer"},
+        )))
+
+        assert "".join(await _collect(gateway)) == (
+            "(thinking) weighing it\n\nthe answer"
+        )
+
+    @pytest.mark.asyncio
+    async def test_streamed_reasoning_is_not_repeated_by_the_buffered_copy(
+        self, gateway,
+    ):
+        """The deltas and the block at the end are the same reasoning once."""
+        _serve(gateway, _sse(
+            _block_start(0), _thinking_delta(0, "weighing it"),
+            _block_start(1), _delta(1, "the answer"),
+            _assistant_blocks(
+                {"type": "thinking", "thinking": "weighing it"},
+                {"type": "text", "text": "the answer"},
+            ),
+        ))
+
+        assert "".join(await _collect(gateway)) == (
+            "(thinking) weighing it\n\nthe answer"
+        )
