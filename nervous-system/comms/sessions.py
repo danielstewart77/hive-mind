@@ -194,6 +194,10 @@ _PRIVATE_SESSION_COLUMNS = ("carry_forward", "carry_forward_sid", "carry_forward
 # `_finalize_rotation` would be retired for a successor, destroying the
 # permanent session row, its label and its ledger binding — which is the
 # outcome in-place rotation exists to prevent.
+# The owner type a conversation carries while a browser tile hosts it. One of
+# `_ADOPTABLE_OWNER_TYPES`, so a chat's picker still offers it back.
+TERMINAL_OWNER_TYPE = "terminal"
+
 ROTATION_ARMED_CHAT = 1
 ROTATION_ARMED_TERMINAL = 2
 
@@ -1565,6 +1569,114 @@ class SessionManager:
                 queue.put_nowait(event)
             except asyncio.QueueFull:
                 continue
+
+    @staticmethod
+    def terminal_client_ref(session_id: str) -> str:
+        """The surface key a browser tile holds a conversation under.
+
+        Derived from the conversation rather than from the tile, because the
+        key is a primary key: `active_sessions` is keyed `(client_type,
+        client_ref)`, so any key shared between conversations lets one
+        conversation's attach silently unbind another's. A shared constant is
+        the worst case — every open tile overwrites one row, the Stop hook's
+        pre-flight answers yes on somebody else's binding, `arm_rotation`
+        stages the carry-forward onto the wrong session and `respawn-pane -k`
+        lands on a pane nowhere near its threshold. One key per conversation
+        makes that collision unrepresentable.
+        """
+        return f"terminal-{session_id}"
+
+    async def adopt_into_terminal(self, session_id: str) -> dict:
+        """Hand a conversation to a browser tile, and to nothing else.
+
+        A tile reaches `attach-pty` directly, so before this nothing bound the
+        conversation to a surface at all: the row sat in `sessions` with no row
+        in `active_sessions`. `_routing_for` then yielded no `client_ref` for
+        the pane's environment, and the Stop hook's liveness pre-flight — which
+        asks whether this conversation is its surface's active one — was
+        answered truthfully with no on every fire, so a rotation was never
+        armed. One pane ran eight days to 1834 messages and `Prompt is too
+        long`.
+
+        The repair is an adoption, not a second binding beside the chat's. A
+        conversation cannot be hosted by two surfaces: `send_message` decides
+        whether a harness is already running by looking at its own process
+        table, which knows nothing of tmux, so a chat whose active binding
+        pointed at a pane-hosted conversation would spawn a rival
+        `--resume` on one transcript and both would append. So the tile takes
+        it: the chat-side process is released first, ownership is retargeted to
+        the terminal surface, and the chat's own key is left exactly where it
+        was, pointing at whatever conversation the chat was already on.
+
+        Releasing before retargeting is the same order `activate_session`
+        uses and for the same reason — a refusal from the mind must abort the
+        handover rather than leave a second writer running, so
+        `MindCallFailed` propagates and the caller refuses the attach.
+
+        A chat-armed rotation is cleared on the way through. Only
+        `send_message` finalizes that flag and the chat will never call it for
+        this conversation again, so leaving it set strands the session on a
+        rotation nothing can complete; the pane's own hook re-arms as a staged
+        terminal rotation on its next turn.
+
+        Returns the routing the pane should carry.
+        """
+        session = await self._get_row(session_id)
+        if not session:
+            raise ValueError(f"Session not found: {session_id}")
+        # The row's own id, never the caller's argument: `get_session`
+        # resolves an id by prefix, and inserting the prefix writes a binding
+        # that fails the foreign key — unhandled, before the handshake, which
+        # the tile reads as a mind with no attach route.
+        sid = session["id"]
+        client_ref = self.terminal_client_ref(sid)
+        routing = {
+            "owner_type": TERMINAL_OWNER_TYPE,
+            "owner_ref": client_ref,
+            "client_ref": client_ref,
+        }
+
+        already_here = (
+            session.get("owner_type") == TERMINAL_OWNER_TYPE
+            and session.get("owner_ref") == client_ref
+        )
+        if not already_here:
+            # Ends the chat-side harness only. The pane being attached to is
+            # the `terminal` surface and releasing that would kill the tmux
+            # session this attach is for.
+            await self.release_on_mind(sid, "stream")
+
+        lock = self._locks.setdefault(sid, asyncio.Lock())
+        async with lock:
+            await self._db.execute(
+                """UPDATE sessions
+                      SET owner_type = ?, owner_ref = ?,
+                          rotation_armed = CASE rotation_armed
+                              WHEN ? THEN 0 ELSE rotation_armed END
+                    WHERE id = ?""",
+                (TERMINAL_OWNER_TYPE, client_ref, ROTATION_ARMED_CHAT, sid),
+            )
+            await self._db.execute(
+                "DELETE FROM active_sessions WHERE session_id = ?", (sid,)
+            )
+            await self._db.execute(
+                """INSERT OR REPLACE INTO active_sessions (client_type, client_ref, session_id)
+                   VALUES (?, ?, ?)""",
+                (TERMINAL_OWNER_TYPE, client_ref, sid),
+            )
+            await self._db.commit()
+        if not already_here:
+            log.info(
+                "Session %s adopted by terminal (was %s/%s)",
+                sid, session.get("owner_type"), session.get("owner_ref"),
+            )
+            log_event(
+                log, "session.adopted", session_id=sid,
+                owner_type=TERMINAL_OWNER_TYPE, owner_ref=client_ref,
+                previous_owner_type=session.get("owner_type"),
+                previous_owner_ref=session.get("owner_ref"),
+            )
+        return routing
 
     async def activate_session(
         self, session_id: str, client_type: str, client_ref: str,
