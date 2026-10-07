@@ -96,6 +96,53 @@ codex minds already run under — the boundary is the container and the
 directories mounted into it. A mind that wants confinement anyway names
 `permission_mode` in its own `runtime.yaml`.
 
+A mind's settings are a form on the console, not a file to open.
+`minds/runtime_settings.py` declares the vocabulary — one entry per control,
+with its label, kind, range and the comment written above a line it creates —
+and `GET`/`PATCH /runtime/settings` relay it. Which controls appear is decided
+by the **harness**: only dsh drives a dispatch as a goal and only dsh enforces
+a turn timeout, so a Claude or Codex mind is never offered a box its runner
+would ignore. A declared schema rather than the file's own keys, because the
+file carries identity, plumbing and an `env` block holding this mind's proxy
+key beside its settings — and because a setting the file has no line for yet
+would otherwise be unreachable. Values are rendered per kind before anything
+is written: `str(False)` is a string a YAML reader loads as truthy, and a
+description holding a bare colon splits its line into a nested mapping.
+
+`turn_timeout_seconds`, `goal_rounds` and `stop_on_failed_call` are re-read
+from the file on **every turn** (`dsh_cli.live_runtime`), so a value the
+console writes takes effect on the next turn rather than on the next container
+start — otherwise the panel would be a form whose every edit waited on a
+restart. A timeout of zero means no bound at all, which is why it is resolved
+through `turn_timeout` rather than `float(raw or 1800)`: that expression read
+zero as absent and handed back a tighter bound than the default it was trying
+to escape.
+
+`model_context_window` is reported beside the settings and is editable
+nowhere. The window belongs to the model, the inference proxy is the only
+thing that knows it, and `PATCH /runtime` writes it in the same write as the
+model — because what needs it is a per-turn hook sizing a rotation threshold
+from a percentage, and a hook that called the proxy would pay for it every
+turn. A model the proxy has not measured writes zero rather than leaving the
+previous model's figure to be multiplied by that percentage, and no request
+body may name the field: a window taken off a request is a number nobody
+measured.
+
+It is deliberately **not** `context_window`. That key is dsh's own — the
+serving ceiling its profile declares, required at the adapter's boot and read
+by its compaction — and it is a different number from a different source.
+Writing a model's nominal window over it is how a model save stops a mind
+starting.
+
+A write reads the document back before it replaces the file, and compares each
+value against what was asked for. One-line substitution cannot express every
+way YAML states a value, and the dangerous cases parse cleanly: a folded or
+multi-line value keeps its continuation lines, which attach to the new scalar,
+and a file carrying a key twice has its first occurrence replaced and its last
+one read — a save reporting success over a change that never took. The
+original's mode is carried across the replace, since a config going 0600
+is a read from another account failing with no edit to explain it.
+
 The profile itself lives under the mind's `DSH_HOME`
 (`profiles/<dsh_profile>/`), with the hive surface package symlinked into its
 `node_modules/@hive/`. dsh resolves every in-box bundle from its own
