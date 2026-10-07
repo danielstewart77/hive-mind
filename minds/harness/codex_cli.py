@@ -686,6 +686,14 @@ async def _run_codex_turn(sid: str, content: str, images: list[dict] | None) -> 
                 text = item.get("text", "") or item.get("content", "")
                 if text:
                     last_reasoning_text = text
+                    # Codex sends its reasoning as readable text, so it reaches
+                    # the surfaces under the same rule every harness answers to:
+                    # thinking that can be read is shown. Relayed as the
+                    # Anthropic-shaped partial the surfaces already speak, which
+                    # is also what decides to drop a payload carrying no text.
+                    yield {"type": "stream_event", "event": {
+                        "type": "content_block_delta", "index": 0,
+                        "delta": {"type": "thinking_delta", "thinking": text}}}
             elif item_type:
                 last_other_item_type = item_type
         elif etype == "turn.completed":
