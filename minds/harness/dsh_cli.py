@@ -83,14 +83,58 @@ DSH_HOME = Path(
 #: The profile whose bundle layers mount the resumable surface. A profile is
 #: the only thing that composes a dsh process, so naming the wrong one is a
 #: mind with no runner rather than a mind with the wrong options.
+#:
+#: The boot value is kept for the pty pane, which caches its argv; the chat
+#: path resolves it per turn through `dsh_profile()` so an edit from the
+#: settings panel takes effect when the next turn spawns rather than at the
+#: next container start — a profile that is not installed must fail where the
+#: operator can still see what they typed.
 DSH_PROFILE = str(RUNTIME.get("dsh_profile") or "hive")
 
-#: How long one turn may run. There is no other bound: a dsh process whose
-#: model request hangs rather than fails would hold the conversation open
-#: forever, `in_flight` set and `/health` still reporting ok, until the
-#: gateway's own socket read expired and reported a stalled model as a mind
-#: that is unreachable — a remedy aimed at the network for a fault in neither.
-TURN_TIMEOUT_SECONDS = float(RUNTIME.get("turn_timeout_seconds") or 1800)
+#: The default when a mind's file names none.
+DEFAULT_TURN_TIMEOUT_SECONDS = 1800.0
+
+
+def turn_timeout(runtime: dict) -> float | None:
+    """How long one turn may run, or None for no bound at all.
+
+    Zero is a deliberate choice and not a missing value: a mind whose work is
+    one dispatch lasting hours would rather risk a hung request than be killed
+    mid-build. It is reported as `None` because that is what `asyncio.timeout`
+    takes for "do not arm one", so the caller has no branch to forget.
+
+    The bound is the only automatic recovery from a model request that hangs
+    rather than fails. Without it such a turn holds the conversation open,
+    `in_flight` set and `/health` still reporting ok, until the gateway's own
+    socket read expires and reports a stalled model as a mind that is
+    unreachable — a remedy aimed at the network for a fault in neither.
+    """
+    raw = runtime.get("turn_timeout_seconds")
+    if raw is None or str(raw).strip() == "":
+        return DEFAULT_TURN_TIMEOUT_SECONDS
+    try:
+        seconds = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_TURN_TIMEOUT_SECONDS
+    return None if seconds <= 0 else seconds
+
+
+def live_runtime() -> dict:
+    """This mind's runtime.yaml as it is on disk right now.
+
+    The module-level `RUNTIME` is this mind's identity and its plumbing, read
+    once because none of it can change under a running process. The three
+    settings below are different: the console writes them into the same file
+    while this process is serving, and a value read at import would mean every
+    edit waited on a container restart — which is the per-instance fiddling the
+    settings panel exists to end. A failed read falls back to the boot copy: a
+    half-written file must not take a turn down.
+    """
+    try:
+        loaded = yaml.safe_load(RUNTIME_PATH.read_text())
+    except (OSError, yaml.YAMLError):
+        return RUNTIME
+    return loaded if isinstance(loaded, dict) else RUNTIME
 
 #: The launcher. A container links the bind-mounted tree's own bin; a bare
 #: invocation can point at it directly.
@@ -394,6 +438,12 @@ def _permission_mode() -> str:
 HEARTBEAT_SECONDS = 120.0
 
 
+
+def dsh_profile() -> str:
+    """The profile this turn's spawn composes itself from, read per turn."""
+    return str(live_runtime().get("dsh_profile") or "hive")
+
+
 def _goal_rounds() -> int:
     """How many goal rounds one dispatch to this mind may be driven for.
 
@@ -405,7 +455,7 @@ def _goal_rounds() -> int:
     first natural pause as the end of the work, and no prompt wording fixes
     that reliably.
     """
-    raw = RUNTIME.get("goal_rounds")
+    raw = live_runtime().get("goal_rounds")
     try:
         rounds = int(raw)
     except (TypeError, ValueError):
@@ -429,7 +479,7 @@ def _stop_on_failed_call() -> bool:
     The report says which side turned the call away, so the run names where to
     look without costing the rounds that would have found out.
     """
-    return bool(RUNTIME.get("stop_on_failed_call") is True)
+    return bool(live_runtime().get("stop_on_failed_call") is True)
 
 
 def _first_env(names: tuple[str, ...]) -> str:
@@ -701,6 +751,11 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
         yield {"type": "result", "is_error": True}
         return
 
+    # Cleared per turn: the flag is the *previous* turn's verdict, and a fresh
+    # turn nobody has interrupted must not report itself as stopped on purpose
+    # the moment its own output is unreadable.
+    state["killed"] = False
+
     # The composed prompt rides in on the conversation's first turn, the way it
     # does for codex: the surface submits the task as a user message, and a
     # system prompt submitted to nothing reaches no transcript.
@@ -773,7 +828,7 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
                           "--goal-objective-file", objective_path]
         if _stop_on_failed_call():
             goal_flags.append("--stop-on-failed-call")
-        cmd = [DSH_BIN, "--profile", DSH_PROFILE, *flags, *goal_flags,
+        cmd = [DSH_BIN, "--profile", dsh_profile(), *flags, *goal_flags,
                "--task-file", task_path]
         log.info("%s session %s: spawning dsh turn (%s %s)",
                  NAME, sid, flags[0], conversation_id)
@@ -817,8 +872,12 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
         lines: list[str] = []
         stderr = b""
         timed_out = False
+        # Resolved now rather than at import: the console writes this value
+        # into the file while this process is serving, and a bound read at
+        # boot would mean every edit waited on a container restart.
+        deadline = turn_timeout(live_runtime())
         try:
-            async with asyncio.timeout(TURN_TIMEOUT_SECONDS):
+            async with asyncio.timeout(deadline):
                 if proc.stdout is not None:
                     # Read with a heartbeat rather than a plain async-for. This
                     # harness writes nothing until a turn or a goal round ends,
@@ -852,7 +911,7 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
         except TimeoutError:
             timed_out = True
             log.error("%s session %s: dsh turn exceeded %ss, killing it",
-                      NAME, sid, TURN_TIMEOUT_SECONDS)
+                      NAME, sid, deadline)
         except ValueError as exc:
             # A single stdout line past the stream limit. Raised after the SSE
             # headers are already out, so an unhandled one ends the response
@@ -886,7 +945,7 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
             "type": "assistant",
             "message": {"role": "assistant", "content": [{
                 "type": "text",
-                "text": f"The turn was still running after {int(TURN_TIMEOUT_SECONDS)}"
+                "text": f"The turn was still running after {int(deadline or 0)}"
                         " seconds and was stopped.",
             }]},
         }
@@ -1004,9 +1063,32 @@ async def send_message(sid: str, req: Request) -> Any:
 
 @app.post("/sessions/{sid}/interrupt")
 async def interrupt_session(sid: str) -> Any:
-    if sid not in SESSIONS:
+    """Stop the turn in flight and leave the conversation standing.
+
+    A per-turn harness has no interrupt of its own: the only thing to stop is
+    the process, and the conversation lives in dsh's session store on disk, so
+    killing one turn costs the turn and nothing else. The session row, its
+    resume id and every completed turn survive — which is what separates this
+    from `DELETE`.
+
+    It used to answer `ok` and do nothing, which is the shape that matters:
+    the surface told the operator the work had been interrupted while forty
+    goal rounds carried on behind it, and the only remedy left was bouncing
+    the container. A refusal reported as a success is worse than a refusal.
+    """
+    sess = SESSIONS.get(sid)
+    if sess is None:
         return JSONResponse({"error": f"Session {sid} not found"}, status_code=404)
-    return {"ok": True, "session_id": sid, "message": "dsh_per_turn"}
+    proc = sess.get("proc")
+    if proc is None or proc.returncode is not None:
+        return {"ok": True, "session_id": sid, "message": "nothing_running"}
+    # Read by the turn generator, which reports a process that wrote no report
+    # as stopped on purpose rather than as a harness that fell over.
+    sess["killed"] = True
+    await _reap_proc(proc)
+    sess["proc"] = None
+    log_event(log, "turn.interrupted", mind_id=MIND_ID, mind_name=NAME, session_id=sid)
+    return {"ok": True, "session_id": sid, "message": "interrupted"}
 
 
 @app.post("/sessions/{sid}/release")

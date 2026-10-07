@@ -138,6 +138,15 @@ async def build_catalog(path: Path) -> list[dict]:
                 "label": str(row.get("label") or name),
                 "provider": provider,
                 "provider_label": str(row.get("provider_label") or provider),
+                # The window belongs to the model, so the proxy is the only
+                # thing that knows it. Relayed rather than mapped here, and
+                # left absent when nobody has declared it: a zero would make
+                # every conversation render as infinitely full.
+                "context_window": (
+                    row.get("context_window")
+                    if isinstance(row.get("context_window"), int)
+                    else None
+                ),
             }
         )
     return rows

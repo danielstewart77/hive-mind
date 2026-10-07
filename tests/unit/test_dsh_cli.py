@@ -19,6 +19,22 @@ import pytest
 from minds.harness import dsh_cli
 
 
+def _set_live(monkeypatch, dsh, key: str, value) -> None:
+    """Set one per-turn setting where the adapter reads it.
+
+    `goal_rounds`, `stop_on_failed_call` and the turn timeout are re-read from
+    `runtime.yaml` on every turn, so the console's settings panel takes effect
+    on the next turn rather than on the next container start. A test that set
+    them on the boot-time copy would be setting them where nothing looks.
+    """
+    live = dict(dsh.RUNTIME)
+    if value is None:
+        live.pop(key, None)
+    else:
+        live[key] = value
+    monkeypatch.setattr(dsh, "live_runtime", lambda: live)
+
+
 class _FakeStdout:
     """The spawned process's stdout, line by line.
 
@@ -236,7 +252,7 @@ async def test_a_mind_under_test_asks_the_harness_to_stop_at_a_refusal(
     _session(dsh)
     spawn = _Spawn([_report()])
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
-    monkeypatch.setitem(dsh.RUNTIME, "stop_on_failed_call", True)
+    _set_live(monkeypatch, dsh, "stop_on_failed_call", True)
     await _drain(dsh)
     assert "--stop-on-failed-call" in spawn.argv
 
@@ -245,7 +261,7 @@ async def test_an_ordinary_mind_drives_through_a_refused_call(dsh, monkeypatch) 
     _session(dsh)
     spawn = _Spawn([_report()])
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
-    monkeypatch.delitem(dsh.RUNTIME, "stop_on_failed_call", raising=False)
+    _set_live(monkeypatch, dsh, "stop_on_failed_call", None)
     await _drain(dsh)
     assert "--stop-on-failed-call" not in spawn.argv
 
@@ -690,7 +706,9 @@ async def test_a_turn_that_never_ends_is_stopped_and_reported(
     conversation open until the gateway's socket read expired and reported a
     stalled model as a mind that cannot be reached."""
     _session(dsh)
-    monkeypatch.setattr(dsh_cli, "TURN_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(
+        dsh_cli, "live_runtime", lambda: {**dsh_cli.RUNTIME, "turn_timeout_seconds": 0.05}
+    )
 
     class _Hangs(_FakeProc):
         def __init__(self) -> None:
@@ -745,11 +763,20 @@ async def test_a_turn_stopped_on_purpose_is_not_reported_as_a_crash(
 ) -> None:
     """A kill or a cross-surface release ends the process mid-turn. The
     harness-exited-without-reporting sentence would read as a crash to the one
-    person who knows they asked for it."""
+    person who knows they asked for it.
+
+    The flag is set *during* the turn, which is the only way it is ever set:
+    one left over from a previous turn is cleared when this one starts, so a
+    stale flag cannot make an unrelated failure look deliberate."""
     state = _session(dsh)
-    state["killed"] = True
-    monkeypatch.setattr(asyncio, "create_subprocess_exec",
-                        _Spawn([], stderr="", returncode=-9))
+    spawn = _Spawn([], stderr="", returncode=-9)
+
+    async def kill_mid_turn(*argv, **kwargs):
+        proc = await spawn(*argv, **kwargs)
+        state["killed"] = True
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", kill_mid_turn)
     result = _result(await _drain(dsh))
     assert result["stop_reason"] == "stopped"
     assert result["is_error"] is False
@@ -869,7 +896,7 @@ async def test_a_chat_minds_dispatch_is_one_turn_and_names_no_rounds(
     every chat turn as a goal would have the model carry on talking to itself
     after it had already replied."""
     _session(dsh)
-    monkeypatch.delitem(dsh.RUNTIME, "goal_rounds", raising=False)
+    _set_live(monkeypatch, dsh, "goal_rounds", None)
     spawn = _Spawn([_report()])
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
     await _drain(dsh)
@@ -884,7 +911,7 @@ async def test_a_build_mind_drives_its_dispatch_for_the_rounds_it_declared(
     job — which is the only thing that reliably stops a small model quitting at
     the two-minute mark."""
     _session(dsh)
-    monkeypatch.setitem(dsh.RUNTIME, "goal_rounds", 40)
+    _set_live(monkeypatch, dsh, "goal_rounds", 40)
     spawn = _Spawn([_report()])
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
     await _drain(dsh)
@@ -898,7 +925,7 @@ async def test_a_round_cap_that_cannot_be_read_is_one_turn_not_a_crash(
     """A hand-edited runtime.yaml holding nonsense costs the long-running
     behaviour, not the mind: every turn still answers."""
     _session(dsh)
-    monkeypatch.setitem(dsh.RUNTIME, "goal_rounds", "lots")
+    _set_live(monkeypatch, dsh, "goal_rounds", "lots")
     spawn = _Spawn([_report()])
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
     await _drain(dsh)
@@ -923,7 +950,7 @@ async def test_each_goal_round_crosses_the_socket_as_an_observer_frame(
     writes nothing is a mind that looks like it stopped answering. Observer-only
     because the chat surface wants the answer, not a running count."""
     _session(dsh)
-    monkeypatch.setitem(dsh.RUNTIME, "goal_rounds", 40)
+    _set_live(monkeypatch, dsh, "goal_rounds", 40)
     spawn = _Spawn([
         json.dumps({"progress": {"round": 1, "turns": 2, "toolCalls": 30}}) + "\n",
         json.dumps({"progress": {"round": 2, "turns": 3, "toolCalls": 51}}) + "\n",
@@ -940,7 +967,7 @@ async def test_a_progress_line_is_not_mistaken_for_the_turn_report(dsh, monkeypa
     """The report is identified by `sessionId` and is scanned for from the end,
     so a progress line carrying one would end the turn at the first round."""
     _session(dsh)
-    monkeypatch.setitem(dsh.RUNTIME, "goal_rounds", 40)
+    _set_live(monkeypatch, dsh, "goal_rounds", 40)
     spawn = _Spawn([
         _report(turns=1, text="the real answer"),
         json.dumps({"sessionId": "conv-1", "progress": {"round": 9}}) + "\n",
@@ -956,7 +983,7 @@ async def test_the_goal_objective_is_the_message_not_the_composed_prompt(
     with a conversation's opening task would spend the context window on forty
     copies of the soul and system prompt."""
     _session(dsh)
-    monkeypatch.setitem(dsh.RUNTIME, "goal_rounds", 40)
+    _set_live(monkeypatch, dsh, "goal_rounds", 40)
     seen: dict[str, str] = {}
     spawn = _Spawn([_report()])
 
@@ -980,7 +1007,7 @@ async def test_the_objective_file_is_cleaned_up_with_the_task_file(
     """One process owns both files; a turn that leaves them behind fills /tmp
     with composed prompts."""
     _session(dsh)
-    monkeypatch.setitem(dsh.RUNTIME, "goal_rounds", 40)
+    _set_live(monkeypatch, dsh, "goal_rounds", 40)
     paths: list[str] = []
     spawn = _Spawn([_report()])
     original = spawn.__call__
@@ -1025,3 +1052,125 @@ async def test_a_line_is_not_lost_to_a_heartbeat_tick(dsh, monkeypatch) -> None:
     events = await _drain(dsh)
     assert [e["progress"]["round"] for e in events if e.get("type") == "goal_progress"] == [1]
     assert _result(events)["turns"] == 2
+
+
+class TestTurnTimeoutResolution:
+    """Zero is a choice, not a missing value.
+
+    `float(raw or 1800)` treated zero as absent and handed back thirty
+    minutes, so a mind asking for no bound got a tighter one than the default
+    it was trying to escape.
+    """
+
+    def test_zero_means_no_bound_at_all(self) -> None:
+        assert dsh_cli.turn_timeout({"turn_timeout_seconds": 0}) is None
+
+    def test_an_absent_value_takes_the_default(self) -> None:
+        assert dsh_cli.turn_timeout({}) == dsh_cli.DEFAULT_TURN_TIMEOUT_SECONDS
+
+    def test_a_declared_number_is_the_bound(self) -> None:
+        assert dsh_cli.turn_timeout({"turn_timeout_seconds": 14400}) == 4 * 3600
+
+    def test_an_unreadable_value_takes_the_default(self) -> None:
+        """A mind with a typo in its file is bounded, not unbounded."""
+        assert (
+            dsh_cli.turn_timeout({"turn_timeout_seconds": "soon"})
+            == dsh_cli.DEFAULT_TURN_TIMEOUT_SECONDS
+        )
+
+
+async def test_a_turn_the_console_unbounded_is_not_killed(dsh, monkeypatch) -> None:
+    """The settings panel offers zero as no bound, so a turn past the default
+    deadline has to complete rather than be stopped."""
+    _session(dsh)
+    monkeypatch.setattr(
+        dsh_cli, "live_runtime", lambda: {**dsh_cli.RUNTIME, "turn_timeout_seconds": 0}
+    )
+    monkeypatch.setattr(dsh_cli, "DEFAULT_TURN_TIMEOUT_SECONDS", 0.05)
+
+    report = {"sessionId": "32db455c", "text": "done", "outcome": "completed"}
+
+    async def spawn(*argv: str, **kwargs: Any) -> _FakeProc:
+        return _FakeProc([json.dumps(report) + "\n"], line_delay=0.2)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    events = await _drain(dsh)
+    assert _result(events)["stop_reason"] == "completed"
+    assert "done" in _assistant_text(events)
+
+
+class TestInterrupt:
+    """`/stop` on a surface reaches this route, and it has to actually stop.
+
+    A per-turn harness has no interrupt of its own, so the process is the only
+    thing there is to stop. The route used to answer `ok` without touching it,
+    which told the operator the work had been interrupted while a forty-round
+    dispatch carried on behind the message.
+    """
+
+    async def test_it_kills_the_process_group_of_the_turn_in_flight(
+        self, dsh, monkeypatch
+    ) -> None:
+        session = _session(dsh)
+        killed: list[Any] = []
+
+        async def reap(proc: Any) -> None:
+            killed.append(proc)
+
+        monkeypatch.setattr(dsh, "_reap_proc", reap)
+        running = _FakeProc([])
+        running.returncode = None
+        session["proc"] = running
+
+        body = await dsh.interrupt_session("row-1")
+        assert body["message"] == "interrupted"
+        assert killed == [running]
+        assert session["killed"] is True
+        assert session["proc"] is None
+
+    async def test_a_session_with_nothing_running_says_so(self, dsh) -> None:
+        """"Interrupted" over an idle session is a lie the operator acts on."""
+        _session(dsh)
+        body = await dsh.interrupt_session("row-1")
+        assert body["message"] == "nothing_running"
+
+    async def test_an_unknown_session_is_a_404(self, dsh) -> None:
+        response = await dsh.interrupt_session("no-such-row")
+        assert response.status_code == 404
+
+    async def test_a_fresh_turn_is_not_stopped_by_the_previous_interrupt(
+        self, dsh, monkeypatch
+    ) -> None:
+        """The flag is the last turn's verdict. Left standing, the next turn
+        whose output is unreadable reports itself as deliberately stopped."""
+        session = _session(dsh)
+        session["killed"] = True
+        report = {"sessionId": "conv-1", "text": "back at it", "outcome": "completed"}
+
+        async def spawn(*argv: str, **kwargs: Any) -> _FakeProc:
+            return _FakeProc([json.dumps(report) + "\n"])
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+        events = await _drain(dsh)
+        assert _result(events)["stop_reason"] == "completed"
+        assert session["killed"] is False
+
+
+async def test_the_profile_is_read_per_turn_so_an_edit_does_not_wait_on_a_restart(
+    dsh, monkeypatch
+) -> None:
+    """The settings panel offers it, and a profile read once at import is a
+    box whose value does nothing until somebody bounces the container —
+    where a profile that is not installed fails far from the edit."""
+    _session(dsh)
+    _set_live(monkeypatch, dsh, "dsh_profile", "exam")
+    argv: list[tuple] = []
+
+    async def spawn(*args: str, **kwargs: Any) -> _FakeProc:
+        argv.append(args)
+        return _FakeProc([_report()])
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh)
+    command = list(argv[0])
+    assert command[command.index("--profile") + 1] == "exam"
