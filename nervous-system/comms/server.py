@@ -571,7 +571,11 @@ async def get_carry_forward(session_id: str, claude_sid: str = ""):
 async def get_session(session_id: str):
     session = await session_mgr.get_session(session_id)
     if not session:
-        return {"error": "Session not found"}, 404
+        # A tuple is not a status code. Returned as one, FastAPI serialized it
+        # into a 200 carrying a two-element array, so every client reading
+        # this route had to guess at an absent session from the shape of a
+        # success.
+        return JSONResponse({"error": "Session not found"}, status_code=404)
     return session
 
 
@@ -652,10 +656,31 @@ async def get_session_history(session_id: str):
 # ---------------------------------------------------------------------------
 @app.post("/sessions/{session_id}/activate")
 async def activate_session(session_id: str, body: ActivateRequest):
-    return await session_mgr.activate_session(
-        session_id, body.client_type, body.client_ref,
-        owner_type=body.owner_type, owner_ref=body.owner_ref,
-    )
+    """A conversation with nowhere to go says which kind of nowhere.
+
+    404 for an id with no row, 410 for one that has been retired — a rotated
+    conversation's predecessor is the common case, and its successor is
+    reachable by `rotated_from`. Both left as the bare 500 a `ValueError`
+    produces read as a broken gateway, so a client retried a dead id rather
+    than following the rotation.
+
+    A refused release stays a 502: the mind was asked to let go of the
+    conversation and did not, which is a refusal about a machine, not a
+    statement about this row.
+    """
+    try:
+        return await session_mgr.activate_session(
+            session_id, body.client_type, body.client_ref,
+            owner_type=body.owner_type, owner_ref=body.owner_ref,
+        )
+    except sessions.SessionNotFound as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    except sessions.SessionClosed as exc:
+        return JSONResponse({"error": str(exc)}, status_code=410)
+    except sessions.MindCallFailed as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
 
 
 @app.post("/sessions/{session_id}/model")

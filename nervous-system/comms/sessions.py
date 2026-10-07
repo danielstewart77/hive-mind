@@ -51,6 +51,26 @@ class MindRefusedCredential(MindCallFailed):
     """
 
 
+class SessionGone(ValueError):
+    """A session cannot be activated because there is nothing there to activate.
+
+    A `ValueError` subclass so every caller that already catches one is
+    unchanged, and its own type so the HTTP route can answer which kind of
+    gone it is. A bare 500 reads as "this gateway is broken" — a client that
+    believes that retries the same dead id forever, which is precisely what
+    the health app did for a month against a conversation that had rotated
+    away under it.
+    """
+
+
+class SessionNotFound(SessionGone):
+    """No row by that id. 404: there never was, or it was deleted."""
+
+
+class SessionClosed(SessionGone):
+    """The row is retired. 410: it existed, and a successor may carry it on."""
+
+
 # ---------------------------------------------------------------------------
 # Subprocess stderr drain — logs stderr lines at WARNING
 # ---------------------------------------------------------------------------
@@ -1698,9 +1718,9 @@ class SessionManager:
         async with lock:
             session = await self._get_row(session_id)
             if not session:
-                raise ValueError(f"Session not found: {session_id}")
+                raise SessionNotFound(f"Session not found: {session_id}")
             if session["status"] == "closed":
-                raise ValueError(f"Session {session_id} is closed")
+                raise SessionClosed(f"Session {session_id} is closed")
             if session["status"] == "suspended":
                 await self._db.execute(
                     "UPDATE sessions SET status = 'idle' WHERE id = ?", (session_id,)
