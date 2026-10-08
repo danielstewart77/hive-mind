@@ -31,7 +31,6 @@ from apscheduler.triggers.cron import CronTrigger
 
 from config import config
 from core import discord_delivery
-from hive_surfaces import voice_routing
 from core.hive_logging import configure_logging, log_event
 from core.scheduled_skills import (
     ScheduledSkill,
@@ -181,24 +180,53 @@ DEV_SURFACE_PROMPT = (
 )
 
 
-#: Resolves a mind to the voice server that speaks for it, from the mind's own
-#: record rather than from this process's environment. A host running both
-#: engines would otherwise speak every scheduled run through one of them.
-_voice_servers = voice_routing.VoiceServerResolver(
-    os.environ.get("COMMS_URL", ""),
-    os.environ.get("COMMS_BEARER_TOKEN", ""),
-    {
-        voice_routing.CHATTERBOX: os.environ.get("VOICE_SERVER_URL_CHATTERBOX", ""),
-        voice_routing.KOKORO: os.environ.get("VOICE_SERVER_URL_KOKORO", ""),
-    },
-    fallback_url=VOICE_SERVER_URL,
-)
+def _build_voice_servers():
+    """Resolves a mind to the voice server that speaks for it.
+
+    From the mind's own record rather than from this process's environment: a
+    host running both engines would otherwise speak every scheduled run
+    through whichever one `VOICE_SERVER_URL` happens to name.
+
+    Imported defensively because the surfaces core is a git dependency that an
+    image can be built without — and a scheduler that refused to start over a
+    routing improvement would take every briefing and reminder down with it.
+    A host without the package keeps the single server it has always used.
+    """
+    try:
+        from hive_surfaces import voice_routing
+    except ImportError:
+        log.warning(
+            "hive_surfaces is not installed; scheduled speech stays on %s",
+            VOICE_SERVER_URL,
+        )
+        return None
+    return voice_routing.VoiceServerResolver(
+        os.environ.get("COMMS_URL", ""),
+        os.environ.get("COMMS_BEARER_TOKEN", ""),
+        {
+            voice_routing.CHATTERBOX: os.environ.get(
+                "VOICE_SERVER_URL_CHATTERBOX", ""
+            ),
+            voice_routing.KOKORO: os.environ.get("VOICE_SERVER_URL_KOKORO", ""),
+        },
+        fallback_url=VOICE_SERVER_URL,
+    )
+
+
+_voice_servers = _build_voice_servers()
+
+
+def _voice_server_for(voice_id: str) -> str:
+    """The server this mind's record points at, or the one URL we hold."""
+    if _voice_servers is None:
+        return VOICE_SERVER_URL
+    return _voice_servers.resolve(voice_id) or VOICE_SERVER_URL
 
 
 async def _tts(http: aiohttp.ClientSession, text: str, voice_id: str) -> bytes:
     timeout = aiohttp.ClientTimeout(total=VOICE_TTS_TIMEOUT_SECONDS)
     async with http.post(
-        f"{_voice_servers.resolve(voice_id)}/tts",
+        f"{_voice_server_for(voice_id)}/tts",
         json={"text": text, "voice_id": voice_id},
         timeout=timeout,
     ) as resp:
