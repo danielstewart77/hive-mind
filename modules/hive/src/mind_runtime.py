@@ -232,17 +232,38 @@ async def push_surface_token(gateway_url: str, token: str) -> dict:
 # of any one Mind.
 
 
-async def push_voice(gateway_url: str, voice: str) -> dict:
-    """Write this Mind's voice into its runtime.yaml.
+#: The speech engines a Mind may be spoken by. Chatterbox clones a reference
+#: recording this Mind's directory holds; Kokoro speaks one of the server's
+#: own catalogued voices.
+CHATTERBOX = "chatterbox"
+KOKORO = "kokoro"
+VOICE_ENGINES: tuple[str, ...] = (CHATTERBOX, KOKORO)
 
-    On its own, without restating the model: a picker that resent the model it
-    rendered a minute ago would write a stale one back over a fresh edit.
+#: What a Mind naming no engine is spoken by, matching the voice server's own
+#: default — so a Mind that has never been through this panel is described the
+#: way it actually sounds.
+DEFAULT_VOICE_ENGINE = CHATTERBOX
+
+
+async def push_voice(gateway_url: str, voice: str, engine: str = "") -> dict:
+    """Write this Mind's voice, and the engine that speaks it, into its file.
+
+    On their own, without restating the model: a picker that resent the model
+    it rendered a minute ago would write a stale one back over a fresh edit.
+
+    Both in one request, because what a voice means depends on the engine — a
+    Kokoro voice name under Kokoro, a clip filename under Chatterbox. Written
+    separately, a Mind would briefly hold one engine's selection under the
+    other, and whichever write failed would leave it there.
     """
+    body: dict[str, str] = {"voice": voice}
+    if engine:
+        body["voice_engine"] = engine
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             response = await client.patch(
                 _endpoint(gateway_url),
-                json={"voice": voice},
+                json=body,
                 headers=admin_headers(),
             )
     except httpx.HTTPError as exc:
@@ -257,13 +278,19 @@ async def push_voice(gateway_url: str, voice: str) -> dict:
 _SAMPLE_TIMEOUT = 60.0
 
 
-async def sample_voice(voice_server_url: str, voice: str) -> bytes:
+async def sample_voice(
+    voice_server_url: str, voice: str, voice_id: str = ""
+) -> bytes:
     """A spoken sample of one voice, for the page to play.
 
     The grades the picker shows describe how a voice was trained, not what it
     sounds like, and nobody choosing the voice of a Mind they talk to daily
     should have to choose from a letter. A voice must be named: sampling
     "whatever the default is" answers a question nobody asked.
+
+    Under Chatterbox the thing being judged is a recording rather than a
+    catalogued voice, so the Mind is named too — the clip lives in that Mind's
+    own directory, and the server has to be told whose.
     """
     name = (voice or "").strip()
     if not name:
@@ -273,9 +300,12 @@ async def sample_voice(voice_server_url: str, voice: str) -> bytes:
         raise HTTPException(
             status_code=502, detail="No voice server is configured to speak it"
         )
+    body = {"voice": name}
+    if voice_id:
+        body["voice_id"] = voice_id
     try:
         async with httpx.AsyncClient(timeout=_SAMPLE_TIMEOUT) as client:
-            response = await client.post(f"{url}/voices/sample", json={"voice": name})
+            response = await client.post(f"{url}/voices/sample", json=body)
     except httpx.HTTPError as exc:
         raise HTTPException(
             status_code=502, detail=f"The voice server is unreachable: {exc}"

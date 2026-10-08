@@ -264,6 +264,103 @@ def test_saving_a_voice_sends_only_the_voice(monkeypatch):
     _run(scenario())
 
 
+def test_saving_a_voice_and_its_engine_travel_in_one_request(monkeypatch):
+    """Test 20: what a voice means depends on the engine beside it.
+
+    Two requests would leave the Mind briefly holding one engine's selection
+    under the other, and whichever one failed would leave it there.
+    """
+
+    async def scenario():
+        calls = []
+        monkeypatch.setattr(
+            httpx,
+            "AsyncClient",
+            _Client(
+                _response(
+                    200,
+                    {
+                        "configuration": {
+                            "voice": "_dramitac_mono_voice_ref.wav",
+                            "voice_engine": "chatterbox",
+                        }
+                    },
+                ),
+                calls=calls,
+            ),
+        )
+
+        configuration = await mind_runtime.push_voice(
+            "http://cypher:8420", "_dramitac_mono_voice_ref.wav", "chatterbox"
+        )
+
+        assert configuration["voice_engine"] == "chatterbox"
+        assert len(calls) == 1
+        assert calls[0][2]["json"] == {
+            "voice": "_dramitac_mono_voice_ref.wav",
+            "voice_engine": "chatterbox",
+        }
+
+    _run(scenario())
+
+
+def test_saving_a_voice_without_an_engine_leaves_the_engine_alone(monkeypatch):
+    """A Kokoro picker on a Mind already on Kokoro restates nothing."""
+
+    async def scenario():
+        calls = []
+        monkeypatch.setattr(
+            httpx,
+            "AsyncClient",
+            _Client(_response(200, {"configuration": {"voice": "af_heart"}}), calls=calls),
+        )
+
+        await mind_runtime.push_voice("http://cypher:8420", "af_heart")
+
+        assert "voice_engine" not in calls[0][2]["json"]
+
+    _run(scenario())
+
+
+def test_a_chatterbox_sample_names_the_mind_whose_clip_it_is(monkeypatch):
+    """The recording lives in one Mind's directory; the server must be told."""
+
+    async def scenario():
+        calls = []
+        monkeypatch.setattr(
+            httpx,
+            "AsyncClient",
+            _Client(_audio_response(200, b"OggS"), calls=calls),
+        )
+
+        await mind_runtime.sample_voice(
+            "http://voice:8422", "_dramitac_mono_voice_ref.wav", "skippy"
+        )
+
+        assert calls[0][2]["json"] == {
+            "voice": "_dramitac_mono_voice_ref.wav",
+            "voice_id": "skippy",
+        }
+
+    _run(scenario())
+
+
+def test_a_kokoro_sample_names_no_mind(monkeypatch):
+    async def scenario():
+        calls = []
+        monkeypatch.setattr(
+            httpx,
+            "AsyncClient",
+            _Client(_audio_response(200, b"OggS"), calls=calls),
+        )
+
+        await mind_runtime.sample_voice("http://voice:8422", "bm_george")
+
+        assert calls[0][2]["json"] == {"voice": "bm_george"}
+
+    _run(scenario())
+
+
 def test_a_mind_with_no_gateway_url_refuses_rather_than_guessing():
     async def scenario():
         with pytest.raises(HTTPException) as exc:

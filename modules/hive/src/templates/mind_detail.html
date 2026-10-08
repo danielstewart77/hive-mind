@@ -10,7 +10,7 @@
     <div class="overview-stack" id="mind-content">
         <section class="surface"><div class="surface-header"><h2>Overview</h2><span id="mind-status"></span></div><div class="surface-body"><dl class="detail-grid" id="mind-details"></dl></div></section>
         <section class="surface" id="mind-editor" data-editable hidden><div class="surface-header"><div><h2>Default model</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-model-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-model-form"><p>Written to this Mind&#39;s runtime.yaml and its registry row. Applies to the next session it is asked for; conversations already running keep their model.</p><div class="field"><label for="mind-provider">Provider</label><select id="mind-provider" name="provider" required></select><small>The upstream hosting the model. This Mind's own proxy key decides which appear.</small></div><div class="field"><label for="mind-default-model">Model</label><select id="mind-default-model" name="default_model" required></select><small>Every model this Mind is permitted to run on the chosen provider.</small></div><div class="form-actions"><button class="button" type="submit" id="mind-model-save">Save model</button></div><small id="mind-model-status"></small></form></div></section>
-        <section class="surface" id="mind-voice" data-editable hidden><div class="surface-header"><div><h2>Voice</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-voice-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-voice-form"><p>Written to this Mind&#39;s runtime.yaml and its registry row. In effect on the next spoken reply.</p><div class="field"><label for="mind-voice-name">Voice</label><select id="mind-voice-name" name="voice" required></select><small id="mind-voice-description"></small><small id="mind-voice-help"></small></div><div class="form-actions"><button class="button" type="submit" id="mind-voice-save">Save voice</button><button class="button button-quiet" type="button" id="mind-voice-listen">Listen</button></div><small id="mind-voice-status"></small></form></div></section>
+        <section class="surface" id="mind-voice" data-editable hidden><div class="surface-header"><div><h2>Voice</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-voice-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-voice-form"><p>Written to this Mind&#39;s runtime.yaml and its registry row. In effect on the next spoken reply.</p><div class="field"><label for="mind-voice-engine">Engine</label><select id="mind-voice-engine" name="voice_engine" required></select><small id="mind-voice-engine-help"></small></div><div class="field"><label for="mind-voice-name">Voice</label><select id="mind-voice-name" name="voice" required></select><small id="mind-voice-description"></small><small id="mind-voice-help"></small></div><div class="form-actions"><button class="button" type="submit" id="mind-voice-save">Save voice</button><button class="button button-quiet" type="button" id="mind-voice-listen">Listen</button></div><small id="mind-voice-status"></small></form><form class="surface-body overview-stack" id="mind-clip-form" hidden><div class="field"><label for="mind-clip-file">Add a reference clip</label><input type="file" id="mind-clip-file" name="file" accept="audio/wav,.wav" required><small>A clean WAV recording. Added beside this Mind&#39;s existing clips; select it above to speak in it.</small></div><div class="form-actions"><button class="button button-quiet" type="submit" id="mind-clip-upload">Upload clip</button></div><small id="mind-clip-status"></small></form></div></section>
         <section class="surface" id="mind-settings" data-editable hidden><div class="surface-header"><div><h2>Settings</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-settings-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-settings-form"><p>Written to this Mind&#39;s runtime.yaml. Which controls appear is decided by its harness.</p><div id="mind-settings-fields"></div><div class="form-actions"><button class="button" type="submit" id="mind-settings-save">Save settings</button></div><small id="mind-settings-status"></small></form></div></section>
         <section class="surface" id="mind-mounts" data-editable hidden><div class="surface-header"><div><h2>Project folders</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-mounts-summary"></dl><div data-editor hidden><div class="surface-body overview-stack"><p>Saving writes this Mind&#39;s compose fragment and then recreates its container. Recreating ends every process the Mind had running inside it, including a harness turn in flight.</p><table class="data-table" id="mind-mounts-table"><thead><tr><th>Folder</th><th>Inside the Mind</th><th>Access</th></tr></thead><tbody id="mind-mounts-rows"></tbody></table><div class="field"><label for="mind-mounts-root">Root</label><select id="mind-mounts-root"></select></div><div class="field"><label for="mind-mounts-browse">Folder</label><select id="mind-mounts-browse"></select><small id="mind-mounts-here"></small></div><div class="form-actions"><button class="button button-quiet" type="button" id="mind-mounts-up">Up one level</button><button class="button button-quiet" type="button" id="mind-mounts-mount">Mount here</button><button class="button button-quiet" type="button" id="mind-mounts-newfolder">Add folder</button></div><div class="field" id="mind-mounts-new-field" hidden><label for="mind-mounts-new">New folder name</label><input id="mind-mounts-new" type="text" spellcheck="false" placeholder="name"><div class="form-actions"><button class="button button-quiet" type="button" id="mind-mounts-create">Create and mount</button></div></div><div class="form-actions"><button class="button" type="button" id="mind-mounts-save">Save and recreate</button></div><small id="mind-mounts-status"></small><div id="mind-mounts-infrastructure"></div></div></div></section>
         <section class="surface" id="mind-surface-token" data-editable hidden><div class="surface-header"><div><h2>Surface token</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Set</button></div><dl class="detail-grid surface-body" data-summary id="mind-token-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-token-form"><p>Checked against the bot API before it is stored, so a token it refuses leaves the working one in place. Written on the Mind, into whichever of its own `.env` or keyring its surface reads. Never readable from here.</p><div class="field"><label for="mind-token-value">Bot token</label><input id="mind-token-value" name="token" type="password" autocomplete="off" spellcheck="false" required placeholder="123456789:AA…"><small>Issued by BotFather. Reaches the surface when it is next restarted.</small></div><div class="form-actions"><button class="button" type="submit" id="mind-token-save">Verify and store</button></div><small id="mind-token-status"></small></form></div></section>
@@ -83,11 +83,18 @@ window.addEventListener("DOMContentLoaded", async function () {
     // is a network answer and the second is never true.
     function voiceSummary(state) {
         if (state.unreachable) return [["Voice", "Could not be read"], ["Reason", state.detail || "Unknown"]];
+        const engine = state.voice_engine || "chatterbox";
         const chosen = state.voice ? state.voice : "";
+        const rows = [["Engine", engine]];
+        if (engine === "chatterbox") {
+            rows.push(["Reference clip", chosen || ("Default (" + (state.default_clip || "voice_ref.wav") + ")")]);
+            if (state.clip_missing) rows.push(["Clip", "Named but not on the voice server"]);
+            rows.push(["Clips held", String((state.clips || []).length)]);
+            return rows;
+        }
         const offered = (state.catalogue && state.catalogue.voices) || [];
         const match = offered.filter(function (v) { return v.name === chosen; })[0];
-        const rows = [["Voice", chosen ? (match ? match.label : chosen) : ("Default (" + (state.default_voice || "unset") + ")")]];
-        rows.push(["Engine", state.engine || "Unknown"]);
+        rows.push(["Voice", chosen ? (match ? match.label : chosen) : ("Default (" + (state.default_voice || "unset") + ")")]);
         if (state.catalogue && state.catalogue.readable === false) {
             rows.push(["Catalogue", "Could not be read"]);
             rows.push(["Reason", state.catalogue.detail || "Unknown"]);
@@ -97,21 +104,67 @@ window.addEventListener("DOMContentLoaded", async function () {
         return rows;
     }
 
+    // The whole payload is kept, because switching the engine re-renders the
+    // other picker from it rather than fetching again: both lists arrive in
+    // one answer precisely so the switch costs no round trip.
+    let voiceState = {};
+
     function renderVoiceOptions(state) {
+        voiceState = state;
+        const engines = (state.engines && state.engines.length) ? state.engines : ["chatterbox", "kokoro"];
+        const current = state.voice_engine || "chatterbox";
+        const engineSelect = document.getElementById("mind-voice-engine");
+        engineSelect.innerHTML = engines.map(function (name) {
+            return '<option value="' + h.escapeHtml(name) + '"' + (name === current ? " selected" : "") + ">" + h.escapeHtml(name) + "</option>";
+        }).join("");
+        document.getElementById("mind-voice-engine-help").textContent =
+            "Chatterbox clones a reference recording this Mind holds. Kokoro speaks one of the speech server's own voices.";
+        renderVoiceChoices();
+        document.getElementById("mind-voice-form").hidden = false;
+    }
+
+    // Which picker the Voice field is depends on the engine selected right
+    // now, not on the one the Mind is saved with: the operator switches the
+    // engine first and then chooses what that engine can actually speak.
+    function renderVoiceChoices() {
+        const engine = document.getElementById("mind-voice-engine").value;
+        const state = voiceState;
+        const saved = (state.voice_engine || "chatterbox") === engine ? (state.voice || "") : "";
         const select = document.getElementById("mind-voice-name");
+        const help = document.getElementById("mind-voice-help");
+        const label = document.querySelector('label[for="mind-voice-name"]');
+        const uploader = document.getElementById("mind-clip-form");
+        voiceDescriptions = {};
+
+        if (engine === "chatterbox") {
+            const clips = state.clips || [];
+            const names = clips.map(function (c) { return c.name; });
+            const rows = clips.map(function (c) { return {name: c.name, label: c.name}; });
+            // A clip the Mind names that is no longer on disk is kept and
+            // selected rather than dropped: it is the Mind's current answer,
+            // and replacing it with whatever sorts first would silently
+            // change the voice of a Mind the operator came here to look at.
+            if (saved && names.indexOf(saved) === -1) rows.unshift({name: saved, label: saved + " — not on the voice server"});
+            select.innerHTML = rows.map(function (c) {
+                return '<option value="' + h.escapeHtml(c.name) + '"' + (c.name === saved ? " selected" : "") + ">" + h.escapeHtml(c.label) + "</option>";
+            }).join("");
+            if (label) label.textContent = "Reference clip";
+            help.textContent = clips.length
+                ? "Every recording in this Mind's own directory."
+                : "This Mind holds no reference recordings. Upload one below.";
+            uploader.hidden = false;
+            describeSelectedVoice();
+            return;
+        }
+
         const offered = (state.catalogue && state.catalogue.voices) || [];
-        const chosen = state.voice || "";
-        // A voice the Mind holds that the catalogue no longer offers is kept
-        // and selected rather than replaced with whatever sorts first: an
-        // operator who opened this page for another reason and pressed Save
-        // must not silently change the Mind's voice.
         const names = offered.map(function (v) { return v.name; });
         const rows = offered.slice();
-        if (chosen && names.indexOf(chosen) === -1) rows.unshift({name: chosen, label: chosen + " — not offered by this engine"});
+        if (saved && names.indexOf(saved) === -1) rows.unshift({name: saved, label: saved + " — not offered by this engine"});
         select.innerHTML = rows.map(function (v) {
-            return '<option value="' + h.escapeHtml(v.name) + '"' + (v.name === chosen ? " selected" : "") + ">" + h.escapeHtml(v.label || v.name) + "</option>";
+            return '<option value="' + h.escapeHtml(v.name) + '"' + (v.name === saved ? " selected" : "") + ">" + h.escapeHtml(v.label || v.name) + "</option>";
         }).join("");
-        const help = document.getElementById("mind-voice-help");
+        if (label) label.textContent = "Voice";
         if (state.catalogue && state.catalogue.readable === false) {
             help.textContent = "The list of voices could not be read: " + (state.catalogue.detail || "unknown reason");
         } else if (state.catalogue && state.catalogue.described === false) {
@@ -119,10 +172,9 @@ window.addEventListener("DOMContentLoaded", async function () {
         } else {
             help.textContent = "Every English voice this engine can speak, in both accents.";
         }
-        voiceDescriptions = {};
+        uploader.hidden = true;
         offered.forEach(function (v) { voiceDescriptions[v.name] = v.description || ""; });
         describeSelectedVoice();
-        document.getElementById("mind-voice-form").hidden = false;
     }
 
     let voiceDescriptions = {};
@@ -151,7 +203,11 @@ window.addEventListener("DOMContentLoaded", async function () {
             const response = await fetch("/api/voices/sample", {
                 method: "POST",
                 headers: {"Content-Type": "application/json"},
-                body: JSON.stringify({voice: select.value})
+                body: JSON.stringify({
+                    voice: select.value,
+                    voice_engine: document.getElementById("mind-voice-engine").value,
+                    voice_id: document.getElementById("mind-voice").dataset.mindName || ""
+                })
             });
             if (!response.ok) throw new Error(await response.text() || response.statusText);
             url = URL.createObjectURL(await response.blob());
@@ -853,6 +909,7 @@ window.addEventListener("DOMContentLoaded", async function () {
     });
 
     document.getElementById("mind-voice-name").addEventListener("change", describeSelectedVoice);
+    document.getElementById("mind-voice-engine").addEventListener("change", renderVoiceChoices);
     document.getElementById("mind-voice-listen").addEventListener("click", playVoiceSample);
 
     document.getElementById("mind-voice-form").addEventListener("submit", async function (event) {
@@ -860,8 +917,27 @@ window.addEventListener("DOMContentLoaded", async function () {
         const section = document.getElementById("mind-voice"), status = document.getElementById("mind-voice-status");
         status.textContent = "Saving…";
         try {
-            const data = await h.requestJson("/api/minds/" + encodeURIComponent(section.dataset.mindName) + "/voice", {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({voice: event.target.elements.voice.value})});
+            const data = await h.requestJson("/api/minds/" + encodeURIComponent(section.dataset.mindName) + "/voice", {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({voice: event.target.elements.voice.value, voice_engine: event.target.elements.voice_engine.value})});
             status.textContent = "Saved. The next spoken reply uses " + (data.voice || "the new voice") + ".";
+            await renderVoice(section.dataset.mindName);
+        } catch (error) { status.textContent = error.message; }
+    });
+
+    // An upload adds a clip and re-reads the panel, so the new recording is
+    // selectable immediately. It does not save it as the voice: pressing
+    // Upload must not change what the Mind currently speaks in.
+    document.getElementById("mind-clip-form").addEventListener("submit", async function (event) {
+        event.preventDefault();
+        const section = document.getElementById("mind-voice"), status = document.getElementById("mind-clip-status");
+        const file = document.getElementById("mind-clip-file");
+        if (!file.files || !file.files.length) { status.textContent = "Choose a WAV file first."; return; }
+        const body = new FormData();
+        body.append("file", file.files[0]);
+        status.textContent = "Uploading…";
+        try {
+            const data = await h.requestJson("/api/minds/" + encodeURIComponent(section.dataset.mindName) + "/voice/clips", {method: "POST", body: body});
+            status.textContent = "Added " + (data.clip || "the clip") + ". Select it above and save to speak in it.";
+            file.value = "";
             await renderVoice(section.dataset.mindName);
         } catch (error) { status.textContent = error.message; }
     });

@@ -159,56 +159,146 @@ def test_hive_tools_status_absent_when_dir_missing(tmp_path, monkeypatch):
     assert settings_data.hive_tools_status()["present"] is False
 
 
-# ── voice ref ──────────────────────────────────────────────────────────
+# ── voice clips ────────────────────────────────────────────────────────
 
 _MINIMAL_WAV = b"RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00" + b"\x00" * 16 + b"data\x00\x00\x00\x00"
 
 
-def test_voice_ref_status_none_when_missing(tmp_path, monkeypatch):
+def test_list_voice_clips_is_empty_for_a_mind_with_no_directory(tmp_path, monkeypatch):
     monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_DIR", tmp_path)
-    assert settings_data.voice_ref_status("bob") is None
+    assert settings_data.list_voice_clips("bob") == []
 
 
-def test_voice_ref_status_reports_size_when_present(tmp_path, monkeypatch):
-    mind_dir = tmp_path / "bob"
+def test_list_voice_clips_reports_every_recording_in_the_directory(
+    tmp_path, monkeypatch
+):
+    """A mind's directory accumulates candidates; all of them are selectable."""
+    mind_dir = tmp_path / "skippy"
+    mind_dir.mkdir()
+    for name in (
+        "voice_ref.wav",
+        "_dramitac_mono_voice_ref.wav",
+        "dramatic_sterio_voice_ref.wav",
+    ):
+        (mind_dir / name).write_bytes(_MINIMAL_WAV)
+    monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_DIR", tmp_path)
+
+    clips = settings_data.list_voice_clips("skippy")
+
+    assert [clip["name"] for clip in clips] == [
+        "_dramitac_mono_voice_ref.wav",
+        "dramatic_sterio_voice_ref.wav",
+        "voice_ref.wav",
+    ]
+    assert clips[0]["size_bytes"] == len(_MINIMAL_WAV)
+
+
+def test_list_voice_clips_ignores_what_is_not_a_recording(tmp_path, monkeypatch):
+    """A mind's directory also holds its runtime.yaml and its soul."""
+    mind_dir = tmp_path / "skippy"
     mind_dir.mkdir()
     (mind_dir / "voice_ref.wav").write_bytes(_MINIMAL_WAV)
+    (mind_dir / "runtime.yaml").write_text("name: skippy\n")
+    (mind_dir / "notes.txt").write_text("not audio")
     monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_DIR", tmp_path)
 
-    status = settings_data.voice_ref_status("bob")
+    assert [c["name"] for c in settings_data.list_voice_clips("skippy")] == [
+        "voice_ref.wav"
+    ]
 
-    assert status["size_bytes"] == len(_MINIMAL_WAV)
+
+def test_list_voice_clips_refuses_a_mind_name_that_is_a_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_DIR", tmp_path)
+    assert settings_data.list_voice_clips("../etc") == []
 
 
-def test_save_voice_ref_writes_file(tmp_path, monkeypatch):
+def test_save_voice_clip_writes_under_its_own_name(tmp_path, monkeypatch):
+    """An upload adds a candidate rather than replacing the active clip."""
     monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_VOICE_DIR", tmp_path)
 
-    target = settings_data.save_voice_ref("bob", _MINIMAL_WAV)
+    target = settings_data.save_voice_clip("bob", "calm_take_two.wav", _MINIMAL_WAV)
 
+    assert target == tmp_path / "bob" / "calm_take_two.wav"
     assert target.read_bytes() == _MINIMAL_WAV
-    assert target == tmp_path / "bob" / "voice_ref.wav"
 
 
-def test_save_voice_ref_rejects_non_wav(tmp_path, monkeypatch):
+def test_save_voice_clip_leaves_the_existing_clip_alone(tmp_path, monkeypatch):
+    """The clip currently being spoken must survive an upload beside it."""
+    mind_dir = tmp_path / "bob"
+    mind_dir.mkdir()
+    existing = mind_dir / "voice_ref.wav"
+    existing.write_bytes(_MINIMAL_WAV + b"original")
+    monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_VOICE_DIR", tmp_path)
+
+    settings_data.save_voice_clip("bob", "second_take.wav", _MINIMAL_WAV)
+
+    assert existing.read_bytes() == _MINIMAL_WAV + b"original"
+
+
+def test_save_voice_clip_keeps_an_escaping_filename_inside_the_directory(
+    tmp_path, monkeypatch
+):
+    """The name comes off a browser upload and is joined onto a directory."""
+    monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_VOICE_DIR", tmp_path)
+
+    target = settings_data.save_voice_clip(
+        "bob", "../../../../etc/evil.wav", _MINIMAL_WAV
+    )
+
+    assert target == tmp_path / "bob" / "evil.wav"
+    assert target.read_bytes() == _MINIMAL_WAV
+
+
+def test_save_voice_clip_keeps_a_windows_path_inside_the_directory(
+    tmp_path, monkeypatch
+):
+    """A Windows browser sends the whole local path as the filename."""
+    monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_VOICE_DIR", tmp_path)
+
+    target = settings_data.save_voice_clip(
+        "bob", r"C:\Users\daniel\Desktop\take.wav", _MINIMAL_WAV
+    )
+
+    assert target == tmp_path / "bob" / "take.wav"
+
+
+def test_save_voice_clip_refuses_a_name_that_is_not_a_wav(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_VOICE_DIR", tmp_path)
+
+    with pytest.raises(ValueError, match="wav"):
+        settings_data.save_voice_clip("bob", "take.mp3", _MINIMAL_WAV)
+
+
+def test_save_voice_clip_refuses_a_name_the_mind_could_not_select(
+    tmp_path, monkeypatch
+):
+    """A filename this accepted and runtime.yaml refused is an unusable clip."""
+    monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_VOICE_DIR", tmp_path)
+
+    with pytest.raises(ValueError, match="clip filename"):
+        settings_data.save_voice_clip("bob", "my take (final).wav", _MINIMAL_WAV)
+
+
+def test_save_voice_clip_rejects_non_wav_content(tmp_path, monkeypatch):
     monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_VOICE_DIR", tmp_path)
 
     with pytest.raises(ValueError, match="WAV"):
-        settings_data.save_voice_ref("bob", b"not a wav file at all")
+        settings_data.save_voice_clip("bob", "take.wav", b"not a wav file at all")
 
 
-def test_save_voice_ref_rejects_unsafe_name(tmp_path, monkeypatch):
+def test_save_voice_clip_rejects_unsafe_mind_name(tmp_path, monkeypatch):
     monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_VOICE_DIR", tmp_path)
 
     with pytest.raises(ValueError, match="invalid mind name"):
-        settings_data.save_voice_ref("../etc", _MINIMAL_WAV)
+        settings_data.save_voice_clip("../etc", "take.wav", _MINIMAL_WAV)
 
 
-def test_save_voice_ref_rejects_oversized_file(tmp_path, monkeypatch):
+def test_save_voice_clip_rejects_oversized_file(tmp_path, monkeypatch):
     monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_VOICE_DIR", tmp_path)
     monkeypatch.setattr(settings_data, "_WAV_MAX_BYTES", 10)
 
     with pytest.raises(ValueError, match="too large"):
-        settings_data.save_voice_ref("bob", _MINIMAL_WAV)
+        settings_data.save_voice_clip("bob", "take.wav", _MINIMAL_WAV)
 
 
 # ── downloads ──────────────────────────────────────────────────────────
