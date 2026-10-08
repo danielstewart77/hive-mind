@@ -284,6 +284,7 @@ def _sweep_stale_seeds(seed_dir) -> None:
 
 def seeded_pane_command(
     argv: list[str], system_prompt: str, seed_file: Path, *, seed_flag: str = "",
+    as_user_turn: bool = False,
 ) -> list[str]:
     """Hand the pane its carry-forward without putting it in the command.
 
@@ -298,6 +299,13 @@ def seeded_pane_command(
     ``seed_flag`` is how this harness takes an opening context — claude has
     ``--append-system-prompt``; codex has no such flag and takes it as the
     positional opening turn, so the flag is empty there.
+
+    ``as_user_turn`` decides which end of the harness the seed enters, and
+    overrides the flag. A fresh terminal takes its seed as standing context,
+    which is where standing context belongs. A staged rotation takes it as the
+    positional opening prompt, because the user's own message is concatenated
+    onto it: a system prompt submits nothing and reaches no transcript, so the
+    pane would open at an empty prompt with what they typed gone.
     """
     if not system_prompt:
         return argv
@@ -309,13 +317,22 @@ def seeded_pane_command(
     seed_file.chmod(0o600)
     quoted_seed = shlex.quote(str(seed_file))
     harness = " ".join(shlex.quote(arg) for arg in argv)
-    flag = f"{seed_flag} " if seed_flag else ""
+    flag = "" if as_user_turn else seed_flag
+    entry = f'{flag} "$seed"' if flag else ' "$seed"'
     # Read then delete: the seed is one process's opening context, and it is
     # the whole conversation's memory sitting in a world-readable file.
+    #
+    # An unreadable or empty seed starts the harness *without* it rather than
+    # exec'ing the entry point with an empty argument, which would open the
+    # successor on nothing while tmux and the gateway both recorded a
+    # successful rotation. An unseeded terminal is recoverable — the gateway
+    # holds the same text on the session row and hands it back on the next
+    # attach — and a dead pane is not.
     return [
         "/bin/sh", "-c",
-        f'seed=$(cat {quoted_seed}); rm -f {quoted_seed}; '
-        f'exec {harness} {flag}"$seed"',
+        f'seed=$(cat {quoted_seed} 2>/dev/null); rm -f {quoted_seed}; '
+        f'[ -n "$seed" ] && exec {harness}{entry}; '
+        f'exec {harness}',
     ]
 
 
@@ -786,8 +803,10 @@ def install_pty_attach(
     reason instead of opening a terminal on nothing.
 
     ``rotate`` is called as ``rotate(session_id=, new_claude_sid=, model=,
-    system_prompt=, client_ref=, owner_type=, owner_ref=)`` and returns
-    whether a live terminal was rotated in place.
+    system_prompt=, user_prompt=, client_ref=, owner_type=, owner_ref=)`` and
+    returns whether a live terminal was rotated in place. ``user_prompt``, when
+    given, is the seed the successor opens on as a user turn; ``system_prompt``
+    is standing context a fresh terminal takes.
     """
     global _TERMINALS
     _TERMINALS = terminals
@@ -832,6 +851,12 @@ def install_pty_attach(
                 # moment someone edited that default in the console.
                 model=body.get("model") or handle.model,
                 system_prompt=body.get("system_prompt") or "",
+                # The staged seed with the user's own typed message on the
+                # end. It enters the harness as an opening *user* turn rather
+                # than as standing context, because a system prompt submits
+                # nothing — dropping it respawns the pane on an empty prompt
+                # while this route reports a successful rotation.
+                user_prompt=body.get("user_prompt") or "",
                 client_ref=body.get("client_ref"),
                 owner_type=body.get("owner_type"),
                 owner_ref=body.get("owner_ref"),

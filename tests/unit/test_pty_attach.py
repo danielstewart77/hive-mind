@@ -351,6 +351,25 @@ class TestRotateRoute:
             ws.send_bytes(b"after\n")
             assert b"after" in _read_until(ws, b"after")
 
+    def test_a_staged_rotation_delivers_the_typed_message_to_the_harness(self):
+        """comms sends the seed-plus-message as user_prompt; it must arrive.
+
+        The staged seed is the summary with the user's own typed message
+        concatenated onto it. Dropping it respawns the pane on nothing while
+        reporting a successful rotation.
+        """
+        calls: list[dict] = []
+        client = TestClient(self._rotating_app(calls))
+        with client.websocket_connect("/sessions/r4/attach-pty?model=opus&resume_sid=old") as ws:
+            ws.send_bytes(b"x\n")
+            ws.receive_bytes()
+            client.post("/sessions/r4/rotate-pty", json={
+                "new_claude_sid": "new-conv", "model": "sonnet",
+                "system_prompt": "the summary",
+                "user_prompt": "the summary\n\nand what I typed",
+            })
+        assert calls[0]["user_prompt"] == "the summary\n\nand what I typed"
+
     def test_rotation_declines_when_no_tile_is_open(self):
         calls: list[dict] = []
         client = TestClient(self._rotating_app(calls))
@@ -546,7 +565,7 @@ class TestSeededPaneCommand:
         # opening turn instead.
         seed_file = tmp_path / "seed.txt"
         cmd = pty_attach.seeded_pane_command(["codex"], "carry-forward", seed_file)
-        assert cmd[-1].endswith('exec codex "$seed"')
+        assert 'exec codex "$seed"' in cmd[-1]
 
     def test_an_oversized_seed_is_trimmed_to_what_exec_can_carry(self, tmp_path):
         seed = ("head " * 40000) + "THE-PENDING-TURNS"
@@ -1001,3 +1020,50 @@ class TestTuiFirstRunFlags:
         pty_attach.ensure_tui_first_run_flags(tmp_path, "/usr/src/app")
 
         assert path.read_text() == "{not json"
+
+
+class TestSeedEntryPoint:
+    """Which end of the harness a carry-forward enters by.
+
+    A fresh terminal's seed is standing context and belongs behind the
+    harness's system-prompt flag. A staged rotation's seed carries the user's
+    own typed message, and a system prompt submits nothing and reaches no
+    transcript — so the pane would open at an empty prompt with what they
+    typed gone.
+    """
+
+    def test_a_staged_rotation_seed_enters_as_the_opening_user_turn(self, tmp_path):
+        cmd = pty_attach.seeded_pane_command(
+            ["harness", "--resume", "c1"], "summary and message",
+            tmp_path / "seed.txt",
+            seed_flag="--append-system-prompt", as_user_turn=True,
+        )
+        script = cmd[-1]
+        assert 'exec harness --resume c1 "$seed"' in script
+        assert "--append-system-prompt" not in script
+
+    def test_a_fresh_terminal_seed_enters_behind_the_system_prompt_flag(self, tmp_path):
+        cmd = pty_attach.seeded_pane_command(
+            ["harness", "--resume", "c1"], "standing context",
+            tmp_path / "seed.txt",
+            seed_flag="--append-system-prompt",
+        )
+        assert '--append-system-prompt "$seed"' in cmd[-1]
+
+    def test_an_unreadable_seed_starts_the_harness_unseeded(self, tmp_path):
+        """A dead pane is unrecoverable; an unseeded one is not.
+
+        The gateway holds the same text on the session row and hands it back
+        on the next attach, so a harness started without its seed can be
+        recovered. Exec'ing the entry point with an empty argument opens the
+        successor on nothing while tmux and the gateway both record success.
+        """
+        seed_file = tmp_path / "seed.txt"
+        cmd = pty_attach.seeded_pane_command(
+            ["/bin/echo", "harness-ran"], "a seed", seed_file,
+            seed_flag="--append-system-prompt", as_user_turn=True,
+        )
+        seed_file.unlink()
+        done = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        assert done.returncode == 0
+        assert "harness-ran" in done.stdout
