@@ -54,6 +54,7 @@ PUBLIC_FIELDS = (
     "surfaces",
     "resume_policy",
     "voice",
+    "voice_engine",
 )
 
 
@@ -82,7 +83,15 @@ def public_runtime(path: Path) -> dict[str, Any]:
 WRITABLE_FIELDS = {
     "default_model": _MODEL_NAME_RE,
     "provider": re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"),
-    "voice": re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"),
+    # A Kokoro voice name under kokoro, a reference-clip filename under
+    # chatterbox. A leading underscore is allowed because real clips have one;
+    # a separator is not, because this value arrives over HTTP and is then
+    # resolved against a directory.
+    "voice": re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,127}"),
+    # Checked against the enumeration as well as the pattern: a misspelled
+    # engine names a voice server nothing is listening on, and the mind would
+    # go silent rather than refuse the save.
+    "voice_engine": re.compile(r"[a-z]{1,32}"),
     # Not a setting anybody types: the chosen model's own window, as the
     # proxy reports it, cached so a per-turn hook can size a rotation
     # threshold without a network call. Zero means the proxy declared none,
@@ -100,20 +109,44 @@ WRITABLE_FIELDS = {
 #: by the route — it writes it beside the model it belongs to — but never by
 #: its caller: a window taken off a request is a number nobody measured, and
 #: the rotation threshold is derived from it.
-CONSOLE_FIELDS: tuple[str, ...] = ("default_model", "provider", "voice")
+CONSOLE_FIELDS: tuple[str, ...] = (
+    "default_model",
+    "provider",
+    "voice",
+    "voice_engine",
+)
+
+#: The speech engines that exist. Chatterbox clones the reference clip the
+#: voice names; Kokoro speaks one of its own catalogued voices. Which one a
+#: mind uses is a property of the mind, so it lives in the mind's own file
+#: rather than in the environment of whichever caller holds a server URL.
+VOICE_ENGINES: tuple[str, ...] = ("chatterbox", "kokoro")
+
+#: What a mind falls back to when its file names no engine — what the voice
+#: server itself has always defaulted to, so this field changes no mind's
+#: voice by arriving.
+DEFAULT_VOICE_ENGINE = "chatterbox"
 
 #: Fields a mind may not have a line for yet. A missing `default_model` means a
 #: malformed file and is refused; a missing `voice` only means this mind was
 #: scaffolded before voices were pickable, and refusing that would make the
 #: field unsettable on every mind already installed.
-CREATABLE_FIELDS = ("voice", "model_context_window")
+CREATABLE_FIELDS = ("voice", "voice_engine", "model_context_window")
 
 #: The comment written above a field created on a mind that had no line for it,
 #: so the next person to open the file is not reading a bare key.
 _FIELD_COMMENTS = {
     "voice": (
-        "# Which voice this mind is spoken in. A Kokoro voice name; the voice",
-        "# server reads it from the broker row, which this file is the truth for.",
+        "# Which voice this mind is spoken in: a Kokoro voice name under the",
+        "# kokoro engine, or the filename of a reference clip in this mind's own",
+        "# directory under chatterbox. The voice server reads it from the broker",
+        "# row, which this file is the truth for.",
+    ),
+    "voice_engine": (
+        "# Which speech engine speaks this mind: chatterbox (clones the reference",
+        "# clip named above) or kokoro (one of its own catalogued voices). Each",
+        "# surface resolves the voice server from this rather than from its own",
+        "# environment.",
     ),
     "model_context_window": (
         "# The chosen model's own context window, as the inference proxy reports",
@@ -140,6 +173,11 @@ def update_runtime_fields(path: Path, fields: dict[str, str]) -> dict[str, Any]:
     for field, value in fields.items():
         if not WRITABLE_FIELDS[field].fullmatch(value or ""):
             raise ValueError(f"{field} contains unsupported characters")
+    engine = fields.get("voice_engine")
+    if engine is not None and engine not in VOICE_ENGINES:
+        raise ValueError(
+            f"{engine} is not a speech engine: " + ", ".join(VOICE_ENGINES)
+        )
 
     return _substitute_lines(path, fields, CREATABLE_FIELDS, _FIELD_COMMENTS)
 
@@ -291,9 +329,10 @@ def registration_payload(path: Path, mind_name: str = "") -> dict[str, str]:
     # broker row is the cache the voice server reads. Omitted when unset, so a
     # mind that has picked none leaves the gateway's copy alone rather than
     # clearing it on every boot.
-    voice = str(loaded.get("voice") or "").strip()
-    if voice:
-        payload["voice"] = voice
+    for field in ("voice", "voice_engine"):
+        value = str(loaded.get(field) or "").strip()
+        if value:
+            payload[field] = value
     # The admin-guarded registration this mind already performs every boot is
     # the only channel by which the gateway learns the credential. Omitted
     # when there is none, because a registration that sent an empty one would
@@ -803,6 +842,15 @@ def install_runtime_routes(app: FastAPI, *, path: Path, mind_id: str, log) -> No
             )
         model = fields.get("default_model", "")
         provider = fields.get("provider", "")
+        # A provider alone would leave this mind on an upstream that does not
+        # host its model. The fields are individually optional so a voice can
+        # be set without restating a model, but these two still travel
+        # together.
+        if provider and not model:
+            return JSONResponse(
+                {"error": "provider requires the default_model it hosts"},
+                status_code=400,
+            )
         # The window travels with the model, in the same write. Asked of the
         # proxy here because this mind holds the key the proxy answers for,
         # and cached in the file because the thing that needs it is a per-turn
@@ -829,6 +877,7 @@ def install_runtime_routes(app: FastAPI, *, path: Path, mind_id: str, log) -> No
             log, "mind.runtime.updated", mind_id=mind_id,
             default_model=model or None, provider=provider or None,
             voice=fields.get("voice") or None,
+            voice_engine=fields.get("voice_engine") or None,
         )
         return {
             "saved": True,

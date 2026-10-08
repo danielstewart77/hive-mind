@@ -283,21 +283,114 @@ class TestSamplingAVoice:
 
         assert refused.value.status_code == 503
 
-    def test_refuses_on_an_engine_that_has_no_catalogue_to_sample(self):
-        """Chatterbox clones from a recording; it has no voices to offer."""
+    def test_chatterbox_refuses_a_sample_that_names_no_mind(self):
+        """Chatterbox samples a recording, and a recording belongs to a Mind.
+
+        Nothing could tell this server whose directory to look in, and the
+        clip it fell back to would be a sample of the wrong voice.
+        """
         import asyncio
 
         from fastapi import HTTPException
 
         vs = self._server()
         vs._TTS_ENGINE = "chatterbox"
+        vs._chatterbox_model = MagicMock()
         try:
             with pytest.raises(HTTPException) as refused:
                 asyncio.run(vs.voices_sample(vs.VoiceSampleRequest(voice="af_bella")))
         finally:
             vs._TTS_ENGINE = "kokoro"
+            vs._chatterbox_model = None
 
         assert refused.value.status_code == 400
+
+    def test_chatterbox_with_no_model_loaded_answers_503_not_400(self):
+        """Readiness before the engine branch.
+
+        Both engines can sample now, so an unloaded model is "not ready yet"
+        rather than "this engine cannot sample" — and 400 would send the
+        operator off to check the clip they picked, which is fine.
+        """
+        import asyncio
+
+        from fastapi import HTTPException
+
+        vs = self._server()
+        vs._TTS_ENGINE = "chatterbox"
+        vs._chatterbox_model = None
+        try:
+            with pytest.raises(HTTPException) as refused:
+                asyncio.run(
+                    vs.voices_sample(
+                        vs.VoiceSampleRequest(voice="voice_ref.wav", voice_id="skippy")
+                    )
+                )
+        finally:
+            vs._TTS_ENGINE = "kokoro"
+
+        assert refused.value.status_code == 503
+
+    def test_chatterbox_refuses_a_clip_the_named_mind_does_not_have(self, tmp_path):
+        import asyncio
+
+        from fastapi import HTTPException
+
+        vs = self._server()
+        vs._TTS_ENGINE = "chatterbox"
+        vs._chatterbox_model = MagicMock()
+        (tmp_path / "skippy").mkdir()
+        try:
+            with patch.object(vs, "_MINDS_DIR", str(tmp_path)):
+                with pytest.raises(HTTPException) as refused:
+                    asyncio.run(
+                        vs.voices_sample(
+                            vs.VoiceSampleRequest(voice="gone.wav", voice_id="skippy")
+                        )
+                    )
+        finally:
+            vs._TTS_ENGINE = "kokoro"
+            vs._chatterbox_model = None
+
+        assert refused.value.status_code == 400
+
+    def test_chatterbox_speaks_the_clip_the_request_names(self, tmp_path):
+        """The Listen button under chatterbox, judging a recording by ear."""
+        import asyncio
+
+        vs = self._server()
+        vs._TTS_ENGINE = "chatterbox"
+        model = MagicMock()
+        model.sr = 24000
+        vs._chatterbox_model = model
+        mind_dir = tmp_path / "skippy"
+        mind_dir.mkdir()
+        (mind_dir / "_dramitac_mono_voice_ref.wav").write_bytes(b"RIFF....WAVE")
+        handed = {}
+
+        def fake_chunked(text, ref_path=None):
+            handed["ref_path"] = ref_path
+            return "waveform"
+
+        try:
+            with patch.object(vs, "_MINDS_DIR", str(tmp_path)), \
+                    patch.object(vs, "_MIND_ID_TO_NAME", {}), \
+                    patch.object(vs, "_synthesize_chunked", fake_chunked), \
+                    patch.object(vs, "torchaudio", MagicMock()), \
+                    patch.object(vs, "_wav_to_ogg", return_value=b"OggS-clip"):
+                response = asyncio.run(
+                    vs.voices_sample(
+                        vs.VoiceSampleRequest(
+                            voice="_dramitac_mono_voice_ref.wav", voice_id="skippy"
+                        )
+                    )
+                )
+        finally:
+            vs._TTS_ENGINE = "kokoro"
+            vs._chatterbox_model = None
+
+        assert response.body == b"OggS-clip"
+        assert handed["ref_path"] == str(mind_dir / "_dramitac_mono_voice_ref.wav")
 
     def test_is_retimed_exactly_as_a_real_reply_is(self):
         """Every reply is retimed before it reaches a surface and no caller

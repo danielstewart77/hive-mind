@@ -129,6 +129,34 @@ def cmd_send(args: argparse.Namespace) -> int:
     return 0 if delivered else 1
 
 
+def _voice_server_url(voice_id: str) -> str:
+    """The voice server that speaks for this mind, per the mind's own record.
+
+    Which engine a mind uses is a field on the mind, so the URL is resolved
+    from it rather than from this process's environment — a host running both
+    engines would otherwise speak every notification through whichever server
+    its `VOICE_SERVER_URL` happened to name.
+    """
+    legacy = os.getenv("VOICE_SERVER_URL", "http://voice-server:8422")
+    try:
+        from hive_surfaces import voice_routing
+    except ImportError:
+        # A host without the surfaces package installed keeps the single
+        # server it has always used. One missing import must not cost the
+        # operator a spoken alert.
+        return legacy
+    resolver = voice_routing.VoiceServerResolver(
+        os.getenv("COMMS_URL", ""),
+        os.getenv("COMMS_BEARER_TOKEN", ""),
+        {
+            voice_routing.CHATTERBOX: os.getenv("VOICE_SERVER_URL_CHATTERBOX", ""),
+            voice_routing.KOKORO: os.getenv("VOICE_SERVER_URL_KOKORO", ""),
+        },
+        fallback_url=legacy,
+    )
+    return resolver.resolve(voice_id) or legacy
+
+
 def cmd_voice(args: argparse.Namespace) -> int:
     if args.test_mode:
         print(json.dumps({"success": True, "detail": "Voice message sent (test)"}))
@@ -139,7 +167,7 @@ def cmd_voice(args: argparse.Namespace) -> int:
 
     token = get_credential("TELEGRAM_BOT_TOKEN")
     chat_id = get_credential("TELEGRAM_OWNER_CHAT_ID")
-    voice_url = os.getenv("VOICE_SERVER_URL", "http://voice-server:8422")
+    voice_url = _voice_server_url(os.getenv("MIND_ID", "default"))
 
     if not token or not chat_id:
         print(json.dumps({"success": False, "error": "Missing bot token or chat ID"}))

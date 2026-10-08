@@ -115,6 +115,12 @@ services:
       - whisper-cache:/home/hivemind/.cache
     environment:
       - WHISPER_MODEL=medium
+      # Which reference clip a mind is spoken from lives on that mind's broker
+      # row, so this server has to be able to read the listing. Without these
+      # it resolves nobody, every mind falls back to `voice_ref.wav`, and the
+      # console's clip picker reports a save that changes nothing audible.
+      - COMMS_URL=http://hive-comms:8424
+      - COMMS_BEARER_TOKEN=${COMMS_BEARER_TOKEN}
     deploy:
       resources:
         reservations:
@@ -204,6 +210,10 @@ services:
       - COMMS_URL=http://hive-comms:8424
       - COMMS_BEARER_TOKEN=${COMMS_BEARER_TOKEN}
       - VOICE_SERVER_URL=http://voice-server:8422
+      # Both engines, so a mind whose record names one is spoken by it. The
+      # line above stays as the fallback for a mind that names neither.
+      - VOICE_SERVER_URL_CHATTERBOX=http://voice-server:8422
+      - VOICE_SERVER_URL_KOKORO=http://voice-server-kokoro:8422
       - PYTHON_KEYRING_BACKEND=core.keyring_backend.HiveMindKeyring
       - PYTHONNOUSERSITE=1
       - KEY_RING=/usr/src/app/data/keyring
@@ -246,6 +256,10 @@ services:
       - COMMS_URL=http://hive-comms:8424
       - COMMS_BEARER_TOKEN=${COMMS_BEARER_TOKEN}
       - VOICE_SERVER_URL=http://voice-server:8422
+      # Both engines, so a mind whose record names one is spoken by it. The
+      # line above stays as the fallback for a mind that names neither.
+      - VOICE_SERVER_URL_CHATTERBOX=http://voice-server:8422
+      - VOICE_SERVER_URL_KOKORO=http://voice-server-kokoro:8422
       - PYTHON_KEYRING_BACKEND=core.keyring_backend.HiveMindKeyring
       - PYTHONNOUSERSITE=1
       - KEY_RING=/usr/src/app/data/keyring

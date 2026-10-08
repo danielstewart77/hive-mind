@@ -567,6 +567,59 @@ class TestVoice:
         assert "voice" not in runtime_api.registration_payload(runtime_file)
 
 
+class TestVoiceEngine:
+    """Which engine speaks a mind is a field on the mind, like its voice."""
+
+    def test_writes_the_engine_and_the_voice_in_one_write(self, runtime_file):
+        loaded = runtime_api.update_runtime_fields(
+            runtime_file, {"voice_engine": "kokoro", "voice": "af_heart"}
+        )
+        assert (loaded["voice_engine"], loaded["voice"]) == ("kokoro", "af_heart")
+        assert runtime_api.load_runtime(runtime_file)["voice_engine"] == "kokoro"
+
+    def test_an_unknown_engine_is_refused_and_nothing_is_written(self, runtime_file):
+        before = runtime_file.read_text()
+        with pytest.raises(ValueError) as exc:
+            runtime_api.update_runtime_fields(runtime_file, {"voice_engine": "festival"})
+        assert "festival" in str(exc.value)
+        assert runtime_file.read_text() == before
+
+    def test_an_underscored_clip_filename_is_accepted(self, runtime_file):
+        """Real reference clips are named `_something_voice_ref.wav`."""
+        runtime_api.update_runtime_fields(
+            runtime_file,
+            {"voice_engine": "chatterbox", "voice": "_dramitac_mono_voice_ref.wav"},
+        )
+        assert (
+            runtime_api.load_runtime(runtime_file)["voice"]
+            == "_dramitac_mono_voice_ref.wav"
+        )
+
+    def test_a_clip_name_holding_a_separator_is_refused(self, runtime_file):
+        before = runtime_file.read_text()
+        with pytest.raises(ValueError):
+            runtime_api.update_runtime_fields(runtime_file, {"voice": "../../etc/passwd"})
+        assert runtime_file.read_text() == before
+
+    def test_a_good_engine_with_a_bad_voice_writes_neither(self, runtime_file):
+        before = runtime_file.read_text()
+        with pytest.raises(ValueError):
+            runtime_api.update_runtime_fields(
+                runtime_file, {"voice_engine": "kokoro", "voice": "not a voice"}
+            )
+        assert runtime_file.read_text() == before
+
+    def test_registration_carries_the_engine(self, runtime_file):
+        runtime_api.update_runtime_fields(runtime_file, {"voice_engine": "kokoro"})
+        payload = runtime_api.registration_payload(runtime_file)
+        assert payload["voice_engine"] == "kokoro"
+
+    def test_registration_omits_an_unset_engine_rather_than_clearing_it(
+        self, runtime_file
+    ):
+        assert "voice_engine" not in runtime_api.registration_payload(runtime_file)
+
+
 class TestVoiceRoute:
     def test_patch_writes_a_voice_without_restating_the_model(
         self, client, runtime_file
@@ -591,6 +644,58 @@ class TestVoiceRoute:
         assert response.status_code == 200
         loaded = runtime_api.load_runtime(runtime_file)
         assert (loaded["default_model"], loaded["voice"]) == ("opus", "am_michael")
+
+    def test_patch_writes_the_engine_and_the_voice_in_one_request(
+        self, client, runtime_file
+    ):
+        """The route, not just the writer underneath it.
+
+        `TestVoiceEngine` drives `update_runtime_fields` directly, so dropping
+        `voice_engine` from `CONSOLE_FIELDS` left the whole suite green while
+        the route refused every engine the console sent.
+        """
+        response = client.patch(
+            "/runtime",
+            json={"voice_engine": "kokoro", "voice": "af_heart"},
+            headers={"Authorization": "Bearer s3cret"},
+        )
+
+        assert response.status_code == 200
+        loaded = runtime_api.load_runtime(runtime_file)
+        assert (loaded["voice_engine"], loaded["voice"]) == ("kokoro", "af_heart")
+
+    def test_the_runtime_report_names_the_engine(self, client, runtime_file):
+        """The console's picker reads this to show which engine is selected,
+        so dropping it from `PUBLIC_FIELDS` is a panel that cannot render."""
+        runtime_api.update_runtime_fields(runtime_file, {"voice_engine": "kokoro"})
+
+        body = client.get(
+            "/runtime", headers={"Authorization": "Bearer s3cret"}
+        ).json()["configuration"]
+
+        assert body["voice_engine"] == "kokoro"
+
+    def test_patch_refuses_a_provider_with_no_model(self, client, runtime_file):
+        """The two travel together even though each field is optional."""
+        response = client.patch(
+            "/runtime",
+            json={"provider": "ollama"},
+            headers={"Authorization": "Bearer s3cret"},
+        )
+
+        assert response.status_code == 400
+        assert runtime_api.load_runtime(runtime_file)["provider"] == "anthropic"
+
+    def test_patch_refuses_an_engine_that_does_not_exist(self, client, runtime_file):
+        before = runtime_file.read_text()
+        response = client.patch(
+            "/runtime",
+            json={"voice_engine": "festival"},
+            headers={"Authorization": "Bearer s3cret"},
+        )
+
+        assert response.status_code == 400
+        assert runtime_file.read_text() == before
 
     def test_patch_with_nothing_writable_is_refused(self, client, runtime_file):
         response = client.patch(
