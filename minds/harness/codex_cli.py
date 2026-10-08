@@ -489,8 +489,8 @@ def _spawn_pty(
 
 def _rotate_pty(
     *, session_id: str, new_claude_sid: str, model: str = "", system_prompt: str = "",
-    client_ref: str | None = None, owner_type: str | None = None,
-    owner_ref: str | None = None,
+    user_prompt: str = "", client_ref: str | None = None,
+    owner_type: str | None = None, owner_ref: str | None = None,
 ) -> bool:
     """Start a fresh codex thread in a live terminal, in place.
 
@@ -520,10 +520,15 @@ def _rotate_pty(
     THREADS.pop(session_id, None)
     before = _existing_rollout_paths()
 
+    # Codex has no system-prompt flag, so its seed is positional either way;
+    # the distinction is kept explicit so the staged path does not depend on
+    # that happening to coincide.
+    seed = user_prompt or system_prompt
     argv = seeded_pane_command(
         _terminal_argv(model, None),
-        system_prompt,
+        seed,
         CODEX_HOME / "rotation-seeds" / f"{session_id}.txt",
+        as_user_turn=bool(user_prompt),
     )
     TERMINALS.respawn(
         session_id, argv,
@@ -531,7 +536,7 @@ def _rotate_pty(
     )
     _watch_for_new_thread_in_background(session_id, before)
     log.info("Rotated the conversation in terminal %s (seed=%d chars)",
-             TERMINALS.session_name(session_id), len(system_prompt))
+             TERMINALS.session_name(session_id), len(seed))
     log_event(log, "session.pty.rotated", mind_id=MIND_ID, mind_name=NAME,
               session_id=session_id)
     return True

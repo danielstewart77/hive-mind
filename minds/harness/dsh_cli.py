@@ -300,12 +300,24 @@ def _terminal_context_file(context: str) -> Path | None:
     return path
 
 
-def _terminal_argv(conversation_id: str, context_file: Path | None = None) -> list[str]:
-    """The persistent DSH prompt loop hosted by one tmux pane."""
+def _terminal_argv(
+    conversation_id: str, context_file: Path | None = None, *,
+    context_as_turn: bool = False,
+) -> list[str]:
+    """The persistent DSH prompt loop hosted by one tmux pane.
+
+    ``context_as_turn`` is how a staged rotation's seed gets answered. The
+    runner queues an opening context by default, which is right for the
+    standing context a fresh terminal opens on; a rotation's seed carries the
+    message the user typed into the conversation this pane replaced, so queuing
+    it would leave their question in the transcript with no reply coming.
+    """
     cmd = [DSH_BIN, "--profile", DSH_PROFILE, *_conversation_flags(conversation_id),
            "--interactive"]
     if context_file is not None:
         cmd.extend(["--context-file", str(context_file)])
+        if context_as_turn:
+            cmd.append("--context-as-turn")
     return cmd
 
 
@@ -375,8 +387,8 @@ def _spawn_pty(
 
 def _rotate_pty(
     *, session_id: str, new_claude_sid: str, model: str = "", system_prompt: str = "",
-    client_ref: str | None = None, owner_type: str | None = None,
-    owner_ref: str | None = None,
+    user_prompt: str = "", client_ref: str | None = None,
+    owner_type: str | None = None, owner_ref: str | None = None,
 ) -> bool:
     """Respawn a live pane onto a fresh gateway-owned DSH conversation."""
     if not TERMINALS.alive(session_id):
@@ -385,11 +397,13 @@ def _rotate_pty(
         log.warning("Refusing to rotate session %s: no model to carry over", session_id)
         return False
 
-    context_file = _terminal_context_file(system_prompt)
+    seed = user_prompt or system_prompt
+    context_file = _terminal_context_file(seed)
     try:
         TERMINALS.respawn(
             session_id,
-            _terminal_argv(new_claude_sid, context_file),
+            _terminal_argv(new_claude_sid, context_file,
+                           context_as_turn=bool(user_prompt)),
             env_overrides=_pane_env(model, client_ref, owner_type, owner_ref),
         )
     except Exception:
