@@ -137,21 +137,29 @@ window.addEventListener("DOMContentLoaded", async function () {
         voiceDescriptions = {};
 
         if (engine === "chatterbox") {
-            const clips = state.clips || [];
+            // A recording the picker cannot offer is still shown, disabled
+            // and labelled: the operator put it there, and silence about it
+            // reads as the file never having arrived.
+            const offerable = (state.clips || []).filter(function (c) { return !c.unselectable; });
+            const clips = offerable;
             const names = clips.map(function (c) { return c.name; });
             const rows = clips.map(function (c) { return {name: c.name, label: c.name}; });
+            (state.clips || []).filter(function (c) { return c.unselectable; }).forEach(function (c) {
+                rows.push({name: c.name, label: c.name + " — cannot be selected, rename it without spaces", disabled: true});
+            });
             // A clip the Mind names that is no longer on disk is kept and
             // selected rather than dropped: it is the Mind's current answer,
             // and replacing it with whatever sorts first would silently
             // change the voice of a Mind the operator came here to look at.
             if (saved && names.indexOf(saved) === -1) rows.unshift({name: saved, label: saved + " — not on the voice server"});
             select.innerHTML = rows.map(function (c) {
-                return '<option value="' + h.escapeHtml(c.name) + '"' + (c.name === saved ? " selected" : "") + ">" + h.escapeHtml(c.label) + "</option>";
+                return '<option value="' + h.escapeHtml(c.name) + '"' + (c.disabled ? " disabled" : "") + (c.name === saved ? " selected" : "") + ">" + h.escapeHtml(c.label) + "</option>";
             }).join("");
             if (label) label.textContent = "Reference clip";
             help.textContent = clips.length
                 ? "Every recording in this Mind's own directory."
-                : "This Mind holds no reference recordings. Upload one below.";
+                : "This Mind holds no reference recordings it can be spoken from. Upload one below.";
+            if (state.clip_missing) help.textContent += " The clip it names is not on the voice server, so it cannot speak until another is saved.";
             uploader.hidden = false;
             describeSelectedVoice();
             return;

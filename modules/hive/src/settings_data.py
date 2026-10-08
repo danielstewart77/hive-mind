@@ -10,6 +10,7 @@ only whatever the broker reports.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -189,8 +190,19 @@ def list_voice_clips(short_name: str) -> list[dict[str, Any]]:
     if not directory.is_dir():
         return []
     clips = []
-    for path in sorted(directory.glob("*.wav")):
-        if not path.is_file() or not _CLIP_NAME_RE.fullmatch(path.name):
+    # Case-insensitively on the extension, because the upload accepts `.WAV` —
+    # which is what Windows Sound Recorder and several converters emit. A
+    # listing that globbed `*.wav` would take such a file, report success
+    # naming it, and then never show it again.
+    for path in sorted(directory.iterdir(), key=lambda entry: entry.name):
+        if path.suffix.lower() != ".wav" or not path.is_file():
+            continue
+        if not _CLIP_NAME_RE.fullmatch(path.name):
+            # Named rather than dropped. A recording the picker cannot offer
+            # is still a recording the operator put there, and a listing that
+            # quietly omits things teaches its reader to distrust it about
+            # absence.
+            clips.append({"name": path.name, "unselectable": True})
             continue
         stat = path.stat()
         clips.append(
@@ -220,6 +232,10 @@ def clip_filename(filename: str) -> str:
     return name
 
 
+class ClipExists(ValueError):
+    """A clip of that name is already in this Mind's directory."""
+
+
 def save_voice_clip(short_name: str, filename: str, data: bytes) -> Path:
     """Write an uploaded reference clip into the mind's own directory.
 
@@ -227,6 +243,12 @@ def save_voice_clip(short_name: str, filename: str, data: bytes) -> Path:
     candidates and an upload adds one rather than replacing the active one.
     What makes a clip active is the mind naming it in its `runtime.yaml`,
     which is a separate write the console makes next.
+
+    A name already taken is refused rather than overwritten. The recording a
+    mind is currently spoken from is usually the one called `voice_ref.wav`,
+    which is also what a second take gets called by whoever recorded it — so
+    an overwrite changes a mind's voice with no save, nothing on screen to
+    show it, and the previous recording gone.
 
     Validated only at the RIFF/WAVE header level — chatterbox is picky about
     format but does its own real validation on synthesis; this is just enough
@@ -241,7 +263,24 @@ def save_voice_clip(short_name: str, filename: str, data: bytes) -> Path:
     mind_dir = _mind_clip_dir(short_name, HIVE_MIND_MINDS_VOICE_DIR)
     mind_dir.mkdir(parents=True, exist_ok=True)
     target = mind_dir / name
-    target.write_bytes(data)
+    if target.exists():
+        raise ClipExists(
+            f"{name} is already one of this Mind's clips. Rename the file and"
+            " upload it again, or remove the existing one first."
+        )
+
+    # Staged and renamed rather than written in place. The voice server opens
+    # these files on every spoken sentence, so a clip written in place is one
+    # chatterbox can read half of — a truncated WAV it refuses, on a path that
+    # was fine a moment earlier. The staging name is dotted so the listing,
+    # which matches on the extension, cannot offer a half-written upload.
+    staging = mind_dir / f".{name}.incoming"
+    try:
+        staging.write_bytes(data)
+        os.replace(staging, target)
+    except BaseException:
+        staging.unlink(missing_ok=True)
+        raise
     return target
 
 

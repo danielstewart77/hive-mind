@@ -235,6 +235,57 @@ def test_save_voice_clip_leaves_the_existing_clip_alone(tmp_path, monkeypatch):
     assert existing.read_bytes() == _MINIMAL_WAV + b"original"
 
 
+def test_save_voice_clip_refuses_a_name_already_taken(tmp_path, monkeypatch):
+    """An overwrite changes a Mind's voice with no save and no way to see it."""
+    mind_dir = tmp_path / "bob"
+    mind_dir.mkdir()
+    existing = mind_dir / "voice_ref.wav"
+    existing.write_bytes(_MINIMAL_WAV + b"original")
+    monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_VOICE_DIR", tmp_path)
+
+    with pytest.raises(settings_data.ClipExists):
+        settings_data.save_voice_clip("bob", "voice_ref.wav", _MINIMAL_WAV)
+
+    assert existing.read_bytes() == _MINIMAL_WAV + b"original"
+
+
+def test_save_voice_clip_leaves_no_staging_file_behind(tmp_path, monkeypatch):
+    """The listing matches on the extension, so a leftover must not be a clip."""
+    monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_VOICE_DIR", tmp_path)
+    monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_DIR", tmp_path)
+
+    settings_data.save_voice_clip("bob", "take.wav", _MINIMAL_WAV)
+
+    assert [p.name for p in (tmp_path / "bob").iterdir()] == ["take.wav"]
+
+
+def test_list_voice_clips_lists_an_uppercase_extension(tmp_path, monkeypatch):
+    """The upload accepts `.WAV`; a listing that missed it would take the file,
+    name it in its own success message, and never show it again."""
+    mind_dir = tmp_path / "bob"
+    mind_dir.mkdir()
+    (mind_dir / "Recording.WAV").write_bytes(_MINIMAL_WAV)
+    monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_DIR", tmp_path)
+
+    assert [c["name"] for c in settings_data.list_voice_clips("bob")] == [
+        "Recording.WAV"
+    ]
+
+
+def test_list_voice_clips_names_a_recording_it_cannot_offer(tmp_path, monkeypatch):
+    """A listing that quietly omits things teaches its reader to distrust it."""
+    mind_dir = tmp_path / "bob"
+    mind_dir.mkdir()
+    (mind_dir / "calm take.wav").write_bytes(_MINIMAL_WAV)
+    (mind_dir / "voice_ref.wav").write_bytes(_MINIMAL_WAV)
+    monkeypatch.setattr(settings_data, "HIVE_MIND_MINDS_DIR", tmp_path)
+
+    clips = {c["name"]: c for c in settings_data.list_voice_clips("bob")}
+
+    assert clips["calm take.wav"]["unselectable"] is True
+    assert "unselectable" not in clips["voice_ref.wav"]
+
+
 def test_save_voice_clip_keeps_an_escaping_filename_inside_the_directory(
     tmp_path, monkeypatch
 ):

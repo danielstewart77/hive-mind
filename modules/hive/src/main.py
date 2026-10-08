@@ -88,6 +88,7 @@ from settings_data import (
     hive_tools_status,
     list_downloads,
     resolve_download_path,
+    ClipExists,
     DEFAULT_VOICE_CLIP,
     list_voice_clips,
     save_voice_clip,
@@ -2592,6 +2593,24 @@ async def api_mind_voice_update(
     """
     del user
     voice, engine = await _named_voice_and_engine(request)
+    # A clip this Mind does not have mutes it: Chatterbox resolves the name
+    # against the Mind's own directory and refuses when it finds nothing. The
+    # engine is already checked against the ones that exist for exactly this
+    # reason — a save that reports success and silences the Mind is the
+    # outcome being guarded against — and the clip half needs the same guard.
+    # Checked here rather than trusting the page, because the listing it chose
+    # from may be minutes old and a recording can be removed under it.
+    if engine == mind_runtime.CHATTERBOX:
+        held = {clip["name"] for clip in list_voice_clips(name)}
+        if voice not in held:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"{name} has no reference clip named {voice}. It may have"
+                    " been removed since this page was loaded — reload and"
+                    " pick again."
+                ),
+            )
     gateway_url = await _mind_gateway_url(name)
     configuration = await mind_runtime.push_voice(gateway_url, voice, engine)
     row = {"voice": voice}
@@ -2878,6 +2897,11 @@ async def api_mind_voice_clip_upload(
     data = await file.read()
     try:
         target = save_voice_clip(name, file.filename or "", data)
+    except ClipExists as exc:
+        # Nothing is wrong with the request, so not a 400: the name is taken,
+        # and the operator has to decide whether this is a new recording or a
+        # replacement for one a Mind may be speaking from right now.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     log_event(

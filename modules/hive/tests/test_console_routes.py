@@ -1195,6 +1195,10 @@ def test_saving_a_voice_writes_the_file_before_the_broker_row(tmp_path, monkeypa
         main_mod, "_mind_gateway_url", new=AsyncMock(return_value="http://skippy:8421")
     ), patch.object(main_mod.mind_runtime, "push_voice", new=push), patch.object(
         main_mod, "_gateway_request", new=gateway
+    ), patch.object(
+        main_mod,
+        "list_voice_clips",
+        return_value=[{"name": "_dramitac_mono_voice_ref.wav"}],
     ):
         response = client.put(
             "/api/minds/skippy/voice",
@@ -1216,6 +1220,69 @@ def test_saving_a_voice_writes_the_file_before_the_broker_row(tmp_path, monkeypa
         "voice": "_dramitac_mono_voice_ref.wav",
         "voice_engine": "chatterbox",
     }
+
+
+def test_saving_a_clip_the_mind_no_longer_has_is_refused(tmp_path, monkeypatch):
+    """A clip removed under a loaded page would mute the Mind on save.
+
+    Chatterbox resolves the name against the Mind's own directory and refuses
+    when it finds nothing, so a save that took this value would report success
+    and leave the Mind silent until somebody noticed.
+    """
+    client = _authed_client(tmp_path, monkeypatch)
+
+    with patch.object(
+        main_mod.mind_runtime, "push_voice", new=AsyncMock()
+    ) as push, patch.object(
+        main_mod, "list_voice_clips", return_value=[{"name": "voice_ref.wav"}]
+    ):
+        response = client.put(
+            "/api/minds/skippy/voice",
+            json={"voice": "deleted.wav", "voice_engine": "chatterbox"},
+        )
+
+    assert response.status_code == 409
+    assert push.await_count == 0
+
+
+def test_saving_a_kokoro_voice_is_not_checked_against_the_clip_directory(
+    tmp_path, monkeypatch
+):
+    """A Kokoro voice is not a file, so no directory can be missing it."""
+    client = _authed_client(tmp_path, monkeypatch)
+
+    async def push(gateway_url, voice, engine=""):
+        return {"voice": voice, "voice_engine": engine}
+
+    with patch.object(
+        main_mod, "_mind_gateway_url", new=AsyncMock(return_value="http://ada:8421")
+    ), patch.object(main_mod.mind_runtime, "push_voice", new=push), patch.object(
+        main_mod, "_gateway_request", new=AsyncMock(return_value={})
+    ), patch.object(main_mod, "list_voice_clips", return_value=[]):
+        response = client.put(
+            "/api/minds/ada/voice",
+            json={"voice": "af_heart", "voice_engine": "kokoro"},
+        )
+
+    assert response.status_code == 200
+
+
+def test_uploading_a_clip_whose_name_is_taken_is_refused(tmp_path, monkeypatch):
+    """The name a second take gets is the name the active clip already has."""
+    client = _authed_client(tmp_path, monkeypatch)
+
+    with patch.object(
+        main_mod,
+        "save_voice_clip",
+        side_effect=main_mod.ClipExists("voice_ref.wav is already one"),
+    ):
+        response = client.post(
+            "/api/minds/skippy/voice/clips",
+            files={"file": ("voice_ref.wav", b"RIFF....WAVE", "audio/wav")},
+        )
+
+    # Not a 400: nothing is wrong with the request, the name is taken.
+    assert response.status_code == 409
 
 
 def test_saving_a_voice_refuses_an_engine_that_does_not_exist(tmp_path, monkeypatch):
