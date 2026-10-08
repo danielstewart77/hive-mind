@@ -283,8 +283,16 @@ def _conversation_flags(session_id: str) -> list[str]:
 
 
 def _terminal_context_file(context: str) -> Path | None:
-    """Write one process-owned opening context for the interactive runner."""
-    if not context:
+    """Write one process-owned opening context for the interactive runner.
+
+    Whitespace is nothing. dsh refuses a context file it cannot make a turn
+    out of, and a refusal here is a dead pane: ``rotate-pty`` has already
+    answered ``rotated: true`` and the gateway has already written the
+    successor's id, so the rotation is recorded against a pane that exited.
+    Writing no file instead brings the pane up unseeded, which the session row
+    can recover.
+    """
+    if not context.strip():
         return None
     directory = DSH_HOME / "terminal-context"
     directory.mkdir(parents=True, exist_ok=True)
@@ -402,8 +410,12 @@ def _rotate_pty(
     try:
         TERMINALS.respawn(
             session_id,
+            # Keyed to the file, not to the seed: a whitespace-only seed wrote
+            # no file, and asking the runner to answer a context that is not
+            # there is refused — which would kill the pane this rotation is
+            # supposed to keep alive.
             _terminal_argv(new_claude_sid, context_file,
-                           context_as_turn=bool(user_prompt)),
+                           context_as_turn=bool(user_prompt) and context_file is not None),
             env_overrides=_pane_env(model, client_ref, owner_type, owner_ref),
         )
     except Exception:

@@ -300,10 +300,18 @@ def _terminal_argv(model: str, conversation_id: str) -> list[str]:
 def _rotation_argv(model: str, new_claude_sid: str) -> list[str]:
     """The interactive `claude` a rotation respawns the pane onto.
 
-    Always `--session-id`, never `--resume`: rotation starts a fresh harness
-    conversation under the same hive session, and it opens holding a summary
-    of the one it replaced. The summary itself rides in via
-    ``seeded_pane_command``.
+    A rotation starts a fresh harness conversation under the same hive
+    session, holding a summary of the one it replaced; the summary itself
+    rides in via ``seeded_pane_command``.
+
+    Which of the pair is passed is decided by whether a transcript already
+    exists, not by the fact that this is a rotation. A fire whose HTTP
+    response was lost stays staged and is retried against the *same*
+    successor id — by design, since the row still holds the seed — and by then
+    the pane's first process has written that transcript. ``--session-id`` on
+    an id claude already knows is the exact error this pairing exists to
+    avoid, and it would kill the pane after ``respawn`` had already returned
+    zero and the gateway had recorded the rotation as done.
     """
     cmd = [
         "claude",
@@ -313,7 +321,7 @@ def _rotation_argv(model: str, new_claude_sid: str) -> list[str]:
     ]
     if MCP_CONFIG:
         cmd.extend(["--mcp-config", MCP_CONFIG])
-    cmd.extend(["--session-id", new_claude_sid])
+    cmd.extend(claude_conversation_flags(new_claude_sid, PROJECT_DIR))
     return cmd
 
 
