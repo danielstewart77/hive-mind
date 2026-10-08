@@ -8,6 +8,7 @@ for a mind whose code predates the field.
 
 from __future__ import annotations
 
+from voice import mind_voices
 from voice.mind_voices import MindVoiceResolver, voice_index
 
 ROWS = [
@@ -90,3 +91,46 @@ class TestResolution:
         now[0] += 2.0
         r.resolve("cypher", env_map={}, default="af_heart")
         assert len(calls) == 2
+
+
+class TestTheNameIndex:
+    """`{uuid -> short name}`, for a caller holding only a UUID.
+
+    The voice server's on-disk scan can only map minds whose `runtime.yaml`
+    lives under its own `minds/`, which excludes every edge install. The
+    gateway's listing is the only thing that knows the rest.
+    """
+
+    def test_both_id_spellings_map_to_the_name(self):
+        index = mind_voices.name_index(
+            [{"name": "skippy", "id": "uuid-1"}, {"name": "ada", "mind_id": "uuid-2"}]
+        )
+        assert index == {"uuid-1": "skippy", "uuid-2": "ada"}
+
+    def test_a_row_with_no_name_contributes_nothing(self):
+        assert mind_voices.name_index([{"id": "uuid-1"}]) == {}
+
+    def test_the_resolver_answers_a_uuid_with_the_short_name(self):
+        resolver = MindVoiceResolver(
+            "http://comms:8426",
+            "token",
+            fetch=lambda url, token, timeout: [
+                {"name": "skippy", "id": "14cb820b", "voice": "voice_ref.wav"}
+            ],
+        )
+        assert resolver.short_name("14cb820b") == "skippy"
+
+    def test_a_uuid_the_gateway_does_not_know_answers_empty(self):
+        resolver = MindVoiceResolver(
+            "http://comms:8426", "token", fetch=lambda url, token, timeout: []
+        )
+        assert resolver.short_name("stranger") == ""
+
+    def test_an_unreachable_gateway_answers_empty_rather_than_raising(self):
+        def fetch(url, token, timeout):
+            raise OSError("comms is down")
+
+        resolver = MindVoiceResolver(
+            "http://comms:8426", "token", fetch=fetch
+        )
+        assert resolver.short_name("14cb820b") == ""

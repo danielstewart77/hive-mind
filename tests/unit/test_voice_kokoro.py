@@ -305,6 +305,32 @@ class TestSamplingAVoice:
 
         assert refused.value.status_code == 400
 
+    def test_chatterbox_with_no_model_loaded_answers_503_not_400(self):
+        """Readiness before the engine branch.
+
+        Both engines can sample now, so an unloaded model is "not ready yet"
+        rather than "this engine cannot sample" — and 400 would send the
+        operator off to check the clip they picked, which is fine.
+        """
+        import asyncio
+
+        from fastapi import HTTPException
+
+        vs = self._server()
+        vs._TTS_ENGINE = "chatterbox"
+        vs._chatterbox_model = None
+        try:
+            with pytest.raises(HTTPException) as refused:
+                asyncio.run(
+                    vs.voices_sample(
+                        vs.VoiceSampleRequest(voice="voice_ref.wav", voice_id="skippy")
+                    )
+                )
+        finally:
+            vs._TTS_ENGINE = "kokoro"
+
+        assert refused.value.status_code == 503
+
     def test_chatterbox_refuses_a_clip_the_named_mind_does_not_have(self, tmp_path):
         import asyncio
 

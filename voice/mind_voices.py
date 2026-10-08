@@ -66,6 +66,29 @@ def voice_index(rows: list[dict]) -> dict[str, str]:
     return index
 
 
+def name_index(rows: list[dict]) -> dict[str, str]:
+    """`{uuid -> short name}` for every mind the gateway knows.
+
+    The broker's listing is the only place that knows this for every mind.
+    The on-disk scan it supplements can only see minds whose `runtime.yaml`
+    lives under this server's own `minds/` — which excludes every edge
+    install, whose file lives in its own checkout on its own machine. A clip
+    directory can still sit here for such a mind, holding recordings the
+    server is expected to speak from, with nothing locally to map the UUID
+    its surface sends onto the directory those recordings are in.
+    """
+    index: dict[str, str] = {}
+    for row in rows:
+        name = str(row.get("name") or "").strip()
+        if not name:
+            continue
+        for key in (row.get("id"), row.get("mind_id")):
+            key = str(key or "").strip()
+            if key:
+                index[key] = name
+    return index
+
+
 class MindVoiceResolver:
     """Resolves a voice_id to a voice name, record first.
 
@@ -91,6 +114,7 @@ class MindVoiceResolver:
         self._fetch = fetch
         self._clock = clock
         self._index: dict[str, str] = {}
+        self._names: dict[str, str] = {}
         self._fetched_at: float | None = None
 
     def _index_now(self) -> dict[str, str]:
@@ -108,8 +132,17 @@ class MindVoiceResolver:
             self._fetched_at = now
             return self._index
         self._index = voice_index(rows)
+        self._names = name_index(rows)
         self._fetched_at = now
         return self._index
+
+    def short_name(self, voice_id: str) -> str:
+        """This mind's short name, for a caller holding only its UUID."""
+        key = str(voice_id or "").strip()
+        if not key:
+            return ""
+        self._index_now()
+        return self._names.get(key, "")
 
     def resolve(
         self, voice_id: str, *, env_map: dict[str, str], default: str

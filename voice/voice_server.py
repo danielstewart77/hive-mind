@@ -159,6 +159,18 @@ def _mind_dir_name(voice_id: str) -> str | None:
         # Lazy refresh: a mind may have been added since startup.
         _MIND_ID_TO_NAME.update(_load_mind_id_map())
         short = _MIND_ID_TO_NAME.get(voice_id)
+    if short is None:
+        # The on-disk scan only sees minds whose `runtime.yaml` lives under
+        # this server's own `minds/`, which excludes every edge install — its
+        # file is in its own checkout on its own machine. Such a mind can
+        # still keep its recordings here, and its surface sends a UUID, so
+        # without the gateway's own listing there is nothing to map that UUID
+        # onto the directory holding them. That is why this host's elder mind
+        # has been answering 400 on every voice note while the same request
+        # by short name succeeds.
+        short = _MIND_VOICES.short_name(voice_id) or None
+        if short:
+            _MIND_ID_TO_NAME[voice_id] = short
     if short and _SEGMENT_RE.fullmatch(short):
         return short
     return None
@@ -557,7 +569,12 @@ async def tts(req: TTSRequest):
         sample_rate = _KOKORO_SR
         engine_label = "Kokoro"
     else:
-        ref_path = _resolve_voice_ref(req.voice_id, _named_clip(req.voice_id))
+        # Off the loop: resolving the clip reads the gateway's listing, and a
+        # comms that hangs rather than refuses would otherwise stall every
+        # other mind's in-flight synthesis for the whole timeout.
+        ref_path = await asyncio.to_thread(
+            lambda: _resolve_voice_ref(req.voice_id, _named_clip(req.voice_id))
+        )
         if ref_path is None:
             # Chatterbox keeps the last-used reference clip cached; passing None
             # silently reuses the previous callers voice. Fail loud at the
@@ -707,7 +724,9 @@ async def voices_sample(req: VoiceSampleRequest):
         # Under chatterbox what is being judged is a recording, not a
         # catalogued voice: the operator picked one of this mind's own clips
         # and wants to hear it before saving it as the mind's voice.
-        ref_path = _resolve_voice_ref(req.voice_id, voice)
+        ref_path = await asyncio.to_thread(
+            _resolve_voice_ref, req.voice_id, voice
+        )
         if ref_path is None:
             raise HTTPException(
                 status_code=400,

@@ -842,6 +842,15 @@ def install_runtime_routes(app: FastAPI, *, path: Path, mind_id: str, log) -> No
             )
         model = fields.get("default_model", "")
         provider = fields.get("provider", "")
+        # A provider alone would leave this mind on an upstream that does not
+        # host its model. The fields are individually optional so a voice can
+        # be set without restating a model, but these two still travel
+        # together.
+        if provider and not model:
+            return JSONResponse(
+                {"error": "provider requires the default_model it hosts"},
+                status_code=400,
+            )
         # The window travels with the model, in the same write. Asked of the
         # proxy here because this mind holds the key the proxy answers for,
         # and cached in the file because the thing that needs it is a per-turn

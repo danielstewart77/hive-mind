@@ -75,3 +75,65 @@ async def test_try_send_voice_threads_voice_id_to_tts():
     assert args[1] == "hi"
     assert args[2] == "ada-uuid"
     send_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_tts_posts_to_the_server_the_minds_record_names():
+    """A scheduled run is spoken by the mind's own engine.
+
+    Nothing exercised this: reverting the URL to the scheduler's own
+    `VOICE_SERVER_URL` left the whole suite green, so every briefing went
+    through one server whatever any mind's file said.
+    """
+    from hive_surfaces import voice_routing
+
+    resp = MagicMock()
+    resp.status = 200
+    resp.read = AsyncMock(return_value=b"OGGBYTES")
+    http = MagicMock()
+    http.post = MagicMock(return_value=_AsyncCtx(resp))
+
+    resolver = voice_routing.VoiceServerResolver(
+        "http://comms:8424",
+        "token",
+        {
+            voice_routing.CHATTERBOX: "http://voice-server:8422",
+            voice_routing.KOKORO: "http://voice-server-kokoro:8422",
+        },
+        fetch=lambda url, token, timeout: [
+            {"id": "ada-uuid-1234", "voice_engine": "kokoro"}
+        ],
+    )
+
+    with patch.object(scheduler, "_voice_servers", resolver):
+        await scheduler._tts(http, "hello", "ada-uuid-1234")
+
+    assert http.post.call_args[0][0] == "http://voice-server-kokoro:8422/tts"
+
+
+@pytest.mark.asyncio
+async def test_tts_keeps_its_own_server_for_a_mind_naming_no_engine():
+    """Declaring nothing means nobody has moved this mind."""
+    from hive_surfaces import voice_routing
+
+    resp = MagicMock()
+    resp.status = 200
+    resp.read = AsyncMock(return_value=b"OGGBYTES")
+    http = MagicMock()
+    http.post = MagicMock(return_value=_AsyncCtx(resp))
+
+    resolver = voice_routing.VoiceServerResolver(
+        "http://comms:8424",
+        "token",
+        {
+            voice_routing.CHATTERBOX: "http://voice-server:8422",
+            voice_routing.KOKORO: "http://voice-server-kokoro:8422",
+        },
+        fallback_url="http://voice-server-kokoro:8422",
+        fetch=lambda url, token, timeout: [{"id": "bilby-uuid"}],
+    )
+
+    with patch.object(scheduler, "_voice_servers", resolver):
+        await scheduler._tts(http, "hello", "bilby-uuid")
+
+    assert http.post.call_args[0][0] == "http://voice-server-kokoro:8422/tts"
