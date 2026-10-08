@@ -137,3 +137,39 @@ async def test_tts_keeps_its_own_server_for_a_mind_naming_no_engine():
         await scheduler._tts(http, "hello", "bilby-uuid")
 
     assert http.post.call_args[0][0] == "http://voice-server-kokoro:8422/tts"
+
+
+@pytest.mark.asyncio
+async def test_tts_keeps_the_single_server_when_the_surfaces_core_is_absent():
+    """The core is a git dependency an image can be built without.
+
+    A scheduler that refused to start over a routing improvement would take
+    every briefing and reminder down with it, so a host without the package
+    keeps the one server it has always used.
+    """
+    resp = MagicMock()
+    resp.status = 200
+    resp.read = AsyncMock(return_value=b"OGGBYTES")
+    http = MagicMock()
+    http.post = MagicMock(return_value=_AsyncCtx(resp))
+
+    with patch.object(scheduler, "_voice_servers", None):
+        await scheduler._tts(http, "hello", "ada-uuid-1234")
+
+    assert http.post.call_args[0][0] == f"{scheduler.VOICE_SERVER_URL}/tts"
+
+
+def test_the_resolver_is_not_built_when_the_surfaces_core_is_absent(monkeypatch):
+    """The import itself must not be what stops the process starting."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def refuse_surfaces(name, *args, **kwargs):
+        if name.startswith("hive_surfaces"):
+            raise ImportError("no module named hive_surfaces")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", refuse_surfaces)
+
+    assert scheduler._build_voice_servers() is None
