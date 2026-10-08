@@ -217,9 +217,11 @@ class RegisterMindRequest(BaseModel):
     # The credential the gateway presents on every call it makes to this mind.
     # Optional on the wire so a mind running an older build still registers.
     session_token: str | None = None
-    # The voice this mind is spoken in. Optional for the same reason, and an
-    # omission leaves the stored one alone rather than clearing it.
+    # The voice this mind is spoken in, and the engine that speaks it.
+    # Optional for the same reason, and an omission leaves the stored value
+    # alone rather than clearing it.
     voice: str | None = None
+    voice_engine: str | None = None
 
 
 class ClientContextReportRequest(BaseModel):
@@ -262,6 +264,7 @@ class UpdateMindRequest(BaseModel):
     model: str | None = None
     harness: str | None = None
     voice: str | None = None
+    voice_engine: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1242,6 +1245,7 @@ async def broker_register_mind(body: RegisterMindRequest):
         harness=body.harness,
         session_token=body.session_token,
         voice=body.voice,
+        voice_engine=body.voice_engine,
     )
     return await broker.get_mind_by_id(db, body.mind_id)
 

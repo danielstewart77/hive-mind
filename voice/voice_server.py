@@ -134,27 +134,66 @@ def _load_mind_id_map() -> dict[str, str]:
     return mapping
 
 
-def _resolve_voice_ref(voice_id: str) -> str | None:
-    """Resolve a voice_id to minds/{short_name}/voice_ref.wav.
+#: What a mind with no clip named in its record is spoken from. The original
+#: single-clip convention, kept as the fallback so a mind that has never
+#: picked one sounds exactly as it did before clips became selectable.
+DEFAULT_CLIP = "voice_ref.wav"
 
-    Accepts either the short name ("ada") or the canonical mind_id (UUID).
-    Short-name lookup is tried first; if that misses, we fall through to a
-    UUID→short-name map built from each mind's runtime.yaml.
-    """
-    direct = os.path.join(_MINDS_DIR, voice_id, "voice_ref.wav")
-    if os.path.exists(direct):
-        return direct
+#: A single path segment: a mind's directory name, or a clip's filename. A
+#: leading underscore is allowed because real clips have one; a separator is
+#: not. Both values reach this module off an HTTP request — the clip by way of
+#: the mind's record, which a console route writes — and both are joined onto
+#: a directory, so neither may contain a path.
+_SEGMENT_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,127}")
+
+
+def _mind_dir_name(voice_id: str) -> str | None:
+    """The directory holding this mind's clips, by short name or by UUID."""
+    if not _SEGMENT_RE.fullmatch(voice_id or ""):
+        return None
+    if os.path.isdir(os.path.join(_MINDS_DIR, voice_id)):
+        return voice_id
 
     short = _MIND_ID_TO_NAME.get(voice_id)
     if short is None:
         # Lazy refresh: a mind may have been added since startup.
         _MIND_ID_TO_NAME.update(_load_mind_id_map())
         short = _MIND_ID_TO_NAME.get(voice_id)
-    if short:
-        by_id = os.path.join(_MINDS_DIR, short, "voice_ref.wav")
-        if os.path.exists(by_id):
-            return by_id
+    if short and _SEGMENT_RE.fullmatch(short):
+        return short
     return None
+
+
+def _resolve_voice_ref(voice_id: str, clip: str = "") -> str | None:
+    """Resolve a mind and a clip filename to the clip's path on disk.
+
+    Accepts either the short name ("ada") or the canonical mind_id (UUID) for
+    the mind. `clip` is the filename that mind names in its own record; empty
+    means it names none, which resolves to the original `voice_ref.wav`.
+
+    A clip that is named but absent resolves to nothing rather than falling
+    back. Falling back would speak a reply in a voice the operator did not
+    choose and had no way to notice — the clip they picked is missing, and
+    that is a different problem from never having picked one.
+    """
+    directory = _mind_dir_name(voice_id)
+    if directory is None:
+        return None
+    filename = (clip or "").strip() or DEFAULT_CLIP
+    if not _SEGMENT_RE.fullmatch(filename):
+        log.warning("TTS clip name is not a filename: %r", clip)
+        return None
+    path = os.path.join(_MINDS_DIR, directory, filename)
+    return path if os.path.isfile(path) else None
+
+
+def _named_clip(voice_id: str) -> str:
+    """The clip filename this mind names in its own record, if any.
+
+    The same path the Kokoro voice name travels: the mind's `runtime.yaml` is
+    the truth, the broker row is the cache this server reads.
+    """
+    return _MIND_VOICES.resolve(voice_id, env_map={}, default="")
 
 
 # ---------------------------------------------------------------------------
@@ -518,7 +557,7 @@ async def tts(req: TTSRequest):
         sample_rate = _KOKORO_SR
         engine_label = "Kokoro"
     else:
-        ref_path = _resolve_voice_ref(req.voice_id)
+        ref_path = _resolve_voice_ref(req.voice_id, _named_clip(req.voice_id))
         if ref_path is None:
             # Chatterbox keeps the last-used reference clip cached; passing None
             # silently reuses the previous callers voice. Fail loud at the
@@ -617,7 +656,12 @@ async def voices():
 
 
 class VoiceSampleRequest(BaseModel):
+    #: A Kokoro voice name under kokoro; a reference-clip filename under
+    #: chatterbox.
     voice: str
+    #: Which mind's clips `voice` names one of. Unused by kokoro, whose voices
+    #: belong to the server rather than to a mind.
+    voice_id: str = ""
     text: str = SAMPLE_TEXT
     speed: float = DEFAULT_SPEED
 
@@ -632,6 +676,14 @@ def _sample_bytes(text: str, voice: str, speed: float) -> bytes:
     return _wav_to_ogg(wav_buf.getvalue(), speed=speed)
 
 
+def _clip_sample_bytes(text: str, ref_path: str, speed: float) -> bytes:
+    """The same, cloning the named reference clip rather than a catalogue."""
+    wav = _synthesize_chunked(text, ref_path)
+    wav_buf = io.BytesIO()
+    torchaudio.save(wav_buf, wav, _chatterbox_model.sr, format="WAV")
+    return _wav_to_ogg(wav_buf.getvalue(), speed=speed)
+
+
 @app.post("/voices/sample")
 async def voices_sample(req: VoiceSampleRequest):
     """Speak a sample line in one named voice, so it can be picked by ear.
@@ -643,19 +695,38 @@ async def voices_sample(req: VoiceSampleRequest):
     A voice the catalogue does not offer is refused rather than quietly
     answered in the default: the operator asked to hear a particular voice, and
     hearing a different one tells them the wrong thing about their own choice.
+    Under chatterbox the same rule applies to a clip the named mind does not
+    have — a sample of the wrong recording is worse than no sample.
     """
-    if _TTS_ENGINE != "kokoro":
-        raise HTTPException(
-            status_code=400, detail=f"{_TTS_ENGINE} has no voice catalogue to sample"
-        )
     if not _tts_ready():
         raise HTTPException(status_code=503, detail="TTS not ready")
     voice = (req.voice or "").strip()
+    text = _strip_markdown(req.text) or SAMPLE_TEXT
+
+    if _TTS_ENGINE != "kokoro":
+        # Under chatterbox what is being judged is a recording, not a
+        # catalogued voice: the operator picked one of this mind's own clips
+        # and wants to hear it before saving it as the mind's voice.
+        ref_path = _resolve_voice_ref(req.voice_id, voice)
+        if ref_path is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{req.voice_id!r} has no reference clip named {voice!r}"
+                ),
+            )
+        ogg_bytes = await asyncio.to_thread(
+            _clip_sample_bytes, text, ref_path, req.speed
+        )
+        log_event(log, "voice.sample.completed", voice=voice,
+                  voice_id=req.voice_id, audio_bytes=len(ogg_bytes),
+                  device=_DEVICE)
+        return Response(content=ogg_bytes, media_type="audio/ogg")
+
     if not kokoro_catalogue.offers(await _catalogue(), voice):
         raise HTTPException(
             status_code=400, detail=f"this server does not offer the voice {voice!r}"
         )
-    text = _strip_markdown(req.text) or SAMPLE_TEXT
     ogg_bytes = await asyncio.to_thread(_sample_bytes, text, voice, req.speed)
     log_event(log, "voice.sample.completed", voice=voice,
               audio_bytes=len(ogg_bytes), device=_DEVICE)
