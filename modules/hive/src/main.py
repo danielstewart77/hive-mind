@@ -77,6 +77,7 @@ import mind_runtime
 import mind_soul
 import mind_files
 import mind_mounts
+import kanban_data
 import mind_skills
 import sentinel_review
 from hive_logging import configure_logging, install_fastapi_logging, log_event
@@ -491,6 +492,11 @@ async def mind_detail_page(request: Request, mind_id: str):
     return _console_page(request, "mind_detail.html", mind_id=mind_id)
 
 
+@app.get("/kanban", response_class=HTMLResponse)
+async def kanban_page(request: Request):
+    return _console_page(request, "kanban.html")
+
+
 @app.get("/edge-minds", response_class=HTMLResponse)
 async def edge_minds_page(request: Request):
     return _console_page(request, "edge_minds.html")
@@ -508,6 +514,88 @@ async def new_edge_mind_page(request: Request):
         or os.getenv("OLLAMA_URL", ""),
         install_options=_mind_install_options(),
     )
+
+
+# Kanban API deliberately uses one REST mapping: collection POST, item PATCH/DELETE.
+_KANBAN_CREATE_FIELDS = {
+    "epics": {"title"},
+    "features": {"epic_id", "title"},
+    "stories": {"title", "feature_id", "epic_id", "status"},
+}
+_KANBAN_UPDATE_FIELDS = {
+    "epics": {"title"},
+    "features": {"epic_id", "title"},
+    "stories": {"title", "feature_id", "epic_id", "status"},
+}
+
+
+async def _kanban_body(request: Request, allowed: set[str], required: set[str] = frozenset()):
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Malformed JSON body") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be an object")
+    missing = required - body.keys()
+    extra = body.keys() - allowed
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Missing required fields: {', '.join(sorted(missing))}")
+    if extra:
+        raise HTTPException(status_code=400, detail=f"Unsupported fields: {', '.join(sorted(extra))}")
+    if "status" in body and body["status"] not in kanban_data.STATUSES:
+        raise HTTPException(status_code=400, detail=f"unsupported status: {body['status']}")
+    return body
+
+
+def _kanban_call(function, *args, **kwargs):
+    try:
+        return function(*args, **kwargs)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/kanban/data")
+async def api_kanban_data(user: dict = Depends(require_auth)):
+    del user
+    return kanban_data.get_data()
+
+
+@app.post("/api/kanban/epics")
+@app.post("/api/kanban/features")
+@app.post("/api/kanban/stories")
+async def api_kanban_create(request: Request, user: dict = Depends(require_auth)):
+    del user
+    kind = request.url.path.rsplit("/", 1)[-1]
+    fields = _KANBAN_CREATE_FIELDS[kind]
+    required = {"title"} if kind == "stories" else fields
+    body = await _kanban_body(request, fields, required)
+    if kind == "stories" and ((body.get("feature_id") is None) == (body.get("epic_id") is None)):
+        raise HTTPException(status_code=400, detail="story requires exactly one of feature_id or epic_id")
+    entity = {"epics": "epic", "features": "feature", "stories": "story"}[kind]
+    return _kanban_call(getattr(kanban_data, f"create_{entity}"), **body)
+
+
+@app.patch("/api/kanban/{kind}/{record_id}")
+async def api_kanban_update(kind: str, record_id: str, request: Request, user: dict = Depends(require_auth)):
+    del user
+    if kind not in _KANBAN_UPDATE_FIELDS:
+        raise HTTPException(status_code=404, detail="Kanban resource not found")
+    body = await _kanban_body(request, _KANBAN_UPDATE_FIELDS[kind])
+    if not body:
+        raise HTTPException(status_code=400, detail="At least one update field is required")
+    entity = {"epics": "epic", "features": "feature", "stories": "story"}[kind]
+    return _kanban_call(getattr(kanban_data, f"update_{entity}"), record_id, **body)
+
+
+@app.delete("/api/kanban/{kind}/{record_id}")
+async def api_kanban_delete(kind: str, record_id: str, user: dict = Depends(require_auth)):
+    del user
+    if kind not in _KANBAN_UPDATE_FIELDS:
+        raise HTTPException(status_code=404, detail="Kanban resource not found")
+    entity = {"epics": "epic", "features": "feature", "stories": "story"}[kind]
+    return _kanban_call(getattr(kanban_data, f"delete_{entity}"), record_id)
 
 
 @app.get("/api/minds/install-options")
