@@ -136,18 +136,37 @@ class VoiceServerResolver:
         self._fetched_at = now
         return self._index
 
-    def engine(self, voice_id: str) -> str:
-        """Which engine speaks this mind, per the mind's own record."""
+    def engine_named(self, voice_id: str) -> str:
+        """The engine this mind's record names, or empty if it names none.
+
+        Empty is not the same answer as the default. A mind that has declared
+        nothing is a mind nobody has moved, and the caller's own configuration
+        is still the best evidence of which server speaks it.
+        """
         key = str(voice_id or "").strip()
-        if key:
-            named = self._index_now().get(key)
-            if named:
-                return named
-        return DEFAULT_ENGINE
+        if not key:
+            return ""
+        return self._index_now().get(key) or ""
+
+    def engine(self, voice_id: str) -> str:
+        """Which engine speaks this mind, with the default applied."""
+        return self.engine_named(voice_id) or DEFAULT_ENGINE
 
     def resolve(self, voice_id: str) -> str:
-        """The voice server URL to call for this mind. Empty if none is set."""
-        return self.url_for(self.engine(voice_id))
+        """The voice server URL to call for this mind. Empty if none is set.
+
+        A mind that names an engine is spoken by that engine's server. A mind
+        that names none keeps the server this caller was already pointed at,
+        which is what makes deploying this field change nobody's voice: two
+        minds on this hive were deliberately pointed at the Kokoro server by
+        their own `VOICE_SERVER_URL` and have never declared an engine, and
+        resolving them to the default would move one onto a cloned voice and
+        silence the other.
+        """
+        named = self.engine_named(voice_id)
+        if named:
+            return self.url_for(named)
+        return self._fallback or self.url_for(DEFAULT_ENGINE)
 
     def url_for(self, engine: str) -> str:
         """The URL configured for one engine, or the single-server fallback."""

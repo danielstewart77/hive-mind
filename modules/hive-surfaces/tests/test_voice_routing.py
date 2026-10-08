@@ -50,20 +50,44 @@ class TestResolvingTheServer:
         resolver, _ = _resolver([{"name": "skippy", "voice_engine": "chatterbox"}])
         assert resolver.resolve("skippy") == CHATTERBOX_URL
 
-    def test_a_mind_naming_no_engine_resolves_to_chatterbox(self):
+    def test_a_mind_naming_no_engine_is_described_as_chatterbox(self):
         """Test 15: what the voice server itself has always defaulted to."""
         resolver, _ = _resolver([{"name": "skippy"}])
         assert resolver.engine("skippy") == "chatterbox"
-        assert resolver.resolve("skippy") == CHATTERBOX_URL
+        assert resolver.engine_named("skippy") == ""
 
-    def test_a_mind_the_gateway_has_never_heard_of_resolves_to_chatterbox(self):
-        resolver, _ = _resolver([])
-        assert resolver.resolve("stranger") == CHATTERBOX_URL
+    def test_a_mind_naming_no_engine_keeps_the_server_its_caller_holds(self):
+        """Declaring nothing means nobody has moved this mind.
+
+        Two minds on this hive were deliberately pointed at the Kokoro server
+        by their own `VOICE_SERVER_URL` and name no engine. Resolving them to
+        the default would move one onto a cloned chatterbox voice and silence
+        the other, which is the opposite of what adding a field should do.
+        """
+        resolver, _ = _resolver([{"name": "bilby"}], fallback=KOKORO_URL)
+        assert resolver.resolve("bilby") == KOKORO_URL
+
+    def test_a_mind_that_names_an_engine_leaves_the_callers_server_behind(self):
+        """Naming one is the act that moves a mind; that is the whole point."""
+        resolver, _ = _resolver(
+            [{"name": "bilby", "voice_engine": "chatterbox"}], fallback=KOKORO_URL
+        )
+        assert resolver.resolve("bilby") == CHATTERBOX_URL
+
+    def test_a_mind_the_gateway_has_never_heard_of_keeps_the_callers_server(self):
+        resolver, _ = _resolver([], fallback=KOKORO_URL)
+        assert resolver.resolve("stranger") == KOKORO_URL
+
+    def test_with_no_caller_server_an_undeclared_mind_falls_to_chatterbox(self):
+        """What the voice server itself defaults to, when nothing else says."""
+        resolver, _ = _resolver([{"name": "skippy"}])
+        assert resolver.resolve("skippy") == CHATTERBOX_URL
 
     def test_an_engine_this_build_does_not_know_is_not_followed(self):
         """A URL cannot be guessed from a name the build has no entry for."""
         resolver, _ = _resolver([{"name": "ada", "voice_engine": "festival"}])
         assert resolver.engine("ada") == "chatterbox"
+        assert resolver.engine_named("ada") == ""
 
     def test_a_mind_addressed_by_uuid_resolves_the_same_as_by_name(self):
         """Test 17: the surfaces send a UUID, a person types a short name."""
@@ -131,14 +155,78 @@ class TestTheListing:
         resolver.resolve("ada")
         assert calls == [("http://comms:8426", "service-token")]
 
-    def test_a_dict_bodied_listing_is_read_the_same_as_a_list(self):
+    def test_a_resolver_built_without_a_fetch_uses_the_broker_listing(self):
+        """The injected `fetch` in every other test must not be the only
+        implementation anything ever reaches."""
         resolver = voice_routing.VoiceServerResolver(
-            "http://comms:8426",
-            "token",
-            {voice_routing.KOKORO: KOKORO_URL},
-            fetch=lambda u, t, to: [{"name": "ada", "voice_engine": "kokoro"}],
+            "http://comms:8426", "t", {voice_routing.KOKORO: KOKORO_URL}
         )
-        assert resolver.resolve("ada") == KOKORO_URL
+        assert resolver._fetch is voice_routing._fetch_minds
+
+
+
+class TestFetchingTheListing:
+    """`_fetch_minds` itself, not a stand-in for it."""
+
+    def _urlopen(self, monkeypatch, body):
+        import json as _json
+
+        seen = {}
+
+        class _Response:
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *exc):
+                return False
+
+            def read(self_inner):
+                return _json.dumps(body).encode("utf-8")
+
+        def fake_urlopen(request, timeout=None):
+            seen["url"] = request.full_url
+            seen["headers"] = dict(request.header_items())
+            seen["timeout"] = timeout
+            return _Response()
+
+        monkeypatch.setattr(
+            voice_routing.urllib.request, "urlopen", fake_urlopen
+        )
+        return seen
+
+    def test_it_asks_the_broker_with_the_service_token(self, monkeypatch):
+        seen = self._urlopen(
+            monkeypatch, [{"name": "ada", "voice_engine": "kokoro"}]
+        )
+
+        rows = voice_routing._fetch_minds("http://comms:8426/", "svc-token", 3.0)
+
+        assert seen["url"] == "http://comms:8426/broker/minds"
+        assert seen["headers"]["Authorization"] == "Bearer svc-token"
+        assert seen["timeout"] == 3.0
+        assert rows == [{"name": "ada", "voice_engine": "kokoro"}]
+
+    def test_it_reads_a_dict_bodied_listing(self, monkeypatch):
+        """The gateway answers a bare list today and may wrap it tomorrow."""
+        self._urlopen(monkeypatch, {"minds": [{"name": "ada"}]})
+
+        assert voice_routing._fetch_minds("http://comms:8426", "t", 3.0) == [
+            {"name": "ada"}
+        ]
+
+    def test_it_drops_entries_that_are_not_rows(self, monkeypatch):
+        self._urlopen(monkeypatch, ["not-a-row", {"name": "ada"}])
+
+        assert voice_routing._fetch_minds("http://comms:8426", "t", 3.0) == [
+            {"name": "ada"}
+        ]
+
+    def test_it_sends_no_authorization_when_there_is_no_token(self, monkeypatch):
+        seen = self._urlopen(monkeypatch, [])
+
+        voice_routing._fetch_minds("http://comms:8426", "", 3.0)
+
+        assert "Authorization" not in seen["headers"]
 
 
 class TestIndexing:
