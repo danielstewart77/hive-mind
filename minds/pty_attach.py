@@ -103,7 +103,9 @@ _TMUX_OPTIONS = [
 # A single argv entry cannot exceed MAX_ARG_STRLEN (32 pages, 128 KiB on
 # Linux); exec fails outright above it. A rotation seed reaches the harness
 # as one argument however it is delivered, so it is capped short of that.
-MAX_SEED_CHARS = 120_000
+# Bytes, not characters: the kernel counts bytes, and a carry-forward quoting
+# a TUI transcript is full of three-byte box-drawing glyphs.
+MAX_SEED_BYTES = 120_000
 
 
 class PtyUnavailable(Exception):
@@ -246,16 +248,27 @@ def capped_seed(system_prompt: str) -> str:
     The tail is what survives: composition puts the rotation summary and the
     turns typed during the window last, and those are the ones the successor
     has to pick the conversation up from.
+
+    Measured in **bytes**, because that is what the kernel counts against
+    ``MAX_ARG_STRLEN``. A carry-forward quoting a TUI transcript carries
+    box-drawing and arrows at three bytes each, so a seed well under the limit
+    in characters is over it in bytes — and exec fails inside the pane after
+    tmux has returned 0 and the gateway has already written the successor's
+    id, recording a successful rotation on a dead pane.
     """
-    if len(system_prompt) <= MAX_SEED_CHARS:
+    raw = system_prompt.encode("utf-8")
+    if len(raw) <= MAX_SEED_BYTES:
         return system_prompt
-    log.warning("Rotation seed of %d chars exceeds the %d-char exec limit — "
-                "keeping the tail", len(system_prompt), MAX_SEED_CHARS)
+    log.warning("Rotation seed of %d bytes exceeds the %d-byte exec limit — "
+                "keeping the tail", len(raw), MAX_SEED_BYTES)
     notice = ("[earlier context omitted: the carry-forward was too large to "
               "pass to the harness]\n\n")
     # The notice counts against the same argv entry the seed rides in, so the
-    # tail is trimmed to leave room for it rather than added on top.
-    return notice + system_prompt[-(MAX_SEED_CHARS - len(notice)):]
+    # tail is trimmed to leave room for it rather than added on top. The cut
+    # can land inside a multi-byte character, so the decode drops a partial
+    # one rather than raising.
+    room = MAX_SEED_BYTES - len(notice.encode("utf-8"))
+    return notice + raw[-room:].decode("utf-8", errors="ignore")
 
 
 SEED_STALE_AFTER_SECONDS = 3600
@@ -284,6 +297,7 @@ def _sweep_stale_seeds(seed_dir) -> None:
 
 def seeded_pane_command(
     argv: list[str], system_prompt: str, seed_file: Path, *, seed_flag: str = "",
+    as_user_turn: bool = False,
 ) -> list[str]:
     """Hand the pane its carry-forward without putting it in the command.
 
@@ -298,6 +312,13 @@ def seeded_pane_command(
     ``seed_flag`` is how this harness takes an opening context — claude has
     ``--append-system-prompt``; codex has no such flag and takes it as the
     positional opening turn, so the flag is empty there.
+
+    ``as_user_turn`` decides which end of the harness the seed enters, and
+    overrides the flag. A fresh terminal takes its seed as standing context,
+    which is where standing context belongs. A staged rotation takes it as the
+    positional opening prompt, because the user's own message is concatenated
+    onto it: a system prompt submits nothing and reaches no transcript, so the
+    pane would open at an empty prompt with what they typed gone.
     """
     if not system_prompt:
         return argv
@@ -309,13 +330,31 @@ def seeded_pane_command(
     seed_file.chmod(0o600)
     quoted_seed = shlex.quote(str(seed_file))
     harness = " ".join(shlex.quote(arg) for arg in argv)
-    flag = f"{seed_flag} " if seed_flag else ""
+    flag = "" if as_user_turn else seed_flag
+    # Both branches carry their own leading space. Concatenated onto the
+    # harness without one, the flag lands glued to the last argv token — the
+    # conversation id — and the harness exits rejecting it.
+    entry = f' {flag} "$seed"' if flag else ' "$seed"'
     # Read then delete: the seed is one process's opening context, and it is
     # the whole conversation's memory sitting in a world-readable file.
+    #
+    # An unreadable or empty seed starts the harness *without* it rather than
+    # exec'ing the entry point with an empty argument, which would open the
+    # successor on nothing while tmux and the gateway both recorded a
+    # successful rotation. An unseeded terminal is recoverable — the gateway
+    # holds the same text on the session row and hands it back on the next
+    # attach — and a dead pane is not.
+    #
+    # That fallback covers an absent or empty seed and nothing else: /bin/sh
+    # is dash, and a non-interactive POSIX shell exits when `exec` itself
+    # fails, so the second `exec` is unreachable from the first one failing.
+    # An oversized argv is prevented by `capped_seed` rather than recovered
+    # from here.
     return [
         "/bin/sh", "-c",
-        f'seed=$(cat {quoted_seed}); rm -f {quoted_seed}; '
-        f'exec {harness} {flag}"$seed"',
+        f'seed=$(cat {quoted_seed} 2>/dev/null); rm -f {quoted_seed}; '
+        f'[ -n "$seed" ] && exec {harness}{entry}; '
+        f'exec {harness}',
     ]
 
 
@@ -786,8 +825,10 @@ def install_pty_attach(
     reason instead of opening a terminal on nothing.
 
     ``rotate`` is called as ``rotate(session_id=, new_claude_sid=, model=,
-    system_prompt=, client_ref=, owner_type=, owner_ref=)`` and returns
-    whether a live terminal was rotated in place.
+    system_prompt=, user_prompt=, client_ref=, owner_type=, owner_ref=)`` and
+    returns whether a live terminal was rotated in place. ``user_prompt``, when
+    given, is the seed the successor opens on as a user turn; ``system_prompt``
+    is standing context a fresh terminal takes.
     """
     global _TERMINALS
     _TERMINALS = terminals
@@ -832,6 +873,12 @@ def install_pty_attach(
                 # moment someone edited that default in the console.
                 model=body.get("model") or handle.model,
                 system_prompt=body.get("system_prompt") or "",
+                # The staged seed with the user's own typed message on the
+                # end. It enters the harness as an opening *user* turn rather
+                # than as standing context, because a system prompt submits
+                # nothing — dropping it respawns the pane on an empty prompt
+                # while this route reports a successful rotation.
+                user_prompt=body.get("user_prompt") or "",
                 client_ref=body.get("client_ref"),
                 owner_type=body.get("owner_type"),
                 owner_ref=body.get("owner_ref"),

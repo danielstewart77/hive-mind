@@ -351,6 +351,25 @@ class TestRotateRoute:
             ws.send_bytes(b"after\n")
             assert b"after" in _read_until(ws, b"after")
 
+    def test_a_staged_rotation_delivers_the_typed_message_to_the_harness(self):
+        """comms sends the seed-plus-message as user_prompt; it must arrive.
+
+        The staged seed is the summary with the user's own typed message
+        concatenated onto it. Dropping it respawns the pane on nothing while
+        reporting a successful rotation.
+        """
+        calls: list[dict] = []
+        client = TestClient(self._rotating_app(calls))
+        with client.websocket_connect("/sessions/r4/attach-pty?model=opus&resume_sid=old") as ws:
+            ws.send_bytes(b"x\n")
+            ws.receive_bytes()
+            client.post("/sessions/r4/rotate-pty", json={
+                "new_claude_sid": "new-conv", "model": "sonnet",
+                "system_prompt": "the summary",
+                "user_prompt": "the summary\n\nand what I typed",
+            })
+        assert calls[0]["user_prompt"] == "the summary\n\nand what I typed"
+
     def test_rotation_declines_when_no_tile_is_open(self):
         calls: list[dict] = []
         client = TestClient(self._rotating_app(calls))
@@ -546,7 +565,7 @@ class TestSeededPaneCommand:
         # opening turn instead.
         seed_file = tmp_path / "seed.txt"
         cmd = pty_attach.seeded_pane_command(["codex"], "carry-forward", seed_file)
-        assert cmd[-1].endswith('exec codex "$seed"')
+        assert 'exec codex "$seed"' in cmd[-1]
 
     def test_an_oversized_seed_is_trimmed_to_what_exec_can_carry(self, tmp_path):
         seed = ("head " * 40000) + "THE-PENDING-TURNS"
@@ -555,7 +574,7 @@ class TestSeededPaneCommand:
         pty_attach.seeded_pane_command(["claude"], seed, seed_file)
 
         written = seed_file.read_text()
-        assert len(written) <= pty_attach.MAX_SEED_CHARS
+        assert len(written.encode("utf-8")) <= pty_attach.MAX_SEED_BYTES
         assert written.endswith("THE-PENDING-TURNS")  # the tail is what continues
 
     def test_a_rotation_with_no_seed_runs_the_harness_directly(self, tmp_path):
@@ -708,6 +727,36 @@ class TestClaudeCliWiring:
         assert "the summary" in (tmp_path / "rotation-seeds" / "conv-4.txt").read_text()
         assert respawned["env"]["env_overrides"]["HIVEMIND_CLIENT_REF"] == "a3"
 
+    def test_a_staged_rotation_reaches_claudes_pane_as_its_opening_turn(
+        self, claude, monkeypatch, tmp_path
+    ):
+        """Both halves of the adapter line, in the argv the pane execs.
+
+        The seed has to be the one carrying the typed message, and it has to
+        enter positionally rather than behind `--append-system-prompt`, which
+        submits nothing. An adapter reading only `system_prompt`, or passing
+        `as_user_turn=False`, fails one half each.
+        """
+        monkeypatch.setattr(claude, "CONFIG_DIR", tmp_path)
+        monkeypatch.setattr(claude.TERMINALS, "alive", lambda sid: True)
+        respawned = {}
+        monkeypatch.setattr(
+            claude.TERMINALS, "respawn",
+            lambda sid, argv, **kw: respawned.update(argv=argv),
+        )
+
+        assert claude._rotate_pty(
+            session_id="a4", new_claude_sid="conv-5", model="sonnet",
+            system_prompt="the summary",
+            user_prompt="the summary\n\nand what I typed",
+        ) is True
+
+        seed = tmp_path / "rotation-seeds" / "conv-5.txt"
+        assert seed.read_text() == "the summary\n\nand what I typed"
+        script = respawned["argv"][-1]
+        assert '"$seed"' in script
+        assert "--append-system-prompt" not in script
+
     def test_a_chat_turn_yields_the_text_a_tile_would_have_missed(self, claude):
         event = {"type": "assistant", "message": {"content": [
             {"type": "text", "text": "spoken"},
@@ -827,10 +876,33 @@ class TestCodexCliThreads:
                          system_prompt="<soul>carried forward</soul>")
 
         assert started["argv"][:2] == ["/bin/sh", "-c"]
-        seed_file = tmp_path / "rotation-seeds" / "n4.txt"
+        seed_file = tmp_path / "rotation-seeds" / "n4-fresh.txt"
         assert seed_file.read_text() == "<soul>carried forward</soul>"
         assert str(seed_file) in started["argv"][2]
         assert seed_file.stat().st_mode & 0o077 == 0
+
+    def test_a_staged_rotation_reaches_codexs_pane_as_its_opening_turn(
+        self, codex, monkeypatch, tmp_path
+    ):
+        """The typed message is what the successor has to answer.
+
+        Guards the adapter line, not the helper: a `_rotate_pty` that reads
+        `system_prompt` and ignores `user_prompt` seeds the pane with the
+        summary alone and loses the question.
+        """
+        monkeypatch.setattr(codex, "CODEX_HOME", tmp_path)
+        monkeypatch.setattr(codex.TERMINALS, "alive", lambda sid: True)
+        monkeypatch.setattr(codex, "_watch_for_new_thread_in_background",
+                            lambda sid, before: None)
+        monkeypatch.setattr(codex.TERMINALS, "respawn", lambda sid, argv, **kw: None)
+
+        assert codex._rotate_pty(
+            session_id="n8", new_claude_sid="conv-10", model="gpt-5",
+            system_prompt="the summary",
+            user_prompt="the summary\n\nand what I typed",
+        ) is True
+        seed = tmp_path / "rotation-seeds" / "n8-conv-10.txt"
+        assert seed.read_text() == "the summary\n\nand what I typed"
 
     def test_the_gateways_copy_of_the_thread_id_wins_after_a_redeploy(
         self, codex, monkeypatch
@@ -910,7 +982,8 @@ class TestCodexCliThreads:
         # rotation the gateway just paid for.
         assert "n7" not in codex.THREADS
         assert "resume" not in " ".join(respawned["argv"])
-        assert "the summary" in (tmp_path / "rotation-seeds" / "n7.txt").read_text()
+        assert "the summary" in (
+            tmp_path / "rotation-seeds" / "n7-conv-9.txt").read_text()
 
     def test_kill_forgets_the_thread(self, codex):
         codex.SESSIONS.clear()
@@ -1001,3 +1074,70 @@ class TestTuiFirstRunFlags:
         pty_attach.ensure_tui_first_run_flags(tmp_path, "/usr/src/app")
 
         assert path.read_text() == "{not json"
+
+
+class TestSeedEntryPoint:
+    """Which end of the harness a carry-forward enters by.
+
+    A fresh terminal's seed is standing context and belongs behind the
+    harness's system-prompt flag. A staged rotation's seed carries the user's
+    own typed message, and a system prompt submits nothing and reaches no
+    transcript — so the pane would open at an empty prompt with what they
+    typed gone.
+    """
+
+    @staticmethod
+    def _argv_the_pane_execs(cmd: list[str], tmp_path) -> list[str]:
+        """Run the generated script against a harness that prints its own argv.
+
+        A substring check on the script cannot see a flag concatenated onto the
+        conversation id — `--session-id abc--append-system-prompt` contains
+        every expected fragment and exits rejecting the id. Only the real argv
+        shows it.
+        """
+        printer = tmp_path / "printer.sh"
+        printer.write_text('#!/bin/sh\nfor a in "$@"; do printf "%s\\n" "$a"; done\n')
+        printer.chmod(0o755)
+        script = cmd[-1].replace("harness", str(printer))
+        done = subprocess.run(["/bin/sh", "-c", script], capture_output=True,
+                              text=True, timeout=10)
+        assert done.returncode == 0, done.stderr
+        return done.stdout.splitlines()
+
+    def test_a_staged_rotation_seed_enters_as_the_opening_user_turn(self, tmp_path):
+        cmd = pty_attach.seeded_pane_command(
+            ["harness", "--resume", "c1"], "summary and message",
+            tmp_path / "seed.txt",
+            seed_flag="--append-system-prompt", as_user_turn=True,
+        )
+        assert self._argv_the_pane_execs(cmd, tmp_path) == [
+            "--resume", "c1", "summary and message",
+        ]
+
+    def test_a_fresh_terminal_seed_enters_behind_the_system_prompt_flag(self, tmp_path):
+        cmd = pty_attach.seeded_pane_command(
+            ["harness", "--resume", "c1"], "standing context",
+            tmp_path / "seed.txt",
+            seed_flag="--append-system-prompt",
+        )
+        assert self._argv_the_pane_execs(cmd, tmp_path) == [
+            "--resume", "c1", "--append-system-prompt", "standing context",
+        ]
+
+    def test_an_unreadable_seed_starts_the_harness_unseeded(self, tmp_path):
+        """A dead pane is unrecoverable; an unseeded one is not.
+
+        The gateway holds the same text on the session row and hands it back
+        on the next attach, so a harness started without its seed can be
+        recovered. Exec'ing the entry point with an empty argument opens the
+        successor on nothing while tmux and the gateway both record success.
+        """
+        seed_file = tmp_path / "seed.txt"
+        cmd = pty_attach.seeded_pane_command(
+            ["/bin/echo", "harness-ran"], "a seed", seed_file,
+            seed_flag="--append-system-prompt", as_user_turn=True,
+        )
+        seed_file.unlink()
+        done = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        assert done.returncode == 0
+        assert "harness-ran" in done.stdout
