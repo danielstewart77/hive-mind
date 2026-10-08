@@ -7,3 +7,9 @@ capabilities/
 
 # Deck photos are personal, not machinery.
 decks/assets/
+
+# Build-orchestrator run artifacts. The decomposition and its per-story
+# state belong to the run that produced them, not to the repo.
+STORIES.md
+build-state.json
+stories/
