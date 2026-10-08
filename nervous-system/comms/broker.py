@@ -54,7 +54,8 @@ CREATE TABLE IF NOT EXISTS minds (
     registered_at  REAL NOT NULL,
     last_seen      REAL NOT NULL,
     session_token  TEXT,
-    voice          TEXT
+    voice          TEXT,
+    voice_engine   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_minds_mind_id ON minds(mind_id);
 
@@ -118,6 +119,8 @@ async def _migrate_minds(db: aiosqlite.Connection) -> None:
         await db.execute("ALTER TABLE minds ADD COLUMN session_token TEXT")
     if "voice" not in have:
         await db.execute("ALTER TABLE minds ADD COLUMN voice TEXT")
+    if "voice_engine" not in have:
+        await db.execute("ALTER TABLE minds ADD COLUMN voice_engine TEXT")
 
 
 # ---------------------------------------------------------------------------
@@ -455,6 +458,7 @@ async def register_mind(
     harness: str,
     session_token: str | None = None,
     voice: str | None = None,
+    voice_engine: str | None = None,
 ) -> None:
     """Register (or update) a mind in the broker database.
 
@@ -467,9 +471,10 @@ async def register_mind(
     in place: a mind re-registering from an older build, or one that failed to
     read its own token file, must not silently lock the gateway out.
 
-    `voice` is cached the same way and for the same reason: the mind's
-    `runtime.yaml` is the truth, this row is what the voice server reads, and a
-    registration that omitted it must not blank a working voice.
+    `voice` and `voice_engine` are cached the same way and for the same
+    reason: the mind's `runtime.yaml` is the truth, this row is what the
+    speaking surfaces read, and a registration that omitted either must not
+    blank a working voice.
     """
     now = time.time()
     row = await db.execute(
@@ -486,6 +491,9 @@ async def register_mind(
         if voice:
             columns.append("voice=?")
             values.append(voice)
+        if voice_engine:
+            columns.append("voice_engine=?")
+            values.append(voice_engine)
         await db.execute(
             f"UPDATE minds SET {', '.join(columns)} WHERE mind_id=?",
             (*values, mind_id),
@@ -493,9 +501,9 @@ async def register_mind(
     else:
         await db.execute(
             "INSERT INTO minds (mind_id, name, gateway_url, model, harness, registered_at, last_seen, "
-            "session_token, voice) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "session_token, voice, voice_engine) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (mind_id, name, gateway_url, model, harness, now, now,
-             session_token or None, voice or None),
+             session_token or None, voice or None, voice_engine or None),
         )
     await db.commit()
     log_event(log, "mind.registered" if not existing else "mind.updated",
@@ -566,14 +574,14 @@ async def get_mind_by_id(db: aiosqlite.Connection, mind_id: str) -> dict | None:
 async def update_mind(db: aiosqlite.Connection, name: str, **fields) -> dict | None:
     """Partially update a mind's fields. Always updates last_seen.
 
-    Allowed fields: gateway_url, model, harness, voice.
+    Allowed fields: gateway_url, model, harness, voice, voice_engine.
     Returns updated dict or None if mind not found.
     """
     existing = await get_mind(db, name)
     if existing is None:
         return None
 
-    allowed = {"gateway_url", "model", "harness", "voice"}
+    allowed = {"gateway_url", "model", "harness", "voice", "voice_engine"}
     updates = {k: v for k, v in fields.items() if k in allowed}
     updates["last_seen"] = time.time()
 
