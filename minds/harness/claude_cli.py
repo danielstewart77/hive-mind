@@ -300,10 +300,18 @@ def _terminal_argv(model: str, conversation_id: str) -> list[str]:
 def _rotation_argv(model: str, new_claude_sid: str) -> list[str]:
     """The interactive `claude` a rotation respawns the pane onto.
 
-    Always `--session-id`, never `--resume`: rotation starts a fresh harness
-    conversation under the same hive session, and it opens holding a summary
-    of the one it replaced. The summary itself rides in via
-    ``seeded_pane_command``.
+    A rotation starts a fresh harness conversation under the same hive
+    session, holding a summary of the one it replaced; the summary itself
+    rides in via ``seeded_pane_command``.
+
+    Which of the pair is passed is decided by whether a transcript already
+    exists, not by the fact that this is a rotation. A fire whose HTTP
+    response was lost stays staged and is retried against the *same*
+    successor id — by design, since the row still holds the seed — and by then
+    the pane's first process has written that transcript. ``--session-id`` on
+    an id claude already knows is the exact error this pairing exists to
+    avoid, and it would kill the pane after ``respawn`` had already returned
+    zero and the gateway had recorded the rotation as done.
     """
     cmd = [
         "claude",
@@ -313,7 +321,7 @@ def _rotation_argv(model: str, new_claude_sid: str) -> list[str]:
     ]
     if MCP_CONFIG:
         cmd.extend(["--mcp-config", MCP_CONFIG])
-    cmd.extend(["--session-id", new_claude_sid])
+    cmd.extend(claude_conversation_flags(new_claude_sid, PROJECT_DIR))
     return cmd
 
 
@@ -395,8 +403,8 @@ def _spawn_pty(
 
 def _rotate_pty(
     *, session_id: str, new_claude_sid: str, model: str = "", system_prompt: str = "",
-    client_ref: str | None = None, owner_type: str | None = None,
-    owner_ref: str | None = None,
+    user_prompt: str = "", client_ref: str | None = None,
+    owner_type: str | None = None, owner_ref: str | None = None,
 ) -> bool:
     """Start a fresh harness conversation in a live terminal, in place.
 
@@ -417,18 +425,23 @@ def _rotate_pty(
                     session_id)
         return False
 
+    # A staged rotation's seed carries the user's own typed message, so it
+    # enters as the opening user turn; a system prompt submits nothing and the
+    # pane would come up at an empty prompt with what they typed gone.
+    seed = user_prompt or system_prompt
     argv = seeded_pane_command(
         _rotation_argv(model, new_claude_sid),
-        system_prompt,
+        seed,
         CONFIG_DIR / "rotation-seeds" / f"{new_claude_sid}.txt",
         seed_flag="--append-system-prompt",
+        as_user_turn=bool(user_prompt),
     )
     TERMINALS.respawn(
         session_id, argv,
         env_overrides=_pane_env(client_ref, owner_type, owner_ref),
     )
     log.info("Rotated the conversation in terminal %s onto %s (seed=%d chars)",
-             TERMINALS.session_name(session_id), new_claude_sid, len(system_prompt))
+             TERMINALS.session_name(session_id), new_claude_sid, len(seed))
     log_event(log, "session.pty.rotated", mind_id=MIND_ID, mind_name=NAME,
               session_id=session_id, conversation_id=new_claude_sid)
     return True

@@ -889,6 +889,44 @@ def test_rotation_respawns_the_same_pane_on_the_new_conversation(
     assert context.read_text(encoding="utf-8") == "carry forward"
 
 
+def test_a_staged_rotation_asks_dsh_to_answer_its_opening_context(
+    dsh, monkeypatch
+) -> None:
+    """dsh queues an opening context unless told to answer it.
+
+    An adapter that reads only `system_prompt`, or that omits the flag, hands
+    the pane the user's question with no reply coming.
+    """
+    terminals = _FakeTerminals(alive=True)
+    monkeypatch.setattr(dsh, "TERMINALS", terminals)
+    assert dsh._rotate_pty(
+        session_id="row-1", new_claude_sid="conv-3", model="qwen35-131k",
+        system_prompt="the summary",
+        user_prompt="the summary\n\nand what I typed",
+    ) is True
+    argv = terminals.respawns[0]["argv"]
+    assert "--context-as-turn" in argv
+    context = Path(argv[argv.index("--context-file") + 1])
+    assert context.read_text(encoding="utf-8") == "the summary\n\nand what I typed"
+
+
+def test_a_whitespace_seed_opens_the_pane_unseeded_rather_than_killing_it(
+    dsh, monkeypatch
+) -> None:
+    """dsh refuses a context it cannot make a turn out of, and a refusal here
+    exits the process — a dead pane, after rotate-pty has already answered
+    `rotated: true` and the gateway has written the successor's id."""
+    terminals = _FakeTerminals(alive=True)
+    monkeypatch.setattr(dsh, "TERMINALS", terminals)
+    assert dsh._rotate_pty(
+        session_id="row-1", new_claude_sid="conv-4", model="qwen35-131k",
+        user_prompt="   \n\t ",
+    ) is True
+    argv = terminals.respawns[0]["argv"]
+    assert "--context-file" not in argv
+    assert "--context-as-turn" not in argv
+
+
 async def test_a_chat_minds_dispatch_is_one_turn_and_names_no_rounds(
     dsh, monkeypatch
 ) -> None:
