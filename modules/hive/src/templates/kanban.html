@@ -1,0 +1,69 @@
+{% extends "layout.html" %}
+{% block title %}Kanban · Hive{% endblock %}
+{% block content %}
+<style>
+.kanban-page { max-width: 1440px; margin: 0 auto; }
+.kanban-toolbar { display:flex; gap:.5rem; margin:1.25rem 0; }
+.kanban-toolbar [aria-pressed="true"] { background:var(--console-accent, #c9a84c); color:#111; }
+.kanban-error { color:var(--console-danger, #ef7777); min-height:1.5em; }
+.kanban-board { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:1rem; }
+.kanban-lane { min-height:250px; padding:1rem; }
+.kanban-lane h2 { margin-top:0; }
+.kanban-drop { min-height:170px; display:flex; flex-direction:column; gap:.65rem; padding:.5rem; border:1px dashed var(--console-border, #555); border-radius:10px; }
+.kanban-card { padding:.9rem; cursor:grab; }
+.kanban-card:active { cursor:grabbing; }
+.kanban-parent { display:block; opacity:.7; font-size:.85rem; margin-top:.4rem; }
+.kanban-tree { display:grid; gap:.8rem; }
+.kanban-item { padding:1rem; }
+.kanban-children { margin: .8rem 0 0 1.2rem; display:grid; gap:.6rem; }
+.kanban-inline { display:flex; flex-wrap:wrap; gap:.5rem; align-items:center; }
+.kanban-item-title { font-weight:600; margin-right:auto; }
+.kanban-empty { opacity:.72; padding:.6rem; }
+@media(max-width:800px){.kanban-board{grid-template-columns:1fr}.kanban-lane{min-height:0}.kanban-drop{min-height:110px}}
+</style>
+<main class="page kanban-page" id="kanban-page">
+  <header class="page-header"><div><h1>Kanban</h1><p>Move work forward on the board, or organize the complete backlog.</p></div></header>
+  <div class="kanban-toolbar" role="group" aria-label="Kanban view">
+    <button class="button" type="button" id="board-toggle" aria-pressed="true">Board</button>
+    <button class="button" type="button" id="backlog-toggle" aria-pressed="false">Backlog</button>
+  </div>
+  <p id="kanban-feedback" class="kanban-error" role="status" aria-live="polite">Loading Kanban…</p>
+  <section id="board-view" aria-label="Kanban board"><div class="kanban-board" id="board-mount"></div></section>
+  <section id="backlog-view" aria-label="Kanban backlog" hidden><div id="backlog-mount" class="kanban-tree"></div></section>
+</main>
+<script>
+(() => {
+  'use strict';
+  const statuses = [['committed','Committed'],['in_progress','Work In Progress'],['done','Done']];
+  const allStatuses = [['backlog','Backlog'], ...statuses];
+  const state = {epics:[],features:[],stories:[]};
+  const $ = id => document.getElementById(id);
+  const feedback = $('kanban-feedback');
+  const el = (tag, cls, text) => { const n=document.createElement(tag); if(cls)n.className=cls; if(text!==undefined)n.textContent=text; return n; };
+  const button = (label, action) => { const b=el('button','button',label); b.type='button'; b.addEventListener('click',action); return b; };
+  async function request(url, method='GET', body) {
+    const opts={method,headers:{'Accept':'application/json'}};
+    if(body!==undefined){opts.headers['Content-Type']='application/json';opts.body=JSON.stringify(body);}
+    const response=await fetch(url,opts);
+    if(!response.ok){let msg=`Request failed (${response.status})`;try{msg=(await response.json()).detail||msg;}catch{}throw new Error(msg);}
+    return response.json();
+  }
+  async function reload(message='') {
+    try { const data=await request('/api/kanban/data'); state.epics=data.epics;state.features=data.features;state.stories=data.stories;render();feedback.textContent=message||''; }
+    catch(err){feedback.textContent=`Unable to load Kanban: ${err.message}`;}
+  }
+  function parentOf(story){const f=state.features.find(x=>x.id===story.feature_id);return f?.title||state.epics.find(x=>x.id===story.epic_id)?.title||'Unassigned';}
+  function renderBoard(){const mount=$('board-mount');mount.replaceChildren();for(const [status,label] of statuses){const lane=el('section','surface kanban-lane');lane.dataset.status=status;lane.append(el('h2','',label));const drop=el('div','kanban-drop');drop.dataset.status=status;drop.setAttribute('aria-label',`${label} drop zone`);drop.addEventListener('dragover',e=>e.preventDefault());drop.addEventListener('drop',onDrop);const cards=state.stories.filter(s=>s.status===status);if(!cards.length)drop.append(el('p','kanban-empty','Drop a story here'));for(const s of cards){const card=el('article','surface kanban-card');card.draggable=true;card.dataset.id=s.id;card.addEventListener('dragstart',e=>{e.dataTransfer.setData('text/plain',s.id);e.dataTransfer.effectAllowed='move';});card.append(el('strong','',s.title),el('span','kanban-parent',parentOf(s)));drop.append(card);}lane.append(drop);mount.append(lane);}}
+  async function onDrop(e){e.preventDefault();const id=e.dataTransfer.getData('text/plain'), target=e.currentTarget.dataset.status, story=state.stories.find(s=>s.id===id);if(!story||story.status===target)return;if(story._busy)return;story._busy=true;try{const updated=await request(`/api/kanban/stories/${encodeURIComponent(id)}`,'PATCH',{status:target});Object.assign(story,updated);feedback.textContent='Story status updated.';}catch(err){feedback.textContent=`Could not move story: ${err.message}`;await reload(feedback.textContent);}finally{if(story)delete story._busy;render();}}
+  function safeTitle(record, kind){const span=el('span','kanban-item-title',record.title);return span;}
+  async function mutate(url,method,body,msg){try{await request(url,method,body);await reload(msg);}catch(err){feedback.textContent=`Change not saved: ${err.message}`;}}
+  function promptTitle(initial=''){const value=window.prompt('Title',initial);return value===null?null:value.trim();}
+  function actionRow(record,kind,parentId){const row=el('div','kanban-inline');row.append(safeTitle(record,kind),button('Rename',async()=>{const title=promptTitle(record.title);if(title)await mutate(`/api/kanban/${kind}/${encodeURIComponent(record.id)}`,'PATCH',{title},`${kind.slice(0,-1)} renamed.`);}));row.append(button('Delete',async()=>{if(window.confirm(`Delete this ${kind.slice(0,-1)} and its children?`))await mutate(`/api/kanban/${kind}/${encodeURIComponent(record.id)}`,'DELETE',undefined,'Deleted successfully.');}));if(kind==='epics')row.append(button('Add feature',async()=>{const title=promptTitle();if(title)await mutate('/api/kanban/features','POST',{epic_id:record.id,title},'Feature created.');}));if(kind==='features')row.append(button('Add story',async()=>{const title=promptTitle();if(title)await mutate('/api/kanban/stories','POST',{feature_id:record.id,title},'Story created in Backlog.');}));if(kind==='epics')row.append(button('Add story',async()=>{const title=promptTitle();if(title)await mutate('/api/kanban/stories','POST',{epic_id:record.id,title},'Story created in Backlog.');}));return row;}
+  function renderStory(s){const item=el('div','kanban-item surface');item.append(actionRow(s,'stories'));const select=el('select','');select.setAttribute('aria-label',`Status for ${s.title}`);for(const [value,label] of allStatuses){const option=el('option','',label);option.value=value;option.selected=value===s.status;select.append(option);}select.addEventListener('change',async()=>{const previous=s.status;try{const updated=await request(`/api/kanban/stories/${encodeURIComponent(s.id)}`,'PATCH',{status:select.value});Object.assign(s,updated);render();feedback.textContent='Story status updated.';}catch(err){select.value=previous;feedback.textContent=`Status not saved: ${err.message}`;await reload(feedback.textContent);}});item.append(select);return item;}
+  function renderBacklog(){const mount=$('backlog-mount');mount.replaceChildren();const featuresOf=e=>state.features.filter(f=>f.epic_id===e.id);const storiesForFeature=f=>state.stories.filter(s=>s.feature_id===f.id);for(const epic of state.epics){const group=el('section','surface kanban-item');group.append(actionRow(epic,'epics'));const children=el('div','kanban-children');for(const feature of featuresOf(epic)){const fg=el('section','surface kanban-item');fg.append(actionRow(feature,'features'));const fs=storiesForFeature(feature);if(!fs.length)fg.append(el('p','kanban-empty','No stories in this feature.'));fs.forEach(s=>fg.append(renderStory(s)));children.append(fg);}state.stories.filter(s=>s.epic_id===epic.id).forEach(s=>children.append(renderStory(s)));if(!featuresOf(epic).length&&!state.stories.some(s=>s.epic_id===epic.id))children.append(el('p','kanban-empty','No features or stories yet.'));group.append(children);mount.append(group);}if(!state.epics.length)mount.append(el('p','kanban-empty surface','No epics yet. Create one to get started.'));mount.prepend(button('Add epic',async()=>{const title=promptTitle();if(title)await mutate('/api/kanban/epics','POST',{title},'Epic created.');}));}
+  function render(){renderBoard();renderBacklog();}
+  function show(which){const board=which==='board';$('board-view').hidden=!board;$('backlog-view').hidden=board;$('board-toggle').setAttribute('aria-pressed',String(board));$('backlog-toggle').setAttribute('aria-pressed',String(!board));}
+  $('board-toggle').addEventListener('click',()=>show('board'));$('backlog-toggle').addEventListener('click',()=>show('backlog'));reload();
+})();
+</script>
+{% endblock %}
