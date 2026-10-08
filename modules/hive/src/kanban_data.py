@@ -9,8 +9,10 @@ epic, an epic for a feature, and either for a story.
 `COALESCE(MAX(position), ...) + 1` over the whole table means a created row
 sorts after everything that exists now and after everything that has ever
 existed, so deleting from the middle does not hand the next item a slot it
-has to share. SQLite leaves ties unordered, so every read sorts by rowid
-underneath position and never returns two orders for one board.
+has to share — which is what keeps two rows from sharing a position in the
+first place. Reads name `rowid` under `position` because SQL leaves the
+order of equal keys undefined; no test covers it, since on this engine the
+scan already comes back in that order and no edit here can make it differ.
 
 The cascade is done here, in Python, and the schema declares no
 `ON DELETE CASCADE`. SQLite's `foreign_keys` pragma is off by default and is
@@ -20,11 +22,13 @@ labelled "Unassigned" while being unreachable from the tree that holds the
 only delete button. Deleted work that comes back and cannot be removed is
 worse than a failed delete. Declaring the cascade *as well* would be worse
 still: with both in place neither is load-bearing, so no test can tell
-whether either works. Children go first so the foreign key holds at every
-step of the delete.
+whether either works. Parent and descendants go in one statement, and
+SQLite checks the foreign key at the end of it, so the order within that
+statement decides nothing.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import secrets
 import sqlite3
@@ -56,10 +60,12 @@ def _connect() -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path, timeout=30.0, isolation_level=None)
     connection.row_factory = sqlite3.Row
-    # WAL so a writer does not block the readers sharing this file — auth and
-    # every other console page live in the same database, and a contended
-    # board write must not stall login.
-    connection.execute("PRAGMA journal_mode = WAL")
+    # No journal-mode change. This file is also opened by auth, design_data
+    # and configuration_data with a bare sqlite3.connect, the change is
+    # one-way and process-wide, and a busy database returns SQLITE_BUSY to it
+    # without invoking the busy handler — so it can silently no-op, or raise
+    # on the connect and 500 the board. busy_timeout is per connection and
+    # carries no such freight.
     connection.execute("PRAGMA busy_timeout = 30000")
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute(
@@ -84,14 +90,59 @@ def _connect() -> sqlite3.Connection:
     return connection
 
 
+@contextlib.contextmanager
+def _session():
+    """A connection that is actually released when the block ends.
+
+    `with sqlite3.connect(...)` commits; it does not close. The connection
+    holds its statement cache in a reference cycle, so refcounting never
+    reclaims it and the descriptor waits on the generational collector —
+    which an idle process does not run. Under concurrent requests that is
+    thousands of open descriptors against a 1024 limit, and the failure is
+    not the board's: it is login, and every other page in this process,
+    refusing to open the database at all.
+    """
+    connection = _connect()
+    try:
+        yield connection
+    finally:
+        connection.close()
+
+
+@contextlib.contextmanager
+def _snapshot(connection: sqlite3.Connection):
+    """One read transaction across several statements.
+
+    Three unguarded reads are three points in time. A write landing between
+    them returns a story whose epic is not in the same payload — which the
+    board draws as "Unassigned" and the backlog tree, walking down from the
+    epics it was given, does not draw at all. That is the orphan this module
+    cascades in Python to avoid, reintroduced by the reader.
+    """
+    connection.execute("BEGIN DEFERRED")
+    try:
+        yield connection
+    finally:
+        connection.execute("COMMIT")
+
+
 def _new_id(kind: str) -> str:
     return _PREFIX[kind] + secrets.token_hex(_ID_BYTES)
+
+
+# Every title on the board is returned in full on every load, so one pasted
+# document is not one bad row, it is a board that is slow for everyone from
+# then on, with nothing on screen naming the row responsible.
+MAX_TITLE_LENGTH = 500
 
 
 def _title(value: Any) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError("title must be a nonblank string")
-    return value.strip()
+    trimmed = value.strip()
+    if len(trimmed) > MAX_TITLE_LENGTH:
+        raise ValueError(f"title must be at most {MAX_TITLE_LENGTH} characters")
+    return trimmed
 
 
 def _check_status(value: Any) -> str:
@@ -170,7 +221,7 @@ def get_data() -> dict[str, list[dict[str, Any]]]:
     from `state.epics` and friends before anything is on it, and a missing
     key is a TypeError in the browser with nothing on screen to explain it.
     """
-    with _connect() as connection:
+    with _session() as connection, _snapshot(connection):
         return {
             "epics": _list(connection, "epic"),
             "features": _list(connection, "feature"),
@@ -179,17 +230,17 @@ def get_data() -> dict[str, list[dict[str, Any]]]:
 
 
 def list_epics() -> list[dict[str, Any]]:
-    with _connect() as connection:
+    with _session() as connection:
         return _list(connection, "epic")
 
 
 def list_features() -> list[dict[str, Any]]:
-    with _connect() as connection:
+    with _session() as connection:
         return _list(connection, "feature")
 
 
 def list_stories() -> list[dict[str, Any]]:
-    with _connect() as connection:
+    with _session() as connection:
         return _list(connection, "story")
 
 
@@ -199,7 +250,7 @@ def count_descendants(record_id: str) -> dict[str, int]:
     The browser asks right before it puts the number in front of Daniel. Its
     own copy of the board is whatever it loaded, which may be an hour old.
     """
-    with _connect() as connection:
+    with _session() as connection:
         row = connection.execute(
             "SELECT kind FROM work_items WHERE id = ?", (record_id,)
         ).fetchone()
@@ -270,7 +321,7 @@ def _insert(
 
 def create_epic(title: str) -> dict[str, Any]:
     checked = _title(title)
-    with _connect() as connection:
+    with _session() as connection:
         _write(connection)
         record = _insert(connection, "epic", checked, None, None)
         connection.execute("COMMIT")
@@ -279,7 +330,7 @@ def create_epic(title: str) -> dict[str, Any]:
 
 def create_feature(epic_id: str, title: str) -> dict[str, Any]:
     checked = _title(title)
-    with _connect() as connection:
+    with _session() as connection:
         _write(connection)
         try:
             _fetch(connection, epic_id, "epic")
@@ -300,7 +351,7 @@ def create_story(
     parent_kind, parent_id = _one_parent(feature_id, epic_id)
     checked = _title(title)
     checked_status = _check_status(status)
-    with _connect() as connection:
+    with _session() as connection:
         _write(connection)
         try:
             _fetch(connection, parent_id, parent_kind)
@@ -334,7 +385,7 @@ def _update(kind: str, record_id: str, changes: dict[str, Any]) -> dict[str, Any
     if unknown:
         raise ValueError(f"unsupported fields: {', '.join(sorted(unknown))}")
 
-    with _connect() as connection:
+    with _session() as connection:
         _write(connection)
         try:
             row = _fetch(connection, record_id, kind)
@@ -357,12 +408,10 @@ def _update(kind: str, record_id: str, changes: dict[str, Any]) -> dict[str, Any
 
             if assignments:
                 clause = ", ".join(f"{column} = ?" for column in assignments)
-                cursor = connection.execute(
+                connection.execute(
                     f"UPDATE work_items SET {clause} WHERE id = ?",
                     (*assignments.values(), record_id),
                 )
-                if cursor.rowcount == 0:
-                    raise KeyError(f"{_LABEL[kind]} not found: {record_id}")
 
             record = _row_to_record(_fetch(connection, record_id, kind))
             connection.execute("COMMIT")
@@ -386,20 +435,16 @@ def update_story(record_id: str, **changes: Any) -> dict[str, Any]:
 
 
 def _delete(kind: str, record_id: str) -> dict[str, Any]:
-    with _connect() as connection:
+    with _session() as connection:
         _write(connection)
         try:
             record = _row_to_record(_fetch(connection, record_id, kind))
             features, stories = _descendants(connection, record_id)
-            # Deepest first: the foreign key is enforced per statement, so a
-            # parent cannot go while a child still points at it.
-            doomed = [*stories, *features, record_id]
+            doomed = [record_id, *features, *stories]
             placeholders = ",".join("?" * len(doomed))
-            cursor = connection.execute(
+            connection.execute(
                 f"DELETE FROM work_items WHERE id IN ({placeholders})", doomed
             )
-            if cursor.rowcount == 0:
-                raise KeyError(f"{_LABEL[kind]} not found: {record_id}")
             connection.execute("COMMIT")
         except BaseException:
             connection.execute("ROLLBACK")

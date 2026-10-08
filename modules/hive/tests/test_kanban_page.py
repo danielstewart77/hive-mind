@@ -22,5 +22,13 @@ def test_a_signed_out_visitor_is_sent_to_log_in(monkeypatch):
     assert response.headers["location"].startswith("/login?next=/kanban")
 
 
-def test_a_signed_in_visitor_is_served_the_board(signed_in):
-    assert signed_in.get("/kanban").status_code == 200
+def test_a_signed_in_visitor_is_served_the_board_and_not_another_page(signed_in):
+    """A 200 alone does not say which template the route rendered.
+
+    The board draws itself in the browser into two mount points that no
+    other console page has, so naming them is how this distinguishes the
+    kanban page from any other page the route could have been pointed at.
+    """
+    body = signed_in.get("/kanban")
+    assert body.status_code == 200
+    assert "board-mount" in body.text and "backlog-mount" in body.text

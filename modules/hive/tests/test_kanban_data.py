@@ -72,7 +72,6 @@ def test_deleting_an_epic_takes_its_features_and_every_story_beneath_them():
     assert [e["id"] for e in data["epics"]] == [survivor["id"]]
     assert data["features"] == []
     assert [s["id"] for s in data["stories"]] == [safe["id"]]
-    assert {nested["id"], direct["id"]} not in [{s["id"]} for s in data["stories"]]
 
 
 def test_deleting_a_feature_takes_its_stories_and_leaves_the_epic_alone():
@@ -196,3 +195,63 @@ def test_descendants_counts_what_a_delete_would_take():
 def test_ids_are_unique_across_many_creations():
     ids = {store.create_epic(f"Epic {n}")["id"] for n in range(50)}
     assert len(ids) == 50
+
+
+def test_a_title_is_stored_without_its_surrounding_whitespace():
+    epic = store.create_epic("  Padded  ")
+    assert epic["title"] == "Padded"
+    assert store.list_epics()[0]["title"] == "Padded"
+    assert store.update_epic(epic["id"], title="\t Renamed \n")["title"] == "Renamed"
+
+
+def test_a_title_past_the_ceiling_is_refused():
+    assert store.create_epic("a" * store.MAX_TITLE_LENGTH)["title"]
+    with pytest.raises(ValueError, match="at most"):
+        store.create_epic("a" * (store.MAX_TITLE_LENGTH + 1))
+    epic = store.create_epic("Fine")
+    with pytest.raises(ValueError, match="at most"):
+        store.update_epic(epic["id"], title="a" * (store.MAX_TITLE_LENGTH + 1))
+
+
+def test_a_feature_moved_to_another_epic_is_stored_under_the_new_one():
+    origin = store.create_epic("Origin")
+    destination = store.create_epic("Destination")
+    feature = store.create_feature(origin["id"], "Feature")
+    story = store.create_story("Story", feature_id=feature["id"])
+
+    store.update_feature(feature["id"], epic_id=destination["id"])
+
+    assert store.list_features()[0]["epic_id"] == destination["id"]
+    # The story rides along: it hangs off the feature, not off the epic.
+    assert store.list_stories()[0]["feature_id"] == feature["id"]
+    assert store.count_descendants(destination["id"]) == {"features": 1, "stories": 1}
+    assert store.count_descendants(origin["id"]) == {"features": 0, "stories": 0}
+
+
+def test_a_story_moved_to_another_feature_is_stored_under_the_new_one():
+    epic = store.create_epic("Epic")
+    origin = store.create_feature(epic["id"], "Origin")
+    destination = store.create_feature(epic["id"], "Destination")
+    story = store.create_story("Story", feature_id=origin["id"])
+
+    store.update_story(story["id"], feature_id=destination["id"])
+
+    assert store.list_stories()[0]["feature_id"] == destination["id"]
+
+
+def test_every_status_the_board_offers_is_accepted_and_nothing_else_is():
+    epic = store.create_epic("Epic")
+    story = store.create_story("Story", epic_id=epic["id"])
+    for status in store.STATUSES:
+        assert store.update_story(story["id"], status=status)["status"] == status
+        assert store.list_stories()[0]["status"] == status
+    with pytest.raises(ValueError, match="unsupported status"):
+        store.update_story(story["id"], status="archived")
+    assert store.list_stories()[0]["status"] == store.STATUSES[-1]
+
+
+def test_each_kind_is_identifiable_from_its_id():
+    epic = store.create_epic("Epic")
+    feature = store.create_feature(epic["id"], "Feature")
+    story = store.create_story("Story", feature_id=feature["id"])
+    assert (epic["id"][0], feature["id"][0], story["id"][0]) == ("e", "f", "s")

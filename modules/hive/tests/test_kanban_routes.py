@@ -162,3 +162,27 @@ def test_every_kanban_route_refuses_a_caller_who_is_not_signed_in():
     page = anon.get("/kanban", follow_redirects=False)
     assert page.status_code == 303
     assert page.headers["location"].startswith("/login?next=/kanban")
+
+
+def test_a_status_the_board_has_no_lane_for_is_refused_on_update(client):
+    _, _, story = _board(client)
+    assert client.patch(
+        f"/api/kanban/stories/{story['id']}", json={"status": "archived"}
+    ).status_code == 400
+    assert client.get("/api/kanban/data").json()["stories"][0]["status"] == "backlog"
+
+
+def test_a_field_the_route_does_not_know_is_refused_rather_than_crashing(client):
+    assert client.post(
+        "/api/kanban/epics", json={"title": "x", "extra": 1}
+    ).status_code == 400
+    epic, _, _ = _board(client)
+    assert client.patch(
+        f"/api/kanban/epics/{epic['id']}", json={"title": "x", "extra": 1}
+    ).status_code == 400
+
+
+def test_a_collection_the_board_does_not_have_is_a_404_rather_than_a_500(client):
+    assert client.patch("/api/kanban/widgets/x", json={"title": "y"}).status_code == 404
+    assert client.delete("/api/kanban/widgets/x").status_code == 404
+    assert client.get("/api/kanban/widgets/x/descendants").status_code == 404

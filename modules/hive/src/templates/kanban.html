@@ -49,18 +49,22 @@
     return response.json();
   }
   async function reload(message='') {
-    try { const data=await request('/api/kanban/data'); state.epics=data.epics;state.features=data.features;state.stories=data.stories;render();feedback.textContent=message||''; }
-    catch(err){feedback.textContent=`Unable to load Kanban: ${err.message}`;}
+    try { const data=await request('/api/kanban/data'); state.epics=data.epics;state.features=data.features;state.stories=data.stories;render();feedback.textContent=message||''; return true; }
+    catch(err){feedback.textContent=`Unable to load Kanban: ${err.message}`; return false;}
   }
   const noun=(n,word)=>`${n} ${word}${n===1?'':'s'}`;
   async function confirmDelete(record,kind){
     // Counted by the server, now. This tab's copy of the board is from
     // whenever it last loaded, and agreeing to destroy two stories that are
     // really nine is not a confirmation.
-    const thing=kind.slice(0,-1);
     let counts;
     try{counts=await request(`/api/kanban/${kind}/${encodeURIComponent(record.id)}/descendants`);}
-    catch(err){feedback.textContent=`Could not check what this would delete: ${err.message}`;return false;}
+    catch(err){
+      // Most often this row is already gone — another tab deleted it. Reload
+      // rather than leave a card on screen that no longer exists.
+      await reload(`Could not check what this would delete: ${err.message}`);
+      return false;
+    }
     const beneath=[counts.features&&noun(counts.features,'feature'),counts.stories&&noun(counts.stories,'story')].filter(Boolean);
     const warning=beneath.length
       ? `Delete "${record.title}" and the ${beneath.join(' and ')} beneath it? This cannot be undone.`
@@ -83,16 +87,21 @@
   function safeTitle(record, kind){const span=el('span','kanban-item-title',record.title);return span;}
   async function mutate(url,method,body,msg){try{await request(url,method,body);await reload(msg);}catch(err){feedback.textContent=`Change not saved: ${err.message}`;}}
   function promptTitle(initial=''){const value=window.prompt('Title',initial);return value===null?null:value.trim();}
-  function actionRow(record,kind,parentId){const row=el('div','kanban-inline');row.append(safeTitle(record,kind),button('Rename',async()=>{const title=promptTitle(record.title);if(title)await mutate(`/api/kanban/${kind}/${encodeURIComponent(record.id)}`,'PATCH',{title},`${kind.slice(0,-1)} renamed.`);}));row.append(button('Delete',async()=>{if(await confirmDelete(record,kind))await removeItem(kind,record.id);}));if(kind==='epics')row.append(button('Add feature',async()=>{const title=promptTitle();if(title)await mutate('/api/kanban/features','POST',{epic_id:record.id,title},'Feature created.');}));if(kind==='features')row.append(button('Add story',async()=>{const title=promptTitle();if(title)await mutate('/api/kanban/stories','POST',{feature_id:record.id,title},'Story created in Backlog.');}));if(kind==='epics')row.append(button('Add story',async()=>{const title=promptTitle();if(title)await mutate('/api/kanban/stories','POST',{epic_id:record.id,title},'Story created in Backlog.');}));return row;}
+  function actionRow(record,kind,parentId){const row=el('div','kanban-inline');row.append(safeTitle(record,kind),button('Rename',async()=>{const title=promptTitle(record.title);if(title)await mutate(`/api/kanban/${kind}/${encodeURIComponent(record.id)}`,'PATCH',{title},`${kind.slice(0,-1)} renamed.`);}));row.append(button('Delete',async(e)=>{const b=e.currentTarget;if(b.disabled)return;b.disabled=true;feedback.textContent='Checking what this would delete…';try{if(await confirmDelete(record,kind))await removeItem(kind,record.id);else feedback.textContent='';}finally{b.disabled=false;}}));if(kind==='epics')row.append(button('Add feature',async()=>{const title=promptTitle();if(title)await mutate('/api/kanban/features','POST',{epic_id:record.id,title},'Feature created.');}));if(kind==='features')row.append(button('Add story',async()=>{const title=promptTitle();if(title)await mutate('/api/kanban/stories','POST',{feature_id:record.id,title},'Story created in Backlog.');}));if(kind==='epics')row.append(button('Add story',async()=>{const title=promptTitle();if(title)await mutate('/api/kanban/stories','POST',{epic_id:record.id,title},'Story created in Backlog.');}));return row;}
   function renderStory(s){const item=el('div','kanban-item surface');item.append(actionRow(s,'stories'));const select=el('select','');select.setAttribute('aria-label',`Status for ${s.title}`);for(const [value,label] of allStatuses){const option=el('option','',label);option.value=value;option.selected=value===s.status;select.append(option);}select.addEventListener('change',async()=>{const previous=s.status;try{const updated=await request(`/api/kanban/stories/${encodeURIComponent(s.id)}`,'PATCH',{status:select.value});Object.assign(s,updated);render();feedback.textContent='Story status updated.';}catch(err){select.value=previous;feedback.textContent=`Status not saved: ${err.message}`;await reload(feedback.textContent);}});item.append(select);return item;}
   function renderBacklog(){const mount=$('backlog-mount');mount.replaceChildren();const featuresOf=e=>state.features.filter(f=>f.epic_id===e.id);const storiesForFeature=f=>state.stories.filter(s=>s.feature_id===f.id);for(const epic of state.epics){const group=el('section','surface kanban-item');group.append(actionRow(epic,'epics'));const children=el('div','kanban-children');for(const feature of featuresOf(epic)){const fg=el('section','surface kanban-item');fg.append(actionRow(feature,'features'));const fs=storiesForFeature(feature);if(!fs.length)fg.append(el('p','kanban-empty','No stories in this feature.'));fs.forEach(s=>fg.append(renderStory(s)));children.append(fg);}state.stories.filter(s=>s.epic_id===epic.id).forEach(s=>children.append(renderStory(s)));if(!featuresOf(epic).length&&!state.stories.some(s=>s.epic_id===epic.id))children.append(el('p','kanban-empty','No features or stories yet.'));group.append(children);mount.append(group);}if(!state.epics.length)mount.append(el('p','kanban-empty surface','No epics yet. Create one to get started.'));mount.prepend(button('Add epic',async()=>{const title=promptTitle();if(title)await mutate('/api/kanban/epics','POST',{title},'Epic created.');}));}
   function render(){renderBoard();renderBacklog();}
   function show(which){const board=which==='board';$('board-view').hidden=!board;$('backlog-view').hidden=board;$('board-toggle').setAttribute('aria-pressed',String(board));$('backlog-toggle').setAttribute('aria-pressed',String(!board));}
-  $('board-toggle').addEventListener('click',()=>show('board'));$('backlog-toggle').addEventListener('click',()=>show('backlog'));
+  let chosen=false;
+  const choose=which=>{chosen=true;show(which);};
+  $('board-toggle').addEventListener('click',()=>choose('board'));$('backlog-toggle').addEventListener('click',()=>choose('backlog'));
   // The board is three empty lanes until something exists, and the only
-  // "Add epic" control is built by the backlog tree. Landing on the board
-  // would leave a fresh install with nothing to press.
-  reload().then(()=>{if(!state.epics.length&&!state.stories.length)show('backlog');});
+  // "Add epic" control is built by the backlog tree, so a fresh install
+  // landing on the board has nothing to press. Only on a load that actually
+  // succeeded — a failed one leaves state empty too, and switching then
+  // moves the user to a panel renderBacklog never filled. And not over a
+  // toggle the user pressed while the first load was still in flight.
+  reload().then(ok=>{if(ok&&!chosen&&!state.epics.length&&!state.stories.length)show('backlog');});
 })();
 </script>
 {% endblock %}
