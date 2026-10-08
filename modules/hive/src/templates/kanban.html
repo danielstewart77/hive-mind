@@ -3,8 +3,11 @@
 {% block content %}
 <style>
 .kanban-page { max-width: 1440px; margin: 0 auto; }
-.kanban-toolbar { display:flex; gap:.5rem; margin:1.25rem 0; }
-.kanban-toolbar [aria-pressed="true"] { background:var(--console-accent, #c9a84c); color:#111; }
+.kanban-toolbar { display:flex; gap:.75rem; margin:1rem auto 1.5rem; max-width:760px; justify-content:center; }
+.kanban-toolbar a { flex:1; text-align:center; padding:.85rem 1.2rem; border:1px solid var(--console-border, #555); border-radius:12px; text-decoration:none; font-weight:650; background:var(--console-surface, #202020); transition:transform .15s ease, background .15s ease, border-color .15s ease; }
+.kanban-toolbar a:hover { transform:translateY(-1px); border-color:var(--console-accent, #c9a84c); }
+.kanban-toolbar a.is-active { background:var(--console-accent, #c9a84c); color:#111; border-color:var(--console-accent, #c9a84c); }
+@media(max-width:520px){.kanban-toolbar{gap:.5rem}.kanban-toolbar a{padding:.75rem .5rem}}
 .kanban-error { color:var(--console-danger, #ef7777); min-height:1.5em; }
 .kanban-board { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:1rem; }
 .kanban-lane { min-height:250px; padding:1rem; }
@@ -19,17 +22,18 @@
 .kanban-inline { display:flex; flex-wrap:wrap; gap:.5rem; align-items:center; }
 .kanban-item-title { font-weight:600; margin-right:auto; }
 .kanban-empty { opacity:.72; padding:.6rem; }
+.kanban-page summary { cursor:pointer; }
+.kanban-drag-over { outline:2px dashed var(--console-accent, #c9a84c); }
 @media(max-width:800px){.kanban-board{grid-template-columns:1fr}.kanban-lane{min-height:0}.kanban-drop{min-height:110px}}
 </style>
 <main class="page kanban-page" id="kanban-page">
-  <header class="page-header"><div><h1>Kanban</h1><p>Move work forward on the board, or organize the complete backlog.</p></div></header>
-  <div class="kanban-toolbar" role="group" aria-label="Kanban view">
-    <button class="button" type="button" id="board-toggle" aria-pressed="true">Board</button>
-    <button class="button" type="button" id="backlog-toggle" aria-pressed="false">Backlog</button>
-  </div>
+  <nav class="kanban-toolbar" aria-label="Kanban view">
+    <a href="/kanban/backlog" class="{% if view == 'backlog' %}is-active{% endif %}" {% if view == 'backlog' %}aria-current="page"{% endif %}>Backlog</a>
+    <a href="/kanban/board" class="{% if view == 'board' %}is-active{% endif %}" {% if view == 'board' %}aria-current="page"{% endif %}>Board</a>
+  </nav>
   <p id="kanban-feedback" class="kanban-error" role="status" aria-live="polite">Loading Kanban…</p>
-  <section id="board-view" aria-label="Kanban board"><div class="kanban-board" id="board-mount"></div></section>
-  <section id="backlog-view" aria-label="Kanban backlog" hidden><div id="backlog-mount" class="kanban-tree"></div></section>
+  <section id="board-view" aria-label="Kanban board" {% if view != 'board' %}hidden{% endif %}><div class="kanban-board" id="board-mount"></div></section>
+  <section id="backlog-view" aria-label="Kanban backlog" {% if view != 'backlog' %}hidden{% endif %}><div class="kanban-inline" role="group" aria-label="Expand or collapse backlog levels"><button class="button" type="button" id="collapse-level" aria-label="Collapse next level">−</button><button class="button" type="button" id="expand-level" aria-label="Expand next level">+</button></div><div id="backlog-mount" class="kanban-tree"></div></section>
 </main>
 <script>
 (() => {
@@ -87,22 +91,22 @@
   function safeTitle(record, kind){const span=el('span','kanban-item-title',record.title);return span;}
   async function mutate(url,method,body,msg){try{await request(url,method,body);await reload(msg);}catch(err){feedback.textContent=`Change not saved: ${err.message}`;}}
   function promptTitle(initial=''){const value=window.prompt('Title',initial);return value===null?null:value.trim();}
-  function actionRow(record,kind,parentId){const row=el('div','kanban-inline');row.append(safeTitle(record,kind),button('Rename',async()=>{const title=promptTitle(record.title);if(title)await mutate(`/api/kanban/${kind}/${encodeURIComponent(record.id)}`,'PATCH',{title},`${kind.slice(0,-1)} renamed.`);}));row.append(button('Delete',async(e)=>{const b=e.currentTarget;if(b.disabled)return;b.disabled=true;feedback.textContent='Checking what this would delete…';try{const asked=await confirmDelete(record,kind);if(asked==='yes')await removeItem(kind,record.id);else if(asked==='no')feedback.textContent='';}finally{b.disabled=false;}}));if(kind==='epics')row.append(button('Add feature',async()=>{const title=promptTitle();if(title)await mutate('/api/kanban/features','POST',{epic_id:record.id,title},'Feature created.');}));if(kind==='features')row.append(button('Add story',async()=>{const title=promptTitle();if(title)await mutate('/api/kanban/stories','POST',{feature_id:record.id,title},'Story created in Backlog.');}));if(kind==='epics')row.append(button('Add story',async()=>{const title=promptTitle();if(title)await mutate('/api/kanban/stories','POST',{epic_id:record.id,title},'Story created in Backlog.');}));return row;}
+  function actionRow(record,kind,parentId){const row=el('div','kanban-inline');row.append(safeTitle(record,kind),button('Rename',async()=>{const title=promptTitle(record.title);if(title)await mutate(`/api/kanban/${kind}/${encodeURIComponent(record.id)}`,'PATCH',{title},`${kind.slice(0,-1)} renamed.`);}));row.append(button('Delete',async(e)=>{const b=e.currentTarget;if(b.disabled)return;b.disabled=true;feedback.textContent='Checking what this would delete…';try{const asked=await confirmDelete(record,kind);if(asked==='yes')await removeItem(kind,record.id);else if(asked==='no')feedback.textContent='';}finally{b.disabled=false;}}));
+row.append(button('Details',()=>showDetails(record)));if(kind==='epics')row.append(button('Add feature',async()=>{const title=promptTitle();if(title)await mutate('/api/kanban/features','POST',{epic_id:record.id,title},'Feature created.');}));if(kind==='features')row.append(button('Add story',async()=>{const title=promptTitle();if(title)await mutate('/api/kanban/stories','POST',{feature_id:record.id,title},'Story created in Backlog.');}));if(kind==='epics')row.append(button('Add story',async()=>{const title=promptTitle();if(title)await mutate('/api/kanban/stories','POST',{epic_id:record.id,title},'Story created in Backlog.');}));return row;}
   function renderStory(s){const item=el('div','kanban-item surface');item.append(actionRow(s,'stories'));const select=el('select','');select.setAttribute('aria-label',`Status for ${s.title}`);for(const [value,label] of allStatuses){const option=el('option','',label);option.value=value;option.selected=value===s.status;select.append(option);}select.addEventListener('change',async()=>{const previous=s.status;try{const updated=await request(`/api/kanban/stories/${encodeURIComponent(s.id)}`,'PATCH',{status:select.value});Object.assign(s,updated);render();feedback.textContent='Story status updated.';}catch(err){select.value=previous;feedback.textContent=`Status not saved: ${err.message}`;await reload(feedback.textContent);}});item.append(select);return item;}
-  function renderBacklog(){const mount=$('backlog-mount');mount.replaceChildren();const featuresOf=e=>state.features.filter(f=>f.epic_id===e.id);const storiesForFeature=f=>state.stories.filter(s=>s.feature_id===f.id);for(const epic of state.epics){const group=el('section','surface kanban-item');group.append(actionRow(epic,'epics'));const children=el('div','kanban-children');for(const feature of featuresOf(epic)){const fg=el('section','surface kanban-item');fg.append(actionRow(feature,'features'));const fs=storiesForFeature(feature);if(!fs.length)fg.append(el('p','kanban-empty','No stories in this feature.'));fs.forEach(s=>fg.append(renderStory(s)));children.append(fg);}state.stories.filter(s=>s.epic_id===epic.id).forEach(s=>children.append(renderStory(s)));if(!featuresOf(epic).length&&!state.stories.some(s=>s.epic_id===epic.id))children.append(el('p','kanban-empty','No features or stories yet.'));group.append(children);mount.append(group);}if(!state.epics.length)mount.append(el('p','kanban-empty surface','No epics yet. Create one to get started.'));mount.prepend(button('Add epic',async()=>{const title=promptTitle();if(title)await mutate('/api/kanban/epics','POST',{title},'Epic created.');}));}
+  function enableDrop(target,kind,parentId,beforeId){target.addEventListener('dragover',e=>{e.preventDefault();target.classList.add('kanban-drag-over');});target.addEventListener('dragleave',()=>target.classList.remove('kanban-drag-over'));target.addEventListener('drop',async e=>{e.preventDefault();target.classList.remove('kanban-drag-over');let data;try{data=JSON.parse(e.dataTransfer.getData('application/json'));}catch{return;}if(data.kind!==kind||data.id===beforeId)return;const body=kind==='features'?{epic_id:parentId}:{feature_id:parentId};if(beforeId)body.before_id=beforeId;try{await request(`/api/kanban/${kind}/${encodeURIComponent(data.id)}`,'PATCH',body);await reload('Order updated.');}catch(err){await reload(`Move failed: ${err.message}`);}});}
+  function makeDraggable(node,kind,id){node.draggable=true;node.addEventListener('dragstart',e=>{e.dataTransfer.setData('application/json',JSON.stringify({kind,id}));e.dataTransfer.effectAllowed='move';});}
+  function renderBacklog(){const mount=$('backlog-mount');mount.replaceChildren();const featuresOf=e=>state.features.filter(f=>f.epic_id===e.id);const storiesForFeature=f=>state.stories.filter(s=>s.feature_id===f.id);mount.append(button('Add epic',async()=>{const title=promptTitle();if(title)await mutate('/api/kanban/epics','POST',{title},'Epic created.');}));state.epics.forEach((epic,ei)=>{const group=el('details','surface kanban-item');group.open=true;const summary=el('summary','');summary.append(el('span','kanban-item-title',`${ei+1}. ${epic.title}`));group.append(summary,actionRow(epic,'epics'));const children=el('div','kanban-children');const features=featuresOf(epic);features.forEach((feature,fi)=>{const fg=el('details','surface kanban-item');fg.open=true;const fs=storiesForFeature(feature);const head=el('summary','');head.append(el('span','kanban-item-title',`${ei+1}.${fi+1} ${feature.title}`));fg.append(head,actionRow(feature,'features'));makeDraggable(fg,'features',feature.id);enableDrop(fg,'features',epic.id,feature.id);const storyList=el('div','kanban-children');fs.forEach((story,si)=>{const item=renderStory(story);const title=item.querySelector('.kanban-item-title');if(title)title.textContent=`${ei+1}.${fi+1}.${si+1} ${story.title}`;makeDraggable(item,'stories',story.id);enableDrop(item,'stories',feature.id,story.id);storyList.append(item);});if(!fs.length)fg.append(el('p','kanban-empty','No stories in this feature.'));fg.append(storyList);children.append(fg);});const direct=state.stories.filter(s=>s.epic_id===epic.id);direct.forEach((story,si)=>{const item=renderStory(story);const title=item.querySelector('.kanban-item-title');if(title)title.textContent=`${ei+1}.S${si+1} ${story.title}`;children.append(item);});if(!features.length&&!direct.length)children.append(el('p','kanban-empty','No features or stories yet.'));group.append(children);enableDrop(group,'features',epic.id,null);mount.append(group);});if(!state.epics.length)mount.append(el('p','kanban-empty surface','No epics yet. Create one to get started.'));}
   function render(){renderBoard();renderBacklog();}
-  function show(which){const board=which==='board';$('board-view').hidden=!board;$('backlog-view').hidden=board;$('board-toggle').setAttribute('aria-pressed',String(board));$('backlog-toggle').setAttribute('aria-pressed',String(!board));}
-  let chosen=false;
-  const choose=which=>{chosen=true;show(which);};
-  $('board-toggle').addEventListener('click',()=>choose('board'));$('backlog-toggle').addEventListener('click',()=>choose('backlog'));
-  // The board is three empty lanes until something exists, and the only
-  // "Add epic" control is built by the backlog tree, so a fresh install
-  // landing on the board has nothing to press. Only on a load that actually
-  // succeeded — a failed one leaves state empty too, and switching then
-  // moves the user to a panel renderBacklog never filled. And not over a
-  // toggle the user pressed while the first load was still in flight.
-  const boardIsBare=()=>!state.stories.some(s=>statuses.some(([v])=>v===s.status));
-  reload().then(ok=>{if(ok&&!chosen&&boardIsBare())show('backlog');});
+  function show(which){const board=which==='board';$('board-view').hidden=!board;$('backlog-view').hidden=board;}
+  function showDetails(record){const fields=['description','requirements','acceptance_criteria','qa_tests'];const lines=fields.map(f=>`${f}: ${record[f] ?? ''}`);alert(lines.join('\n'));}
+  let collapseLevel=0, expandLevel=0;
+  function itemLevel(node){const label=node.querySelector(':scope > summary .kanban-item-title')?.textContent||'';return (label.match(/\d+/g)||[]).length;}
+  $('collapse-level').addEventListener('click',()=>{const nodes=Array.from($('backlog-mount').querySelectorAll('details'));const level=collapseLevel++%3;const target=[3,2,1][level];nodes.filter(n=>itemLevel(n)===target).forEach(n=>{n.open=false;});});
+  $('expand-level').addEventListener('click',()=>{const nodes=Array.from($('backlog-mount').querySelectorAll('details'));const level=expandLevel++%3;const target=[1,2,3][level];nodes.filter(n=>itemLevel(n)===target).forEach(n=>{n.open=true;});});
+  const initialView={{ view|tojson }};
+  show(initialView);
+  reload();
 })();
 </script>
 {% endblock %}

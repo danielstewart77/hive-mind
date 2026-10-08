@@ -15,11 +15,56 @@ def signed_in(monkeypatch):
     return client
 
 
-def test_a_signed_out_visitor_is_sent_to_log_in(monkeypatch):
+def test_kanban_view_routes_require_authentication(monkeypatch):
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
-    response = TestClient(main_mod.app).get("/kanban", follow_redirects=False)
+    client = TestClient(main_mod.app)
+    for path in ("/kanban", "/kanban/board", "/kanban/backlog"):
+        response = client.get(path, follow_redirects=False)
+        assert response.status_code == 303
+        assert response.headers["location"] == f"/login?next={path}"
+
+
+def test_backlog_uses_collapsible_items_and_drag_drop_hooks(signed_in):
+    body = signed_in.get("/kanban/backlog")
+    assert body.status_code == 200
+    assert "el('details'" in body.text
+    assert "application/json" in body.text
+    assert "before_id" in body.text
+    assert "enableDrop" in body.text
+    assert 'id="collapse-level"' in body.text
+    assert 'id="expand-level"' in body.text
+    assert "const target=[3,2,1][level]" in body.text
+    assert "const target=[1,2,3][level]" in body.text
+    assert 'href="/kanban/backlog"' in body.text
+    assert 'href="/kanban/board"' in body.text
+    assert 'aria-current="page"' in body.text
+    assert 'href="/kanban/backlog" class="is-active" aria-current="page"' in body.text
+    assert "aria-current=\"page\"" in body.text
+    assert "board-toggle" not in body.text
+    assert "backlog-toggle" not in body.text
+    assert "Move work forward on the board" not in body.text
+
+
+def test_board_and_backlog_routes_render_only_their_selected_view(signed_in):
+    board = signed_in.get("/kanban/board")
+    backlog = signed_in.get("/kanban/backlog")
+    assert board.status_code == backlog.status_code == 200
+    assert 'id="board-view" aria-label="Kanban board"' in board.text
+    assert 'id="backlog-view" aria-label="Kanban backlog" hidden' in board.text
+    assert 'id="backlog-view" aria-label="Kanban backlog"' in backlog.text
+    assert 'id="board-view" aria-label="Kanban board" hidden' in backlog.text
+
+
+def test_kanban_navigation_links_point_to_the_distinct_view_routes(signed_in):
+    body = signed_in.get("/kanban/backlog").text
+    assert 'href="/kanban/backlog"' in body
+    assert 'href="/kanban/board"' in body
+
+
+def test_a_legacy_kanban_url_redirects_to_the_board_route(signed_in):
+    response = signed_in.get("/kanban?filter=active", follow_redirects=False)
     assert response.status_code == 303
-    assert response.headers["location"].startswith("/login?next=/kanban")
+    assert response.headers["location"] == "/kanban/board?filter=active"
 
 
 def test_a_signed_in_visitor_is_served_the_board_and_not_another_page(signed_in):
@@ -29,6 +74,12 @@ def test_a_signed_in_visitor_is_served_the_board_and_not_another_page(signed_in)
     other console page has, so naming them is how this distinguishes the
     kanban page from any other page the route could have been pointed at.
     """
-    body = signed_in.get("/kanban")
+    body = signed_in.get("/kanban/board")
     assert body.status_code == 200
-    assert "board-mount" in body.text and "backlog-mount" in body.text
+    assert "board-mount" in body.text and 'id="backlog-view" aria-label="Kanban backlog" hidden' in body.text
+
+
+def test_kanban_entry_point_sends_a_signed_in_browser_to_the_board_keeping_its_query(signed_in):
+    response = signed_in.get("/kanban?epic=e1", follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/kanban/board?epic=e1"

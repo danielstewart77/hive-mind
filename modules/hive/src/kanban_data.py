@@ -79,10 +79,18 @@ def _connect() -> sqlite3.Connection:
             parent_id TEXT REFERENCES work_items(id),
             title TEXT NOT NULL,
             status TEXT,
-            position INTEGER NOT NULL
+            position INTEGER NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            requirements TEXT NOT NULL DEFAULT '',
+            acceptance_criteria TEXT NOT NULL DEFAULT '',
+            qa_tests TEXT NOT NULL DEFAULT ''
         )
         """
     )
+    columns = {row["name"] for row in connection.execute("PRAGMA table_info(work_items)")}
+    for column in ("description", "requirements", "acceptance_criteria", "qa_tests"):
+        if column not in columns:
+            connection.execute(f"ALTER TABLE work_items ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
     connection.execute(
         "CREATE INDEX IF NOT EXISTS work_items_kind_position"
         " ON work_items (kind, position)"
@@ -162,7 +170,15 @@ def _row_to_record(row: sqlite3.Row) -> dict[str, Any]:
     with `s.epic_id === epic.id`, so a story carrying both keys with one null
     reads as parentless on one view and duplicated on the other.
     """
-    record: dict[str, Any] = {"id": row["id"], "title": row["title"]}
+    record: dict[str, Any] = {
+    "id": row["id"],
+    "title": row["title"],
+    "description": row["description"],
+    "requirements": row["requirements"],
+    "acceptance_criteria": row["acceptance_criteria"],
+    "qa_tests": row["qa_tests"],
+}
+
     if row["kind"] == "feature":
         record["epic_id"] = row["parent_id"]
     elif row["kind"] == "story":
@@ -173,7 +189,8 @@ def _row_to_record(row: sqlite3.Row) -> dict[str, Any]:
 
 _SELECT = """
     SELECT item.id, item.kind, item.parent_id, item.title, item.status,
-           parent.kind AS parent_kind
+           item.description, item.requirements, item.acceptance_criteria, item.qa_tests,
+           item.position, parent.kind AS parent_kind
       FROM work_items AS item
       LEFT JOIN work_items AS parent ON parent.id = item.parent_id
 """
@@ -201,6 +218,38 @@ def _next_position(connection: sqlite3.Connection) -> int:
         (_MIN_POSITION - 1,),
     ).fetchone()
     return int(row["next"])
+
+
+def _ordered_children(connection: sqlite3.Connection, parent_id: str, kind: str) -> list[str]:
+    return [row["id"] for row in connection.execute(
+        "SELECT id FROM work_items WHERE parent_id = ? AND kind = ? ORDER BY position, rowid",
+        (parent_id, kind),
+    ).fetchall()]
+
+
+def _reorder_children(connection: sqlite3.Connection, ids: list[str]) -> None:
+    for position, item_id in enumerate(ids, start=_MIN_POSITION):
+        connection.execute("UPDATE work_items SET position = ? WHERE id = ?", (position, item_id))
+
+
+def _move_child(connection: sqlite3.Connection, item_id: str, kind: str, parent_id: str, before_id: str | None) -> dict[str, Any]:
+    row = _fetch(connection, item_id, kind)
+    old_parent = row["parent_id"]
+    siblings = _ordered_children(connection, parent_id, kind)
+    if old_parent == parent_id:
+        siblings.remove(item_id)
+    if before_id is None:
+        index = len(siblings)
+    else:
+        if before_id not in siblings:
+            raise ValueError("drop target is not a child of the destination")
+        index = siblings.index(before_id)
+    siblings.insert(index, item_id)
+    connection.execute("UPDATE work_items SET parent_id = ? WHERE id = ?", (parent_id, item_id))
+    _reorder_children(connection, siblings)
+    if old_parent is not None and old_parent != parent_id:
+        _reorder_children(connection, _ordered_children(connection, old_parent, kind))
+    return _row_to_record(_fetch(connection, item_id, kind))
 
 
 def _write(connection: sqlite3.Connection) -> sqlite3.Connection:
@@ -312,32 +361,36 @@ def _insert(
     title: str,
     parent_id: str | None,
     status: str | None,
+    description: str = "",
+    requirements: str = "",
+    acceptance_criteria: str = "",
+    qa_tests: str = "",
 ) -> dict[str, Any]:
     record_id = _new_id(kind)
     connection.execute(
-        "INSERT INTO work_items (id, kind, parent_id, title, status, position)"
-        " VALUES (?, ?, ?, ?, ?, ?)",
-        (record_id, kind, parent_id, title, status, _next_position(connection)),
+        "INSERT INTO work_items (id, kind, parent_id, title, status, description, requirements, acceptance_criteria, qa_tests, position)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (record_id, kind, parent_id, title, status, description, requirements, acceptance_criteria, qa_tests, _next_position(connection)),
     )
     return _row_to_record(_fetch(connection, record_id, kind))
 
 
-def create_epic(title: str) -> dict[str, Any]:
+def create_epic(title: str, description: str = "", requirements: str = "", acceptance_criteria: str = "", qa_tests: str = "") -> dict[str, Any]:
     checked = _title(title)
     with _session() as connection:
         _write(connection)
-        record = _insert(connection, "epic", checked, None, None)
+        record = _insert(connection, "epic", checked, None, None, description, requirements, acceptance_criteria, qa_tests)
         connection.execute("COMMIT")
         return record
 
 
-def create_feature(epic_id: str, title: str) -> dict[str, Any]:
+def create_feature(epic_id: str, title: str, description: str = "", requirements: str = "", acceptance_criteria: str = "", qa_tests: str = "") -> dict[str, Any]:
     checked = _title(title)
     with _session() as connection:
         _write(connection)
         try:
             _fetch(connection, epic_id, "epic")
-            record = _insert(connection, "feature", checked, epic_id, None)
+            record = _insert(connection, "feature", checked, epic_id, None, description, requirements, acceptance_criteria, qa_tests)
             connection.execute("COMMIT")
         except BaseException:
             connection.execute("ROLLBACK")
@@ -350,6 +403,10 @@ def create_story(
     feature_id: str | None = None,
     epic_id: str | None = None,
     status: str = "backlog",
+    description: str = "",
+    requirements: str = "",
+    acceptance_criteria: str = "",
+    qa_tests: str = "",
 ) -> dict[str, Any]:
     parent_kind, parent_id = _one_parent(feature_id, epic_id)
     checked = _title(title)
@@ -358,7 +415,7 @@ def create_story(
         _write(connection)
         try:
             _fetch(connection, parent_id, parent_kind)
-            record = _insert(connection, "story", checked, parent_id, checked_status)
+            record = _insert(connection, "story", checked, parent_id, checked_status, description, requirements, acceptance_criteria, qa_tests)
             connection.execute("COMMIT")
         except BaseException:
             connection.execute("ROLLBACK")
@@ -377,9 +434,9 @@ def _one_parent(
 
 
 _ALLOWED_UPDATES = {
-    "epic": {"title"},
-    "feature": {"title", "epic_id"},
-    "story": {"title", "status", "feature_id", "epic_id"},
+    "epic": {"title", "description", "requirements", "acceptance_criteria", "qa_tests"},
+    "feature": {"title", "epic_id", "before_id", "description", "requirements", "acceptance_criteria", "qa_tests"},
+    "story": {"title", "status", "feature_id", "epic_id", "before_id", "description", "requirements", "acceptance_criteria", "qa_tests"},
 }
 
 
@@ -398,16 +455,37 @@ def _update(kind: str, record_id: str, changes: dict[str, Any]) -> dict[str, Any
                 assignments["title"] = _title(changes["title"])
             if "status" in changes:
                 assignments["status"] = _check_status(changes["status"])
+            if "description" in changes:
+                assignments["description"] = str(changes["description"])
+            if "requirements" in changes:
+                assignments["requirements"] = str(changes["requirements"])
+            if "acceptance_criteria" in changes:
+                assignments["acceptance_criteria"] = str(changes["acceptance_criteria"])
+            if "qa_tests" in changes:
+                assignments["qa_tests"] = str(changes["qa_tests"])
 
-            if kind == "feature" and "epic_id" in changes:
-                _fetch(connection, changes["epic_id"], "epic")
-                assignments["parent_id"] = changes["epic_id"]
-            elif kind == "story" and ("feature_id" in changes or "epic_id" in changes):
-                parent_kind, parent_id = _one_parent(
-                    changes.get("feature_id"), changes.get("epic_id")
-                )
+            if kind == "feature" and ("epic_id" in changes or "before_id" in changes):
+                parent_id = changes.get("epic_id", row["parent_id"])
+                _fetch(connection, parent_id, "epic")
+                record = _move_child(connection, record_id, kind, parent_id, changes.get("before_id"))
+                if assignments:
+                    clause = ", ".join(f"{column} = ?" for column in assignments)
+                    connection.execute(f"UPDATE work_items SET {clause} WHERE id = ?", (*assignments.values(), record_id))
+                assignments = {}
+            elif kind == "story" and ("feature_id" in changes or "epic_id" in changes or "before_id" in changes):
+                if "feature_id" not in changes and "epic_id" not in changes:
+                    parent_id = row["parent_id"]
+                    parent_kind = row["parent_kind"]
+                else:
+                    parent_kind, parent_id = _one_parent(
+                        changes.get("feature_id"), changes.get("epic_id")
+                    )
                 _fetch(connection, parent_id, parent_kind)
-                assignments["parent_id"] = parent_id
+                record = _move_child(connection, record_id, kind, parent_id, changes.get("before_id"))
+                if assignments:
+                    clause = ", ".join(f"{column} = ?" for column in assignments)
+                    connection.execute(f"UPDATE work_items SET {clause} WHERE id = ?", (*assignments.values(), record_id))
+                assignments = {}
 
             if assignments:
                 clause = ", ".join(f"{column} = ?" for column in assignments)
