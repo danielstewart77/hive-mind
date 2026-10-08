@@ -497,7 +497,24 @@ async def mind_detail_page(request: Request, mind_id: str):
 
 @app.get("/kanban", response_class=HTMLResponse)
 async def kanban_page(request: Request):
-    return _console_page(request, "kanban.html")
+    # A page, not an API: an unauthenticated browser belongs at the login
+    # form like every other console route, not holding a bare 401.
+    if not get_current_user_from_request(request):
+        return _login_redirect_for(request)
+    target = "/kanban/board"
+    if request.url.query:
+        target += f"?{request.url.query}"
+    return RedirectResponse(target, status_code=303)
+
+
+@app.get("/kanban/board", response_class=HTMLResponse)
+async def kanban_board_page(request: Request):
+    return _console_page(request, "kanban.html", view="board")
+
+
+@app.get("/kanban/backlog", response_class=HTMLResponse)
+async def kanban_backlog_page(request: Request):
+    return _console_page(request, "kanban.html", view="backlog")
 
 
 @app.get("/edge-minds", response_class=HTMLResponse)
@@ -527,8 +544,8 @@ _KANBAN_CREATE_FIELDS = {
 }
 _KANBAN_UPDATE_FIELDS = {
     "epics": {"title"},
-    "features": {"epic_id", "title"},
-    "stories": {"title", "feature_id", "epic_id", "status"},
+    "features": {"epic_id", "title", "before_id"},
+    "stories": {"title", "feature_id", "epic_id", "status", "before_id"},
 }
 
 
@@ -547,6 +564,8 @@ async def _kanban_body(request: Request, allowed: set[str], required: set[str] =
         raise HTTPException(status_code=400, detail=f"Unsupported fields: {', '.join(sorted(extra))}")
     if "status" in body and body["status"] not in kanban_data.STATUSES:
         raise HTTPException(status_code=400, detail=f"unsupported status: {body['status']}")
+    if "before_id" in body and not isinstance(body["before_id"], str):
+        raise HTTPException(status_code=400, detail="before_id must be a string")
     return body
 
 

@@ -26,6 +26,22 @@ def _board(client):
     return epic, feature, story
 
 
+def test_data_api_migrates_an_existing_board_database(client):
+    import os
+    import sqlite3
+
+    database = sqlite3.connect(os.environ["HIVE_DB_PATH"])
+    database.execute("CREATE TABLE work_items (id TEXT PRIMARY KEY, kind TEXT NOT NULL, parent_id TEXT REFERENCES work_items(id), title TEXT NOT NULL, status TEXT, position INTEGER NOT NULL)")
+    database.execute("INSERT INTO work_items VALUES ('e-existing', 'epic', NULL, 'Existing', NULL, 1)")
+    database.commit()
+    database.close()
+
+    response = client.get("/api/kanban/data")
+    assert response.status_code == 200
+    assert response.json()["epics"][0]["title"] == "Existing"
+    assert response.json()["epics"][0]["description"] == ""
+
+
 def test_a_new_board_is_served_with_every_lane_present_and_empty(client):
     assert client.get("/api/kanban/data").json() == {
         "epics": [],
@@ -63,6 +79,18 @@ def test_a_rename_is_stored_and_not_merely_reported(client):
     ).status_code == 200
     stored = client.get("/api/kanban/data").json()["epics"][0]
     assert stored["title"] == "Renamed"
+
+
+def test_a_story_can_be_reordered_to_a_drop_position_through_the_api(client):
+    epic, feature, original_story = _board(client)
+    client.delete(f"/api/kanban/stories/{original_story['id']}")
+    second = client.post("/api/kanban/stories", json={"title": "Second", "feature_id": feature["id"]}).json()
+    first = client.post("/api/kanban/stories", json={"title": "First", "feature_id": feature["id"]}).json()
+
+    response = client.patch(f"/api/kanban/stories/{second['id']}", json={"feature_id": feature["id"], "before_id": first["id"]})
+    assert response.status_code == 200
+    data = client.get("/api/kanban/data").json()
+    assert [item["id"] for item in data["stories"] if item.get("feature_id") == feature["id"]] == [second["id"], first["id"]]
 
 
 def test_a_status_change_is_stored_and_not_merely_reported(client):
@@ -159,9 +187,10 @@ def test_every_kanban_route_refuses_a_caller_who_is_not_signed_in():
     ):
         assert getattr(anon, method)(path, **kwargs).status_code == 401, path
 
-    page = anon.get("/kanban", follow_redirects=False)
-    assert page.status_code == 303
-    assert page.headers["location"].startswith("/login?next=/kanban")
+    for path in ("/kanban", "/kanban/board", "/kanban/backlog"):
+        page = anon.get(path, follow_redirects=False)
+        assert page.status_code == 303
+        assert page.headers["location"].startswith("/login?next=")
 
 
 def test_a_status_the_board_has_no_lane_for_is_refused_on_update(client):

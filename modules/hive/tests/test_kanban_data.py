@@ -19,6 +19,19 @@ def _db():
     return sqlite3.connect(os.environ["HIVE_DB_PATH"])
 
 
+def test_existing_board_database_without_metadata_columns_is_upgraded(monkeypatch, tmp_path):
+    legacy_path = tmp_path / "legacy.db"
+    connection = sqlite3.connect(legacy_path)
+    connection.execute("CREATE TABLE work_items (id TEXT PRIMARY KEY, kind TEXT NOT NULL, parent_id TEXT REFERENCES work_items(id), title TEXT NOT NULL, status TEXT, position INTEGER NOT NULL)")
+    connection.execute("INSERT INTO work_items VALUES ('e-old', 'epic', NULL, 'Existing epic', NULL, 1)")
+    connection.commit()
+    connection.close()
+    monkeypatch.setenv("HIVE_DB_PATH", str(legacy_path))
+    importlib.reload(store)
+
+    assert store.get_data()["epics"] == [{"id": "e-old", "title": "Existing epic", "description": "", "requirements": "", "acceptance_criteria": "", "qa_tests": ""}]
+
+
 def test_a_new_board_holds_nothing_and_each_list_holds_only_its_own_kind():
     assert store.get_data() == {"epics": [], "features": [], "stories": []}
     epic = store.create_epic("Only epic")
@@ -237,6 +250,8 @@ def test_a_story_moved_to_another_feature_is_stored_under_the_new_one():
     store.update_story(story["id"], feature_id=destination["id"])
 
     assert store.list_stories()[0]["feature_id"] == destination["id"]
+    assert store.list_stories()[0]["id"] == story["id"]
+    assert store.get_data()["stories"] == store.list_stories()
 
 
 def test_every_status_the_board_offers_is_accepted_and_nothing_else_is():
