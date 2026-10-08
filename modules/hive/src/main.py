@@ -78,6 +78,7 @@ import mind_soul
 import mind_files
 import mind_mounts
 import kanban_data
+from starlette.concurrency import run_in_threadpool
 import mind_skills
 import sentinel_review
 from hive_logging import configure_logging, install_fastapi_logging, log_event
@@ -547,9 +548,15 @@ async def _kanban_body(request: Request, allowed: set[str], required: set[str] =
     return body
 
 
-def _kanban_call(function, *args, **kwargs):
+async def _kanban_call(function, *args, **kwargs):
+    """Run a store call off the event loop and map its errors to the wire.
+
+    The store talks to SQLite, which blocks. This database also holds the
+    console's logins, so a contended board write made on the loop stalls
+    every other request in the process, login included.
+    """
     try:
-        return function(*args, **kwargs)
+        return await run_in_threadpool(function, *args, **kwargs)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
     except ValueError as exc:
@@ -559,7 +566,24 @@ def _kanban_call(function, *args, **kwargs):
 @app.get("/api/kanban/data")
 async def api_kanban_data(user: dict = Depends(require_auth)):
     del user
-    return kanban_data.get_data()
+    return await _kanban_call(kanban_data.get_data)
+
+
+_COLLECTION_KIND = {"epics": "epic", "features": "feature", "stories": "story"}
+
+
+@app.get("/api/kanban/{kind}/{record_id}/descendants")
+async def api_kanban_descendants(kind: str, record_id: str, user: dict = Depends(require_auth)):
+    """What a delete of this row would take with it, counted now.
+
+    The page asks immediately before it puts the number in front of Daniel.
+    Its own copy of the board is from whenever it last loaded, and agreeing
+    to destroy two stories that are really nine is not a confirmation.
+    """
+    del user
+    if kind not in _KANBAN_UPDATE_FIELDS:
+        raise HTTPException(status_code=404, detail="Kanban resource not found")
+    return await _kanban_call(kanban_data.count_descendants, record_id, _COLLECTION_KIND[kind])
 
 
 @app.post("/api/kanban/epics")
@@ -574,7 +598,7 @@ async def api_kanban_create(request: Request, user: dict = Depends(require_auth)
     if kind == "stories" and ((body.get("feature_id") is None) == (body.get("epic_id") is None)):
         raise HTTPException(status_code=400, detail="story requires exactly one of feature_id or epic_id")
     entity = {"epics": "epic", "features": "feature", "stories": "story"}[kind]
-    return _kanban_call(getattr(kanban_data, f"create_{entity}"), **body)
+    return await _kanban_call(getattr(kanban_data, f"create_{entity}"), **body)
 
 
 @app.patch("/api/kanban/{kind}/{record_id}")
@@ -586,7 +610,7 @@ async def api_kanban_update(kind: str, record_id: str, request: Request, user: d
     if not body:
         raise HTTPException(status_code=400, detail="At least one update field is required")
     entity = {"epics": "epic", "features": "feature", "stories": "story"}[kind]
-    return _kanban_call(getattr(kanban_data, f"update_{entity}"), record_id, **body)
+    return await _kanban_call(getattr(kanban_data, f"update_{entity}"), record_id, **body)
 
 
 @app.delete("/api/kanban/{kind}/{record_id}")
@@ -595,7 +619,7 @@ async def api_kanban_delete(kind: str, record_id: str, user: dict = Depends(requ
     if kind not in _KANBAN_UPDATE_FIELDS:
         raise HTTPException(status_code=404, detail="Kanban resource not found")
     entity = {"epics": "epic", "features": "feature", "stories": "story"}[kind]
-    return _kanban_call(getattr(kanban_data, f"delete_{entity}"), record_id)
+    return await _kanban_call(getattr(kanban_data, f"delete_{entity}"), record_id)
 
 
 @app.get("/api/minds/install-options")
