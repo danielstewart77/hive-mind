@@ -345,54 +345,64 @@ def test_api_settings_voice_requires_auth(tmp_path, monkeypatch):
     assert client.get("/api/settings/voice").status_code == 401
 
 
-def test_api_settings_voice_merges_server_health_and_per_mind_refs(tmp_path, monkeypatch):
+def test_api_settings_voice_reports_each_server_health(tmp_path, monkeypatch):
+    """The tab is about the servers. Per-mind clips live on the Mind's page."""
     client = _authed_client(tmp_path, monkeypatch)
-    broker_minds = [{"name": "bob"}, {"name": "ada"}]
-    with patch.object(main_mod, "_broker_minds_safe", new=AsyncMock(return_value=broker_minds)), \
-         patch.object(main_mod, "_service_health", new=AsyncMock(return_value={"reachable": True, "detail": {}})), \
-         patch.object(main_mod, "voice_ref_status", side_effect=lambda n: {"size_bytes": 1} if n == "bob" else None):
+    with patch.object(
+        main_mod,
+        "_service_health",
+        new=AsyncMock(return_value={"reachable": True, "detail": {}}),
+    ):
         response = client.get("/api/settings/voice")
 
     assert response.status_code == 200
     body = response.json()
     assert set(body["servers"]) == {"chatterbox", "kokoro"}
-    by_name = {m["name"]: m for m in body["minds"]}
-    assert by_name["bob"]["voice_ref"]["size_bytes"] == 1
-    assert by_name["ada"]["voice_ref"] is None
+    assert body["servers"]["kokoro"]["reachable"] is True
 
 
-def test_api_settings_voice_upload_requires_auth(tmp_path, monkeypatch):
+def test_api_mind_voice_clip_upload_requires_auth(tmp_path, monkeypatch):
     monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
     client = TestClient(main_mod.app)
 
     response = client.post(
-        "/api/settings/voice/bob/voice-ref",
+        "/api/minds/bob/voice/clips",
         files={"file": ("ref.wav", b"RIFF....WAVE", "audio/wav")},
     )
     assert response.status_code == 401
 
 
-def test_api_settings_voice_upload_saves_via_settings_data(tmp_path, monkeypatch):
+def test_api_mind_voice_clip_upload_saves_under_the_sent_filename(
+    tmp_path, monkeypatch
+):
     client = _authed_client(tmp_path, monkeypatch)
-    target = tmp_path / "bob" / "voice_ref.wav"
-    with patch.object(main_mod, "save_voice_ref", return_value=target) as mock_save:
+    target = tmp_path / "bob" / "calm_take.wav"
+    with patch.object(main_mod, "save_voice_clip", return_value=target) as mock_save, \
+         patch.object(main_mod, "list_voice_clips", return_value=[{"name": "calm_take.wav"}]):
         response = client.post(
-            "/api/settings/voice/bob/voice-ref",
-            files={"file": ("ref.wav", b"RIFF....WAVE", "audio/wav")},
+            "/api/minds/bob/voice/clips",
+            files={"file": ("calm_take.wav", b"RIFF....WAVE", "audio/wav")},
         )
 
     assert response.status_code == 200
-    assert response.json()["ok"] is True
-    mock_save.assert_called_once()
+    body = response.json()
+    assert body["ok"] is True
+    assert body["clip"] == "calm_take.wav"
+    # The refreshed listing rides back, so the picker gains the new clip
+    # without a second request.
+    assert body["clips"] == [{"name": "calm_take.wav"}]
     assert mock_save.call_args[0][0] == "bob"
+    assert mock_save.call_args[0][1] == "calm_take.wav"
 
 
-def test_api_settings_voice_upload_rejects_invalid_wav(tmp_path, monkeypatch):
+def test_api_mind_voice_clip_upload_rejects_invalid_wav(tmp_path, monkeypatch):
     client = _authed_client(tmp_path, monkeypatch)
-    with patch.object(main_mod, "save_voice_ref", side_effect=ValueError("not a WAV file")):
+    with patch.object(
+        main_mod, "save_voice_clip", side_effect=ValueError("not a WAV file")
+    ):
         response = client.post(
-            "/api/settings/voice/bob/voice-ref",
+            "/api/minds/bob/voice/clips",
             files={"file": ("ref.wav", b"not audio", "audio/wav")},
         )
 

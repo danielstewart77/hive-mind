@@ -88,8 +88,10 @@ from settings_data import (
     hive_tools_status,
     list_downloads,
     resolve_download_path,
-    save_voice_ref,
-    voice_ref_status,
+    ClipExists,
+    DEFAULT_VOICE_CLIP,
+    list_voice_clips,
+    save_voice_clip,
 )
 
 _canvas_connections: set[WebSocket] = set()
@@ -2534,20 +2536,44 @@ async def api_mind_mounts_update(
 
 @app.get("/api/minds/{name}/voice")
 async def api_mind_voice(name: str, user: dict = Depends(require_auth)):
-    """This Mind's voice, and the voices the speech engine can actually speak.
+    """This Mind's engine and voice, and what each engine offers it.
 
-    The current value comes from the Mind's own file; the catalogue comes from
-    the voice server, because what is selectable is a property of the running
-    engine and its language rather than of any one Mind. Only Kokoro has a
-    catalogue — Chatterbox clones from a reference recording, so for a Mind on
-    Chatterbox the question is which recording it has, not which voice it picked.
+    The current values come from the Mind's own file. What is selectable comes
+    from somewhere different for each engine: Kokoro's voices are a property
+    of the running speech engine and its language, so they are read from the
+    voice server, while Chatterbox clones a recording — so what it offers is
+    the clips sitting in this Mind's own directory.
+
+    Both are reported whichever engine the Mind is on, because the panel has
+    to render the other engine's picker the moment the operator switches to
+    it, without a second round trip to find out what it would contain.
     """
     del user
     gateway_url = await _mind_gateway_url(name)
     configuration = await mind_runtime.fetch_configuration(gateway_url)
     offered = await mind_runtime.fetch_voice_catalogue(_voice_server_urls()["kokoro"])
+    engine = (
+        str(configuration.get("voice_engine") or "").strip().lower()
+        or mind_runtime.DEFAULT_VOICE_ENGINE
+    )
+    voice = str(configuration.get("voice") or "")
+    clips = list_voice_clips(name)
+    # A clip the Mind names that is no longer on the disk is said so rather
+    # than shown as nothing selected: the remedy for a missing recording is
+    # not the remedy for never having picked one, and under Chatterbox a Mind
+    # in this state fails to speak at all.
+    missing = bool(
+        engine == mind_runtime.CHATTERBOX
+        and voice
+        and voice not in {clip["name"] for clip in clips}
+    )
     return {
-        "voice": str(configuration.get("voice") or ""),
+        "voice": voice,
+        "voice_engine": engine,
+        "engines": list(mind_runtime.VOICE_ENGINES),
+        "default_clip": DEFAULT_VOICE_CLIP,
+        "clips": clips,
+        "clip_missing": missing,
         "engine": offered.get("engine") or "",
         "default_voice": offered.get("default_voice") or "",
         "catalogue": offered.get("catalogue") or {},
@@ -2558,7 +2584,7 @@ async def api_mind_voice(name: str, user: dict = Depends(require_auth)):
 async def api_mind_voice_update(
     name: str, request: Request, user: dict = Depends(require_auth)
 ):
-    """Set this Mind's voice.
+    """Set this Mind's voice and the engine that speaks it.
 
     The Mind's own file first, then the broker row that caches it, in that
     order for the same reason the model takes: the Mind re-registers from its
@@ -2566,16 +2592,41 @@ async def api_mind_voice_update(
     would be undone anyway.
     """
     del user
-    voice = await _named_voice(request)
+    voice, engine = await _named_voice_and_engine(request)
+    # A clip this Mind does not have mutes it: Chatterbox resolves the name
+    # against the Mind's own directory and refuses when it finds nothing. The
+    # engine is already checked against the ones that exist for exactly this
+    # reason — a save that reports success and silences the Mind is the
+    # outcome being guarded against — and the clip half needs the same guard.
+    # Checked here rather than trusting the page, because the listing it chose
+    # from may be minutes old and a recording can be removed under it.
+    if engine == mind_runtime.CHATTERBOX:
+        held = {clip["name"] for clip in list_voice_clips(name)}
+        if voice not in held:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"{name} has no reference clip named {voice}. It may have"
+                    " been removed since this page was loaded — reload and"
+                    " pick again."
+                ),
+            )
     gateway_url = await _mind_gateway_url(name)
-    configuration = await mind_runtime.push_voice(gateway_url, voice)
+    configuration = await mind_runtime.push_voice(gateway_url, voice, engine)
+    row = {"voice": voice}
+    if engine:
+        row["voice_engine"] = engine
     await _gateway_request(
         "PUT",
         f"/broker/minds/{urllib.parse.quote(name)}",
-        json_body={"voice": voice},
+        json_body=row,
         admin=True,
     )
-    return {"saved": True, "voice": str(configuration.get("voice") or voice)}
+    return {
+        "saved": True,
+        "voice": str(configuration.get("voice") or voice),
+        "voice_engine": str(configuration.get("voice_engine") or engine),
+    }
 
 
 @app.patch("/api/minds/{name}/configuration")
@@ -2758,12 +2809,21 @@ async def _named_voice(request: Request) -> str:
     written into a Mind's runtime.yaml as its voice. A body that is not JSON at
     all is the caller's mistake and answers 400 rather than 500.
     """
+    return _voice_from(await _json_object(request))
+
+
+async def _json_object(request: Request) -> dict:
+    """A request's body as an object. A body that is not one answers 400."""
     try:
         body = await request.json()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Expected a JSON object") from exc
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Expected a JSON object")
+    return body
+
+
+def _voice_from(body: dict) -> str:
     voice = body.get("voice")
     voice = voice.strip() if isinstance(voice, str) else ""
     if not voice:
@@ -2771,18 +2831,89 @@ async def _named_voice(request: Request) -> str:
     return voice
 
 
+async def _named_voice_and_engine(request: Request) -> tuple[str, str]:
+    """The voice and engine a request names, refusing anything that is not.
+
+    The engine is optional on the wire — a caller setting only a Kokoro voice
+    on a Mind already on Kokoro has no reason to restate it — but an engine
+    that is named must be one that exists. Accepting an unknown one would
+    point the Mind at a voice server nobody is running, and it would go silent
+    rather than refuse the save.
+    """
+    body = await _json_object(request)
+    engine = body.get("voice_engine")
+    engine = engine.strip().lower() if isinstance(engine, str) else ""
+    if engine and engine not in mind_runtime.VOICE_ENGINES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{engine} is not a speech engine: "
+            + ", ".join(mind_runtime.VOICE_ENGINES),
+        )
+    return _voice_from(body), engine
+
+
 @app.post("/api/voices/sample")
 async def api_voice_sample(request: Request, user: dict = Depends(require_auth)):
     """Speak a sample line in one voice, so it can be picked by ear.
 
-    Not per Mind: the voices a sample can be spoken in are a property of the
-    speech engine, exactly as the catalogue is, and every Mind on this hive
-    reads from the same one.
+    Which server speaks it follows the engine the request names, because the
+    two engines are separate processes with separate models. Under Kokoro the
+    voice belongs to the server and every Mind on this hive reads the same
+    catalogue; under Chatterbox it is a recording in one Mind's own directory,
+    so the Mind is named too and the sample is of that Mind's clip.
     """
     del user
-    voice = await _named_voice(request)
-    audio = await mind_runtime.sample_voice(_voice_server_urls()["kokoro"], voice)
+    voice, engine = await _named_voice_and_engine(request)
+    body = await _json_object(request)
+    voice_id = body.get("voice_id")
+    voice_id = voice_id.strip() if isinstance(voice_id, str) else ""
+    # Kokoro when the caller names no engine. Not the Mind-side default:
+    # there is no Mind in this request, and a voice named without an engine is
+    # a catalogued one — the only kind that can be sampled without knowing
+    # whose directory to look in.
+    engine = engine or mind_runtime.KOKORO
+    if engine == mind_runtime.CHATTERBOX and not voice_id:
+        raise HTTPException(
+            status_code=400,
+            detail="A Mind is required to sample one of its reference clips",
+        )
+    audio = await mind_runtime.sample_voice(
+        _voice_server_urls()[engine], voice, voice_id
+    )
     return Response(content=audio, media_type="audio/ogg")
+
+
+@app.post("/api/minds/{name}/voice/clips")
+async def api_mind_voice_clip_upload(
+    name: str, file: UploadFile, user: dict = Depends(require_auth)
+):
+    """Add a reference recording to this Mind's own directory.
+
+    An upload adds a candidate; it does not change what the Mind speaks in.
+    The clip lands under its own filename beside whatever is already there,
+    and becomes the Mind's voice only when the picker saves it — so uploading
+    a second take cannot silently replace the one currently being spoken.
+    """
+    data = await file.read()
+    try:
+        target = save_voice_clip(name, file.filename or "", data)
+    except ClipExists as exc:
+        # Nothing is wrong with the request, so not a 400: the name is taken,
+        # and the operator has to decide whether this is a new recording or a
+        # replacement for one a Mind may be speaking from right now.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_event(
+        log, "mind.voice_clip.uploaded", **_actor_fields(user), mind_name=name,
+        clip=target.name, size_bytes=len(data), path=str(target),
+    )
+    return {
+        "ok": True,
+        "clip": target.name,
+        "size_bytes": len(data),
+        "clips": list_voice_clips(name),
+    }
 
 
 @app.get("/api/minds/{name}/skills")
@@ -3555,31 +3686,7 @@ async def api_settings_voice(user: dict = Depends(require_auth)):
     servers = {
         name: await _service_health(f"{url}/health") for name, url in server_urls.items()
     }
-    broker_minds = await _broker_minds_safe()
-    minds = []
-    for m in broker_minds:
-        if not isinstance(m, dict):
-            continue
-        name = m.get("name") or ""
-        minds.append({"name": name, "voice_ref": voice_ref_status(name) if name else None})
-    minds.sort(key=lambda r: str(r["name"]))
-    return {"servers": servers, "minds": minds}
-
-
-@app.post("/api/settings/voice/{name}/voice-ref")
-async def api_settings_voice_upload(
-    name: str, file: UploadFile, user: dict = Depends(require_auth)
-):
-    data = await file.read()
-    try:
-        target = save_voice_ref(name, data)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    log_event(
-        log, "mind.voice_ref.updated", **_actor_fields(user), mind_name=name,
-        size_bytes=len(data), path=str(target),
-    )
-    return {"ok": True, "path": str(target), "size_bytes": len(data)}
+    return {"servers": servers}
 
 
 @app.get("/api/settings/downloads")

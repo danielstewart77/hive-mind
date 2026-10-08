@@ -10,6 +10,7 @@ only whatever the broker reports.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -154,34 +155,132 @@ def hive_tools_status() -> dict[str, Any]:
     }
 
 
-def voice_ref_status(short_name: str) -> dict[str, Any] | None:
-    """Whether a mind has a chatterbox voice_ref.wav, and its stats."""
-    path = HIVE_MIND_MINDS_DIR / short_name / "voice_ref.wav"
-    if not path.is_file():
-        return None
-    stat = path.stat()
-    return {"path": str(path), "size_bytes": stat.st_size, "modified_at": stat.st_mtime}
+#: The clip a chatterbox mind is spoken from when it names none. The original
+#: single-clip convention, which every mind installed before clips became
+#: selectable is still on.
+DEFAULT_VOICE_CLIP = "voice_ref.wav"
+
+#: A clip filename, matching what a mind will accept into its own
+#: `runtime.yaml`. A leading underscore is allowed because real clips have
+#: one; a separator is not. Deliberately the same shape as the mind-side
+#: pattern — a name this accepted and the mind refused would be a clip that
+#: uploads, lists, and cannot be selected.
+_CLIP_NAME_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,127}")
 
 
-def save_voice_ref(short_name: str, data: bytes) -> Path:
-    """Write a mind's voice_ref.wav to the read-write mind mount.
-
-    Validated only at the RIFF/WAVE header level — chatterbox is picky
-    about format but does its own real validation on synthesis; this is
-    just enough to reject an obviously-wrong upload (a PNG, an mp3) before
-    it lands on disk.
-    """
-    if not short_name or not re.match(r"^[A-Za-z0-9_-]+$", short_name):
+def _mind_clip_dir(short_name: str, root: Path) -> Path:
+    """The directory holding one mind's reference recordings."""
+    if not short_name or not re.fullmatch(r"[A-Za-z0-9_-]+", short_name):
         raise ValueError(f"invalid mind name: {short_name!r}")
+    return root / short_name
+
+
+def list_voice_clips(short_name: str) -> list[dict[str, Any]]:
+    """Every reference recording sitting in this mind's own directory.
+
+    A mind's directory accumulates candidates — a clip recorded twice, a
+    stereo take kept beside a mono one — and only the one the mind names is
+    spoken. Listing them is what makes the others selectable instead of
+    needing a re-upload of a file already on the disk.
+    """
+    try:
+        directory = _mind_clip_dir(short_name, HIVE_MIND_MINDS_DIR)
+    except ValueError:
+        return []
+    if not directory.is_dir():
+        return []
+    clips = []
+    # Case-insensitively on the extension, because the upload accepts `.WAV` —
+    # which is what Windows Sound Recorder and several converters emit. A
+    # listing that globbed `*.wav` would take such a file, report success
+    # naming it, and then never show it again.
+    for path in sorted(directory.iterdir(), key=lambda entry: entry.name):
+        if path.suffix.lower() != ".wav" or not path.is_file():
+            continue
+        if not _CLIP_NAME_RE.fullmatch(path.name):
+            # Named rather than dropped. A recording the picker cannot offer
+            # is still a recording the operator put there, and a listing that
+            # quietly omits things teaches its reader to distrust it about
+            # absence.
+            clips.append({"name": path.name, "unselectable": True})
+            continue
+        stat = path.stat()
+        clips.append(
+            {
+                "name": path.name,
+                "size_bytes": stat.st_size,
+                "modified_at": stat.st_mtime,
+            }
+        )
+    return clips
+
+
+def clip_filename(filename: str) -> str:
+    """The name an uploaded clip is stored under.
+
+    The basename only: an upload arrives named by whatever the browser sent,
+    and a name carrying a path would otherwise be joined onto a directory.
+    `.wav` is required rather than appended, because a clip that is not a WAV
+    is one chatterbox will refuse at synthesis — long after the upload said
+    it worked.
+    """
+    name = Path(str(filename or "").replace("\\", "/")).name.strip()
+    if not name.lower().endswith(".wav"):
+        raise ValueError("a reference clip must be a .wav file")
+    if not _CLIP_NAME_RE.fullmatch(name):
+        raise ValueError(f"not a usable clip filename: {filename!r}")
+    return name
+
+
+class ClipExists(ValueError):
+    """A clip of that name is already in this Mind's directory."""
+
+
+def save_voice_clip(short_name: str, filename: str, data: bytes) -> Path:
+    """Write an uploaded reference clip into the mind's own directory.
+
+    Under its own name, beside whatever is already there: a mind's clips are
+    candidates and an upload adds one rather than replacing the active one.
+    What makes a clip active is the mind naming it in its `runtime.yaml`,
+    which is a separate write the console makes next.
+
+    A name already taken is refused rather than overwritten. The recording a
+    mind is currently spoken from is usually the one called `voice_ref.wav`,
+    which is also what a second take gets called by whoever recorded it — so
+    an overwrite changes a mind's voice with no save, nothing on screen to
+    show it, and the previous recording gone.
+
+    Validated only at the RIFF/WAVE header level — chatterbox is picky about
+    format but does its own real validation on synthesis; this is just enough
+    to reject an obviously-wrong upload (a PNG, an mp3) before it lands.
+    """
+    name = clip_filename(filename)
     if len(data) > _WAV_MAX_BYTES:
         raise ValueError(f"file too large: {len(data)} bytes (max {_WAV_MAX_BYTES})")
     if data[:4] != b"RIFF" or data[8:12] != b"WAVE":
         raise ValueError("not a WAV file (missing RIFF/WAVE header)")
 
-    mind_dir = HIVE_MIND_MINDS_VOICE_DIR / short_name
+    mind_dir = _mind_clip_dir(short_name, HIVE_MIND_MINDS_VOICE_DIR)
     mind_dir.mkdir(parents=True, exist_ok=True)
-    target = mind_dir / "voice_ref.wav"
-    target.write_bytes(data)
+    target = mind_dir / name
+    if target.exists():
+        raise ClipExists(
+            f"{name} is already one of this Mind's clips. Rename the file and"
+            " upload it again, or remove the existing one first."
+        )
+
+    # Staged and renamed rather than written in place. The voice server opens
+    # these files on every spoken sentence, so a clip written in place is one
+    # chatterbox can read half of — a truncated WAV it refuses, on a path that
+    # was fine a moment earlier. The staging name is dotted so the listing,
+    # which matches on the extension, cannot offer a half-written upload.
+    staging = mind_dir / f".{name}.incoming"
+    try:
+        staging.write_bytes(data)
+        os.replace(staging, target)
+    except BaseException:
+        staging.unlink(missing_ok=True)
+        raise
     return target
 
 

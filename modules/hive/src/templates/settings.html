@@ -22,8 +22,7 @@
         {% elif settings_section == 'connections' %}
             <section class="surface"><div class="surface-header"><div><h2>Shared services</h2><p>Connectivity from the Hive application.</p></div><button id="connections-refresh" class="icon-button" type="button" aria-label="Refresh connections"><i data-lucide="refresh-cw"></i></button></div><ul class="service-list" id="settings-connections"><li class="loading-state">Checking connections…</li></ul></section>
         {% elif settings_section == 'voice' %}
-            <section class="surface"><div class="settings-section-copy"><h2>Voice services</h2><p>Server health and reference clips used for voice cloning.</p></div><ul class="service-list" id="voice-servers"><li class="loading-state">Checking voice servers…</li></ul></section>
-            <section class="surface"><div class="surface-header"><div><h2>Mind voices</h2><p>Upload a clean WAV reference clip for a registered mind.</p></div></div><div class="surface-body overview-stack" id="voice-minds"><div class="loading-state">Loading minds…</div></div></section>
+            <section class="surface"><div class="settings-section-copy"><h2>Voice services</h2><p>Health of each speech server. A Mind's own engine and voice are set on its page.</p></div><ul class="service-list" id="voice-servers"><li class="loading-state">Checking voice servers…</li></ul></section>
         {% elif settings_section == 'credentials' %}
             <section class="surface"><div class="settings-section-copy"><h2>Shared-secret tokens</h2><p>Rotating writes a new value to every file that holds it. Nothing restarts automatically — restart the listed services yourself once rotation completes.</p></div><ul class="service-list" id="settings-credentials"><li class="loading-state">Loading credentials…</li></ul></section>
         {% elif settings_section == 'advanced' %}
@@ -57,9 +56,8 @@ window.addEventListener("DOMContentLoaded", function () {
     async function loadVoice() {
         try {
             const data = await h.requestJson("/api/settings/voice");
-            document.getElementById("voice-servers").innerHTML = Object.entries(data.servers || {}).map(function (entry) { return '<li class="service-row"><span class="service-icon"><i data-lucide="audio-lines"></i></span><span class="service-copy"><strong>' + h.escapeHtml(entry[0]) + '</strong><small>Text to speech service</small></span>' + h.statusPill(entry[1].reachable, "Ready", "Unavailable") + '</li>'; }).join("");
-            document.getElementById("voice-minds").innerHTML = (data.minds || []).map(function (mind) { return '<form class="voice-form detail-item" data-mind="' + h.escapeHtml(mind.name) + '"><div style="display:flex;align-items:center;gap:12px"><span class="entity-avatar">' + h.escapeHtml(mind.name.slice(0,2)) + '</span><span class="entity-copy"><strong>' + h.escapeHtml(mind.name) + '</strong><small>' + (mind.voice_ref ? "Reference clip configured" : "No reference clip") + '</small></span><input type="file" name="file" accept="audio/wav,.wav" required style="margin-left:auto;max-width:240px"><button class="button" type="submit">Upload</button></div><small data-status></small></form>'; }).join(""); refreshIcons();
-        } catch (error) { document.getElementById("voice-minds").innerHTML = '<div class="error-state">' + h.escapeHtml(error.message) + '</div>'; }
+            document.getElementById("voice-servers").innerHTML = Object.entries(data.servers || {}).map(function (entry) { return '<li class="service-row"><span class="service-icon"><i data-lucide="audio-lines"></i></span><span class="service-copy"><strong>' + h.escapeHtml(entry[0]) + '</strong><small>Text to speech service</small></span>' + h.statusPill(entry[1].reachable, "Ready", "Unavailable") + '</li>'; }).join(""); refreshIcons();
+        } catch (error) { document.getElementById("voice-servers").innerHTML = '<li class="error-state">' + h.escapeHtml(error.message) + '</li>'; }
     }
     async function loadCredentials() {
         const list = document.getElementById("settings-credentials");
@@ -93,7 +91,7 @@ window.addEventListener("DOMContentLoaded", function () {
     }
     if (section === "access") { document.getElementById("sessions-refresh").addEventListener("click", loadSessions); document.getElementById("settings-sessions").addEventListener("click", async function (event) { const button = event.target.closest("[data-delete-session]"); if (!button || !window.confirm("Delete this session?")) return; try { await h.requestJson("/api/settings/hive-comms/sessions/" + encodeURIComponent(button.dataset.deleteSession), {method: "DELETE"}); loadSessions(); } catch (error) { window.alert(error.message); } }); loadSessions(); }
     if (section === "connections") { document.getElementById("connections-refresh").addEventListener("click", loadConnections); loadConnections(); }
-    if (section === "voice") { document.getElementById("voice-minds").addEventListener("submit", async function (event) { const form = event.target.closest(".voice-form"); if (!form) return; event.preventDefault(); const status = form.querySelector("[data-status]"); status.textContent = "Uploading…"; try { await h.requestJson("/api/settings/voice/" + encodeURIComponent(form.dataset.mind) + "/voice-ref", {method: "POST", body: new FormData(form)}); status.textContent = "Uploaded"; loadVoice(); } catch (error) { status.textContent = error.message; } }); loadVoice(); }
+    if (section === "voice") { loadVoice(); }
     if (section === "credentials") {
     // Writing a credential to five files is five operations, not one. The
     // report names each file and, where it was skipped, why — a summary that
