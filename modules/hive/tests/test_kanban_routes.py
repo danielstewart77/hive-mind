@@ -186,3 +186,13 @@ def test_a_collection_the_board_does_not_have_is_a_404_rather_than_a_500(client)
     assert client.patch("/api/kanban/widgets/x", json={"title": "y"}).status_code == 404
     assert client.delete("/api/kanban/widgets/x").status_code == 404
     assert client.get("/api/kanban/widgets/x/descendants").status_code == 404
+
+
+def test_the_descendant_count_honours_the_kind_in_the_url(client):
+    epic, feature, story = _board(client)
+    assert client.get(f"/api/kanban/stories/{epic['id']}/descendants").status_code == 404
+    assert client.get(f"/api/kanban/epics/{feature['id']}/descendants").status_code == 404
+    assert client.get(f"/api/kanban/stories/{story['id']}/descendants").json() == {
+        "features": 0,
+        "stories": 0,
+    }

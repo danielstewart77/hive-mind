@@ -58,15 +58,18 @@ def _db_path() -> Path:
 def _connect() -> sqlite3.Connection:
     path = _db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(path, timeout=30.0, isolation_level=None)
+    connection = sqlite3.connect(path, timeout=5.0, isolation_level=None)
     connection.row_factory = sqlite3.Row
     # No journal-mode change. This file is also opened by auth, design_data
     # and configuration_data with a bare sqlite3.connect, the change is
     # one-way and process-wide, and a busy database returns SQLITE_BUSY to it
     # without invoking the busy handler — so it can silently no-op, or raise
-    # on the connect and 500 the board. busy_timeout is per connection and
-    # carries no such freight.
-    connection.execute("PRAGMA busy_timeout = 30000")
+    # on the connect and 500 the board. The timeout matches sqlite3's own
+    # default, which is what auth, design_data and configuration_data open
+    # this same file on: in rollback-journal mode a writer locks the whole
+    # file, so a board transaction allowed to hold longer than they will wait
+    # is a failed login write.
+    connection.execute("PRAGMA busy_timeout = 5000")
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute(
         """
@@ -244,7 +247,7 @@ def list_stories() -> list[dict[str, Any]]:
         return _list(connection, "story")
 
 
-def count_descendants(record_id: str) -> dict[str, int]:
+def count_descendants(record_id: str, kind: str | None = None) -> dict[str, int]:
     """How many features and stories a delete of this row would take with it.
 
     The browser asks right before it puts the number in front of Daniel. Its
@@ -254,8 +257,8 @@ def count_descendants(record_id: str) -> dict[str, int]:
         row = connection.execute(
             "SELECT kind FROM work_items WHERE id = ?", (record_id,)
         ).fetchone()
-        if row is None:
-            raise KeyError(f"Item not found: {record_id}")
+        if row is None or (kind is not None and row["kind"] != kind):
+            raise KeyError(f"{_LABEL.get(kind, 'Item')} not found: {record_id}")
         features, stories = _descendants(connection, record_id)
         return {"features": len(features), "stories": len(stories)}
 

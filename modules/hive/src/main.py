@@ -569,6 +569,9 @@ async def api_kanban_data(user: dict = Depends(require_auth)):
     return await _kanban_call(kanban_data.get_data)
 
 
+_COLLECTION_KIND = {"epics": "epic", "features": "feature", "stories": "story"}
+
+
 @app.get("/api/kanban/{kind}/{record_id}/descendants")
 async def api_kanban_descendants(kind: str, record_id: str, user: dict = Depends(require_auth)):
     """What a delete of this row would take with it, counted now.
@@ -580,7 +583,7 @@ async def api_kanban_descendants(kind: str, record_id: str, user: dict = Depends
     del user
     if kind not in _KANBAN_UPDATE_FIELDS:
         raise HTTPException(status_code=404, detail="Kanban resource not found")
-    return await _kanban_call(kanban_data.count_descendants, record_id)
+    return await _kanban_call(kanban_data.count_descendants, record_id, _COLLECTION_KIND[kind])
 
 
 @app.post("/api/kanban/epics")
