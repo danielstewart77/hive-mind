@@ -469,7 +469,12 @@ def _spawn_pty(
         seeded_pane_command(
             _terminal_argv(model, thread_id),
             system_prompt,
-            CODEX_HOME / "rotation-seeds" / f"{session_id}.txt",
+            # Keyed by the conversation, not the session: a rotation and a
+            # fresh attach on one session would otherwise write and delete a
+            # single path, and whichever lost opens unseeded or on the other's
+            # context. `thread_id` is empty for a bare terminal, which is its
+            # own distinct key.
+            CODEX_HOME / "rotation-seeds" / f"{session_id}-{thread_id or 'fresh'}.txt",
         ),
         env_overrides=pane_env, cols=cols, rows=rows,
     )
@@ -504,7 +509,9 @@ def _rotate_pty(
     first turn. The carry-forward rides in as codex's opening prompt, which
     is the only channel this harness has for it.
     """
-    del new_claude_sid  # symmetry with the claude harness; codex mints its own
+    # Codex mints its own thread id, so the gateway's successor id does not
+    # name this conversation — it is used here only as a per-rotation key for
+    # the seed file, which a fresh attach on the same session must not share.
     if not TERMINALS.alive(session_id):
         log.info("No live terminal for session %s — nothing to rotate in place",
                  session_id)
@@ -527,7 +534,7 @@ def _rotate_pty(
     argv = seeded_pane_command(
         _terminal_argv(model, None),
         seed,
-        CODEX_HOME / "rotation-seeds" / f"{session_id}.txt",
+        CODEX_HOME / "rotation-seeds" / f"{session_id}-{new_claude_sid}.txt",
         as_user_turn=bool(user_prompt),
     )
     TERMINALS.respawn(

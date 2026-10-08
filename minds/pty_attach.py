@@ -103,7 +103,9 @@ _TMUX_OPTIONS = [
 # A single argv entry cannot exceed MAX_ARG_STRLEN (32 pages, 128 KiB on
 # Linux); exec fails outright above it. A rotation seed reaches the harness
 # as one argument however it is delivered, so it is capped short of that.
-MAX_SEED_CHARS = 120_000
+# Bytes, not characters: the kernel counts bytes, and a carry-forward quoting
+# a TUI transcript is full of three-byte box-drawing glyphs.
+MAX_SEED_BYTES = 120_000
 
 
 class PtyUnavailable(Exception):
@@ -246,16 +248,27 @@ def capped_seed(system_prompt: str) -> str:
     The tail is what survives: composition puts the rotation summary and the
     turns typed during the window last, and those are the ones the successor
     has to pick the conversation up from.
+
+    Measured in **bytes**, because that is what the kernel counts against
+    ``MAX_ARG_STRLEN``. A carry-forward quoting a TUI transcript carries
+    box-drawing and arrows at three bytes each, so a seed well under the limit
+    in characters is over it in bytes — and exec fails inside the pane after
+    tmux has returned 0 and the gateway has already written the successor's
+    id, recording a successful rotation on a dead pane.
     """
-    if len(system_prompt) <= MAX_SEED_CHARS:
+    raw = system_prompt.encode("utf-8")
+    if len(raw) <= MAX_SEED_BYTES:
         return system_prompt
-    log.warning("Rotation seed of %d chars exceeds the %d-char exec limit — "
-                "keeping the tail", len(system_prompt), MAX_SEED_CHARS)
+    log.warning("Rotation seed of %d bytes exceeds the %d-byte exec limit — "
+                "keeping the tail", len(raw), MAX_SEED_BYTES)
     notice = ("[earlier context omitted: the carry-forward was too large to "
               "pass to the harness]\n\n")
     # The notice counts against the same argv entry the seed rides in, so the
-    # tail is trimmed to leave room for it rather than added on top.
-    return notice + system_prompt[-(MAX_SEED_CHARS - len(notice)):]
+    # tail is trimmed to leave room for it rather than added on top. The cut
+    # can land inside a multi-byte character, so the decode drops a partial
+    # one rather than raising.
+    room = MAX_SEED_BYTES - len(notice.encode("utf-8"))
+    return notice + raw[-room:].decode("utf-8", errors="ignore")
 
 
 SEED_STALE_AFTER_SECONDS = 3600
@@ -318,7 +331,10 @@ def seeded_pane_command(
     quoted_seed = shlex.quote(str(seed_file))
     harness = " ".join(shlex.quote(arg) for arg in argv)
     flag = "" if as_user_turn else seed_flag
-    entry = f'{flag} "$seed"' if flag else ' "$seed"'
+    # Both branches carry their own leading space. Concatenated onto the
+    # harness without one, the flag lands glued to the last argv token — the
+    # conversation id — and the harness exits rejecting it.
+    entry = f' {flag} "$seed"' if flag else ' "$seed"'
     # Read then delete: the seed is one process's opening context, and it is
     # the whole conversation's memory sitting in a world-readable file.
     #
@@ -328,6 +344,12 @@ def seeded_pane_command(
     # successful rotation. An unseeded terminal is recoverable — the gateway
     # holds the same text on the session row and hands it back on the next
     # attach — and a dead pane is not.
+    #
+    # That fallback covers an absent or empty seed and nothing else: /bin/sh
+    # is dash, and a non-interactive POSIX shell exits when `exec` itself
+    # fails, so the second `exec` is unreachable from the first one failing.
+    # An oversized argv is prevented by `capped_seed` rather than recovered
+    # from here.
     return [
         "/bin/sh", "-c",
         f'seed=$(cat {quoted_seed} 2>/dev/null); rm -f {quoted_seed}; '
