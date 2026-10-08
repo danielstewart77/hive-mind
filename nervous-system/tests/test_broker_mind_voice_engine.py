@@ -80,6 +80,28 @@ def test_a_mind_that_has_named_no_engine_stores_none() -> None:
     _run(scenario())
 
 
+def test_a_re_registration_that_changes_the_engine_updates_the_row() -> None:
+    """The primary path: a mind re-registers from its file on every boot.
+
+    Every other test here lands on the INSERT, so the UPDATE branch was only
+    ever exercised with the engine absent — and deleting it entirely left all
+    five green while an engine edit in `runtime.yaml` never reached the row.
+    """
+
+    async def scenario() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = await broker.init_db(os.path.join(tmp, "broker.db"))
+            try:
+                await _registered(db, voice_engine="chatterbox", voice="voice_ref.wav")
+                row = await _registered(db, voice_engine="kokoro", voice="af_heart")
+                assert row["voice_engine"] == "kokoro"
+                assert row["voice"] == "af_heart"
+            finally:
+                await db.close()
+
+    _run(scenario())
+
+
 def test_the_engine_can_be_updated_without_restating_the_rest() -> None:
     async def scenario() -> None:
         with tempfile.TemporaryDirectory() as tmp:

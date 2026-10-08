@@ -645,6 +645,58 @@ class TestVoiceRoute:
         loaded = runtime_api.load_runtime(runtime_file)
         assert (loaded["default_model"], loaded["voice"]) == ("opus", "am_michael")
 
+    def test_patch_writes_the_engine_and_the_voice_in_one_request(
+        self, client, runtime_file
+    ):
+        """The route, not just the writer underneath it.
+
+        `TestVoiceEngine` drives `update_runtime_fields` directly, so dropping
+        `voice_engine` from `CONSOLE_FIELDS` left the whole suite green while
+        the route refused every engine the console sent.
+        """
+        response = client.patch(
+            "/runtime",
+            json={"voice_engine": "kokoro", "voice": "af_heart"},
+            headers={"Authorization": "Bearer s3cret"},
+        )
+
+        assert response.status_code == 200
+        loaded = runtime_api.load_runtime(runtime_file)
+        assert (loaded["voice_engine"], loaded["voice"]) == ("kokoro", "af_heart")
+
+    def test_the_runtime_report_names_the_engine(self, client, runtime_file):
+        """The console's picker reads this to show which engine is selected,
+        so dropping it from `PUBLIC_FIELDS` is a panel that cannot render."""
+        runtime_api.update_runtime_fields(runtime_file, {"voice_engine": "kokoro"})
+
+        body = client.get(
+            "/runtime", headers={"Authorization": "Bearer s3cret"}
+        ).json()["configuration"]
+
+        assert body["voice_engine"] == "kokoro"
+
+    def test_patch_refuses_a_provider_with_no_model(self, client, runtime_file):
+        """The two travel together even though each field is optional."""
+        response = client.patch(
+            "/runtime",
+            json={"provider": "ollama"},
+            headers={"Authorization": "Bearer s3cret"},
+        )
+
+        assert response.status_code == 400
+        assert runtime_api.load_runtime(runtime_file)["provider"] == "anthropic"
+
+    def test_patch_refuses_an_engine_that_does_not_exist(self, client, runtime_file):
+        before = runtime_file.read_text()
+        response = client.patch(
+            "/runtime",
+            json={"voice_engine": "festival"},
+            headers={"Authorization": "Bearer s3cret"},
+        )
+
+        assert response.status_code == 400
+        assert runtime_file.read_text() == before
+
     def test_patch_with_nothing_writable_is_refused(self, client, runtime_file):
         response = client.patch(
             "/runtime",
