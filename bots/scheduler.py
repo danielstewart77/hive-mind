@@ -31,6 +31,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from config import config
 from core import discord_delivery
+from hive_surfaces import voice_routing
 from core.hive_logging import configure_logging, log_event
 from core.scheduled_skills import (
     ScheduledSkill,
@@ -180,10 +181,24 @@ DEV_SURFACE_PROMPT = (
 )
 
 
+#: Resolves a mind to the voice server that speaks for it, from the mind's own
+#: record rather than from this process's environment. A host running both
+#: engines would otherwise speak every scheduled run through one of them.
+_voice_servers = voice_routing.VoiceServerResolver(
+    os.environ.get("COMMS_URL", ""),
+    os.environ.get("COMMS_BEARER_TOKEN", ""),
+    {
+        voice_routing.CHATTERBOX: os.environ.get("VOICE_SERVER_URL_CHATTERBOX", ""),
+        voice_routing.KOKORO: os.environ.get("VOICE_SERVER_URL_KOKORO", ""),
+    },
+    fallback_url=VOICE_SERVER_URL,
+)
+
+
 async def _tts(http: aiohttp.ClientSession, text: str, voice_id: str) -> bytes:
     timeout = aiohttp.ClientTimeout(total=VOICE_TTS_TIMEOUT_SECONDS)
     async with http.post(
-        f"{VOICE_SERVER_URL}/tts",
+        f"{_voice_servers.resolve(voice_id)}/tts",
         json={"text": text, "voice_id": voice_id},
         timeout=timeout,
     ) as resp:
