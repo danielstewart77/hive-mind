@@ -32,7 +32,7 @@ from telegram.ext import (
 from hive_surfaces.config import config, photo_root
 from hive_surfaces.bot_utils import claim_picker, get_lock, get_queue, time_ago
 from hive_surfaces.gateway_client import GatewayClient
-from hive_surfaces import hitl, rename_prompt, session_picker
+from hive_surfaces import hitl, rename_prompt, session_picker, voice_routing
 from hive_surfaces.skills import get_skills
 from hive_surfaces.hive_logging import configure_logging, log_event
 
@@ -51,6 +51,12 @@ COMMS_BEARER_TOKEN = os.environ.get("COMMS_BEARER_TOKEN", "")
 # a screenshot is worth exactly one renamed conversation.
 TERMINAL_LABELS_TOKEN = os.environ.get("TERMINAL_LABELS_TOKEN", "")
 VOICE_SERVER_URL = os.environ.get("VOICE_SERVER_URL", "http://localhost:8422")
+# A host running both engines names each one's server; a host running one
+# names neither and `VOICE_SERVER_URL` answers for whichever engine its minds
+# picked. Which of the two a given mind is spoken by comes off that mind's own
+# record, never off this environment.
+VOICE_SERVER_URL_CHATTERBOX = os.environ.get("VOICE_SERVER_URL_CHATTERBOX", "")
+VOICE_SERVER_URL_KOKORO = os.environ.get("VOICE_SERVER_URL_KOKORO", "")
 # When on (default), every conversational reply is voiced: text still streams,
 # a voice note follows. Set ALWAYS_VOICE=0 in .env for text-only except when
 # the user sends a voice message. A missing/unreachable voice server degrades
@@ -93,11 +99,35 @@ def _is_allowed_user(user_id: int) -> bool:
 # ---------------------------------------------------------------------------
 # Voice helpers
 # ---------------------------------------------------------------------------
+#: Resolves a mind to the voice server that speaks for it. Built once: the
+#: listing behind it is cached with its own TTL, so a mind's engine can change
+#: while this process runs.
+_voice_servers = voice_routing.VoiceServerResolver(
+    COMMS_URL,
+    COMMS_BEARER_TOKEN or "",
+    {
+        voice_routing.CHATTERBOX: VOICE_SERVER_URL_CHATTERBOX,
+        voice_routing.KOKORO: VOICE_SERVER_URL_KOKORO,
+    },
+    fallback_url=VOICE_SERVER_URL,
+)
+
+
+def _voice_server() -> str:
+    """The voice server this mind's own record points at."""
+    return _voice_servers.resolve(_voice_id())
+
+
 async def _stt(ogg_bytes: bytes) -> str:
-    """POST OGG audio to voice-server /stt, return transcribed text."""
+    """POST OGG audio to voice-server /stt, return transcribed text.
+
+    Sent to the same server that speaks for this mind. Both engines ship the
+    same faster-whisper half, and a host that configured only the engine it
+    uses has no other server to ask.
+    """
     form = aiohttp.FormData()
     form.add_field("file", ogg_bytes, filename="audio.ogg", content_type="audio/ogg")
-    async with http.post(f"{VOICE_SERVER_URL}/stt", data=form) as resp:
+    async with http.post(f"{_voice_server()}/stt", data=form) as resp:
         if resp.status != 200:
             raise RuntimeError(f"STT error {resp.status}: {await resp.text()}")
         return (await resp.json())["text"]
@@ -121,7 +151,7 @@ def _voice_id() -> str:
 
 async def _tts(text: str) -> bytes:
     """POST text to voice-server /tts, return OGG audio bytes."""
-    async with http.post(f"{VOICE_SERVER_URL}/tts", json={"text": text, "voice_id": _voice_id()}) as resp:
+    async with http.post(f"{_voice_server()}/tts", json={"text": text, "voice_id": _voice_id()}) as resp:
         if resp.status != 200:
             raise RuntimeError(f"TTS error {resp.status}: {await resp.text()}")
         return await resp.read()

@@ -16,7 +16,7 @@ import aiohttp
 import discord
 from discord import app_commands
 
-from hive_surfaces import token_store
+from hive_surfaces import token_store, voice_routing
 from hive_surfaces.config import config
 from hive_surfaces.gateway_client import GatewayClient
 from hive_surfaces.bot_utils import get_lock, time_ago
@@ -32,6 +32,12 @@ DISCORD_MSG_LIMIT = 2000
 COMMS_URL = os.environ.get("COMMS_URL", "http://127.0.0.1:8426")
 COMMS_BEARER_TOKEN = os.environ.get("COMMS_BEARER_TOKEN")
 VOICE_COMMS_URL = os.environ.get("VOICE_COMMS_URL", "http://localhost:8422")
+# A host running both engines names each one's server; a host running one
+# names neither and `VOICE_COMMS_URL` answers for whichever engine its minds
+# picked. Which of the two a given mind is spoken by comes off that mind's own
+# record, never off this environment.
+VOICE_SERVER_URL_CHATTERBOX = os.environ.get("VOICE_SERVER_URL_CHATTERBOX", "")
+VOICE_SERVER_URL_KOKORO = os.environ.get("VOICE_SERVER_URL_KOKORO", "")
 
 # Persistent HTTP session and gateway client (created in setup_hook)
 http: aiohttp.ClientSession | None = None
@@ -127,15 +133,30 @@ def should_handle_message(
 # Voice / TTS helpers
 # ---------------------------------------------------------------------------
 
+#: Resolves a mind to the voice server that speaks for it. Built once: the
+#: listing behind it is cached with its own TTL, so a mind's engine can change
+#: while this process runs.
+_voice_servers = voice_routing.VoiceServerResolver(
+    COMMS_URL,
+    COMMS_BEARER_TOKEN or "",
+    {
+        voice_routing.CHATTERBOX: VOICE_SERVER_URL_CHATTERBOX,
+        voice_routing.KOKORO: VOICE_SERVER_URL_KOKORO,
+    },
+    fallback_url=VOICE_COMMS_URL,
+)
+
+
 async def _tts(text: str, voice_id: str) -> bytes:
     """POST text to voice-server /tts, return OGG audio bytes.
 
-    `voice_id` selects the per-mind reference clip on the voice server
-    (resolves to `minds/<voice_id>/voice_ref.wav`). Without it the voice
-    server falls back to chatterbox's built-in default voice.
+    `voice_id` names the mind, which decides both the server called and the
+    voice spoken: under chatterbox it selects that mind's reference clip,
+    under kokoro the catalogued voice its record names.
     """
     async with http.post(
-        f"{VOICE_COMMS_URL}/tts", json={"text": text, "voice_id": voice_id}
+        f"{_voice_servers.resolve(voice_id)}/tts",
+        json={"text": text, "voice_id": voice_id},
     ) as resp:
         if resp.status != 200:
             raise RuntimeError(f"TTS error {resp.status}: {await resp.text()}")
