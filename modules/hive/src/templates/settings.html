@@ -117,7 +117,13 @@ window.addEventListener("DOMContentLoaded", function () {
         const keys = 'data-credential="' + h.escapeHtml(row.credential) + '" data-holder="' + h.escapeHtml(row.holder) + '"';
         let action = "";
         if (row.settable) {
-            action = '<span class="credential-set"><input type="password" placeholder="Paste a token" autocomplete="off" data-set-input ' + keys + '><button class="button button-quiet" type="button" data-set-row ' + keys + '>Save</button></span>';
+            // The paste box is its own form, and asks for a new password rather
+            // than off. Chrome ignores autocomplete="off" on a password field
+            // outside a form: it treats the whole document as one login form,
+            // fills the nearest preceding text input as the username — which is
+            // the filter box at the top of the page — and the filter's own
+            // handler then re-renders the table out from under the cursor.
+            action = '<form class="credential-set" autocomplete="off"><input type="password" placeholder="Paste a token" autocomplete="new-password" data-set-input ' + keys + '><button class="button button-quiet" type="button" data-set-row ' + keys + '>Save</button></form>';
         } else if (row.checkable) {
             action = '<button class="button button-quiet" type="button" data-check-row ' + keys + '>Check</button>';
         }
@@ -135,7 +141,7 @@ window.addEventListener("DOMContentLoaded", function () {
         if (credential.rotatable) {
             action = '<button class="button" type="button" data-rotate="' + h.escapeHtml(credential.key) + '">Rotate</button>';
         } else if (credential.key === "github_pat") {
-            action = '<span class="credential-set"><input type="password" placeholder="Paste a token" autocomplete="off" data-set-input data-credential="github_pat" data-holder="host"><button class="button" type="button" data-set-host="github_pat">Save</button></span>';
+            action = '<form class="credential-set" autocomplete="off"><input type="password" placeholder="Paste a token" autocomplete="new-password" data-set-input data-credential="github_pat" data-holder="host"><button class="button" type="button" data-set-host="github_pat">Save</button></form>';
         } else if (credential.manual_reason) {
             action = '<span class="pill" title="' + h.escapeHtml(credential.manual_reason) + '">Manual only</span>';
         } else {
@@ -334,6 +340,13 @@ window.addEventListener("DOMContentLoaded", function () {
                 await loadCredentials(false);
             } catch (error) { window.alert(error.message); setRowButton.disabled = false; setRowButton.textContent = "Save"; }
         }
+    });
+    registry.addEventListener("submit", function (event) {
+        const form = event.target.closest("form.credential-set");
+        if (!form) return;
+        event.preventDefault();
+        const button = form.querySelector("button");
+        if (button && !button.disabled) button.click();
     });
     document.getElementById("credential-filter").addEventListener("input", renderCredentials);
     document.getElementById("credential-status-filter").addEventListener("change", renderCredentials);
