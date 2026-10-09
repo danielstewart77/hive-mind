@@ -140,7 +140,7 @@
   function trashButton(s){const b=el('button','button kanban-trash');b.type='button';b.innerHTML='<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/></svg>';b.setAttribute('aria-label',`Delete ${s.title}`);b.title='Delete';b.draggable=false;b.addEventListener('click',e=>{e.stopPropagation();const del=actionList(s,'stories').find(([label])=>label==='Delete');if(del)del[1]();});return b;}
   function renderBoard(){const mount=$('board-mount');mount.replaceChildren();for(const [status,label] of statuses){const lane=el('section','surface kanban-lane');lane.dataset.status=status;lane.append(el('h2','',label));const drop=el('div','kanban-drop');drop.dataset.status=status;drop.setAttribute('aria-label',`${label} drop zone`);drop.addEventListener('dragover',e=>e.preventDefault());drop.addEventListener('drop',onDrop);const cards=state.stories.filter(s=>s.status===status);if(!cards.length)drop.append(el('p','kanban-empty','Drop a story here'));for(const s of cards){const card=el('article','surface kanban-card');if(s.subtype==='bug')card.classList.add('kanban-bug');card.draggable=true;card.dataset.id=s.id;card.addEventListener('dragstart',e=>{e.dataTransfer.setData('text/plain',s.id);e.dataTransfer.effectAllowed='move';});const text=el('div','kanban-card-text');const heading=el('strong','');heading.append(safeTitle(s));text.append(heading,el('span','kanban-parent',parentOf(s)));card.append(text);if(status==='done'){card.classList.add('kanban-card-done');card.append(trashButton(s));}drop.append(card);}lane.append(drop);mount.append(lane);}}
   async function onDrop(e){e.preventDefault();const id=e.dataTransfer.getData('text/plain'), target=e.currentTarget.dataset.status, story=state.stories.find(s=>s.id===id);if(!story||story.status===target)return;if(story._busy)return;story._busy=true;try{const updated=await request(`/api/kanban/stories/${encodeURIComponent(id)}`,'PATCH',{status:target});Object.assign(story,updated);feedback.textContent='Story status updated.';}catch(err){feedback.textContent=`Could not move story: ${err.message}`;await reload(feedback.textContent);}finally{if(story)delete story._busy;render();}}
-  function safeTitle(record){const a=el('a','kanban-item-title',record.title);a.href=`/kanban/item/${encodeURIComponent(record.id)}`;return a;}
+  function safeTitle(record){const a=el('a','kanban-item-title',record.title);a.href=`/kanban/item/${encodeURIComponent(record.id)}`;a.draggable=false;return a;}
   async function mutate(url,method,body,msg){try{await request(url,method,body);await reload(msg);}catch(err){feedback.textContent=`Change not saved: ${err.message}`;}}
   function promptTitle(initial=''){const value=window.prompt('Title',initial);return value===null?null:value.trim();}
   function actionList(record,kind){
@@ -190,7 +190,7 @@
     target.addEventListener('dragleave',e=>{if(!target.contains(e.relatedTarget))clearMarks();});
     target.addEventListener('drop',async e=>{
       e.preventDefault();e.stopPropagation();const zone=zoneOf(e);clearMarks();
-      let data;try{data=JSON.parse(e.dataTransfer.getData('application/json'));}catch{return;}
+      let data;try{data=JSON.parse(e.dataTransfer.getData('text/plain'));}catch{return;}
       if(!data||!data.id)return;
       let url,body;
       if(zone==='reorder'&&beforeId){
@@ -204,7 +204,7 @@
       catch(err){await reload(`Move failed: ${err.message}`);}
     });
   }
-  function makeDraggable(node,kind,id){node.draggable=true;node.addEventListener('dragstart',e=>{if(e.target.closest&&e.target.closest('button,select,textarea,input,a')&&e.target!==node)return;e.stopPropagation();e.dataTransfer.setData('application/json',JSON.stringify({kind,id}));e.dataTransfer.effectAllowed='move';});}
+  function makeDraggable(node,kind,id){node.draggable=true;node.addEventListener('dragstart',e=>{if(e.target.closest&&e.target.closest('button,select,textarea,input')&&e.target!==node)return;e.stopPropagation();e.dataTransfer.setData('text/plain',JSON.stringify({kind,id}));e.dataTransfer.effectAllowed='move';});}
   const EXPANDED_KEY='kanban-expanded-items';
   function loadExpanded(){try{return new Set(JSON.parse(localStorage.getItem(EXPANDED_KEY)||'[]'));}catch{return new Set();}}
   function saveExpanded(set){try{localStorage.setItem(EXPANDED_KEY,JSON.stringify([...set]));}catch{}}
