@@ -32,7 +32,7 @@ from telegram.ext import (
 from hive_surfaces.config import config, photo_root
 from hive_surfaces.bot_utils import claim_picker, get_lock, get_queue, time_ago
 from hive_surfaces.gateway_client import GatewayClient
-from hive_surfaces import hitl, rename_prompt, session_picker, voice_routing
+from hive_surfaces import hitl, model_picker, rename_prompt, session_picker, voice_routing
 from hive_surfaces.skills import get_skills
 from hive_surfaces.hive_logging import configure_logging, log_event
 
@@ -493,6 +493,34 @@ def _format_queue_batch(messages: list[str]) -> str:
     )
 
 
+def format_model_result(result: object) -> str:
+    """What a `/model` answer says to the operator.
+
+    A listing is not a switch. The gateway answers a bare `/model` with
+    ``{"models": [...]}``, and this used to test the answer for being a
+    *list* — which a dict is not — so the listing fell straight through to the
+    switch report and read "Switched to None": a switch nothing had performed,
+    named after a field the answer does not carry. A bare `/model` now draws
+    the picker and never arrives here; a listing that arrives anyway is still
+    not reported as a switch, and an answer naming no model claims nothing.
+    """
+    rows = model_picker.models_from(result)
+    if rows:
+        lines = ["Available models:"]
+        for row in rows:
+            provider = row.get("provider_label") or row.get("provider")
+            lines.append(f"- {row['name']}" + (f" ({provider})" if provider else ""))
+        lines.append("\nSend /model to pick one.")
+        return "\n".join(lines)
+    switched = result.get("model") if isinstance(result, dict) else None
+    if not switched:
+        return "No model change was made \u2014 send /model to pick one."
+    msg = f"Switched to {switched}"
+    if isinstance(result, dict) and result.get("warning"):
+        msg += f"\n\u26a0\ufe0f {result['warning']}"
+    return msg
+
+
 def _format_status(data: dict) -> str:
     return (
         f"Server port: {data.get('server_port')}\n"
@@ -570,16 +598,7 @@ async def _handle_server_command(content: str, user_id: int, chat_id: int) -> st
     if cmd == "/clear":
         return f"Session cleared. New: {result.get('id', '?')[:8]}"
     if cmd == "/model":
-        if isinstance(result, list):
-            lines = ["Available models:"]
-            for m in result:
-                lines.append(f"- {m['name']} ({m['provider']})")
-            lines.append("\n/model <name> to switch")
-            return "\n".join(lines)
-        msg = f"Switched to {result.get('model')}"
-        if result.get("warning"):
-            msg += f"\n\u26a0\ufe0f {result['warning']}"
-        return msg
+        return format_model_result(result)
     if cmd == "/autopilot":
         on = result.get("autopilot", False)
         summary = _conversation_caption(result)
@@ -902,6 +921,13 @@ async def _run_session_button(
         if had_one:
             msg += "\nThe conversation you were in was ended."
         return True, msg
+    if action == model_picker.CB_PICK and target:
+        # The name travels whole, so the gateway resolves it against what the
+        # mind offers now rather than against the keyboard's order. A switch
+        # refused — a model withdrawn since the picker was drawn, or a turn
+        # still streaming — is reported as the refusal it is.
+        msg = await _handle_server_command(f"/model {target}", user_id, chat_id)
+        return not msg.startswith("Error:"), msg
     if action == session_picker.CB_SWITCH and target:
         # The id travels whole, so the gateway resolves it against what exists
         # now rather than against the order this message was drawn in. A
@@ -1058,12 +1084,56 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Named, it switches. Bare, it offers the models as buttons.
+
+    The names are deployment names rather than aliases, so asking the operator
+    to retype one on a phone is asking for a typo — and a bare `/model` is the
+    easiest thing in the world to send, because tapping the command in
+    Telegram's menu sends it with no arguments at all.
+    """
     if not await _auth_check(update):
         return
-    name = " ".join(context.args) if context.args else None
-    cmd = f"/model {name}" if name else "/model"
-    msg = await _handle_server_command(cmd, update.effective_user.id, update.effective_chat.id)
+    name = " ".join(context.args).strip() if context.args else ""
+    if not name:
+        await _send_model_picker(
+            context.bot, update.effective_user.id, update.effective_chat.id
+        )
+        return
+    msg = await _handle_server_command(
+        f"/model {name}", update.effective_user.id, update.effective_chat.id
+    )
     await _reply_chunked(update, msg)
+
+
+async def _send_model_picker(bot, user_id: int, chat_id: int) -> None:
+    """Draw a model picker into the chat, from what the mind offers now.
+
+    The list is the gateway's answer to a bare `/model`, which it gets by
+    asking the mind, which asks its own inference proxy with its own key. So
+    the buttons are the deployments this mind may actually address — a model
+    it would be refused never appears, and nothing here holds a table that
+    could disagree with the proxy.
+    """
+    result = await gateway.server_command(user_id, chat_id, "/model")
+    if isinstance(result, dict) and not result.get("models"):
+        # FastAPI reports its own rejections as `detail`, not `error`, and the
+        # gateway refuses a bare `/model` with no active session — both have to
+        # reach the operator as themselves rather than as "no models".
+        problem = result.get("error") or result.get("detail")
+        if problem:
+            await _deliver(bot, chat_id, f"Error: {problem}")
+            return
+    keyboard = model_picker.build_model_keyboard(result, config.default_model)
+    if keyboard is None:
+        await _deliver(
+            bot, chat_id,
+            "No models offered \u2014 this mind cannot reach its provider right now.",
+        )
+        return
+    await bot.send_message(
+        chat_id=chat_id, text="Pick a model for this conversation:",
+        reply_markup=keyboard,
+    )
 
 
 async def cmd_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1754,7 +1824,7 @@ COMMANDS: tuple[tuple[str, str, object], ...] = (
     ("new", "Start a fresh conversation (ends this one)", cmd_new),
     ("clear", "Clear this conversation and start over", cmd_clear),
     ("status", "Server port, default model, sessions running", cmd_status),
-    ("model", "Show the current model, or /model <name> to switch", cmd_model),
+    ("model", "Pick a model for this conversation", cmd_model),
     ("models", "List the models this mind can be pointed at", cmd_models),
     ("autopilot", "Toggle autopilot for this conversation", cmd_autopilot),
     ("switch", "Resume a conversation: /switch <id>", cmd_switch),
@@ -1933,6 +2003,12 @@ def _build_application(token: str):
     ))
     app.add_handler(CallbackQueryHandler(
         with_typing(on_session_button), pattern=session_picker.CALLBACK_PATTERN,
+    ))
+    # The same handler, because that is where the single-use claim, the
+    # keyboard removal and the acknowledgement live — a model picker left
+    # tappable in scrollback would switch a conversation weeks later.
+    app.add_handler(CallbackQueryHandler(
+        with_typing(on_session_button), pattern=model_picker.CALLBACK_PATTERN,
     ))
     app.add_handler(MessageHandler(filters.PHOTO, with_typing(handle_photo)))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, with_typing(handle_text)))
