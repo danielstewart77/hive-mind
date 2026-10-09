@@ -169,7 +169,21 @@
     return row;
   }
   function renderStory(s){const item=el('div','kanban-item surface');item.append(actionRow(s,'stories'));const select=el('select','');select.setAttribute('aria-label',`Status for ${s.title}`);for(const [value,label] of allStatuses){const option=el('option','',label);option.value=value;option.selected=value===s.status;select.append(option);}select.addEventListener('change',async()=>{const previous=s.status;try{const updated=await request(`/api/kanban/stories/${encodeURIComponent(s.id)}`,'PATCH',{status:select.value});Object.assign(s,updated);render();feedback.textContent='Story status updated.';}catch(err){select.value=previous;feedback.textContent=`Status not saved: ${err.message}`;await reload(feedback.textContent);}});item.append(select);return item;}
-  function enableDrop(target,kind,parentId,beforeId){target.addEventListener('dragover',e=>{e.preventDefault();target.classList.add('kanban-drag-over');});target.addEventListener('dragleave',()=>target.classList.remove('kanban-drag-over'));target.addEventListener('drop',async e=>{e.preventDefault();e.stopPropagation();target.classList.remove('kanban-drag-over');let data;try{data=JSON.parse(e.dataTransfer.getData('application/json'));}catch{return;}if(data.id===beforeId)return;const accepted=kind==='epics'?'epics':kind==='features'?'features':'stories';if(data.kind!==accepted)return;const body=kind==='epics'?{before_id:beforeId}:kind==='features'?{epic_id:parentId}:{feature_id:parentId};if(beforeId)body.before_id=beforeId;try{await request(`/api/kanban/${kind}/${encodeURIComponent(data.id)}`,'PATCH',body);await reload('Order updated.');}catch(err){await reload(`Move failed: ${err.message}`);}});}
+  function enableDrop(target,kind,parentId,beforeId){
+    target.addEventListener('dragover',e=>{e.preventDefault();target.classList.add('kanban-drag-over');});
+    target.addEventListener('dragleave',()=>target.classList.remove('kanban-drag-over'));
+    target.addEventListener('drop',async e=>{
+      e.preventDefault();e.stopPropagation();target.classList.remove('kanban-drag-over');
+      let data;try{data=JSON.parse(e.dataTransfer.getData('application/json'));}catch{return;}
+      // Anything can go into anything: the dropped item takes the drop target as its parent.
+      // Its own children keep their parent links; only the moved item changes.
+      if(!data||!data.id)return;
+      const dropOn=beforeId||parentId;
+      if(dropOn===data.id)return;
+      try{await request(`/api/kanban/${data.kind}/${encodeURIComponent(data.id)}`,'PATCH',{parent_id:dropOn||null});await reload('Moved.');}
+      catch(err){await reload(`Move failed: ${err.message}`);}
+    });
+  }
   function makeDraggable(node,kind,id){node.draggable=true;node.addEventListener('dragstart',e=>{if(e.target!==node)return;e.stopPropagation();e.dataTransfer.setData('application/json',JSON.stringify({kind,id}));e.dataTransfer.effectAllowed='move';});}
   const EXPANDED_KEY='kanban-expanded-items';
   function loadExpanded(){try{return new Set(JSON.parse(localStorage.getItem(EXPANDED_KEY)||'[]'));}catch{return new Set();}}

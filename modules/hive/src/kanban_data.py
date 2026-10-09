@@ -667,6 +667,35 @@ def current_type(record_id: str) -> str:
     return row["kind"]
 
 
+def set_parent(record_id: str, parent_id: str | None) -> dict[str, Any]:
+    """Make parent_id the parent of record_id, or clear it when parent_id is None.
+
+    No rule about kind or level. Only the item moved changes; its children keep
+    their own parent links, which is the point of a parent-only move.
+    """
+    if parent_id == record_id:
+        raise ValueError("An item cannot be its own parent")
+    with _session() as connection:
+        _write(connection)
+        try:
+            if connection.execute("SELECT 1 FROM work_items WHERE id = ?", (record_id,)).fetchone() is None:
+                raise KeyError(f"Item not found: {record_id}")
+            if parent_id is not None and connection.execute(
+                "SELECT 1 FROM work_items WHERE id = ?", (parent_id,)
+            ).fetchone() is None:
+                raise KeyError(f"Item not found: {parent_id}")
+            connection.execute(
+                "UPDATE work_items SET parent_id = ?, position = ? WHERE id = ?",
+                (parent_id, _next_position(connection), record_id),
+            )
+            record = _row_to_record(connection.execute(_SELECT + " WHERE item.id = ?", (record_id,)).fetchone())
+            connection.execute("COMMIT")
+        except BaseException:
+            connection.execute("ROLLBACK")
+            raise
+    return record
+
+
 def kind_of(record_id: str) -> str:
     """The kind a row is now, which may differ from the kind its URL was built with."""
     with _session() as connection:

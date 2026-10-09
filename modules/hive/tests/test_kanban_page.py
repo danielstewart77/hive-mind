@@ -30,7 +30,7 @@ def test_backlog_uses_collapsible_items_and_drag_drop_hooks(signed_in):
     assert "kanban-toggle" in body.text
     assert "/kanban/item/" in body.text
     assert "application/json" in body.text
-    assert "before_id" in body.text
+    assert "parent_id" in body.text
     assert "enableDrop" in body.text
     assert 'id="collapse-level"' in body.text
     assert 'id="expand-level"' in body.text
