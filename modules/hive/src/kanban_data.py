@@ -225,6 +225,15 @@ def _next_position(connection: sqlite3.Connection) -> int:
     return int(row["next"])
 
 
+def _first_position(connection: sqlite3.Connection) -> int:
+    """A position before every existing row, so a new top-level item lands at the top."""
+    row = connection.execute(
+        "SELECT COALESCE(MIN(position), ?) - 1 AS first FROM work_items",
+        (_MIN_POSITION,),
+    ).fetchone()
+    return int(row["first"])
+
+
 def _ordered_children(connection: sqlite3.Connection, parent_id: str, kind: str) -> list[str]:
     return [row["id"] for row in connection.execute(
         "SELECT id FROM work_items WHERE parent_id = ? AND kind = ? ORDER BY position, rowid",
@@ -475,6 +484,8 @@ def create_epic(title: str, description: str = "", requirements: str = "", accep
     with _session() as connection:
         _write(connection)
         record = _insert(connection, "epic", checked, None, None, description, requirements, acceptance_criteria, qa_tests)
+        connection.execute("UPDATE work_items SET position = ? WHERE id = ?", (_first_position(connection), record["id"]))
+        record = _row_to_record(_fetch(connection, record["id"], "epic"))
         connection.execute("COMMIT")
         return record
 

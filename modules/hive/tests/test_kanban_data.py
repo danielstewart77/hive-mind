@@ -58,17 +58,17 @@ def test_the_stored_position_decides_the_order_not_the_insertion_order():
     with _db() as connection:
         connection.execute(
             "UPDATE work_items SET position = ? WHERE id = ?",
-            (store._MIN_POSITION - 1, second["id"]),
+            (store._MIN_POSITION + 99, first["id"]),
         )
     assert [e["id"] for e in store.list_epics()] == [second["id"], first["id"]]
 
 
-def test_an_item_created_after_several_deletions_sorts_last():
+def test_an_epic_created_after_several_deletions_sorts_first():
     made = [store.create_epic(f"Epic {n}") for n in range(5)]
     store.delete_epic(made[1]["id"])
     store.delete_epic(made[2]["id"])
     latest = store.create_epic("Newest")
-    assert [e["id"] for e in store.list_epics()][-1] == latest["id"]
+    assert [e["id"] for e in store.list_epics()][0] == latest["id"]
 
 
 def test_deleting_an_epic_takes_its_features_and_every_story_beneath_them():

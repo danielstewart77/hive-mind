@@ -63,8 +63,9 @@ def test_moving_an_epic_before_another_reorders_the_epic_list():
     first = store.create_epic("First")
     second = store.create_epic("Second")
     third = store.create_epic("Third")
+    assert [e["id"] for e in store.list_epics()] == [third["id"], second["id"], first["id"]]
     store.update_epic(third["id"], before_id=first["id"])
-    assert [e["id"] for e in store.list_epics()] == [third["id"], first["id"], second["id"]]
+    assert [e["id"] for e in store.list_epics()] == [second["id"], third["id"], first["id"]]
 
 
 def test_a_childless_story_becoming_a_feature_moves_under_its_feature_epic():
