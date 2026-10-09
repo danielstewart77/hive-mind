@@ -75,12 +75,18 @@ def test_a_model_the_mind_offers_is_switched_to():
                 new=AsyncMock(return_value=[
                     {"name": "claude-opus-5"}, {"name": "claude-sonnet-5"},
                 ]),
-            ), patch.object(mgr, "_kill_process", new=AsyncMock()), \
-                    patch.object(mgr, "_spawn", new=AsyncMock()), \
+            ), patch.object(mgr, "_kill_process", new=AsyncMock()) as killed, \
+                    patch.object(mgr, "_spawn", new=AsyncMock()) as spawned, \
                     patch.object(mgr, "_routing_for", new=AsyncMock(return_value={})):
                 await mgr.switch_model("sess-1", "claude-sonnet-5")
             row = await mgr._get_row("sess-1")
             assert row["model"] == "claude-sonnet-5"
+            # The switch is a teardown and a respawn, not a column write: a
+            # row updated without the process being replaced is a conversation
+            # reporting a model it is not running.
+            assert killed.await_count == 1
+            assert spawned.await_count == 1
+            assert spawned.await_args.args[1] == "claude-sonnet-5"
             await mgr.shutdown()
 
     _run(scenario())
@@ -97,6 +103,69 @@ def test_an_unreachable_mind_refuses_rather_than_approving_everything():
                     patch.object(mgr, "_spawn", new=AsyncMock()):
                 with pytest.raises(ValueError):
                     await mgr.switch_model("sess-1", "claude-sonnet-5")
+            await mgr.shutdown()
+
+    _run(scenario())
+
+
+def test_a_switch_while_the_turn_is_still_streaming_is_refused():
+    """The conversation keeps its model and its process until the turn ends.
+
+    `send_message` holds the session's turn lock for the whole stream. A
+    switch that ignored it killed the harness mid-answer: the reply being
+    written was lost and the surface went on awaiting a stream that would
+    never close, which reads as a mind that is still thinking.
+    """
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr, "claude-opus-5")
+            lock = mgr._locks.setdefault("sess-1", asyncio.Lock())
+            async with lock:
+                with patch.object(
+                    mgr, "mind_models",
+                    new=AsyncMock(return_value=[
+                        {"name": "claude-opus-5"}, {"name": "claude-sonnet-5"},
+                    ]),
+                ), patch.object(mgr, "_kill_process", new=AsyncMock()) as killed, \
+                        patch.object(mgr, "_spawn", new=AsyncMock()) as spawned, \
+                        patch.object(mgr, "_routing_for", new=AsyncMock(return_value={})):
+                    with pytest.raises(ValueError):
+                        await mgr.switch_model("sess-1", "claude-sonnet-5")
+                assert killed.await_count == 0
+                assert spawned.await_count == 0
+            row = await mgr._get_row("sess-1")
+            assert row["model"] == "claude-opus-5"
+            await mgr.shutdown()
+
+    _run(scenario())
+
+
+def test_a_switch_once_the_turn_has_finished_goes_through():
+    """The guard is the lock being held, not the lock existing.
+
+    A session that has ever taken a turn keeps its lock object for the life of
+    the process, so a guard that tested for presence rather than for being
+    held would refuse every switch after the conversation's first turn.
+    """
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr, "claude-opus-5")
+            lock = mgr._locks.setdefault("sess-1", asyncio.Lock())
+            async with lock:
+                pass
+            with patch.object(
+                mgr, "mind_models",
+                new=AsyncMock(return_value=[
+                    {"name": "claude-opus-5"}, {"name": "claude-sonnet-5"},
+                ]),
+            ), patch.object(mgr, "_kill_process", new=AsyncMock()), \
+                    patch.object(mgr, "_spawn", new=AsyncMock()), \
+                    patch.object(mgr, "_routing_for", new=AsyncMock(return_value={})):
+                await mgr.switch_model("sess-1", "claude-sonnet-5")
+            row = await mgr._get_row("sess-1")
+            assert row["model"] == "claude-sonnet-5"
             await mgr.shutdown()
 
     _run(scenario())
