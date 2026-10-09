@@ -43,7 +43,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from minds.proactive import make_proactive_router
-from minds import models_api, runtime_api, surface_token_api
+from minds import github_token_api, models_api, runtime_api, surface_token_api
 from minds.pty_attach import (
     PtyUnavailable,
     TmuxTerminals,
@@ -612,6 +612,10 @@ async def _reap_proc(proc: asyncio.subprocess.Process | None) -> None:
 @app.on_event("startup")
 async def _startup() -> None:
     await _fetch_secrets_on_startup()
+    # After the shared fetch, never before: this mind's own GitHub token
+    # wins over the hive's, and `GH_TOKEN` from that fetch would
+    # otherwise shadow it on every spawn.
+    github_token_api.adopt_stored_token()
     asyncio.ensure_future(runtime_api.registration_loop(
         RUNTIME_PATH, mind_name=MIND_NAME, mind_id=MIND_ID, log=log
     ))
@@ -1208,6 +1212,7 @@ runtime_api.install_session_guard(app, mind_dir=MIND_DIR)
 runtime_api.install_runtime_routes(app, path=RUNTIME_PATH, mind_id=MIND_ID, log=log)
 models_api.install_models_route(app, path=RUNTIME_PATH, mind_id=MIND_ID, log=log)
 surface_token_api.install_surface_token_routes(app, mind_id=MIND_ID, log=log)
+github_token_api.install_github_token_routes(app, mind_id=MIND_ID, log=log)
 
 
 def main() -> None:
