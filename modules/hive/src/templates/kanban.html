@@ -252,14 +252,11 @@
       }
       node.append(labelRow(node,actionRow(r,r._kind),label,sub,r.id,{type:kindLabel(r),number,state:'',inProgress:false}));
       makeDraggable(node,r._kind,r.id);
-      if(r._kind==='epics')enableDrop(node,'epics',null,r.id);
-      if(r._kind==='features')enableDrop(node,'features',r.parent_id||r.epic_id||null,r.id);
+      enableDrop(node,r._kind,r.parent_id||r.epic_id||null,r.id);
       const children=el('div','kanban-children');
       kids.forEach((k,ki)=>children.append(build(k,level+1,`${number}.${ki+1}`)));
       if(!sub)children.append(el('p','kanban-empty','Nothing under this yet.'));
       node.append(children);
-      if(r._kind==='epics')enableDrop(node,'features',r.id,null);
-      if(r._kind!=='stories')enableDrop(node,'stories',r.id,null);
       return node;
     };
     roots.forEach((r,ri)=>mount.append(build(r,1,`${ri+1}`)));
