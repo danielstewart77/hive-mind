@@ -11,6 +11,7 @@ import os
 import sys
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from starlette.testclient import TestClient
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -101,13 +102,16 @@ class TestTheListing:
 
 
 class TestOneRowsCheck:
-    def test_it_reports_what_the_check_found(self, tmp_path, monkeypatch) -> None:
+    def test_it_checks_the_credential_and_holder_it_was_asked_about(
+        self, tmp_path, monkeypatch
+    ) -> None:
         client = _authed_client(tmp_path, monkeypatch)
         answer = {"credential": "mind_github_token", "holder": "cypher",
                   "status": registry.WORKING, "names": "danielstewart77"}
-        monkeypatch.setattr(registry, "check", AsyncMock(return_value=answer))
+        checked = AsyncMock(return_value=answer)
+        monkeypatch.setattr(registry, "check", checked)
 
-        with patch.object(main_mod, "_broker_minds_safe", AsyncMock(return_value=MINDS)):
+        with patch.object(main_mod, "_gateway_json", AsyncMock(return_value=MINDS)):
             response = client.post(
                 "/api/settings/credentials/mind_github_token/check",
                 json={"holder": "cypher"},
@@ -115,6 +119,47 @@ class TestOneRowsCheck:
 
         assert response.status_code == 200
         assert response.json()["status"] == registry.WORKING
+        assert checked.await_args.args[:2] == ("mind_github_token", "cypher")
+
+    def test_a_credential_the_hive_does_not_have_is_refused(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The key arrives on a URL, and an entry per invented name is a
+        dictionary that grows for as long as the console is up."""
+        client = _authed_client(tmp_path, monkeypatch)
+        checked = AsyncMock()
+        monkeypatch.setattr(registry, "check", checked)
+
+        response = client.post(
+            "/api/settings/credentials/not_a_credential/check",
+            json={"holder": "cypher"},
+        )
+
+        assert response.status_code == 404
+        checked.assert_not_awaited()
+
+    def test_a_broker_it_cannot_read_is_not_reported_as_an_absent_holder(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Otherwise every mind at once is remembered as "not in the
+        registry" — a confident sentence, false, with nothing on screen
+        attributing it to comms."""
+        client = _authed_client(tmp_path, monkeypatch)
+        registry.forget_all()
+        checked = AsyncMock()
+        monkeypatch.setattr(registry, "check", checked)
+
+        with patch.object(
+            main_mod, "_gateway_json", AsyncMock(side_effect=RuntimeError("down"))
+        ):
+            response = client.post(
+                "/api/settings/credentials/mind_github_token/check",
+                json={"holder": "cypher"},
+            )
+
+        assert response.status_code == 502
+        checked.assert_not_awaited()
+        assert registry.recall("mind_github_token", "cypher") is None
 
     def test_a_check_with_no_holder_is_refused(self, tmp_path, monkeypatch) -> None:
         client = _authed_client(tmp_path, monkeypatch)
@@ -269,3 +314,141 @@ class TestRotation:
         client.post("/api/settings/credentials/comms_bearer_token/rotate")
 
         assert registry.recall("comms_bearer_token", "hive_mind") is None
+
+
+class TestTheRelayItself:
+    """`push_github_token` and `_unwrap_github_token` in `src/mind_runtime.py`.
+
+    Driven through a transport rather than by stubbing the relay: a test that
+    hands the route a hand-raised `HTTPException` puts its stub on the status
+    mapping, which is the whole behaviour.
+    """
+
+    def _relay(self, monkeypatch, handler):
+        import httpx
+
+        import mind_runtime
+
+        monkeypatch.setattr(
+            mind_runtime, "admin_headers", lambda: {"Authorization": "Bearer a"}
+        )
+        original = httpx.AsyncClient
+
+        class _Client(original):
+            def __init__(self, *args, **kwargs):
+                kwargs["transport"] = httpx.MockTransport(handler)
+                super().__init__(*args, **kwargs)
+
+        monkeypatch.setattr(httpx, "AsyncClient", _Client)
+        return mind_runtime
+
+    def test_a_refused_token_keeps_its_own_four_hundred(self, monkeypatch) -> None:
+        import asyncio
+
+        import httpx
+
+        relay = self._relay(
+            monkeypatch,
+            lambda request: httpx.Response(400, json={"error": "GitHub rejected that token"}),
+        )
+
+        with pytest.raises(HTTPException) as refusal:
+            asyncio.run(relay.push_github_token("http://cypher:8420", "ghp_x"))
+
+        assert refusal.value.status_code == 400
+        assert "rejected" in refusal.value.detail
+
+    def test_a_mind_that_cannot_store_one_keeps_its_five_oh_three(
+        self, monkeypatch
+    ) -> None:
+        import asyncio
+
+        import httpx
+
+        relay = self._relay(
+            monkeypatch, lambda request: httpx.Response(503, json={"error": "names no key"})
+        )
+
+        with pytest.raises(HTTPException) as refusal:
+            asyncio.run(relay.push_github_token("http://bob:8420", "ghp_x"))
+
+        assert refusal.value.status_code == 503
+
+    def test_a_mind_without_the_route_is_not_a_bad_request(self, monkeypatch) -> None:
+        """501, so the console can say "redeploy this mind" rather than
+        "your token is malformed"."""
+        import asyncio
+
+        import httpx
+
+        relay = self._relay(monkeypatch, lambda request: httpx.Response(404, json={}))
+
+        with pytest.raises(HTTPException) as refusal:
+            asyncio.run(relay.push_github_token("http://old:8420", "ghp_x"))
+
+        assert refusal.value.status_code == 501
+
+    def test_a_mind_that_is_down_is_a_bad_gateway(self, monkeypatch) -> None:
+        import asyncio
+
+        import httpx
+
+        def _down(request):
+            raise httpx.ConnectError("no route")
+
+        relay = self._relay(monkeypatch, _down)
+
+        with pytest.raises(HTTPException) as refusal:
+            asyncio.run(relay.push_github_token("http://gone:8420", "ghp_x"))
+
+        assert refusal.value.status_code == 502
+
+    def test_a_mind_answering_something_other_than_a_state_is_not_passed_through(
+        self, monkeypatch
+    ) -> None:
+        import asyncio
+
+        import httpx
+
+        relay = self._relay(monkeypatch, lambda request: httpx.Response(200, json=[1, 2]))
+
+        with pytest.raises(HTTPException) as refusal:
+            asyncio.run(relay.push_github_token("http://odd:8420", "ghp_x"))
+
+        assert refusal.value.status_code == 502
+
+    def test_a_mind_with_no_gateway_url_is_refused_rather_than_guessed_at(
+        self, monkeypatch
+    ) -> None:
+        import asyncio
+
+        import httpx
+
+        relay = self._relay(monkeypatch, lambda request: httpx.Response(200, json={}))
+
+        with pytest.raises(HTTPException) as refusal:
+            asyncio.run(relay.push_github_token("", "ghp_x"))
+
+        assert refusal.value.status_code == 400
+
+
+class TestWhatTheRouteRelaysBack:
+    def test_an_edge_mind_that_owes_a_restart_says_so_on_the_row_too(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The alert said it and the row did not, so the row read Working
+        over a token the running process has never loaded."""
+        client = _authed_client(tmp_path, monkeypatch)
+        registry.forget_all()
+        pushed = AsyncMock(return_value={
+            "login": "danielstewart77", "where": "env", "restart_required": True,
+        })
+        with patch.object(
+            main_mod, "_mind_gateway_url", AsyncMock(return_value="http://skippy:8420")
+        ), patch.object(main_mod.mind_runtime, "push_github_token", pushed):
+            body = client.put(
+                "/api/minds/skippy/github-token", json={"token": "ghp_pasted"}
+            ).json()
+
+        assert body["restart_required"] is True
+        assert "restarted" in registry.recall("mind_github_token", "skippy").detail

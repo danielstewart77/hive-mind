@@ -3781,7 +3781,28 @@ async def api_settings_credentials_check(
     holder = str((payload or {}).get("holder") or "").strip()
     if not holder:
         raise HTTPException(status_code=400, detail="a holder is required")
-    minds = await _broker_minds_safe()
+    if not credential_registry.is_declared(key):
+        # Refused before anything is remembered: the key arrives on a URL,
+        # and an entry per invented name is a dictionary that grows for as
+        # long as this console is up.
+        raise HTTPException(status_code=404, detail="no such credential")
+    if credential_registry._per_mind(key) is not None:
+        # A broker blip must not be remembered as "this holder is not in the
+        # registry" for every mind at once. `_broker_minds_safe` turns any
+        # failure into an empty list, which here would read as a hive with
+        # nobody registered — a confident sentence, false, with nothing on
+        # screen attributing it to comms.
+        try:
+            raw = await _gateway_json("/broker/minds")
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="the mind registry could not be read, so this holder "
+                       "could not be asked",
+            ) from exc
+        minds = [m for m in raw if isinstance(m, dict)] if isinstance(raw, list) else []
+    else:
+        minds = []
     return await credential_registry.check(key, holder, minds)
 
 
@@ -3824,6 +3845,15 @@ async def api_mind_github_token_set(
         "mind_github_token", name, status=credential_registry.WORKING,
         present=True, names=str(state.get("login") or ""),
         where=str(state.get("where") or ""),
+        preview=str(state.get("preview") or ""),
+        # An edge mind read its environment at boot and keeps that value until
+        # it is restarted, so the row says so rather than reading Working over
+        # a token nothing has loaded. The alert said it; the row did not.
+        detail=(
+            "stored — this mind keeps the value it booted with until it is restarted"
+            if state.get("restart_required")
+            else ""
+        ),
     )
     return {
         "saved": True,

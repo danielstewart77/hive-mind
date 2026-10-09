@@ -229,6 +229,11 @@ class _Checked:
     #: the stack, its own `.env` on an edge host. Only the holder knows, and
     #: it is the operator's whole remedy path.
     where: str
+    #: Whether this holder says it can take a value at all. The holder's own
+    #: answer, since only it knows whether it has somewhere to put one.
+    settable: bool
+    #: The last four characters of the stored value, reported by the holder.
+    preview: str
     taken_at: float  # wall clock, for the operator
     monotonic_at: float  # for the age, which a clock change must not move
 
@@ -245,6 +250,8 @@ def remember(
     present: bool | None = None,
     names: str = "",
     where: str = "",
+    settable: bool = True,
+    preview: str = "",
 ) -> _Checked:
     entry = _Checked(
         status=status,
@@ -252,6 +259,8 @@ def remember(
         present=present,
         names=names,
         where=where,
+        settable=settable,
+        preview=preview,
         taken_at=time.time(),
         monotonic_at=time.monotonic(),
     )
@@ -370,15 +379,15 @@ def _per_mind_rows(
                 "holder_kind": MIND,
                 "where": entry.where if entry is not None else "",
                 "present": entry.present if entry is not None else None,
-                "preview": None,
+                "preview": entry.preview if entry is not None else None,
                 "status": status,
                 "detail": detail,
                 "names": entry.names if entry is not None else "",
                 # A mind that answered and said it cannot take one is not
                 # offered a paste box: offering one that always refuses is
                 # worse than offering none.
-                "settable": status in (WORKING, REFUSED, NOT_SET, UNCHECKED)
-                and (entry is None or entry.status != PREDATES_API),
+                "settable": status in (WORKING, REFUSED, NOT_SET, UNCHECKED, UNDETERMINED)
+                and (entry is None or entry.settable),
                 "checkable": not retired and status != UNADDRESSABLE,
                 **_checked_fields(entry),
             }
@@ -402,6 +411,7 @@ def build_rows(minds: list[dict]) -> list[dict[str, Any]]:
         rows.extend(
             sorted(_per_mind_rows(credential, minds), key=lambda r: r["holder"])
         )
+    prune({(row["credential"], row["holder"]) for row in rows})
     return rows
 
 
@@ -472,16 +482,90 @@ def _shared_value(credential: str, holder: str) -> str | None:
         if file_label != holder:
             continue
         try:
-            return credentials_data._read_env_value(
+            raw = credentials_data._read_env_value(
                 credentials_data.ENV_FILES[file_label], env_key
             )
-        except credentials_data.Unreadable:
+        except credentials_data.Unreadable as exc:
+            raise Unreadable(str(exc)) from exc
+        if raw is None:
             return None
+        # Stripped exactly as `python-dotenv`, docker compose and the mind's
+        # own reader strip it. A quoted value is ordinary and legal in a
+        # `.env`; probing the raw text sends `Bearer "abc"`, gets a 401, and
+        # renders Refused — the one status whose remedy is to revoke and
+        # regenerate — over a credential that works everywhere.
+        return raw.strip().strip("'\"")
     return None
+
+
+class Unreadable(Exception):
+    """The file this holder reads could not be read."""
+
+
+async def check_host_github_pat(holder: str) -> _Checked:
+    """Ask GitHub about the token in the operator's own files.
+
+    The one credential on the page most likely to have been revoked, and the
+    only one with no service inside the hive to present it to. The old tab
+    verified it against `api.github.com` on every save; leaving it as "could
+    not tell" forever would have made the page quieter and less true.
+    """
+    rows, _in_sync = credentials_data._github_pat_locations()
+    row = next((r for r in rows if r["file"] == holder), None)
+    if row is None:
+        return remember("github_pat", holder, status=UNDETERMINED, detail="no such file")
+    if row.get("unreadable"):
+        return remember(
+            "github_pat", holder, status=UNREADABLE,
+            detail=f"{row['path']} could not be read",
+        )
+    if not row.get("present"):
+        return remember("github_pat", holder, status=NOT_SET, present=False)
+    token = _host_github_token(holder)
+    if not token:
+        return remember("github_pat", holder, status=NOT_SET, present=False)
+    try:
+        login = await asyncio.to_thread(credentials_data._verify_github_pat, token)
+    except ValueError as exc:
+        # `_verify_github_pat` raises the same error for a 401 and for a
+        # GitHub it could not reach, so only the 401 may be read as refused.
+        message = str(exc)
+        if "(401)" in message:
+            return remember(
+                "github_pat", holder, status=REFUSED, present=True,
+                detail="GitHub rejected this token",
+                preview=row.get("preview") or "",
+            )
+        return remember(
+            "github_pat", holder, status=UNDETERMINED, present=True, detail=message,
+            preview=row.get("preview") or "",
+        )
+    return remember(
+        "github_pat", holder, status=WORKING, present=True, names=login,
+        preview=row.get("preview") or "",
+    )
+
+
+def _host_github_token(holder: str) -> str:
+    """The operator's own GitHub token as the named file carries it."""
+    try:
+        if holder == "git_credentials":
+            match = credentials_data._GIT_CREDENTIALS_GITHUB_RE.search(
+                credentials_data._read_text(credentials_data.GIT_CREDENTIALS_PATH)
+            )
+            return match.group("token") or "" if match else ""
+        tokens = credentials_data._github_oauth_tokens(
+            credentials_data._read_text(credentials_data.GH_HOSTS_PATH)
+        )
+        return tokens[0] if tokens else ""
+    except (credentials_data.Unreadable, OSError):
+        return ""
 
 
 async def check_shared(credential: str, holder: str) -> _Checked:
     """Present this holder's own copy to the service that validates it."""
+    if credential == "github_pat":
+        return await check_host_github_pat(holder)
     probe = SHARED_PROBES.get(credential)
     if probe is None:
         return remember(
@@ -493,7 +577,14 @@ async def check_shared(credential: str, holder: str) -> _Checked:
             credential, holder, status=VALIDATOR,
             detail="this holder is what the others authenticate to",
         )
-    value = _shared_value(credential, holder)
+    try:
+        value = _shared_value(credential, holder)
+    except Unreadable as exc:
+        # Not "not set": the remedy offered for an absent value is to write
+        # one, over a credential that is present and fine.
+        return remember(
+            credential, holder, status=UNREADABLE, detail=f"could not be read: {exc}",
+        )
     if not value:
         return remember(credential, holder, status=NOT_SET, present=False)
     try:
@@ -501,6 +592,14 @@ async def check_shared(credential: str, holder: str) -> _Checked:
             response = await client.get(
                 probe.url(), headers={"Authorization": f"Bearer {value}"}
             )
+    except (ValueError, UnicodeError) as exc:
+        # A stray carriage return from a CRLF `.env`, or a non-ASCII
+        # character: the header cannot be built. Neither `httpx.HTTPError`,
+        # so unguarded this escaped and 500'd the check route.
+        return remember(
+            credential, holder, status=UNDETERMINED, present=True,
+            detail=f"this value cannot be sent as a header: {type(exc).__name__}",
+        )
     except httpx.HTTPError as exc:
         # The service did not answer. Never "refused": the remedy for a
         # refusal is a new credential, and applying it to a token behind an
@@ -588,23 +687,58 @@ async def check_mind(credential: str, holder: str, gateway_url: str) -> _Checked
             detail="the mind answered something other than a credential state",
         )
     where = str(body.get("where") or "")
+    # Whether this mind can take one at all is the mind's own answer, not a
+    # guess from its status: a container naming no keyring key of its own
+    # refuses every write, and a page offering it a paste box offers one that
+    # can only ever fail.
+    settable = bool(body.get("settable", True))
+    preview = str(body.get("preview") or "")
     if not body.get("stored"):
-        return remember(credential, holder, status=NOT_SET, present=False, where=where)
+        return remember(
+            credential, holder, status=NOT_SET, present=False, where=where,
+            settable=settable, detail=str(body.get("detail") or ""),
+        )
     accepted = body.get("accepted")
     if accepted is True:
         return remember(
             credential, holder, status=WORKING, present=True, where=where,
-            names=str(body.get(spec.names) or ""),
+            names=str(body.get(spec.names) or ""), settable=settable, preview=preview,
         )
     if accepted is False:
         return remember(
             credential, holder, status=REFUSED, present=True, where=where,
+            settable=settable, preview=preview,
             detail=str(body.get("detail") or "the service rejected the stored value"),
         )
     return remember(
         credential, holder, status=UNDETERMINED, present=True, where=where,
-        detail="the mind holds a value it could not get a verdict on",
+        settable=settable, preview=preview,
+        detail=str(body.get("detail") or "the mind could not get a verdict on it"),
     )
+
+
+def is_declared(credential: str) -> bool:
+    """Whether this is a credential the hive actually has.
+
+    Checked before anything is remembered: the key arrives on a URL, and an
+    entry per invented name is a dictionary that grows for as long as the
+    console is up.
+    """
+    if _per_mind(credential) is not None:
+        return True
+    return any(g["key"] == credential for g in credentials_data.CREDENTIAL_GROUPS)
+
+
+def prune(known: set[tuple[str, str]]) -> None:
+    """Drop remembered answers about holders the page no longer shows.
+
+    A machine decommissioned and a different one registered under the same
+    name would otherwise inherit the old verdict and the old account name,
+    and a credential dropped from the declaration would keep its entries for
+    as long as the process lives.
+    """
+    for key in [k for k in _checks if k not in known]:
+        del _checks[key]
 
 
 async def check(credential: str, holder: str, minds: list[dict]) -> dict[str, Any]:

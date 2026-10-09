@@ -90,7 +90,7 @@ window.addEventListener("DOMContentLoaded", function () {
 
     const STATUS_WORDS = {
         working: "Working", refused: "Refused", not_set: "Not set",
-        unchecked: "Checking…", undetermined: "Could not tell",
+        unchecked: "Unchecked", undetermined: "Could not tell",
         unreachable: "Unreachable", predates_api: "Older code",
         unaddressable: "No address", unreadable: "Unreadable",
         retired: "Retired", validator: "Validator",
@@ -114,14 +114,14 @@ window.addEventListener("DOMContentLoaded", function () {
         const detail = row.detail ? '<small>' + h.escapeHtml(row.detail) + '</small>' : "";
         const account = row.names ? '<small>' + h.escapeHtml(row.names) + '</small>' : "";
         const value = row.preview ? h.escapeHtml(row.preview) : (row.present === false ? "—" : "");
-        const target = h.escapeHtml(row.credential) + "::" + h.escapeHtml(row.holder);
+        const keys = 'data-credential="' + h.escapeHtml(row.credential) + '" data-holder="' + h.escapeHtml(row.holder) + '"';
         let action = "";
         if (row.settable) {
-            action = '<span class="credential-set"><input type="password" placeholder="Paste a token" autocomplete="off" data-set-input="' + target + '"><button class="button button-quiet" type="button" data-set-row="' + target + '">Save</button></span>';
+            action = '<span class="credential-set"><input type="password" placeholder="Paste a token" autocomplete="off" data-set-input ' + keys + '><button class="button button-quiet" type="button" data-set-row ' + keys + '>Save</button></span>';
         } else if (row.checkable) {
-            action = '<button class="button button-quiet" type="button" data-check-row="' + target + '">Check</button>';
+            action = '<button class="button button-quiet" type="button" data-check-row ' + keys + '>Check</button>';
         }
-        return '<tr data-row="' + target + '" data-status="' + h.escapeHtml(row.status) + '" data-search="' + h.escapeHtml((row.holder + " " + row.holder_label + " " + row.credential_label).toLowerCase()) + '">'
+        return '<tr data-row ' + keys + ' data-status="' + h.escapeHtml(row.status) + '">'
             + '<td><strong>' + h.escapeHtml(row.holder_label) + '</strong>' + account + '</td>'
             + '<td><small>' + h.escapeHtml(row.where || "—") + '</small></td>'
             + '<td>' + value + '</td>'
@@ -135,7 +135,7 @@ window.addEventListener("DOMContentLoaded", function () {
         if (credential.rotatable) {
             action = '<button class="button" type="button" data-rotate="' + h.escapeHtml(credential.key) + '">Rotate</button>';
         } else if (credential.key === "github_pat") {
-            action = '<span class="credential-set"><input type="password" placeholder="Paste a token" autocomplete="off" data-set-input="host::github_pat"><button class="button" type="button" data-set-host="github_pat">Save</button></span>';
+            action = '<span class="credential-set"><input type="password" placeholder="Paste a token" autocomplete="off" data-set-input data-credential="github_pat" data-holder="host"><button class="button" type="button" data-set-host="github_pat">Save</button></span>';
         } else if (credential.manual_reason) {
             action = '<span class="pill" title="' + h.escapeHtml(credential.manual_reason) + '">Manual only</span>';
         } else {
@@ -182,8 +182,26 @@ window.addEventListener("DOMContentLoaded", function () {
             if (!rows.length && (needle || wanted)) return "";
             return credentialGroupHtml(credential, rows);
         }).join("");
+        const typed = {};
+        let focused = null;
+        container.querySelectorAll("input[data-set-input]").forEach(function (input) {
+            if (input.value) typed[input.dataset.credential + "\u0000" + input.dataset.holder] = input.value;
+            if (document.activeElement === input) focused = input.dataset.credential + "\u0000" + input.dataset.holder;
+        });
         container.innerHTML = banner + (html || '<p class="empty-state">Nothing matches that filter.</p>');
+        container.querySelectorAll("input[data-set-input]").forEach(function (input) {
+            const key = input.dataset.credential + "\u0000" + input.dataset.holder;
+            if (typed[key]) input.value = typed[key];
+            if (focused === key) input.focus();
+        });
         refreshIcons();
+    }
+
+    function credentialRowElement(credential, holder) {
+        return Array.prototype.find.call(
+            document.querySelectorAll("#credential-registry tr[data-row]"),
+            function (element) { return element.dataset.credential === credential && element.dataset.holder === holder; }
+        );
     }
 
     function replaceCredentialRow(answer) {
@@ -193,7 +211,25 @@ window.addEventListener("DOMContentLoaded", function () {
         // A mind that turned out to be running older code is not offered a
         // paste box: one that always refuses is worse than none.
         if (answer.status === "predates_api" || answer.status === "retired") row.settable = false;
-        renderCredentials();
+        // One row, never the whole table. The paste boxes live inside the
+        // container, and the first load queues a check for every row — so
+        // re-rendering here threw away whatever the operator had typed, and
+        // the focus with it, repeatedly, for as long as the sweep took.
+        const existing = credentialRowElement(row.credential, row.holder);
+        if (!existing) return;
+        const typed = existing.querySelector("input");
+        const occupied = typed && (typed.value !== "" || document.activeElement === typed);
+        if (occupied) {
+            // Mid-paste: the status and the age may move, the action may not.
+            const cells = existing.children;
+            if (cells.length >= 5) {
+                cells[3].innerHTML = h.escapeHtml(STATUS_WORDS[row.status] || row.status) + (row.detail ? '<small>' + h.escapeHtml(row.detail) + '</small>' : "");
+                cells[4].innerHTML = '<small>' + credentialAge(row) + '</small>';
+            }
+            return;
+        }
+        existing.outerHTML = credentialRowHtml(row);
+        refreshIcons();
     }
 
     // Three at a time. A hive with a dozen minds and five shared secrets is
@@ -268,7 +304,7 @@ window.addEventListener("DOMContentLoaded", function () {
         }
         const hostButton = event.target.closest("[data-set-host]");
         if (hostButton) {
-            const input = document.querySelector('[data-set-input="host::github_pat"]');
+            const input = hostButton.parentElement.querySelector("input[data-set-input]");
             const token = (input && input.value || "").trim();
             if (!token) { window.alert("Paste the token first."); return; }
             hostButton.disabled = true; hostButton.textContent = "Verifying…";
@@ -278,24 +314,23 @@ window.addEventListener("DOMContentLoaded", function () {
         }
         const checkButton = event.target.closest("[data-check-row]");
         if (checkButton) {
-            const parts = checkButton.dataset.checkRow.split("::");
             checkButton.disabled = true; checkButton.textContent = "Checking…";
-            await checkCredentialRows([{credential: parts[0], holder: parts[1]}]);
+            await checkCredentialRows([{credential: checkButton.dataset.credential, holder: checkButton.dataset.holder}]);
             return;
         }
         const setRowButton = event.target.closest("[data-set-row]");
         if (setRowButton) {
-            const target = setRowButton.dataset.setRow;
-            const parts = target.split("::");
-            const input = document.querySelector('[data-set-input="' + target + '"]');
+            const credential = setRowButton.dataset.credential;
+            const holder = setRowButton.dataset.holder;
+            const input = setRowButton.parentElement.querySelector("input[data-set-input]");
             const token = (input && input.value || "").trim();
             if (!token) { window.alert("Paste the token first."); return; }
-            const route = parts[0] === "mind_github_token" ? "github-token" : "surface-token";
+            const route = credential === "mind_github_token" ? "github-token" : "surface-token";
             setRowButton.disabled = true; setRowButton.textContent = "Verifying…";
             try {
-                const result = await h.requestJson("/api/minds/" + encodeURIComponent(parts[1]) + "/" + route, {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({token: token})});
+                const result = await h.requestJson("/api/minds/" + encodeURIComponent(holder) + "/" + route, {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({token: token})});
                 const who = result.login || result.bot_username || "unknown";
-                window.alert("Stored on " + parts[1] + ", authenticating as " + who + "." + (result.restart_required ? "\n\nThis mind keeps the value it booted with until it is restarted." : ""));
+                window.alert("Stored on " + holder + ", authenticating as " + who + "." + (result.restart_required ? "\n\nThis mind keeps the value it booted with until it is restarted." : ""));
                 await loadCredentials(false);
             } catch (error) { window.alert(error.message); setRowButton.disabled = false; setRowButton.textContent = "Save"; }
         }
