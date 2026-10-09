@@ -88,6 +88,26 @@ def install_github_token_routes(app: FastAPI, *, mind_id: str, log) -> None:
         refusal = authorize_admin(request)
         if refusal is not None:
             return refusal
+        if github_token.storage_location()[0] != "keyring":
+            # The read is gated exactly as the write is. Without a key of its
+            # own, `storage_location` falls back to the ambient `GITHUB_TOKEN`
+            # — which here resolves to the one `.env` every mind in the stack
+            # shares. A hive-wide token in that file would have four minds all
+            # reporting stored, accepted and working as the same account,
+            # which is the "working and wrong" outcome the required key
+            # exists to prevent.
+            return {
+                "stored": False,
+                "accepted": None,
+                "login": "",
+                "where": "",
+                "detail": (
+                    "this mind names no GITHUB_TOKEN_KEYRING_KEY, so it has "
+                    "no store of its own"
+                ),
+                "preview": "",
+                "settable": False,
+            }
         state = await github_token.status()
         return {
             "stored": state.stored,
@@ -95,7 +115,8 @@ def install_github_token_routes(app: FastAPI, *, mind_id: str, log) -> None:
             "login": state.login,
             "where": state.where,
             "detail": state.detail,
-            "settable": github_token.storage_location()[0] == "keyring",
+            "preview": state.preview,
+            "settable": True,
         }
 
     @app.put("/github-token")
@@ -128,6 +149,15 @@ def install_github_token_routes(app: FastAPI, *, mind_id: str, log) -> None:
                 mind_id=mind_id, reason=str(exc),
             )
             return JSONResponse({"error": str(exc), "stored": False}, status_code=400)
+        except github_token.TokenUnverifiable as exc:
+            # 503, not 400: nothing is wrong with the paste and nothing was
+            # stored. GitHub did not answer, and telling the operator their
+            # token is bad is how a working one gets revoked.
+            log_event(
+                log, "mind.github_token.unverifiable", level=logging.WARNING,
+                mind_id=mind_id, reason=str(exc),
+            )
+            return JSONResponse({"error": str(exc), "stored": False}, status_code=503)
         except OSError as exc:
             return JSONResponse(
                 {"error": f"could not store the token: {exc}"}, status_code=500
@@ -146,6 +176,7 @@ def install_github_token_routes(app: FastAPI, *, mind_id: str, log) -> None:
             "login": state.login,
             "where": state.where,
             "configured": state.configured,
+            "preview": state.preview,
             # `git` and `gh` read their files per invocation, so a new
             # subprocess has it. A harness process already running does not.
             "restart_required": False,
