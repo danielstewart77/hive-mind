@@ -2751,6 +2751,7 @@ async def api_mind_surface_token(name: str, user: dict = Depends(require_auth)):
         "bot_username": str(state.get("bot_username") or ""),
         "where": str(state.get("where") or ""),
         "detail": str(state.get("detail") or ""),
+        "preview": str(state.get("preview") or ""),
     }
 
 
