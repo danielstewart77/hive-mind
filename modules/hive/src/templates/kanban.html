@@ -19,11 +19,43 @@
 .kanban-tree { display:grid; gap:.8rem; }
 .kanban-item { padding:1rem; }
 .kanban-children { margin: .8rem 0 0 1.2rem; display:grid; gap:.6rem; }
-.kanban-inline { display:flex; flex-wrap:wrap; gap:.5rem; align-items:center; }
-.kanban-item-title { font-weight:600; margin-right:auto; }
+.kanban-inline { display:flex; flex-wrap:wrap; gap:.5rem; align-items:center; max-width:100%; }
+.kanban-inline > * { min-width:0; max-width:100%; }
+.kanban-inline .button { flex:0 1 auto; max-width:100%; white-space:normal; overflow-wrap:anywhere; box-sizing:border-box; }
+.kanban-inline select { max-width:100%; }
+.kanban-item-title { font-weight:600; margin-right:0; margin-left:0; text-align:left; justify-self:start; align-self:center; }
 .kanban-empty { opacity:.72; padding:.6rem; }
 .kanban-page summary { cursor:pointer; }
 .kanban-drag-over { outline:2px dashed var(--console-accent, #c9a84c); }
+.kanban-item[data-collapsed="true"] > .kanban-children { display:none; }
+.kanban-toggle { min-width:2rem; padding:.2rem .4rem; }
+.kanban-item-link { color:inherit; text-decoration:none; }
+.kanban-cols { display:flex; flex-direction:row; align-items:center; justify-content:flex-start; gap:.5rem; width:100%; min-width:0; text-align:left; }
+.kanban-col-num { font-variant-numeric:tabular-nums; font-weight:600; min-width:2.6rem; text-align:left; flex:0 0 auto; }
+
+
+.kanban-row { display:block; }
+.kanban-actions { display:flex; flex-wrap:wrap; gap:.4rem; margin-top:.35rem; }
+.kanban-col-order { font-variant-numeric:tabular-nums; opacity:.8; flex:0 0 auto; text-align:left; }
+.kanban-col-type { font-size:.8rem; opacity:.8; flex:0 0 auto; text-align:left; }
+
+.kanban-col-title { flex:1 1 auto; min-width:0; overflow-wrap:anywhere; font-weight:600; display:block; text-align:left; margin:0; }
+.kanban-col-title .kanban-item-title { display:inline; margin:0; text-align:left; flex:0 1 auto; }
+.kanban-col-state { font-size:.8rem; opacity:.85; flex:0 0 auto; text-align:left; }
+.kanban-dot { color:#3fb950; margin-right:.35rem; font-size:.7rem; }
+@media(max-width:520px){.kanban-cols{column-gap:.3rem}.kanban-col-type{display:none}}
+.kanban-bug { border:2px solid #e05252 !important; }
+.kanban-bug-icon { margin-right:.3rem; }
+.kanban-menu { position:fixed; z-index:1000; display:grid; min-width:180px; padding:.3rem; background:var(--console-surface-2, #1d2226); border:1px solid var(--console-line-strong, #4a555e); border-radius:8px; box-shadow:0 8px 24px rgba(0,0,0,.45); }
+.kanban-menu-item { text-align:left; background:none; border:0; color:inherit; font:inherit; padding:.55rem .75rem; border-radius:6px; cursor:pointer; }
+.kanban-menu-item:hover, .kanban-menu-item:focus { background:rgba(255,255,255,.08); outline:none; }
+
+.kanban-num { font-variant-numeric:tabular-nums; opacity:.75; font-size:.9rem; flex:0 0 auto; }
+.kanban-item > .kanban-inline { flex-wrap:wrap; }
+.kanban-row .kanban-inline { min-width:0; }
+.kanban-row .kanban-item-title { overflow-wrap:anywhere; margin:0; text-align:left; }
+.kanban-tree, .kanban-children, .kanban-item { min-width:0; max-width:100%; box-sizing:border-box; }
+@media(max-width:520px){.kanban-children{margin-left:.25rem}.kanban-num{font-size:.8rem}.kanban-inline{gap:.3rem}.kanban-inline .button{padding:.3rem .45rem;font-size:.8rem;min-height:0}.kanban-page{padding-left:.4rem;padding-right:.4rem;overflow-x:hidden}.kanban-inline .button{flex:1 1 calc(50% - .3rem)}.kanban-item{padding:.6rem}.kanban-toolbar a{font-size:.9rem}}
 @media(max-width:800px){.kanban-board{grid-template-columns:1fr}.kanban-lane{min-height:0}.kanban-drop{min-height:110px}}
 </style>
 <main class="page kanban-page" id="kanban-page">
@@ -86,24 +118,76 @@
     }catch(err){await reload(`Could not delete: ${err.message}`);}
   }
   function parentOf(story){const f=state.features.find(x=>x.id===story.feature_id);return f?.title||state.epics.find(x=>x.id===story.epic_id)?.title||'Unassigned';}
-  function renderBoard(){const mount=$('board-mount');mount.replaceChildren();for(const [status,label] of statuses){const lane=el('section','surface kanban-lane');lane.dataset.status=status;lane.append(el('h2','',label));const drop=el('div','kanban-drop');drop.dataset.status=status;drop.setAttribute('aria-label',`${label} drop zone`);drop.addEventListener('dragover',e=>e.preventDefault());drop.addEventListener('drop',onDrop);const cards=state.stories.filter(s=>s.status===status);if(!cards.length)drop.append(el('p','kanban-empty','Drop a story here'));for(const s of cards){const card=el('article','surface kanban-card');card.draggable=true;card.dataset.id=s.id;card.addEventListener('dragstart',e=>{e.dataTransfer.setData('text/plain',s.id);e.dataTransfer.effectAllowed='move';});card.append(el('strong','',s.title),el('span','kanban-parent',parentOf(s)));drop.append(card);}lane.append(drop);mount.append(lane);}}
+  function renderBoard(){const mount=$('board-mount');mount.replaceChildren();for(const [status,label] of statuses){const lane=el('section','surface kanban-lane');lane.dataset.status=status;lane.append(el('h2','',label));const drop=el('div','kanban-drop');drop.dataset.status=status;drop.setAttribute('aria-label',`${label} drop zone`);drop.addEventListener('dragover',e=>e.preventDefault());drop.addEventListener('drop',onDrop);const cards=state.stories.filter(s=>s.status===status);if(!cards.length)drop.append(el('p','kanban-empty','Drop a story here'));for(const s of cards){const card=el('article','surface kanban-card');if(s.subtype==='bug')card.classList.add('kanban-bug');card.draggable=true;card.dataset.id=s.id;card.addEventListener('dragstart',e=>{e.dataTransfer.setData('text/plain',s.id);e.dataTransfer.effectAllowed='move';});card.append(el('strong','',s.title),el('span','kanban-parent',parentOf(s)));drop.append(card);}lane.append(drop);mount.append(lane);}}
   async function onDrop(e){e.preventDefault();const id=e.dataTransfer.getData('text/plain'), target=e.currentTarget.dataset.status, story=state.stories.find(s=>s.id===id);if(!story||story.status===target)return;if(story._busy)return;story._busy=true;try{const updated=await request(`/api/kanban/stories/${encodeURIComponent(id)}`,'PATCH',{status:target});Object.assign(story,updated);feedback.textContent='Story status updated.';}catch(err){feedback.textContent=`Could not move story: ${err.message}`;await reload(feedback.textContent);}finally{if(story)delete story._busy;render();}}
-  function safeTitle(record, kind){const span=el('span','kanban-item-title',record.title);return span;}
+  function safeTitle(record){const a=el('a','kanban-item-title',record.title);a.href=`/kanban/item/${encodeURIComponent(record.id)}`;return a;}
   async function mutate(url,method,body,msg){try{await request(url,method,body);await reload(msg);}catch(err){feedback.textContent=`Change not saved: ${err.message}`;}}
   function promptTitle(initial=''){const value=window.prompt('Title',initial);return value===null?null:value.trim();}
-  function actionRow(record,kind,parentId){const row=el('div','kanban-inline');row.append(safeTitle(record,kind),button('Rename',async()=>{const title=promptTitle(record.title);if(title)await mutate(`/api/kanban/${kind}/${encodeURIComponent(record.id)}`,'PATCH',{title},`${kind.slice(0,-1)} renamed.`);}));row.append(button('Delete',async(e)=>{const b=e.currentTarget;if(b.disabled)return;b.disabled=true;feedback.textContent='Checking what this would delete…';try{const asked=await confirmDelete(record,kind);if(asked==='yes')await removeItem(kind,record.id);else if(asked==='no')feedback.textContent='';}finally{b.disabled=false;}}));
-row.append(button('Details',()=>showDetails(record)));if(kind==='epics')row.append(button('Add feature',async()=>{const title=promptTitle();if(title)await mutate('/api/kanban/features','POST',{epic_id:record.id,title},'Feature created.');}));if(kind==='features')row.append(button('Add story',async()=>{const title=promptTitle();if(title)await mutate('/api/kanban/stories','POST',{feature_id:record.id,title},'Story created in Backlog.');}));if(kind==='epics')row.append(button('Add story',async()=>{const title=promptTitle();if(title)await mutate('/api/kanban/stories','POST',{epic_id:record.id,title},'Story created in Backlog.');}));return row;}
+  function actionList(record,kind){
+    const deleteRecord=async()=>{if(deleteRecord.busy)return;deleteRecord.busy=true;feedback.textContent='Checking what this would delete…';try{const asked=await confirmDelete(record,kind);if(asked==='yes')await removeItem(kind,record.id);else if(asked==='no')feedback.textContent='';}finally{deleteRecord.busy=false;}};
+    const list=[
+      ['Rename',async()=>{const title=promptTitle(record.title);if(title)await mutate(`/api/kanban/${kind}/${encodeURIComponent(record.id)}`,'PATCH',{title},`${kind.slice(0,-1)} renamed.`);}],
+      ['Delete',deleteRecord],
+      ['Details',()=>showDetails(record)],
+    ];
+    if(kind==='epics')list.push(['Add feature',async()=>{const title=promptTitle();if(title)await mutate('/api/kanban/features','POST',{epic_id:record.id,title},'Feature created.');}]);
+    if(kind==='features')list.push(['Add story',async()=>{const title=promptTitle();if(title)await mutate('/api/kanban/stories','POST',{feature_id:record.id,title},'Story created in Backlog.');}]);
+    if(kind==='epics')list.push(['Add story',async()=>{const title=promptTitle();if(title)await mutate('/api/kanban/stories','POST',{epic_id:record.id,title},'Story created in Backlog.');}]);
+    const current=kind==='stories'?'story':kind.slice(0,-1);
+    for(const t of ['epic','feature','story'].filter(t=>t!==current)){if(kind==='epics'&&t==='epic')continue;list.push([`Change to ${t}`,()=>mutate(`/api/kanban/${kind}/${encodeURIComponent(record.id)}`,'PATCH',{type:t},`Changed to ${t}.`)]);}
+    return list;
+  }
+  function markBug(node,story){if(story.subtype!=='bug')return;node.classList.add('kanban-bug');const title=node.querySelector('.kanban-item-title');if(title&&!title.querySelector('.kanban-bug-icon')){const icon=el('span','kanban-bug-icon','🐞');icon.setAttribute('aria-label','Bug');title.prepend(icon);}}
+  let openMenu=null;
+  function closeMenu(){if(openMenu){openMenu.remove();openMenu=null;}}
+  function showMenu(x,y,list){closeMenu();const menu=el('div','kanban-menu');menu.setAttribute('role','menu');for(const [label,action] of list){const item=el('button','kanban-menu-item',label);item.type='button';item.setAttribute('role','menuitem');item.addEventListener('click',async()=>{closeMenu();await action();});menu.append(item);}document.body.append(menu);const maxLeft=window.innerWidth-menu.offsetWidth-8;const maxTop=window.innerHeight-menu.offsetHeight-8;menu.style.left=`${Math.max(8,Math.min(x,maxLeft))}px`;menu.style.top=`${Math.max(8,Math.min(y,maxTop))}px`;openMenu=menu;}
+  document.addEventListener('click',e=>{if(openMenu&&!openMenu.contains(e.target))closeMenu();});
+  document.addEventListener('keydown',e=>{if(e.key==='Escape')closeMenu();});
+  window.addEventListener('scroll',closeMenu,true);
+  function actionRow(record,kind){
+    const list=actionList(record,kind);
+    const row=el('div','kanban-inline');
+    row.append(safeTitle(record));
+    for(const [label,action] of list)row.append(button(label,action));
+    row.addEventListener('contextmenu',e=>{e.preventDefault();showMenu(e.clientX,e.clientY,list);});
+    return row;
+  }
   function renderStory(s){const item=el('div','kanban-item surface');item.append(actionRow(s,'stories'));const select=el('select','');select.setAttribute('aria-label',`Status for ${s.title}`);for(const [value,label] of allStatuses){const option=el('option','',label);option.value=value;option.selected=value===s.status;select.append(option);}select.addEventListener('change',async()=>{const previous=s.status;try{const updated=await request(`/api/kanban/stories/${encodeURIComponent(s.id)}`,'PATCH',{status:select.value});Object.assign(s,updated);render();feedback.textContent='Story status updated.';}catch(err){select.value=previous;feedback.textContent=`Status not saved: ${err.message}`;await reload(feedback.textContent);}});item.append(select);return item;}
-  function enableDrop(target,kind,parentId,beforeId){target.addEventListener('dragover',e=>{e.preventDefault();target.classList.add('kanban-drag-over');});target.addEventListener('dragleave',()=>target.classList.remove('kanban-drag-over'));target.addEventListener('drop',async e=>{e.preventDefault();target.classList.remove('kanban-drag-over');let data;try{data=JSON.parse(e.dataTransfer.getData('application/json'));}catch{return;}if(data.kind!==kind||data.id===beforeId)return;const body=kind==='features'?{epic_id:parentId}:{feature_id:parentId};if(beforeId)body.before_id=beforeId;try{await request(`/api/kanban/${kind}/${encodeURIComponent(data.id)}`,'PATCH',body);await reload('Order updated.');}catch(err){await reload(`Move failed: ${err.message}`);}});}
-  function makeDraggable(node,kind,id){node.draggable=true;node.addEventListener('dragstart',e=>{e.dataTransfer.setData('application/json',JSON.stringify({kind,id}));e.dataTransfer.effectAllowed='move';});}
-  function renderBacklog(){const mount=$('backlog-mount');mount.replaceChildren();const featuresOf=e=>state.features.filter(f=>f.epic_id===e.id);const storiesForFeature=f=>state.stories.filter(s=>s.feature_id===f.id);mount.append(button('Add epic',async()=>{const title=promptTitle();if(title)await mutate('/api/kanban/epics','POST',{title},'Epic created.');}));state.epics.forEach((epic,ei)=>{const group=el('details','surface kanban-item');group.open=true;const summary=el('summary','');summary.append(el('span','kanban-item-title',`${ei+1}. ${epic.title}`));group.append(summary,actionRow(epic,'epics'));const children=el('div','kanban-children');const features=featuresOf(epic);features.forEach((feature,fi)=>{const fg=el('details','surface kanban-item');fg.open=true;const fs=storiesForFeature(feature);const head=el('summary','');head.append(el('span','kanban-item-title',`${ei+1}.${fi+1} ${feature.title}`));fg.append(head,actionRow(feature,'features'));makeDraggable(fg,'features',feature.id);enableDrop(fg,'features',epic.id,feature.id);const storyList=el('div','kanban-children');fs.forEach((story,si)=>{const item=renderStory(story);const title=item.querySelector('.kanban-item-title');if(title)title.textContent=`${ei+1}.${fi+1}.${si+1} ${story.title}`;makeDraggable(item,'stories',story.id);enableDrop(item,'stories',feature.id,story.id);storyList.append(item);});if(!fs.length)fg.append(el('p','kanban-empty','No stories in this feature.'));fg.append(storyList);children.append(fg);});const direct=state.stories.filter(s=>s.epic_id===epic.id);direct.forEach((story,si)=>{const item=renderStory(story);const title=item.querySelector('.kanban-item-title');if(title)title.textContent=`${ei+1}.S${si+1} ${story.title}`;children.append(item);});if(!features.length&&!direct.length)children.append(el('p','kanban-empty','No features or stories yet.'));group.append(children);enableDrop(group,'features',epic.id,null);mount.append(group);});if(!state.epics.length)mount.append(el('p','kanban-empty surface','No epics yet. Create one to get started.'));}
+  function enableDrop(target,kind,parentId,beforeId){target.addEventListener('dragover',e=>{e.preventDefault();target.classList.add('kanban-drag-over');});target.addEventListener('dragleave',()=>target.classList.remove('kanban-drag-over'));target.addEventListener('drop',async e=>{e.preventDefault();e.stopPropagation();target.classList.remove('kanban-drag-over');let data;try{data=JSON.parse(e.dataTransfer.getData('application/json'));}catch{return;}if(data.id===beforeId)return;const accepted=kind==='features'?'features':'stories';if(data.kind!==accepted)return;const body=kind==='features'?{epic_id:parentId}:{feature_id:parentId};if(beforeId)body.before_id=beforeId;try{await request(`/api/kanban/${kind}/${encodeURIComponent(data.id)}`,'PATCH',body);await reload('Order updated.');}catch(err){await reload(`Move failed: ${err.message}`);}});}
+  function makeDraggable(node,kind,id){node.draggable=true;node.addEventListener('dragstart',e=>{if(e.target!==node)return;e.stopPropagation();e.dataTransfer.setData('application/json',JSON.stringify({kind,id}));e.dataTransfer.effectAllowed='move';});}
+  const EXPANDED_KEY='kanban-expanded-items';
+  function loadExpanded(){try{return new Set(JSON.parse(localStorage.getItem(EXPANDED_KEY)||'[]'));}catch{return new Set();}}
+  function saveExpanded(set){try{localStorage.setItem(EXPANDED_KEY,JSON.stringify([...set]));}catch{}}
+  let expandedIds=loadExpanded();
+  function rememberState(node,id){if(!id)return;const on=node.dataset.collapsed!=='true';if(on)expandedIds.add(id);else expandedIds.delete(id);saveExpanded(expandedIds);}
+  function makeToggle(node,hasChildren){const t=el('button','button kanban-toggle','▾');t.type='button';t.disabled=!hasChildren;t.setAttribute('aria-label','Expand or collapse');t.setAttribute('aria-expanded','true');t.addEventListener('click',e=>{e.stopPropagation();setCollapsed(node,node.dataset.collapsed!=='true');rememberState(node,node.dataset.itemId);});return t;}
+  function setCollapsed(node,on){node.dataset.collapsed=String(on);const t=node.querySelector(':scope > .kanban-inline .kanban-toggle');if(t&&!t.disabled){t.setAttribute('aria-expanded',String(!on));t.textContent=on?'▸':'▾';}}
+  function labelRow(node,row,label,hasChildren,id,meta){
+    node.dataset.itemId=id||'';
+    if(id&&hasChildren){setCollapsed(node,!expandedIds.has(id));}else if(hasChildren){setCollapsed(node,true);}
+    const dot=label.indexOf(' ');const order=dot>0?label.slice(0,dot):'';const name=dot>0?label.slice(dot+1):label;
+    const title=row.querySelector('.kanban-item-title');
+    const actions=Array.from(row.children).filter(c=>c!==title);
+    const cols=el('div','kanban-cols');
+    cols.append(makeToggle(node,hasChildren));
+    cols.append(el('span','kanban-col-order',order));
+    cols.append(el('span','kanban-col-type',meta.type));
+    cols.append(el('span','kanban-col-num',meta.number));
+    const t=el('span','kanban-col-title');
+    if(meta.inProgress)t.append(el('span','kanban-dot','●'));
+    title.textContent=name;t.append(title);cols.append(t);
+    cols.append(el('span','kanban-col-state',meta.state||''));
+    row.replaceChildren(cols);
+    row.classList.add('kanban-row');
+    return row;
+  }
+  function renderBacklog(){const mount=$('backlog-mount');mount.replaceChildren();const featuresOf=e=>state.features.filter(f=>f.epic_id===e.id);const storiesForFeature=f=>state.stories.filter(s=>s.feature_id===f.id);mount.append(button('Add epic',async()=>{const title=promptTitle();if(title)await mutate('/api/kanban/epics','POST',{title},'Epic created.');}));const unassigned=el('div','surface kanban-item kanban-unassigned');unassigned.dataset.level='1';unassigned.dataset.unassigned='true';const looseFeatures=state.features.filter(f=>!f.epic_id);const looseStories=state.stories.filter(s=>!s.feature_id&&!s.epic_id);if(looseFeatures.length||looseStories.length){unassigned.append(el('div','kanban-col-title','Unassigned'));const un=el('div','kanban-children');looseFeatures.forEach(f=>{const row=renderStory({...f,status:null,subtype:'story'});un.append(row);});looseStories.forEach(s=>{const row=renderStory(s);makeDraggable(row,'stories',s.id);un.append(row);});unassigned.append(un);enableDrop(unassigned,'features',null,null);enableDrop(unassigned,'stories',null,null);mount.append(unassigned);}state.epics.forEach((epic,ei)=>{const features=featuresOf(epic);const direct=state.stories.filter(s=>s.epic_id===epic.id);const group=el('div','surface kanban-item');group.dataset.level='1';const children=el('div','kanban-children');group.append(labelRow(group,actionRow(epic,'epics'),`${ei+1}. ${epic.title}`,features.length+direct.length>0,epic.id,{type:'Epic',number:`${ei+1}`,state:'',inProgress:state.stories.some(x=>x.status==='in_progress'&&(x.epic_id===epic.id||state.features.some(f=>f.id===x.feature_id&&f.epic_id===epic.id)))}));makeDraggable(group,'epics',epic.id);enableDrop(group,'epics',null,epic.id);features.forEach((feature,fi)=>{const fg=el('div','surface kanban-item');fg.dataset.level='2';const fs=storiesForFeature(feature);fg.append(labelRow(fg,actionRow(feature,'features'),`${ei+1}.${fi+1} ${feature.title}`,fs.length>0,feature.id,{type:'Feature',number:`${ei+1}.${fi+1}`,state:'',inProgress:fs.some(x=>x.status==='in_progress')}));makeDraggable(fg,'features',feature.id);enableDrop(fg,'features',epic.id,feature.id);const storyList=el('div','kanban-children');fs.forEach((story,si)=>{const item=renderStory(story);item.dataset.level='3';labelRow(item,item.querySelector(':scope > .kanban-inline'),`${ei+1}.${fi+1}.${si+1} ${story.title}`,false,story.id,{type:story.subtype==='bug'?'Bug':'Story',number:`${ei+1}.S${si+1}`,state:story.status,inProgress:story.status==='in_progress'});markBug(item,story);makeDraggable(item,'stories',story.id);enableDrop(item,'stories',feature.id,story.id);storyList.append(item);});if(!fs.length)fg.append(el('p','kanban-empty','No stories in this feature.'));fg.append(storyList);enableDrop(fg,'stories',feature.id,null);children.append(fg);});direct.forEach((story,si)=>{const item=renderStory(story);item.dataset.level='3';labelRow(item,item.querySelector(':scope > .kanban-inline'),`${ei+1}.S${si+1} ${story.title}`,false,story.id,{type:story.subtype==='bug'?'Bug':'Story',number:`${ei+1}.S${si+1}`,state:story.status,inProgress:story.status==='in_progress'});markBug(item,story);children.append(item);});if(!features.length&&!direct.length)children.append(el('p','kanban-empty','No features or stories yet.'));group.append(children);enableDrop(group,'features',epic.id,null);mount.append(group);});if(!state.epics.length)mount.append(el('p','kanban-empty surface','No epics yet. Create one to get started.'));}
   function render(){renderBoard();renderBacklog();}
   function show(which){const board=which==='board';$('board-view').hidden=!board;$('backlog-view').hidden=board;}
   function showDetails(record){const fields=['description','requirements','acceptance_criteria','qa_tests'];const lines=fields.map(f=>`${f}: ${record[f] ?? ''}`);alert(lines.join('\n'));}
   let collapseLevel=0, expandLevel=0;
-  function itemLevel(node){const label=node.querySelector(':scope > summary .kanban-item-title')?.textContent||'';return (label.match(/\d+/g)||[]).length;}
-  $('collapse-level').addEventListener('click',()=>{const nodes=Array.from($('backlog-mount').querySelectorAll('details'));const level=collapseLevel++%3;const target=[3,2,1][level];nodes.filter(n=>itemLevel(n)===target).forEach(n=>{n.open=false;});});
-  $('expand-level').addEventListener('click',()=>{const nodes=Array.from($('backlog-mount').querySelectorAll('details'));const level=expandLevel++%3;const target=[1,2,3][level];nodes.filter(n=>itemLevel(n)===target).forEach(n=>{n.open=true;});});
+  $('collapse-level').addEventListener('click',()=>{const nodes=Array.from($('backlog-mount').querySelectorAll('.kanban-item[data-level]'));const level=collapseLevel++%3;const target=[3,2,1][level];nodes.filter(n=>Number(n.dataset.level)===target).forEach(n=>{setCollapsed(n,true);rememberState(n,n.dataset.itemId);});});
+  $('expand-level').addEventListener('click',()=>{const nodes=Array.from($('backlog-mount').querySelectorAll('.kanban-item[data-level]'));const level=expandLevel++%3;const target=[1,2,3][level];nodes.filter(n=>Number(n.dataset.level)===target).forEach(n=>{setCollapsed(n,false);rememberState(n,n.dataset.itemId);});});
   const initialView={{ view|tojson }};
   show(initialView);
   reload();
