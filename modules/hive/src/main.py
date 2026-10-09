@@ -651,6 +651,8 @@ async def api_kanban_update(kind: str, record_id: str, request: Request, user: d
     # The URL names the kind the page was built with; a type change may have moved the row since.
     actual = _PLURAL[await _kanban_call(kanban_data.kind_of, record_id)]
     body = await _kanban_body(request, _KANBAN_UPDATE_FIELDS[actual])
+    if set(body) == {"before_id"} and body["before_id"]:
+        return await _kanban_call(kanban_data.place_before, record_id, body["before_id"])
     if set(body) == {"parent_id"}:
         return await _kanban_call(kanban_data.set_parent, record_id, body["parent_id"] or None)
     if not body:

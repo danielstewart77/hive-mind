@@ -42,6 +42,10 @@
 .kanban-empty { opacity:.72; padding:.6rem; }
 .kanban-page summary { cursor:pointer; }
 .kanban-drag-over { outline:2px dashed var(--console-accent, #c9a84c); }
+.kanban-item { position:relative; }
+.kanban-drop-band { position:absolute; left:0; right:0; top:-4px; height:8px; border-radius:4px; pointer-events:none; }
+.kanban-band-over .kanban-drop-band, .kanban-drop-band.kanban-band-over { background:var(--console-accent, #c9a84c); }
+.kanban-nest-over { outline:2px solid var(--console-accent, #c9a84c); outline-offset:2px; }
 .kanban-item[data-collapsed="true"] > .kanban-children { display:none; }
 .kanban-toggle { min-width:2rem; padding:.2rem .4rem; }
 .kanban-item-link { color:inherit; text-decoration:none; }
@@ -169,18 +173,34 @@
     return row;
   }
   function renderStory(s){const item=el('div','kanban-item surface');item.append(actionRow(s,'stories'));const select=el('select','');select.setAttribute('aria-label',`Status for ${s.title}`);for(const [value,label] of allStatuses){const option=el('option','',label);option.value=value;option.selected=value===s.status;select.append(option);}select.addEventListener('change',async()=>{const previous=s.status;try{const updated=await request(`/api/kanban/stories/${encodeURIComponent(s.id)}`,'PATCH',{status:select.value});Object.assign(s,updated);render();feedback.textContent='Story status updated.';}catch(err){select.value=previous;feedback.textContent=`Status not saved: ${err.message}`;await reload(feedback.textContent);}});item.append(select);return item;}
+  // Two drop zones on every row. The top band of a row is a reorder: a vertical line shows
+  // where the item will land, and the dropped item takes the row's parent. The rest of the
+  // row is a nest: a border shows the row will become the dropped item's parent.
   function enableDrop(target,kind,parentId,beforeId){
-    target.addEventListener('dragover',e=>{e.preventDefault();target.classList.add('kanban-drag-over');});
-    target.addEventListener('dragleave',()=>target.classList.remove('kanban-drag-over'));
+    const band=el('div','kanban-drop-band');band.setAttribute('aria-hidden','true');
+    if(beforeId)target.prepend(band);
+    const clearMarks=()=>{target.classList.remove('kanban-nest-over');band.classList.remove('kanban-band-over');};
+    const zoneOf=e=>{if(!beforeId)return 'nest';const r=target.getBoundingClientRect();return (e.clientY-r.top)<Math.min(14,r.height/3)?'reorder':'nest';};
+    target.addEventListener('dragover',e=>{
+      e.preventDefault();
+      const zone=zoneOf(e);
+      target.classList.toggle('kanban-nest-over',zone==='nest');
+      band.classList.toggle('kanban-band-over',zone==='reorder');
+    });
+    target.addEventListener('dragleave',e=>{if(!target.contains(e.relatedTarget))clearMarks();});
     target.addEventListener('drop',async e=>{
-      e.preventDefault();e.stopPropagation();target.classList.remove('kanban-drag-over');
+      e.preventDefault();e.stopPropagation();const zone=zoneOf(e);clearMarks();
       let data;try{data=JSON.parse(e.dataTransfer.getData('application/json'));}catch{return;}
-      // Anything can go into anything: the dropped item takes the drop target as its parent.
-      // Its own children keep their parent links; only the moved item changes.
       if(!data||!data.id)return;
-      const dropOn=beforeId||parentId;
-      if(dropOn===data.id)return;
-      try{await request(`/api/kanban/${data.kind}/${encodeURIComponent(data.id)}`,'PATCH',{parent_id:dropOn||null});await reload('Moved.');}
+      let url,body;
+      if(zone==='reorder'&&beforeId){
+        if(data.id===beforeId)return;
+        url=`/api/kanban/${data.kind}/${encodeURIComponent(data.id)}`;body={before_id:beforeId};
+      }else{
+        if(data.id===target.dataset.id)return;
+        url=`/api/kanban/${data.kind}/${encodeURIComponent(data.id)}`;body={parent_id:target.dataset.id||null};
+      }
+      try{await request(url,'PATCH',body);await reload(zone==='reorder'?'Moved.':'Nested.');}
       catch(err){await reload(`Move failed: ${err.message}`);}
     });
   }
@@ -221,11 +241,11 @@
     const kindLabel=r=>r._kind==='epics'?'Epic':r._kind==='features'?'Feature':(r.subtype==='bug'?'Bug':'Story');
     const build=(r,level,number)=>{
       const kids=childrenOf(r.id);
-      const node=el('div','surface kanban-item');node.dataset.level=String(level);
+      const node=el('div','surface kanban-item');node.dataset.level=String(level);node.dataset.id=r.id;
       const label=`${number} ${r.title}`;
       const sub=kids.length>0;
       if(r._kind==='stories'){
-        const item=renderStory(r);item.dataset.level=String(level);
+        const item=renderStory(r);item.dataset.level=String(level);item.dataset.id=r.id;
         labelRow(item,item.querySelector(':scope > .kanban-inline'),label,false,r.id,{type:kindLabel(r),number,state:r.status,inProgress:r.status==='in_progress'});
         markBug(item,r);makeDraggable(item,'stories',r.id);enableDrop(item,'stories',parentOf(r),r.id);
         return item;

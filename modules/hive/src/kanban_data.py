@@ -678,6 +678,38 @@ def current_type(record_id: str) -> str:
     return row["kind"]
 
 
+def place_before(record_id: str, before_id: str) -> dict[str, Any]:
+    """Put record_id directly before before_id, under before_id's parent.
+
+    A reorder drop: the moved item takes the same parent as the item it lands
+    in front of, and nothing else changes. Its own children are not touched.
+    """
+    if before_id == record_id:
+        raise ValueError("An item cannot be placed before itself")
+    with _session() as connection:
+        _write(connection)
+        try:
+            target = connection.execute("SELECT parent_id, position FROM work_items WHERE id = ?", (before_id,)).fetchone()
+            if target is None:
+                raise KeyError(f"Item not found: {before_id}")
+            if connection.execute("SELECT 1 FROM work_items WHERE id = ?", (record_id,)).fetchone() is None:
+                raise KeyError(f"Item not found: {record_id}")
+            siblings = [row["id"] for row in connection.execute(
+                "SELECT id FROM work_items WHERE parent_id IS ? AND id != ? ORDER BY position, rowid",
+                (target["parent_id"], record_id),
+            ).fetchall()]
+            index = siblings.index(before_id)
+            siblings.insert(index, record_id)
+            connection.execute("UPDATE work_items SET parent_id = ? WHERE id = ?", (target["parent_id"], record_id))
+            _reorder_children(connection, siblings)
+            record = _row_to_record(connection.execute(_SELECT + " WHERE item.id = ?", (record_id,)).fetchone())
+            connection.execute("COMMIT")
+        except BaseException:
+            connection.execute("ROLLBACK")
+            raise
+    return record
+
+
 def set_parent(record_id: str, parent_id: str | None) -> dict[str, Any]:
     """Make parent_id the parent of record_id, or clear it when parent_id is None.
 
