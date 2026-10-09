@@ -3,8 +3,19 @@
 {% block content %}
 <style>
 .kanban-page { max-width: 1440px; margin: 0 auto; }
-.kanban-toolbar { display:flex; gap:.75rem; margin:1rem auto 1.5rem; max-width:760px; justify-content:center; }
-.kanban-toolbar a { flex:1; text-align:center; padding:.85rem 1.2rem; border:1px solid var(--console-border, #555); border-radius:12px; text-decoration:none; font-weight:650; background:var(--console-surface, #202020); transition:transform .15s ease, background .15s ease, border-color .15s ease; }
+.kanban-toolbar {
+  /* Pinned: the switcher is how the operator leaves the view they are in, and
+     a two-thousand-row backlog puts it a long scroll behind them. Sticky sits
+     under the sidebar's own layer so an open menu covers it rather than the
+     reverse. */
+  position:sticky; top:0; z-index:5;
+  display:flex; gap:.75rem; margin:0 0 1.5rem; padding:1rem 0;
+  justify-content:center;
+  background:var(--console-bg, #111417);
+}
+/* The band spans the content column so nothing scrolls through it; the two
+   buttons keep the width they had when the row itself was centred at 760px. */
+.kanban-toolbar a { flex:0 1 370px; max-width:370px; text-align:center; padding:.85rem 1.2rem; border:1px solid var(--console-border, #555); border-radius:12px; text-decoration:none; font-weight:650; background:var(--console-surface, #202020); transition:transform .15s ease, background .15s ease, border-color .15s ease; }
 .kanban-toolbar a:hover { transform:translateY(-1px); border-color:var(--console-accent, #c9a84c); }
 .kanban-toolbar a.is-active { background:var(--console-accent, #c9a84c); color:#111; border-color:var(--console-accent, #c9a84c); }
 @media(max-width:520px){.kanban-toolbar{gap:.5rem}.kanban-toolbar a{padding:.75rem .5rem}}
@@ -55,7 +66,7 @@
 .kanban-row .kanban-inline { min-width:0; }
 .kanban-row .kanban-item-title { overflow-wrap:anywhere; margin:0; text-align:left; }
 .kanban-tree, .kanban-children, .kanban-item { min-width:0; max-width:100%; box-sizing:border-box; }
-@media(max-width:520px){.kanban-children{margin-left:.25rem}.kanban-num{font-size:.8rem}.kanban-inline{gap:.3rem}.kanban-inline .button{padding:.3rem .45rem;font-size:.8rem;min-height:0}.kanban-page{padding-left:.4rem;padding-right:.4rem;overflow-x:hidden}.kanban-inline .button{flex:1 1 calc(50% - .3rem)}.kanban-item{padding:.6rem}.kanban-toolbar a{font-size:.9rem}}
+@media(max-width:520px){.kanban-children{margin-left:.25rem}.kanban-num{font-size:.8rem}.kanban-inline{gap:.3rem}.kanban-inline .button{padding:.3rem .45rem;font-size:.8rem;min-height:0}.kanban-page{padding-left:.4rem;padding-right:.4rem}.kanban-inline .button{flex:1 1 calc(50% - .3rem)}.kanban-item{padding:.6rem}.kanban-toolbar a{font-size:.9rem}}
 @media(max-width:800px){.kanban-board{grid-template-columns:1fr}.kanban-lane{min-height:0}.kanban-drop{min-height:110px}}
 </style>
 <main class="page kanban-page" id="kanban-page">
