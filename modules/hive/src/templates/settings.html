@@ -101,6 +101,68 @@ window.addEventListener("DOMContentLoaded", function () {
                          "predates_api", "unaddressable", "not_set", "unchecked",
                          "retired", "validator", "working"];
 
+    // A save in flight, and a box whose token has just been stored. Both were
+    // held only on the DOM node, and a filter keystroke, a sort click or any
+    // completed save replaces the whole container — so a row mid-save came back
+    // with an enabled Save button and its token still in the box, one reflex
+    // Enter away from a duplicate write.
+    const credentialSaving = {};
+    function credentialKey(credential, holder) { return credential + "\u0000" + holder; }
+
+    // The mask is CSS, so it is feature-detected rather than assumed: where the
+    // property is unsupported the box falls back to a password field, which
+    // masks and carries the autofill cost, instead of rendering a live token as
+    // plain text on screen with nothing to say the mask had been dropped.
+    const CREDENTIAL_INPUT_TYPE = (window.CSS && window.CSS.supports
+        && window.CSS.supports("-webkit-text-security", "disc")) ? "text" : "password";
+
+    // A save with no deadline wedges the control. The disabled "Verifying…"
+    // state now survives a re-render, so a socket held open by a proxy in front
+    // of a mind leaves that row unusable until the whole page is reloaded, with
+    // nothing on screen to say why.
+    const CREDENTIAL_SAVE_TIMEOUT_MS = 45 * 1000;
+    async function credentialSave(url, options) {
+        const controller = new AbortController();
+        const timer = window.setTimeout(function () { controller.abort(); }, CREDENTIAL_SAVE_TIMEOUT_MS);
+        try {
+            return await h.requestJson(url, Object.assign({}, options, {signal: controller.signal}));
+        } catch (error) {
+            // Whether it landed is genuinely unknown — the request may have been
+            // served and the answer lost — so the message says so rather than
+            // claiming nothing was written.
+            if (controller.signal.aborted) {
+                throw new Error("No answer in " + (CREDENTIAL_SAVE_TIMEOUT_MS / 1000)
+                    + " seconds. Whether the token was stored is unknown — check the row before pasting again.");
+            }
+            throw error;
+        } finally {
+            window.clearTimeout(timer);
+        }
+    }
+
+    function credentialInput(attrs) {
+        return '<input type="' + CREDENTIAL_INPUT_TYPE + '" class="credential-token"'
+            + ' placeholder="Paste a token" autocomplete="off" spellcheck="false" data-set-input ' + attrs + '>';
+    }
+
+    // Clearing the live node, never a flag consumed by the next render: a flag
+    // outlives a render that never comes — a group filtered off the page, a
+    // reload that failed — and then eats the next token pasted into that box.
+    // And a value that is no longer the one just stored is a correction typed
+    // during the save, which is not ours to discard.
+    function clearCredentialInput(credential, holder, stored) {
+        document.querySelectorAll("#credential-registry input[data-set-input]").forEach(function (input) {
+            if (input.dataset.credential !== credential || input.dataset.holder !== holder) return;
+            if (input.value.trim() === stored) input.value = "";
+        });
+    }
+
+    function credentialSaveButton(classes, attrs, credential, holder) {
+        const saving = credentialSaving[credentialKey(credential, holder)];
+        return '<button class="' + classes + '" type="button" ' + attrs + (saving ? " disabled" : "") + '>'
+            + (saving ? "Verifying…" : "Save") + '</button>';
+    }
+
     function credentialAge(row) {
         if (row.age_seconds === null || row.age_seconds === undefined) return "—";
         const seconds = Math.round(row.age_seconds);
@@ -117,13 +179,21 @@ window.addEventListener("DOMContentLoaded", function () {
         const keys = 'data-credential="' + h.escapeHtml(row.credential) + '" data-holder="' + h.escapeHtml(row.holder) + '"';
         let action = "";
         if (row.settable) {
-            // The paste box is its own form, and asks for a new password rather
-            // than off. Chrome ignores autocomplete="off" on a password field
-            // outside a form: it treats the whole document as one login form,
-            // fills the nearest preceding text input as the username — which is
-            // the filter box at the top of the page — and the filter's own
-            // handler then re-renders the table out from under the cursor.
-            action = '<form class="credential-set" autocomplete="off"><input type="password" placeholder="Paste a token" autocomplete="new-password" data-set-input ' + keys + '><button class="button button-quiet" type="button" data-set-row ' + keys + '>Save</button></form>';
+            // Masked by CSS, never type="password", and that is the whole
+            // defence: with no password field anywhere on the page Chrome finds
+            // no login form to anchor, so it classifies this group as unfillable
+            // and has no username field to fill. A password field here cost
+            // secrets twice over. Chrome ignores autocomplete="off" on one and
+            // treats the whole document as one login form, filling the nearest
+            // preceding text input as the username — which is the filter box,
+            // whose own handler then re-renders the table out from under the
+            // cursor. And a password field whose node is removed after a
+            // successful XHR is Chrome's "password changed" shape, so it offers
+            // to save a live bot token or the host PAT into the browser's synced
+            // credential store. No route in this console returns a token;
+            // handing one to the password manager is the same leak by another
+            // door.
+            action = '<span class="credential-set">' + credentialInput(keys) + '' + credentialSaveButton("button button-quiet", "data-set-row " + keys, row.credential, row.holder) + '</span>';
         } else if (row.checkable) {
             action = '<button class="button button-quiet" type="button" data-check-row ' + keys + '>Check</button>';
         }
@@ -141,7 +211,7 @@ window.addEventListener("DOMContentLoaded", function () {
         if (credential.rotatable) {
             action = '<button class="button" type="button" data-rotate="' + h.escapeHtml(credential.key) + '">Rotate</button>';
         } else if (credential.key === "github_pat") {
-            action = '<form class="credential-set" autocomplete="off"><input type="password" placeholder="Paste a token" autocomplete="new-password" data-set-input data-credential="github_pat" data-holder="host"><button class="button" type="button" data-set-host="github_pat">Save</button></form>';
+            action = '<span class="credential-set">' + credentialInput('data-credential="github_pat" data-holder="host"') + '' + credentialSaveButton("button", 'data-set-host="github_pat"', "github_pat", "host") + '</span>';
         } else if (credential.manual_reason) {
             action = '<span class="pill" title="' + h.escapeHtml(credential.manual_reason) + '">Manual only</span>';
         } else {
@@ -185,18 +255,24 @@ window.addEventListener("DOMContentLoaded", function () {
                 if (left > right) return credentialSort.ascending ? 1 : -1;
                 return 0;
             });
-            if (!rows.length && (needle || wanted)) return "";
+            // A filter hides rows, never a credential that has none to begin
+            // with: the host PAT's only control lives in its group header, and
+            // dropping the group took the paste box off the page along with
+            // anything already pasted into it.
+            const hasRows = credentialState.rows.some(function (row) { return row.credential === credential.key; });
+            if (!rows.length && hasRows && (needle || wanted)) return "";
             return credentialGroupHtml(credential, rows);
         }).join("");
         const typed = {};
         let focused = null;
         container.querySelectorAll("input[data-set-input]").forEach(function (input) {
-            if (input.value) typed[input.dataset.credential + "\u0000" + input.dataset.holder] = input.value;
-            if (document.activeElement === input) focused = input.dataset.credential + "\u0000" + input.dataset.holder;
+            const key = credentialKey(input.dataset.credential, input.dataset.holder);
+            if (document.activeElement === input) focused = key;
+            if (input.value) typed[key] = input.value;
         });
         container.innerHTML = banner + (html || '<p class="empty-state">Nothing matches that filter.</p>');
         container.querySelectorAll("input[data-set-input]").forEach(function (input) {
-            const key = input.dataset.credential + "\u0000" + input.dataset.holder;
+            const key = credentialKey(input.dataset.credential, input.dataset.holder);
             if (typed[key]) input.value = typed[key];
             if (focused === key) input.focus();
         });
@@ -224,11 +300,17 @@ window.addEventListener("DOMContentLoaded", function () {
         const existing = credentialRowElement(row.credential, row.holder);
         if (!existing) return;
         const typed = existing.querySelector("input");
-        const occupied = typed && (typed.value !== "" || document.activeElement === typed);
-        if (occupied) {
-            // Mid-paste: the status and the age may move, the action may not.
+        // The caret is in this row: nothing is rewritten at all. A longer status
+        // or detail string widens its column, which reflows the whole table and
+        // slides the focused box out from under the cursor mid-paste — the row
+        // catches up when focus leaves, and the save queues its own check.
+        if (typed && document.activeElement === typed) return;
+        if (typed && typed.value !== "") {
+            // Holding a token but unfocused: the status, value and age may move,
+            // the action may not.
             const cells = existing.children;
             if (cells.length >= 5) {
+                cells[2].innerHTML = row.preview ? h.escapeHtml(row.preview) : (row.present === false ? "—" : "");
                 cells[3].innerHTML = h.escapeHtml(STATUS_WORDS[row.status] || row.status) + (row.detail ? '<small>' + h.escapeHtml(row.detail) + '</small>' : "");
                 cells[4].innerHTML = '<small>' + credentialAge(row) + '</small>';
             }
@@ -313,9 +395,25 @@ window.addEventListener("DOMContentLoaded", function () {
             const input = hostButton.parentElement.querySelector("input[data-set-input]");
             const token = (input && input.value || "").trim();
             if (!token) { window.alert("Paste the token first."); return; }
+            const hostKey = credentialKey("github_pat", "host");
+            credentialSaving[hostKey] = true;
             hostButton.disabled = true; hostButton.textContent = "Verifying…";
-            try { const result = await h.requestJson("/api/settings/credentials/github_pat/set", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({token: token})}); window.alert("Verified as " + (result.login || "unknown") + ".\n\n" + locationReport(result)); await loadCredentials(true); }
-            catch (error) { window.alert(error.message); hostButton.disabled = false; hostButton.textContent = "Save"; }
+            try {
+                const result = await credentialSave("/api/settings/credentials/github_pat/set", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({token: token})});
+                delete credentialSaving[hostKey];
+                clearCredentialInput("github_pat", "host", token);
+                window.alert("Verified as " + (result.login || "unknown") + ".\n\n" + locationReport(result));
+                await loadCredentials(true);
+            } catch (error) {
+                // The error is reported before the re-render, never after: a
+                // throw inside the render would otherwise swallow it and leave
+                // the control reading "Verifying…" with nothing said at all.
+                // Re-render rather than re-enable this node, because a sweep
+                // that landed mid-save has already detached the button.
+                delete credentialSaving[hostKey];
+                window.alert(error.message);
+                renderCredentials();
+            }
             return;
         }
         const checkButton = event.target.closest("[data-check-row]");
@@ -332,20 +430,41 @@ window.addEventListener("DOMContentLoaded", function () {
             const token = (input && input.value || "").trim();
             if (!token) { window.alert("Paste the token first."); return; }
             const route = credential === "mind_github_token" ? "github-token" : "surface-token";
+            const rowKey = credentialKey(credential, holder);
+            credentialSaving[rowKey] = true;
             setRowButton.disabled = true; setRowButton.textContent = "Verifying…";
             try {
-                const result = await h.requestJson("/api/minds/" + encodeURIComponent(holder) + "/" + route, {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({token: token})});
+                const result = await credentialSave("/api/minds/" + encodeURIComponent(holder) + "/" + route, {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({token: token})});
+                delete credentialSaving[rowKey];
+                clearCredentialInput(credential, holder, token);
                 const who = result.login || result.bot_username || "unknown";
                 window.alert("Stored on " + holder + ", authenticating as " + who + "." + (result.restart_required ? "\n\nThis mind keeps the value it booted with until it is restarted." : (result.note ? "\n\n" + result.note : "")));
                 await loadCredentials(false);
-            } catch (error) { window.alert(error.message); setRowButton.disabled = false; setRowButton.textContent = "Save"; }
+                // The set routes record no check of their own and the row was
+                // checked minutes ago, so a reload alone leaves it reporting the
+                // status the token just replaced — refused, against a token that
+                // now works, beside an empty box saying nothing happened.
+                await checkCredentialRows([{credential: credential, holder: holder}]);
+            } catch (error) {
+                delete credentialSaving[rowKey];
+                window.alert(error.message);
+                renderCredentials();
+            }
         }
     });
-    registry.addEventListener("submit", function (event) {
-        const form = event.target.closest("form.credential-set");
-        if (!form) return;
+    // Enter saves. A keydown rather than a form submission: implicit submission
+    // only fires while a form holds exactly one field, so a second input added
+    // to this control later would silently kill the key with nothing on screen
+    // to say so.
+    registry.addEventListener("keydown", function (event) {
+        if (event.key !== "Enter" || event.isComposing) return;
+        const input = event.target.closest("input[data-set-input]");
+        if (!input) return;
         event.preventDefault();
-        const button = form.querySelector("button");
+        // An empty box stays a no-op. Routing it to Save would turn a keystroke
+        // that did nothing before into a modal the operator has to dismiss.
+        if (!input.value.trim()) return;
+        const button = input.parentElement.querySelector("button");
         if (button && !button.disabled) button.click();
     });
     document.getElementById("credential-filter").addEventListener("input", renderCredentials);
