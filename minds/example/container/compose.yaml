@@ -25,6 +25,11 @@ services:
       - PYTHONNOUSERSITE=1
       - PYTHONPATH=/usr/src/app/vendor
       - KEY_RING=/usr/src/app/data/keyring
+      # This mind's own GitHub token, under a name no other mind uses.
+      # Every mind here resolves the same keyring file, separated only by
+      # key name, so a mind falling back to the default would store its
+      # token over another's and both would read as working and wrong.
+      - GITHUB_TOKEN_KEYRING_KEY=EXAMPLE_GITHUB_TOKEN
     volumes:
       - ${HOST_PROJECT_DIR:-.}:/usr/src/app:rw
       - ${HOST_CLAUDE_DIR:-~/.claude}:/home/hivemind/.host-claude:ro
