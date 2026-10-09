@@ -537,16 +537,6 @@ def test_api_settings_credentials_requires_auth(tmp_path, monkeypatch):
     assert client.get("/api/settings/credentials").status_code == 401
 
 
-def test_api_settings_credentials_lists_from_credentials_data(tmp_path, monkeypatch):
-    client = _authed_client(tmp_path, monkeypatch)
-    fake = [{"key": "comms_bearer_token", "label": "Hive Comms bearer token", "rotatable": True}]
-    with patch.object(main_mod, "list_credentials", return_value=fake):
-        response = client.get("/api/settings/credentials")
-
-    assert response.status_code == 200
-    assert response.json()["credentials"] == fake
-
-
 def test_api_settings_credentials_rotate_requires_auth(tmp_path, monkeypatch):
     monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")

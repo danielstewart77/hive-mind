@@ -82,7 +82,8 @@ from starlette.concurrency import run_in_threadpool
 import mind_skills
 import sentinel_review
 from hive_logging import configure_logging, install_fastapi_logging, log_event
-from credentials_data import list_credentials, rotate_credential, set_github_pat
+import credential_registry
+from credentials_data import rotate_credential, set_github_pat
 from settings_data import (
     build_mind_registry,
     hive_tools_status,
@@ -3738,8 +3739,103 @@ async def api_settings_downloads(user: dict = Depends(require_auth)):
 
 @app.get("/api/settings/credentials")
 async def api_settings_credentials(user: dict = Depends(require_auth)):
+    """Every credential and every holder of one, with no live check run.
+
+    Deliberately without the checks: this is what the operator sees first,
+    and a listing that waited on a mind that is down — or on GitHub, once per
+    row — would hang the page it is the whole content of. Each row carries
+    whatever its last check found and how long ago, and the page asks for the
+    rest per row.
+
+    `registry` is reported separately because a hive whose broker cannot be
+    read produces no per-mind rows at all, and a credentials page with no
+    holders on it looks exactly like a credentials page with nothing wrong.
+    """
     del user
-    return {"credentials": list_credentials()}
+    try:
+        raw = await _gateway_json("/broker/minds")
+        minds = [m for m in raw if isinstance(m, dict)] if isinstance(raw, list) else []
+        registry = "ok"
+    except Exception:
+        minds, registry = [], "unreadable"
+    return {
+        "credentials": credential_registry.credential_summaries(minds),
+        "rows": credential_registry.build_rows(minds),
+        "registry": registry,
+        "check_ttl_seconds": credential_registry.CHECK_TTL_S,
+    }
+
+
+@app.post("/api/settings/credentials/{key}/check")
+async def api_settings_credentials_check(
+    key: str, payload: dict, user: dict = Depends(require_auth)
+):
+    """Take one row's live check and remember it.
+
+    One row per call, because the page decides which rows are worth asking
+    about and how many at once — and because a single route that checked
+    everything would be one request the operator cannot cancel, against as
+    many services as the hive has.
+    """
+    del user
+    holder = str((payload or {}).get("holder") or "").strip()
+    if not holder:
+        raise HTTPException(status_code=400, detail="a holder is required")
+    minds = await _broker_minds_safe()
+    return await credential_registry.check(key, holder, minds)
+
+
+@app.put("/api/minds/{name}/github-token")
+async def api_mind_github_token_set(
+    name: str, request: Request, user: dict = Depends(require_auth)
+):
+    """Hand this Mind a new GitHub token for it to verify and store.
+
+    The Mind writes it, because the value has to land where that Mind's own
+    `git` and `gh` look — a per-mind keyring key in the stack, its own `.env`
+    on an edge host — and this console can see neither.
+
+    The Mind verifies against GitHub before storing, so a token refused there
+    leaves the working one in place. The audit line records which Mind and
+    what came of it; the value never enters a log, a response, or an
+    exception message.
+    """
+    body = await request.json()
+    token = str((body or {}).get("token") or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="A GitHub token is required")
+    gateway_url = await _mind_gateway_url(name)
+    try:
+        state = await mind_runtime.push_github_token(gateway_url, token)
+    except HTTPException as exc:
+        log_event(
+            log, "mind.github_token.refused", level=logging.WARNING,
+            **_actor_fields(user), mind=name, status=exc.status_code,
+        )
+        raise
+    log_event(
+        log, "mind.github_token.updated", **_actor_fields(user), mind=name,
+        login=str(state.get("login") or ""), where=str(state.get("where") or ""),
+    )
+    # The row the page redraws comes from this, not from a second round trip:
+    # the Mind just verified, and asking again would spend another GitHub call
+    # to learn what it already said.
+    credential_registry.remember(
+        "mind_github_token", name, status=credential_registry.WORKING,
+        present=True, names=str(state.get("login") or ""),
+        where=str(state.get("where") or ""),
+    )
+    return {
+        "saved": True,
+        "stored": True,
+        "accepted": True,
+        "login": str(state.get("login") or ""),
+        "where": str(state.get("where") or ""),
+        "configured": state.get("configured") or [],
+        # `git` and `gh` read their files per invocation, so a container mind
+        # needs nothing bounced. An edge mind read its environment at boot.
+        "restart_required": bool(state.get("restart_required")),
+    }
 
 
 @app.post("/api/settings/credentials/{key}/rotate")
@@ -3754,6 +3850,10 @@ async def api_settings_credentials_rotate(key: str, user: dict = Depends(require
         complete=result["complete"],
         skipped=[r["file"] for r in result["locations"] if not r["written"]],
     )
+    # Whatever any holder's last check found is now about a value that no
+    # longer exists, and a stale "working" beside a freshly rotated secret is
+    # the one thing on this page nobody should believe.
+    credential_registry.forget_all()
     return result
 
 

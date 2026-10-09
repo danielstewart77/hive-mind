@@ -92,3 +92,10 @@ def test_sidebar_marks_kanban_current_on_every_page_of_the_section(signed_in):
         body = signed_in.get(path)
         assert body.status_code == 200, path
         assert '<a href="/kanban" class="console-nav-link is-active">' in body.text, path
+
+
+def test_done_cards_on_the_board_carry_a_trash_control(signed_in):
+    body = signed_in.get("/kanban/board").text
+    assert "kanban-trash" in body
+    assert "trashButton(s)" in body
+    assert "status==='done'" in body

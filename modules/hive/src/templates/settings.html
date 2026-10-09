@@ -24,7 +24,30 @@
         {% elif settings_section == 'voice' %}
             <section class="surface"><div class="settings-section-copy"><h2>Voice services</h2><p>Health of each speech server. A Mind's own engine and voice are set on its page.</p></div><ul class="service-list" id="voice-servers"><li class="loading-state">Checking voice servers…</li></ul></section>
         {% elif settings_section == 'credentials' %}
-            <section class="surface"><div class="settings-section-copy"><h2>Shared-secret tokens</h2><p>Rotating writes a new value to every file that holds it. Nothing restarts automatically — restart the listed services yourself once rotation completes.</p></div><ul class="service-list" id="settings-credentials"><li class="loading-state">Loading credentials…</li></ul></section>
+            <section class="surface">
+                <div class="surface-header">
+                    <div><h2>Credentials</h2><p>One row per holder. Rotation belongs to the credential; a per-mind token is set on its own row.</p></div>
+                    <button id="credentials-refresh" class="icon-button" type="button" aria-label="Re-check every credential"><i data-lucide="refresh-cw"></i></button>
+                </div>
+                <div class="surface-body credential-toolbar">
+                    <input type="search" id="credential-filter" placeholder="Filter by mind or credential" autocomplete="off" spellcheck="false">
+                    <select id="credential-status-filter">
+                        <option value="">Any status</option>
+                        <option value="working">Working</option>
+                        <option value="refused">Refused</option>
+                        <option value="not_set">Not set</option>
+                        <option value="unchecked">Unchecked</option>
+                        <option value="undetermined">Undetermined</option>
+                        <option value="unreachable">Unreachable</option>
+                        <option value="predates_api">Older code</option>
+                        <option value="unaddressable">No address</option>
+                        <option value="unreadable">Unreadable</option>
+                        <option value="retired">Retired</option>
+                        <option value="validator">Validator</option>
+                    </select>
+                </div>
+                <div id="credential-registry"><p class="loading-state">Loading credentials…</p></div>
+            </section>
         {% elif settings_section == 'advanced' %}
             <section class="surface"><div class="settings-section-copy"><h2>Installer downloads</h2><p>Approved bootstrap assets published by Hive Init.</p></div><ul class="service-list" id="settings-downloads"><li class="loading-state">Loading downloads…</li></ul></section>
             <section class="surface"><div class="settings-section-copy"><h2>Diagnostics</h2><p>Detailed runtime configuration is available on each Mind page with secrets removed.</p></div><div class="surface-body"><a class="button" href="/minds"><i data-lucide="brain-circuit"></i>Open mind diagnostics</a></div></section>
@@ -59,31 +82,152 @@ window.addEventListener("DOMContentLoaded", function () {
             document.getElementById("voice-servers").innerHTML = Object.entries(data.servers || {}).map(function (entry) { return '<li class="service-row"><span class="service-icon"><i data-lucide="audio-lines"></i></span><span class="service-copy"><strong>' + h.escapeHtml(entry[0]) + '</strong><small>Text to speech service</small></span>' + h.statusPill(entry[1].reachable, "Ready", "Unavailable") + '</li>'; }).join(""); refreshIcons();
         } catch (error) { document.getElementById("voice-servers").innerHTML = '<li class="error-state">' + h.escapeHtml(error.message) + '</li>'; }
     }
-    async function loadCredentials() {
-        const list = document.getElementById("settings-credentials");
-        try {
-            const rows = (await h.requestJson("/api/settings/credentials")).credentials || [];
-            list.innerHTML = rows.map(function (item) {
-                // "unreadable" is its own word: the remedy for a missing value
-                // is to write one, and offering that over a file this console
-                // merely cannot parse would overwrite a credential that is
-                // present and fine.
-                const locations = item.locations.map(function (loc) { return h.escapeHtml(loc.file) + " (" + h.escapeHtml(loc.env_key) + "): " + (loc.unreadable ? "unreadable" : loc.present ? h.escapeHtml(loc.preview || "set") : "missing"); }).join(", ");
-                const syncNote = item.locations.length && !item.in_sync ? '<br><strong style="color:var(--color-danger,#c0392b)">Out of sync across files</strong>' : "";
-                const note = item.note ? '<br><em>' + h.escapeHtml(item.note) + '</em>' : "";
-                let action;
-                if (item.rotatable) {
-                    action = '<button class="button" type="button" data-rotate="' + h.escapeHtml(item.key) + '">Rotate</button>';
-                } else if (item.settable) {
-                    action = '<span style="display:flex;gap:8px;align-items:center"><input type="password" placeholder="Paste new PAT" data-set-input="' + h.escapeHtml(item.key) + '" style="max-width:220px"><button class="button" type="button" data-set="' + h.escapeHtml(item.key) + '">Save</button></span>';
-                } else {
-                    action = '<span class="pill" title="' + h.escapeHtml(item.manual_reason || "") + '">Manual only</span>';
-                }
-                return '<li class="service-row"><span class="service-icon"><i data-lucide="key-round"></i></span><span class="service-copy"><strong>' + h.escapeHtml(item.label) + '</strong><small>' + locations + syncNote + note + '</small></span>' + action + '</li>';
-            }).join("");
-            refreshIcons();
-        } catch (error) { list.innerHTML = '<li><div class="error-state">' + h.escapeHtml(error.message) + '</div></li>'; }
+    // The page keeps the whole answer and re-renders from it: a filter or a
+    // sort must not cost a round trip, and a live check that lands while the
+    // operator is typing must not drop what they typed.
+    let credentialState = {credentials: [], rows: [], registry: "ok", ttl: 300};
+    let credentialSort = {column: "holder", ascending: true};
+
+    const STATUS_WORDS = {
+        working: "Working", refused: "Refused", not_set: "Not set",
+        unchecked: "Checking…", undetermined: "Could not tell",
+        unreachable: "Unreachable", predates_api: "Older code",
+        unaddressable: "No address", unreadable: "Unreadable",
+        retired: "Retired", validator: "Validator",
+    };
+    // Rank for sort-by-status: what the operator must act on first. Never a
+    // colour — the whole status is a word for that reason.
+    const STATUS_RANK = ["refused", "undetermined", "unreadable", "unreachable",
+                         "predates_api", "unaddressable", "not_set", "unchecked",
+                         "retired", "validator", "working"];
+
+    function credentialAge(row) {
+        if (row.age_seconds === null || row.age_seconds === undefined) return "—";
+        const seconds = Math.round(row.age_seconds);
+        if (seconds < 60) return seconds + "s ago";
+        if (seconds < 3600) return Math.round(seconds / 60) + "m ago";
+        return Math.round(seconds / 3600) + "h ago";
     }
+
+    function credentialRowHtml(row) {
+        const status = STATUS_WORDS[row.status] || row.status;
+        const detail = row.detail ? '<small>' + h.escapeHtml(row.detail) + '</small>' : "";
+        const account = row.names ? '<small>' + h.escapeHtml(row.names) + '</small>' : "";
+        const value = row.preview ? h.escapeHtml(row.preview) : (row.present === false ? "—" : "");
+        const target = h.escapeHtml(row.credential) + "::" + h.escapeHtml(row.holder);
+        let action = "";
+        if (row.settable) {
+            action = '<span class="credential-set"><input type="password" placeholder="Paste a token" autocomplete="off" data-set-input="' + target + '"><button class="button button-quiet" type="button" data-set-row="' + target + '">Save</button></span>';
+        } else if (row.checkable) {
+            action = '<button class="button button-quiet" type="button" data-check-row="' + target + '">Check</button>';
+        }
+        return '<tr data-row="' + target + '" data-status="' + h.escapeHtml(row.status) + '" data-search="' + h.escapeHtml((row.holder + " " + row.holder_label + " " + row.credential_label).toLowerCase()) + '">'
+            + '<td><strong>' + h.escapeHtml(row.holder_label) + '</strong>' + account + '</td>'
+            + '<td><small>' + h.escapeHtml(row.where || "—") + '</small></td>'
+            + '<td>' + value + '</td>'
+            + '<td>' + h.escapeHtml(status) + detail + '</td>'
+            + '<td><small>' + credentialAge(row) + '</small></td>'
+            + '<td>' + action + '</td></tr>';
+    }
+
+    function credentialGroupHtml(credential, rows) {
+        let action;
+        if (credential.rotatable) {
+            action = '<button class="button" type="button" data-rotate="' + h.escapeHtml(credential.key) + '">Rotate</button>';
+        } else if (credential.key === "github_pat") {
+            action = '<span class="credential-set"><input type="password" placeholder="Paste a token" autocomplete="off" data-set-input="host::github_pat"><button class="button" type="button" data-set-host="github_pat">Save</button></span>';
+        } else if (credential.manual_reason) {
+            action = '<span class="pill" title="' + h.escapeHtml(credential.manual_reason) + '">Manual only</span>';
+        } else {
+            action = "";
+        }
+        const note = credential.note ? '<p>' + h.escapeHtml(credential.note) + '</p>' : "";
+        const outOfSync = credential.kind === "shared" && !credential.in_sync
+            ? '<p><strong>Holders do not all carry the same value.</strong></p>' : "";
+        const body = rows.length
+            ? '<table class="credential-table"><thead><tr>'
+              + '<th data-sort="holder">Holder</th><th>Where it is kept</th><th>Value</th>'
+              + '<th data-sort="status">Status</th><th data-sort="checked">Checked</th><th></th>'
+              + '</tr></thead><tbody>' + rows.map(credentialRowHtml).join("") + '</tbody></table>'
+            : '<p class="empty-state">No holders match.</p>';
+        return '<section class="credential-group" data-credential="' + h.escapeHtml(credential.key) + '">'
+            + '<div class="surface-header"><div><h3>' + h.escapeHtml(credential.label) + '</h3>' + note + outOfSync + '</div>' + action + '</div>'
+            + body + '</section>';
+    }
+
+    function renderCredentials() {
+        const container = document.getElementById("credential-registry");
+        const needle = (document.getElementById("credential-filter").value || "").trim().toLowerCase();
+        const wanted = document.getElementById("credential-status-filter").value;
+        const banner = credentialState.registry === "unreadable"
+            ? '<div class="error-state">The mind registry could not be read, so no per-mind rows are shown. The shared secrets below are read from this host.</div>'
+            : "";
+        const html = credentialState.credentials.map(function (credential) {
+            // Filtering and sorting move rows within a credential, never out
+            // of one: the rotate control writes every holder it has, and a
+            // sort that dissolved the grouping would leave it over rows that
+            // are no longer on screen.
+            let rows = credentialState.rows.filter(function (row) { return row.credential === credential.key; });
+            if (needle) rows = rows.filter(function (row) { return (row.holder + " " + row.holder_label + " " + row.credential_label).toLowerCase().indexOf(needle) !== -1; });
+            if (wanted) rows = rows.filter(function (row) { return row.status === wanted; });
+            rows = rows.slice().sort(function (a, b) {
+                let left, right;
+                if (credentialSort.column === "status") { left = STATUS_RANK.indexOf(a.status); right = STATUS_RANK.indexOf(b.status); }
+                else if (credentialSort.column === "checked") { left = a.age_seconds === null ? Infinity : a.age_seconds; right = b.age_seconds === null ? Infinity : b.age_seconds; }
+                else { left = a.holder_label.toLowerCase(); right = b.holder_label.toLowerCase(); }
+                if (left < right) return credentialSort.ascending ? -1 : 1;
+                if (left > right) return credentialSort.ascending ? 1 : -1;
+                return 0;
+            });
+            if (!rows.length && (needle || wanted)) return "";
+            return credentialGroupHtml(credential, rows);
+        }).join("");
+        container.innerHTML = banner + (html || '<p class="empty-state">Nothing matches that filter.</p>');
+        refreshIcons();
+    }
+
+    function replaceCredentialRow(answer) {
+        const row = credentialState.rows.find(function (item) { return item.credential === answer.credential && item.holder === answer.holder; });
+        if (!row) return;
+        Object.assign(row, answer);
+        // A mind that turned out to be running older code is not offered a
+        // paste box: one that always refuses is worse than none.
+        if (answer.status === "predates_api" || answer.status === "retired") row.settable = false;
+        renderCredentials();
+    }
+
+    // Three at a time. A hive with a dozen minds and five shared secrets is
+    // tens of probes, and a page that fired them all at once would earn a
+    // secondary rate limit from GitHub whose rows then read as refused.
+    async function checkCredentialRows(rows) {
+        const queue = rows.slice();
+        async function worker() {
+            while (queue.length) {
+                const row = queue.shift();
+                try {
+                    replaceCredentialRow(await h.requestJson("/api/settings/credentials/" + encodeURIComponent(row.credential) + "/check", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({holder: row.holder})}));
+                } catch (error) {
+                    replaceCredentialRow({credential: row.credential, holder: row.holder, status: "undetermined", detail: error.message, age_seconds: 0});
+                }
+            }
+        }
+        await Promise.all([worker(), worker(), worker()]);
+    }
+
+    async function loadCredentials(recheckAll) {
+        const container = document.getElementById("credential-registry");
+        try {
+            const data = await h.requestJson("/api/settings/credentials");
+            credentialState = {credentials: data.credentials || [], rows: data.rows || [], registry: data.registry || "ok", ttl: data.check_ttl_seconds || 300};
+            renderCredentials();
+            // Only rows with no answer or a stale one. The answer is held on
+            // the console and shared by every open tab, so a second browser
+            // and a left-open dashboard cost nothing.
+            const due = credentialState.rows.filter(function (row) { return row.checkable && (recheckAll || row.stale); });
+            if (due.length) await checkCredentialRows(due);
+        } catch (error) { container.innerHTML = '<div class="error-state">' + h.escapeHtml(error.message) + '</div>'; }
+    }
+
     async function loadDownloads() {
         const list = document.getElementById("settings-downloads");
         try { const rows = (await h.requestJson("/api/settings/downloads")).downloads || []; list.innerHTML = rows.length ? rows.map(function (item) { return '<li class="service-row"><span class="service-icon"><i data-lucide="download"></i></span><span class="service-copy"><strong>' + h.escapeHtml(item.filename) + '</strong><small>' + h.escapeHtml(item.size_bytes) + ' bytes</small></span><a class="button" href="/downloads/' + encodeURIComponent(item.filename) + '">Download</a></li>'; }).join("") : '<li class="empty-state"><h3>No installer assets</h3><p>Hive Init has not published downloads on this host.</p></li>'; refreshIcons(); }
@@ -104,12 +248,62 @@ window.addEventListener("DOMContentLoaded", function () {
         const heading = result.complete ? "Written to all " + rows.length + " locations." : "Partial: " + done + " of " + rows.length + " locations written.";
         return [heading].concat(lines).join("\n");
     }
-    document.getElementById("settings-credentials").addEventListener("click", async function (event) {
+    const registry = document.getElementById("credential-registry");
+    registry.addEventListener("click", async function (event) {
+        const header = event.target.closest("[data-sort]");
+        if (header) {
+            const column = header.dataset.sort;
+            credentialSort = {column: column, ascending: credentialSort.column === column ? !credentialSort.ascending : true};
+            renderCredentials();
+            return;
+        }
         const rotateButton = event.target.closest("[data-rotate]");
-        if (rotateButton) { const key = rotateButton.dataset.rotate; if (!window.confirm("Rotate this credential? Nothing restarts automatically — you'll need to bounce the affected services yourself.")) return; rotateButton.disabled = true; rotateButton.textContent = "Rotating…"; try { const result = await h.requestJson("/api/settings/credentials/" + encodeURIComponent(key) + "/rotate", {method: "POST"}); window.alert(locationReport(result) + "\n\nRestart: " + (result.restart_targets || []).join(", ")); loadCredentials(); } catch (error) { window.alert(error.message); rotateButton.disabled = false; rotateButton.textContent = "Rotate"; } return; }
-        const setButton = event.target.closest("[data-set]");
-        if (setButton) { const key = setButton.dataset.set; const input = document.querySelector('[data-set-input="' + key + '"]'); const token = (input && input.value || "").trim(); if (!token) { window.alert("Paste the new token first."); return; } setButton.disabled = true; setButton.textContent = "Verifying…"; try { const result = await h.requestJson("/api/settings/credentials/" + encodeURIComponent(key) + "/set", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({token: token})}); window.alert("Verified as " + (result.login || "unknown") + ".\n\n" + locationReport(result)); loadCredentials(); } catch (error) { window.alert(error.message); setButton.disabled = false; setButton.textContent = "Save"; } }
-    }); loadCredentials(); }
+        if (rotateButton) {
+            const key = rotateButton.dataset.rotate;
+            if (!window.confirm("Rotate this credential for every holder? Nothing restarts automatically — you'll need to bounce the affected services yourself.")) return;
+            rotateButton.disabled = true; rotateButton.textContent = "Rotating…";
+            try { const result = await h.requestJson("/api/settings/credentials/" + encodeURIComponent(key) + "/rotate", {method: "POST"}); window.alert(locationReport(result) + "\n\nRestart: " + (result.restart_targets || []).join(", ")); await loadCredentials(true); }
+            catch (error) { window.alert(error.message); rotateButton.disabled = false; rotateButton.textContent = "Rotate"; }
+            return;
+        }
+        const hostButton = event.target.closest("[data-set-host]");
+        if (hostButton) {
+            const input = document.querySelector('[data-set-input="host::github_pat"]');
+            const token = (input && input.value || "").trim();
+            if (!token) { window.alert("Paste the token first."); return; }
+            hostButton.disabled = true; hostButton.textContent = "Verifying…";
+            try { const result = await h.requestJson("/api/settings/credentials/github_pat/set", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({token: token})}); window.alert("Verified as " + (result.login || "unknown") + ".\n\n" + locationReport(result)); await loadCredentials(true); }
+            catch (error) { window.alert(error.message); hostButton.disabled = false; hostButton.textContent = "Save"; }
+            return;
+        }
+        const checkButton = event.target.closest("[data-check-row]");
+        if (checkButton) {
+            const parts = checkButton.dataset.checkRow.split("::");
+            checkButton.disabled = true; checkButton.textContent = "Checking…";
+            await checkCredentialRows([{credential: parts[0], holder: parts[1]}]);
+            return;
+        }
+        const setRowButton = event.target.closest("[data-set-row]");
+        if (setRowButton) {
+            const target = setRowButton.dataset.setRow;
+            const parts = target.split("::");
+            const input = document.querySelector('[data-set-input="' + target + '"]');
+            const token = (input && input.value || "").trim();
+            if (!token) { window.alert("Paste the token first."); return; }
+            const route = parts[0] === "mind_github_token" ? "github-token" : "surface-token";
+            setRowButton.disabled = true; setRowButton.textContent = "Verifying…";
+            try {
+                const result = await h.requestJson("/api/minds/" + encodeURIComponent(parts[1]) + "/" + route, {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({token: token})});
+                const who = result.login || result.bot_username || "unknown";
+                window.alert("Stored on " + parts[1] + ", authenticating as " + who + "." + (result.restart_required ? "\n\nThis mind keeps the value it booted with until it is restarted." : ""));
+                await loadCredentials(false);
+            } catch (error) { window.alert(error.message); setRowButton.disabled = false; setRowButton.textContent = "Save"; }
+        }
+    });
+    document.getElementById("credential-filter").addEventListener("input", renderCredentials);
+    document.getElementById("credential-status-filter").addEventListener("change", renderCredentials);
+    document.getElementById("credentials-refresh").addEventListener("click", function () { loadCredentials(true); });
+    loadCredentials(false); }
     if (section === "advanced") loadDownloads();
 });
 </script>

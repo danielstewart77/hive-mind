@@ -223,6 +223,77 @@ async def push_surface_token(gateway_url: str, token: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# The GitHub token
+# ---------------------------------------------------------------------------
+# Set through the Mind for the same reason its bot token is: the value has to
+# land where *that* Mind's own `git` and `gh` look — a per-mind keyring key in
+# the containerised stack, its own `.env` on an edge host — and this console
+# can see neither. So the Mind writes, and what travels is one PUT.
+#
+# Nothing comes back but a verdict and an account name. A console that could
+# read these would hold every Mind's push credential behind one session
+# cookie.
+
+
+def _github_token_endpoint(gateway_url: str) -> str:
+    url = (gateway_url or "").strip().rstrip("/")
+    if not url:
+        raise HTTPException(
+            status_code=400, detail="This Mind has no gateway URL in the registry"
+        )
+    return f"{url}/github-token"
+
+
+def _unwrap_github_token(response: httpx.Response) -> dict:
+    """What the Mind said, with its own refusal preserved.
+
+    A 400 from the Mind means the *token* was refused, not the credential this
+    console presented; a 503 means the Mind cannot store one at all. Neither
+    may become the other, and neither may become "unreachable" — the remedies
+    are a new token, a compose change, and a trip to the machine.
+    """
+    if response.status_code == 404:
+        raise HTTPException(
+            status_code=501,
+            detail="This Mind is running a version without the GitHub-token API",
+        )
+    if response.status_code >= 400:
+        detail = response.text
+        try:
+            body = response.json()
+            if isinstance(body, dict) and body.get("error"):
+                detail = str(body["error"])
+        except ValueError:
+            pass
+        raise HTTPException(status_code=response.status_code, detail=detail)
+    body = response.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=502, detail="Mind returned no token state")
+    return body
+
+
+async def push_github_token(gateway_url: str, token: str) -> dict:
+    """Hand a Mind a new GitHub token for it to verify and store.
+
+    The Mind checks it against GitHub before storing, so a refusal leaves the
+    working token in place. What comes back names the account the token
+    authenticates as, and never the token.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT + 12.0) as client:
+            response = await client.put(
+                _github_token_endpoint(gateway_url),
+                json={"token": token},
+                headers=admin_headers(),
+            )
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Mind is unreachable: {exc}"
+        ) from exc
+    return _unwrap_github_token(response)
+
+
+# ---------------------------------------------------------------------------
 # The voice
 # ---------------------------------------------------------------------------
 # A Mind's voice lives in that Mind's own runtime.yaml, written the way its

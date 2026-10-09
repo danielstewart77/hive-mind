@@ -852,3 +852,22 @@ a { color: inherit; }
 .design-answer { font-size: 0.9rem; }
 .design-actions { display: flex; gap: 0.75rem; margin-top: 1rem; }
 .design-item.is-context { opacity: 0.75; }
+
+/* The credentials registry: one row per holder, grouped by credential, with
+   the rotate control on the group because rotating one holder's copy of a
+   shared secret and not the rest takes the hive down. Status is a word and
+   never a colour. */
+.credential-toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.credential-toolbar input[type="search"] { flex: 1 1 240px; min-width: 180px; }
+.credential-group { border-top: 1px solid var(--console-line); padding: 14px 0 4px; }
+.credential-group .surface-header { padding: 0 0 8px; }
+.credential-group h3 { margin: 0; font-size: 14px; }
+.credential-group p { margin: 4px 0 0; font-size: 12px; color: var(--console-faint); }
+.credential-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.credential-table th { padding: 8px 10px; color: var(--console-faint); background: #14181b; border-bottom: 1px solid var(--console-line); text-align: left; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; white-space: nowrap; }
+.credential-table th[data-sort] { cursor: pointer; }
+.credential-table td { padding: 10px; color: #cbd2d6; border-bottom: 1px solid #252c31; vertical-align: top; }
+.credential-table td small { display: block; color: var(--console-faint); font-size: 11px; overflow-wrap: anywhere; }
+.credential-table tbody tr:last-child td { border-bottom: 0; }
+.credential-set { display: flex; gap: 6px; align-items: center; }
+.credential-set input { max-width: 180px; }
