@@ -53,6 +53,7 @@ def install_surface_token_routes(app: FastAPI, *, mind_id: str, log) -> None:
             "bot_username": state.bot_username,
             "where": state.where,
             "detail": state.detail,
+            "preview": state.preview,
         }
 
     @app.put("/surface-token")
@@ -99,5 +100,6 @@ def install_surface_token_routes(app: FastAPI, *, mind_id: str, log) -> None:
             "accepted": True,
             "bot_username": state.bot_username,
             "where": state.where,
+            "preview": state.preview,
             "restart_required": True,
         }
