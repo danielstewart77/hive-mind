@@ -99,3 +99,8 @@ def test_done_cards_on_the_board_carry_a_trash_control(signed_in):
     assert "kanban-trash" in body
     assert "trashButton(s)" in body
     assert "status==='done'" in body
+
+
+def test_board_cards_link_to_the_item_details_page(signed_in):
+    body = signed_in.get("/kanban/board").text
+    assert "const heading=el('strong','');heading.append(safeTitle(s))" in body

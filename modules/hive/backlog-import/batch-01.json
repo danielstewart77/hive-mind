@@ -1,0 +1,316 @@
+{
+"epics": [
+{
+  "title": "CRM MVP",
+  "description": "A minimum-viable CRM for a working real estate agent. Contacts, leads and deals, with the follow-up cadence driven by lead type rather than left to the agent's memory. No implementation has started; the source doc is a capability list, not a design.",
+  "requirements": "Contact records are created and edited. A contact carries a lead type (buyer, seller, renter, landlord, investor, referral) and a lead source (website, Zillow, referral, open house, sign call, social). Notes attach to a contact, a lead or a deal. Calls, emails and meetings are logged as touchpoints. Deals move through pipeline stages. Lead type decides which funnel a lead enters and which follow-up strategy applies, and follow-ups are scheduled automatically from lead type plus stage. Everything is searchable and filterable by lead type, stage, source, status and recent activity.",
+  "acceptance_criteria": "An agent can take a new lead from first contact to a closed deal without leaving the app and without setting a single reminder by hand. Overdue follow-ups are visible on one screen. A pipeline view exists per lead type. Recent activity across all leads and deals is on one page.",
+  "qa_tests": "Creating a contact with each of the six lead types puts it in the matching funnel with the matching follow-up schedule. Moving a deal between stages reschedules the next follow-up. A follow-up whose due date has passed appears in the overdue view and nowhere else. Filtering by source returns only that source. No design or schema exists yet, so these are acceptance tests to write against, not a suite to port.",
+  "features": [
+    {
+      "title": "Contacts and lead records",
+      "description": "The record layer: a contact, its lead type, its source, and the notes and touchpoints hanging off it.",
+      "requirements": "Create and edit a contact. Tag with one of six lead types. Record lead source from a fixed vocabulary. Attach free-text notes to a contact, lead or deal. Log a call, email, meeting or other touchpoint with a timestamp.",
+      "acceptance_criteria": "A contact round-trips through create, edit and read with every field intact. A touchpoint log reads back in time order.",
+      "qa_tests": "A contact created with each lead type and each source reads back with that value. A note attached to a deal is reachable from the deal and from the contact. Touchpoints come back newest first."
+    },
+    {
+      "title": "Pipeline and deals",
+      "description": "Opportunities moving through stages, viewable as a pipeline per lead type.",
+      "requirements": "Create a deal against a contact. Move it through pipeline stages. Render a pipeline view filtered by lead type.",
+      "acceptance_criteria": "A deal's stage history is recoverable. The pipeline view for one lead type shows only that type's deals.",
+      "qa_tests": "Advancing a deal two stages and reading it back reports the current stage and both transitions. A pipeline filtered to 'seller' excludes a buyer deal."
+    },
+    {
+      "title": "Follow-up automation",
+      "description": "The part that makes it a CRM rather than a contact list: the next action is scheduled by the system, from lead type and stage.",
+      "requirements": "Each lead type has a follow-up strategy. A lead's funnel is decided by its type. Scheduling a follow-up is automatic on lead creation and on every stage change. Manual follow-up tasks and reminders are also settable. Overdue follow-ups surface on their own view.",
+      "acceptance_criteria": "No follow-up ever has to be created by hand for the normal path. An overdue item is impossible to miss.",
+      "qa_tests": "Creating an investor lead schedules the investor cadence and not the buyer cadence. A stage change reschedules rather than duplicating. A follow-up dated yesterday appears in the overdue view; one dated tomorrow does not."
+    },
+    {
+      "title": "Search and filtering",
+      "description": "Finding a record across contacts, leads and deals.",
+      "requirements": "Free-text search across contacts, leads and deals. Filter by lead type, pipeline stage, source, status and recent activity. A recent-activity view spanning leads and deals.",
+      "acceptance_criteria": "Any record the agent remembers a fragment of is findable in one search.",
+      "qa_tests": "A search term matching a contact name, a note body and a deal title returns all three. Two filters combined narrow rather than widen."
+    }
+  ]
+},
+{
+  "title": "Browser terminal — feature wishlist",
+  "description": "Outstanding work on the tmux-backed browser terminal at terminal.sparktobloom.com. Explicitly separate from the rendering-artifact investigation, which is its own epic. Daniel's own note says this list is incomplete and should be extended rather than treated as closed.",
+  "requirements": "The terminal gets a voice path, or a recorded decision that it should not have one. Selecting text in the tile puts it on the clipboard on desktop and on both mobile browsers. The list itself stays open to additions.",
+  "acceptance_criteria": "Voice either works in the tile or the exemption is written down with its reasoning. Copy works from an xterm.js selection on desktop Chrome, mobile Safari and mobile Chrome.",
+  "qa_tests": "Judged by using the tile, not asserted: a reply is heard in the tile, and a selected block pastes correctly into another app on each of the three browsers.",
+  "stories": [
+    {
+      "title": "Decide whether the terminal surface gets a voice",
+      "description": "Spoken replies exist for Telegram and the other chat surfaces. The terminal tile lost that when it moved to its own site. The terminal is also explicitly exempted from the TTS prose rule — prose_reminder.sh skips 'terminal' and 'local' — so restoring voice either lives alongside that exemption or means relaxing it.",
+      "requirements": "Decide: voice on a surface exempt from the prose rule, or relax the exemption for the terminal. Record the decision and the reasoning.",
+      "acceptance_criteria": "The decision is written down somewhere a later session will find it, not just acted on.",
+      "qa_tests": "Not testable as code. The artifact is the written decision.",
+      "status": "backlog"
+    },
+    {
+      "title": "Copy a selection out of the terminal tile",
+      "description": "Selecting text in the xterm.js tile does not put it on the clipboard. Needs either xterm's selection-to-clipboard wiring or a copy affordance in the tile chrome.",
+      "requirements": "A selection in the tile reaches the system clipboard. Works on desktop, on mobile Safari and on mobile Chrome, which behave differently here and both matter.",
+      "acceptance_criteria": "Text selected in the tile pastes into another application unchanged on all three browsers.",
+      "qa_tests": "Judged by hand on each browser. A multi-line selection pastes with its line breaks intact and without the pane's right-hand padding.",
+      "status": "backlog"
+    }
+  ]
+},
+{
+  "title": "Unified logging standard — rollout",
+  "description": "The standard is built and merged; this is the rollout to the apps that do not have it yet. Documented at docs/system-configuration/unified-logging-standard.md. The procedure per app: copy core/hive_logging.py into it (copy, never share — per-repo ownership), swap logging.basicConfig for configure_logging, add install_fastapi_logging to the FastAPI app, then instrument the mutation points with log_event.",
+  "requirements": "Every app's process logs are one JSON stream. Every mutation emits a named event with actor attribution. No secret and no message body ever appears in a log. Non-Python apps keep the record shape and the event vocabulary and port the formatter, which is about fifty lines in any language with a JSON library.",
+  "acceptance_criteria": "Done means all three of those hold for the app in question, not that the module was copied in.",
+  "qa_tests": "Per app: the log stream parses as one JSON object per line. A mutation through the app's own API produces an event naming the actor. A request carrying a bearer token and a message body produces a log line containing neither.",
+  "features": [
+    {
+      "title": "Originating implementations",
+      "description": "The two repos the standard was written in, plus the two already carried across.",
+      "requirements": "hive-mind, hive-edge-minds, hive-tools and the hive site all run the standard.",
+      "acceptance_criteria": "hive_logging.py is present and in use in each.",
+      "qa_tests": "Each app's log stream parses as line-delimited JSON and mutations carry actor attribution.",
+      "stories": [
+        {"title": "hive-mind — originating implementation (PR #199)", "description": "Where the standard was written.", "requirements": "configure_logging, install_fastapi_logging and log_event in place.", "acceptance_criteria": "Merged as PR #199.", "qa_tests": "Covered by that PR's own suite.", "status": "done"},
+        {"title": "hive-edge-minds — originating implementation (PR #7)", "description": "The edge-mind half of the originating work.", "requirements": "Same three pieces in the edge-mind repo.", "acceptance_criteria": "Merged as PR #7.", "qa_tests": "Covered by that PR's own suite.", "status": "done"},
+        {"title": "hive-tools — hive_logging.py in place", "description": "~/Storage/hive-tools carries its own copy.", "requirements": "Copy in, basicConfig swapped, FastAPI wired, mutation points instrumented.", "acceptance_criteria": "Present and in use.", "qa_tests": "Tool invocations emit named events with actor attribution.", "status": "done"},
+        {"title": "hive site — src/hive_logging.py in place", "description": "~/Storage/Dev/hive carries its own copy.", "requirements": "Copy in, basicConfig swapped, FastAPI wired, mutation points instrumented.", "acceptance_criteria": "Present and in use.", "qa_tests": "Console mutations emit named events; the kanban writes are a live example.", "status": "done"}
+      ]
+    },
+    {
+      "title": "Remaining Python apps",
+      "description": "The apps still on ad-hoc logging.",
+      "requirements": "Each gets its own copy of hive_logging.py and the four-step treatment.",
+      "acceptance_criteria": "One JSON stream, named events with actors, no secrets or bodies.",
+      "qa_tests": "Per app as in the epic's tests.",
+      "stories": [
+        {"title": "hive_mind_mcp — instrument MCP tool invocations", "description": "The MCP server's tool calls are the mutation points.", "requirements": "Every tool invocation emits a named event with actor attribution.", "acceptance_criteria": "An MCP call is traceable to who made it.", "qa_tests": "Invoking a tool through the MCP server produces one JSON event naming the tool and the actor, with no argument payload carrying a secret.", "status": "backlog"},
+        {"title": "inference-proxy — request routing and provider failures", "description": "The proxy decides which provider serves a model; its routing decisions and provider failures are what need to be legible after the fact.", "requirements": "Routing decisions and provider failures emit named events. No API key and no prompt body in any line.", "acceptance_criteria": "A 400 from a retired model is diagnosable from the log alone.", "qa_tests": "A request for a model the backend has retired produces an event naming the model and the provider, with no prompt text and no key.", "status": "backlog"},
+        {"title": "property_lens — change-queue processing", "description": "The 'ding' pipeline's queue processing.", "requirements": "Queue events emit named events with actor attribution.", "acceptance_criteria": "A ding run is reconstructable from the log.", "qa_tests": "Processing one queued event emits a named event naming the property and the change, with no listing body.", "status": "backlog"},
+        {"title": "spark_to_bloom and owner site backends", "description": "The two public-facing site backends.", "requirements": "Standard applied to both.", "acceptance_criteria": "One JSON stream each.", "qa_tests": "Each backend's log parses line-by-line as JSON.", "status": "backlog"},
+        {"title": "remote-admin bridge — SSH session audit trail", "description": "SSH session create, command and close is exactly the who-did-what audit trail this standard exists for. The highest-value target on the list.", "requirements": "Session create, each command, and session close each emit a named event with actor attribution. No command output and no credential in the line.", "acceptance_criteria": "Who ran what, where and when is answerable from the log alone.", "qa_tests": "Opening a session, running one command and closing it produces three named events naming the actor and the host, with no command output body.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "Non-Python apps",
+      "description": "Apps that cannot take the Python module and must port the formatter instead.",
+      "requirements": "Keep the record shape and the event vocabulary. Port the formatter — about fifty lines in any language with a JSON library.",
+      "acceptance_criteria": "A non-Python app's lines are indistinguishable in shape from a Python app's.",
+      "qa_tests": "A line from a ported app and a line from a Python app both satisfy the same record-shape check.",
+      "stories": [
+        {"title": "Port the formatter to the non-Python apps", "description": "Identify which apps these are and port rather than copy.", "requirements": "Same record shape, same event vocabulary, native formatter.", "acceptance_criteria": "Shape parity with the Python implementations.", "qa_tests": "One line from each ported app validates against the record shape used for the Python apps.", "status": "backlog"}
+      ]
+    }
+  ]
+},
+{
+  "title": "Mind install automation",
+  "description": "Standing up a mind on a remote host is a manual procedure today. The two written procedures — docs/system-configuration/remote-baremetal-windows-mind-install.md (the Zach pattern) and docs/system-configuration/hivemind-spoke-install-requirements.md (the Arnold reference build) — are complete and proven, but they are guides a human follows, not something add-mind or setup-mind can execute.",
+  "requirements": "Three parts of the bare-metal-on-a-different-host case become automated: broker registration, soul seed, and voice. The soul is never auto-generated — the personality flow is driven by the user.",
+  "acceptance_criteria": "add-mind or setup-mind can stand up a remote bare-metal mind end to end, with the operator answering personality and voice questions rather than following a document.",
+  "qa_tests": "A run against a fresh host produces a mind the hub can reach, with a soul the operator dictated and a voice that speaks. A run with no broker row inserted fails loudly naming the missing row, rather than throwing a hub-side 500 with nothing pointing at the cause.",
+  "features": [
+    {
+      "title": "Automate the remote bare-metal install",
+      "description": "The three unautomated parts of the cross-host case.",
+      "requirements": "Broker registration, soul seed and voice selection all driven by the install skill.",
+      "acceptance_criteria": "No step requires reading a document and typing commands by hand.",
+      "qa_tests": "End-to-end run against a fresh host.",
+      "stories": [
+        {"title": "Automate broker registration for a remote mind", "description": "Insert the remote mind's row with a LAN-reachable gateway_url and verify cross-subnet reachability. Today this is a manual afterthought, and its absence throws a silent hub-side 500 with nothing in the message pointing at the missing row.", "requirements": "The install inserts the row with a reachable gateway_url and verifies reachability across subnets before reporting success. A missing or unreachable row fails loudly and names itself.", "acceptance_criteria": "A mind installed on another subnet is reachable from the hub immediately after install, and a failure says which part is missing.", "qa_tests": "An install that cannot reach the new gateway_url refuses with a message naming the URL and the subnet, not a 500.", "status": "backlog"},
+        {"title": "Drive the soul seed through setup-personality", "description": "An interactive personality and backstory flow the user drives, reusing setup-personality. The character is never auto-generated.", "requirements": "The install calls setup-personality and seeds the resulting soul into the KG against the new mind's UUID.", "acceptance_criteria": "The new mind answers as the character the operator described, not as a generated default.", "qa_tests": "Judged by talking to the installed mind: it answers to its own name and its own backstory. A mind with no KG Mind node is the known failure mode — Hex answered as Ada — so the test is that the node exists keyed to the new UUID.", "status": "backlog"},
+        {"title": "Wire the new mind's voice during install", "description": "Choose prompt clone (Chatterbox, hive-mind-voice) versus preset (Kokoro, hive-mind-voice-kokoro), collect the sample or the selection, and wire only the new mind's voice mapping.", "requirements": "The install asks which engine, collects a reference clip or a catalogued voice name, and writes voice and voice_engine for that mind alone.", "acceptance_criteria": "The new mind speaks in the chosen voice and no other mind's mapping changes.", "qa_tests": "After an install naming a clip, that mind speaks in it; another mind on the same host still speaks in its own. A clip name that is not on the voice server is refused rather than silently falling back.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "Residual from the Mordecai containerization",
+      "description": "One item left over from moving Mordecai into a container.",
+      "requirements": "Mordecai holds the operating rule in his own standing memory.",
+      "acceptance_criteria": "The rule is in his memory, not only in the design.",
+      "qa_tests": "Asked to restart his own container, Mordecai declines and says why.",
+      "stories": [
+        {"title": "Seed 'don't bounce your own container' into Mordecai's memory", "description": "Bouncing his own container cuts him off mid-stream. The rule exists in the design but not in his standing memory.", "requirements": "The rule is written to Mordecai's standing tier.", "acceptance_criteria": "He refuses to restart hive-mind-mordecai and explains the reason.", "qa_tests": "Judged by asking him. Standing tier requires source=always-remember, so the write has to go through that path.", "status": "backlog"}
+      ]
+    }
+  ]
+},
+{
+  "title": "Sentinel — outstanding work",
+  "description": "Sentinel is deployed. What it runs today is documented at docs/system-configuration/sentinel-deployed-state.md. This epic carries only what is still owed.",
+  "requirements": "Wazuh agents on the boys' Windows machines. A witnessed ClamAV carve from live mirrored traffic. event_triage reconciled to origin/master. NetSage decommissioned once Sentinel is proven. One stale comment corrected.",
+  "acceptance_criteria": "Every item below is either done or consciously dropped. NetSage is off and gone, not merely unused.",
+  "qa_tests": "Each story carries its own verification; none of them are unit tests — this is deployed infrastructure, verified by watching the chain work.",
+  "features": [
+    {
+      "title": "Pending actions",
+      "description": "The four substantive items owed before Sentinel is finished.",
+      "requirements": "Agents enrolled, carve witnessed, triage reconciled, NetSage retired.",
+      "acceptance_criteria": "All four closed.",
+      "qa_tests": "Per story.",
+      "stories": [
+        {"title": "Install Wazuh agents on the boys' Windows machines", "description": "Left uninstalled per instruction; the procedure is staged and ready. The manager at 192.168.4.16 (authd :1515, remoted :1514) accepts the enrollment automatically.", "requirements": "On each machine, in an Administrator PowerShell: fetch wazuh-agent-4.12.0-1.msi from packages.wazuh.com/4.x/windows/, install it with msiexec passing WAZUH_MANAGER=\"192.168.4.16\" and WAZUH_AGENT_NAME=\"<machine-name>\", then NET START WazuhSvc.", "acceptance_criteria": "Both machines appear enrolled on the manager under their own names.", "qa_tests": "The manager lists each agent as active. A test event raised on the endpoint reaches the manager.", "status": "backlog"},
+        {"title": "Witness a ClamAV carve off live plaintext traffic", "description": "The detection, log and ship chain is already validated via an EICAR file placed directly in the filestore. The only unwitnessed link is Suricata carving a real file off live plaintext traffic.", "requirements": "Download EICAR over plain HTTP from a LAN client while watching /capture/filestore and source=\"clamav\" in Loki.", "acceptance_criteria": "The carved file appears in the filestore and the ClamAV detection appears in Loki, from traffic rather than from a planted file.", "qa_tests": "Judged by watching the two surfaces during the download. A carve that lands in the filestore but produces no Loki row is a failure of the ship step, not of the carve.", "status": "backlog"},
+        {"title": "Reconcile the on-box event_triage with origin/master", "description": "Bring the on-box copy up to origin/master (PR #160) and re-validate.", "requirements": "Verify the events.db path is unchanged before swapping, then update and re-validate.", "acceptance_criteria": "The on-box copy matches origin/master and still writes to the same events.db.", "qa_tests": "The events.db path before and after the swap are identical. A triage run after the swap produces the same classification for a known alert as before it.", "status": "backlog"},
+        {"title": "Retire NetSage", "description": "Keep it powered on roughly a week as a rollback path, then decommission once Sentinel is proven across a real usage window.", "requirements": "A week of overlap, then decommission.", "acceptance_criteria": "NetSage is off and removed, and nothing is still pointing at it.", "qa_tests": "After decommission, no config, cron or skill references NetSage as a live target. The alert pipeline still fires from Sentinel alone.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "Minor cleanup",
+      "description": "Non-blocking tidy-up.",
+      "requirements": "Correct one stale comment.",
+      "acceptance_criteria": "The comment matches the live record.",
+      "qa_tests": "Reading the file shows the correct address.",
+      "stories": [
+        {"title": "Fix the stale Loki address in the netsage vector.yaml comment", "description": "agents/netsage/vector.yaml's header comment says loki.sparktobloom.home maps to 192.168.4.64; the live record is 192.168.4.16. Stale comment only, no behaviour change.", "requirements": "Correct the comment to 192.168.4.16.", "acceptance_criteria": "Comment matches the live DNS record.", "qa_tests": "No test — a comment. Verified by reading the file.", "status": "backlog"}
+      ]
+    }
+  ]
+},
+{
+  "title": "Ollama Skill Agent",
+  "description": "A skill-plus-agent pair that hands a task to an Ollama-backed Claude session and streams the result back. The source doc is a full draft of both files — skills/ollama-task/SKILL.md and agents/ollama-task.md — not a description of one. Note that the drafted environment points ANTHROPIC_BASE_URL straight at a bare Ollama daemon on 192.168.4.64:11434, which is no longer how Ollama is reached: Ollama now binds loopback and containers go through ollama-bridge-relay, and inference is reached through the inference proxy. The draft needs that corrected before it is installed.",
+  "requirements": "A user-invocable ollama-task skill packages a task, an optional model and optional allowed directories as JSON and invokes the ollama-task agent. The agent spawns a Claude session against the Ollama-backed provider with stream-json in and out, passes the task in, streams JSON events back, and stops on the result event. Output is a JSON event stream: status, progress, result.",
+  "acceptance_criteria": "A task handed to the skill comes back as a streamed JSON result from a model served by Ollama, not by Anthropic. The provider is reached through the inference proxy with a bearer key, not as a bare daemon.",
+  "qa_tests": "Invoking the skill with a trivial task returns a result event. The spawned session's model is the Ollama-served one, verifiable from the proxy's own log. A call with no bearer key is refused by the proxy with 401 rather than silently reaching a daemon.",
+  "stories": [
+    {
+      "title": "Correct the drafted Ollama environment before installing the skill",
+      "description": "The draft sets ANTHROPIC_BASE_URL to http://192.168.4.64:11434 — a bare Ollama daemon. Ollama now binds 127.0.0.1 with the Host check on, containers reach it through ollama-bridge-relay.service on the docker0 gateway, and inference goes through the inference proxy, which answers 401 without a bearer key.",
+      "requirements": "Point the drafted environment at the inference proxy and declare the key. Drop the bare-daemon address.",
+      "acceptance_criteria": "The drafted spawn environment matches how every other Ollama-backed mind reaches inference.",
+      "qa_tests": "The skill's spawned session reaches a model and the proxy logs the request. The old address is gone from the draft.",
+      "status": "backlog"
+    },
+    {
+      "title": "Install the ollama-task skill and agent",
+      "description": "Write skills/ollama-task/SKILL.md and agents/ollama-task.md as drafted, with the environment corrected.",
+      "requirements": "Skill is user-invocable, takes task plus optional model and allowed directories, and hands a JSON payload to the agent. Agent spawns the session, streams JSON back and stops on the result event.",
+      "acceptance_criteria": "The skill appears in the skills listing and a run streams events back.",
+      "qa_tests": "A trivial task returns status, progress and result events in order. The agent stops on result rather than hanging.",
+      "status": "backlog"
+    }
+  ]
+},
+{
+  "title": "Hive Mind Consolidation",
+  "description": "Renaming hive_mind to hive-mind across the repo, the docs and the plugin. The GitHub repo is already renamed and every doc and prose self-reference across hive-mind, hive_mind_skippy and hivemind-claude-plugin is updated. What remains is the container and directory cutover, which needs a hive-comms bounce and is therefore staged rather than run from a session that depends on hive-comms.",
+  "requirements": "The directory is renamed, the stack comes back up under the new Compose project name, and the three spots that still assume the old project name are corrected. The plugin's last hive_mind:latest fragment is updated once the image rebuilds under the new name.",
+  "acceptance_criteria": "Nothing on the machine refers to hive_mind as a live project, directory or image name, and the stack is up.",
+  "qa_tests": "docker compose ps reports the stack under the hive-mind project name. A grep for hive_mind across the repo, the plugin and specs returns only historical prose. check_container_health resolves a real container rather than erroring on a name that no longer exists.",
+  "features": [
+    {
+      "title": "The container and directory cutover",
+      "description": "Staged because it needs a hive-comms bounce. Daniel picks the moment, per the standing rule against Skippy-initiated hive-comms restarts.",
+      "requirements": "Bring the stack down, rename the directory, bring it back up, then correct the now-stale project-name assumptions.",
+      "acceptance_criteria": "Stack up under the new project name with no stale references.",
+      "qa_tests": "Stack reports healthy; a grep for the old name finds nothing live.",
+      "stories": [
+        {"title": "Bring the stack down, rename the directory, bring it back up", "description": "cd ~/Storage/Dev/hive_mind && docker compose down, then mv ~/Storage/Dev/hive_mind ~/Storage/Dev/hive-mind, then cd ~/Storage/Dev/hive-mind && docker compose up -d --build. Needs a hive-comms bounce, so Daniel picks the moment.", "requirements": "Down, move, up with a rebuild.", "acceptance_criteria": "The stack is healthy from the new path.", "qa_tests": "docker compose ps from the new directory lists every service up. The old path no longer exists.", "status": "backlog"},
+        {"title": "Fix the three spots assuming the hive_mind Compose project name", "description": "The directory rename changes the Compose project name, since there is no explicit name: override. Three places still assume the old one: core/story_pipeline.py's check_container_health and run_post_merge_pipeline defaults, and the docker compose -p hive_mind examples in specs/containers.md and specs/logging.md.", "requirements": "All three become hive-mind.", "acceptance_criteria": "No code path or documented example passes the old project name.", "qa_tests": "check_container_health against the live stack resolves a container. A grep for '-p hive_mind' across specs returns nothing.", "status": "backlog"},
+        {"title": "Update the plugin's last hive_mind:latest fragment", "description": "hivemind-claude-plugin's skills/add-mind/SKILL.md has one remaining image: hive_mind:latest fragment example. It can only be updated once the image actually rebuilds under the new name.", "requirements": "Change the fragment to hive-mind:latest after the rebuild.", "acceptance_criteria": "The example names an image that exists.", "qa_tests": "docker image ls shows hive-mind:latest and the skill's example matches it.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "Hive Mind site remainder",
+      "description": "The console at ~/Storage/Dev/hive. Graph explorer, memory browser, standing-rules dashboard, canvas whiteboard and settings page (mind registry, hive-comms session view, hive-tools status, voice server config, downloads) are all live. Three things remain, per hive-settings-page.md.",
+      "requirements": "The full new-mind creation flow wrapping create-mind, add-mind and generate-compose into the web form. Hive-to-hive federation, for which no protocol is designed yet. Confirmation that hive-tools access is actually gated to operator minds only.",
+      "acceptance_criteria": "A mind can be created from the web form end to end; federation has at minimum a designed protocol; the hive-tools gate is verified rather than assumed.",
+      "qa_tests": "Creating a mind through the form produces a registered, reachable mind. A sandboxed mind calling hive-tools is refused.",
+      "stories": [
+        {"title": "Wrap create-mind, add-mind and generate-compose into the web form", "description": "The settings page has the registry and the views; what it lacks is the creation flow.", "requirements": "The form drives the three skills end to end.", "acceptance_criteria": "A mind created from the form is registered and reachable without any terminal step.", "qa_tests": "A form submission produces a broker row, a mind directory and a compose fragment, and the mind answers.", "status": "backlog"},
+        {"title": "Design the hive-to-hive federation protocol", "description": "No protocol designed yet. This is a design story, not an implementation one.", "requirements": "A written protocol for two hives exchanging whatever they need to exchange.", "acceptance_criteria": "A document another session could implement from.", "qa_tests": "Not code. The artifact is the design.", "status": "backlog"},
+        {"title": "Confirm hive-tools access is gated to operator minds only", "description": "Believed true, not verified. A sandboxed mind reaching hive-tools would be a real hole.", "requirements": "Verify the gate by calling as a sandboxed mind.", "acceptance_criteria": "A sandboxed mind is refused; an operator mind is not.", "qa_tests": "A hive-tools call carrying a sandboxed mind's credential is refused. The same call as an operator mind succeeds. If the gate turns out to be absent, that becomes its own story rather than a silent pass.", "status": "backlog"}
+      ]
+    }
+  ]
+},
+{
+  "title": "The graph fan-out still puts names in URLs",
+  "description": "Started the week of 2026-09-21. contextual_retrieval.py — every mind's copy — pulls every capitalised token out of the user's prompt and sends each one to lucent as its own GET /graph/query?entity_name=<token>. One request per candidate name, per turn, in the URL. Zeek's http.log records it verbatim, so does uvicorn's access log, and both land in Loki. Live rows in the sentinel store on 192.168.4.16 show the shape: three requests for Traceback, Error and ERROR off one prompt about a stack trace. When the prompt is about a person, what lands in the log is a person's name, one line per name, timestamped and attributable to whoever was typing.",
+  "requirements": "Candidate names stop appearing in URLs. Either /graph/query becomes a POST as /memory/retrieve did, or the fan-out becomes one batched request carrying all candidate names — batching being the bigger win, since the fan-out is up to a dozen round trips on a prompt with several capitalised words, on the hot path of every turn.",
+  "acceptance_criteria": "No name reaches Zeek's http.log, uvicorn's access log or Loki by way of a URL. The hot path is no slower, and preferably faster.",
+  "qa_tests": "A turn whose prompt contains several capitalised words produces no access-log line carrying any of them. The same turn produces one request rather than a dozen if batching is the chosen route.",
+  "features": [
+    {
+      "title": "Close the leak",
+      "description": "The change itself. hive-mind#252 moved /memory/retrieve to a POST body because the question was in the URL; this is a different route sending a different thing — a single extracted token, not the prompt. Same family of leak, separate change. Folding it into #252 would have widened a signed-off scope mid-flight.",
+      "requirements": "Decide between POST and batching, then implement across every mind's copy of contextual_retrieval.py.",
+      "acceptance_criteria": "No candidate name in any URL, in any mind.",
+      "qa_tests": "Per story.",
+      "stories": [
+        {"title": "Decide: POST the query, or batch the fan-out", "description": "Two routes. POST mirrors what #252 did for /memory/retrieve. Batching is the bigger win because it also collapses up to a dozen round trips on the hot path of every turn.", "requirements": "A decision with its reasoning, covering both the leak and the round-trip count.", "acceptance_criteria": "A decision another session can implement from without reopening the question.", "qa_tests": "Not code. The artifact is the decision.", "status": "backlog"},
+        {"title": "Implement the chosen shape across every mind's contextual_retrieval.py", "description": "Every mind carries its own copy, so this lands once per mind rather than in one shared place.", "requirements": "The new call shape in every copy. No mind left on the GET path.", "acceptance_criteria": "A turn on any mind produces no name-bearing URL.", "qa_tests": "Per mind: a prompt with several capitalised words produces access-log lines carrying none of them. A mind still on the old path fails this, which is the point.", "status": "backlog"},
+        {"title": "Check whether the hive-sentinel sensor gate already covers this", "description": "The gate added in hive-sentinel@1151c7c drops hive-origin traffic to a hive service, so these rows stop becoming events. But the names are still written into Loki and Zeek's logs, which is the part that matters.", "requirements": "Establish what the gate does and does not cover, so the remaining exposure is known rather than assumed closed.", "acceptance_criteria": "A clear statement of what still reaches Loki after the gate.", "qa_tests": "A fan-out request after the gate: confirm no event is raised, and confirm whether or not a Loki row still carries the name. Both answers matter.", "status": "backlog"},
+        {"title": "Decide whether anything already in Loki needs purging", "description": "Names are already written. The question is whether Loki's own retention window handles it or whether a purge is warranted.", "requirements": "Establish the retention window and decide.", "acceptance_criteria": "Either a purge is done or the retention window is recorded as sufficient.", "qa_tests": "Not code. If a purge happens, a query for a known leaked name returns nothing afterwards.", "status": "backlog"}
+      ]
+    }
+  ]
+},
+{
+  "title": "Credential rotation — outstanding work",
+  "description": "The console itself is built and merged; what it does is documented at docs/system-configuration/credential-rotation-console.md. This epic carries only what is still owed: the bind-mount deploy, two rotations, the Planka-orphaned pipeline skills, a safety net, and one open question about where the console lives.",
+  "requirements": "The .env bind-mounts go live. The GitHub PAT and the comms bearer tokens rotate. The orphaned dev-pipeline skills are either retired or repointed. A rotation log and a staleness alert exist.",
+  "acceptance_criteria": "The Credentials tab reads real files rather than empty ones, both rotations are done, and a credential that has not rotated in its configured window raises an alert.",
+  "qa_tests": "The Credentials tab shows populated .env contents after the restart. gh auth status reports the new token. A credential with a backdated rotation timestamp triggers the alert.",
+  "features": [
+    {
+      "title": "Deploy the mounts",
+      "description": "The .env bind-mounts are only live after hive-site restarts. Until then the Credentials tab reads empty .env files, because /env_nervous_system/.env and its siblings do not exist inside the running container yet.",
+      "requirements": "docker compose up -d hive on this host. Not on the hot path of any live conversation, unlike hive-comms — restart whenever convenient.",
+      "acceptance_criteria": "The mounted paths exist in the container and the tab reads them.",
+      "qa_tests": "docker exec into hive-site and the mounted .env paths exist and are non-empty. The Credentials tab renders their contents.",
+      "stories": [
+        {"title": "Restart hive-site to bring the .env bind-mounts live", "description": "docker compose up -d hive on this host. Safe to do whenever — hive-site is not on the hot path of a live conversation.", "requirements": "The container comes back with the mounts present.", "acceptance_criteria": "/env_nervous_system/.env and its siblings exist inside the container.", "qa_tests": "docker exec hive-site ls on each mounted path returns a non-empty file. The Credentials tab is no longer blank.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "Rotations still owed",
+      "description": "Two credentials due for rotation, one of them deferred by standing rule.",
+      "requirements": "The GitHub PAT and the comms bearer tokens both rotate.",
+      "acceptance_criteria": "Both old values are dead and everything that consumed them works on the new ones.",
+      "qa_tests": "Per story.",
+      "stories": [
+        {"title": "Rotate the GitHub PAT", "description": "gh auth status shows a classic token (gho_...) with scopes gist, read:org, repo and workflow, logged in as danielstewart77. Manual — there is no rotation API.", "requirements": "Generate the replacement in the GitHub UI, then gh auth login and update wherever else it is consumed.", "acceptance_criteria": "gh auth status reports the new token and every consumer still authenticates.", "qa_tests": "gh auth status succeeds on the new token. A push and a PR creation both work. The old token is revoked and fails.", "status": "backlog"},
+        {"title": "Rotate COMMS_BEARER_TOKEN and COMMS_ADMIN_BEARER_TOKEN", "description": "In hive-edge-mind-skippy/.env. Requires restarting skippy.service and hive-comms, which kills the live conversation. Deferred to Daniel's chosen moment, per the standing rule against Skippy-initiated hive-comms restarts.", "requirements": "New values in .env, both services restarted at a moment Daniel picks.", "acceptance_criteria": "Every surface still authenticates on the new tokens and the old ones are refused.", "qa_tests": "After the restart, a Telegram turn completes and a terminal attach succeeds. A call carrying the old token is refused with 401 rather than silently accepted.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "Dev-pipeline skills orphaned by the Planka teardown",
+      "description": "/hivemind:planka, /create-story, /story-start, /story-close and /orchestrator all called tools/stateless/planka/planka.py, deleted along with Planka on 2026-07-30. The live marketplace plugin repo already stripped these to setup-only skills; the local cache is stale relative to it.",
+      "requirements": "Daniel's decision: retire the dev-pipeline skills entirely, or pick a replacement work-item source before restoring them. Worth noting that the kanban board these backlog items now live on is a candidate replacement.",
+      "acceptance_criteria": "The skills either do not exist or work against a live work-item source.",
+      "qa_tests": "Invoking any of the five either reports it is retired or completes against the replacement source. None of them fails on a missing planka.py.",
+      "stories": [
+        {"title": "Decide: retire the dev-pipeline skills or repoint them", "description": "Five skills call a tool that no longer exists. The console's own kanban is now a candidate work-item source, which it was not when this was written.", "requirements": "A decision, then either removal or a repoint.", "acceptance_criteria": "No skill on the machine calls the deleted planka.py.", "qa_tests": "Invoking each of the five produces either a clean retirement message or real work against the new source.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "Safety net",
+      "description": "Rotation is only trustworthy if it is recorded and if staleness is noticed.",
+      "requirements": "A rotation log saying what rotated, when, and what triggered it. An alert when a credential has not rotated in N days, configured per credential — PATs and passwords rotate less often than session tokens.",
+      "acceptance_criteria": "Every rotation leaves a record, and an overdue credential raises an alert without anyone looking.",
+      "qa_tests": "A rotation writes a log row naming the credential, the time and the trigger. A credential backdated past its window raises an alert; one inside its window does not.",
+      "stories": [
+        {"title": "Record every rotation in a log", "description": "What rotated, when, and by what it was triggered.", "requirements": "A durable log row per rotation carrying all three.", "acceptance_criteria": "The history of a credential is reconstructable.", "qa_tests": "Rotating a credential writes exactly one row naming it, the timestamp and the trigger. A failed rotation writes no success row.", "status": "backlog"},
+        {"title": "Alert on a credential that has not rotated in N days", "description": "N is configured per credential, because PATs and passwords rotate less often than session tokens.", "requirements": "A per-credential window and an alert when it is exceeded.", "acceptance_criteria": "An overdue credential is surfaced without anyone checking.", "qa_tests": "A credential whose last rotation is one day past its window alerts; one a day inside it does not. Driven by injected time, not by waiting.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "Open question",
+      "description": "Where the console belongs.",
+      "requirements": "Decide whether this console stays in the hive repo, where /minds/<id> already exists, or whether hive-edge-mind-skippy needs its own settings surface for edge-only secrets.",
+      "acceptance_criteria": "A decision, so the next credential surface is not built in both places.",
+      "qa_tests": "Not code. The artifact is the decision.",
+      "stories": [
+        {"title": "Decide where the credential console lives", "description": "The hive repo already has /minds/<id>. The alternative is a settings surface in hive-edge-mind-skippy for edge-only secrets.", "requirements": "A decision covering edge-only secrets specifically, since those are what motivate a second surface.", "acceptance_criteria": "One home chosen and written down.", "qa_tests": "Not code. The artifact is the decision.", "status": "backlog"}
+      ]
+    }
+  ]
+}
+]
+}

@@ -1,0 +1,516 @@
+{
+"epics": [
+{
+  "title": "Skippy rotation — backport from Dragoman",
+  "description": "Four rotation improvements land in Dragoman first. Once they are proven there, they come into Skippy's own ~/.claude/hooks/rotation_check.py. Nothing else about Skippy's rotation changes. Blocks on Dragoman story 03 shipping and running long enough to show the four additions behave. Hooks are not tracked in git — editing the file is deploying it. There is no commit, no PR, and no template to update.",
+  "requirements": "Port the four improvements one at a time, in order, each proven in Dragoman before it moves. After each port, force a rotation with /rotate-session and read the resulting carry-forward before porting the next.",
+  "acceptance_criteria": "A fact established before the previous rotation is present in the next rotation's carry-forward. No section of the carry-forward reads as an instruction to the successor. A conversation ending in six oversized turns still carries its summary. Tool output is absent from the summariser's input. A forced rotation completes and the successor opens with correct context.",
+  "qa_tests": "Judged by reading carry-forwards, not asserted: force a rotation after each port and read what the successor receives. The four acceptance statements are the five things to read for. Note that hooks are untracked, so there is no suite here — the rotation itself is the test.",
+  "features": [
+    {
+      "title": "Iterative summary",
+      "description": "Today _reduce_transcript map-reduces the transcript and composes fresh each time. A fact established three rotations ago survives only if it is still legible in the transcript being chewed.",
+      "requirements": "Fetch the previous carry-forward for this session from the gateway before extraction, and pass it into the extraction prompts as an explicit prior-state input. Instruct the extractor to carry forward anything still true and drop what the new transcript supersedes.",
+      "acceptance_criteria": "A fact established before the previous rotation is present in the next rotation's carry-forward.",
+      "qa_tests": "Establish a fact, rotate twice, and read the second carry-forward for it. Supersede a fact and confirm the old version is gone rather than carried alongside.",
+      "stories": [
+        {"title": "Fetch the prior carry-forward and pass it into extraction", "description": "The gateway already stores carry_forward on the session row. Read it before extraction and hand it to the extraction prompts as prior state.", "requirements": "Prior state reaches the extractor as an explicit input, with instructions to carry forward what is still true and drop what is superseded.", "acceptance_criteria": "A three-rotation-old fact survives.", "qa_tests": "Rotate twice after establishing a fact; read the second carry-forward. A fact the newer transcript contradicts is absent, not duplicated.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "Filter-safe preamble and historical headings",
+      "description": "_format_carry_forward renders sections a successor can misread as live instructions.",
+      "requirements": "Add a preamble framing the transcript as source material being described rather than instructions being relayed, and title output sections so they read as history. Do not change what is extracted, only how it is framed.",
+      "acceptance_criteria": "No section of the carry-forward reads as an instruction to the successor.",
+      "qa_tests": "Read a real carry-forward and judge whether any heading or line could be followed as an instruction. Extraction content before and after the change is identical — only the framing moves.",
+      "stories": [
+        {"title": "Reframe the carry-forward as history, not instruction", "description": "A preamble plus section titles that read as description of the past.", "requirements": "Framing only. Extraction unchanged.", "acceptance_criteria": "A successor reading it cannot mistake a section for a directive.", "qa_tests": "Judged by reading. The extracted content is byte-comparable before and after, which is what proves nothing but the framing changed.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "Token-budget tail",
+      "description": "_format_carry_forward appends a fixed last-six-turns tail. Six oversized turns crowd out the summary.",
+      "requirements": "Replace the fixed count with a token budget: include turns from the end until the budget is spent, then stop.",
+      "acceptance_criteria": "A conversation ending in six oversized turns still carries its summary.",
+      "qa_tests": "A transcript ending in six very large turns produces a carry-forward whose summary is intact and whose tail is truncated. A transcript of small turns still carries several of them.",
+      "stories": [
+        {"title": "Replace the fixed six-turn tail with a token budget", "description": "Include turns from the end until the budget is spent.", "requirements": "A configurable budget rather than a count.", "acceptance_criteria": "The summary always survives.", "qa_tests": "Driven by a constructed transcript, not by waiting for a real one: six oversized turns leave the summary present; many small turns fill the budget with more than six.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "Tool-output pruning pre-pass",
+      "description": "_transcript_blob_full feeds everything to the summariser, tool output included. Deterministic, no model call, and it removes most of what the map-reduce currently pays to read.",
+      "requirements": "Prune tool output to a short marker before chunking.",
+      "acceptance_criteria": "Tool output is absent from the summariser's input.",
+      "qa_tests": "A transcript containing a large tool result produces a summariser input carrying a marker rather than the result body. The pre-pass is deterministic, so the same transcript produces the same pruned blob every time.",
+      "stories": [
+        {"title": "Prune tool output to a marker before chunking", "description": "Deterministic, no model call.", "requirements": "Tool results become short markers in the summariser's input.", "acceptance_criteria": "No tool-result body reaches the summariser.", "qa_tests": "A constructed transcript with a 100KB tool result yields a pruned blob with no part of that result in it, and yields the identical blob on a second run.", "status": "backlog"}
+      ]
+    }
+  ]
+},
+{
+  "title": "Upstream Minds NS — Punch List",
+  "description": "The sequential working checklist for the upstream-minds Layer-2 onboarding epic. Each phase has implementable and testable steps plus a final documentation step that splits writes between two repos: hive_mind takes anything mind-specific (per-mind env, harness quirks, per-mind container compose entries, MIND.md contracts) and hive_nervous_system takes anything NS-side (strict-schema cutover notes, Layer-2 onboarding docs).",
+  "requirements": "Phases run in order. Phase 5's residual cleanup, then Phase 6's provisioning endpoint, then Phase 7's regression and doc cleanup.",
+  "acceptance_criteria": "All three phases closed, with the documentation landed in the correct repo for each kind of content.",
+  "qa_tests": "Per story. The Phase 7 smoke test across all five minds is the gate for the whole epic.",
+  "features": [
+    {
+      "title": "Phase 5 — schema enforcement residual",
+      "description": "The cutover is done: the validating handler owns /graph/upsert, the legacy handler is parked at /graph/upsert-backup, NS has restarted, and the contract is documented in hive_nervous_system/docs/memory-system-implementation.md. One thing remains.",
+      "requirements": "Delete /graph/upsert-backup now the cutover is stable.",
+      "acceptance_criteria": "The backup route is gone and nothing calls it.",
+      "qa_tests": "A call to /graph/upsert-backup 404s. A grep across every mind's code finds no caller. Writes through /graph/upsert still validate.",
+      "stories": [
+        {"title": "Delete /graph/upsert-backup", "description": "The cutover is stable, so the legacy parking spot can go.", "requirements": "Remove the route. Confirm no caller remains first.", "acceptance_criteria": "Route absent, no callers.", "qa_tests": "A grep across all minds for 'upsert-backup' returns nothing. A write through /graph/upsert still validates and still rejects a bad shape.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "Phase 6 — Layer 2 onboarding",
+      "description": "Scope item 2 from the parent epic, with mind-registration-service.md as its companion plan.",
+      "requirements": "POST /minds/provision implemented end to end: UUID issue, broker row, KG Mind node, soul seed, container scaffold. A minimal admin UI, or at minimum a first-pass curl recipe, so new minds do not need manual admin-bearer enumeration. Documentation to hive_nervous_system as docs/onboarding/layer-2.md covering the provisioning flow, the endpoint contract and an ops runbook.",
+      "acceptance_criteria": "A throwaway mind provisions end to end through the endpoint, registers, dispatches a turn, and is cleanly removed.",
+      "qa_tests": "Provision a throwaway mind via the endpoint; verify it registers, takes a turn, and removes cleanly leaving no broker row, no KG node and no container.",
+      "stories": [
+        {"title": "Implement POST /minds/provision end to end", "description": "UUID issue, broker row, KG Mind node, soul seed, container scaffold — all five, in one call.", "requirements": "All five steps, atomic enough that a partial provision is recoverable rather than left half-registered.", "acceptance_criteria": "One call produces a working mind.", "qa_tests": "A provision produces a UUID, a broker row keyed to it, a KG Mind node keyed to the same UUID, a seeded soul and a container scaffold. A provision that fails midway leaves nothing partially registered — the Hex case, where a missing KG Mind node made him answer as Ada, is exactly the failure this must not produce.", "status": "backlog"},
+        {"title": "Wire a minimal admin UI or curl recipe for provisioning", "description": "So new minds do not need manual admin-bearer enumeration.", "requirements": "Either a form or a documented first-pass curl recipe.", "acceptance_criteria": "An operator can provision without reading the endpoint's source.", "qa_tests": "Following the recipe or the form produces a mind. POST /broker/minds is admin-bearer-gated until this ships, which is the thing being removed from the manual path.", "status": "backlog"},
+        {"title": "Provision a throwaway mind end to end as the phase test", "description": "The phase's own verification step.", "requirements": "Provision, register, dispatch a turn, remove cleanly.", "acceptance_criteria": "All four succeed and removal leaves nothing behind.", "qa_tests": "After removal: no broker row, no KG node, no container, no mind directory. Verify mind_id in any captured memory row is the UUID and never the short name.", "status": "backlog"},
+        {"title": "Document the provisioning flow to hive_nervous_system", "description": "docs/onboarding/layer-2.md — provisioning flow, endpoint contract, ops runbook. NS-side content, so it goes in the NS repo.", "requirements": "All three sections.", "acceptance_criteria": "An operator can provision and troubleshoot from the doc alone.", "qa_tests": "Not code. The artifact is the document, in the correct repo.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "Phase 7 — final regression and cleanup",
+      "description": "The gate for the whole epic, plus the doc teardown.",
+      "requirements": "Smoke-test all five minds (Skippy plus four upstream) end to end on a single afternoon. Confirm mind-registration-service.md is resolvable from this doc set. Delete the three backlog docs whose content now lives in hive_mind/docs and hive_nervous_system/docs.",
+      "acceptance_criteria": "Every mind takes a turn, every hook fires, every skill self-announces, and every write goes through /graph/upsert-strict.",
+      "qa_tests": "The five-mind smoke test is the test. Judged by reading each mind's output and each mind's captured memory rows, not by a suite.",
+      "stories": [
+        {"title": "Smoke-test all five minds end to end", "description": "Skippy plus four upstream, on a single afternoon.", "requirements": "Every mind takes a turn, every hook fires, every skill self-announces, every write goes through /graph/upsert-strict.", "acceptance_criteria": "All four hold for all five minds.", "qa_tests": "Per mind: a turn completes, the capture hook writes a row, an invoked skill announces itself, and the written row went through the strict route. Check mind_id on each row is the UUID. Remember the standing-tier soft cap of ten is per mind_id, so each mind's own rules and the shared rules count against separate scopes.", "status": "backlog"},
+        {"title": "Confirm mind-registration-service.md is resolvable from this doc set", "description": "It is either still in the backlog or migrated into the Phase 6 docs; either way it has to be findable.", "requirements": "Establish where it lives and make the reference resolve.", "acceptance_criteria": "The link from this doc set reaches it.", "qa_tests": "Following the reference lands on the document.", "status": "backlog"},
+        {"title": "Delete the three superseded backlog docs", "description": "upstream-minds-strict-schema-and-onboarding.md, skills-enhancement.md and this punch list, from the backlog directory. Their content lives in hive_mind/docs and hive_nervous_system/docs. Note the doc says spark_to_bloom/src/backlog, which is stale — the backlog moved to the owner site on 2026-07-23.", "requirements": "Delete all three from the current backlog directory, once their content is confirmed landed in the two repos.", "acceptance_criteria": "The three files are gone and nothing links to them unresolved.", "qa_tests": "The files are absent. A grep across the remaining backlog for their names finds no live link. Content is present in the two docs directories.", "status": "backlog"}
+      ]
+    }
+  ]
+},
+{
+  "title": "Job Queuing Architecture",
+  "description": "A background-job architecture for a .NET solution: the web API publishes, a dedicated Worker Service consumes, RabbitMQ is the broker self-hosted as a Docker container on the existing VM infrastructure, and MassTransit is the abstraction that wires consumers to exchanges and queues without embedding broker plumbing in business logic. Status in the source doc is draft. The design's central property is that developers running the web API are never workers — the worker only runs when the Worker Service project is explicitly started.",
+  "requirements": "Two separate deployable units in one solution. Api references Contracts and publishes via IPublishEndpoint, with no dependency on Worker. Worker references Contracts and registers each consumer with MassTransit's hosted service. Contracts holds DTOs only, no logic. Each environment gets its own RabbitMQ virtual host (dev, staging, prod). Developer machines connect to nothing by default. Retry policy and dead-letter queues are configured declaratively in the worker's Program.cs.",
+  "acceptance_criteria": "A message published by the API is held by RabbitMQ until a worker picks it up. No developer can accidentally become a production or staging worker. A failed message lands in the dead-letter exchange after the configured retry count and is inspectable and re-queueable from the management UI with no code change. Scaling is adding Worker Service instances, with RabbitMQ's competing-consumer model distributing work.",
+  "qa_tests": "Publishing with no worker running leaves the message queued rather than lost. Starting a worker drains it. A consumer that throws repeatedly ends up in the dead-letter exchange after exactly the configured retry count. Two worker instances split a batch rather than both processing every message. A developer machine with the Worker project not started holds no RabbitMQ connection.",
+  "features": [
+    {
+      "title": "Solution structure and message contracts",
+      "description": "Api publishes, Worker consumes, Contracts carries the DTOs between them. Api has no dependency on Worker.",
+      "requirements": "Three projects. Contracts holds IProcessDocument and nothing with logic in it. Api calls publishEndpoint.Publish<IProcessDocument>. Worker holds Consumers/ClassifyDocumentConsumer.cs and Consumers/ExtractDocumentConsumer.cs and registers them in Program.cs.",
+      "acceptance_criteria": "The dependency graph has no edge from Api to Worker.",
+      "qa_tests": "The Api project's references do not include Worker. A publish from Api reaches a consumer in Worker with no shared code beyond Contracts.",
+      "stories": [
+        {"title": "Stand up the three-project structure", "description": "Api, Worker and Contracts, with the dependency direction the design requires.", "requirements": "Api and Worker both reference Contracts; neither references the other.", "acceptance_criteria": "Build succeeds and the reference graph is clean.", "qa_tests": "A build with the Worker project removed from the solution still builds Api. Contracts compiles with no logic in it.", "status": "backlog"},
+        {"title": "Wire MassTransit consumers to RabbitMQ", "description": "Register ClassifyDocumentConsumer and ExtractDocumentConsumer with MassTransit's hosted service.", "requirements": "Each consumer bound to its exchange and queue through MassTransit, with no broker-specific plumbing in the business logic.", "acceptance_criteria": "A published IProcessDocument reaches the right consumer.", "qa_tests": "A publish reaches ClassifyDocumentConsumer; a different message type does not. The consumer code contains no RabbitMQ type.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "Environment isolation",
+      "description": "The property that keeps a developer from becoming a production worker.",
+      "requirements": "Each environment gets its own RabbitMQ virtual host: dev, staging, prod. Developer machines connect to nothing by default — the worker only touches RabbitMQ when the Worker Service project is started, which is opt-in.",
+      "acceptance_criteria": "A developer running only the API holds no broker connection to any environment.",
+      "qa_tests": "With the Worker project not started, no connection to RabbitMQ exists. A worker started against the dev vhost cannot see staging's queues.",
+      "stories": [
+        {"title": "Create a virtual host per environment", "description": "dev, staging and prod, isolated.", "requirements": "Three vhosts, each worker configured to exactly one.", "acceptance_criteria": "No cross-environment visibility.", "qa_tests": "A message published to dev is invisible to a staging worker. Confirmed from the management UI's own queue listing per vhost.", "status": "backlog"},
+        {"title": "Add RabbitMQ to the local Docker Compose stack", "description": "Alongside the existing stack. Developers who need the full pipeline start the Worker project; everyone else ignores it. The management UI runs on 15672 for visibility.", "requirements": "A RabbitMQ service in Compose with the management UI exposed.", "acceptance_criteria": "A developer can run the whole pipeline locally, and can also ignore it entirely.", "qa_tests": "Bringing the stack up without starting Worker leaves the API functional with messages queueing. The management UI answers on 15672.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "Deployment and scaling",
+      "description": "The Worker Service as a deployable unit on the same VM, built and deployed independently from the API.",
+      "requirements": "Deployed as a Windows Service or a systemd unit on the VM hosting the application. CI/CD builds and deploys it independently from the API. Scaling is running additional instances.",
+      "acceptance_criteria": "The worker can be redeployed without touching the API, and a second instance shares the load automatically.",
+      "qa_tests": "A worker deploy leaves the API's version unchanged. Two instances processing one batch each handle a strict subset, with no message processed twice.",
+      "stories": [
+        {"title": "Deploy the Worker Service as a managed service unit", "description": "Windows Service or systemd unit on the application's VM.", "requirements": "Starts on boot, restarts on failure, logs to the host's log stream.", "acceptance_criteria": "The worker survives a host reboot.", "qa_tests": "A kill of the worker process brings it back. A reboot brings it back. Its log stream is reachable.", "status": "backlog"},
+        {"title": "Build and deploy the worker independently in CI/CD", "description": "Separate pipeline from the API.", "requirements": "The worker's pipeline does not require an API deploy and vice versa.", "acceptance_criteria": "Either can ship alone.", "qa_tests": "A worker-only change triggers only the worker pipeline. An API-only change does not redeploy the worker.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "Retry and dead-lettering",
+      "description": "Configured declaratively in Program.cs, so failed messages are recoverable without a code change.",
+      "requirements": "Retry policy and dead-letter queues declared in MassTransit's configuration. Failed messages move to a dead-letter exchange after the configured retry count, where they can be inspected and re-queued via the management UI.",
+      "acceptance_criteria": "A poison message does not block the queue and does not vanish. Re-queueing it needs no deploy.",
+      "qa_tests": "A consumer that throws every time lands its message in the dead-letter exchange after exactly the configured count, not before and not after. Re-queueing from the management UI reprocesses it. A second message behind the poison one is processed rather than blocked.",
+      "stories": [
+        {"title": "Declare retry policy and dead-letter queues", "description": "In the worker's Program.cs, declaratively.", "requirements": "A configured retry count and a dead-letter exchange per consumer.", "acceptance_criteria": "Poison messages are isolated and inspectable.", "qa_tests": "A consumer throwing on every attempt produces exactly the configured number of attempts, then one dead-letter message. The queue behind it keeps draining.", "status": "backlog"}
+      ]
+    }
+  ]
+},
+{
+  "title": "GNOME Shell stability — mitigations",
+  "description": "The freeze is diagnosed; the analysis and the recovery procedure live at docs/system-configuration/gnome-shell-freeze-diagnosis.md. None of the seven mitigations below are implemented, and each carries open questions Daniel has to answer before it can be. This epic is therefore a set of decisions first and changes second.",
+  "requirements": "Each mitigation gets its open questions answered, then either implemented or consciously dropped. Nothing here is implemented on a guess, because several of them change Daniel's desktop behaviour.",
+  "acceptance_criteria": "The 21-day accumulation that produces the freeze stops happening, or the freeze becomes a known, survivable event with a one-command recovery.",
+  "qa_tests": "The real test is a stretch longer than 21 days without the freeze. Per-mitigation verification is in each story; none of this is unit-testable.",
+  "features": [
+    {
+      "title": "Periodic gnome-shell restart",
+      "description": "Restart gnome-shell on a schedule to prevent the 21-day accumulation. Could be a cron job or a systemd timer running killall -HUP gnome-shell.",
+      "requirements": "Answer first: what frequency — weekly or bi-weekly? Automatic via cron, or a reminder Daniel acts on? What time of day minimises disruption? Does HUP reliably restart without issues every time, or are there edge cases?",
+      "acceptance_criteria": "A decided frequency and mechanism, and a HUP that is known to be safe rather than assumed.",
+      "qa_tests": "Run the HUP by hand several times across different desktop states — windows open, a fullscreen app, a screen share — and confirm it recovers each time. A HUP that loses window state is an edge case that changes the answer.",
+      "stories": [
+        {"title": "Answer the restart-schedule questions and decide the mechanism", "description": "Frequency, automatic versus reminder, time of day, and whether HUP is reliable.", "requirements": "All four answered.", "acceptance_criteria": "A decision specific enough to implement from.", "qa_tests": "Not code. The artifact is the decision, with the HUP reliability finding behind it.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "Zombie process reaping",
+      "description": "Cleanup for orphaned chrome-headless and python processes from browser automation — Playwright in the hive_mind containers.",
+      "requirements": "Answer first: should the hive_mind container clean up its own Playwright processes, should a host-level cron job reap zombies periodically, or can the root cause be fixed in the browser automation tool so it terminates its child processes properly?",
+      "acceptance_criteria": "Orphans stop accumulating, preferably because the tool stopped creating them rather than because something sweeps them up.",
+      "qa_tests": "After a browser-automation run, no chrome-headless or python child outlives it. Measured by process count before and after, not by a sweep's own report.",
+      "stories": [
+        {"title": "Decide where Playwright orphans get reaped — or fix the root cause", "description": "Three options: the container cleans up after itself, a host cron reaps, or the automation tool is fixed to terminate its children.", "requirements": "A decision, with the root-cause option properly considered rather than skipped for the easy sweep.", "acceptance_criteria": "A chosen approach.", "qa_tests": "Once implemented: a run leaves no orphan. The root-cause fix is distinguishable from a sweep because the orphan never exists, not because it is cleaned up later.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "gnome-software autostart",
+      "description": "gnome-software was using 755MB doing nothing useful. Masking it is one command: systemctl --user mask gnome-software-service.service.",
+      "requirements": "Answer first: does Daniel use gnome-software for anything, or is apt and snap from the CLI sufficient? Any downside to masking it?",
+      "acceptance_criteria": "Either masked with the 755MB reclaimed, or kept with a reason.",
+      "qa_tests": "After masking, the service does not start on login and memory use drops by roughly that amount. Nothing Daniel relies on breaks, which is judged by using the desktop rather than asserted.",
+      "stories": [
+        {"title": "Decide whether to mask gnome-software, then do it", "description": "755MB for nothing, if Daniel does not use it.", "requirements": "The two questions answered, then the mask applied or the decision recorded.", "acceptance_criteria": "Decided and acted on.", "qa_tests": "The service is absent from the user session after login. Memory use is measurably lower.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "claude-usage extension polling interval",
+      "description": "Currently polls every 2 minutes. Reducing to 10 to 15 minutes would lower GJS timer churn.",
+      "requirements": "Answer first: where is the polling interval configured? What does the extension actually display, and is it worth keeping at all?",
+      "acceptance_criteria": "Either a longer interval, or the extension removed.",
+      "qa_tests": "The extension polls at the new interval, confirmed by watching the requests rather than reading the config.",
+      "stories": [
+        {"title": "Find the polling interval and decide the extension's fate", "description": "Either slow it to 10 to 15 minutes or drop the extension.", "requirements": "Locate the config, judge whether the display earns its churn.", "acceptance_criteria": "Interval changed or extension removed.", "qa_tests": "Observed request frequency matches the new interval.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "ding@rastersoft.com extension",
+      "description": "The most problematic extension for long-running sessions. Provides desktop icons.",
+      "requirements": "Answer first: does Daniel use desktop icons? Is there a lighter alternative? Or is disabling it acceptable?",
+      "acceptance_criteria": "Either disabled, replaced with something lighter, or kept with the cost accepted knowingly.",
+      "qa_tests": "After disabling, a long-running session does not accumulate the same way. Judged across a multi-week stretch, not in an afternoon.",
+      "stories": [
+        {"title": "Decide the fate of the desktop-icons extension", "description": "It is the worst offender for long sessions.", "requirements": "The three questions answered.", "acceptance_criteria": "A decision.", "qa_tests": "Not code. If disabled, the multi-week stretch is the verification.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "NVIDIA driver update",
+      "description": "Upgrade from 570.211.01 to 575 or later for the Wayland flip-timeout fixes.",
+      "requirements": "Answer first: is 575 available in the Ubuntu 24.04 repos or does it need a PPA? Any risk of breaking CUDA or Docker GPU passthrough? Should this wait for the system migration to the new drive?",
+      "acceptance_criteria": "Either upgraded with CUDA and Docker GPU passthrough verified intact, or deliberately deferred to the migration.",
+      "qa_tests": "After the upgrade: nvidia-smi reports the new version, a CUDA workload runs, and a container with GPU passthrough still sees the device. All three, because the second and third are what the risk is about. Note that Ollama and the inference proxy both depend on this working.",
+      "stories": [
+        {"title": "Assess the 575 upgrade against CUDA and Docker GPU passthrough", "description": "The upgrade is for Wayland flip-timeout fixes, but the risk is to the GPU stack everything else on this box depends on.", "requirements": "Availability answered, risk assessed, timing decided against the system migration.", "acceptance_criteria": "A go or a deferral with reasons.", "qa_tests": "If it proceeds: nvidia-smi on the new version, a CUDA workload completes, and a GPU container sees the card. A rollback path is established before the upgrade, not after.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "Telegram Desktop Wayland behaviour",
+      "description": "Telegram was triggering bad popup parenting that contributed to the Mutter stack corruption.",
+      "requirements": "Answer first: is this the snap version or a .deb? Can it run in XWayland mode to avoid the Wayland surface bugs? Is there an update that fixes the popup behaviour?",
+      "acceptance_criteria": "Telegram stops contributing to the corruption, by whichever of the three routes works.",
+      "qa_tests": "Judged over a long session with Telegram open, since the corruption accumulates rather than appearing immediately.",
+      "stories": [
+        {"title": "Establish Telegram's packaging and move it off native Wayland", "description": "Snap or deb, then XWayland or an update.", "requirements": "The three questions answered and a route chosen.", "acceptance_criteria": "Telegram runs in a mode that does not corrupt the Mutter stack.", "qa_tests": "A long session with Telegram open no longer shows the popup-parenting symptom.", "status": "backlog"}
+      ]
+    }
+  ]
+},
+{
+  "title": "The pass runner — requirements",
+  "description": "One night of the nightly behaviour-preserving refactor loop, with the builder as a seam rather than a model. Graded against the oracle built in hive-health PRs #26 and #27. Lives in its own repository at /home/daniel/Storage/Dev/refactor-loop, because nothing that measures may be writable by the thing being measured — the oracle runner, the duplication counter, the ledger and this runner all sit outside the target repo.",
+  "requirements": "Fifteen numbered requirements, carried as stories. The structural ones: a pass runs in a throwaway worktree, records a baseline before any edit, halts the night if the baseline cannot be established, treats the builder as a seam, compares oracle reports behaviour by behaviour, rejects any behaviour change naming what changed, counts duplication mechanically and order-independently, records a sub-floor gain as neutral rather than accepted, commits accepted passes to a night branch one commit per pass and never to master, allows at most one accepted change per file per night, writes every pass to the ledger whatever its outcome, picks its next target from the ledger, runs inside a fixed window abandoning anything still running at the close, reports each accepted pass in the morning with its delta and branch, and leaves nothing behind on any exit path.",
+  "acceptance_criteria": "A night completes with a branch of accepted passes, a ledger covering every pass including the abandoned ones, no worktrees left on disk, and a morning report naming each accepted pass with its duplication delta and branch.",
+  "qa_tests": "The scripted builder with three known behaviours — a real consolidation, a deliberate behaviour break, and a no-op — is what proves the loop before a model is attached. The consolidation is accepted, the break is rejected naming the changed behaviour numbers, and the no-op is recorded neutral.",
+  "features": [
+    {
+      "title": "Isolation and baseline",
+      "description": "Requirements 1 through 3. Nothing runs against Daniel's working copy, and nothing is compared against a baseline that was never established.",
+      "requirements": "A pass runs in its own throwaway git worktree of the target repository, cut from the branch under test, and never touches the working copy Daniel uses. A pass begins by recording a baseline from that worktree before any edit: the oracle's behaviour report and the duplication count. If the baseline cannot be established — the oracle fails, or the app will not start — the night halts and says so. A broken baseline is never used as the thing a later run is compared against.",
+      "acceptance_criteria": "Daniel's checkout is untouched by any pass, and a night with a broken baseline produces a halt rather than results.",
+      "qa_tests": "A pass against a repo whose oracle fails halts the night and names the failure. Daniel's working copy's git status is unchanged after a full night. A baseline recorded from a worktree that will not start is never written as a comparison point.",
+      "stories": [
+        {"title": "Run each pass in a throwaway worktree cut from the branch under test", "description": "Requirement 1. Never the working copy Daniel uses.", "requirements": "A fresh worktree per pass, from the branch under test.", "acceptance_criteria": "Daniel's checkout is never written to.", "qa_tests": "After a night, git status in Daniel's checkout is clean and its HEAD is unmoved. Each pass's edits are visible only in its own worktree.", "status": "backlog"},
+        {"title": "Record the baseline before any edit", "description": "Requirement 2. The oracle's behaviour report and the duplication count, from the worktree, before the builder runs.", "requirements": "Both figures captured pre-edit.", "acceptance_criteria": "Every pass has a pre-edit baseline on record.", "qa_tests": "A pass's ledger entry carries a baseline captured before its first edit. A pass with no baseline is not runnable.", "status": "backlog"},
+        {"title": "Halt the night on an unestablishable baseline", "description": "Requirement 3. The oracle fails, or the app will not start. A broken baseline is never used as the comparison point for a later run.", "requirements": "Halt and say so. Never record a broken baseline as a comparison point.", "acceptance_criteria": "A broken baseline ends the night loudly.", "qa_tests": "With the oracle made to fail, the night halts and the message names the oracle. No ledger entry claims a baseline. A later run does not find a stored broken baseline to compare against.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "The builder seam",
+      "description": "Requirement 4. The runner hands the builder a worktree and a target and knows nothing about what makes the edits.",
+      "requirements": "The builder is a seam. A scripted builder with three known behaviours — a real consolidation, a deliberate behaviour break, and a no-op — is what proves the loop before a model is attached.",
+      "acceptance_criteria": "The loop is proven against the scripted builder before any model is attached to it.",
+      "qa_tests": "The consolidation builder produces an accepted pass. The break builder produces a rejection naming the changed behaviours. The no-op builder produces a neutral record. All three without a model involved.",
+      "stories": [
+        {"title": "Define the builder seam", "description": "The runner hands over a worktree and a target. It knows nothing else.", "requirements": "A seam narrow enough that a model and a script are interchangeable behind it.", "acceptance_criteria": "Swapping the scripted builder for a model requires no runner change.", "qa_tests": "The runner's own code contains no reference to a model. The scripted builder satisfies the same interface a model would.", "status": "backlog"},
+        {"title": "Write the three-behaviour scripted builder", "description": "A real consolidation, a deliberate behaviour break, and a no-op.", "requirements": "All three behaviours, deterministic.", "acceptance_criteria": "Each produces its expected verdict from the loop.", "qa_tests": "Consolidation accepted, break rejected with named behaviours, no-op neutral. Deterministic across runs.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "Grading a pass",
+      "description": "Requirements 5 through 8. The oracle comparison, the rejection message, the duplication count, and the gain floor.",
+      "requirements": "After the builder, the oracle runs again and the two reports are compared behaviour by behaviour. A pass whose behaviour report differs anywhere is rejected, and the rejection names the behaviour numbers that changed and how. Duplication is counted mechanically across the repository's source as one number, and the count does not depend on file order, on absolute paths, or on which directory the counter was run from. A pass that preserves behaviour but reduces duplication by less than the gain floor is recorded as neutral, not accepted. The floor is configurable.",
+      "acceptance_criteria": "A behaviour change is always caught and always named. A duplication count is reproducible from any directory.",
+      "qa_tests": "The break builder's rejection names the specific behaviour numbers. The same repo counted from two different working directories and with files in two different orders yields the same number. A gain just under the floor records neutral; just over records accepted.",
+      "stories": [
+        {"title": "Compare oracle reports behaviour by behaviour", "description": "Requirement 5.", "requirements": "A per-behaviour comparison, not a pass or fail aggregate.", "acceptance_criteria": "A single changed behaviour among many is detected.", "qa_tests": "A builder that changes exactly one behaviour is caught. One that changes none is not flagged.", "status": "backlog"},
+        {"title": "Name the changed behaviours in every rejection", "description": "Requirement 6. Which behaviour numbers changed, and how.", "requirements": "The rejection carries numbers and the nature of each change.", "acceptance_criteria": "A reviewer can act on the rejection without rerunning anything.", "qa_tests": "The break builder's rejection message contains the behaviour numbers it broke and a description of each change.", "status": "backlog"},
+        {"title": "Count duplication mechanically and reproducibly", "description": "Requirement 7. One number across the repository's source, independent of file order, absolute paths and the counter's working directory.", "requirements": "Order-independent, path-independent, cwd-independent.", "acceptance_criteria": "Two runs over the same tree always agree.", "qa_tests": "The same tree counted from two directories agrees. The same tree with its files enumerated in reverse agrees. A tree moved to a different absolute path agrees.", "status": "backlog"},
+        {"title": "Record a sub-floor gain as neutral", "description": "Requirement 8. Behaviour preserved but duplication reduced by less than the configurable gain floor.", "requirements": "A configurable floor, and a neutral outcome distinct from accepted and from rejected.", "acceptance_criteria": "Neutral is its own outcome in the ledger.", "qa_tests": "A gain one unit under the floor records neutral; one unit over records accepted. Changing the floor moves the boundary.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "Commits and the ledger",
+      "description": "Requirements 9 through 12. Where accepted work lands, how much of it per file, and what the ledger carries and drives.",
+      "requirements": "An accepted pass is committed to a branch named for the night, one commit per accepted pass. Never master, never the running app. At most one accepted change per file per night. Every pass is written to the ledger — accepted, rejected, neutral or abandoned — with the files it touched, the duplication delta, the oracle's verdict, and the reason. The next pass reads the ledger to pick its target, and a file whose recent passes all scored neutral drops down the order.",
+      "acceptance_criteria": "The night's work is reviewable as a branch of discrete commits, and the ledger explains every pass that ran.",
+      "qa_tests": "A night produces one commit per accepted pass on a night-named branch and nothing on master. A second accepted change to a file already changed that night is refused. The ledger has an entry for every pass including the abandoned ones. A file with three neutral passes is picked later than one with none.",
+      "stories": [
+        {"title": "Commit accepted passes to a night branch, one commit each", "description": "Requirement 9. Never master, never the running app.", "requirements": "A branch named for the night; one commit per accepted pass.", "acceptance_criteria": "Master is never written to.", "qa_tests": "After a night, master's HEAD is unmoved and the night branch has exactly as many commits as there were accepted passes.", "status": "backlog"},
+        {"title": "Allow at most one accepted change per file per night", "description": "Requirement 10.", "requirements": "A second accepted change to the same file in one night is refused.", "acceptance_criteria": "No file carries two accepted changes from one night.", "qa_tests": "Two passes both producing an accepted change to one file result in one commit, not two. The second is recorded with its reason.", "status": "backlog"},
+        {"title": "Write every pass to the ledger with its full outcome", "description": "Requirement 11. Accepted, rejected, neutral or abandoned — with files touched, duplication delta, oracle verdict and reason.", "requirements": "All four outcomes, all four fields.", "acceptance_criteria": "No pass is invisible in the ledger.", "qa_tests": "A night's ledger entry count equals its pass count. An abandoned pass has an entry carrying its reason. Each entry carries all four fields.", "status": "backlog"},
+        {"title": "Pick the next target from the ledger", "description": "Requirement 12. A file whose recent passes all scored neutral drops down the order.", "requirements": "Target selection reads the ledger and deprioritises repeatedly-neutral files.", "acceptance_criteria": "The loop stops re-attempting files it has learned nothing from.", "qa_tests": "With a seeded ledger where one file has three neutral passes, the next target is a different file. With an empty ledger, selection still produces a target.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "The window, the report and cleanup",
+      "description": "Requirements 13 through 15. The night is time-boxed, reported, and leaves nothing on disk.",
+      "requirements": "The night runs inside a fixed window. A pass still running when the window closes is abandoned, and the abandonment is recorded like any other outcome. The morning report names each accepted pass, its duplication delta, and the branch to review. A pass leaves nothing behind: the worktree is removed on every exit path, including the abandoned one, and the ledger entry is written before the cleanup.",
+      "acceptance_criteria": "No worktree survives any exit path, and the ledger entry always exists even when the cleanup is what ended the pass.",
+      "qa_tests": "A pass killed at the window close has a ledger entry and no worktree. A pass that raises mid-builder has both too. The morning report's accepted list matches the night branch's commits.",
+      "stories": [
+        {"title": "Time-box the night and abandon the pass still running at the close", "description": "Requirement 13. Abandonment is recorded like any other outcome.", "requirements": "A fixed window; an abandoned outcome with a ledger entry.", "acceptance_criteria": "The window always ends the night.", "qa_tests": "Driven by injected time rather than by waiting: a pass whose builder runs past the close is abandoned and recorded. The window closing with no pass in flight ends cleanly.", "status": "backlog"},
+        {"title": "Write the morning report", "description": "Requirement 14. Each accepted pass, its duplication delta, and the branch to review.", "requirements": "All three per accepted pass.", "acceptance_criteria": "The report is enough to start a review from.", "qa_tests": "The report's pass list matches the ledger's accepted entries and the branch's commits. Each line carries a delta and a branch name.", "status": "backlog"},
+        {"title": "Remove the worktree on every exit path, after the ledger write", "description": "Requirement 15. Including the abandoned path. The ledger entry is written before the cleanup, so a cleanup that fails still leaves a record.", "requirements": "Cleanup on every exit; ledger write ordered before it.", "acceptance_criteria": "No orphaned worktree after any night, however it ended.", "qa_tests": "After a normal pass, an abandoned pass and a pass that raised, git worktree list shows none of them. Each has a ledger entry. A cleanup made to fail still leaves the entry.", "status": "backlog"}
+      ]
+    }
+  ]
+},
+{
+  "title": "Upstream minds — Layer-2 onboarding and follow-on work",
+  "description": "Forward-looking work remaining on the upstream hive_mind minds after they were wired onto the shared nervous-system services. The per-mind NS plumbing, capture hooks, persona anchors, shared standing rules and the /graph/upsert schema-validation cutover are all in place; this epic covers the unfinished pieces. The sequential execution checklist is the Upstream Minds NS punch list epic.",
+  "requirements": "Five scope items: Layer-2 onboarding via POST /minds/provision, per-mind standing-rule seeds, the skills overhaul on upstream minds, a skill self-announcement contract, and a final five-mind regression.",
+  "acceptance_criteria": "A new mind joins the hive without a manual admin-bearer curl. Every upstream mind carries its own behavioural rules. Every user-invocable skill announces itself. All five minds pass an end-to-end smoke test.",
+  "qa_tests": "Per story. Three landmines to re-read before each phase: the standing-tier soft cap of ten is per mind_id, so each mind's own rules and the shared rules count against separate scopes; POST /broker/minds is admin-bearer-gated until Layer-2 onboarding ships; and mind_id in lucent writes is the UUID and never the short name — verify after every change by inspecting a freshly-captured memory row.",
+  "features": [
+    {
+      "title": "Layer-2 onboarding",
+      "description": "Scope item 1. New minds in the hive should not require admin-bearer manual curls. Companion plan: the Mind Registration Service epic.",
+      "requirements": "POST /minds/provision implemented end to end — UUID issue, broker row, KG Mind node, soul seed, container scaffold — plus a minimal admin UI or a first-pass curl recipe.",
+      "acceptance_criteria": "A mind is provisioned without hand-enumerating an admin bearer.",
+      "qa_tests": "Covered by the punch list's Phase 6 stories; this feature is the scope statement those execute against.",
+      "stories": [
+        {"title": "Deliver POST /minds/provision and its admin path", "description": "Tracked in detail as Phase 6 of the punch list. Kept here as the scope item so the parent epic is complete on its own terms.", "requirements": "The endpoint and an admin path that does not require manual bearer enumeration.", "acceptance_criteria": "A throwaway mind provisions, registers, takes a turn and removes cleanly.", "qa_tests": "See the punch list's Phase 6 stories. The landmine to watch: POST /broker/minds stays admin-gated until this ships.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "Per-mind standing-rule seeds",
+      "description": "Scope item 2. Shared rules already live in lucent under mind_id=\"shared\" and apply to every mind. What each upstream mind lacks is its own mind-specific behavioural rules.",
+      "requirements": "Each upstream mind's mind-specific rules written via /always-remember --self. Per-mind rules accumulate through interaction rather than being fabricated up front.",
+      "acceptance_criteria": "Each mind carries rules that came out of working with it, not rules invented at install time.",
+      "qa_tests": "A mind's standing tier contains rules keyed to its own mind_id. The soft cap of ten applies per mind_id, so a mind's own rules and the shared set do not crowd each other out — verify both are present and neither is truncated.",
+      "stories": [
+        {"title": "Let each upstream mind accumulate its own standing rules", "description": "Written via /always-remember --self, as they emerge from interaction. Not fabricated up front.", "requirements": "The path works on every upstream mind, and rules land under that mind's own mind_id.", "acceptance_criteria": "A rule written on one mind does not appear on another.", "qa_tests": "A rule written on one mind reads back under its UUID and is absent from another mind's standing tier. Standing tier requires source=always-remember, which is a server-side check in lucent.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "Skills overhaul on upstream minds",
+      "description": "Scope item 3. Install /always-remember, /remember, /prune-memory and the broader skills-enhancement pass — taxonomy reorg, context: fork, dynamic injection, bundled scripts, progressive disclosure, multi-mind affordances — on each containerised mind. Skills currently land via the ollama@danielstewart77 plugin's plugin_skills_sync.sh hook on Claude-CLI minds; Codex-CLI minds need an equivalent.",
+      "requirements": "The three memory skills plus the enhancement pass on every containerised mind. A sync path for Codex-CLI minds equivalent to what Claude-CLI minds have.",
+      "acceptance_criteria": "Every mind has the memory skills, and a Codex mind receives skills by the same kind of mechanism a Claude mind does.",
+      "qa_tests": "On each mind: the three skills are invocable and write to the right mind_id. On a Codex mind, a skill added upstream arrives without a hand copy.",
+      "stories": [
+        {"title": "Install the three memory skills on every containerised mind", "description": "/always-remember, /remember and /prune-memory.", "requirements": "All three present and working on each mind.", "acceptance_criteria": "Each mind can save and prune its own memory.", "qa_tests": "Per mind: a /remember writes a row carrying that mind's UUID. A /always-remember lands in the standing tier. Verify the UUID on a freshly-captured row rather than trusting the short name.", "status": "backlog"},
+        {"title": "Build a skills-sync path for Codex-CLI minds", "description": "Claude-CLI minds get skills via the ollama@danielstewart77 plugin's plugin_skills_sync.sh hook. Codex minds have no equivalent.", "requirements": "A mechanism that puts skills in $CODEX_HOME/skills the way the hook does for Claude.", "acceptance_criteria": "A skill added upstream reaches a Codex mind without a manual copy.", "qa_tests": "A skill added to the source reaches a Codex mind's installed directory. The mind's /skills listing reports it as installed and matching.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "Skill self-announcement contract",
+      "description": "Scope item 4. Every user-invocable skill should announce itself before doing work — 'using skill: <name>', nested when skills chain. Rolls out alongside the skills overhaul.",
+      "requirements": "Define the contract, audit every SKILL.md, add the directive, and update the skill-creation template so new skills carry it by default.",
+      "acceptance_criteria": "Every user-invocable skill announces itself, and a newly created skill does so without anyone remembering to add it.",
+      "qa_tests": "Invoking any user-invocable skill produces the announcement. A chained invocation nests. A skill created from the template announces without edit.",
+      "stories": [
+        {"title": "Define the self-announcement contract", "description": "The exact form — 'using skill: <name>' — and how it nests when skills chain.", "requirements": "A written contract covering the nesting case.", "acceptance_criteria": "Unambiguous enough to audit against.", "qa_tests": "Not code. The artifact is the contract.", "status": "backlog"},
+        {"title": "Audit every SKILL.md and add the directive", "description": "Across every mind's skills.", "requirements": "Every user-invocable skill carries it.", "acceptance_criteria": "No user-invocable skill is silent.", "qa_tests": "Invoking each one produces the announcement. A chained pair nests correctly.", "status": "backlog"},
+        {"title": "Update the skill-creation template", "description": "So new skills carry the directive by default rather than by memory.", "requirements": "The template includes it.", "acceptance_criteria": "A skill created from the template announces with no edit.", "qa_tests": "A freshly templated skill announces on first invocation.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "Final regression",
+      "description": "Scope item 5. Smoke-test all five minds — Skippy plus four upstream — end to end.",
+      "requirements": "Every mind takes a turn, every hook fires, every skill self-announces, and every write goes through the validating /graph/upsert.",
+      "acceptance_criteria": "All four hold for all five minds.",
+      "qa_tests": "Executed as the punch list's Phase 7 story. Verify mind_id is the UUID on a freshly-captured row for each mind.",
+      "stories": [
+        {"title": "Run the five-mind end-to-end regression", "description": "Tracked in detail as Phase 7 of the punch list. Kept here as the scope item.", "requirements": "Four checks across five minds in one sitting.", "acceptance_criteria": "No mind fails any of the four.", "qa_tests": "See the punch list's Phase 7 story.", "status": "backlog"}
+      ]
+    }
+  ]
+},
+{
+  "title": "★★★ BUG — a terminal pane starts a second conversation on the same session row",
+  "description": "Found 2026-10-04, live on this workstation. Severity high: two minds act as one session, each unaware of the other's work. Selecting the same session from Telegram and from the browser terminal gives one comms session row, as intended, but two harness processes, each on its own conversation and its own transcript. The pane does not adopt the conversation the row registers; it starts a new one. Observed verbatim: comms session row e6ea581f-5c4c-4bec-823a-9dd56d4d2905, name RSI, owner_type telegram, claude_sid f42f4468-bc7a-47ac-b36a-d7359d9e94b3; tmux session skippy-e6ea581f... on socket skippy-terminal created 19:37:20 and still alive 59 minutes later; that pane ran conversations 4136b416... and then ba067ef3..., neither bound to any session row; the row's claude_sid was never repointed, so comms still believed the session was on the Telegram process throughout.",
+  "requirements": "A pane attaching to an existing session must either resume that session's registered conversation, or release the process holding it first — the same rule POST /sessions/{id}/release already enforces for cross-surface adoption from Telegram. Starting a fresh conversation id while the row names another live one must not be reachable. Worth checking alongside it: whether the pane registers its conversation on the row at all, since here it never did, and a pane whose conversation comms cannot see is also a pane whose rotation and carry-forward cannot work.",
+  "acceptance_criteria": "One live harness process per conversation, which is the invariant the design states outright. Attaching a pane to a session already held by another surface either resumes that conversation or releases the holder first, and never produces a second transcript.",
+  "qa_tests": "Attach a pane to a session owned by Telegram: either the pane resumes the row's claude_sid, or the release fires and the row is repointed. In neither case does a second conversation id appear. A pane attach writes its conversation id to the row, verified by reading the row rather than trusting the pane. A refused release aborts the adoption rather than retargeting ownership over a still-running harness.",
+  "features": [
+    {
+      "title": "Make the second conversation unreachable",
+      "description": "The fix proper: a pane cannot mint a new conversation while the row names a live one.",
+      "requirements": "Resume the registered conversation, or release the holder first. Starting fresh against a live row is not a reachable state.",
+      "acceptance_criteria": "The one-process-per-conversation invariant holds across a Telegram-then-terminal attach.",
+      "qa_tests": "The attach sequence that produced the bug now produces one conversation. The row's claude_sid is always the conversation actually running.",
+      "stories": [
+        {"title": "Resume the row's registered conversation on pane attach", "description": "Where it matters: mind_server.py's WS /sessions/{id}/attach-pty, and spawn_pty in minds/<name>/implementation.py — the installed copy, not the template, since editing the template changes nothing at runtime.", "requirements": "A pane attaching to a session with a registered conversation resumes it rather than minting a new id.", "acceptance_criteria": "No new conversation id appears on an attach to a live row.", "qa_tests": "Attach to a session whose row carries a claude_sid: the pane's process runs with --resume against that id. The row is unchanged. A second transcript does not appear on disk.", "status": "backlog"},
+        {"title": "Release the holder when the pane cannot resume", "description": "The same rule POST /sessions/{id}/release already enforces for cross-surface adoption from Telegram.", "requirements": "If resuming is not possible, release the process holding the conversation before starting. A refused release aborts rather than proceeding.", "acceptance_criteria": "Two processes never hold one conversation, and a refusal is honoured as a refusal.", "qa_tests": "A pane attach that requires a release triggers one and the previous process is gone. A release that is refused aborts the adoption rather than retargeting ownership over a harness that is still running — which would put two processes on one transcript, the exact bug.", "status": "backlog"},
+        {"title": "Make starting a fresh conversation against a live row unreachable", "description": "Not merely discouraged. The design states one live harness process per conversation outright.", "requirements": "The code path that mints an id while the row names a live one does not exist.", "acceptance_criteria": "The bug cannot recur by a different route.", "qa_tests": "An attach against a live row cannot produce an unbound conversation id by any argument combination. A mind handed no id raises rather than inventing one, which is the existing rule this extends.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "Pane conversation registration",
+      "description": "Worth checking alongside the fix: whether the pane registers its conversation on the row at all. Here it never did — and a pane whose conversation comms cannot see is also a pane whose rotation and carry-forward cannot work.",
+      "requirements": "A pane's conversation id reaches the session row. Where to look: nervous-system/comms/sessions.py — activate_session, the active_sessions binding, and how claude_sid is written for a pty attach.",
+      "acceptance_criteria": "Rotation and carry-forward work for a terminal-hosted conversation, which they cannot if comms does not know the conversation exists.",
+      "qa_tests": "After a pane attach, the row's claude_sid names the pane's conversation. A rotation armed from the pane finds a conversation to rotate. A carry-forward request for the pane's conversation returns what it is owed.",
+      "stories": [
+        {"title": "Write the pane's conversation id onto the session row", "description": "In nervous-system/comms/sessions.py: activate_session, the active_sessions binding, and the claude_sid write for a pty attach.", "requirements": "A pty attach writes claude_sid the way a chat turn does.", "acceptance_criteria": "comms can see the conversation a pane is running.", "qa_tests": "Read the row after an attach: claude_sid matches the pane's conversation. Before the fix it did not, which is what made rotation silently impossible.", "status": "backlog"},
+        {"title": "Check which session id a new tile claims", "description": "The console's terminal routing is the third place this could go wrong.", "requirements": "A new tile claims the session the operator selected, not a fresh one.", "acceptance_criteria": "The tile, the row and the pane all name one session.", "qa_tests": "Opening a tile against a named session produces a pane under that session id. Two tiles on one session join one pane rather than creating two.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "The damage this caused, as a reminder of stakes",
+      "description": "Same evening: the pane configured and dispatched a Cypher exam run — rewriting minds/cypher/runtime.yaml, clearing model-testing/hive-health-rebuild/runs/, and overwriting admin/run-20.token, admin/run-20.sid and the dispatch payload — on top of a run the Telegram process had just dispatched to the same mind. Each side reported its own run as the live one. Neither was wrong about what it had done; both were wrong about the state of the machine. Two processes on one row also means every per-session write races: name, colour, rotation arming, carry-forward, the turn ledger.",
+      "requirements": "Nothing to implement here. This exists so the severity is not re-litigated later.",
+      "acceptance_criteria": "Not applicable.",
+      "qa_tests": "Not applicable.",
+      "stories": [
+        {"title": "Confirm no per-session write is still racing after the fix", "description": "Name, colour, rotation arming, carry-forward and the turn ledger were all racing while two processes shared one row. With one process per conversation they should not be — but that is worth checking rather than assuming.", "requirements": "Each of the five writes verified under a Telegram-then-terminal adoption.", "acceptance_criteria": "No write is lost or interleaved across the adoption.", "qa_tests": "Set a name and a colour from one surface, adopt into the other, and read both back. Arm a rotation from the pane and confirm the chat surface does not finalize it — a staged terminal rotation carries the value 2 and must not reach _finalize_rotation, which would retire the permanent session row.", "status": "backlog"}
+      ]
+    }
+  ]
+},
+{
+  "title": "Gmail Tool — Attachment Access",
+  "description": "Surfaced 2026-05-29 while reviewing a house listing during a walk-through. The hive-tools Gmail router exposes message read endpoints — GET /gmail/messages and GET /gmail/messages/{message_id} — that return attachment metadata (filename, mime_type, size) but never the binary payload. The attachments[].data field comes back null even when an attachment exists, and there is no separate download endpoint. The upload direction already works: Skippy sent an MRI PDF on 2026-05-11 via the MCP send_email flow. The asymmetry is purely on the read side.",
+  "requirements": "A mind can fetch any attachment from any Gmail message it can already read. Attachments over 5 MB do not blow up the standard GET /gmail/messages/{id} response when callers do not ask for the data. Authentication, HITL gating and audit logging behave the same as the existing Gmail endpoints.",
+  "acceptance_criteria": "The concrete 2026-05-29 repro works: a photo of an AC condenser data plate emailed in can be located, fetched and read by the mind, without Daniel reading the plate aloud.",
+  "qa_tests": "Fetching an attachment returns its bytes and they match the sent file. A message with a 10 MB attachment returns a light response when the data is not requested. An unauthenticated call is refused exactly as the existing endpoints refuse one. A fetch appears in the audit log.",
+  "features": [
+    {
+      "title": "A dedicated attachment endpoint",
+      "description": "Preferred shape. GET /gmail/messages/{message_id}/attachments/{attachment_id} returns the raw bytes, or a base64 payload, for a single attachment. Mirrors the Gmail API's own users.messages.attachments.get, which already returns the data field on demand. Keeps the message-list payload light, and is the right call for any attachment over a few hundred kilobytes.",
+      "requirements": "The route exists, returns the payload for one attachment, and leaves the message endpoints' responses unchanged.",
+      "acceptance_criteria": "Any attachment the mind can see metadata for, it can fetch.",
+      "qa_tests": "Fetching a known attachment returns bytes identical to the file that was sent. The message endpoint's response size is unchanged by the new route's existence.",
+      "stories": [
+        {"title": "Add GET /gmail/messages/{message_id}/attachments/{attachment_id}", "description": "Mirrors the Gmail API's own attachments.get.", "requirements": "Raw bytes or base64 for one attachment. Same auth, HITL gating and audit logging as the existing Gmail endpoints.", "acceptance_criteria": "The bytes come back and match.", "qa_tests": "A round trip of a known JPEG returns identical bytes. An unauthenticated call is refused the same way the existing endpoints refuse one. The fetch is in the audit log.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "Optional inline data on the message endpoint",
+      "description": "Secondary shape, for small attachments. An include_attachment_data=true query param on GET /gmail/messages/{message_id} populates attachments[].data inline. Simpler caller code but bloats the response for large attachments, so it exists alongside the dedicated endpoint rather than instead of it.",
+      "requirements": "The param is opt-in and defaults off, so a caller that does not ask gets the light response.",
+      "acceptance_criteria": "An attachment over 5 MB does not blow up the response when the data was not requested.",
+      "qa_tests": "The message endpoint without the param returns no payload for a 10 MB attachment. With the param, it returns the payload. The default is off.",
+      "stories": [
+        {"title": "Add include_attachment_data to the message endpoint", "description": "Opt-in, default off.", "requirements": "Default off; populated only when asked.", "acceptance_criteria": "Large attachments cost nothing unless requested.", "qa_tests": "A message with a 10 MB attachment returns a small response by default and a large one with the param. Omitting the param never populates data.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "Image handling for vision-capable minds",
+      "description": "For Claude-class minds the bytes should be deliverable in a form the harness can hand to a vision call. Two options: return base64 and let the caller wrap it in the model's image-input format, or save the attachment to a known path (for example /tmp/hive-tools-attachments/{message_id}/{filename}) and return the path, so the mind reads it with its native Read tool, which already handles image files. The path-on-disk approach is simpler for Claude Code and avoids round-tripping a megabyte through JSON.",
+      "requirements": "At least one of the two paths works end to end for a photo. The path-on-disk option writes somewhere the mind can actually read from, which on a containerised mind is not the same filesystem as hive-tools.",
+      "acceptance_criteria": "A mind can look at a photo that was emailed in.",
+      "qa_tests": "An emailed photo is fetched and described by the mind. On a containerised mind, the returned path is readable from inside that container — a path on the hive-tools host is not, which is the failure mode to check for rather than assume away.",
+      "stories": [
+        {"title": "Deliver attachment bytes in a vision-callable form", "description": "Base64 for the caller to wrap, or a path on disk for the native Read tool. The doc prefers the path.", "requirements": "Whichever path is chosen works for a containerised mind as well as a bare-metal one.", "acceptance_criteria": "The mind describes the image.", "qa_tests": "Judged by reading the mind's description of a known photo, not by asserting on bytes. On a container, the path resolves inside the container or the base64 route is used instead.", "status": "backlog"}
+      ]
+    }
+  ]
+},
+{
+  "title": "Audible Plus — Cyberpunk Listening Checklist",
+  "description": "Titles pulled live from Amazon's Cyberpunk category with the Audible Plus Catalog filter applied, scanned 2026-08-01 while signed out. LitRPG, isekai, progression fantasy, cultivation and dungeon-core titles are filtered out on purpose, as are non-English editions and AI Virtual Voice narrations. Source scan: Amazon node 18580633011 with p_n_audible_programs:20956260011, sorted by review count, eight pages, driven through Playwright with the system Chrome binary. This is a listening checklist rather than engineering work — a story is a title, and done means listened. A title started and abandoned is marked as such rather than completed.",
+  "requirements": "Entitlement is confirmed once the logged-in browser profile is wired up — the scan was signed out, so Plus membership on these titles is inferred rather than verified. The Plus Catalog rotates, so the scan is re-run before assuming a title is still free.",
+  "acceptance_criteria": "Not applicable in an engineering sense. A title is done when listened; abandoned is its own outcome.",
+  "qa_tests": "Not applicable. The one testable piece is the scan itself, which is its own story.",
+  "features": [
+    {
+      "title": "Scan maintenance",
+      "description": "The two pieces of actual work behind the list.",
+      "requirements": "A persistent logged-in browser profile so the scan can read Daniel's actual library and entitlements instead of inferring them. A re-run before trusting any title's availability.",
+      "acceptance_criteria": "The list reflects what Daniel can actually listen to today.",
+      "qa_tests": "A scan from the logged-in profile reports entitlement per title rather than inferring it, and flags a title that has rotated out of the Plus catalogue.",
+      "stories": [
+        {"title": "Wire a persistent logged-in browser profile for the scan", "description": "The 2026-08-01 scan ran signed out, so entitlement is inferred. A logged-in profile would read the real library and the real Plus entitlements.", "requirements": "A persistent profile the Playwright scan can reuse, reading Daniel's own library and entitlements.", "acceptance_criteria": "The scan reports entitlement as fact rather than inference, and knows what is already in the library.", "qa_tests": "A scan against the logged-in profile correctly reports a title already owned as owned, and a title outside Plus as outside Plus. The profile survives between runs without a re-login.", "status": "backlog"},
+        {"title": "Re-run the scan before trusting the list", "description": "The Plus Catalog rotates. The list is from 2026-08-01.", "requirements": "A re-run, with rotated-out titles flagged rather than silently dropped.", "acceptance_criteria": "The list says which titles are still free.", "qa_tests": "A title known to have rotated out is flagged, not deleted — the distinction matters because a dropped title reads as never having been there.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "Tier 1 — the ones worth the walk",
+      "description": "The eight titles at the top of the list.",
+      "requirements": "Listen. Mark abandoned if started and dropped.",
+      "acceptance_criteria": "Done means listened.",
+      "qa_tests": "Not applicable.",
+      "stories": [
+        {"title": "36 Streets — T. R. Napper, narrated by Katherine Littrell", "description": "Tier 1.", "requirements": "Listen.", "acceptance_criteria": "Listened.", "qa_tests": "Not applicable.", "status": "backlog"},
+        {"title": "Autonomous — Annalee Newitz, narrated by Alessandra De Luca", "description": "Tier 1.", "requirements": "Listen.", "acceptance_criteria": "Listened.", "qa_tests": "Not applicable.", "status": "backlog"},
+        {"title": "Halting State — Charles Stross, narrated by Robert Ian MacKenzie", "description": "Tier 1.", "requirements": "Listen.", "acceptance_criteria": "Listened.", "qa_tests": "Not applicable.", "status": "backlog"},
+        {"title": "The Courier — Gerald Brandt, narrated by Ali Ahn", "description": "Tier 1.", "requirements": "Listen.", "acceptance_criteria": "Listened.", "qa_tests": "Not applicable.", "status": "backlog"},
+        {"title": "Metropolitan (The Metropolitan Series, Book 1) — Walter Jon Williams", "description": "Tier 1.", "requirements": "Listen.", "acceptance_criteria": "Listened.", "qa_tests": "Not applicable.", "status": "backlog"},
+        {"title": "Hopeland — Ian McDonald, narrated by Esther Wane", "description": "Tier 1.", "requirements": "Listen.", "acceptance_criteria": "Listened.", "qa_tests": "Not applicable.", "status": "backlog"},
+        {"title": "Alita: Battle Angel — Iron City — Pat Cadigan, narrated by Brian Nishii", "description": "Tier 1.", "requirements": "Listen.", "acceptance_criteria": "Listened.", "qa_tests": "Not applicable.", "status": "backlog"},
+        {"title": "Cash Crash Jubilee — Eli K. P. William, narrated by Brian Nishii", "description": "Tier 1.", "requirements": "Listen.", "acceptance_criteria": "Listened.", "qa_tests": "Not applicable.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "Tier 2 — solid cyberpunk and near-future noir",
+      "description": "Twelve titles.",
+      "requirements": "Listen. Mark abandoned if started and dropped.",
+      "acceptance_criteria": "Done means listened.",
+      "qa_tests": "Not applicable.",
+      "stories": [
+        {"title": "Hammered (Jenny Casey, Book 1) — Elizabeth Bear", "description": "Tier 2.", "requirements": "Listen.", "acceptance_criteria": "Listened.", "qa_tests": "Not applicable.", "status": "backlog"},
+        {"title": "SINthetic — J. T. Nicholas, narrated by Brian Hutchison", "description": "Tier 2.", "requirements": "Listen.", "acceptance_criteria": "Listened.", "qa_tests": "Not applicable.", "status": "backlog"},
+        {"title": "The Subjugate — Amanda Bridgeman, narrated by Lyssa Browne", "description": "Tier 2.", "requirements": "Listen.", "acceptance_criteria": "Listened.", "qa_tests": "Not applicable.", "status": "backlog"},
+        {"title": "The Song of Synth — Seb Doubinsky, narrated by Noah Michael Levine", "description": "Tier 2.", "requirements": "Listen.", "acceptance_criteria": "Listened.", "qa_tests": "Not applicable.", "status": "backlog"},
+        {"title": "Shattered Roads — Alice Henderson, narrated by Emily Pike Stewart", "description": "Tier 2.", "requirements": "Listen.", "acceptance_criteria": "Listened.", "qa_tests": "Not applicable.", "status": "backlog"},
+        {"title": "Mind Burn: A Hacker Thriller Novel — T. E. Bakutis", "description": "Tier 2.", "requirements": "Listen.", "acceptance_criteria": "Listened.", "qa_tests": "Not applicable.", "status": "backlog"},
+        {"title": "Neon Nights (There's No Murder in Paradise, Book 1) — Anna Mocikat", "description": "Tier 2.", "requirements": "Listen.", "acceptance_criteria": "Listened.", "qa_tests": "Not applicable.", "status": "backlog"},
+        {"title": "Electric Angel (Cyber Dreams, Book 1) — Plum Parrot, narrated by Suzy Jackson", "description": "Tier 2.", "requirements": "Listen.", "acceptance_criteria": "Listened.", "qa_tests": "Not applicable.", "status": "backlog"},
+        {"title": "Reality Testing (Sundown, Book 1) — Grant Price", "description": "Tier 2.", "requirements": "Listen.", "acceptance_criteria": "Listened.", "qa_tests": "Not applicable.", "status": "backlog"},
+        {"title": "Reborn — Lance Erlick, narrated by Celeste Ciulla", "description": "Tier 2.", "requirements": "Listen.", "acceptance_criteria": "Listened.", "qa_tests": "Not applicable.", "status": "backlog"},
+        {"title": "The Fractured Man: A Hardboiled Noir From The Future — K.C. Sivils", "description": "Tier 2.", "requirements": "Listen.", "acceptance_criteria": "Listened.", "qa_tests": "Not applicable.", "status": "backlog"},
+        {"title": "Neon Horizon, Books 1-3 Box Set: A Cyberpunk Thriller — Michael Robertson", "description": "Tier 2.", "requirements": "Listen.", "acceptance_criteria": "Listened.", "qa_tests": "Not applicable.", "status": "backlog"}
+      ]
+    },
+    {
+      "title": "Tier 3 — adjacent SF in the same filter",
+      "description": "Eight titles, not strictly cyberpunk but caught by the same filter.",
+      "requirements": "Listen. Mark abandoned if started and dropped.",
+      "acceptance_criteria": "Done means listened.",
+      "qa_tests": "Not applicable.",
+      "stories": [
+        {"title": "Singularity Sky — Charles Stross, narrated by George Guidall", "description": "Tier 3.", "requirements": "Listen.", "acceptance_criteria": "Listened.", "qa_tests": "Not applicable.", "status": "backlog"},
+        {"title": "Saturn's Children — Charles Stross, narrated by Bianca Amato", "description": "Tier 3.", "requirements": "Listen.", "acceptance_criteria": "Listened.", "qa_tests": "Not applicable.", "status": "backlog"},
+        {"title": "The Departure (The Owner, Book 1) — Neal Asher, narrated by Steve West", "description": "Tier 3.", "requirements": "Listen.", "acceptance_criteria": "Listened.", "qa_tests": "Not applicable.", "status": "backlog"},
+        {"title": "The Technician — Neal Asher, narrated by David Marantz", "description": "Tier 3.", "requirements": "Listen.", "acceptance_criteria": "Listened.", "qa_tests": "Not applicable.", "status": "backlog"},
+        {"title": "Defragmenting Daniel: The Bubble, Books 1-3 — Jason Werbeloff", "description": "Tier 3.", "requirements": "Listen.", "acceptance_criteria": "Listened.", "qa_tests": "Not applicable.", "status": "backlog"},
+        {"title": "A Cut Below (Kapamentis Crime, Book 1) — T. W. M. Ashford", "description": "Tier 3.", "requirements": "Listen.", "acceptance_criteria": "Listened.", "qa_tests": "Not applicable.", "status": "backlog"},
+        {"title": "Cyberpunk Uploads: Complete Collection — Seth Rain", "description": "Tier 3.", "requirements": "Listen.", "acceptance_criteria": "Listened.", "qa_tests": "Not applicable.", "status": "backlog"},
+        {"title": "Altered States II: a cyberpunk anthology — Jorge Salgado-Reyes", "description": "Tier 3.", "requirements": "Listen.", "acceptance_criteria": "Listened.", "qa_tests": "Not applicable.", "status": "backlog"}
+      ]
+    }
+  ]
+}
+]
+}
