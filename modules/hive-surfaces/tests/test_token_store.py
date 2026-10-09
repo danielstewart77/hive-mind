@@ -240,3 +240,82 @@ class TestWhatTheConsoleMayKnow:
         (project / ".env").write_text(f"TELEGRAM_BOT_TOKEN={GOOD}\n")
 
         assert surface_token.stored_token() == GOOD
+
+
+class TestTheFileTheConsoleAlsoHolds:
+    """An edge mind's `.env` is bind-mounted into the hive console as a single
+    file. A rename hands the host a new inode while that mount goes on
+    pointing at the old one, so from that moment the console reads and rotates
+    a file nobody loads — five green ticks over a mind that 401s on every call
+    after its next restart.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_env_file_keeps_its_inode(self, vault, project) -> None:
+        env = project / ".env"
+        env.write_text("TELEGRAM_BOT_TOKEN=" + PREVIOUS + "\nOTHER=keep\n")
+        before = env.stat().st_ino
+
+        await surface_token.replace(GOOD, session=_bot_api())
+
+        assert env.stat().st_ino == before
+        assert GOOD in env.read_text()
+
+    @pytest.mark.asyncio
+    async def test_a_write_that_fails_partway_leaves_the_file_as_it_was(
+        self, vault, project, monkeypatch
+    ) -> None:
+        """Truncate-then-write means a failure leaves an empty `.env`, which
+        is a mind that will not boot."""
+        env = project / ".env"
+        original = "TELEGRAM_BOT_TOKEN=" + PREVIOUS + "\nOTHER=keep\n"
+        env.write_text(original)
+
+        real_open = open
+        calls = {"n": 0}
+
+        def failing_open(path, mode="r", *args, **kwargs):
+            handle = real_open(path, mode, *args, **kwargs)
+            if "w" in mode and str(path) == str(env):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    class _Failing:
+                        def __enter__(self_inner):
+                            return self_inner
+
+                        def __exit__(self_inner, *_):
+                            handle.close()
+                            return False
+
+                        def write(self_inner, _text):
+                            raise OSError("no space left on device")
+
+                    return _Failing()
+            return handle
+
+        monkeypatch.setattr("builtins.open", failing_open)
+
+        with pytest.raises(OSError):
+            await surface_token.replace(GOOD, session=_bot_api())
+
+        monkeypatch.undo()
+        assert env.read_text() == original
+
+
+class TestWhatAnUpstreamQuotesBack:
+    @pytest.mark.asyncio
+    async def test_an_error_carrying_the_verify_url_is_redacted(self, vault) -> None:
+        """The bot API's own shape puts the token in the URL, and aiohttp
+        quotes that URL in the text of several of its errors — text the mind
+        logs and returns to the console."""
+        session = MagicMock()
+        session.get = MagicMock(
+            side_effect=RuntimeError(f"unexpected mimetype, url='bot{GOOD}/getMe'")
+        )
+
+        with pytest.raises(surface_token.TokenRefused) as refusal:
+            await surface_token.verify(GOOD, session=session)
+
+        assert str(refusal.value) == (
+            "could not reach the bot API: unexpected mimetype, url='bot<token>/getMe'"
+        )

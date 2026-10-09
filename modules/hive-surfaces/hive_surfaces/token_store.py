@@ -22,8 +22,11 @@ has one that works, which is a question the bot API answers.
 
 from __future__ import annotations
 
+import fcntl
 import os
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -89,11 +92,22 @@ def resolve_token(surface: str = DEFAULT_SURFACE) -> str:
     env_var, key_var = names(surface)
     named = os.environ.get(key_var, "").strip()
     if named:
-        return _keyring_get(named) or os.environ.get(env_var, "")
-    return os.environ.get(env_var, "") or _keyring_get(env_var)
+        return keyring_get(named) or os.environ.get(env_var, "")
+    return os.environ.get(env_var, "") or keyring_get(env_var)
 
 VERIFY_URL = "https://api.telegram.org/bot{token}/getMe"
 VERIFY_TIMEOUT_S = 15.0
+
+
+def redact(text: str, token: str) -> str:
+    """`text` with `token` replaced, wherever an upstream put it.
+
+    Upstream error text quotes the URL it failed on, and the bot API's URL
+    carries the token. Anything derived from such a message is logged and
+    returned, so it is redacted at the point it becomes ours rather than at
+    each of the places it is later read.
+    """
+    return text.replace(token, "<token>") if token else text
 
 
 class TokenRefused(Exception):
@@ -134,12 +148,12 @@ def storage_location(surface: str = DEFAULT_SURFACE) -> tuple[str, str]:
     return "env", env_var
 
 
-def _env_path() -> Path:
+def env_path() -> Path:
     """The `.env` an edge mind's own process loads."""
     return Path(os.environ.get("HIVE_PROJECT_DIR", ".")).resolve() / ".env"
 
 
-def _keyring_get(key: str) -> str:
+def keyring_get(key: str) -> str:
     try:
         import keyring
 
@@ -148,20 +162,53 @@ def _keyring_get(key: str) -> str:
         return ""
 
 
-def _keyring_set(key: str, token: str) -> None:
+def keyring_set(key: str, token: str) -> None:
+    """Store `token` under `key`, serialized against every other writer.
+
+    The stack's backend is a single plaintext file shared by every mind on the
+    machine, and a write is read-config, modify, write-config. Two minds
+    storing at once therefore drop one another's unrelated entries — a mind's
+    bot token disappearing days later, from a write that reported success — so
+    the whole read-modify-write happens under one lock on that file's own
+    directory. An `flock` because the writers are separate processes, which a
+    thread lock would not see.
+    """
     import keyring
 
-    keyring.set_password(_KEYRING_SERVICE, key, token)
+    with _keyring_lock():
+        keyring.set_password(_KEYRING_SERVICE, key, token)
 
 
-def _env_get(env_var: str = _ENV_VAR) -> str:
+@contextmanager
+def _keyring_lock() -> Iterator[None]:
+    root = Path(os.environ.get("KEY_RING") or Path.home() / ".local" / "share")
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        handle = os.open(root / ".keyring.lock", os.O_WRONLY | os.O_CREAT, 0o600)
+    except OSError:
+        # A backend we cannot lock is still a backend that must take the
+        # write: refusing here would leave a mind unable to store a token at
+        # all on a host whose lock directory is read-only.
+        yield
+        return
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+        finally:
+            os.close(handle)
+
+
+def env_get(env_var: str = _ENV_VAR) -> str:
     """The token currently in the `.env` file, not in this process.
 
     The process's own environment is a snapshot from boot: a token written an
     hour ago is on disk and not in `os.environ`, and reporting the stale copy
     would tell the operator their write never landed.
     """
-    path = _env_path()
+    path = env_path()
     try:
         # `open`, not `Path.read_text`: the `newline` keyword only reached
         # the latter in 3.13 and a mind may be running 3.12. Pinned either
@@ -179,16 +226,24 @@ def _env_get(env_var: str = _ENV_VAR) -> str:
     return ""
 
 
-def _env_set(token: str, env_var: str = _ENV_VAR) -> None:
+def env_set(token: str, env_var: str = _ENV_VAR) -> None:
     """Replace the token line in `.env`, or add it, and nothing else.
 
     A line rewrite rather than a dump: the file carries comments and every
     other secret this mind holds, and a round-trip through any parser is how
-    one of those comes back quoted differently or not at all. Written to a
-    temporary file in the same directory and renamed, carrying the original's
-    mode, because a half-written `.env` is a mind that will not boot.
+    one of those comes back quoted differently or not at all.
+
+    Rewritten **in place**, not staged and renamed. An edge mind's `.env` is
+    bind-mounted into the hive console as a single file, and a rename hands the
+    host a new inode while that mount goes on pointing at the old one: from
+    that moment the console reads and rotates a file nobody loads, reports five
+    green ticks, and the mind 401s on every call after its next restart. The
+    inode is therefore preserved, which also carries the mode and ownership
+    across by construction. `open(path, "w")` truncates before it writes, so a
+    failure partway leaves the file empty and the mind unable to boot — the
+    original text goes back in that case, and the failure is raised either way.
     """
-    path = _env_path()
+    path = env_path()
     try:
         with open(path, encoding="utf-8", newline="") as handle:
             original = handle.read()
@@ -211,14 +266,37 @@ def _env_set(token: str, env_var: str = _ENV_VAR) -> None:
             out.append("\n")
         out.append(replacement)
 
-    staging = path.with_name(f".{path.name}.surface-token.tmp")
-    with open(staging, "w", encoding="utf-8", newline="") as handle:
-        handle.write("".join(out))
-    if path.exists():
-        os.chmod(staging, path.stat().st_mode & 0o7777)
-    else:
-        os.chmod(staging, 0o600)
-    os.replace(staging, path)
+    updated = "".join(out)
+    existed = path.exists()
+    if not existed:
+        # A file this process is creating has no inode worth preserving and no
+        # mode to inherit. 0600 on the open itself: the window between a 0644
+        # write and a later chmod is a window where a mind's secrets are
+        # readable by anyone on the host.
+        handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(handle, "w", encoding="utf-8", newline="") as out_file:
+            out_file.write(updated)
+        return
+
+    _write_in_place(path, updated, original)
+
+
+def _write_in_place(path: Path, updated: str, original: str) -> None:
+    """Overwrite this file, putting its old contents back if the write fails."""
+    try:
+        with open(path, "w", encoding="utf-8", newline="") as handle:
+            handle.write(updated)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError:
+        try:
+            with open(path, "w", encoding="utf-8", newline="") as handle:
+                handle.write(original)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError:
+            raise
+        raise
 
 
 def stored_token(surface: str = DEFAULT_SURFACE) -> str:
@@ -228,7 +306,7 @@ def stored_token(surface: str = DEFAULT_SURFACE) -> str:
     boot, so a token written an hour ago would read as never having landed.
     """
     kind, name = storage_location(surface)
-    return _keyring_get(name) if kind == "keyring" else _env_get(name)
+    return keyring_get(name) if kind == "keyring" else env_get(name)
 
 
 async def verify(token: str, session: aiohttp.ClientSession | None = None) -> str:
@@ -258,7 +336,13 @@ async def verify(token: str, session: aiohttp.ClientSession | None = None) -> st
     except TokenRefused:
         raise
     except Exception as exc:  # noqa: BLE001
-        raise TokenRefused(f"could not reach the bot API: {exc}") from exc
+        # The token is in the request URL — the bot API's own shape — and
+        # aiohttp puts that URL in the text of several of its errors. That
+        # text is logged by the mind and returned to the console, so an
+        # unredacted wrap publishes the token to every reader of either.
+        raise TokenRefused(
+            f"could not reach the bot API: {redact(str(exc), token)}"
+        ) from None
     finally:
         if owns_session:
             await session.close()
@@ -298,9 +382,9 @@ async def replace(
     username = await verify(token, session=session)
     kind, name = storage_location(surface)
     if kind == "keyring":
-        _keyring_set(name, token)
+        keyring_set(name, token)
     else:
-        _env_set(token, name)
+        env_set(token, name)
     return TokenStatus(
         stored=True,
         accepted=True,
