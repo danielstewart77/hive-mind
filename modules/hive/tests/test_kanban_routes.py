@@ -231,10 +231,10 @@ def test_a_collection_the_board_does_not_have_is_a_404_rather_than_a_500(client)
     assert client.get("/api/kanban/widgets/x/descendants").status_code == 404
 
 
-def test_the_descendant_count_honours_the_kind_in_the_url(client):
+def test_the_descendant_count_follows_the_row_not_the_kind_in_the_url(client):
     epic, feature, story = _board(client)
-    assert client.get(f"/api/kanban/stories/{epic['id']}/descendants").status_code == 404
-    assert client.get(f"/api/kanban/epics/{feature['id']}/descendants").status_code == 404
+    assert client.get(f"/api/kanban/stories/{epic['id']}/descendants").status_code == 200
+    assert client.get(f"/api/kanban/epics/{feature['id']}/descendants").status_code == 200
     assert client.get(f"/api/kanban/stories/{story['id']}/descendants").json() == {
         "features": 0,
         "stories": 0,
@@ -254,5 +254,6 @@ def test_changing_an_item_type_through_the_api_follows_the_parent_rules(client):
     changed = client.patch(f"/api/kanban/stories/{story['id']}", json={"type": "bug"})
     assert changed.status_code == 200
     assert changed.json()["subtype"] == "bug"
-    refused = client.patch(f"/api/kanban/features/{feature['id']}", json={"type": "bug"})
-    assert refused.status_code == 400
+    made_bug = client.patch(f"/api/kanban/features/{feature['id']}", json={"type": "bug"})
+    assert made_bug.status_code == 200
+    assert made_bug.json()["subtype"] == "bug"

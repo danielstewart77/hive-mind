@@ -184,7 +184,8 @@ def _row_to_record(row: sqlite3.Row) -> dict[str, Any]:
     if row["kind"] == "feature":
         record["epic_id"] = row["parent_id"]
     elif row["kind"] == "story":
-        record[f"{row['parent_kind']}_id"] = row["parent_id"]
+        if row["parent_kind"]:
+            record[f"{row['parent_kind']}_id"] = row["parent_id"]
         record["status"] = row["status"]
         record["subtype"] = row["subtype"] or "story"
     return record
@@ -305,7 +306,10 @@ def find_item(record_id: str) -> dict[str, Any]:
         row = connection.execute(_SELECT + " WHERE item.id = ?", (record_id,)).fetchone()
         if row is None:
             raise KeyError(f"Item not found: {record_id}")
-        return _row_to_record(row)
+        record = _row_to_record(row)
+    # The item page builds its API URL from this kind; the record itself does not carry it.
+    record["kind"] = row["kind"]
+    return record
 
 
 def item_relations(record_id: str) -> dict[str, Any]:
@@ -324,12 +328,14 @@ def item_relations(record_id: str) -> dict[str, Any]:
                 _SELECT + " WHERE item.parent_id = ? ORDER BY item.position, item.rowid", (record_id,)
             ).fetchall()
         ]
-        if row["kind"] == "feature":
-            choices_sql = _SELECT + " WHERE item.kind = 'epic' AND item.id != ?"
-        elif row["kind"] == "story":
-            choices_sql = _SELECT + " WHERE (item.kind = 'feature' OR item.kind = 'epic') AND item.id != ?"
-        else:
+        # Parents this item may take: any item of equal or higher level, except itself and its own descendants.
+        if row["kind"] == "epic":
+            # An epic has no parent; a change of type gives it one.
             choices_sql = None
+        elif row["kind"] == "feature":
+            choices_sql = _SELECT + " WHERE item.kind = 'epic' AND item.id != ?"
+        else:
+            choices_sql = _SELECT + " WHERE (item.kind = 'feature' OR item.kind = 'epic') AND item.id != ?"
         # Children this item may take: a feature may take stories, an epic may take features or stories.
         if row["kind"] == "epic":
             child_sql = _SELECT + " WHERE item.parent_id IS NULL AND item.kind IN ('feature','story') AND item.id != ?"
@@ -345,7 +351,28 @@ def item_relations(record_id: str) -> dict[str, Any]:
             [_row_to_record(c) for c in connection.execute(choices_sql, (record_id,)).fetchall()]
             if choices_sql else []
         )
-        return {"parent": parent, "children": children, "choices": choices, "addable": addable}
+        return {
+            "parent": parent,
+            "children": children,
+            "choices": choices,
+            "addable": addable,
+            "all": [
+                _row_to_record(r)
+                for r in connection.execute(_SELECT + " WHERE item.id != ? ORDER BY item.kind, item.position, item.rowid", (record_id,)).fetchall()
+            ],
+        }
+
+
+def _parents_for(connection: sqlite3.Connection, record_id: str, kind: str) -> list[dict[str, Any]]:
+    """Items that could be this item's parent once it has the given type."""
+    if kind == "epic":
+        return []
+    allowed = "('epic')" if kind == "feature" else "('epic','feature')"
+    rows = connection.execute(
+        _SELECT + f" WHERE item.kind IN {allowed} AND item.id != ? ORDER BY item.position, item.rowid",
+        (record_id,),
+    ).fetchall()
+    return [_row_to_record(r) for r in rows]
 
 
 def list_epics() -> list[dict[str, Any]]:
@@ -585,66 +612,67 @@ def _update(kind: str, record_id: str, changes: dict[str, Any]) -> dict[str, Any
         return record
 
 
-def change_type(record_id: str, new_kind: str) -> dict[str, Any]:
-    """Turn a feature or story into another kind, keeping its place where it fits.
 
-    Only an item with no children may change type. A feature keeps its epic.
-    A story keeps its feature or epic. A story under a feature that becomes a
-    feature moves under that feature's epic, since a feature cannot sit under
-    a feature. An epic has no parent to keep, so it never changes type.
+
+def change_type(record_id: str, new_kind: str, parent_id: str | None = None, clear_parent: bool = False) -> dict[str, Any]:
+    """Set an item's type and parent as chosen. Nothing is refused for its level or its children.
+
+    The only checks are that the item exists, the parent (if any) exists, and
+    an item is not made its own parent. A bug is a story with the bug subtype.
+    An epic with a parent keeps that parent in the row; the page is what offers
+    the choice, and the store keeps what it is given.
     """
     if new_kind not in KINDS + ("bug",):
         raise ValueError(f"unsupported type: {new_kind}")
+    target_kind = "story" if new_kind == "bug" else new_kind
+    subtype = "bug" if new_kind == "bug" else ""
     with _session() as connection:
         _write(connection)
         try:
             row = connection.execute(_SELECT + " WHERE item.id = ?", (record_id,)).fetchone()
             if row is None:
                 raise KeyError(f"Item not found: {record_id}")
-            old_kind = row["kind"]
-            if new_kind == "bug":
-                if old_kind != "story":
-                    raise ValueError("Only a story can become a bug")
-                connection.execute("UPDATE work_items SET subtype = 'bug' WHERE id = ?", (record_id,))
-                record = _row_to_record(connection.execute(_SELECT + " WHERE item.id = ?", (record_id,)).fetchone())
-                connection.execute("COMMIT")
-                return record
-            if new_kind == "story" and old_kind == "story":
-                connection.execute("UPDATE work_items SET subtype = 'story' WHERE id = ?", (record_id,))
-                record = _row_to_record(connection.execute(_SELECT + " WHERE item.id = ?", (record_id,)).fetchone())
-                connection.execute("COMMIT")
-                return record
-            if old_kind == new_kind:
-                raise ValueError(f"This item is already a {new_kind}")
-            if old_kind == "epic":
-                raise ValueError("An epic has no parent to keep, so it cannot change type")
-            if connection.execute(
-                "SELECT 1 FROM work_items WHERE parent_id = ? LIMIT 1", (record_id,)
-            ).fetchone():
-                raise ValueError("Move or remove this item's children before changing its type")
-            parent_id = row["parent_id"]
-            if new_kind == "epic":
-                parent_id, status = None, None
-            elif new_kind == "feature":
-                if row["parent_kind"] == "feature":
-                    parent_id = connection.execute(
-                        "SELECT parent_id FROM work_items WHERE id = ?", (parent_id,)
-                    ).fetchone()["parent_id"]
-                status = None
+            if parent_id is not None:
+                if parent_id == record_id:
+                    raise ValueError("An item cannot be its own parent")
+                if connection.execute("SELECT 1 FROM work_items WHERE id = ?", (parent_id,)).fetchone() is None:
+                    raise KeyError(f"Item not found: {parent_id}")
+                new_parent = parent_id
+            elif clear_parent or target_kind == "epic":
+                new_parent = None
             else:
-                status = row["status"] or "backlog"
+                new_parent = row["parent_id"]
+            status = None if target_kind in ("epic", "feature") else (row["status"] or "backlog")
             connection.execute(
-                "UPDATE work_items SET kind = ?, parent_id = ?, status = ?, position = ? WHERE id = ?",
-                (new_kind, parent_id, status, _next_position(connection), record_id),
+                "UPDATE work_items SET kind = ?, parent_id = ?, status = ?, subtype = ?, position = ? WHERE id = ?",
+                (target_kind, new_parent, status, subtype, _next_position(connection), record_id),
             )
-            record = _row_to_record(
-                connection.execute(_SELECT + " WHERE item.id = ?", (record_id,)).fetchone()
-            )
+            record = _row_to_record(connection.execute(_SELECT + " WHERE item.id = ?", (record_id,)).fetchone())
             connection.execute("COMMIT")
         except BaseException:
             connection.execute("ROLLBACK")
             raise
     return record
+
+
+def current_type(record_id: str) -> str:
+    """The type a row has now, as change_type accepts it: a bug stays a bug."""
+    with _session() as connection:
+        row = connection.execute(_SELECT + " WHERE item.id = ?", (record_id,)).fetchone()
+    if row is None:
+        raise KeyError(f"Item not found: {record_id}")
+    if row["kind"] == "story" and (row["subtype"] or "") == "bug":
+        return "bug"
+    return row["kind"]
+
+
+def kind_of(record_id: str) -> str:
+    """The kind a row is now, which may differ from the kind its URL was built with."""
+    with _session() as connection:
+        row = connection.execute("SELECT kind FROM work_items WHERE id = ?", (record_id,)).fetchone()
+    if row is None:
+        raise KeyError(f"Item not found: {record_id}")
+    return row["kind"]
 
 
 def update_epic(record_id: str, **changes: Any) -> dict[str, Any]:

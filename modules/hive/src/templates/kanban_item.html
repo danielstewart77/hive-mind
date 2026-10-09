@@ -30,11 +30,11 @@
   </form>
   <aside class="surface item-relations" id="item-relations" aria-label="Parent and children">
     <h2>Type</h2>
-    <div class="relation-row"><select id="type-choice" aria-label="Item type"></select><button class="button" type="button" id="type-save">Change type</button></div>
+    <div class="relation-row"><select id="type-choice" aria-label="Item type"></select></div>
     <hr>
     <h2>Parent</h2>
     <div id="parent-slot"></div>
-    <div class="relation-row"><select id="parent-choice" aria-label="Choose a parent"></select><button class="button" type="button" id="parent-add">Set parent</button></div>
+    <div class="relation-row"><select id="parent-choice" aria-label="Choose a parent"></select></div>
     <hr>
     <h2>Children</h2>
     <div id="children-slot"></div>
@@ -64,11 +64,8 @@
     } else {
       const none = document.createElement('p'); none.textContent = 'None (unassigned)'; parentSlot.append(none);
     }
-    const parentChoice = document.getElementById('parent-choice');
-    parentChoice.replaceChildren();
-    for (const c of r.choices) { const o = document.createElement('option'); o.value = c.id; o.textContent = `${kindName[c.kind || (c.epic_id !== undefined ? 'feature' : 'epic')] || 'Item'}: ${c.title}`; parentChoice.append(o); }
-    parentChoice.disabled = r.choices.length === 0;
-    document.getElementById('parent-add').disabled = r.choices.length === 0;
+    latestRelations = r;
+    fillParentChoices();
     const childChoice = document.getElementById('child-choice');
     childChoice.replaceChildren();
     for (const c of r.addable || []) { const o = document.createElement('option'); o.value = c.id; o.textContent = `${kindName[c.kind || 'story']}: ${c.title}`; o.dataset.kind = c.kind || ''; childChoice.append(o); }
@@ -98,12 +95,6 @@
     if (!response.ok) { feedback.textContent = `Not saved: ${(await response.json()).detail || response.status}`; return; }
     feedback.textContent = message; await loadRelations();
   }
-  document.getElementById('parent-add').addEventListener('click', () => {
-    const choice = document.getElementById('parent-choice').value;
-    if (!choice) return;
-    const field = page.dataset.itemKind === 'feature' ? 'epic_id' : (page.dataset.itemKind === 'story' ? 'feature_id' : null);
-    if (field) patch({[field]: choice}, 'Parent set.');
-  });
   document.getElementById('child-add').addEventListener('click', () => {
     const choice = document.getElementById('child-choice').value;
     if (!choice) return;
@@ -113,21 +104,27 @@
       .then(async r => { feedback.textContent = r.ok ? 'Child added.' : `Not saved: ${(await r.json()).detail || r.status}`; await loadRelations(); });
   });
   function currentType(){return page.dataset.itemKind==='story'&&page.dataset.itemSubtype==='bug'?'bug':page.dataset.itemKind;}
-  function fillTypes(){const sel=document.getElementById('type-choice');sel.replaceChildren();const kinds=page.dataset.itemKind==='epic'?['epic']:['epic','feature','story','bug'];for(const k of kinds){const o=document.createElement('option');o.value=k;o.textContent=k.charAt(0).toUpperCase()+k.slice(1);if(k===currentType())o.selected=true;sel.append(o);}}
-  document.getElementById('type-save').addEventListener('click', async () => {
-    const type = document.getElementById('type-choice').value;
-    if (type === currentType()) { feedback.textContent = 'Already that type.'; return; }
-    const kind = kinds[page.dataset.itemKind];
-    const response = await fetch(`/api/kanban/${kind}/${encodeURIComponent(itemId)}`, {method: 'PATCH', headers: {'Content-Type': 'application/json', 'Accept': 'application/json'}, body: JSON.stringify({type})});
-    if (!response.ok) { feedback.textContent = `Not changed: ${(await response.json()).detail || response.status}`; fillTypes(); return; }
-    window.location.reload();
-  });
+  let latestRelations = {parents_for_type: {}};
+  function fillParentChoices(){
+    const parentChoice = document.getElementById('parent-choice');
+    const options = latestRelations.all || [];
+    parentChoice.replaceChildren();
+    const none = document.createElement('option'); none.value = ''; none.textContent = 'No parent'; parentChoice.append(none);
+    for (const c of options) { if (c.id === itemId) continue; const o = document.createElement('option'); o.value = c.id; o.textContent = `${c.kind ? kindName[c.kind] : 'Item'}: ${c.title}`; o.selected = !!(latestRelations.parent && latestRelations.parent.id === c.id); parentChoice.append(o); }
+    parentChoice.disabled = false;
+  }
+  function fillTypes(){const sel=document.getElementById('type-choice');sel.replaceChildren();const kinds=['epic','feature','story','bug'];for(const k of kinds){const o=document.createElement('option');o.value=k;o.textContent=k.charAt(0).toUpperCase()+k.slice(1);if(k===currentType())o.selected=true;sel.append(o);}sel.onchange=fillParentChoices;}
   fillTypes();
   loadRelations();
 
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     const body = Object.fromEntries(new FormData(form).entries());
+    const type = document.getElementById('type-choice').value;
+    if (type !== currentType()) body.type = type;
+    const parent = document.getElementById('parent-choice').value;
+    const current = latestRelations.parent ? latestRelations.parent.id : '';
+    if (parent !== current) body.parent_id = parent || null;
     const url = `/api/kanban/${kinds[page.dataset.itemKind]}/${encodeURIComponent(page.dataset.itemId)}`;
     feedback.textContent = 'Saving…';
     try {

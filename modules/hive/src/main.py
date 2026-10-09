@@ -562,9 +562,9 @@ _KANBAN_CREATE_FIELDS = {
 }
 _KANBAN_METADATA_FIELDS = {"description", "requirements", "acceptance_criteria", "qa_tests"}
 _KANBAN_UPDATE_FIELDS = {
-    "epics": {"title", "before_id", "type"} | _KANBAN_METADATA_FIELDS,
-    "features": {"epic_id", "title", "before_id", "type"} | _KANBAN_METADATA_FIELDS,
-    "stories": {"title", "feature_id", "epic_id", "status", "before_id", "type"} | _KANBAN_METADATA_FIELDS,
+    "epics": {"title", "before_id", "type", "parent_id"} | _KANBAN_METADATA_FIELDS,
+    "features": {"epic_id", "title", "before_id", "type", "parent", "parent_id"} | _KANBAN_METADATA_FIELDS,
+    "stories": {"title", "feature_id", "epic_id", "status", "before_id", "type", "parent", "parent_id"} | _KANBAN_METADATA_FIELDS,
 }
 
 
@@ -610,6 +610,8 @@ async def api_kanban_data(user: dict = Depends(require_auth)):
 
 
 _COLLECTION_KIND = {"epics": "epic", "features": "feature", "stories": "story"}
+_PLURAL = {"epic": "epics", "feature": "features", "story": "stories"}
+_SINGULAR = {"epics": "epic", "features": "feature", "stories": "story"}
 
 
 @app.get("/api/kanban/{kind}/{record_id}/descendants")
@@ -623,7 +625,7 @@ async def api_kanban_descendants(kind: str, record_id: str, user: dict = Depends
     del user
     if kind not in _KANBAN_UPDATE_FIELDS:
         raise HTTPException(status_code=404, detail="Kanban resource not found")
-    return await _kanban_call(kanban_data.count_descendants, record_id, _COLLECTION_KIND[kind])
+    return await _kanban_call(kanban_data.count_descendants, record_id)
 
 
 @app.post("/api/kanban/epics")
@@ -646,15 +648,26 @@ async def api_kanban_update(kind: str, record_id: str, request: Request, user: d
     del user
     if kind not in _KANBAN_UPDATE_FIELDS:
         raise HTTPException(status_code=404, detail="Kanban resource not found")
-    body = await _kanban_body(request, _KANBAN_UPDATE_FIELDS[kind])
-    if "type" in body:
-        if len(body) > 1:
-            raise HTTPException(status_code=400, detail="Change the type on its own, then edit the fields")
-        return await _kanban_call(kanban_data.change_type, record_id, body["type"])
+    # The URL names the kind the page was built with; a type change may have moved the row since.
+    actual = _PLURAL[await _kanban_call(kanban_data.kind_of, record_id)]
+    body = await _kanban_body(request, _KANBAN_UPDATE_FIELDS[actual])
     if not body:
         raise HTTPException(status_code=400, detail="At least one update field is required")
-    entity = {"epics": "epic", "features": "feature", "stories": "story"}[kind]
-    return await _kanban_call(getattr(kanban_data, f"update_{entity}"), record_id, **body)
+    entity = _SINGULAR[actual]
+    # One save: the type and parent first, then the fields, so the page makes a single request.
+    changes = dict(body)
+    if "type" in changes or "parent_id" in changes:
+        clearing = "parent_id" in changes and changes["parent_id"] in (None, "")
+        chosen = None if clearing else changes.get("parent_id")
+        new_type = changes.pop("type", None) or await _kanban_call(kanban_data.current_type, record_id)
+        changes.pop("parent_id", None)
+        await _kanban_call(kanban_data.change_type, record_id, new_type, chosen, clearing)
+        changes.pop("parent", None)
+        if not changes:
+            return await _kanban_call(kanban_data.find_item, record_id)
+        actual = _PLURAL[await _kanban_call(kanban_data.kind_of, record_id)]
+        entity = _SINGULAR[actual]
+    return await _kanban_call(getattr(kanban_data, f"update_{entity}"), record_id, **changes)
 
 
 @app.delete("/api/kanban/{kind}/{record_id}")
@@ -662,8 +675,8 @@ async def api_kanban_delete(kind: str, record_id: str, user: dict = Depends(requ
     del user
     if kind not in _KANBAN_UPDATE_FIELDS:
         raise HTTPException(status_code=404, detail="Kanban resource not found")
-    entity = {"epics": "epic", "features": "feature", "stories": "story"}[kind]
-    return await _kanban_call(getattr(kanban_data, f"delete_{entity}"), record_id)
+    actual = _PLURAL[await _kanban_call(kanban_data.kind_of, record_id)]
+    return await _kanban_call(getattr(kanban_data, f"delete_{_SINGULAR[actual]}"), record_id)
 
 
 @app.get("/api/minds/install-options")

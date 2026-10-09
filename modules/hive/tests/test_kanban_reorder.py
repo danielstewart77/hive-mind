@@ -71,18 +71,17 @@ def test_a_childless_story_becoming_a_feature_moves_under_its_feature_epic():
     epic = store.create_epic("Epic")
     feature = store.create_feature(epic["id"], "Feature")
     story = store.create_story("Story", feature_id=feature["id"])
-    changed = store.change_type(story["id"], "feature")
+    changed = store.change_type(story["id"], "feature", epic["id"])
     assert changed["epic_id"] == epic["id"]
     assert [f["id"] for f in store.list_features()] == [feature["id"], story["id"]]
 
 
-def test_a_feature_with_children_cannot_change_type():
+def test_a_feature_with_children_changes_type_and_its_children_keep_their_parent():
     epic = store.create_epic("Epic")
     feature = store.create_feature(epic["id"], "Feature")
-    store.create_story("Child", feature_id=feature["id"])
-    with pytest.raises(ValueError, match="children"):
-        store.change_type(feature["id"], "story")
-    assert store.list_features()[0]["id"] == feature["id"]
+    child = store.create_story("Child", feature_id=feature["id"])
+    store.change_type(feature["id"], "story", epic["id"])
+    assert store.item_relations(child["id"])["parent"]["id"] == feature["id"]
 
 
 def test_a_story_becomes_a_feature_under_the_epic_it_sat_in_directly():
@@ -109,11 +108,12 @@ def test_a_story_can_become_a_bug_and_back_without_moving():
     assert store.list_stories()[0]["epic_id"] == epic["id"]
 
 
-def test_a_feature_cannot_become_a_bug():
+def test_a_feature_becomes_a_bug_under_the_epic_it_sat_in():
     epic = store.create_epic("Epic")
     feature = store.create_feature(epic["id"], "Feature")
-    with pytest.raises(ValueError, match="Only a story"):
-        store.change_type(feature["id"], "bug")
+    bug = store.change_type(feature["id"], "bug")
+    assert bug["subtype"] == "bug"
+    assert bug["epic_id"] == epic["id"]
 
 
 def test_removing_a_story_parent_leaves_the_story_unassigned_and_listed():
