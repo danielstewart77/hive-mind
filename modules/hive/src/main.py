@@ -517,6 +517,23 @@ async def kanban_backlog_page(request: Request):
     return _console_page(request, "kanban.html", view="backlog")
 
 
+@app.get("/api/kanban/relations/{record_id}")
+async def api_kanban_relations(record_id: str, user: dict = Depends(require_auth)):
+    del user
+    return await _kanban_call(kanban_data.item_relations, record_id)
+
+
+@app.get("/kanban/item/{record_id}", response_class=HTMLResponse)
+async def kanban_item_page(request: Request, record_id: str):
+    if not get_current_user_from_request(request):
+        return _login_redirect_for(request)
+    try:
+        record = await run_in_threadpool(kanban_data.find_item, record_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+    return _console_page(request, "kanban_item.html", item=record)
+
+
 @app.get("/edge-minds", response_class=HTMLResponse)
 async def edge_minds_page(request: Request):
     return _console_page(request, "edge_minds.html")
@@ -542,10 +559,11 @@ _KANBAN_CREATE_FIELDS = {
     "features": {"epic_id", "title"},
     "stories": {"title", "feature_id", "epic_id", "status"},
 }
+_KANBAN_METADATA_FIELDS = {"description", "requirements", "acceptance_criteria", "qa_tests"}
 _KANBAN_UPDATE_FIELDS = {
-    "epics": {"title"},
-    "features": {"epic_id", "title", "before_id"},
-    "stories": {"title", "feature_id", "epic_id", "status", "before_id"},
+    "epics": {"title", "before_id", "type"} | _KANBAN_METADATA_FIELDS,
+    "features": {"epic_id", "title", "before_id", "type"} | _KANBAN_METADATA_FIELDS,
+    "stories": {"title", "feature_id", "epic_id", "status", "before_id", "type"} | _KANBAN_METADATA_FIELDS,
 }
 
 
@@ -628,6 +646,10 @@ async def api_kanban_update(kind: str, record_id: str, request: Request, user: d
     if kind not in _KANBAN_UPDATE_FIELDS:
         raise HTTPException(status_code=404, detail="Kanban resource not found")
     body = await _kanban_body(request, _KANBAN_UPDATE_FIELDS[kind])
+    if "type" in body:
+        if len(body) > 1:
+            raise HTTPException(status_code=400, detail="Change the type on its own, then edit the fields")
+        return await _kanban_call(kanban_data.change_type, record_id, body["type"])
     if not body:
         raise HTTPException(status_code=400, detail="At least one update field is required")
     entity = {"epics": "epic", "features": "feature", "stories": "story"}[kind]

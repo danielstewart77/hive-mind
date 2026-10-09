@@ -1,0 +1,143 @@
+{% extends "layout.html" %}
+{% block title %}{{ item.title }} · Hive{% endblock %}
+{% block content %}
+<style>
+.item-page { max-width: 1100px; margin: 0 auto; display:grid; gap:1rem; }
+.item-layout { display:grid; grid-template-columns:minmax(0,1fr) 300px; gap:1rem; align-items:start; }
+.item-relations { display:grid; gap:.75rem; padding:1rem; }
+.item-relations h2 { font-size:1rem; margin:0; }
+.item-relations hr { border:0; border-top:1px solid var(--console-line, #333); margin:.25rem 0; }
+.relation-row { display:flex; gap:.4rem; align-items:center; min-width:0; }
+.relation-row span { min-width:0; overflow-wrap:anywhere; }
+.relation-row .button { flex:0 0 auto; padding:.25rem .5rem; font-size:.8rem; min-height:0; }
+.relation-row select { min-width:0; max-width:100%; }
+@media(max-width:800px){.item-layout{grid-template-columns:minmax(0,1fr)}}
+.item-field { display:grid; gap:.4rem; }
+.item-field textarea { min-height:110px; width:100%; }
+.item-actions { display:flex; gap:.5rem; align-items:center; }
+.item-feedback { min-height:1.5em; }
+</style>
+<main class="page item-page" id="item-page" data-item-id="{{ item.id }}" data-item-kind="{{ item.kind }}" data-item-subtype="{{ item.subtype or '' }}">
+  <nav><a href="/kanban/backlog">Back to backlog</a></nav>
+  <header><h1>{{ item.title }}</h1><p>{{ item.kind | capitalize }}</p></header>
+  <div class="item-layout">
+  <form id="item-form" class="surface item-field">
+    <label class="item-field">Description<textarea name="description">{{ item.description }}</textarea></label>
+    <label class="item-field">Requirements<textarea name="requirements">{{ item.requirements }}</textarea></label>
+    <label class="item-field">Acceptance criteria<textarea name="acceptance_criteria">{{ item.acceptance_criteria }}</textarea></label>
+    <label class="item-field">QA tests<textarea name="qa_tests">{{ item.qa_tests }}</textarea></label>
+    <div class="item-actions"><button class="button" type="submit">Save</button><span id="item-feedback" class="item-feedback" role="status" aria-live="polite"></span></div>
+  </form>
+  <aside class="surface item-relations" id="item-relations" aria-label="Parent and children">
+    <h2>Type</h2>
+    <div class="relation-row"><select id="type-choice" aria-label="Item type"></select><button class="button" type="button" id="type-save">Change type</button></div>
+    <hr>
+    <h2>Parent</h2>
+    <div id="parent-slot"></div>
+    <div class="relation-row"><select id="parent-choice" aria-label="Choose a parent"></select><button class="button" type="button" id="parent-add">Set parent</button></div>
+    <hr>
+    <h2>Children</h2>
+    <div id="children-slot"></div>
+    <div class="relation-row"><select id="child-choice" aria-label="Choose a child to add"></select><button class="button" type="button" id="child-add">Add child</button></div>
+  </aside>
+  </div>
+</main>
+<script>
+(() => {
+  'use strict';
+  const form = document.getElementById('item-form');
+  const feedback = document.getElementById('item-feedback');
+  const page = document.getElementById('item-page');
+  const kinds = {epic: 'epics', feature: 'features', story: 'stories'};
+  const itemId = page.dataset.itemId;
+  const kindName = {epic: 'Epic', feature: 'Feature', story: 'Story'};
+  async function loadRelations(){
+    const r = await (await fetch(`/api/kanban/relations/${encodeURIComponent(itemId)}`, {headers: {'Accept': 'application/json'}})).json();
+    const parentSlot = document.getElementById('parent-slot');
+    parentSlot.replaceChildren();
+    if (r.parent) {
+      const row = document.createElement('div'); row.className = 'relation-row';
+      const label = document.createElement('span'); label.textContent = r.parent.title;
+      const remove = document.createElement('button'); remove.className = 'button'; remove.type = 'button'; remove.textContent = 'Remove'; remove.setAttribute('aria-label', 'Remove parent');
+      remove.addEventListener('click', () => patch({parent: 'none'}, 'Parent removed.'));
+      row.append(label, remove); parentSlot.append(row);
+    } else {
+      const none = document.createElement('p'); none.textContent = 'None (unassigned)'; parentSlot.append(none);
+    }
+    const parentChoice = document.getElementById('parent-choice');
+    parentChoice.replaceChildren();
+    for (const c of r.choices) { const o = document.createElement('option'); o.value = c.id; o.textContent = `${kindName[c.kind || (c.epic_id !== undefined ? 'feature' : 'epic')] || 'Item'}: ${c.title}`; parentChoice.append(o); }
+    parentChoice.disabled = r.choices.length === 0;
+    document.getElementById('parent-add').disabled = r.choices.length === 0;
+    const childChoice = document.getElementById('child-choice');
+    childChoice.replaceChildren();
+    for (const c of r.addable || []) { const o = document.createElement('option'); o.value = c.id; o.textContent = `${kindName[c.kind || 'story']}: ${c.title}`; o.dataset.kind = c.kind || ''; childChoice.append(o); }
+    childChoice.disabled = !(r.addable || []).length;
+    document.getElementById('child-add').disabled = !(r.addable || []).length;
+    const childrenSlot = document.getElementById('children-slot');
+    childrenSlot.replaceChildren();
+    if (r.children.length === 0) { const none = document.createElement('p'); none.textContent = 'No children'; childrenSlot.append(none); }
+    for (const c of r.children) {
+      const row = document.createElement('div'); row.className = 'relation-row';
+      const label = document.createElement('span'); label.textContent = c.title;
+      const remove = document.createElement('button'); remove.className = 'button'; remove.type = 'button'; remove.textContent = 'Remove'; remove.setAttribute('aria-label', `Remove child ${c.title}`);
+      remove.addEventListener('click', () => patchChild(c, {parent: 'none'}, 'Child removed.'));
+      row.append(label, remove); childrenSlot.append(row);
+    }
+  }
+  async function patch(body, message){
+    const url = `/api/kanban/${kinds[page.dataset.itemKind]}/${encodeURIComponent(itemId)}`;
+    const response = await fetch(url, {method: 'PATCH', headers: {'Content-Type': 'application/json', 'Accept': 'application/json'}, body: JSON.stringify(body)});
+    if (!response.ok) { feedback.textContent = `Not saved: ${(await response.json()).detail || response.status}`; return; }
+    feedback.textContent = message; await loadRelations();
+  }
+  async function patchChild(child, body, message){
+    const kind = child.kind || (child.subtype !== undefined ? 'stories' : 'features');
+    const url = `/api/kanban/${kind}/${encodeURIComponent(child.id)}`;
+    const response = await fetch(url, {method: 'PATCH', headers: {'Content-Type': 'application/json', 'Accept': 'application/json'}, body: JSON.stringify(body)});
+    if (!response.ok) { feedback.textContent = `Not saved: ${(await response.json()).detail || response.status}`; return; }
+    feedback.textContent = message; await loadRelations();
+  }
+  document.getElementById('parent-add').addEventListener('click', () => {
+    const choice = document.getElementById('parent-choice').value;
+    if (!choice) return;
+    const field = page.dataset.itemKind === 'feature' ? 'epic_id' : (page.dataset.itemKind === 'story' ? 'feature_id' : null);
+    if (field) patch({[field]: choice}, 'Parent set.');
+  });
+  document.getElementById('child-add').addEventListener('click', () => {
+    const choice = document.getElementById('child-choice').value;
+    if (!choice) return;
+    const kind = page.dataset.itemKind === 'epic' ? (document.querySelector(`#child-choice option[value="${choice}"]`)?.dataset.kind === 'feature' ? 'features' : 'stories') : 'stories';
+    const field = page.dataset.itemKind === 'epic' ? 'epic_id' : 'feature_id';
+    fetch(`/api/kanban/${kind}/${encodeURIComponent(choice)}`, {method: 'PATCH', headers: {'Content-Type': 'application/json', 'Accept': 'application/json'}, body: JSON.stringify({[field]: itemId})})
+      .then(async r => { feedback.textContent = r.ok ? 'Child added.' : `Not saved: ${(await r.json()).detail || r.status}`; await loadRelations(); });
+  });
+  function currentType(){return page.dataset.itemKind==='story'&&page.dataset.itemSubtype==='bug'?'bug':page.dataset.itemKind;}
+  function fillTypes(){const sel=document.getElementById('type-choice');sel.replaceChildren();const kinds=page.dataset.itemKind==='epic'?['epic']:['epic','feature','story','bug'];for(const k of kinds){const o=document.createElement('option');o.value=k;o.textContent=k.charAt(0).toUpperCase()+k.slice(1);if(k===currentType())o.selected=true;sel.append(o);}}
+  document.getElementById('type-save').addEventListener('click', async () => {
+    const type = document.getElementById('type-choice').value;
+    if (type === currentType()) { feedback.textContent = 'Already that type.'; return; }
+    const kind = kinds[page.dataset.itemKind];
+    const response = await fetch(`/api/kanban/${kind}/${encodeURIComponent(itemId)}`, {method: 'PATCH', headers: {'Content-Type': 'application/json', 'Accept': 'application/json'}, body: JSON.stringify({type})});
+    if (!response.ok) { feedback.textContent = `Not changed: ${(await response.json()).detail || response.status}`; fillTypes(); return; }
+    window.location.reload();
+  });
+  fillTypes();
+  loadRelations();
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const body = Object.fromEntries(new FormData(form).entries());
+    const url = `/api/kanban/${kinds[page.dataset.itemKind]}/${encodeURIComponent(page.dataset.itemId)}`;
+    feedback.textContent = 'Saving…';
+    try {
+      const response = await fetch(url, {method: 'PATCH', headers: {'Content-Type': 'application/json', 'Accept': 'application/json'}, body: JSON.stringify(body)});
+      if (!response.ok) throw new Error((await response.json()).detail || `Request failed (${response.status})`);
+      feedback.textContent = 'Saved.';
+    } catch (err) {
+      feedback.textContent = `Not saved: ${err.message}`;
+    }
+  });
+})();
+</script>
+{% endblock %}

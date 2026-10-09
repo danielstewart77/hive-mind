@@ -27,7 +27,8 @@ def test_kanban_view_routes_require_authentication(monkeypatch):
 def test_backlog_uses_collapsible_items_and_drag_drop_hooks(signed_in):
     body = signed_in.get("/kanban/backlog")
     assert body.status_code == 200
-    assert "el('details'" in body.text
+    assert "kanban-toggle" in body.text
+    assert "/kanban/item/" in body.text
     assert "application/json" in body.text
     assert "before_id" in body.text
     assert "enableDrop" in body.text
@@ -83,3 +84,11 @@ def test_kanban_entry_point_sends_a_signed_in_browser_to_the_board_keeping_its_q
     response = signed_in.get("/kanban?epic=e1", follow_redirects=False)
     assert response.status_code == 303
     assert response.headers["location"] == "/kanban/board?epic=e1"
+
+
+def test_sidebar_marks_kanban_current_on_every_page_of_the_section(signed_in):
+    epic = signed_in.post("/api/kanban/epics", json={"title": "Nav epic"}).json()
+    for path in ("/kanban/board", "/kanban/backlog", f"/kanban/item/{epic['id']}"):
+        body = signed_in.get(path)
+        assert body.status_code == 200, path
+        assert '<a href="/kanban" class="console-nav-link is-active">' in body.text, path

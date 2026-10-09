@@ -26,6 +26,20 @@ def _board(client):
     return epic, feature, story
 
 
+def test_item_detail_page_loads_and_saves_metadata(client):
+    epic, _, _ = _board(client)
+    page = client.get(f"/kanban/item/{epic['id']}")
+    assert page.status_code == 200
+    assert "Description" in page.text
+    saved = client.patch(
+        f"/api/kanban/epics/{epic['id']}",
+        json={"description": "Purpose", "requirements": "Need", "acceptance_criteria": "Works", "qa_tests": "Check it"},
+    )
+    assert saved.status_code == 200
+    assert client.get("/api/kanban/data").json()["epics"][0]["qa_tests"] == "Check it"
+    assert client.get("/kanban/item/no-such-item").status_code == 404
+
+
 def test_data_api_migrates_an_existing_board_database(client):
     import os
     import sqlite3
@@ -225,3 +239,20 @@ def test_the_descendant_count_honours_the_kind_in_the_url(client):
         "features": 0,
         "stories": 0,
     }
+
+
+def test_item_relations_endpoint_lists_parent_children_and_choices(client):
+    epic, feature, story = _board(client)
+    relations = client.get(f"/api/kanban/relations/{story['id']}").json()
+    assert relations["parent"]["id"] == feature["id"]
+    assert relations["children"] == []
+    assert {c["id"] for c in relations["choices"]} >= {epic["id"], feature["id"]}
+
+
+def test_changing_an_item_type_through_the_api_follows_the_parent_rules(client):
+    epic, feature, story = _board(client)
+    changed = client.patch(f"/api/kanban/stories/{story['id']}", json={"type": "bug"})
+    assert changed.status_code == 200
+    assert changed.json()["subtype"] == "bug"
+    refused = client.patch(f"/api/kanban/features/{feature['id']}", json={"type": "bug"})
+    assert refused.status_code == 400
