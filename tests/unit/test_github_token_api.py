@@ -54,10 +54,8 @@ class TestSettingIt:
         """`git` and `gh` read their files per invocation, so the next
         subprocess has it — unlike a surface, which holds its token until it
         is recreated."""
-        monkeypatch.setattr(
-            github_token, "replace",
-            AsyncMock(return_value=_stored(configured=["~/.git-credentials"])),
-        )
+        replace = AsyncMock(return_value=_stored(configured=["~/.git-credentials"]))
+        monkeypatch.setattr(github_token, "replace", replace)
 
         response = client.put("/github-token", json={"token": GOOD}, headers=ADMIN)
 
@@ -67,6 +65,8 @@ class TestSettingIt:
         assert body["login"] == "danielstewart77"
         assert body["restart_required"] is False
         assert body["configured"] == ["~/.git-credentials"]
+        # The route must not truncate, mangle or substitute on the way.
+        assert replace.await_args.args[0] == GOOD
 
     def test_a_stored_token_is_what_the_next_harness_inherits(
         self, client, monkeypatch
@@ -119,6 +119,22 @@ class TestSettingIt:
         assert client.put("/github-token", json={}, headers=ADMIN).status_code == 400
         replace.assert_not_called()
 
+    def test_a_github_that_gave_no_verdict_is_not_a_bad_paste(
+        self, client, monkeypatch
+    ) -> None:
+        """503: nothing is wrong with what was pasted and nothing was stored.
+        A 400 would tell the operator their token is bad on GitHub's bad
+        afternoon."""
+        monkeypatch.setattr(
+            github_token, "replace",
+            AsyncMock(side_effect=github_token.TokenUnverifiable("GitHub answered 403")),
+        )
+
+        response = client.put("/github-token", json={"token": GOOD}, headers=ADMIN)
+
+        assert response.status_code == 503
+        assert response.json()["stored"] is False
+
     def test_an_unauthenticated_write_is_refused(self, client, monkeypatch) -> None:
         replace = AsyncMock(return_value=_stored())
         monkeypatch.setattr(github_token, "replace", replace)
@@ -149,16 +165,18 @@ class TestTheKeyThisStackCannotDoWithout:
         """The page offers a paste box on the strength of this, and offering
         one that always refuses is worse than offering none."""
         monkeypatch.delenv("GITHUB_TOKEN_KEYRING_KEY", raising=False)
-        monkeypatch.setattr(
-            github_token, "status",
-            AsyncMock(return_value=github_token.GithubTokenStatus(
-                stored=False, accepted=None, where="env",
-            )),
-        )
+        status = AsyncMock(return_value=_stored())
+        monkeypatch.setattr(github_token, "status", status)
 
         body = client.get("/github-token", headers=ADMIN).json()
 
         assert body["settable"] is False
+        # And it never asked: without a key of its own the fallback is the
+        # one `.env` every mind in this stack shares, so a hive-wide token in
+        # that file would have four minds all reporting stored, accepted and
+        # working as the same account.
+        status.assert_not_awaited()
+        assert body["stored"] is False
 
 
 class TestReadingIt:
@@ -186,6 +204,45 @@ class TestReadingIt:
         body = client.get("/github-token", headers=ADMIN).json()
 
         assert (body["stored"], body["accepted"]) == (True, False)
+
+    def test_a_mind_with_nothing_stored_says_so(self, client, monkeypatch) -> None:
+        """The other side of the boundary below: absent is absent, and the
+        remedy is a paste rather than a new token."""
+        monkeypatch.setattr(
+            github_token, "status",
+            AsyncMock(return_value=github_token.GithubTokenStatus(
+                stored=False, accepted=None, where="keyring:CYPHER_GITHUB_TOKEN",
+            )),
+        )
+
+        body = client.get("/github-token", headers=ADMIN).json()
+
+        assert (body["stored"], body["accepted"]) == (False, None)
+
+    def test_a_stored_token_with_no_verdict_is_neither(
+        self, client, monkeypatch
+    ) -> None:
+        """GitHub did not answer. Rendering that as refused is how a working
+        token gets revoked."""
+        monkeypatch.setattr(
+            github_token, "status",
+            AsyncMock(return_value=_stored(accepted=None, login="", detail="GitHub answered 403")),
+        )
+
+        body = client.get("/github-token", headers=ADMIN).json()
+
+        assert (body["stored"], body["accepted"]) == (True, None)
+
+    def test_the_read_reports_the_last_four_characters_and_nothing_more(
+        self, client, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(
+            github_token, "status", AsyncMock(return_value=_stored(preview="...1234")),
+        )
+
+        body = client.get("/github-token", headers=ADMIN).json()
+
+        assert body["preview"] == "...1234"
 
     def test_an_unauthenticated_read_is_refused(self, client, monkeypatch) -> None:
         """The read names the account this mind pushes as, on a port that

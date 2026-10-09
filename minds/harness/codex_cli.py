@@ -205,8 +205,14 @@ async def _startup() -> None:
     await _fetch_secrets_on_startup()
     # After the shared fetch, never before: this mind's own GitHub token
     # wins over the hive's, and `GH_TOKEN` from that fetch would
-    # otherwise shadow it on every spawn.
-    github_token_api.adopt_stored_token()
+    # otherwise shadow it on every spawn. Logged and never fatal, like
+    # every other thing on this path: an exception in a startup event
+    # aborts startup, and `restart: unless-stopped` turns that into a
+    # crash loop over a credential file.
+    try:
+        github_token_api.adopt_stored_token()
+    except Exception:  # noqa: BLE001
+        log.exception("could not adopt this mind's own GitHub token")
     asyncio.ensure_future(runtime_api.registration_loop(
         RUNTIME_PATH, mind_name=MIND_NAME, mind_id=MIND_ID, log=log
     ))

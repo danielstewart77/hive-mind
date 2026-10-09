@@ -30,6 +30,11 @@ services:
       # key name, so a mind falling back to the default would store its
       # token over another's and both would read as working and wrong.
       - GITHUB_TOKEN_KEYRING_KEY=EXAMPLE_GITHUB_TOKEN
+      # This mind's home is image layers nothing else reads and a rebuild
+      # deletes, so writing `git` and `gh`'s own files there is its own
+      # business. An edge mind shares a home with the person who owns the
+      # machine and must never be given this.
+      - GITHUB_TOKEN_CONFIGURES_TOOLS=1
     volumes:
       - ${HOST_PROJECT_DIR:-.}:/usr/src/app:rw
       - ${HOST_CLAUDE_DIR:-~/.claude}:/home/hivemind/.host-claude:ro
