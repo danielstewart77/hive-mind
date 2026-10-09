@@ -41,6 +41,7 @@ from minds.pty_attach import (
 from minds.pty_attach import teardown as teardown_pty
 from minds import (
     files_api,
+    github_token_api,
     models_api,
     runtime_api,
     skills_api,
@@ -455,6 +456,7 @@ skills_api.install_skills_routes(app, harness="claude_cli", mind_id=MIND_ID, log
 files_api.install_files_routes(app, harness="claude_cli", mind_id=MIND_ID, log=log)
 models_api.install_models_route(app, path=RUNTIME_PATH, mind_id=MIND_ID, log=log)
 surface_token_api.install_surface_token_routes(app, mind_id=MIND_ID, log=log)
+github_token_api.install_github_token_routes(app, mind_id=MIND_ID, log=log)
 
 
 async def _drain_stderr(proc: asyncio.subprocess.Process, session_id: str) -> None:
@@ -487,6 +489,10 @@ async def _kill_proc(proc: asyncio.subprocess.Process | None) -> None:
 @app.on_event("startup")
 async def _startup() -> None:
     await _fetch_secrets_on_startup()
+    # After the shared fetch, never before: this mind's own GitHub token
+    # wins over the hive's, and `GH_TOKEN` from that fetch would
+    # otherwise shadow it on every spawn.
+    github_token_api.adopt_stored_token()
     asyncio.ensure_future(runtime_api.registration_loop(
         RUNTIME_PATH, mind_name=MIND_NAME, mind_id=MIND_ID, log=log
     ))
