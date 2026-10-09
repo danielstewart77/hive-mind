@@ -319,3 +319,43 @@ class TestWhatAnUpstreamQuotesBack:
         assert str(refusal.value) == (
             "could not reach the bot API: unexpected mimetype, url='bot<token>/getMe'"
         )
+
+
+class TestADuplicatedKey:
+    @pytest.mark.asyncio
+    async def test_the_value_reported_is_the_one_the_process_would_load(
+        self, vault, project
+    ) -> None:
+        """`python-dotenv`, compose and the console's reader all take the
+        last. Reading the first reports a token — and a bot name — that
+        nothing has ever loaded."""
+        (project / ".env").write_text(
+            "TELEGRAM_BOT_TOKEN=" + PREVIOUS + "\nTELEGRAM_BOT_TOKEN=" + GOOD + "\n"
+        )
+
+        assert surface_token.stored_token() == GOOD
+
+
+class TestTheCopyTakenBeforeTruncating:
+    @pytest.mark.asyncio
+    async def test_the_previous_contents_are_kept_beside_the_file(
+        self, vault, project
+    ) -> None:
+        """In-place writing truncates first, so a kill or a full disk between
+        that and the write leaves a `.env` holding every secret this mind has,
+        empty — and the restore path needs the space it just ran out of."""
+        env = project / ".env"
+        env.write_text("TELEGRAM_BOT_TOKEN=" + PREVIOUS + "\nOTHER=keep\n")
+
+        await surface_token.replace(GOOD, session=_bot_api())
+
+        assert PREVIOUS in (project / ".env.prev").read_text()
+
+    @pytest.mark.asyncio
+    async def test_that_copy_is_owner_only(self, vault, project) -> None:
+        env = project / ".env"
+        env.write_text("TELEGRAM_BOT_TOKEN=" + PREVIOUS + "\n")
+
+        await surface_token.replace(GOOD, session=_bot_api())
+
+        assert (project / ".env.prev").stat().st_mode & 0o777 == 0o600

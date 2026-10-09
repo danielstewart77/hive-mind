@@ -34,7 +34,14 @@ from pathlib import Path
 
 import aiohttp
 
-from hive_surfaces.token_store import env_get, env_set, keyring_get, keyring_set, redact
+from hive_surfaces.token_store import (
+    env_get,
+    env_set,
+    keyring_get,
+    keyring_lock,
+    keyring_set,
+    redact,
+)
 
 #: The name a mind's token is stored under, and the variable naming a keyring
 #: key when the ambient environment is not where it belongs. Declared here and
@@ -43,6 +50,14 @@ from hive_surfaces.token_store import env_get, env_set, keyring_get, keyring_set
 TOKEN_ENV_VAR = "GITHUB_TOKEN"  # secret-guard: allow — a key name
 KEYRING_KEY_VAR = "GITHUB_TOKEN_KEYRING_KEY"  # secret-guard: allow — a variable name
 
+#: Whether this mind's home directory is its own to rewrite. Declared by the
+#: deployment rather than inferred from where the token is stored: a keyring
+#: key set on an edge install would otherwise have the mind truncating the
+#: operator's own `~/.git-credentials` and `gh` `hosts.yml` — two files the
+#: console already manages, whose other hosts and second accounts a
+#: single-block rewrite destroys.
+OWNS_HOME_VAR = "GITHUB_TOKEN_CONFIGURES_TOOLS"
+
 VERIFY_URL = "https://api.github.com/user"
 VERIFY_TIMEOUT_S = 15.0
 
@@ -50,7 +65,20 @@ GITHUB_HOST = "github.com"
 
 
 class TokenRefused(Exception):
-    """The token is malformed, or GitHub will not authenticate it."""
+    """GitHub explicitly rejected this token, or it is malformed.
+
+    The only state whose remedy is a new token, which is why it is a separate
+    exception from the one below.
+    """
+
+
+class TokenUnverifiable(Exception):
+    """GitHub did not answer, or answered something that is not a verdict.
+
+    A secondary rate limit, a 5xx, a DNS failure, a mind with no egress. Not
+    a refusal: a page that rendered this as one would have the operator
+    revoking a token that works, and nothing in the hive would say otherwise.
+    """
 
 
 @dataclass(frozen=True)
@@ -71,6 +99,11 @@ class GithubTokenStatus:
     where: str = ""  # "keyring:<key>" or "env", for the operator's own sake
     detail: str = ""
     configured: list[str] = field(default_factory=list)
+    #: The last four characters of the stored value, so a row can show which
+    #: token this is without the console ever holding one. Never more: four
+    #: characters identify a token to the person who pasted it and
+    #: authenticate as nobody.
+    preview: str = ""
 
 
 def storage_location() -> tuple[str, str]:
@@ -83,6 +116,16 @@ def storage_location() -> tuple[str, str]:
     if named:
         return "keyring", named
     return "env", TOKEN_ENV_VAR
+
+
+def owns_its_home() -> bool:
+    """Whether writing `git` and `gh`'s own files here is this mind's business.
+
+    True in a container, whose home is image layers nothing else reads and a
+    rebuild deletes. False everywhere else, by default: an edge mind shares a
+    home with the person who owns the machine.
+    """
+    return os.environ.get(OWNS_HOME_VAR, "").strip().lower() in {"1", "true", "yes"}
 
 
 def where_label() -> str:
@@ -118,10 +161,14 @@ def _reject_unusable(token: str) -> None:
 async def verify(token: str, session: aiohttp.ClientSession | None = None) -> str:
     """The GitHub account this token authenticates as.
 
-    Raises `TokenRefused` when GitHub will not take it. This is the whole
-    reason the write is not a blind store: a token with a character missing is
-    accepted by any file, and the symptom arrives later as a push that fails
-    for a mind nobody is watching.
+    Raises `TokenRefused` when GitHub rejected it and `TokenUnverifiable`
+    when GitHub did not answer at all. Two exceptions because they are two
+    situations: one is a token to replace, the other is a verifier to wait
+    for, and folding them together is how a working token gets revoked.
+
+    Verification at all because a token with a character missing is accepted
+    by any file, and the symptom arrives later as a push that fails for a
+    mind nobody is watching.
     """
     _reject_unusable(token)
 
@@ -140,19 +187,35 @@ async def verify(token: str, session: aiohttp.ClientSession | None = None) -> st
             if response.status == 401:
                 raise TokenRefused("GitHub rejected that token")
             if response.status != 200:
-                raise TokenRefused(f"GitHub answered {response.status}")
+                # Including 403, which is how a secondary rate limit arrives
+                # and which says nothing whatever about the token.
+                raise TokenUnverifiable(f"GitHub answered {response.status}")
             body = await response.json(content_type=None)
             return str((body or {}).get("login") or "")
-    except TokenRefused:
+    except (TokenRefused, TokenUnverifiable):
         raise
     except Exception as exc:  # noqa: BLE001
         # Redacted for the same reason the bot API's errors are: this text is
         # logged by the mind and returned to the console, and an upstream is
         # free to quote whatever it was given back at us.
-        raise TokenRefused(f"could not reach GitHub: {redact(str(exc), token)}") from None
+        raise TokenUnverifiable(
+            f"could not reach GitHub: {redact(str(exc), token)}"
+        ) from None
     finally:
         if owns_session:
             await session.close()
+
+
+def preview_of(token: str) -> str:
+    """The last four characters, or nothing. Never the token.
+
+    Four characters tell the person who pasted it which token this is and
+    authenticate as nobody. A short value gets stars rather than most of
+    itself.
+    """
+    if not token:
+        return ""
+    return f"...{token[-4:]}" if len(token) > 4 else "****"
 
 
 def _home() -> Path:
@@ -190,30 +253,40 @@ def configure_tools(token: str, login: str) -> list[str]:
     a hand-appended section is how a mind ends up with two `[credential]`
     blocks and no helper.
 
-    Returns the paths it wrote. A `git` that is not installed is not an error:
-    the token is stored either way, and a mind with no git had nothing to
-    configure.
+    Returns the paths it wrote and never raises. By the time this runs the
+    token is already in the keyring, so an unwritable home would otherwise
+    answer the caller with a failure over a token that was in fact stored —
+    and the operator would paste it again, or worse, conclude it had not
+    taken. What could not be written is reported instead.
     """
     written: list[str] = []
 
     account = login or "x-access-token"
-    _write_private(
-        git_credentials_path(),
-        f"https://{account}:{token}@{GITHUB_HOST}\n",  # secret-guard: allow — template, not a value
-    )
-    written.append(str(git_credentials_path()))
+    try:
+        _write_private(
+            git_credentials_path(),
+            f"https://{account}:{token}@{GITHUB_HOST}\n",  # secret-guard: allow — template, not a value
+        )
+    except OSError as exc:
+        written.append(f"{git_credentials_path()} could not be written: {exc.strerror or exc}")
+    else:
+        written.append(str(git_credentials_path()))
 
-    _write_private(
-        gh_hosts_path(),
-        f"{GITHUB_HOST}:\n"
-        f"    oauth_token: {token}\n"
-        f"    user: {account}\n"
-        "    git_protocol: https\n"
-        "    users:\n"
-        f"        {account}:\n"
-        f"            oauth_token: {token}\n",
-    )
-    written.append(str(gh_hosts_path()))
+    try:
+        _write_private(
+            gh_hosts_path(),
+            f"{GITHUB_HOST}:\n"
+            f"    oauth_token: {token}\n"
+            f"    user: {account}\n"
+            "    git_protocol: https\n"
+            "    users:\n"
+            f"        {account}:\n"
+            f"            oauth_token: {token}\n",
+        )
+    except OSError as exc:
+        written.append(f"{gh_hosts_path()} could not be written: {exc.strerror or exc}")
+    else:
+        written.append(str(gh_hosts_path()))
 
     try:
         subprocess.run(
@@ -236,11 +309,23 @@ async def status(session: aiohttp.ClientSession | None = None) -> GithubTokenSta
     token = stored_token()
     if not token:
         return GithubTokenStatus(stored=False, accepted=None, where=where)
+    tail = preview_of(token)
     try:
         login = await verify(token, session=session)
     except TokenRefused as exc:
-        return GithubTokenStatus(stored=True, accepted=False, where=where, detail=str(exc))
-    return GithubTokenStatus(stored=True, accepted=True, login=login, where=where)
+        return GithubTokenStatus(
+            stored=True, accepted=False, where=where, detail=str(exc), preview=tail,
+        )
+    except TokenUnverifiable as exc:
+        # Stored, and no verdict. `accepted=None` beside `stored=True` is a
+        # third answer the console renders as "could not tell" rather than as
+        # a refusal, whose remedy would be to revoke a working token.
+        return GithubTokenStatus(
+            stored=True, accepted=None, where=where, detail=str(exc), preview=tail,
+        )
+    return GithubTokenStatus(
+        stored=True, accepted=True, login=login, where=where, preview=tail,
+    )
 
 
 async def replace(
@@ -256,8 +341,14 @@ async def replace(
     kind, name = storage_location()
     configured: list[str] = []
     if kind == "keyring":
-        keyring_set(name, token)
-        configured = configure_tools(token, login)
+        # One lock across both, not one per write. Two overlapping stores
+        # otherwise leave the keyring holding the second token while the
+        # credential files hold the first: the mind pushes as one account and
+        # reports the other, and nothing on either side disagrees.
+        with keyring_lock():
+            keyring_set(name, token, locked=True)
+            if owns_its_home():
+                configured = configure_tools(token, login)
     else:
         env_set(token, name)
     return GithubTokenStatus(
@@ -266,6 +357,7 @@ async def replace(
         login=login,
         where=where_label(),
         configured=configured,
+        preview=preview_of(token),
     )
 
 
@@ -277,6 +369,8 @@ def apply_stored() -> list[str]:
     this runs while the mind is coming up, and a GitHub that is unreachable
     must not delay that or discard a token that is probably fine.
     """
+    if not owns_its_home():
+        return []
     kind, _name = storage_location()
     if kind != "keyring":
         return []

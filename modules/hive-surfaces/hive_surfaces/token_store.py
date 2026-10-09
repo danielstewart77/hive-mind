@@ -154,15 +154,22 @@ def env_path() -> Path:
 
 
 def keyring_get(key: str) -> str:
+    """Read `key`, excluded from writers rewriting the config whole.
+
+    `keyrings.alt` rewrites its entire config file on every write, so an
+    unlocked read lands on a truncated file and returns nothing — a mind
+    reporting no token stored, or a bot starting with none.
+    """
     try:
         import keyring
 
-        return keyring.get_password(_KEYRING_SERVICE, key) or ""
+        with keyring_lock(shared=True):
+            return keyring.get_password(_KEYRING_SERVICE, key) or ""
     except Exception:  # noqa: BLE001
         return ""
 
 
-def keyring_set(key: str, token: str) -> None:
+def keyring_set(key: str, token: str, locked: bool = False) -> None:
     """Store `token` under `key`, serialized against every other writer.
 
     The stack's backend is a single plaintext file shared by every mind on the
@@ -175,12 +182,16 @@ def keyring_set(key: str, token: str) -> None:
     """
     import keyring
 
-    with _keyring_lock():
+    if locked:
+        # The caller holds it across more than this write.
+        keyring.set_password(_KEYRING_SERVICE, key, token)
+        return
+    with keyring_lock():
         keyring.set_password(_KEYRING_SERVICE, key, token)
 
 
 @contextmanager
-def _keyring_lock() -> Iterator[None]:
+def keyring_lock(shared: bool = False) -> Iterator[None]:
     root = Path(os.environ.get("KEY_RING") or Path.home() / ".local" / "share")
     try:
         root.mkdir(parents=True, exist_ok=True)
@@ -192,7 +203,7 @@ def _keyring_lock() -> Iterator[None]:
         yield
         return
     try:
-        fcntl.flock(handle, fcntl.LOCK_EX)
+        fcntl.flock(handle, fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
         yield
     finally:
         try:
@@ -219,11 +230,16 @@ def env_get(env_var: str = _ENV_VAR) -> str:
             text = handle.read()
     except OSError:
         return ""
+    # The last occurrence, not the first. `python-dotenv`, docker compose and
+    # the console's own reader all take the last, and a hand-edited file
+    # carrying a stale duplicate is exactly where reading the first reports a
+    # value — and an account — that nothing has ever loaded.
+    found = ""
     for line in text.splitlines():
         stripped = line.strip()
         if stripped.startswith(f"{env_var}="):
-            return stripped.split("=", 1)[1].strip().strip("'\"")
-    return ""
+            found = stripped.split("=", 1)[1].strip().strip("'\"")
+    return found
 
 
 def env_set(token: str, env_var: str = _ENV_VAR) -> None:
@@ -244,6 +260,59 @@ def env_set(token: str, env_var: str = _ENV_VAR) -> None:
     original text goes back in that case, and the failure is raised either way.
     """
     path = env_path()
+    # The whole read-modify-write under one `flock` on the file itself. The
+    # console mounts this same `.env` read-write and rotates shared secrets in
+    # it from another process entirely, so two writers each read the original
+    # and each write their own whole file — and the loser's key is simply gone,
+    # with both reporting success. A thread lock cannot see across processes.
+    with _env_lock(path):
+        _env_set_locked(path, token, env_var)
+
+
+@contextmanager
+def _env_lock(path: Path) -> Iterator[None]:
+    """Exclude every other writer of this `.env`, in any process."""
+    try:
+        handle = os.open(
+            path.parent / f"{path.name}.lock", os.O_WRONLY | os.O_CREAT, 0o600
+        )
+    except OSError:
+        yield
+        return
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+        finally:
+            os.close(handle)
+
+
+def _backup_env(path: Path, text: str) -> None:
+    """A 0600 copy beside the file, before it is truncated.
+
+    In-place writing means `open(path, "w")` truncates first, so a kill, an
+    OOM or a full disk between that and the write leaves a `.env` holding
+    every secret this mind has, empty. The restore path needs the space it
+    just ran out of; this copy does not.
+    """
+    try:
+        handle = os.open(
+            path.parent / f"{path.name}.prev",
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+            0o600,
+        )
+    except OSError:
+        return
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8", newline="") as out:
+            out.write(text)
+    except OSError:
+        pass
+
+
+def _env_set_locked(path: Path, token: str, env_var: str) -> None:
     try:
         with open(path, encoding="utf-8", newline="") as handle:
             original = handle.read()
@@ -268,6 +337,8 @@ def env_set(token: str, env_var: str = _ENV_VAR) -> None:
 
     updated = "".join(out)
     existed = path.exists()
+    if existed:
+        _backup_env(path, original)
     if not existed:
         # A file this process is creating has no inode worth preserving and no
         # mode to inherit. 0600 on the open itself: the window between a 0644
