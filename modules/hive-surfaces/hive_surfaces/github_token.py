@@ -40,6 +40,7 @@ from hive_surfaces.token_store import (
     keyring_get,
     keyring_lock,
     keyring_set,
+    preview_of,
     redact,
 )
 
@@ -204,18 +205,6 @@ async def verify(token: str, session: aiohttp.ClientSession | None = None) -> st
     finally:
         if owns_session:
             await session.close()
-
-
-def preview_of(token: str) -> str:
-    """The last four characters, or nothing. Never the token.
-
-    Four characters tell the person who pasted it which token this is and
-    authenticate as nobody. A short value gets stars rather than most of
-    itself.
-    """
-    if not token:
-        return ""
-    return f"...{token[-4:]}" if len(token) > 4 else "****"
 
 
 def _home() -> Path:

@@ -131,6 +131,17 @@ class TokenStatus:
     bot_username: str = ""
     where: str = ""  # "keyring:<key>" or "env", for the operator's own sake
     detail: str = ""
+    #: The last four characters of the stored value, so a row can say which
+    #: token this is. Four characters identify it to the person who pasted it
+    #: and authenticate as nobody.
+    preview: str = ""
+
+
+def preview_of(token: str) -> str:
+    """The last four characters, or nothing. Never the token."""
+    if not token:
+        return ""
+    return f"...{token[-4:]}" if len(token) > 4 else "****"
 
 
 def storage_location(surface: str = DEFAULT_SURFACE) -> tuple[str, str]:
@@ -428,14 +439,15 @@ async def status(
     token = stored_token(surface)
     if not token:
         return TokenStatus(stored=False, accepted=None, where=where)
+    tail = preview_of(token)
     try:
         username = await verify(token, session=session)
     except TokenRefused as exc:
         return TokenStatus(
-            stored=True, accepted=False, where=where, detail=str(exc),
+            stored=True, accepted=False, where=where, detail=str(exc), preview=tail,
         )
     return TokenStatus(
-        stored=True, accepted=True, bot_username=username, where=where,
+        stored=True, accepted=True, bot_username=username, where=where, preview=tail,
     )
 
 
@@ -461,4 +473,5 @@ async def replace(
         accepted=True,
         bot_username=username,
         where=f"keyring:{name}" if kind == "keyring" else "env",
+        preview=preview_of(token),
     )

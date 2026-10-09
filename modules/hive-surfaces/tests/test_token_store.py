@@ -359,3 +359,17 @@ class TestTheCopyTakenBeforeTruncating:
         await surface_token.replace(GOOD, session=_bot_api())
 
         assert (project / ".env.prev").stat().st_mode & 0o777 == 0o600
+
+
+class TestWhatARowCanShow:
+    @pytest.mark.asyncio
+    async def test_a_stored_token_reports_its_last_four_characters(
+        self, vault, project
+    ) -> None:
+        """So the row can say which token it is without the console ever
+        holding one."""
+        (project / ".env").write_text("TELEGRAM_BOT_TOKEN=" + GOOD + "\n")
+
+        state = await surface_token.status(session=_bot_api())
+
+        assert state.preview == "..." + GOOD[-4:]
