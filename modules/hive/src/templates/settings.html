@@ -330,7 +330,7 @@ window.addEventListener("DOMContentLoaded", function () {
             try {
                 const result = await h.requestJson("/api/minds/" + encodeURIComponent(holder) + "/" + route, {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({token: token})});
                 const who = result.login || result.bot_username || "unknown";
-                window.alert("Stored on " + holder + ", authenticating as " + who + "." + (result.restart_required ? "\n\nThis mind keeps the value it booted with until it is restarted." : ""));
+                window.alert("Stored on " + holder + ", authenticating as " + who + "." + (result.restart_required ? "\n\nThis mind keeps the value it booted with until it is restarted." : (result.note ? "\n\n" + result.note : "")));
                 await loadCredentials(false);
             } catch (error) { window.alert(error.message); setRowButton.disabled = false; setRowButton.textContent = "Save"; }
         }

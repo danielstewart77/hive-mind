@@ -772,5 +772,7 @@ async def check(credential: str, holder: str, minds: list[dict]) -> dict[str, An
         "present": entry.present,
         "names": entry.names,
         "where": entry.where,
+        "preview": entry.preview,
+        "settable": entry.settable,
         **_checked_fields(entry),
     }

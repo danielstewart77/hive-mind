@@ -3862,6 +3862,17 @@ async def api_mind_github_token_set(
         "login": str(state.get("login") or ""),
         "where": str(state.get("where") or ""),
         "configured": state.get("configured") or [],
+        # `git` reads its file per invocation and a newly spawned harness
+        # inherits the new value, but a conversation already running kept the
+        # one it booted with — `gh` prefers that variable over its own hosts
+        # file. Said here rather than left for the operator to discover when
+        # a push in an open session authenticates as the previous account.
+        "note": (
+            "git has it now, and so will the next harness this mind spawns. A "
+            "conversation already running keeps the token it started with."
+            if not state.get("restart_required")
+            else ""
+        ),
         # `git` and `gh` read their files per invocation, so a container mind
         # needs nothing bounced. An edge mind read its environment at boot.
         "restart_required": bool(state.get("restart_required")),

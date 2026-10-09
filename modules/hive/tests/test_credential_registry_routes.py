@@ -452,3 +452,46 @@ class TestWhatTheRouteRelaysBack:
 
         assert body["restart_required"] is True
         assert "restarted" in registry.recall("mind_github_token", "skippy").detail
+
+
+class TestWhatAStoreSaysAboutWhatIsRunning:
+    def test_a_container_mind_is_told_what_an_open_conversation_still_holds(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """`git` reads its file per invocation and a newly spawned harness
+        inherits the new value, but a conversation already running keeps the
+        one it booted with — `gh` prefers that variable over its hosts file.
+        Left unsaid, the operator discovers it when a push in an open session
+        authenticates as the previous account."""
+        client = _authed_client(tmp_path, monkeypatch)
+        registry.forget_all()
+        pushed = AsyncMock(return_value={
+            "login": "danielstewart77", "where": "keyring:CYPHER_GITHUB_TOKEN",
+            "restart_required": False,
+        })
+        with patch.object(
+            main_mod, "_mind_gateway_url", AsyncMock(return_value="http://cypher:8420")
+        ), patch.object(main_mod.mind_runtime, "push_github_token", pushed):
+            body = client.put(
+                "/api/minds/cypher/github-token", json={"token": "ghp_pasted"}
+            ).json()
+
+        assert "already running" in body["note"]
+
+    def test_an_edge_mind_owed_a_restart_is_not_also_told_that(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        client = _authed_client(tmp_path, monkeypatch)
+        registry.forget_all()
+        pushed = AsyncMock(return_value={
+            "login": "danielstewart77", "where": "env", "restart_required": True,
+        })
+        with patch.object(
+            main_mod, "_mind_gateway_url", AsyncMock(return_value="http://skippy:8420")
+        ), patch.object(main_mod.mind_runtime, "push_github_token", pushed):
+            body = client.put(
+                "/api/minds/skippy/github-token", json={"token": "ghp_pasted"}
+            ).json()
+
+        assert body["note"] == ""
+        assert body["restart_required"] is True

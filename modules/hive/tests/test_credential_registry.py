@@ -661,3 +661,26 @@ class TestWhatIsForgotten:
         assert registry.is_declared("mind_github_token") is True
         assert registry.is_declared("comms_bearer_token") is True
         assert registry.is_declared("not_a_credential") is False
+
+
+class TestWhatACheckHandsBack:
+    def test_it_carries_the_tail_the_holder_reported(
+        self, tmp_path, monkeypatch, network
+    ) -> None:
+        """The page redraws the row from this answer, so a field missing here
+        is a Value column that stays empty over a token that is stored."""
+        _patch_env_files(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            "mind_runtime.admin_headers", lambda: {"Authorization": "Bearer a"}
+        )
+        network["cypher:8420"] = (
+            200,
+            {"stored": True, "accepted": True, "login": "dan", "preview": "...wxyz"},
+        )
+
+        answer = _run(registry.check(
+            "mind_github_token", "cypher", [_mind("cypher", "http://cypher:8420")]
+        ))
+
+        assert answer["preview"] == "...wxyz"
+        assert answer["settable"] is True
