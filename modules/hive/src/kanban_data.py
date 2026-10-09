@@ -183,6 +183,7 @@ def _row_to_record(row: sqlite3.Row) -> dict[str, Any]:
 
     if row["kind"] == "feature":
         record["epic_id"] = row["parent_id"]
+        record["parent_id"] = row["parent_id"]
     elif row["kind"] == "story":
         if row["parent_kind"]:
             record[f"{row['parent_kind']}_id"] = row["parent_id"]
