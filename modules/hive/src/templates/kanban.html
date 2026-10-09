@@ -204,7 +204,7 @@
       catch(err){await reload(`Move failed: ${err.message}`);}
     });
   }
-  function makeDraggable(node,kind,id){node.draggable=true;node.addEventListener('dragstart',e=>{if(e.target!==node)return;e.stopPropagation();e.dataTransfer.setData('application/json',JSON.stringify({kind,id}));e.dataTransfer.effectAllowed='move';});}
+  function makeDraggable(node,kind,id){node.draggable=true;node.addEventListener('dragstart',e=>{if(e.target.closest&&e.target.closest('button,select,textarea,input,a')&&e.target!==node)return;e.stopPropagation();e.dataTransfer.setData('application/json',JSON.stringify({kind,id}));e.dataTransfer.effectAllowed='move';});}
   const EXPANDED_KEY='kanban-expanded-items';
   function loadExpanded(){try{return new Set(JSON.parse(localStorage.getItem(EXPANDED_KEY)||'[]'));}catch{return new Set();}}
   function saveExpanded(set){try{localStorage.setItem(EXPANDED_KEY,JSON.stringify([...set]));}catch{}}
