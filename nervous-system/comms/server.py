@@ -27,7 +27,7 @@ from comms.broker import check_secret_scope, get_secret_scopes, grant_secret_sco
 from comms.network_identity import resolve_container_name
 from comms.secrets import get_credential
 import comms.sessions as sessions
-from comms.sessions import SessionManager
+from comms.sessions import SessionManager, normalise_harness
 from hive_logging import configure_logging, install_fastapi_logging, log_event
 
 log = configure_logging("hive-mind.server")
@@ -431,6 +431,9 @@ class ArmRotationRequest(BaseModel):
     # that knows one is there. Absent means a chat surface, which is what
     # every caller predating the staged path is.
     surface: str = ""
+    # The conversation the hook measured. An arm for one a harness switch
+    # has since replaced is ignored; absent means a hook predating it.
+    claude_sid: str = ""
 
 
 class FireRotationRequest(BaseModel):
@@ -471,6 +474,7 @@ async def arm_rotation(body: ArmRotationRequest):
     """
     return await session_mgr.arm_rotation(
         body.client_type, body.client_ref, surface=body.surface,
+        claude_sid=body.claude_sid,
     )
 
 
@@ -955,6 +959,9 @@ async def ws_attach(ws: WebSocket, session_id: str):
         # The conversation's effort, so a pane runs at what `/effort` set
         # rather than the harness's configured level.
         "effort": session.get("effort") or "",
+        # The conversation's harness: a pane opens the CLI the conversation
+        # is on, which a switch may have moved off the mind's default.
+        "harness": await session_mgr.conversation_harness(session) or "",
         # Initial pty geometry from the browser tile, so the TUI's first
         # paint matches; live changes arrive as resize control frames.
         "cols": ws.query_params.get("cols") or "80",
@@ -1063,7 +1070,7 @@ async def ws_attach(ws: WebSocket, session_id: str):
 # ---------------------------------------------------------------------------
 # Slash command routing (used by clients)
 # ---------------------------------------------------------------------------
-SERVER_COMMANDS = {"/clear", "/model", "/autopilot", "/kill", "/prune", "/status", "/sessions", "/switch", "/new", "/remember"}
+SERVER_COMMANDS = {"/clear", "/model", "/effort", "/harness", "/autopilot", "/kill", "/prune", "/status", "/sessions", "/switch", "/new", "/remember"}
 
 
 class CommandRequest(BaseModel):
@@ -1165,8 +1172,13 @@ async def _handle_command(cmd: str, parts: list[str], body: CommandRequest):
             # and the mind's configured default is a different fact — on an
             # edge install it is a pre-proxy alias that matches no deployment
             # name in the catalog at all, so marking that marked nothing.
+            # The conversation's own harness's listing: a model offered to
+            # one harness can be withheld from another.
             return {
-                "models": await session_mgr.mind_models(active["mind_id"]),
+                "models": await session_mgr.mind_models(
+                    active["mind_id"],
+                    harness=await session_mgr.conversation_harness(active),
+                ),
                 "current": active.get("model"),
             }
         model_name = parts[1]
@@ -1188,6 +1200,29 @@ async def _handle_command(cmd: str, parts: list[str], body: CommandRequest):
             return await session_mgr.set_effort(active["id"], parts[1])
         except ValueError as exc:
             return {"error": str(exc)}
+
+    if cmd == "/harness":
+        # Bare: what the mind offers, unavailable ones with their reason, and
+        # where this conversation is. With a harness: that harness's models,
+        # since the switch lands only once one is picked. With both: switch.
+        active = await session_mgr.get_active_session(body.owner_type, body.client_ref)
+        if not active:
+            return {"error": "No active session. Use /new first."}
+        if len(parts) < 2:
+            listing = await session_mgr.mind_harnesses(active["mind_id"])
+            if listing is None:
+                return {"error": "Couldn't read which harnesses this mind offers right now."}
+            return {
+                "harnesses": listing["harnesses"],
+                "current": await session_mgr.conversation_harness(active),
+            }
+        harness = normalise_harness(parts[1])
+        if len(parts) < 3:
+            return {
+                "models": await session_mgr.mind_models(active["mind_id"], harness=harness),
+                "harness": harness,
+            }
+        return await session_mgr.switch_harness(active["id"], harness, parts[2])
 
     if cmd == "/autopilot":
         active = await session_mgr.get_active_session(body.owner_type, body.client_ref)

@@ -157,7 +157,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     context_threshold INTEGER,
     context_window INTEGER,
     context_observed_at REAL,
-    effort        TEXT
+    effort        TEXT,
+    harness       TEXT
 );
 
 CREATE TABLE IF NOT EXISTS active_sessions (
@@ -227,6 +228,10 @@ ROTATION_ARMED_TERMINAL = 2
 # the move.
 MAX_SESSION_NAME_CHARS = 40
 
+# The most a handover may weigh, in bytes. The same ceiling a terminal
+# rotation's seed is trimmed to, because a handover travels the same way.
+HANDOVER_MAX_BYTES = 120_000
+
 # A tile colour is a free hex value picked in the browser, and it is assigned
 # straight into a style attribute on the way back out. Validated here rather
 # than at the surface that happens to be asking: the check used to live in the
@@ -241,6 +246,32 @@ def effort_levels_of(model_row: dict | None) -> list[str]:
     if not isinstance(levels, list):
         return []
     return [str(level) for level in levels if isinstance(level, str) and level]
+
+
+def normalise_harness(value: str | None) -> str:
+    """A harness as the bare name every caller speaks: claude, codex, dsh.
+
+    The broker row holds the mind's adapter module (`claude_cli`,
+    `codex_cli`, `dsh_cli`) because that is what a mind registers; a
+    conversation, a spawn and a command all name the harness itself.
+    """
+    return str(value or "").strip().lower().split("_", 1)[0]
+
+
+def handover_budget_bytes(context_window: Any) -> int:
+    """How much rendered transcript a handover may carry into `context_window`.
+
+    Half the window at four bytes a token, and never past the byte ceiling a
+    single opening turn can be delivered at; a window nobody measured gets
+    the ceiling.
+    """
+    try:
+        window = int(context_window or 0)
+    except (TypeError, ValueError):
+        window = 0
+    if window <= 0:
+        return HANDOVER_MAX_BYTES
+    return min(HANDOVER_MAX_BYTES, window * 4 // 2)
 
 
 def _public_session_row(row) -> dict:
@@ -407,6 +438,16 @@ class SessionManager:
             await self._db.commit()
         except Exception:
             pass  # Column already exists
+        # The harness this conversation runs on, as a bare name. A property
+        # of the conversation like its model: written at creation from the
+        # mind's default, carried by a rotation, changed only by a switch.
+        # Rows from before the column are resolved from the mind's
+        # registration on first use (see conversation_harness).
+        try:
+            await self._db.execute("ALTER TABLE sessions ADD COLUMN harness TEXT")
+            await self._db.commit()
+        except Exception:
+            pass  # Column already exists
         # Backfill: every session owns a conversation id. Rows created before
         # the id was minted at session creation may still be blank — those are
         # sessions that never finished a turn, so there is no conversation on
@@ -506,6 +547,10 @@ class SessionManager:
         # retired moments later and a read-through would inherit from a row
         # anything later cleaning up closed sessions is free to touch.
         inherited_name, inherited_color, inherited_effort = None, None, None
+        # The mind's default harness is for a new conversation. A rotation
+        # successor is the same conversation, so it stays on the harness its
+        # parent was switched to.
+        harness = normalise_harness((mind_row or {}).get("harness"))
         if rotated_from:
             parent = await self._get_row(rotated_from)
             if parent:
@@ -514,12 +559,14 @@ class SessionManager:
                 # The effort travels with the model it was chosen for.
                 if parent.get("model") == model:
                     inherited_effort = parent.get("effort")
+                if parent.get("harness"):
+                    harness = parent["harness"]
 
         await self._db.execute(
-            """INSERT INTO sessions (id, owner_type, owner_ref, model, claude_sid, created_at, last_active, status, mind_id, rotated_from, name, color, effort)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?)""",
+            """INSERT INTO sessions (id, owner_type, owner_ref, model, claude_sid, created_at, last_active, status, mind_id, rotated_from, name, color, effort, harness)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?)""",
             (session_id, owner_type, owner_ref, model, claude_sid, now, now, mind_id, rotated_from,
-             inherited_name, inherited_color, inherited_effort),
+             inherited_name, inherited_color, inherited_effort, harness or None),
         )
         await self._db.execute(
             """INSERT OR REPLACE INTO active_sessions (client_type, client_ref, session_id)
@@ -1199,6 +1246,7 @@ class SessionManager:
     # ------------------------------------------------------------------
     async def arm_rotation(
         self, client_type: str, client_ref: str, surface: str = "",
+        claude_sid: str = "",
     ) -> dict:
         """Prepare the active session for (client_type, client_ref) to rotate.
 
@@ -1216,10 +1264,23 @@ class SessionManager:
         answer this: a Telegram session adopted into a terminal keeps its
         chat ownership while living in a pane, and keying on it would arm
         that conversation for a successor row while a pane holds it.
+
+        ``claude_sid`` is the conversation the hook measured. A harness
+        switch replaces the conversation under the row while that hook's
+        composition can still be running, and its arm would rotate a
+        conversation that has only just begun — so an arm for any
+        conversation but the current one is ignored. Absent means a hook
+        that predates the field.
         """
         active = await self.get_active_session(client_type, client_ref)
         if not active:
             return {"ok": False, "error": "no active session"}
+        if claude_sid and active.get("claude_sid") and claude_sid != active["claude_sid"]:
+            log.info(
+                "ignoring rotation arm for replaced conversation %s on session %s",
+                claude_sid, active["id"],
+            )
+            return {"ok": False, "error": "stale conversation", "session_id": active["id"]}
         if surface == "terminal":
             return await self._stage_terminal_rotation(active, client_ref)
         await self._db.execute(
@@ -2154,7 +2215,12 @@ class SessionManager:
                                     # surface, and without this the seed would
                                     # outlive it and be re-applied on top of the
                                     # transcript the next time a tile opened cold.
-                                    if _pinned_sid:
+                                    #
+                                    # Only a turn that completed without error:
+                                    # a handover the harness choked on has not
+                                    # landed, and the next spawn must carry it
+                                    # again.
+                                    if _pinned_sid and not event.get("is_error"):
                                         await self._db.execute(
                                             "UPDATE sessions SET carry_forward = NULL, "
                                             "carry_forward_sid = NULL, "
@@ -2220,7 +2286,10 @@ class SessionManager:
 
         lock = self._claim_turn_lock(session_id)
         async with lock:
-            offered = await self.mind_model_row(session["mind_id"], model)
+            offered = await self.mind_model_row(
+                session["mind_id"], model,
+                harness=await self.conversation_harness(session),
+            )
             if offered is None:
                 raise ValueError(
                     f"Model {model!r} is not one this mind may run. "
@@ -2252,6 +2321,199 @@ class SessionManager:
         return await self._session_dict(session_id)
 
     # ------------------------------------------------------------------
+    # Harness switching
+    # ------------------------------------------------------------------
+    async def switch_harness(self, session_id: str, harness: str, model: str) -> dict:
+        """Move this conversation onto another harness and model.
+
+        The same row throughout — its id, label and ledger are the
+        conversation's identity — under a fresh conversation id, since no
+        harness can resume another's transcript. What carries the
+        conversation across is the handover: the old conversation rendered
+        to plain text by the mind, stored on the row, and delivered to the
+        new harness as its opening user turn by every spawn until a turn
+        completes without error.
+
+        The order is the guarantee. The handover is rendered *before*
+        anything is killed, so a conversation that cannot be rendered is
+        refused with the old harness still running. And a new harness that
+        will not start puts the row back — harness, model, conversation id,
+        thread id and effort — and respawns the old one, so a failed switch
+        leaves the conversation where it was rather than nowhere.
+        """
+        session = await self._get_row(session_id)
+        if not session:
+            raise ValueError(f"Session not found: {session_id}")
+        session_id = session["id"]
+        mind_id = session["mind_id"]
+        target = normalise_harness(harness)
+
+        lock = self._claim_turn_lock(session_id)
+        async with lock:
+            listing = await self.mind_harnesses(mind_id)
+            if not listing:
+                raise ValueError(
+                    "Couldn't read which harnesses this mind offers right now."
+                )
+            entry = next(
+                (h for h in listing.get("harnesses") or [] if h.get("name") == target),
+                None,
+            )
+            if entry is None:
+                raise ValueError(f"This mind has no {target!r} harness.")
+            if not entry.get("available"):
+                raise ValueError(
+                    f"{target} isn't available on this mind: "
+                    f"{entry.get('reason') or 'no reason given'}."
+                )
+            offered = await self.mind_model_row(mind_id, model, harness=target)
+            if offered is None:
+                raise ValueError(
+                    f"Model {model!r} is not one {target} may run on this mind."
+                )
+            effort = session.get("effort")
+            if effort not in effort_levels_of(offered):
+                effort = None
+
+            old_harness = await self.conversation_harness(session)
+            handover = await self._render_handover_on_mind(
+                mind_id,
+                harness=old_harness,
+                claude_sid=session.get("claude_sid") or "",
+                harness_sid=session.get("harness_sid") or "",
+                summary=await self._latest_session_memory(session_id),
+                budget_bytes=handover_budget_bytes(offered.get("context_window")),
+            )
+
+            await self._kill_process(session_id, forget_thread=True)
+            new_claude_sid = str(uuid.uuid4())
+            now = time.time()
+            # Any rotation armed or staged belonged to the conversation being
+            # replaced; the handover is this conversation's carry-forward now.
+            await self._db.execute(
+                "UPDATE sessions SET harness = ?, model = ?, effort = ?, "
+                "claude_sid = ?, harness_sid = NULL, rotation_armed = 0, "
+                "carry_forward = ?, carry_forward_sid = ?, carry_forward_at = ?, "
+                "status = 'running', last_active = ? WHERE id = ?",
+                (target, model, effort, new_claude_sid, handover, new_claude_sid,
+                 now, now, session_id),
+            )
+            await self._db.commit()
+
+            routing = await self._routing_for(session)
+            from comms import bootstrap_loader  # noqa: PLC0415
+            mind_row = await self._get_mind_row(mind_id)
+            system_prompt_blocks = await bootstrap_loader.compose_prompt_blocks(
+                mind_id=mind_id,
+                mind_name=(mind_row or {}).get("name") or mind_id,
+                client_ref=routing["client_ref"],
+                db=self._db,
+            )
+            try:
+                await self._spawn(
+                    session_id,
+                    model,
+                    autopilot=bool(session["autopilot"]),
+                    resume_sid=new_claude_sid,
+                    mind_id=mind_id,
+                    system_prompt_blocks=system_prompt_blocks,
+                    **routing,
+                )
+            except Exception as exc:
+                log.error(
+                    "harness switch: %s failed to start for session %s; restoring %s: %s",
+                    target, session_id, old_harness, exc,
+                )
+                await self._kill_process(session_id, forget_thread=True)
+                await self._db.execute(
+                    "UPDATE sessions SET harness = ?, model = ?, effort = ?, "
+                    "claude_sid = ?, harness_sid = ?, carry_forward = NULL, "
+                    "carry_forward_sid = NULL, carry_forward_at = NULL WHERE id = ?",
+                    (session.get("harness") or old_harness or None, session["model"],
+                     session.get("effort"), session["claude_sid"],
+                     session.get("harness_sid"), session_id),
+                )
+                await self._db.commit()
+                try:
+                    await self._spawn(
+                        session_id,
+                        session["model"],
+                        autopilot=bool(session["autopilot"]),
+                        resume_sid=session["claude_sid"],
+                        mind_id=mind_id,
+                        **routing,
+                    )
+                except Exception:
+                    log.exception(
+                        "harness switch: could not respawn %s for session %s either",
+                        old_harness, session_id,
+                    )
+                raise ValueError(
+                    f"{target} didn't start, so this conversation stays on "
+                    f"{old_harness}: {exc}"
+                ) from exc
+
+        # A different conversation under the same row: the old one's fullness
+        # and its words on the live feed belong to a transcript left behind.
+        await self.clear_context(session_id)
+        self.dashboard.forget(session_id)
+        log.info(
+            "harness switch: session %s now on %s/%s as conversation %s",
+            session_id, target, model, new_claude_sid,
+        )
+        log_event(
+            log, "session.harness_switched", session_id=session_id,
+            conversation_id=new_claude_sid, mind_id=mind_id,
+            harness=target, previous_harness=old_harness, model=model,
+        )
+        return await self._session_dict(session_id)
+
+    async def _latest_session_memory(self, session_id: str) -> str:
+        """The latest rotation summary written for this session, as text.
+
+        Rows are a JSON envelope whose ``carry_forward`` is the rendered
+        summary; older rows are the summary itself.
+        """
+        cur = await self._db.execute(
+            "SELECT body FROM session_memory WHERE session_id = ? "
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            (session_id,),
+        )
+        row = await cur.fetchone()
+        raw = (row["body"] if row else "") or ""
+        try:
+            envelope = json.loads(raw)
+        except (ValueError, TypeError):
+            return raw.strip()
+        if isinstance(envelope, dict):
+            text = envelope.get("carry_forward")
+            return text.strip() if isinstance(text, str) else ""
+        return raw.strip()
+
+    async def conversation_harness(self, session: dict) -> str:
+        """The harness this conversation runs on, as a bare name.
+
+        A row written before the column existed carries none; it is resolved
+        from the mind's registration and written back, so the answer is
+        settled once rather than re-derived from a default that can change
+        under a live conversation. Empty when the mind cannot be resolved.
+        """
+        if session.get("harness"):
+            return session["harness"]
+        try:
+            mind_row = await self._get_mind_row(session["mind_id"])
+        except Exception:
+            return ""
+        harness = normalise_harness((mind_row or {}).get("harness"))
+        if harness and session.get("id"):
+            await self._db.execute(
+                "UPDATE sessions SET harness = ? WHERE id = ? AND harness IS NULL",
+                (harness, session["id"]),
+            )
+            await self._db.commit()
+        return harness
+
+    # ------------------------------------------------------------------
     # Effort
     # ------------------------------------------------------------------
     async def effort_options(self, session_id: str) -> dict:
@@ -2274,7 +2536,9 @@ class SessionManager:
         "this model takes no effort setting" would aim the operator at the
         wrong fact entirely.
         """
-        listing = await self.mind_models(session["mind_id"])
+        listing = await self.mind_models(
+            session["mind_id"], harness=await self.conversation_harness(session)
+        )
         if not listing:
             raise ValueError(
                 f"Couldn't read which models this mind offers right now, so "
@@ -2676,6 +2940,11 @@ class SessionManager:
         if harness_sid is None:
             harness_sid = session_row.get("harness_sid") if session_row else None
         effort = (session_row or {}).get("effort") or None
+        # Like the effort: the conversation's own harness, read off the row,
+        # and the stored handover for the conversation being spawned, which
+        # every spawn re-applies until a turn completes without error.
+        harness = await self.conversation_harness(session_row) if session_row else ""
+        opening_turn = await self.get_carry_forward(session_id, resume_sid) or ""
         mind_url = row["gateway_url"]
         mind_name = row["name"]
         import aiohttp
@@ -2708,6 +2977,8 @@ class SessionManager:
                     "surface": self._surface_label(owner_type or ""),
                     "system_prompt_blocks": system_prompt_blocks,
                     "effort": effort,
+                    "harness": harness or None,
+                    "opening_turn": opening_turn,
                 },
                 headers=await self.mind_auth_headers(mind_id),
                 timeout=aiohttp.ClientTimeout(total=10),
@@ -2760,6 +3031,10 @@ class SessionManager:
         mind_url = await self._mind_url_for_session(session_id, mind_id)
         if not mind_url:
             return False
+        # The pane respawns on the conversation's own harness and effort,
+        # never on whatever the mind would default a fresh terminal to.
+        session_row = await self._get_row(session_id) or {}
+        harness = await self.conversation_harness(session_row) if session_row else ""
         import aiohttp
         try:
             async with aiohttp.ClientSession() as http:
@@ -2780,6 +3055,8 @@ class SessionManager:
                         "owner_type": owner_type,
                         "owner_ref": owner_ref,
                         "surface": self._surface_label(owner_type or ""),
+                        "harness": harness or None,
+                        "effort": session_row.get("effort") or None,
                     },
                     timeout=aiohttp.ClientTimeout(total=20),
                 ) as resp:
@@ -2811,8 +3088,19 @@ class SessionManager:
             ) from exc
         return bool(data.get("rotated"))
 
-    async def mind_models(self, mind_id: str) -> list[dict]:
+    def _mind_admin_headers(self) -> dict[str, str]:
+        """The admin credential for a mind's operator routes."""
+        admin = os.environ.get("MIND_ADMIN_TOKEN") or os.environ.get(
+            "COMMS_ADMIN_BEARER_TOKEN", ""
+        )
+        return {"Authorization": f"Bearer {admin}"} if admin else {}
+
+    async def mind_models(self, mind_id: str, harness: str | None = None) -> list[dict]:
         """What a mind reports it may run, asked of the mind.
+
+        ``harness`` names whose listing: one model may be offered to one
+        harness and withheld from another, so a conversation's picker and
+        its checks ask for the harness that conversation is on.
 
         The gateway holds no table of models and no map of model to provider:
         a mind queries the inference proxy with its own key, and the proxy
@@ -2827,15 +3115,14 @@ class SessionManager:
         gateway_url = str((mind_row or {}).get("gateway_url") or "").rstrip("/")
         if not gateway_url:
             return []
-        admin = os.environ.get("MIND_ADMIN_TOKEN") or os.environ.get(
-            "COMMS_ADMIN_BEARER_TOKEN", ""
-        )
+        harness = normalise_harness(harness)
         import aiohttp
         try:
             async with aiohttp.ClientSession() as http:
                 async with http.get(
                     f"{gateway_url}/models",
-                    headers={"Authorization": f"Bearer {admin}"} if admin else {},
+                    params={"harness": harness} if harness else None,
+                    headers=self._mind_admin_headers(),
                     timeout=aiohttp.ClientTimeout(total=10),
                 ) as resp:
                     if resp.status in (401, 503):
@@ -2868,9 +3155,119 @@ class SessionManager:
         """
         return await self.mind_model_row(mind_id, model) is not None
 
-    async def mind_model_row(self, mind_id: str, model: str) -> dict | None:
+    async def mind_harnesses(self, mind_id: str) -> dict | None:
+        """The harnesses a mind offers, each available or not with its reason.
+
+        None when the mind cannot be asked — distinct from a mind that
+        answered, so nobody is told a harness is missing when it was the
+        question that never arrived.
+        """
+        try:
+            mind_row = await self._get_mind_row(mind_id)
+        except Exception:
+            return None
+        gateway_url = str((mind_row or {}).get("gateway_url") or "").rstrip("/")
+        if not gateway_url:
+            return None
+        import aiohttp
+        try:
+            async with aiohttp.ClientSession() as http:
+                async with http.get(
+                    f"{gateway_url}/harnesses",
+                    headers=self._mind_admin_headers(),
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status in (401, 503):
+                        await resp.read()
+                        raise MindRefusedCredential(
+                            f"mind {mind_id} refused the gateway's admin "
+                            f"credential on /harnesses (HTTP {resp.status})"
+                        )
+                    if resp.status != 200:
+                        return None
+                    body = await resp.json()
+        except MindCallFailed:
+            raise
+        except Exception:
+            log.warning("Could not read harnesses from mind %s", mind_id)
+            return None
+        if not isinstance(body, dict) or not isinstance(body.get("harnesses"), list):
+            return None
+        return {
+            "harnesses": [h for h in body["harnesses"] if isinstance(h, dict) and h.get("name")],
+            "default": body.get("default"),
+        }
+
+    async def _render_handover_on_mind(
+        self,
+        mind_id: str,
+        *,
+        harness: str,
+        claude_sid: str,
+        harness_sid: str,
+        summary: str,
+        budget_bytes: int,
+    ) -> str:
+        """Ask the mind to render a conversation on ``harness`` as plain text.
+
+        Raises ValueError when the mind reports the transcript unreadable
+        with no summary to stand in for it, and for any other failure: a
+        switch with nothing to hand over is refused rather than opened on a
+        blank conversation.
+        """
+        mind_row = await self._get_mind_row(mind_id)
+        gateway_url = str((mind_row or {}).get("gateway_url") or "").rstrip("/")
+        import aiohttp
+        try:
+            async with aiohttp.ClientSession() as http:
+                async with http.post(
+                    f"{gateway_url}/handover",
+                    json={
+                        "harness": harness,
+                        "claude_sid": claude_sid,
+                        "harness_sid": harness_sid,
+                        "summary": summary,
+                        "budget_bytes": budget_bytes,
+                    },
+                    headers=self._mind_admin_headers(),
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    if resp.status in (401, 503):
+                        await resp.read()
+                        raise MindRefusedCredential(
+                            f"mind {mind_id} refused the gateway's admin "
+                            f"credential on /handover (HTTP {resp.status})"
+                        )
+                    if resp.status == 422:
+                        await resp.read()
+                        raise ValueError(
+                            "This conversation's transcript can't be read and "
+                            "there is no summary to carry instead, so it stays "
+                            f"on {harness}."
+                        )
+                    if resp.status != 200:
+                        body = await resp.text()
+                        raise ValueError(
+                            f"The mind couldn't render this conversation for "
+                            f"handover (HTTP {resp.status}): {body}"
+                        )
+                    body = await resp.json()
+        except (MindCallFailed, ValueError):
+            raise
+        except Exception as exc:
+            raise MindCallFailed(
+                f"could not reach mind {mind_id} to render the handover: {exc}"
+            ) from exc
+        text = (body or {}).get("text") if isinstance(body, dict) else None
+        if not isinstance(text, str):
+            raise ValueError("The mind answered the handover with no text.")
+        return text
+
+    async def mind_model_row(
+        self, mind_id: str, model: str, harness: str | None = None,
+    ) -> dict | None:
         """The mind's own row for `model`, matched exactly, or None."""
-        for row in await self.mind_models(mind_id):
+        for row in await self.mind_models(mind_id, harness=harness):
             if str(row.get("name")) == model:
                 return row
         return None
@@ -2893,8 +3290,13 @@ class SessionManager:
             return None
         return (mind_row or {}).get("gateway_url")
 
-    async def _kill_process(self, session_id: str):
-        """Kill a session on its mind container via HTTP."""
+    async def _kill_process(self, session_id: str, *, forget_thread: bool = False):
+        """Kill a session on its mind container via HTTP.
+
+        ``forget_thread`` also drops the mind's own record of the session's
+        codex thread, which a harness switch leaves behind with the
+        conversation it belonged to.
+        """
         await self.kill_rc_process(session_id)
 
         proc = self._procs.pop(session_id, None)
@@ -2918,6 +3320,7 @@ class SessionManager:
             async with aiohttp.ClientSession() as http:
                 async with http.delete(
                     f"{mind_url}/sessions/{session_id}",
+                    params={"forget_thread": "1"} if forget_thread else None,
                     headers=await self._mind_auth_headers_for_session(
                         session_id, mind_id
                     ),
@@ -3307,6 +3710,7 @@ class SessionManager:
             "color": row.get("color"),
             "model": row["model"],
             "effort": row.get("effort"),
+            "harness": row.get("harness"),
             "autopilot": bool(row["autopilot"]),
             "created_at": row["created_at"],
             "last_active": row["last_active"],
