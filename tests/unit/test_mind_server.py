@@ -675,10 +675,12 @@ def test_an_unreadable_transcript_with_no_summary_refuses_the_handover(homes):
     assert summarised.json() == {"text": "Summary of the conversation so far:\nthe gist"}
 
 
-def test_a_conversation_with_no_transcript_on_disk_and_no_summary_is_refused(homes):
+def test_a_conversation_that_never_had_a_turn_hands_over_nothing(homes):
+    """No transcript on disk is an empty conversation, not an unreadable one:
+    a conversation must be switchable before its first turn."""
     resp = _handover(TestClient(mind_server.app), harness="claude", claude_sid="conv-new")
 
-    assert (resp.status_code, resp.json()) == (422, {"detail": "unreadable"})
+    assert (resp.status_code, resp.json()) == (200, {"text": ""})
 
 
 def test_a_switch_kill_forgets_the_codex_thread_and_a_plain_kill_keeps_it(homes):

@@ -391,10 +391,12 @@ async def get_harnesses(request: Request) -> Any:
 async def handover(request: Request) -> Any:
     """The named (outgoing) harness's conversation, rendered for the next one.
 
-    A transcript that cannot be read — absent from disk, or there and
-    undecodable — hands over as the summary alone. With no summary either, the
-    switch would open the new harness on nothing and lose the conversation it
-    was moving, so it is refused and the old harness keeps running.
+    A conversation with no transcript on disk has never had a turn: it is
+    empty, not unreadable, and hands over as the summary alone or nothing —
+    its harness would declare the id fresh on its next spawn anyway. A
+    transcript that exists and cannot be read is different: with no summary
+    to stand in for it, the switch would lose the conversation it was moving,
+    so it is refused and the old harness keeps running.
     """
     denied = runtime_api.authorize_admin(request)
     if denied is not None:
@@ -415,9 +417,7 @@ async def handover(request: Request) -> Any:
     try:
         path = adapter.transcript_path(str(body.get("claude_sid") or ""),
                                        str(body.get("harness_sid") or "") or None)
-        if path is None:
-            raise transcript.Unreadable("no transcript on disk for this conversation")
-        blocks = transcript.READERS[harness](path)
+        blocks = transcript.READERS[harness](path) if path is not None else []
     except transcript.Unreadable as exc:
         log_event(log, "session.handover.unreadable", level=logging.WARNING,
                   mind_id=MIND_ID, harness=harness, error=str(exc))
