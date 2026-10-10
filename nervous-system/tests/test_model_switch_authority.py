@@ -169,3 +169,34 @@ def test_a_switch_once_the_turn_has_finished_goes_through():
             await mgr.shutdown()
 
     _run(scenario())
+
+
+def test_a_name_that_is_merely_a_prefix_of_an_offered_model_is_refused():
+    """The check is an exact name, never a prefix.
+
+    `mind_offers_model` compares the requested name against what the proxy
+    said it serves. Loosened to a prefix match, "claude-opus-5" is approved
+    against an offered "claude-opus-5-5" and then spawned verbatim — so the
+    gate passes a name the proxy will reject, and the operator's switch
+    reports success over a conversation that cannot answer. Every other test
+    here asks for a name sharing no prefix with anything offered, which a
+    prefix match satisfies too.
+    """
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr, "claude-sonnet-5-5")
+            with patch.object(
+                mgr, "mind_models",
+                new=AsyncMock(return_value=[{"name": "claude-opus-5-5"}]),
+            ), patch.object(mgr, "_kill_process", new=AsyncMock()) as killed, \
+                    patch.object(mgr, "_spawn", new=AsyncMock()) as spawned:
+                with pytest.raises(ValueError):
+                    await mgr.switch_model("sess-1", "claude-opus-5")
+            assert killed.await_count == 0
+            assert spawned.await_count == 0
+            row = await mgr._get_row("sess-1")
+            assert row["model"] == "claude-sonnet-5-5"
+            await mgr.shutdown()
+
+    _run(scenario())
