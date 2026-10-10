@@ -264,6 +264,24 @@ class TestWsAttach:
 
         assert "harness_sid=codex-thread-7" in _FakeHttpSession.requested_url
 
+    def test_relays_the_conversations_effort_to_the_mind(self, app_client, monkeypatch):
+        """A pane opened on a conversation set to `/effort high` runs at high."""
+        client, server_module = app_client
+        _run(_seed_session_and_mind(server_module))
+        mgr = server_module.session_mgr
+        _run(mgr._db.execute("UPDATE sessions SET effort = 'high' WHERE id = 'sess-attach'"))
+        _run(mgr._db.commit())
+
+        fake_ws = _FakeMindWS(incoming=[b"hi\r\n"])
+        _FakeHttpSession.ws_to_return = fake_ws
+        _FakeHttpSession.raise_on_connect = None
+        monkeypatch.setattr(server_module.aiohttp, "ClientSession", _FakeHttpSession)
+
+        with client.websocket_connect("/sessions/sess-attach/attach") as ws:
+            ws.receive_bytes()
+
+        assert "effort=high" in _FakeHttpSession.requested_url
+
     def test_relays_browser_input_to_mind(self, app_client, monkeypatch):
         client, server_module = app_client
         _run(_seed_session_and_mind(server_module, session_id="sess-attach2"))

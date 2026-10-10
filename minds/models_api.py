@@ -151,6 +151,13 @@ async def build_catalog(path: Path) -> list[dict]:
                     if isinstance(row.get("context_window"), int)
                     else None
                 ),
+                # The levels a picker may offer, in the proxy's order. Empty
+                # when the model takes no effort setting, or when an older
+                # proxy says nothing about it.
+                "effort_levels": [
+                    str(level) for level in (row.get("effort_levels") or [])
+                    if isinstance(level, str) and level
+                ] if isinstance(row.get("effort_levels"), list) else [],
             }
         )
     return rows

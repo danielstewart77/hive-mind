@@ -213,6 +213,7 @@ async def _spawn_proc(
     system_prompt_blocks: str | None = None,
     client_ref: str = "",
     owner_ref: str = "",
+    effort: str | None = None,
 ) -> asyncio.subprocess.Process:
     blocks = system_prompt_blocks or ""
     if blocks and surface_prompt:
@@ -231,6 +232,7 @@ async def _spawn_proc(
         "--permission-mode", "bypassPermissions",
         "--dangerously-skip-permissions",
         "--model", model,
+        *_effort_args(effort),
         "--append-system-prompt", full_prompt,
     ]
     if MCP_CONFIG:
@@ -277,7 +279,17 @@ async def _spawn_proc(
 TERMINALS = TmuxTerminals(NAME, PROJECT_DIR)
 
 
-def _terminal_argv(model: str, conversation_id: str) -> list[str]:
+def _effort_args(effort: str | None) -> list[str]:
+    """`--effort <level>` when the conversation names one, else nothing.
+
+    Nothing rather than a default: an unset effort is the harness's own
+    configured level, and naming one here would override it on every
+    conversation that never asked.
+    """
+    return ["--effort", effort] if effort else []
+
+
+def _terminal_argv(model: str, conversation_id: str, effort: str | None = None) -> list[str]:
     """The interactive `claude` that runs inside the tmux pane.
 
     Distinct from `_spawn_proc`'s argv: no `-p`, no stream-json — those are
@@ -291,6 +303,7 @@ def _terminal_argv(model: str, conversation_id: str) -> list[str]:
         "--permission-mode", "bypassPermissions",
         "--dangerously-skip-permissions",
         "--model", model,
+        *_effort_args(effort),
     ]
     if MCP_CONFIG:
         cmd.extend(["--mcp-config", MCP_CONFIG])
@@ -298,7 +311,7 @@ def _terminal_argv(model: str, conversation_id: str) -> list[str]:
     return cmd
 
 
-def _rotation_argv(model: str, new_claude_sid: str) -> list[str]:
+def _rotation_argv(model: str, new_claude_sid: str, effort: str | None = None) -> list[str]:
     """The interactive `claude` a rotation respawns the pane onto.
 
     A rotation starts a fresh harness conversation under the same hive
@@ -319,6 +332,7 @@ def _rotation_argv(model: str, new_claude_sid: str) -> list[str]:
         "--permission-mode", "bypassPermissions",
         "--dangerously-skip-permissions",
         "--model", model,
+        *_effort_args(effort),
     ]
     if MCP_CONFIG:
         cmd.extend(["--mcp-config", MCP_CONFIG])
@@ -359,7 +373,7 @@ def _spawn_pty(
     *, session_id: str, model: str, conversation_id: str, cols: int, rows: int,
     harness_sid: str | None = None, client_ref: str | None = None,
     owner_type: str | None = None, owner_ref: str | None = None,
-    system_prompt: str = "",
+    system_prompt: str = "", effort: str | None = None,
 ) -> tuple[Any, int]:
     """Attach a pty to this session's interactive `claude`, starting it if needed.
 
@@ -384,7 +398,7 @@ def _spawn_pty(
     TERMINALS.start(
         session_id,
         seeded_pane_command(
-            _terminal_argv(model, conversation_id),
+            _terminal_argv(model, conversation_id, effort),
             system_prompt,
             CONFIG_DIR / "rotation-seeds" / f"{conversation_id}.txt",
             seed_flag="--append-system-prompt",
@@ -406,6 +420,7 @@ def _rotate_pty(
     *, session_id: str, new_claude_sid: str, model: str = "", system_prompt: str = "",
     user_prompt: str = "", client_ref: str | None = None,
     owner_type: str | None = None, owner_ref: str | None = None,
+    effort: str | None = None,
 ) -> bool:
     """Start a fresh harness conversation in a live terminal, in place.
 
@@ -431,7 +446,7 @@ def _rotate_pty(
     # pane would come up at an empty prompt with what they typed gone.
     seed = user_prompt or system_prompt
     argv = seeded_pane_command(
-        _rotation_argv(model, new_claude_sid),
+        _rotation_argv(model, new_claude_sid, effort),
         seed,
         CONFIG_DIR / "rotation-seeds" / f"{new_claude_sid}.txt",
         seed_flag="--append-system-prompt",
@@ -553,6 +568,7 @@ async def create_session(req: Request) -> Any:
             system_prompt_blocks=system_prompt_blocks,
             client_ref=client_ref,
             owner_ref=owner_ref,
+            effort=body.get("effort") or None,
         )
         session = {
             "proc": proc,
