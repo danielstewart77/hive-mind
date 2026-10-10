@@ -103,6 +103,12 @@ def test_done_cards_on_the_board_carry_a_trash_control(signed_in):
     assert "status==='done'" in body
 
 
+def test_board_card_markup_includes_a_selectable_item_id(signed_in):
+    body = signed_in.get("/kanban/board").text
+    assert "kanban-card-id" in body
+    assert "el('span','kanban-card-id',s.id)" in body
+
+
 def test_board_cards_link_to_the_item_details_page(signed_in):
     body = signed_in.get("/kanban/board").text
     assert "const heading=el('strong','');heading.append(safeTitle(s))" in body

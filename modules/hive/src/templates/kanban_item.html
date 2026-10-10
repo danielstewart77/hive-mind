@@ -16,6 +16,7 @@
 .item-field textarea { width:100%; overflow:hidden; resize:none; }
 .item-form-header { display:flex; justify-content:flex-end; align-items:center; gap:.75rem; margin-bottom:.25rem; }
 .item-title-input { font-size:1.4rem; font-weight:650; padding:.3rem .4rem; width:100%; }
+.item-id { margin:0 0 .75rem; color:var(--console-faint,#69747c); font-size:.78rem; font-family:ui-monospace,monospace; user-select:text; overflow-wrap:anywhere; }
 .item-actions { display:flex; gap:.5rem; align-items:center; }
 .item-feedback { min-height:1.5em; }
 .item-back-nav { position:static; background:none; padding:0; min-height:0; z-index:auto; }
@@ -25,6 +26,7 @@
 <main class="page item-page" id="item-page" data-item-id="{{ item.id }}" data-item-kind="{{ item.kind }}" data-item-subtype="{{ item.subtype or '' }}" data-item-status="{{ item.status or '' }}">
   <nav class="item-back-nav"><a href="/kanban/backlog">Back to backlog</a></nav>
   <p>{{ item.kind | capitalize }}</p>
+  <p class="item-id" aria-label="Item ID">{{ item.id }}</p>
   <div class="item-layout">
   <form id="item-form" class="surface item-field">
     <div class="item-actions item-form-header"><select id="status-choice" aria-label="Status" hidden></select><button class="button" type="submit">Save</button><span id="item-feedback" class="item-feedback" role="status" aria-live="polite"></span></div>
