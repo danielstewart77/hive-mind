@@ -19,12 +19,12 @@
 .item-actions { display:flex; gap:.5rem; align-items:center; }
 .item-feedback { min-height:1.5em; }
 </style>
-<main class="page item-page" id="item-page" data-item-id="{{ item.id }}" data-item-kind="{{ item.kind }}" data-item-subtype="{{ item.subtype or '' }}">
+<main class="page item-page" id="item-page" data-item-id="{{ item.id }}" data-item-kind="{{ item.kind }}" data-item-subtype="{{ item.subtype or '' }}" data-item-status="{{ item.status or '' }}">
   <nav><a href="/kanban/backlog">Back to backlog</a></nav>
   <p>{{ item.kind | capitalize }}</p>
   <div class="item-layout">
   <form id="item-form" class="surface item-field">
-    <div class="item-actions item-form-header"><button class="button" type="submit">Save</button><span id="item-feedback" class="item-feedback" role="status" aria-live="polite"></span></div>
+    <div class="item-actions item-form-header"><select id="status-choice" aria-label="Status" hidden></select><button class="button" type="submit">Save</button><span id="item-feedback" class="item-feedback" role="status" aria-live="polite"></span></div>
     <label class="item-field">Title<input class="item-title-input" type="text" name="title" value="{{ item.title }}" required></label>
     <label class="item-field">Description<textarea name="description">{{ item.description }}</textarea></label>
     <label class="item-field">Requirements<textarea name="requirements">{{ item.requirements }}</textarea></label>
@@ -121,7 +121,16 @@
     parentChoice.disabled = false;
   }
   function fillTypes(){const sel=document.getElementById('type-choice');sel.replaceChildren();const kinds=['epic','feature','story','bug'];for(const k of kinds){const o=document.createElement('option');o.value=k;o.textContent=k.charAt(0).toUpperCase()+k.slice(1);if(k===currentType())o.selected=true;sel.append(o);}sel.onchange=fillParentChoices;}
+  const statusLabel = {backlog: 'Backlog', committed: 'Committed', in_progress: 'Work In Progress', done: 'Done'};
+  function fillStatus(){
+    const sel = document.getElementById('status-choice');
+    if (page.dataset.itemKind !== 'story') { sel.hidden = true; return; }
+    sel.hidden = false;
+    sel.replaceChildren();
+    for (const value of Object.keys(statusLabel)) { const o = document.createElement('option'); o.value = value; o.textContent = statusLabel[value]; o.selected = value === page.dataset.itemStatus; sel.append(o); }
+  }
   fillTypes();
+  fillStatus();
   loadRelations();
 
   form.addEventListener('submit', async (event) => {
@@ -132,11 +141,17 @@
     const parent = document.getElementById('parent-choice').value;
     const current = latestRelations.parent ? latestRelations.parent.id : '';
     if (parent !== current) body.parent_id = parent || null;
+    if (page.dataset.itemKind === 'story') {
+      const status = document.getElementById('status-choice').value;
+      if (status !== page.dataset.itemStatus) body.status = status;
+    }
     const url = `/api/kanban/${kinds[page.dataset.itemKind]}/${encodeURIComponent(page.dataset.itemId)}`;
     feedback.textContent = 'Saving…';
     try {
       const response = await fetch(url, {method: 'PATCH', headers: {'Content-Type': 'application/json', 'Accept': 'application/json'}, body: JSON.stringify(body)});
       if (!response.ok) throw new Error((await response.json()).detail || `Request failed (${response.status})`);
+      const updated = await response.json();
+      if ('status' in updated) page.dataset.itemStatus = updated.status;
       feedback.textContent = 'Saved.';
     } catch (err) {
       feedback.textContent = `Not saved: ${err.message}`;
