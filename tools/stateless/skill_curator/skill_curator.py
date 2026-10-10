@@ -59,7 +59,7 @@ import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import yaml
 
@@ -131,7 +131,37 @@ def is_curation_eligible(config_dir: Path, name: str, record: Dict[str, Any]) ->
     return True
 
 
-def eligible_skill_rows(config_dir: Path) -> List[Dict[str, Any]]:
+_ACTIVITY_KEYS = ("last_used_at", "last_viewed_at", "last_patched_at")
+_COUNT_KEYS = ("use_count", "view_count", "patch_count")
+
+
+def _merge_activity(row: Dict[str, Any], name: str, usage_dirs: Iterable[Path]) -> None:
+    """Fold other harnesses' activity for *name* into *row*, in place.
+
+    A mind's skills are rendered into every harness it can switch to, and each
+    harness's Stop hook bumps the sidecar in its own config dir. Only this
+    dir's skills are aged, but a skill used under codex or dsh is a skill in
+    use: the newest timestamp wins and the counters add up. Lifecycle state,
+    provenance and pinning stay this dir's own.
+    """
+    for usage_dir in usage_dirs:
+        other = telemetry.load_usage(Path(usage_dir)).get(name)
+        if not isinstance(other, dict):
+            continue
+        for key in _ACTIVITY_KEYS:
+            mine, theirs = _parse_iso(row.get(key)), _parse_iso(other.get(key))
+            if theirs is not None and (mine is None or theirs > mine):
+                row[key] = other[key]
+        for key in _COUNT_KEYS:
+            try:
+                row[key] = int(row.get(key) or 0) + int(other.get(key) or 0)
+            except (TypeError, ValueError):
+                pass
+
+
+def eligible_skill_rows(
+    config_dir: Path, usage_dirs: Iterable[Path] = ()
+) -> List[Dict[str, Any]]:
     """Walk ``<config-dir>/skills/*/SKILL.md`` one level deep and return the
     eligible rows, each joined with its sidecar record.
 
@@ -169,6 +199,7 @@ def eligible_skill_rows(config_dir: Path) -> List[Dict[str, Any]]:
             continue
 
         row = {"name": name, **rec, "_persisted": persisted}
+        _merge_activity(row, name, usage_dirs)
         row["last_activity_at"] = telemetry.latest_activity_at(row)
         rows.append(row)
 
@@ -335,6 +366,7 @@ def apply_automatic_transitions(
     now: Optional[datetime] = None,
     stale_after_days: Optional[int] = None,
     archive_after_days: Optional[int] = None,
+    usage_dirs: Iterable[Path] = (),
 ) -> Dict[str, Any]:
     """Walk every eligible skill and move active/stale/archived based on the
     latest real activity timestamp. Pinned skills are never touched.
@@ -369,7 +401,7 @@ def apply_automatic_transitions(
     }
     events: List[Dict[str, Any]] = []
 
-    for row in eligible_skill_rows(config_dir):
+    for row in eligible_skill_rows(config_dir, usage_dirs):
         counts["checked"] += 1
         name = row["name"]
         if row.get("pinned"):
@@ -626,6 +658,7 @@ def _compute_dry_run_counts(
     now: datetime,
     stale_after_days: int,
     archive_after_days: int,
+    usage_dirs: Iterable[Path] = (),
 ) -> Dict[str, Any]:
     """Compute would-be transition counts + events WITHOUT mutating anything."""
     stale_cutoff = now - timedelta(days=stale_after_days)
@@ -634,7 +667,7 @@ def _compute_dry_run_counts(
         "marked_stale": 0, "archived": 0, "reactivated": 0, "checked": 0,
     }
     events: List[Dict[str, Any]] = []
-    for row in eligible_skill_rows(config_dir):
+    for row in eligible_skill_rows(config_dir, usage_dirs):
         counts["checked"] += 1
         if row.get("pinned"):
             continue
@@ -669,6 +702,7 @@ def run(
     now: Optional[datetime] = None,
     consolidate: Optional[bool] = None,
     dry_run: bool = False,
+    usage_dirs: Iterable[Path] = (),
 ) -> Dict[str, Any]:
     """Run the curator: deterministic transitions, then (if enabled) the
     consolidation hook. Writes ``.curator_state`` on a live run; a ``dry_run``
@@ -691,6 +725,7 @@ def run(
             now=now,
             stale_after_days=conf["stale_after_days"],
             archive_after_days=conf["archive_after_days"],
+            usage_dirs=usage_dirs,
         )
         return {
             "harness": harness,
@@ -705,6 +740,7 @@ def run(
         now=now,
         stale_after_days=conf["stale_after_days"],
         archive_after_days=conf["archive_after_days"],
+        usage_dirs=usage_dirs,
     )
     report_path = write_run_report(config_dir, counts, now=now)
     consolidation = maybe_consolidate(
@@ -821,6 +857,23 @@ def maybe_notify(config_dir: Path, summary: Dict[str, Any]) -> Optional[List[str
 # CLI
 # ---------------------------------------------------------------------------
 
+def declared_usage_dirs(config_dir: Path, extra: Iterable[Path] = ()) -> List[Path]:
+    """Every other harness home this mind declares, plus any named.
+
+    A mind's skills are rendered into each harness it can switch to, so the
+    homes it declares are where its usage is recorded; a caller that forgets
+    to name one must not archive a skill used every day under it.
+    """
+    mine = Path(config_dir).resolve()
+    dirs: List[Path] = []
+    declared = [os.environ.get(v) for v in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "DSH_HOME")]
+    for candidate in [*extra, *(Path(d) for d in declared if d)]:
+        resolved = Path(candidate).resolve()
+        if resolved != mine and resolved not in dirs:
+            dirs.append(resolved)
+    return dirs
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Deterministic per-mind skill-lifecycle curator"
@@ -828,6 +881,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--config-dir", required=True, help="Mind config dir (.claude/.codex)")
     parser.add_argument(
         "--harness", default="claude_cli", choices=["claude_cli", "codex_cli"]
+    )
+    parser.add_argument(
+        "--usage-dir", action="append", default=[], type=Path,
+        help="Another harness's config dir whose usage sidecar counts as activity "
+             "(repeatable). The mind's declared CLAUDE_CONFIG_DIR, CODEX_HOME and "
+             "DSH_HOME are always included.",
     )
     parser.add_argument(
         "--consolidate", action="store_true",
@@ -847,6 +906,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     summary = run(
         Path(args.config_dir), args.harness,
         consolidate=consolidate_arg, dry_run=args.dry_run,
+        usage_dirs=declared_usage_dirs(Path(args.config_dir), args.usage_dir),
     )
     if args.notify and not args.dry_run:
         maybe_notify(Path(args.config_dir), summary)

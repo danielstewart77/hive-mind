@@ -1,22 +1,24 @@
-"""A mind's own view of its skills: what the repo ships, what it runs.
+"""The mind's own view of its skills: what the repo ships, what it runs.
 
-A skill exists twice. `specs/skills/<harness>/` is the tracked source that
-travels with a clone; the harness reads a different directory entirely
-(`$CLAUDE_CONFIG_DIR/skills` or `$CODEX_HOME/skills`), and that copy is the
-one that runs. Nothing keeps them in step, so a mind drifts from the repo
-the moment anyone edits a skill in place — which is a feature, since that is
-how a mind gets a skill tuned to its own job.
+A skill exists three ways. `specs/skills/` is the tracked reference that
+travels with a clone; `minds/<name>/reference/skills/` is this mind's own
+reference, which is where a skill tuned to its job lives; and each harness
+reads a rendered copy from its own directory (`$CLAUDE_CONFIG_DIR/skills`,
+`$CODEX_HOME/skills`, `$DSH_HOME/skills`). `skill_reference` owns the
+rendering. This module reports how the three stand and moves a skill between
+the repo and the mind.
 
-Both directories live on the mind's own filesystem, so the mind is the only
-thing that can see both. It reports the pair and applies changes to either
-side; the console renders and issues the actions. That is the same shape as
-`runtime_api` and for the same reason: a container in this stack, a
-bare-metal mind on this host, and a mind on another machine are one code
-path, and no bind mount can reach the third.
+All of it lives on the mind's own filesystem, so the mind is the only thing
+that can see it. It reports and applies changes; the console renders and
+issues the actions. That is the same shape as `runtime_config` and for the
+same reason: a container in this stack, a bare-metal mind on this host, and
+a mind on another machine are one code path, and no bind mount can reach the
+third.
 
-There are two harness directories rather than one because Codex honours a
-subset of Claude's frontmatter. The files could be shared, but writing them
-separately keeps each one honest about what its harness actually reads.
+A row is `same` when the repo's reference matches this mind's and the
+harness's copy is exactly what was rendered from it. A freshly rendered copy
+is therefore `same` even though its frontmatter differs from the reference:
+each harness's copy carries only the frontmatter that harness reads.
 
 A skill is a *directory*. State compares every file in it, not just the
 `SKILL.md`, because a copy moves the whole tree — a `SKILL.md` that matched
@@ -28,18 +30,18 @@ from __future__ import annotations
 
 import asyncio
 import difflib
-import hashlib
-import os
 import re
 import shutil
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+import logging
+
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 
 from core.hive_logging import log_event
+from minds import skill_reference
 from minds.runtime_api import authorize_admin
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
@@ -62,7 +64,7 @@ STATE_UNREADABLE = "unreadable"
 
 # A skill is source, not a build artifact. Anything past this is a
 # virtualenv or a node_modules that was never meant to travel.
-MAX_SKILL_BYTES = 8 * 1024 * 1024
+MAX_SKILL_BYTES = skill_reference.MAX_SKILL_BYTES
 
 
 class SkillError(ValueError):
@@ -73,6 +75,18 @@ class SkillUnavailable(SkillError):
     """The skill root itself could not be read. Not the same as empty."""
 
 
+class SkillConflict(SkillError):
+    """An in-place edit that would overwrite a reference changed since."""
+
+
+class SkillRefused(SkillError):
+    """A skill no harness may be handed as written."""
+
+
+class SkillHarnessUndeclared(SkillError):
+    """The mind declares no home for this harness, so nothing is rendered there."""
+
+
 @dataclass(frozen=True)
 class SkillPair:
     """One skill as it exists in the repo and on this mind."""
@@ -81,6 +95,10 @@ class SkillPair:
     state: str
     repo_text: str | None
     installed_text: str | None
+    reference_text: str | None = None
+    # How the harness's copy stands against what was rendered for it:
+    # `rendered`, `edited`, `stale`, `missing` or `unmanaged`.
+    copy: str = "missing"
 
     def as_dict(self) -> dict:
         return {
@@ -88,21 +106,30 @@ class SkillPair:
             "state": self.state,
             "repo": self.repo_text,
             "installed": self.installed_text,
+            "reference": self.reference_text,
+            "copy": self.copy,
         }
 
 
 def harness_directory(harness: str) -> str:
-    """`claude_cli` and `codex_cli` name their own source directory."""
-    key = (harness or "").strip().lower()
-    if key.startswith("codex"):
-        return "codex"
-    if key.startswith("claude"):
-        return "claude"
-    raise SkillError(f"Unknown harness: {harness!r}")
+    """`claude_cli`, `codex_cli` and `dsh_cli` name their bare harness."""
+    try:
+        return skill_reference.normalize_harness(harness)
+    except skill_reference.RenderError as exc:
+        raise SkillError(str(exc)) from exc
 
 
-def repo_root(harness: str) -> Path:
-    return PROJECT_DIR / "specs" / "skills" / harness_directory(harness)
+def repo_root(harness: str | None = None) -> Path:
+    """The tracked references. One directory: a reference is harness-neutral."""
+    return PROJECT_DIR / "specs" / "skills"
+
+
+def reference_root() -> Path:
+    """This mind's own references."""
+    try:
+        return skill_reference.reference_root() / "skills"
+    except skill_reference.RenderError as exc:
+        raise SkillError(str(exc)) from exc
 
 
 def installed_root(harness: str) -> Path:
@@ -112,11 +139,10 @@ def installed_root(harness: str) -> Path:
     these per case, and a mind's config directory is a deployment fact
     rather than a constant.
     """
-    if harness_directory(harness) == "codex":
-        home = os.environ.get("CODEX_HOME") or str(Path.home() / ".codex")
-    else:
-        home = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
-    return Path(home) / "skills"
+    try:
+        return skill_reference.harness_home(harness_directory(harness)) / "skills"
+    except skill_reference.HarnessUndeclared as exc:
+        raise SkillHarnessUndeclared(str(exc)) from exc
 
 
 def _validate(name: str) -> str:
@@ -146,21 +172,16 @@ def _fingerprint(root: Path, name: str) -> str | None:
 
     This is what `same` and `differs` are computed from. Comparing only the
     `SKILL.md` would call a skill synced while its scripts had drifted, and
-    the console offers no action on a synced row.
+    the console offers no action on a synced row. The same hash the render
+    record uses, so built files and symlink targets count the same way.
     """
     directory = root / name
     if not (directory / SKILL_FILE).exists():
         return None
-    digest = hashlib.sha256()
     try:
-        for path in sorted(p for p in directory.rglob("*") if p.is_file()):
-            digest.update(str(path.relative_to(directory)).encode())
-            digest.update(b"\0")
-            digest.update(path.read_bytes())
-            digest.update(b"\0")
+        return skill_reference.fingerprint(directory)
     except OSError as exc:
         raise SkillUnavailable(f"{directory} cannot be read: {exc}") from exc
-    return digest.hexdigest()
 
 
 def _names(root: Path) -> set[str]:
@@ -193,50 +214,58 @@ def _names(root: Path) -> set[str]:
 
 
 def list_skills(harness: str) -> list[SkillPair]:
-    """Every skill this mind knows about, from either side, sorted by name."""
-    repo, installed = repo_root(harness), installed_root(harness)
-    pairs = []
-    for name in sorted(_names(repo) | _names(installed)):
-        pairs.append(_pair_in(repo, installed, name))
-    return pairs
+    """Every skill this mind knows about, from any side, sorted by name."""
+    h = harness_directory(harness)
+    names = _names(repo_root()) | _names(reference_root()) | _names(installed_root(h))
+    return [_pair(h, name) for name in sorted(names)]
 
 
-def _pair_in(repo: Path, installed: Path, name: str) -> SkillPair:
+def _pair(harness: str, name: str) -> SkillPair:
+    repo, reference, installed = repo_root(), reference_root(), installed_root(harness)
     try:
-        repo_text, installed_text = _read(repo, name), _read(installed, name)
-        state = _state(_fingerprint(repo, name), _fingerprint(installed, name))
-    except SkillUnavailable:
+        repo_text, reference_text = _read(repo, name), _read(reference, name)
+        installed_text = _read(installed, name)
+        repo_hash, reference_hash = _fingerprint(repo, name), _fingerprint(reference, name)
+        copy = skill_reference.copy_status(skill_reference.KIND_SKILL, name, harness)
+    except (SkillUnavailable, OSError, skill_reference.RecordsCorrupt):
         return SkillPair(name, STATE_UNREADABLE, None, None)
-    return SkillPair(name, state, repo_text, installed_text)
+    return SkillPair(
+        name, _state(repo_hash, reference_hash, copy),
+        repo_text, installed_text, reference_text, copy,
+    )
 
 
-def _state(repo_hash: str | None, installed_hash: str | None) -> str:
+def _state(repo_hash: str | None, reference_hash: str | None, copy: str) -> str:
     if repo_hash is None:
         return STATE_LOCAL_ONLY
-    if installed_hash is None:
+    if reference_hash is None:
         return STATE_NOT_INSTALLED
-    return STATE_SAME if repo_hash == installed_hash else STATE_DIFFERS
+    if repo_hash == reference_hash and copy == "rendered":
+        return STATE_SAME
+    return STATE_DIFFERS
 
 
 def diff_skill(harness: str, name: str) -> str:
-    """Unified diff of the repo version against the installed one."""
+    """Unified diff of the repo's reference against this mind's.
+
+    A mind with no reference yet is diffed against the copy its harness
+    runs, which is what a write-back would adopt.
+    """
     _validate(name)
-    repo_text = _read(repo_root(harness), name)
-    installed_text = _read(installed_root(harness), name)
-    if repo_text is None and installed_text is None:
+    repo_text = _read(repo_root(), name)
+    mind_text = _read(reference_root(), name)
+    if mind_text is None:
+        mind_text = _read(installed_root(harness), name)
+    if repo_text is None and mind_text is None:
         raise SkillError(f"No such skill: {name}")
     return "".join(
         difflib.unified_diff(
             (repo_text or "").splitlines(keepends=True),
-            (installed_text or "").splitlines(keepends=True),
+            (mind_text or "").splitlines(keepends=True),
             fromfile=f"repo/{name}/{SKILL_FILE}",
             tofile=f"mind/{name}/{SKILL_FILE}",
         )
     )
-
-
-def _tree_bytes(directory: Path) -> int:
-    return sum(p.stat().st_size for p in directory.rglob("*") if p.is_file())
 
 
 def _copy_skill(source: Path, target: Path, name: str) -> None:
@@ -244,35 +273,21 @@ def _copy_skill(source: Path, target: Path, name: str) -> None:
 
     A skill is a directory, not a file — references, scripts and templates
     ride along with the SKILL.md and a copy that moved only the markdown
-    would leave the rest stale.
-
-    Symlinks are copied as symlinks. Following them turns a skill carrying a
-    virtualenv into hundreds of megabytes of materialised interpreter, which
-    a `venv/` gitignore then hides from `git status` entirely.
+    would leave the rest stale. What it built (a venv, node_modules,
+    bytecode) does not travel, and the swap leaves no moment with no skill.
     """
     origin = source / name
     if not (origin / SKILL_FILE).is_file():
         raise SkillError(f"No such skill: {name}")
-    size = _tree_bytes(origin)
-    if size > MAX_SKILL_BYTES:
-        raise SkillError(
-            f"{name} is {size // (1024 * 1024)} MB — larger than a skill should be. "
-            "Something built (a virtualenv, node_modules) is inside it."
-        )
-
-    target.mkdir(parents=True, exist_ok=True)
-    # A unique staging directory, not a name derived from the skill: two
-    # writers sharing this directory would otherwise delete each other's
-    # staging mid-copy and each report success over a truncated tree.
-    staging = Path(tempfile.mkdtemp(prefix=f".{name}.incoming.", dir=target))
-    incoming = staging / name
+    _guard_size(origin, name)
     destination = target / name
+    staged = skill_reference._aside(destination, "incoming")
     try:
-        shutil.copytree(origin, incoming, symlinks=True)
-        _replace(destination)
-        incoming.rename(destination)
+        skill_reference._copytree(origin, staged)
+        skill_reference._swap_in(staged, destination)
     finally:
-        shutil.rmtree(staging, ignore_errors=True)
+        if staged.exists():
+            shutil.rmtree(staged, ignore_errors=True)
 
 
 def _replace(path: Path) -> None:
@@ -288,40 +303,135 @@ def _replace(path: Path) -> None:
         shutil.rmtree(path)
 
 
-def install_skill(harness: str, name: str) -> SkillPair:
-    """Copy the repo's version onto this mind. Apply and revert are one act."""
+def _transports(catalog, notify):
+    return (
+        catalog or skill_reference.proxy_catalog(),
+        notify or skill_reference.telegram_notifier(),
+    )
+
+
+def _rendering(call, *args, **kwargs):
+    """Run a `skill_reference` call, in this module's error vocabulary."""
+    try:
+        return call(*args, **kwargs)
+    except skill_reference.RenderConflict as exc:
+        raise SkillConflict(str(exc)) from exc
+    except skill_reference.RenderRefused as exc:
+        raise SkillRefused(str(exc)) from exc
+    except skill_reference.HarnessUndeclared as exc:
+        raise SkillHarnessUndeclared(str(exc)) from exc
+    except skill_reference.RecordsCorrupt as exc:
+        raise SkillUnavailable(str(exc)) from exc
+    except skill_reference.RenderError as exc:
+        raise SkillError(str(exc)) from exc
+
+
+def _guard_size(directory: Path, name: str) -> None:
+    try:
+        skill_reference._guard_size(directory, name)
+    except skill_reference.RenderError as exc:
+        raise SkillError(str(exc)) from exc
+
+
+def install_skill(harness: str, name: str, *, catalog=None, notify=None) -> SkillPair:
+    """Take the repo's reference onto this mind and render it.
+
+    Apply and revert are one act for the harness named: its copy is
+    replaced whatever it held. Every other harness goes through the ordinary
+    pass, so a copy tuned there is reported as a conflict rather than
+    silently discarded. A refused skill changes nothing at all.
+    """
     _validate(name)
-    repo, installed = repo_root(harness), installed_root(harness)
-    _copy_skill(repo, installed, name)
-    return _pair_in(repo, installed, name)
+    h = harness_directory(harness)
+    catalog, notify = _transports(catalog, notify)
+    origin = repo_root() / name
+    text = _read(repo_root(), name)
+    if text is None:
+        raise SkillError(f"No such skill: {name}")
+    _rendering(
+        skill_reference.install, skill_reference.KIND_SKILL, name, h, text, origin,
+        catalog=catalog, notify=notify,
+    )
+    return _pair(h, name)
 
 
-def write_back_skill(harness: str, name: str) -> SkillPair:
-    """Copy this mind's version into the repo checkout.
+def resolve_skill(harness: str, name: str, *, catalog=None, notify=None) -> SkillPair:
+    """Settle a conflict: this harness's copy becomes the reference."""
+    _validate(name)
+    h = harness_directory(harness)
+    catalog, notify = _transports(catalog, notify)
+    _rendering(skill_reference.resolve, skill_reference.KIND_SKILL, name, h,
+               catalog=catalog, notify=notify)
+    return _pair(h, name)
 
+
+def write_back_skill(harness: str, name: str, *, catalog=None, notify=None) -> SkillPair:
+    """Copy this mind's reference into the repo checkout.
+
+    An in-place edit is merged into the reference first, and a copy with no
+    reference is adopted as one, so what lands is what the mind runs.
     Nothing is committed. The write lands in a working tree whose owner
     still has to review and push it, which is the whole safety story.
     """
     _validate(name)
-    repo, installed = repo_root(harness), installed_root(harness)
-    _copy_skill(installed, repo, name)
-    return _pair_in(repo, installed, name)
+    h = harness_directory(harness)
+    catalog, notify = _transports(catalog, notify)
+    if _read(reference_root(), name) is None:
+        copy = installed_root(h) / name
+        if not (copy / SKILL_FILE).is_file():
+            raise SkillError(f"No such skill: {name}")
+        _guard_size(copy, name)
+        _rendering(skill_reference.adopt, skill_reference.KIND_SKILL, name, h,
+                   catalog=catalog, notify=notify)
+    else:
+        _rendering(skill_reference.merge_copy, skill_reference.KIND_SKILL, name,
+                   catalog=catalog, notify=notify)
+    _copy_skill(reference_root(), repo_root(), name)
+    return _pair(h, name)
 
 
 def remove_skill(harness: str, name: str) -> None:
-    """Delete this mind's copy. The repo is never touched."""
-    _validate(name)
-    target = installed_root(harness) / name
-    if not (target / SKILL_FILE).is_file():
-        raise SkillError(f"No such skill: {name}")
-    _replace(target)
+    """Delete this mind's reference and every copy rendered from it.
 
+    The repo is never touched. This harness's copy goes too when nothing
+    rendered it, which is what removing a skill from a harness always meant.
+    """
+    _validate(name)
+    h = harness_directory(harness)
+    had_reference = _read(reference_root(), name) is not None
+    if had_reference:
+        _rendering(skill_reference.remove, skill_reference.KIND_SKILL, name)
+    target = installed_root(h) / name
+    if (target / SKILL_FILE).is_file():
+        _replace(target)
+    elif not had_reference:
+        raise SkillError(f"No such skill: {name}")
+
+
+def check_all(*, catalog=None, notify=None) -> dict:
+    """The full render pass over this mind's skills and agents.
+
+    Called with no arguments by mind start and by the gateway's pre-switch
+    route; the proxy listing and the Telegram notifier are its transports.
+    """
+    catalog, notify = _transports(catalog, notify)
+    return _rendering(skill_reference.check, catalog=catalog, notify=notify).as_dict()
 
 
 def _failure(exc: Exception) -> JSONResponse:
     """One mapping for every skills failure, so the console reads one shape."""
     if isinstance(exc, SkillUnavailable):
         return JSONResponse({"error": str(exc)}, status_code=503)
+    # An edit that would overwrite a newer reference, and a skill no harness
+    # may be handed, are refusals of a real skill — never "no such skill".
+    if isinstance(exc, SkillConflict):
+        return JSONResponse({"error": str(exc)}, status_code=409)
+    if isinstance(exc, SkillRefused):
+        return JSONResponse({"error": str(exc)}, status_code=422)
+    # A harness this mind declares no home for: a fact about the mind, not
+    # a missing skill and not a missing route.
+    if isinstance(exc, SkillHarnessUndeclared):
+        return JSONResponse({"error": str(exc)}, status_code=409)
     if isinstance(exc, SkillError):
         return JSONResponse({"error": str(exc)}, status_code=404)
     # A malformed runtime value reaches here as a bare ValueError, and a
@@ -333,14 +443,16 @@ def install_skills_routes(app: FastAPI, *, harness: str, mind_id: str, log) -> N
     """Mount the skills routes on a mind's FastAPI app.
 
     Both harness servers call this, the same way both call
-    `install_runtime_routes`. The harness is fixed for the life of the
-    process — a mind does not change which CLI it runs — so it is passed in
-    rather than re-read per request.
+    `install_runtime_routes`. `harness` is the mind's default; every route
+    takes the harness it acts on, since every skill is rendered into all
+    three and the console says which copy it is looking at.
     """
 
     @app.get("/skills")
-    async def get_skills(req: Request):
-        """Every skill this mind knows, repo side and installed side.
+    async def get_skills(
+        req: Request, harness_name: str | None = Query(None, alias="harness")
+    ):
+        """Every skill this mind knows: the repo's, its own, and the harness copy.
 
         Guarded like the writes: this returns the full text of every skill
         the mind runs, on a port reachable across the LAN.
@@ -350,59 +462,101 @@ def install_skills_routes(app: FastAPI, *, harness: str, mind_id: str, log) -> N
             return denied
         try:
             return {
-                "harness": harness_directory(harness),
-                "skills": [pair.as_dict() for pair in list_skills(harness)],
+                "harness": harness_directory(harness_name or harness),
+                "skills": [
+                    pair.as_dict() for pair in list_skills(harness_name or harness)
+                ],
             }
         except (ValueError, OSError) as exc:
             return _failure(exc)
 
     @app.get("/skills/{name}/diff")
-    async def get_skill_diff(req: Request, name: str):
+    async def get_skill_diff(
+        req: Request, name: str, harness_name: str | None = Query(None, alias="harness")
+    ):
         denied = authorize_admin(req)
         if denied is not None:
             return denied
         try:
-            return {"name": name, "diff": diff_skill(harness, name)}
+            return {"name": name, "diff": diff_skill(harness_name or harness, name)}
         except (ValueError, OSError) as exc:
             return _failure(exc)
 
     @app.post("/skills/{name}/install")
-    async def post_skill_install(req: Request, name: str):
-        """Copy the repo's version onto this mind — apply and revert alike."""
+    async def post_skill_install(
+        req: Request, name: str, harness_name: str | None = Query(None, alias="harness")
+    ):
+        """Take the repo's reference onto this mind — apply and revert alike."""
         denied = authorize_admin(req)
         if denied is not None:
             return denied
         try:
             # Off the event loop: a directory copy is not instant, and this
             # loop also serves every session this mind is holding.
-            pair = await asyncio.to_thread(install_skill, harness, name)
+            pair = await asyncio.to_thread(install_skill, harness_name or harness, name)
         except (ValueError, OSError) as exc:
             return _failure(exc)
         log_event(log, "mind.skill.installed", mind_id=mind_id, skill=name)
         return {"saved": True, "skill": pair.as_dict()}
 
     @app.post("/skills/{name}/write-back")
-    async def post_skill_write_back(req: Request, name: str):
-        """Copy this mind's version into its repo checkout, uncommitted."""
+    async def post_skill_write_back(
+        req: Request, name: str, harness_name: str | None = Query(None, alias="harness")
+    ):
+        """Copy this mind's reference into its repo checkout, uncommitted."""
         denied = authorize_admin(req)
         if denied is not None:
             return denied
         try:
-            pair = await asyncio.to_thread(write_back_skill, harness, name)
+            pair = await asyncio.to_thread(write_back_skill, harness_name or harness, name)
         except (ValueError, OSError) as exc:
             return _failure(exc)
         log_event(log, "mind.skill.written_back", mind_id=mind_id, skill=name)
         return {"saved": True, "skill": pair.as_dict()}
 
-    @app.delete("/skills/{name}")
-    async def delete_skill(req: Request, name: str):
-        """Remove this mind's copy. The repo keeps whatever it had."""
+    @app.post("/skills/{name}/resolve")
+    async def post_skill_resolve(
+        req: Request, name: str, from_: str = Query(..., alias="from")
+    ):
+        """Settle a conflict: the named harness's copy becomes the reference.
+
+        Every other copy is regenerated from it. This is what a conflict
+        notification asks the operator, or the mind, to decide.
+        """
         denied = authorize_admin(req)
         if denied is not None:
             return denied
         try:
-            await asyncio.to_thread(remove_skill, harness, name)
+            pair = await asyncio.to_thread(resolve_skill, from_, name)
+        except (ValueError, OSError) as exc:
+            return _failure(exc)
+        log_event(log, "mind.skill.resolved", mind_id=mind_id, skill=name, harness=from_)
+        return {"saved": True, "skill": pair.as_dict()}
+
+    @app.delete("/skills/{name}")
+    async def delete_skill(
+        req: Request, name: str, harness_name: str | None = Query(None, alias="harness")
+    ):
+        """Remove this mind's reference and copies; the repo keeps its own."""
+        denied = authorize_admin(req)
+        if denied is not None:
+            return denied
+        try:
+            await asyncio.to_thread(remove_skill, harness_name or harness, name)
         except (ValueError, OSError) as exc:
             return _failure(exc)
         log_event(log, "mind.skill.removed", mind_id=mind_id, skill=name)
         return {"removed": True, "name": name}
+
+
+async def check_at_start(log, mind_id: str) -> None:
+    """Render this mind's references once at start, off the event loop.
+
+    Never fatal: a mind that cannot render its skills still answers, and
+    the pass reports and notifies its own failures.
+    """
+    try:
+        await asyncio.to_thread(check_all)
+    except Exception as exc:  # noqa: BLE001
+        log_event(log, "mind.skill.check_failed", level=logging.WARNING,
+                  mind_id=mind_id, error=str(exc))

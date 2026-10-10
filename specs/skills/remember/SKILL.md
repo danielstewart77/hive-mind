@@ -1,9 +1,11 @@
 ---
 name: remember
-description: >
-  Save a piece of information to contextual memory. Trigger when the user
-  says "remember [something]", "remember this", or "/remember [something]".
-  Classifies the content via the local Ollama classifier and writes to lucent.
+description: |
+  Save a piece of information to contextual memory. Trigger when the user says "remember [something]", "remember this", or "/remember [something]". Classifies the content via the local Ollama classifier and writes to lucent.
+harness:
+  claude:
+    user-invocable: true
+    model: sonnet
 ---
 
 # remember
@@ -18,7 +20,9 @@ using skill: remember
 
 ## Step 1 — Run the backend script
 
-Pipe the user's content into `"${CODEX_HOME:-$HOME/.codex}/skills/remember/remember.sh"` via stdin.
+`<skills directory>` stands for the directory this skill is installed in — the running harness's own skills directory, one level above this file.
+
+Pipe the user's content into `"<skills directory>/remember/remember.sh"` via stdin.
 The script handles the entire pipeline (classify via hive-tools
 `/ollama/structured`, save via lucent `/memory/store`) and prints a summary.
 
@@ -26,7 +30,7 @@ Use the Bash tool. Avoid shell-quoting issues by writing the content to a
 temp file first, then redirecting it into the script's stdin:
 
 ```bash
-cat <<'__REMEMBER_INPUT__' | bash "${CODEX_HOME:-$HOME/.codex}/skills/remember/remember.sh"
+cat <<'__REMEMBER_INPUT__' | bash "<skills directory>/remember/remember.sh"
 <the user's content, verbatim>
 __REMEMBER_INPUT__
 ```
