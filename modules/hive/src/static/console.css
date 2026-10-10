@@ -81,30 +81,14 @@ a { color: inherit; }
 .console-nav-link.is-active svg, .setup-link.is-active svg { color: var(--console-cyan); }
 .console-nav-flyout { position: relative; }
 .nav-flyout-caret { width: 15px; height: 15px; margin-left: auto; color: #77828a; transition: transform .15s ease; }
-.console-nav-submenu {
-    position: absolute;
-    z-index: 130;
-    left: calc(100% + 8px);
-    top: 0;
-    display: none;
-    min-width: 150px;
-    padding: 6px;
-    border: 1px solid var(--console-line);
-    border-radius: 9px;
-    background: var(--console-surface, #171b1e);
-    box-shadow: 0 10px 28px rgba(0,0,0,.35);
-}
+.console-nav-submenu { display: none; gap: 2px; margin: 0 0 5px 29px; padding: 3px 0 3px 8px; border-left: 1px solid #39444b; }
 .console-nav-flyout:hover .console-nav-submenu,
-.console-nav-flyout:focus-within .console-nav-submenu { display: grid; gap: 2px; }
+.console-nav-flyout:focus-within .console-nav-submenu { display: grid; }
 .console-nav-flyout:hover .nav-flyout-caret,
 .console-nav-flyout:focus-within .nav-flyout-caret { transform: rotate(90deg); }
 .console-nav-sublink { display: block; padding: 8px 10px; border-radius: 6px; color: var(--console-muted, #aab4ba); text-decoration: none; font-size: 13px; }
 .console-nav-sublink:hover, .console-nav-sublink:focus-visible { color: var(--console-text); background: #252b30; outline: none; }
 .console-nav-sublink.is-active { color: var(--console-cyan); background: rgba(76,201,217,.1); }
-@media (max-width: 820px) {
-    .console-nav-submenu { position: static; display: grid; gap: 2px; margin: 0 0 5px 29px; padding: 3px 0 3px 8px; border: 0; border-left: 1px solid #39444b; border-radius: 0; background: transparent; box-shadow: none; }
-    .nav-flyout-caret { transform: rotate(90deg); }
-}
 .console-nav-label {
     margin: 18px 10px 7px;
     color: #59636a;

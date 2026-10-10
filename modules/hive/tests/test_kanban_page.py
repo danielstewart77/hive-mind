@@ -40,6 +40,7 @@ def test_backlog_uses_collapsible_items_and_drag_drop_hooks(signed_in):
     assert body.text.count('href="/kanban/backlog"') == 1
     assert body.text.count('href="/kanban/board"') == 1
     assert 'class="console-nav-flyout"' in body.text
+    assert 'class="console-nav-submenu"' in body.text
     assert 'href="/kanban/backlog" class="console-nav-sublink is-active"' in body.text
     assert 'href="/kanban/board" class="console-nav-sublink "' in body.text
     assert "board-toggle" not in body.text
