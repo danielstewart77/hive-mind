@@ -178,13 +178,15 @@ class TestTheKeyboard:
         assert "no models offered" in delivered.await_args.args[2].lower()
 
     @pytest.mark.asyncio
-    async def test_a_gateway_refusal_is_reported_rather_than_read_as_no_models(self) -> None:
-        """"No active session" and "the proxy is down" have different remedies."""
+    @pytest.mark.parametrize("key", ["error", "detail"])
+    async def test_a_gateway_refusal_is_reported_rather_than_read_as_no_models(self, key) -> None:
+        """"No active session" and "the proxy is down" have different remedies.
+        FastAPI's own rejections arrive as `detail`, the gateway's as `error`."""
         _allow()
         update, context = _authorized_update()
 
         with patch.object(tb, "gateway", MagicMock(server_command=AsyncMock(
-                    return_value={"error": "No active session. Use /new first."}))), \
+                    return_value={key: "No active session. Use /new first."}))), \
                 patch.object(tb, "_deliver", new=AsyncMock()) as delivered:
             await tb.cmd_model(update, context)
 
@@ -216,7 +218,73 @@ class TestTheKeyboard:
         ]
 
 
+    def test_a_name_whose_payload_exactly_fills_a_callback_is_kept(self) -> None:
+        """The limit is Telegram's own, inclusive: 64 bytes is legal."""
+        prefix = len(model_picker.encode(""))
+        name = "a" * (model_picker.CALLBACK_DATA_LIMIT - prefix)
+
+        assert _payloads(model_picker.build_model_keyboard({"models": [{"name": name}]})) == [
+            model_picker.encode(name)
+        ]
+
+
+def _model_tap(name: str, message_id: int = 99):
+    query = MagicMock()
+    query.data = model_picker.encode(name)
+    query.answer = AsyncMock()
+    query.message.message_id = message_id
+    query.message.text = "Pick a model:"
+    query.edit_message_reply_markup = AsyncMock()
+    query.edit_message_text = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+    update.effective_user.id = 123
+    update.effective_chat.id = 456
+    context = MagicMock()
+    context.bot = MagicMock()
+    return update, context
+
+
 class TestTappingAButton:
+    @pytest.mark.asyncio
+    async def test_a_second_tap_on_one_model_picker_switches_nothing(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """A model picker left in scrollback must not switch a conversation
+        weeks later — the claim covers model taps, not only conversation taps."""
+        from hive_surfaces import bot_utils
+
+        monkeypatch.setenv("PICKER_STATE_PATH", str(tmp_path / "spent_pickers.json"))
+        bot_utils._reset_pickers()
+        _allow()
+        try:
+            with patch.object(tb, "_handle_server_command",
+                              new=AsyncMock(return_value="Switched to qwen3-coder")) as sent, \
+                    patch.object(tb, "_deliver", new=AsyncMock()):
+                for _ in range(2):
+                    await tb.on_session_button(*_model_tap("qwen3-coder"))
+        finally:
+            bot_utils._reset_pickers()
+
+        assert sent.await_count == 1
+
+    def test_the_running_application_routes_a_model_tap_to_a_handler(self) -> None:
+        """Every other test calls the handler directly, so a dropped
+        registration would leave every model button inert behind a green suite."""
+        from telegram.ext import CallbackQueryHandler
+
+        with patch.object(tb, "_on_startup"), patch.object(tb, "_on_shutdown"):
+            app = tb._build_application("123456:fake-token-for-tests")
+        payload = model_picker.encode("qwen3-coder")
+
+        routed = [
+            h for group in app.handlers.values() for h in group
+            if isinstance(h, CallbackQueryHandler)
+            and h.pattern is not None and h.pattern.match(payload)
+        ]
+        assert len(routed) == 1
+
+
     @pytest.mark.asyncio
     async def test_a_tapped_model_is_the_model_switched_to(self) -> None:
         with patch.object(tb, "_handle_server_command",
