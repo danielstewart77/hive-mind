@@ -1,9 +1,11 @@
 ---
 name: memory
 description: Access the mind's memory store — vector recall and knowledge graph. Use when querying entities, relationships, or recalling and storing memories.
-argument-hint: [operation] [...]
-tools: Bash
-user-invocable: true
+argument-hint: '[operation] [...]'
+harness:
+  claude:
+    tools: Bash
+    user-invocable: true
 ---
 
 # Lucent — Knowledge Graph & Vector Memory

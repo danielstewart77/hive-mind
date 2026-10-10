@@ -36,6 +36,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from core.hive_logging import log_event
+from minds import skill_reference
 from minds.runtime_api import authorize_admin
 
 from minds.skills_api import SKILL_FILE, SkillError, SkillUnavailable, harness_directory
@@ -95,11 +96,7 @@ class FileUnavailable(SkillUnavailable):
 
 def harness_home(harness: str) -> Path:
     """The config home this harness reads, from the environment at call time."""
-    if harness_directory(harness) == "codex":
-        home = os.environ.get("CODEX_HOME") or str(Path.home() / ".codex")
-    else:
-        home = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
-    return Path(home)
+    return skill_reference.harness_home(harness_directory(harness))
 
 
 def tree_root(harness: str, tree: str) -> Path:

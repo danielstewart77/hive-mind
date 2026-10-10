@@ -1,8 +1,10 @@
 ---
 name: save-session
 description: Harvest durable memory from the session so far without closing it. Use when the user says "save session", "save this session", or "/save-session" — unlike /end-session, the conversation continues.
-tools: Bash
-user-invocable: true
+harness:
+  claude:
+    tools: Bash
+    user-invocable: true
 ---
 
 # /save-session
@@ -17,11 +19,13 @@ categories:
 - **current configuration** — settings and facts about systems as they now are
 - **future configuration** — planned or intended changes not yet made
 
+`<skills directory>` stands for the directory this skill is installed in — the running harness's own skills directory, one level above this file.
+
 Pipe each fact separately through the remember pipeline, one invocation per
 fact:
 
 ```bash
-cat <<'__REMEMBER_INPUT__' | bash "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/remember/remember.sh"
+cat <<'__REMEMBER_INPUT__' | bash "<skills directory>/remember/remember.sh"
 <one fact, verbatim>
 __REMEMBER_INPUT__
 ```

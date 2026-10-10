@@ -1,9 +1,12 @@
 ---
 name: self-reflect
 description: Load this mind's identity from the knowledge graph at session start, or evaluate the session so far for changes worth writing back. Use when invoked by the session-start hook, by the periodic nudge, or when the user asks the mind to reflect.
-argument-hint: [--load | --reflect]
-tools: Bash
-user-invocable: true
+argument-hint:
+- --load | --reflect
+harness:
+  claude:
+    tools: Bash
+    user-invocable: true
 ---
 
 # /self-reflect

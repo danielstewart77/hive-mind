@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resolve this Codex thread and delete its gateway session after a delay."""
+"""Resolve this conversation and delete its gateway session after a delay."""
 
 from __future__ import annotations
 
@@ -53,18 +53,27 @@ def resolve_session() -> str:
 
     ``HIVE_SESSION_ID`` is the gateway's own row id, stamped on the harness
     process by the mind at spawn — no lookup, no ambiguity. It is preferred
-    when present. Otherwise fall back to matching the codex thread id, which
-    codex exports into every shell tool call it runs (but not into hook
-    processes, which read their identity off stdin instead), against the
-    ``harness_sid`` the mind reported to the gateway.
+    when present. Otherwise fall back to the harness's own conversation id,
+    which each harness exports into the shell tool calls it runs (but not into
+    hook processes, which read their identity off stdin instead): Claude's
+    ``CLAUDE_CODE_SESSION_ID`` is the session's ``claude_sid``, Codex's
+    ``CODEX_THREAD_ID`` the ``harness_sid`` the mind reported to the gateway.
     """
     session_id = os.environ.get("HIVE_SESSION_ID", "")
     if session_id:
         return session_id
 
-    thread_id = os.environ.get("CODEX_THREAD_ID", "")
-    if not thread_id:
-        raise RuntimeError("neither HIVE_SESSION_ID nor CODEX_THREAD_ID is set")
+    for variable, column in (
+        ("CLAUDE_CODE_SESSION_ID", "claude_sid"),
+        ("CODEX_THREAD_ID", "harness_sid"),
+    ):
+        conversation = os.environ.get(variable, "")
+        if conversation:
+            break
+    else:
+        raise RuntimeError(
+            "none of HIVE_SESSION_ID, CLAUDE_CODE_SESSION_ID or CODEX_THREAD_ID is set"
+        )
     sessions = gateway_request("/sessions")
     if not isinstance(sessions, list):
         raise RuntimeError("gateway returned an invalid session list")
@@ -72,11 +81,11 @@ def resolve_session() -> str:
         row
         for row in sessions
         if isinstance(row, dict)
-        and row.get("harness_sid") == thread_id
+        and row.get(column) == conversation
         and row.get("status") != "closed"
     ]
     if len(matches) != 1:
-        raise RuntimeError(f"expected one live Codex session, found {len(matches)}")
+        raise RuntimeError(f"expected one live session, found {len(matches)}")
     session_id = matches[0].get("id")
     if not session_id:
         raise RuntimeError("matched session has no id")
