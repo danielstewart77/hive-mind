@@ -100,7 +100,7 @@ def runtime_file(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_the_listing_is_fetched_with_this_minds_own_proxy_key(wire, runtime_file):
     """The proxy filters by key, so the key decides what the picker offers."""
-    seen = wire({"/v1/anthropic/models": CLAUDE_ROWS})
+    seen = wire({"/v1/models?harness=claude": CLAUDE_ROWS})
     path = runtime_file(env={
         "ANTHROPIC_BASE_URL": "http://proxy:8899",
         "ANTHROPIC_AUTH_TOKEN": "hmp-ada",
@@ -108,7 +108,7 @@ async def test_the_listing_is_fetched_with_this_minds_own_proxy_key(wire, runtim
 
     await models_api.build_catalog(path)
 
-    assert seen == [("http://proxy:8899/v1/anthropic/models", "Bearer hmp-ada")]
+    assert seen == [("http://proxy:8899/v1/models?harness=claude", "Bearer hmp-ada")]
 
 
 @pytest.mark.asyncio
@@ -131,7 +131,7 @@ async def test_each_row_carries_the_label_and_the_provider_hosting_it(
     wire, runtime_file
 ):
     """A picker shows the label, saves the name, and groups by provider."""
-    wire({"/v1/anthropic/models": CLAUDE_ROWS})
+    wire({"/v1/models?harness=claude": CLAUDE_ROWS})
     path = runtime_file(env={
         "ANTHROPIC_BASE_URL": "http://proxy:8899",
         "ANTHROPIC_AUTH_TOKEN": "hmp-ada",
@@ -150,7 +150,7 @@ async def test_an_unreachable_proxy_yields_nothing_rather_than_raising(
     wire, runtime_file
 ):
     """The console needs an empty list to report on, not a 502 to swallow."""
-    wire({"/v1/anthropic/models": RuntimeError("connection refused")})
+    wire({"/v1/models?harness=claude": RuntimeError("connection refused")})
     path = runtime_file(env={
         "ANTHROPIC_BASE_URL": "http://proxy:8899",
         "ANTHROPIC_AUTH_TOKEN": "hmp-ada",
