@@ -1,11 +1,11 @@
 ---
 name: always-remember
-description: >
-  Save a piece of information to the standing tier — always-on, loaded at
-  every session bootstrap. Reserved for behavioural rules and high-signal
-  invariants. Trigger when the user says "always remember [something]" or
-  "/always-remember [something]". Skips classification (override) and writes
-  directly to lucent with tier=standing.
+description: |
+  Save a piece of information to the standing tier — always-on, loaded at every session bootstrap. Reserved for behavioural rules and high-signal invariants. Trigger when the user says "always remember [something]" or "/always-remember [something]". Skips classification (override) and writes directly to lucent with tier=standing.
+harness:
+  claude:
+    user-invocable: true
+    model: sonnet
 ---
 
 # always-remember
@@ -47,7 +47,9 @@ Then proceed once the user answers.
 
 ## Step 2 — Run the backend script
 
-Pipe the rule into `"${CODEX_HOME:-$HOME/.codex}/skills/always-remember/always_remember.sh"` via stdin.
+`<skills directory>` stands for the directory this skill is installed in — the running harness's own skills directory, one level above this file.
+
+Pipe the rule into `"<skills directory>/always-remember/always_remember.sh"` via stdin.
 Pass the scope as the first arg: `shared` or `self`.
 
 The script POSTs directly to lucent with `tier=standing`,
@@ -57,7 +59,7 @@ The script POSTs directly to lucent with `tier=standing`,
 Use the Bash tool, heredoc form to avoid shell-quoting issues:
 
 ```bash
-cat <<'__ALWAYS_REMEMBER_INPUT__' | bash "${CODEX_HOME:-$HOME/.codex}/skills/always-remember/always_remember.sh" shared
+cat <<'__ALWAYS_REMEMBER_INPUT__' | bash "<skills directory>/always-remember/always_remember.sh" shared
 <the rule, verbatim>
 __ALWAYS_REMEMBER_INPUT__
 ```
