@@ -411,6 +411,12 @@ def remove_skill(harness: str, name: str) -> None:
         raise SkillError(f"No such skill: {name}")
 
 
+
+def check_all(*, catalog=None, notify=None) -> dict:
+    """The full render pass over this mind's skills and agents."""
+    catalog, notify = _transports(catalog, notify)
+    return _rendering(skill_reference.check, catalog=catalog, notify=notify).as_dict()
+
 def _failure(exc: Exception) -> JSONResponse:
     """One mapping for every skills failure, so the console reads one shape."""
     if isinstance(exc, SkillUnavailable):
@@ -456,6 +462,23 @@ def install_skills_routes(app: FastAPI, *, harness: str, mind_id: str, log) -> N
                     pair.as_dict() for pair in list_skills(harness_name or harness)
                 ],
             }
+        except (ValueError, OSError) as exc:
+            return _failure(exc)
+
+    @app.post("/skills/check")
+    async def post_skills_check(req: Request):
+        """Merge every in-place edit and render every reference everywhere.
+
+        The same pass `tools/stateless/skill_render` runs from the Stop hooks
+        and at mind start, reachable by the gateway before it switches a
+        conversation to another harness. Conflicts and refusals come back in
+        the body: the pass ran, and each one has already been notified.
+        """
+        denied = authorize_admin(req)
+        if denied is not None:
+            return denied
+        try:
+            return await asyncio.to_thread(check_all)
         except (ValueError, OSError) as exc:
             return _failure(exc)
 
