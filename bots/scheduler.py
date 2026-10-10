@@ -12,7 +12,7 @@ layer, not from chat history.
 
 A task that names a `discord_channel` works the other way round. The fire
 is a nudge into the session already bound to that channel — the same
-binding the Discord bot uses, `("discord", "<channel_id>")` in
+binding the Discord bot uses, `("discord:<mind_id>", "<channel_id>")` in
 `active_sessions` — so the conversation holds every previous fire and
 everything Daniel said back. The session is never killed, and the response
 is posted into the channel rather than sent to Telegram.
@@ -291,14 +291,17 @@ async def _ensure_channel_session(
 
     Deliberately the same two steps `GatewayClient.ensure_session` takes for
     an inbound Discord message — look for the active binding on
-    ("discord", channel_id), create and bind only when there is none. Any
-    other addressing here would mint a second session for a channel that
-    already had one, and the reply Daniel types would land in whichever of
-    them the bot happened to resolve.
+    (`discord:<mind_id>`, channel_id), create and bind only when there is
+    none. The bot namespaces its client type by mind so two minds' bots in
+    one channel keep separate conversations, and the key here has to be
+    that one: any other addressing mints a second session for a channel
+    that already had one, so every fire posts into a conversation Daniel's
+    replies never reach.
     """
+    client_type = f"discord:{skill.mind_id}"
     async with http.get(
         f"{SERVER_URL}/sessions",
-        params={"client_type": "discord", "client_ref": channel_id},
+        params={"client_type": client_type, "client_ref": channel_id},
     ) as resp:
         if resp.status != 200:
             # Not "this channel has no session" — "I could not find out". A
@@ -318,7 +321,7 @@ async def _ensure_channel_session(
 
     owner_ref = str(config.discord_allowed_users[0]) if config.discord_allowed_users else "scheduler"
     payload = {
-        "owner_type": "discord",
+        "owner_type": client_type,
         "owner_ref": owner_ref,
         "client_ref": channel_id,
         "mind_id": skill.mind_id,

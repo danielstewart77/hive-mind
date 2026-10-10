@@ -168,47 +168,54 @@ async def test_no_token_means_no_call_to_discord():
 # ---------------------------------------------------------------------------
 # R3/R8 — the fire reuses the channel's session, or creates and binds one
 # ---------------------------------------------------------------------------
+class _Comms:
+    """A stand-in for comms' session routes, keyed the way `active_sessions`
+    is: one live session per `(client_type, client_ref)`, and a created
+    session bound under its own `owner_type`."""
+
+    def __init__(self, bindings=None):
+        self.bindings = dict(bindings or {})
+
+    def get(self, _url, params):
+        sid = self.bindings.get((params["client_type"], params["client_ref"]))
+        listing = MagicMock()
+        listing.status = 200
+        listing.json = AsyncMock(
+            return_value=[{"id": sid, "is_active": True}] if sid else []
+        )
+        return _AsyncCtx(listing)
+
+    def post(self, _url, json):
+        sid = f"new-{len(self.bindings)}"
+        self.bindings[(json["owner_type"], json["client_ref"])] = sid
+        created = MagicMock()
+        created.json = AsyncMock(return_value={"id": sid})
+        return _AsyncCtx(created)
+
+
+# The Discord bot's own key for a channel: its client type is namespaced by
+# the mind (`discord:<mind_id>`, hive_surfaces.discord_bot.setup_hook).
+_BOT_KEY = ("discord:ada-uuid", "777")
+
+
 @pytest.mark.asyncio
-async def test_existing_channel_session_is_reused():
-    listing = MagicMock()
-    listing.status = 200
-    listing.json = AsyncMock(return_value=[
-        {"id": "old-sid", "is_active": False},
-        {"id": "live-sid", "is_active": True},
-    ])
-    http = MagicMock()
-    http.get = MagicMock(return_value=_AsyncCtx(listing))
-    http.post = MagicMock()
+async def test_a_fire_posts_into_the_conversation_the_bot_holds_for_the_channel():
+    comms = _Comms({_BOT_KEY: "bot-sid"})
 
-    sid = await scheduler._ensure_channel_session(http, _skill(), "777")
+    sid = await scheduler._ensure_channel_session(comms, _skill(), "777")
 
-    assert sid == "live-sid"
-    http.post.assert_not_called()
-    _, kwargs = http.get.call_args
-    assert kwargs["params"] == {"client_type": "discord", "client_ref": "777"}
+    assert sid == "bot-sid"
+    assert comms.bindings == {_BOT_KEY: "bot-sid"}
 
 
 @pytest.mark.asyncio
-async def test_channel_with_no_session_gets_one_bound_to_it():
-    listing = MagicMock()
-    listing.status = 200
-    listing.json = AsyncMock(return_value=[])
-    created = MagicMock()
-    created.json = AsyncMock(return_value={"id": "new-sid"})
-
-    http = MagicMock()
-    http.get = MagicMock(return_value=_AsyncCtx(listing))
-    http.post = MagicMock(return_value=_AsyncCtx(created))
+async def test_a_channel_session_the_scheduler_opens_is_the_one_a_reply_finds():
+    comms = _Comms()
 
     with patch.object(scheduler.config, "discord_allowed_users", [4242]):
-        sid = await scheduler._ensure_channel_session(http, _skill(), "777")
+        sid = await scheduler._ensure_channel_session(comms, _skill(), "777")
 
-    assert sid == "new-sid"
-    _, kwargs = http.post.call_args
-    assert kwargs["json"]["owner_type"] == "discord"
-    assert kwargs["json"]["client_ref"] == "777"
-    assert kwargs["json"]["owner_ref"] == "4242"
-    assert kwargs["json"]["mind_id"] == "ada-uuid"
+    assert comms.bindings[_BOT_KEY] == sid
 
 
 # ---------------------------------------------------------------------------

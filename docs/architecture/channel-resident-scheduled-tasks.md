@@ -20,7 +20,7 @@ The routing Daniel described is already the system's shape, not new work:
 - The Discord surface (`hive-surfaces`) passes `channel_id` as `client_ref` on every inbound
   message and server command.
 - `active_sessions` in `nervous-system/comms/sessions.py` is
-  `PRIMARY KEY (client_type, client_ref)` — so `("discord", "<channel_id>")`
+  `PRIMARY KEY (client_type, client_ref)` — so `("discord:<mind_id>", "<channel_id>")`
   already resolves to exactly one live session per channel, with rotation,
   adoption and the turn ledger attached.
 
