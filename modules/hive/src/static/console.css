@@ -56,7 +56,7 @@ a { color: inherit; }
 .console-brand small, .console-user small { color: var(--console-faint); font-size: 11px; line-height: 1.4; }
 .sidebar-close { display: none !important; margin-left: auto; }
 
-.console-nav { flex: 1; min-height: 0; overflow-y: auto; scrollbar-width: thin; }
+.console-nav { flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; scrollbar-width: thin; }
 .console-nav-link, .setup-link {
     min-height: 39px;
     display: flex;
