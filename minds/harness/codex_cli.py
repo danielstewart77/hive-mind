@@ -268,6 +268,7 @@ async def create_session(req: Request) -> Any:
             "system_prompt": full_prompt,
             "thread_id": THREADS.get(sid),
             "model": model,
+            "effort": body.get("effort") or None,
             "client_ref": client_ref,
             "owner_type": owner_type,
             "owner_ref": owner_ref,
@@ -377,7 +378,15 @@ def _watch_for_new_thread_in_background(session_id: str, before: set[Path]) -> N
     ).start()
 
 
-def _terminal_argv(model: str, thread_id: str | None) -> list[str]:
+def _effort_args(effort: str | None) -> list[str]:
+    """Codex's reasoning-effort override when the conversation names one.
+
+    Nothing otherwise, leaving the profile's own level in force.
+    """
+    return ["-c", f'model_reasoning_effort="{effort}"'] if effort else []
+
+
+def _terminal_argv(model: str, thread_id: str | None, effort: str | None = None) -> list[str]:
     """The interactive `codex` that runs inside the tmux pane.
 
     Resumes a known thread (`codex resume <id>`) when one exists and has a
@@ -391,6 +400,7 @@ def _terminal_argv(model: str, thread_id: str | None) -> list[str]:
         "codex",
         "--dangerously-bypass-approvals-and-sandbox",
         "--model", model,
+        *_effort_args(effort),
         *_provider_args(),
     ]
     if thread_id:
@@ -451,7 +461,7 @@ def _spawn_pty(
     *, session_id: str, model: str, conversation_id: str, cols: int, rows: int,
     harness_sid: str | None = None, client_ref: str | None = None,
     owner_type: str | None = None, owner_ref: str | None = None,
-    system_prompt: str = "",
+    system_prompt: str = "", effort: str | None = None,
 ) -> tuple[Any, int]:
     """Attach a pty to this session's interactive `codex`, starting it if needed.
 
@@ -478,7 +488,7 @@ def _spawn_pty(
     TERMINALS.start(
         session_id,
         seeded_pane_command(
-            _terminal_argv(model, thread_id),
+            _terminal_argv(model, thread_id, effort),
             system_prompt,
             # Keyed by the conversation, not the session: a rotation and a
             # fresh attach on one session would otherwise write and delete a
@@ -507,6 +517,7 @@ def _rotate_pty(
     *, session_id: str, new_claude_sid: str, model: str = "", system_prompt: str = "",
     user_prompt: str = "", client_ref: str | None = None,
     owner_type: str | None = None, owner_ref: str | None = None,
+    effort: str | None = None,
 ) -> bool:
     """Start a fresh codex thread in a live terminal, in place.
 
@@ -543,7 +554,7 @@ def _rotate_pty(
     # that happening to coincide.
     seed = user_prompt or system_prompt
     argv = seeded_pane_command(
-        _terminal_argv(model, None),
+        _terminal_argv(model, None, effort),
         seed,
         CODEX_HOME / "rotation-seeds" / f"{session_id}-{new_claude_sid}.txt",
         as_user_turn=bool(user_prompt),
@@ -586,6 +597,7 @@ async def _run_codex_turn(sid: str, content: str, images: list[dict] | None) -> 
             "--dangerously-bypass-approvals-and-sandbox",
             "--model",
             state["model"],
+            *_effort_args(state.get("effort")),
             *_provider_args(),
             "resume",
             thread_id,
@@ -600,6 +612,7 @@ async def _run_codex_turn(sid: str, content: str, images: list[dict] | None) -> 
             "--dangerously-bypass-approvals-and-sandbox",
             "--model",
             state["model"],
+            *_effort_args(state.get("effort")),
             *_provider_args(),
             "-",
         ]

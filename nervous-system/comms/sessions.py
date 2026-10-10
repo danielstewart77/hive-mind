@@ -156,7 +156,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     context_tokens INTEGER,
     context_threshold INTEGER,
     context_window INTEGER,
-    context_observed_at REAL
+    context_observed_at REAL,
+    effort        TEXT
 );
 
 CREATE TABLE IF NOT EXISTS active_sessions (
@@ -232,6 +233,14 @@ MAX_SESSION_NAME_CHARS = 40
 # browser terminal's own route, which is the route this replaces, and a check
 # that dies with the code path it guarded was never guarding the value.
 _COLOR_RE = re.compile(r"^#[0-9a-fA-F]{3,8}$")
+
+
+def effort_levels_of(model_row: dict | None) -> list[str]:
+    """The effort levels a mind's model row declares; empty means none."""
+    levels = (model_row or {}).get("effort_levels")
+    if not isinstance(levels, list):
+        return []
+    return [str(level) for level in levels if isinstance(level, str) and level]
 
 
 def _public_session_row(row) -> dict:
@@ -389,6 +398,15 @@ class SessionManager:
                 await self._db.commit()
             except Exception:
                 pass  # Column already exists
+        # The reasoning effort this conversation runs at, or null for the
+        # model's own default. A property of the conversation like its model:
+        # every spawn reads it off the row, so a restart or a rotation cannot
+        # quietly drop it back to the default.
+        try:
+            await self._db.execute("ALTER TABLE sessions ADD COLUMN effort TEXT")
+            await self._db.commit()
+        except Exception:
+            pass  # Column already exists
         # Backfill: every session owns a conversation id. Rows created before
         # the id was minted at session creation may still be blank — those are
         # sessions that never finished a turn, so there is no conversation on
@@ -487,18 +505,21 @@ class SessionManager:
         # read through `rotated_from` on display, because the predecessor is
         # retired moments later and a read-through would inherit from a row
         # anything later cleaning up closed sessions is free to touch.
-        inherited_name, inherited_color = None, None
+        inherited_name, inherited_color, inherited_effort = None, None, None
         if rotated_from:
             parent = await self._get_row(rotated_from)
             if parent:
                 inherited_name = parent.get("name")
                 inherited_color = parent.get("color")
+                # The effort travels with the model it was chosen for.
+                if parent.get("model") == model:
+                    inherited_effort = parent.get("effort")
 
         await self._db.execute(
-            """INSERT INTO sessions (id, owner_type, owner_ref, model, claude_sid, created_at, last_active, status, mind_id, rotated_from, name, color)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?)""",
+            """INSERT INTO sessions (id, owner_type, owner_ref, model, claude_sid, created_at, last_active, status, mind_id, rotated_from, name, color, effort)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?)""",
             (session_id, owner_type, owner_ref, model, claude_sid, now, now, mind_id, rotated_from,
-             inherited_name, inherited_color),
+             inherited_name, inherited_color, inherited_effort),
         )
         await self._db.execute(
             """INSERT OR REPLACE INTO active_sessions (client_type, client_ref, session_id)
@@ -2199,16 +2220,22 @@ class SessionManager:
 
         lock = self._claim_turn_lock(session_id)
         async with lock:
-            if not await self.mind_offers_model(session["mind_id"], model):
+            offered = await self.mind_model_row(session["mind_id"], model)
+            if offered is None:
                 raise ValueError(
                     f"Model {model!r} is not one this mind may run. "
                     "Its provider decides that, not the hive."
                 )
+            # An effort the new model does not take drops to that model's own
+            # default rather than spawning the harness on a value it rejects.
+            effort = session.get("effort")
+            if effort not in effort_levels_of(offered):
+                effort = None
 
             await self._kill_process(session_id)
             await self._db.execute(
-                "UPDATE sessions SET model = ?, status = 'running' WHERE id = ?",
-                (model, session_id),
+                "UPDATE sessions SET model = ?, effort = ?, status = 'running' WHERE id = ?",
+                (model, effort, session_id),
             )
             await self._db.commit()
 
@@ -2222,6 +2249,79 @@ class SessionManager:
                 **routing,
             )
 
+        return await self._session_dict(session_id)
+
+    # ------------------------------------------------------------------
+    # Effort
+    # ------------------------------------------------------------------
+    async def effort_options(self, session_id: str) -> dict:
+        """The levels this conversation's model takes, and the one it is on."""
+        session = await self._get_row(session_id)
+        if not session:
+            raise ValueError(f"Session not found: {session_id}")
+        offered = await self._current_model_row(session)
+        return {
+            "model": session["model"],
+            "levels": effort_levels_of(offered),
+            "current": session.get("effort"),
+        }
+
+    async def _current_model_row(self, session: dict) -> dict:
+        """The mind's row for the model this conversation is on.
+
+        A model absent from the listing is not a model with no effort: an
+        empty listing is a mind or proxy that could not be asked, and saying
+        "this model takes no effort setting" would aim the operator at the
+        wrong fact entirely.
+        """
+        offered = await self.mind_model_row(session["mind_id"], session["model"])
+        if offered is None:
+            raise ValueError(
+                f"Couldn't read which models this mind offers right now, so "
+                f"there is no telling what effort {session['model']} takes."
+            )
+        return offered
+
+    async def set_effort(self, session_id: str, level: str) -> dict:
+        """Run this conversation at `level`: kill, record, respawn on --resume.
+
+        The same teardown as a model switch, under the same lock and for the
+        same reason — done mid-answer it destroys the answer.
+        """
+        session = await self._get_row(session_id)
+        if not session:
+            raise ValueError(f"Session not found: {session_id}")
+        level = str(level or "").strip().lower()
+
+        lock = self._claim_turn_lock(session_id)
+        async with lock:
+            offered = await self._current_model_row(session)
+            levels = effort_levels_of(offered)
+            if level not in levels:
+                if not levels:
+                    raise ValueError(
+                        f"{session['model']} takes no effort setting."
+                    )
+                raise ValueError(
+                    f"{session['model']} takes {', '.join(levels)}, not {level!r}."
+                )
+
+            await self._kill_process(session_id)
+            await self._db.execute(
+                "UPDATE sessions SET effort = ?, status = 'running' WHERE id = ?",
+                (level, session_id),
+            )
+            await self._db.commit()
+
+            routing = await self._routing_for(session)
+            await self._spawn(
+                session_id,
+                session["model"],
+                autopilot=bool(session["autopilot"]),
+                resume_sid=session["claude_sid"],
+                mind_id=session["mind_id"],
+                **routing,
+            )
         return await self._session_dict(session_id)
 
     # ------------------------------------------------------------------
@@ -2559,9 +2659,13 @@ class SessionManager:
                 f"refusing to spawn session {session_id} without a conversation id"
             )
         row = await self._get_mind_row(mind_id)
+        # The effort is read off the row on every spawn, never passed in, so
+        # no spawn path can forget it: a respawn after a restart, a rotation
+        # successor and a model switch all run at what the row says.
+        session_row = await self._get_row(session_id)
         if harness_sid is None:
-            session_row = await self._get_row(session_id)
             harness_sid = session_row.get("harness_sid") if session_row else None
+        effort = (session_row or {}).get("effort") or None
         mind_url = row["gateway_url"]
         mind_name = row["name"]
         import aiohttp
@@ -2593,6 +2697,7 @@ class SessionManager:
                     # surface without knowing gateway naming conventions.
                     "surface": self._surface_label(owner_type or ""),
                     "system_prompt_blocks": system_prompt_blocks,
+                    "effort": effort,
                 },
                 headers=await self.mind_auth_headers(mind_id),
                 timeout=aiohttp.ClientTimeout(total=10),
@@ -2751,7 +2856,14 @@ class SessionManager:
         listing — and an empty listing must not silently approve every name, or
         the one moment the check matters is the moment it stops working.
         """
-        return any(str(row.get("name")) == model for row in await self.mind_models(mind_id))
+        return await self.mind_model_row(mind_id, model) is not None
+
+    async def mind_model_row(self, mind_id: str, model: str) -> dict | None:
+        """The mind's own row for `model`, matched exactly, or None."""
+        for row in await self.mind_models(mind_id):
+            if str(row.get("name")) == model:
+                return row
+        return None
 
     async def _mind_url_for_session(self, session_id: str, mind_id: str | None = None) -> str | None:
         """Resolve a session's mind base URL from the database.
@@ -3184,6 +3296,7 @@ class SessionManager:
             "name": row.get("name"),
             "color": row.get("color"),
             "model": row["model"],
+            "effort": row.get("effort"),
             "autopilot": bool(row["autopilot"]),
             "created_at": row["created_at"],
             "last_active": row["last_active"],

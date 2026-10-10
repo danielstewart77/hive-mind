@@ -952,6 +952,9 @@ async def ws_attach(ws: WebSocket, session_id: str):
         "resume_sid": conversation_id,
         "harness_sid": session.get("harness_sid") or "",
         "model": session_model,
+        # The conversation's effort, so a pane runs at what `/effort` set
+        # rather than the harness's configured level.
+        "effort": session.get("effort") or "",
         # Initial pty geometry from the browser tile, so the TUI's first
         # paint matches; live changes arrive as resize control frames.
         "cols": ws.query_params.get("cols") or "80",
@@ -1171,6 +1174,18 @@ async def _handle_command(cmd: str, parts: list[str], body: CommandRequest):
             return {"error": "No active session. Use /new first."}
         try:
             return await session_mgr.switch_model(active["id"], model_name)
+        except ValueError as exc:
+            return {"error": str(exc)}
+
+    if cmd == "/effort":
+        active = await session_mgr.get_active_session(body.owner_type, body.client_ref)
+        if not active:
+            return {"error": "No active session. Use /new first."}
+        try:
+            if len(parts) < 2:
+                # The levels this conversation's model takes, and where it is.
+                return await session_mgr.effort_options(active["id"])
+            return await session_mgr.set_effort(active["id"], parts[1])
         except ValueError as exc:
             return {"error": str(exc)}
 

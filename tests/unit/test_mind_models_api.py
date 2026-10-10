@@ -175,3 +175,24 @@ async def test_an_unreachable_proxy_yields_nothing_rather_than_raising(
     })
 
     assert await models_api.build_catalog(path) == []
+
+
+@pytest.mark.asyncio
+async def test_each_row_carries_the_effort_levels_the_proxy_declares(wire, runtime_file):
+    """The effort picker draws from the mind's list, so the levels have to
+    survive the relay — in the proxy's order, and empty where it has none."""
+    wire({"/v1/models?harness=claude": {"data": [
+        {"id": "claude-opus-5", "effort_levels": ["low", "medium", "high", "max"]},
+        {"id": "qwen35-131k", "effort_levels": []},
+        {"id": "older-proxy-row"},
+    ]}})
+    path = runtime_file(env={
+        "ANTHROPIC_BASE_URL": "http://proxy:8899",
+        "ANTHROPIC_AUTH_TOKEN": "hmp-ada",
+    })
+
+    rows = {row["name"]: row for row in await models_api.build_catalog(path)}
+
+    assert rows["claude-opus-5"]["effort_levels"] == ["low", "medium", "high", "max"]
+    assert rows["qwen35-131k"]["effort_levels"] == []
+    assert rows["older-proxy-row"]["effort_levels"] == []

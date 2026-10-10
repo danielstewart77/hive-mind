@@ -370,6 +370,33 @@ class TestRotateRoute:
             })
         assert calls[0]["user_prompt"] == "the summary\n\nand what I typed"
 
+    def test_the_conversations_effort_reaches_the_pane_and_survives_rotation(self):
+        """A pane opened at `/effort high` runs at high, and a rotation sent
+        without one keeps it there rather than dropping to the default."""
+        calls: list[dict] = []
+        spawned: dict = {}
+
+        def _spawn(**kwargs):
+            spawned.update(kwargs)
+            return _echo_spawn(**kwargs)
+
+        def _rotate(**kwargs):
+            calls.append(kwargs)
+            return True
+
+        client = TestClient(_app(_spawn, rotate=_rotate))
+        with client.websocket_connect(
+            "/sessions/r9/attach-pty?model=opus&resume_sid=old&effort=high"
+        ) as ws:
+            ws.send_bytes(b"x\n")
+            ws.receive_bytes()
+            client.post("/sessions/r9/rotate-pty", json={
+                "new_claude_sid": "new-conv", "model": "opus",
+            })
+
+        assert spawned["effort"] == "high"
+        assert calls[0]["effort"] == "high"
+
     def test_rotation_declines_when_no_tile_is_open(self):
         calls: list[dict] = []
         client = TestClient(self._rotating_app(calls))
@@ -642,6 +669,19 @@ class TestClaudeCliWiring:
         # The TUI must not get print-mode flags — they disable the terminal.
         assert "-p" not in cmd
         assert "--input-format" not in cmd
+
+    @pytest.mark.parametrize("effort,expected", [("max", ["--effort", "max"]), (None, [])])
+    def test_the_pane_and_its_rotation_run_at_the_conversations_effort(
+        self, claude, monkeypatch, effort, expected,
+    ):
+        """Unset passes nothing, leaving the harness its own configured level."""
+        monkeypatch.setattr(claude, "claude_conversation_flags",
+                            lambda cid, _dir: ["--session-id", cid])
+        for argv in (claude._terminal_argv("opus", "conv-9", effort),
+                     claude._rotation_argv("opus", "conv-9", effort)):
+            flag = argv[argv.index("--effort"):argv.index("--effort") + 2] \
+                if "--effort" in argv else []
+            assert flag == expected
 
     def test_rotation_starts_a_fresh_conversation_rather_than_resuming(self, claude):
         argv = claude._rotation_argv("sonnet", "conv-2")
@@ -952,6 +992,15 @@ class TestCodexCliThreads:
         assert cmd[-2:] == ["resume", "codex-thread-4"]
         for arg in codex._provider_args():
             assert arg in cmd
+
+    @pytest.mark.parametrize("effort,expected", [
+        ("high", ['-c', 'model_reasoning_effort="high"']), (None, []),
+    ])
+    def test_the_codex_pane_runs_at_the_conversations_effort(self, codex, effort, expected):
+        cmd = codex._terminal_argv("gpt-5.6-terra", "codex-thread-4", effort)
+
+        reasoning = [a for a in cmd if "model_reasoning_effort" in a]
+        assert (["-c", reasoning[0]] if reasoning else []) == expected
 
     def test_the_pane_carries_the_session_metadata_the_hooks_need(self, codex):
         env = codex._pane_env("chat-7", "telegram", "daniel")
