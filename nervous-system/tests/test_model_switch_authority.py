@@ -578,3 +578,16 @@ def test_an_unreadable_model_list_is_said_rather_than_read_as_no_effort():
             await mgr.shutdown()
 
     _run(scenario())
+
+
+def test_a_model_no_longer_offered_is_said_rather_than_read_as_unreadable():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr, "claude-opus-4-8")
+            with _offering(mgr):
+                with pytest.raises(ValueError, match="no longer offered"):
+                    await mgr.effort_options("sess-1")
+            await mgr.shutdown()
+
+    _run(scenario())

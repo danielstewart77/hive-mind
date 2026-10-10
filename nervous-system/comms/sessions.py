@@ -2274,13 +2274,19 @@ class SessionManager:
         "this model takes no effort setting" would aim the operator at the
         wrong fact entirely.
         """
-        offered = await self.mind_model_row(session["mind_id"], session["model"])
-        if offered is None:
+        listing = await self.mind_models(session["mind_id"])
+        if not listing:
             raise ValueError(
                 f"Couldn't read which models this mind offers right now, so "
                 f"there is no telling what effort {session['model']} takes."
             )
-        return offered
+        for row in listing:
+            if str(row.get("name")) == session["model"]:
+                return row
+        raise ValueError(
+            f"{session['model']} is no longer offered to this mind — switch "
+            f"model with /model first."
+        )
 
     async def set_effort(self, session_id: str, level: str) -> dict:
         """Run this conversation at `level`: kill, record, respawn on --resume.
