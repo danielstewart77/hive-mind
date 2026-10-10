@@ -48,7 +48,7 @@ _KEY_VARS = ("MIND_PROXY_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY")
 
 #: The listing endpoint each harness may address. A claude CLI can only speak
 #: Anthropic Messages; everything else speaks the OpenAI shape.
-_LISTING_PATH = {"claude": "/v1/anthropic/models", "codex": "/v1/models"}
+_LISTING_PATH = {"claude": "/v1/models?harness=claude", "codex": "/v1/models"}
 
 
 def _harness_family(harness: str) -> str:
