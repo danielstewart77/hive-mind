@@ -1275,7 +1275,9 @@ class SessionManager:
         active = await self.get_active_session(client_type, client_ref)
         if not active:
             return {"ok": False, "error": "no active session"}
-        if claude_sid and active.get("claude_sid") and claude_sid != active["claude_sid"]:
+        # A codex hook measures the thread codex minted, not the gateway's id.
+        current = {active.get("claude_sid"), active.get("harness_sid")} - {None, ""}
+        if claude_sid and current and claude_sid not in current:
             log.info(
                 "ignoring rotation arm for replaced conversation %s on session %s",
                 claude_sid, active["id"],

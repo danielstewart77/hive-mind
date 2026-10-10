@@ -673,6 +673,25 @@ def test_an_arm_from_the_conversation_the_switch_replaced_is_ignored():
     _run(scenario())
 
 
+def test_a_codex_arm_measured_by_its_own_thread_id_is_honoured():
+    # A codex hook only knows the thread codex minted, never the gateway's id.
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr)
+            mind = FakeMind()
+            with mind.wired(), _soul():
+                await mgr.switch_harness("sess-1", "codex", "gpt-5.6-terra")
+            await mgr.set_harness_sid("sess-1", "thread-9")
+
+            armed = await mgr.arm_rotation("telegram", "123", claude_sid="thread-9")
+            assert armed["ok"] is True
+            assert (await mgr._get_row("sess-1"))["rotation_armed"] == 1
+            await _close(mgr)
+
+    _run(scenario())
+
+
 # ---------------------------------------------------------------------------
 # 13. Effort survives only where the new model takes it
 # ---------------------------------------------------------------------------
