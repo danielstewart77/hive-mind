@@ -562,8 +562,6 @@ def _format_status(data: dict) -> str:
 # ---------------------------------------------------------------------------
 # Server command dispatcher
 # ---------------------------------------------------------------------------
-SERVER_COMMANDS = {"/clear", "/model", "/harness", "/autopilot", "/kill", "/prune", "/status", "/sessions", "/switch", "/new", "/remember"}
-
 # Shown on the button itself the moment a tap is received, before any work
 # runs. Telegram renders it as a toast over the chat, which is the only
 # feedback available that costs no round trip of its own — answering the
