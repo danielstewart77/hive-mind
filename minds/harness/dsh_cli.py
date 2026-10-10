@@ -311,6 +311,17 @@ def _terminal_context_file(context: str) -> Path | None:
     return path
 
 
+def _patch_args() -> list[str]:
+    """The mind's rendered agents overlay, when the skills render wrote one.
+
+    Only when the file exists: dsh refuses a patch it cannot read, and a mind
+    with no agents has nothing to overlay — so naming an absent file would be
+    every turn failing over a feature nobody uses.
+    """
+    patch = DSH_HOME / "agents.patch.yml"
+    return ["--patch", str(patch)] if patch.is_file() else []
+
+
 def _terminal_argv(
     conversation_id: str, context_file: Path | None = None, *,
     context_as_turn: bool = False,
@@ -323,8 +334,8 @@ def _terminal_argv(
     message the user typed into the conversation this pane replaced, so queuing
     it would leave their question in the transcript with no reply coming.
     """
-    cmd = [DSH_BIN, "--profile", DSH_PROFILE, *_conversation_flags(conversation_id),
-           "--interactive"]
+    cmd = [DSH_BIN, "--profile", DSH_PROFILE, *_patch_args(),
+           *_conversation_flags(conversation_id), "--interactive"]
     if context_file is not None:
         cmd.extend(["--context-file", str(context_file)])
         if context_as_turn:
@@ -461,13 +472,15 @@ def _rotate_pty(
     return True
 
 
-def transcript_path(claude_sid: str, harness_sid: str | None = None) -> Path | None:
+def transcript_path(
+    claude_sid: str, harness_sid: str | None = None, session_id: str = "",
+) -> Path | None:
     """Where this conversation's session log is, for a handover to read.
 
     dsh adopts the gateway's id, so the id names the log — compressed or not,
     whichever dsh wrote. None when it has written neither.
     """
-    del harness_sid
+    del harness_sid, session_id
     if not claude_sid:
         return None
     directory = DSH_HOME / "sessions" / _project_key(_spawn_cwd()) / _encode_segment(claude_sid)
@@ -500,7 +513,8 @@ PROXY_KEY_ENV = "HIVE_PROXY_KEY"
 _PROXY_KEY_SOURCES = ("OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN", "DSH_API_KEY")
 
 #: And its endpoint.
-_PROXY_URL_SOURCES = ("OLLAMA_BASE_URL", "OPENAI_BASE_URL", "ANTHROPIC_BASE_URL")
+_PROXY_URL_SOURCES = ("DSH_PROXY_BASE_URL", "OLLAMA_BASE_URL", "OPENAI_BASE_URL",
+                      "ANTHROPIC_BASE_URL")
 
 
 def _permission_mode() -> str:
@@ -975,7 +989,7 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
                           "--goal-objective-file", objective_path]
         if _stop_on_failed_call():
             goal_flags.append("--stop-on-failed-call")
-        cmd = [DSH_BIN, "--profile", dsh_profile(), *flags, *goal_flags,
+        cmd = [DSH_BIN, "--profile", dsh_profile(), *_patch_args(), *flags, *goal_flags,
                "--task-file", task_path]
         log.info("%s session %s: spawning dsh turn (%s %s)",
                  NAME, sid, flags[0], conversation_id)
@@ -1166,6 +1180,7 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
               tools_failed=traffic.get("failed"),
               tools_unanswered=traffic.get("unanswered"),
               turns=report.get("turns"), goal_phase=report.get("goalPhase"))
+    transcript.settle_opening_turn(state, ok=outcome == "completed")
     result: dict[str, Any] = {
         "type": "result",
         "session_id": str(report.get("sessionId") or conversation_id),

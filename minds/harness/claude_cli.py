@@ -472,14 +472,16 @@ def _rotate_pty(
     return True
 
 
-def transcript_path(claude_sid: str, harness_sid: str | None = None) -> Path | None:
+def transcript_path(
+    claude_sid: str, harness_sid: str | None = None, session_id: str = "",
+) -> Path | None:
     """Where this conversation's transcript is, for a handover to read.
 
     The conversation id is the gateway's, which claude adopts, so the id
     alone names the file. None when claude has written none — the same test
     ``claude_conversation_flags`` uses to declare the id fresh.
     """
-    del harness_sid
+    del harness_sid, session_id
     if not claude_sid:
         return None
     path = claude_transcript_path(claude_sid, PROJECT_DIR, CONFIG_DIR)
@@ -720,6 +722,7 @@ async def send(sid: str, body: dict) -> Any:
                     event = json.loads(decoded)
                     spoken.extend(_assistant_texts(event))
                     if event.get("type") == "result":
+                        transcript.settle_opening_turn(sess, ok=not event.get("is_error"))
                         cs = event.get("session_id")
                         if cs:
                             sess["resume_sid"] = cs

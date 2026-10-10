@@ -138,3 +138,79 @@ class TestBudget:
         assert transcript.render([], summary="  the summary  ") == (
             "Summary of the conversation so far:\nthe summary"
         )
+
+
+class TestOversizedBlocks:
+    def _text(self, role: str, text: str) -> dict:
+        return {"role": role, "kind": "text", "text": text, "name": ""}
+
+    def test_an_oversized_newest_block_is_cut_to_its_tail_and_older_blocks_still_come(self):
+        older = [self._text("user", f"older turn {i}") for i in range(3)]
+        huge = self._text("user", "HEAD-" + "x" * 50_000 + "-TAIL")
+
+        text = transcript.render(older + [huge], budget_bytes=10_000)
+
+        assert len(text.encode("utf-8")) <= 10_000
+        assert "-TAIL" in text and "HEAD-" not in text
+        assert transcript.TRIMMED in text
+
+    def test_a_cut_block_leaves_room_the_walk_spends_on_older_blocks(self):
+        older = [self._text("assistant", "the older answer")]
+        big = self._text("user", "y" * 5_000)
+        newest = self._text("user", "z" * 50_000)
+
+        text = transcript.render(older + [big, newest], budget_bytes=4_000)
+
+        assert len(text.encode("utf-8")) <= 4_000
+        assert "zzzz" in text and "yyyy" in text
+        assert "Assistant: the older answer" in text
+
+    def test_a_tool_calls_input_keeps_its_head_when_cut(self):
+        call = {"role": "assistant", "kind": "tool_call", "name": "Write",
+                "text": "START-" + "q" * 50_000 + "-END"}
+
+        text = transcript.render([call], budget_bytes=5_000)
+
+        assert "Tool call (Write): START-" in text
+        assert "-END" not in text
+        assert text.rstrip().endswith(transcript.TRIMMED)
+        assert len(text.encode("utf-8")) <= 5_000
+
+    def test_a_previous_handover_inside_the_transcript_is_trimmed_not_dropped(self):
+        previous = self._text("user", "Summary of the conversation so far:\n" + "p" * 30_000
+                              + transcript.SEPARATOR + "the question after the switch")
+
+        text = transcript.render([previous], budget_bytes=3_000)
+
+        assert "the question after the switch" in text
+        assert len(text.encode("utf-8")) <= 3_000
+
+
+class TestReaderEdges:
+    def test_codex_turns_are_read_once_not_again_from_the_event_stream(self):
+        text = transcript.render(transcript.read_codex(CODEX))
+
+        assert text.count("Run the netsage-alert skill.") == 1
+
+    def test_the_byte_ceiling_holds_for_a_real_transcript_with_no_budget_given(self):
+        blocks = transcript.read_dsh(DSH_PLAIN) * 200
+
+        text = transcript.render(blocks)
+
+        assert 100_000 < len(text.encode("utf-8")) <= transcript.MAX_HANDOVER_BYTES
+        assert "earlier entries omitted]" in text
+
+    def test_a_claude_sidechain_entry_is_not_the_minds_conversation(self, tmp_path):
+        log = tmp_path / "t.jsonl"
+        log.write_text(CLAUDE.read_text() + '{"type": "user", "isSidechain": true, '
+                       '"message": {"role": "user", "content": "DELEGATE WORK"}}\n')
+
+        assert "DELEGATE WORK" not in transcript.render(transcript.read_claude(log))
+
+    def test_one_line_tool_result_is_capped_in_bytes(self):
+        result = {"role": "user", "kind": "tool_result", "name": "", "text": "r" * 10_000}
+
+        rendered = transcript.render_block(result)
+
+        assert rendered.endswith(transcript.TRIMMED)
+        assert len(rendered.encode("utf-8")) <= transcript.RESULT_BYTES + 64

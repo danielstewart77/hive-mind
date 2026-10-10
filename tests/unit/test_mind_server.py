@@ -217,8 +217,9 @@ TURN_OUTPUT = {
 class _Spawner:
     """``asyncio.create_subprocess_exec``, recording what each spawn was."""
 
-    def __init__(self, harness: str):
+    def __init__(self, harness: str, outputs: list[list[bytes]] | None = None):
         self.harness = harness
+        self.outputs = list(outputs or [])
         self.calls: list[dict] = []
 
     async def __call__(self, *argv: str, **kwargs: Any) -> _Proc:
@@ -226,7 +227,8 @@ class _Spawner:
         if "--task-file" in argv:
             # dsh's turn arrives in a file the adapter deletes afterwards.
             call["task"] = Path(argv[argv.index("--task-file") + 1]).read_text()
-        proc = _Proc(TURN_OUTPUT[self.harness], gated=self.harness == "claude")
+        lines = self.outputs.pop(0) if self.outputs else TURN_OUTPUT[self.harness]
+        proc = _Proc(lines, gated=self.harness == "claude")
         call["proc"] = proc
         self.calls.append(call)
         return proc
@@ -522,6 +524,7 @@ def test_a_rotation_addressed_to_another_harness_leaves_the_pane_alone(panes, mo
         "new_claude_sid": "conv-r3", "harness": "codex", "model": "gpt-5",
     })
 
+    assert resp.status_code == 409
     assert resp.json()["rotated"] is False
     assert panes["claude"]["respawn"] == [] and panes["codex"]["respawn"] == []
 
@@ -694,3 +697,284 @@ def test_a_switch_kill_forgets_the_codex_thread_and_a_plain_kill_keeps_it(homes)
     assert kept == {"k1": "thread-k1"}
     assert "k1" not in codex_cli.THREADS
 
+
+
+# ---------------------------------------------------------------------------
+# Grill round 1
+# ---------------------------------------------------------------------------
+
+FAILED_CODEX_TURN = [_line({"type": "thread.started", "thread_id": "thread-f"}),
+                     _line({"type": "turn.failed", "error": {"message": "boom"}})]
+
+
+def test_the_handover_is_held_until_a_turn_completes_without_error(homes, proxy, monkeypatch):
+    """A failed first turn must not spend the handover: codex starts a fresh
+    thread after a failure, and that thread would open on nothing."""
+    proxy({})
+    spawner = _Spawner("codex", outputs=[FAILED_CODEX_TURN])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawner)
+    client = TestClient(mind_server.app)
+    client.post("/sessions", headers=SESSION, json={
+        "session_id": "g1", "resume_sid": "conv-g1", "model": "gpt-5",
+        "harness": "codex", "system_prompt_blocks": "SOUL", "opening_turn": "HANDOVER",
+    })
+
+    for content in ("one", "two", "three"):
+        client.post("/sessions/g1/message", headers=SESSION, json={"content": content})
+
+    delivered = [_delivered("codex", call) for call in spawner.calls]
+    assert delivered[0].endswith("HANDOVER\n\n---\n\none")
+    assert delivered[1].endswith("HANDOVER\n\n---\n\ntwo")
+    assert delivered[2] == "three"
+
+
+def test_a_resumed_codex_thread_also_gets_the_held_opening_turn(homes, proxy, monkeypatch):
+    proxy({})
+    spawner = _Spawner("codex")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawner)
+    codex_cli.THREADS["g2"] = "thread-existing"
+    client = TestClient(mind_server.app)
+    client.post("/sessions", headers=SESSION, json={
+        "session_id": "g2", "resume_sid": "conv-g2", "model": "gpt-5",
+        "harness": "codex", "opening_turn": "HANDOVER",
+    })
+
+    client.post("/sessions/g2/message", headers=SESSION, json={"content": "hello"})
+
+    assert spawner.calls[0]["argv"][-3:] == ["resume", "thread-existing", "-"]
+    assert _delivered("codex", spawner.calls[0]) == "HANDOVER\n\n---\n\nhello"
+
+
+def test_a_missing_transcript_after_turns_with_no_summary_is_unreadable(homes):
+    resp = _handover(TestClient(mind_server.app), harness="claude", claude_sid="conv-gone",
+                     had_turns=True)
+
+    assert (resp.status_code, resp.json()) == (422, {"detail": "unreadable"})
+
+
+def test_a_codex_handover_without_a_thread_id_uses_the_minds_own_thread(homes):
+    rollouts = homes["codex"] / "sessions" / "2026" / "06" / "01"
+    rollouts.mkdir(parents=True)
+    shutil.copy(FIXTURES / CODEX_ROLLOUT, rollouts / CODEX_ROLLOUT)
+    codex_cli.THREADS["g3"] = CODEX_THREAD
+
+    resp = _handover(TestClient(mind_server.app), harness="codex", claude_sid="conv-g3",
+                     session_id="g3", had_turns=True)
+
+    assert "Tool call (exec_command)" in resp.json()["text"]
+
+
+def test_a_handover_honours_the_budget_it_is_given(homes):
+    log_dir = (homes["dsh"] / "sessions" / dsh_cli._project_key(dsh_cli._spawn_cwd())
+               / dsh_cli._encode_segment("conv-g4"))
+    log_dir.mkdir(parents=True)
+    shutil.copy(FIXTURES / "dsh" / "session.jsonl.zstd", log_dir / "session.jsonl.zstd")
+
+    text = _handover(TestClient(mind_server.app), harness="dsh", claude_sid="conv-g4",
+                     budget_bytes=1_500).json()["text"]
+
+    assert 0 < len(text.encode("utf-8")) <= 1_500
+
+
+def test_an_attach_tears_down_an_idle_chat_process_first(panes, monkeypatch):
+    spawner = _Spawner("claude")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawner)
+    client = TestClient(mind_server.app)
+    client.post("/sessions", headers=SESSION, json={
+        "session_id": "g5", "resume_sid": "conv-g5", "model": "claude-opus-5",
+        "harness": "claude",
+    })
+    assert "g5" in claude_cli.SESSIONS
+
+    _attach(client, "g5", "claude", "claude-opus-5", "", monkeypatch)
+
+    assert "g5" not in claude_cli.SESSIONS
+    assert panes["claude"]["start"]
+
+
+def test_a_later_rotation_without_a_model_keeps_the_last_named_model_and_effort(
+    panes, monkeypatch,
+):
+    client = TestClient(mind_server.app)
+    _attach(client, "g6", "codex", "gpt-a", "", monkeypatch)
+    client.post("/sessions/g6/rotate-pty", headers=SESSION, json={
+        "new_claude_sid": "r1", "harness": "codex", "model": "gpt-b", "effort": "high"})
+
+    client.post("/sessions/g6/rotate-pty", headers=SESSION, json={
+        "new_claude_sid": "r2", "harness": "codex"})
+
+    last = " ".join(panes["codex"]["respawn"][-1]["argv"])
+    assert "--model gpt-b" in last
+    assert 'model_reasoning_effort="high"' in last
+
+
+def test_the_next_attach_on_another_harness_is_cold_on_one_shared_tmux_session(
+    homes, proxy, monkeypatch,
+):
+    """Production runs every harness's panes on one tmux socket under one
+    session name, so the old pane answers `alive` for the new harness too."""
+    proxy({})
+    live: set[str] = set()
+    started: dict[str, list] = {"claude": [], "codex": []}
+    fetched: list[str] = []
+    for name in ("claude", "codex", "dsh"):
+        terminals = mind_server.ADAPTERS[name].TERMINALS
+        monkeypatch.setattr(terminals, "start",
+                            lambda sid, argv, _n=name, **kw: (started.setdefault(_n, []).append(argv),
+                                                              live.add(sid)))
+        monkeypatch.setattr(terminals, "kill", lambda sid: (live.discard(sid), True)[1])
+        monkeypatch.setattr(terminals, "alive", lambda sid: sid in live)
+        monkeypatch.setattr(terminals, "attach", lambda sid, **kw: _echo_client(**kw))
+    monkeypatch.setattr(codex_cli, "_watch_for_new_thread_in_background", lambda *a, **k: None)
+    client = TestClient(mind_server.app)
+
+    async def fetch(session_id, claude_sid):
+        fetched.append(claude_sid)
+        return "HANDOVER TEXT"
+
+    for harness in ("claude", "codex"):
+        monkeypatch.setattr(pty_attach, "fetch_carry_forward", fetch)
+        with client.websocket_connect(
+            f"/sessions/g7/attach-pty?harness={harness}&model=m&resume_sid=conv-{harness}",
+            headers=SESSION,
+        ) as ws:
+            ws.send_bytes(b"x\n")
+            ws.receive_bytes()
+
+    assert fetched == ["conv-claude", "conv-codex"]
+    assert _seed_in(started["codex"][0]).read_text() == "HANDOVER TEXT"
+
+
+def _all_hooks() -> dict:
+    return {"hooks": {
+        "Stop": [{"hooks": [{"type": "command", "command": "auto_remember.sh"},
+                            {"type": "command", "command": "rotation_check.sh"}]}],
+        "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "surface_inject.sh"}]}],
+    }}
+
+
+@pytest.fixture
+def equipped(homes, monkeypatch, tmp_path):
+    """Every harness with its CLI, hooks and login present."""
+    for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+                "OPENAI_API_KEY", "DSH_API_KEY", "OLLAMA_BASE_URL", "OPENAI_BASE_URL",
+                "ANTHROPIC_BASE_URL", "DSH_PROXY_BASE_URL", "DSH_HOOKS_CONFIG"):
+        monkeypatch.delenv(var, raising=False)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for cli in ("claude", "codex"):
+        _executable(bin_dir / cli)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    launcher = tmp_path / "dsh-bin.js"
+    launcher.write_text("")
+    monkeypatch.setattr(dsh_cli, "DSH_BIN", str(launcher))
+    (homes["claude"] / "settings.json").write_text(json.dumps(_all_hooks()))
+    (homes["claude"] / ".credentials.json").write_text("{}")
+    (homes["codex"] / "config.toml").write_text(
+        '[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = "command"\ncommand = "auto_remember.sh"\n'
+        '[[hooks.Stop.hooks]]\ntype = "command"\ncommand = "rotation_check.sh"\n'
+        '[[hooks.UserPromptSubmit]]\n[[hooks.UserPromptSubmit.hooks]]\n'
+        'type = "command"\ncommand = "surface_inject.sh"\n')
+    (homes["codex"] / "auth.json").write_text("{}")
+    # dsh's hooks resolve under DSH_HOME, the way its adapter resolves it.
+    (homes["dsh"] / "hooks.json").write_text(json.dumps(_all_hooks()))
+    monkeypatch.setenv("DSH_API_KEY", "hmp-dsh")
+    monkeypatch.setenv("DSH_PROXY_BASE_URL", "http://proxy.test")
+    return homes
+
+
+def _report() -> dict[str, dict]:
+    body = TestClient(mind_server.app).get("/harnesses", headers=ADMIN).json()
+    return {row["name"]: row for row in body["harnesses"]}
+
+
+def test_every_harness_is_offered_when_fully_equipped(equipped):
+    assert all(row["available"] for row in _report().values()), _report()
+
+
+@pytest.mark.parametrize("harness,remove", [
+    ("claude", lambda h: (h["claude"] / ".credentials.json").unlink()),
+    ("codex", lambda h: (h["codex"] / "auth.json").unlink()),
+    ("dsh", lambda h: os.environ.pop("DSH_API_KEY")),
+    ("dsh", lambda h: os.environ.pop("DSH_PROXY_BASE_URL")),
+])
+def test_a_harness_without_its_login_is_not_offered(equipped, harness, remove):
+    remove(equipped)
+
+    row = _report()[harness]
+
+    assert row["available"] is False
+    assert "login" in row["reason"] or "proxy" in row["reason"]
+
+
+def test_a_harness_without_a_user_prompt_hook_is_not_offered(equipped):
+    hooks = _all_hooks()
+    del hooks["hooks"]["UserPromptSubmit"]
+    (equipped["claude"] / "settings.json").write_text(json.dumps(hooks))
+
+    row = _report()["claude"]
+
+    assert row["available"] is False and "UserPromptSubmit" in row["reason"]
+
+
+def test_a_harness_whose_adapter_failed_to_load_is_not_offered(equipped, monkeypatch):
+    loaded, failed = mind_server.load_adapters(
+        {"claude": "minds.harness.claude_cli", "dsh": "minds.harness.no_such_adapter"})
+    monkeypatch.setattr(mind_server, "ADAPTERS", loaded)
+    monkeypatch.setattr(mind_server, "LOAD_FAILURES", failed)
+
+    rows = _report()
+
+    assert rows["claude"]["available"] is True
+    assert rows["dsh"]["available"] is False
+    assert "failed to load" in rows["dsh"]["reason"]
+
+
+def test_a_dsh_launch_carries_the_agents_patch_only_when_it_exists(homes, proxy, monkeypatch):
+    proxy({})
+    spawner = _Spawner("dsh")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawner)
+    client = TestClient(mind_server.app)
+    client.post("/sessions", headers=SESSION, json={
+        "session_id": "g8", "resume_sid": "conv-g8", "model": "qwen", "harness": "dsh"})
+
+    client.post("/sessions/g8/message", headers=SESSION, json={"content": "one"})
+    patch = homes["dsh"] / "agents.patch.yml"
+    patch.write_text("agents: []\n")
+    client.post("/sessions/g8/message", headers=SESSION, json={"content": "two"})
+
+    assert "--patch" not in spawner.calls[0]["argv"]
+    argv = spawner.calls[1]["argv"]
+    assert argv[argv.index("--patch") + 1] == str(patch)
+
+
+def test_the_skills_check_runs_the_render_pass(homes, monkeypatch):
+    ran: list[bool] = []
+    monkeypatch.setattr(mind_server.skills_api, "check_all",
+                        lambda **kw: ran.append(True) or {"rendered": 3}, raising=False)
+
+    resp = TestClient(mind_server.app).post("/skills/check", headers=ADMIN)
+
+    assert (resp.status_code, resp.json(), ran) == (200, {"rendered": 3}, [True])
+
+
+def test_the_skills_check_is_refused_rather_than_faked_without_the_render_pass(
+    homes, monkeypatch,
+):
+    monkeypatch.delattr(mind_server.skills_api, "check_all", raising=False)
+
+    resp = TestClient(mind_server.app).post("/skills/check", headers=ADMIN)
+
+    assert resp.status_code == 501
+
+
+def test_the_skills_page_answers_for_the_harness_it_names(homes, monkeypatch):
+    seen: list[str] = []
+    monkeypatch.setattr(mind_server.skills_api, "list_skills",
+                        lambda harness: seen.append(harness) or [])
+
+    client = TestClient(mind_server.app)
+    client.get("/skills?harness=codex", headers=ADMIN)
+    client.get("/skills", headers=ADMIN)
+
+    assert [name.removesuffix("_cli") for name in seen] == ["codex", "claude"]

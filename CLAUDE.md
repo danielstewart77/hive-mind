@@ -74,30 +74,41 @@ only together with a `default_model` that harness's proxy listing offers, in
 one write, or refuses and writes nothing.
 
 `GET /harnesses` (admin-guarded) reports each harness as offered or not, with
-the reason: its CLI on PATH (dsh: the launcher in the mounted tree), its hooks
-configured (Stop carrying `auto_remember` and `rotation_check`, plus a
+the reason: its adapter loaded (one that fails to import costs that harness,
+not the server), its CLI on PATH (dsh: the launcher in the mounted tree), its
+hooks configured (Stop carrying `auto_remember` and `rotation_check`, plus a
 UserPromptSubmit hook — read from claude's `settings.json`, codex's
-`config.toml`, or `DSH_HOOKS_CONFIG`), and a login (claude's credentials file
-or token, codex's `auth.json` or key, dsh's proxy key). The checks are a list,
-`mind_server.CHECKS`, so a deployment whose login lives elsewhere replaces one.
-`GET /models?harness=` relays that harness's listing.
+`config.toml`, or `DSH_HOOKS_CONFIG` falling back to `$DSH_HOME/hooks.json`),
+and a login (claude's credentials file or token, codex's `auth.json` or key,
+dsh's proxy key *and* proxy URL). The checks are a list, `mind_server.CHECKS`,
+so a deployment whose login lives elsewhere replaces one. `GET /models?harness=`
+relays that harness's listing. `/skills` and `/files` answer for the harness a
+request names (`?harness=`, the default's otherwise), and `POST /skills/check`
+runs the skills render pass — refused with 501, never faked, where it is not
+installed.
 
 A switch hands the old conversation over as **history, not a session**:
 `POST /handover` (admin-guarded) reads the outgoing harness's own transcript
 through `minds/transcript.py` — one reader per harness, one renderer — and
 returns plain text: the summary whole in front, prose and tool calls whole,
-each tool result cut to its first lines and marked `[trimmed]`, oldest
-transcript dropped first to fit the byte budget (half the window at four bytes
-a token, never past 120,000). A conversation with no transcript on disk has
-never had a turn and hands over the summary alone, or nothing; one whose
-transcript exists and cannot be read hands over the summary alone, and with no
-summary either the switch is refused with 422 and the old harness keeps
-running. The
-spawn that follows carries the text as `opening_turn`, which every adapter puts
-in front of the first user message it sends (`handover\n\n---\n\nmessage`) —
-stdin, stream-json or task file, never argv — so it lands in the new
-transcript and survives the next switch. A pane takes a carry-forward the same
-way, as its first user turn. `DELETE /sessions/{id}?forget_thread=1` also
+each tool result cut to its first lines and marked `[trimmed]`, newest first
+into the byte budget (half the window at four bytes a token, never past
+120,000). A block too large for what is left is cut to half the remaining room
+and marked — prose keeps its tail, a tool call or result its head — and the
+walk goes on to older blocks, so a previous handover inside the transcript is
+trimmed rather than dropped. A conversation with no transcript and no turns
+(`had_turns` false) hands over the summary alone, or nothing; a transcript
+missing after turns, or one that cannot be read, hands over the summary alone,
+and with no summary either the switch is refused with 422 and the old harness
+keeps running. Codex's rollout is found by `harness_sid`, or the mind's own
+thread for `session_id` when the gateway has none. The spawn that follows
+carries the text as `opening_turn`, which every adapter puts in front of each
+user message (`handover\n\n---\n\nmessage`) — stdin, stream-json or task file,
+never argv — until a turn completes without error, so a failed first turn
+does not spend it. It lands in the new transcript and survives the next
+switch. A pane takes a carry-forward the same
+way, as its first user turn, and an attach first ends the session's idle chat
+process: one live harness process per conversation. `DELETE /sessions/{id}?forget_thread=1` also
 drops codex's thread for the session; a plain kill keeps it, so a respawn
 rejoins its thread.
 
@@ -107,7 +118,9 @@ mind's `rotation_threshold_percent`), looked up from the proxy for that
 conversation's harness and model. `model_context_window` in the file is the
 default model's, which is the wrong room for a conversation switched to
 another; a rotation hook reads the environment first. A dsh conversation on a
-mind with no `context_window` line is sized by the same window.
+mind with no `context_window` line is sized by the same window, and a dsh
+launch adds `--patch $DSH_HOME/agents.patch.yml` when the skills render has
+written one.
 
 The image carries claude and codex; **dsh is mounted, not baked** — the
 harness tree is a built working copy, bind-mounted read-only at `/opt/dsh`

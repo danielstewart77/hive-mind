@@ -79,17 +79,28 @@ def budget_for_window(window: int | None) -> int:
 
 
 def with_opening_turn(state: dict, content: str) -> str:
-    """The user message, with a pending opening turn put in front of it once.
+    """The user message, with a held opening turn put in front of it.
 
     The opening turn is the handover a switch composed. It enters the new
     harness as part of the first user message rather than as a system prompt,
     because a system prompt reaches no transcript — and a handover that is not
     in the new transcript is gone at the next switch.
+
+    Held, not spent: it rides every send until a turn completes without error
+    (``settle_opening_turn``). A failed first turn would otherwise take it
+    along, and codex in particular starts a fresh thread after a failure —
+    one that would open on nothing.
     """
-    opening = str(state.pop("opening_turn", "") or "")
+    opening = str(state.get("opening_turn") or "")
     if not opening.strip():
         return content
     return f"{opening}{SEPARATOR}{content}"
+
+
+def settle_opening_turn(state: dict, *, ok: bool) -> None:
+    """Drop the held opening turn once a turn carrying it has completed."""
+    if ok:
+        state.pop("opening_turn", None)
 
 
 def _text(value: Any) -> str:
@@ -333,6 +344,34 @@ def _trim_result(text: str) -> str:
     return f"{head}\n{TRIMMED}" if cut else head
 
 
+#: The least room worth cutting a block into. Below this a cut keeps a few
+#: words of something and costs the room an older block might have filled.
+MIN_CUT_BYTES = 200
+
+
+def _cut_block(block: dict, room: int) -> str | None:
+    """The block rendered in at most ``room`` bytes, marked trimmed, or None.
+
+    Prose keeps its tail — the end of a message is where it arrives at its
+    point, and a previous handover's tail is the question asked after it.
+    A tool call or result keeps its head, which names what was done.
+    """
+    whole = render_block(block)
+    label = whole[: len(whole) - len(block["text"])] if whole.endswith(block["text"]) else ""
+    if block["kind"] == "tool_result":
+        label = "Tool result: "
+    marker = TRIMMED + "\n" if block["kind"] == "text" else "\n" + TRIMMED
+    available = room - len(label.encode("utf-8")) - len(marker.encode("utf-8"))
+    if available < MIN_CUT_BYTES // 2:
+        return None
+    raw = block["text"].encode("utf-8")
+    if block["kind"] == "text":
+        body = raw[-available:].decode("utf-8", errors="ignore")
+        return f"{label}{marker}{body}"
+    body = raw[:available].decode("utf-8", errors="ignore")
+    return f"{label}{body}{marker}"
+
+
 def render_block(block: dict) -> str:
     """One block as the text the next harness reads."""
     kind = block["kind"]
@@ -379,15 +418,25 @@ def render(blocks: list[dict], *, summary: str = "", budget_bytes: int | None = 
         return "\n\n".join(parts)
 
     # Walk back from the newest block, keeping each while the whole still
-    # fits. The omission note is counted at its widest so adding it can never
-    # push a rendering that fit back over the line.
+    # fits. A block too large for what is left is cut rather than ending the
+    # walk: it gets half the remaining room, so older blocks still get the
+    # rest. Only a block with no worthwhile room left is dropped, and the walk
+    # goes on to older ones in case they are small. The omission note is
+    # counted at its widest so adding it can never push a rendering over.
     kept: list[str] = []
+    dropped = 0
     fixed = size(assemble(["x"], len(rendered))) - 1
     total = fixed
-    for text in reversed(rendered):
+    for block, text in zip(reversed(blocks), reversed(rendered)):
+        remaining = budget - total
         cost = size(text) + 2
-        if total + cost > budget:
-            break
+        if cost > remaining:
+            room = remaining // 2 if remaining // 2 >= MIN_CUT_BYTES else remaining
+            cut = _cut_block(block, room - 2) if room - 2 >= MIN_CUT_BYTES // 2 else None
+            if cut is None:
+                dropped += 1
+                continue
+            text, cost = cut, size(cut) + 2
         kept.insert(0, text)
         total += cost
-    return assemble(kept, len(rendered) - len(kept))
+    return assemble(kept, dropped)

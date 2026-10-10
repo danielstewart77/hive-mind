@@ -7,7 +7,9 @@ and a real TUI. `minds/pty_attach.py` owns the plumbing; each harness
 argv its own CLI needs. One mind server hosts panes of every harness at once:
 an attach names its conversation's harness in the `harness` query, a pane
 remembers which harness it runs, and a rotation addressed to another harness
-is refused rather than respawning the pane onto the wrong CLI. A pane still
+is refused with 409 and the pane left alone rather than respawned onto the
+wrong CLI. An attach ends the session's idle chat process before it opens the
+pane, so one conversation never has two harness processes on one transcript. A pane still
 running the harness its conversation was switched away from is ended by the
 next attach, which opens the new harness's CLI on the stored handover as its
 first user turn. A carry-forward always enters a pane as a user turn, never
