@@ -193,10 +193,18 @@ class TestTappingAButton:
 
 
 class TestTheSwitchReport:
-    def test_a_listing_is_never_reported_as_a_switch(self) -> None:
-        """The defect verbatim: a dict of models rendered as "Switched to None"."""
+    def test_a_listing_names_the_models_it_was_given_and_claims_no_switch(self) -> None:
+        """The defect verbatim: a dict of models rendered as "Switched to None".
+
+        The names are asserted, not only the absence of "switched" — a
+        constant string would satisfy an absence and tell the operator
+        nothing about what this mind can run.
+        """
         reported = tb.format_model_result(GATEWAY_ANSWER)
 
+        for row in GATEWAY_ANSWER["models"]:
+            assert row["name"] in reported
+        assert "Azure" in reported and "ollama" in reported
         assert "switched" not in reported.lower()
         assert "none" not in reported.lower()
 
