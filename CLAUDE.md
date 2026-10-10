@@ -60,6 +60,62 @@ model to upstream, so adding a provider is a row there rather than a change
 here, and one locally-hosted model can serve a claude harness and a codex
 harness both.
 
+### One mind server, every harness
+
+A conversation runs on a harness — `claude`, `codex` or `dsh`, always the bare
+name — and can be switched mid-conversation, so a container runs
+`minds/mind_server.py` rather than one harness module. It mounts all three
+adapters and routes each session by the harness its spawn payload names, a
+terminal attach by its `harness` query, and a pane rotation by the `harness`
+in its body. Each adapter keeps its own session table, thread map and process
+handling; the server adds only a session-to-harness map. `runtime.yaml`'s
+`harness` is the default for a *new* conversation, and `PATCH /runtime` sets it
+only together with a `default_model` that harness's proxy listing offers, in
+one write, or refuses and writes nothing.
+
+`GET /harnesses` (admin-guarded) reports each harness as offered or not, with
+the reason: its CLI on PATH (dsh: the launcher in the mounted tree), its hooks
+configured (Stop carrying `auto_remember` and `rotation_check`, plus a
+UserPromptSubmit hook — read from claude's `settings.json`, codex's
+`config.toml`, or `DSH_HOOKS_CONFIG`), and a login (claude's credentials file
+or token, codex's `auth.json` or key, dsh's proxy key). The checks are a list,
+`mind_server.CHECKS`, so a deployment whose login lives elsewhere replaces one.
+`GET /models?harness=` relays that harness's listing.
+
+A switch hands the old conversation over as **history, not a session**:
+`POST /handover` (admin-guarded) reads the outgoing harness's own transcript
+through `minds/transcript.py` — one reader per harness, one renderer — and
+returns plain text: the summary whole in front, prose and tool calls whole,
+each tool result cut to its first lines and marked `[trimmed]`, oldest
+transcript dropped first to fit the byte budget (half the window at four bytes
+a token, never past 120,000). A transcript that cannot be read — absent, or
+undecodable — hands over the summary alone; with no summary either the switch
+is refused with 422 and the old harness keeps running. The
+spawn that follows carries the text as `opening_turn`, which every adapter puts
+in front of the first user message it sends (`handover\n\n---\n\nmessage`) —
+stdin, stream-json or task file, never argv — so it lands in the new
+transcript and survives the next switch. A pane takes a carry-forward the same
+way, as its first user turn. `DELETE /sessions/{id}?forget_thread=1` also
+drops codex's thread for the session; a plain kill keeps it, so a respawn
+rejoins its thread.
+
+Each process a conversation runs in is told its own model's window
+(`HIVE_MODEL_CONTEXT_WINDOW`, and `HIVE_ROTATION_THRESHOLD_TOKENS` at this
+mind's `rotation_threshold_percent`), looked up from the proxy for that
+conversation's harness and model. `model_context_window` in the file is the
+default model's, which is the wrong room for a conversation switched to
+another; a rotation hook reads the environment first. A dsh conversation on a
+mind with no `context_window` line is sized by the same window.
+
+The image carries claude and codex; **dsh is mounted, not baked** — the
+harness tree is a built working copy, bind-mounted read-only at `/opt/dsh`
+with `DSH_BIN` naming its launcher, the pattern Cypher established. Baking it
+would mean a monorepo build inside the image and a harness frozen at each
+rebuild. A host without the tree gets dsh reported unavailable, not a mind
+that fails to start. Codex and dsh keep their own homes (`CODEX_HOME`,
+`DSH_HOME`, defaulting to `minds/<name>/.codex` and `.dsh`); a mind's
+`runtime_config_dir` is read only by the harness it was written for.
+
 ### What a dsh mind needs that the other two do not
 
 `minds/harness/dsh_cli.py` drives our fork of the DeepSeek harness
@@ -205,7 +261,9 @@ hive-mind/
 ├── data/                          # SQLite databases (Docker volume)
 │
 ├── minds/                         # Minds: shared harness code + per-deployment folders
-│   ├── harness/                  # Tracked in-container services: claude_cli.py, codex_cli.py, dsh_cli.py
+│   ├── mind_server.py            # The in-container service: every harness adapter, routed per session
+│   ├── transcript.py             # Harness transcripts rendered as a plain-text handover
+│   ├── harness/                  # Harness adapters: claude_cli.py, codex_cli.py, dsh_cli.py
 │   ├── proactive.py              # Shared unsolicited-delivery plumbing
 │   ├── pty_attach.py             # Shared tmux-backed browser terminal (docs/architecture/browser-terminal.md)
 │   ├── example/                  # Tracked starter mind (runtime.yaml + compose fragment)
@@ -292,7 +350,7 @@ processes on one transcript — and a refused kill read as success left a tmux
 session and its context alive until the box rebooted. The terminal tile closes
 on **4416** rather than the 4415 that means "no pty route in this image".
 
-On the mind side (`minds/runtime_api.py`, mounted by both harness servers) one
+On the mind side (`minds/runtime_api.py`, mounted by the mind server) one
 middleware guards every `/sessions` route, reading `scope["path"]` and not
 `request.url.path` — Starlette builds that URL from the *Host header*, so a
 Host carrying a `/` moves the route out of `.path` while the router still

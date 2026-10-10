@@ -8,7 +8,10 @@ gateway_url: http://example:8420
 remote: false
 description: "Example — starter mind, Claude CLI, Anthropic-backed."
 
-harness: claude_cli
+# The harness a new conversation starts on: claude, codex or dsh. Every
+# harness runs in this mind's one server, and a conversation can be switched
+# between them; this is only where one begins.
+harness: claude
 provider: anthropic
 default_model: claude-sonnet-5
 runtime_config_dir: /usr/src/app/minds/example/.claude

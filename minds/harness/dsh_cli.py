@@ -43,7 +43,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from minds.proactive import make_proactive_router
-from minds import github_token_api, models_api, runtime_api, surface_token_api
+from minds import github_token_api, models_api, runtime_api, surface_token_api, transcript
 from minds.pty_attach import (
     PtyUnavailable,
     TmuxTerminals,
@@ -74,9 +74,12 @@ RUNTIME_ENV: dict[str, Any] = RUNTIME.get("env", {}) or {}
 NS_URL = os.environ.get("HIVE_MIND_SERVER_URL", "http://server:8420")
 
 #: DSH_HOME is dsh's own knob: profiles, sessions and credentials live under it.
+#: Only a dsh mind's `runtime_config_dir` is dsh's — on a mind whose default
+#: harness is another, that key names the other harness's directory.
 DSH_HOME = Path(
     os.environ.get("DSH_HOME")
-    or RUNTIME.get("runtime_config_dir")
+    or (RUNTIME.get("runtime_config_dir")
+        if runtime_api.harness_name(RUNTIME.get("harness")) == "dsh" else None)
     or str(MIND_DIR / ".dsh")
 )
 
@@ -329,12 +332,20 @@ def _terminal_argv(
     return cmd
 
 
+#: The environment the mind server composed for each live pane's conversation,
+#: kept so a rotation — which arrives without it — respawns the pane sized the
+#: same way it was opened.
+PANE_CONVERSATION_ENV: dict[str, dict[str, str]] = {}
+
+
 def _pane_env(
     model: str, client_ref: str | None, owner_type: str | None, owner_ref: str | None,
+    conversation_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Environment the tmux pane needs for this conversation and model."""
     env = {k: str(v) for k, v in RUNTIME_ENV.items()}
-    env.update(_model_env(model))
+    env.update(conversation_env or {})
+    env.update(_model_env(model, (conversation_env or {}).get("HIVE_MODEL_CONTEXT_WINDOW")))
     env["DSH_HOME"] = str(DSH_HOME)
     env["DSH_PERMISSION_MODE"] = _permission_mode()
     env["HIVE_SURFACE"] = "terminal"
@@ -356,24 +367,44 @@ def _spawn_pty(
     harness_sid: str | None = None, client_ref: str | None = None,
     owner_type: str | None = None, owner_ref: str | None = None,
     system_prompt: str = "", effort: str | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[Any, int]:
-    """Attach to this session's DSH terminal, starting its pane if absent."""
+    """Attach to this session's DSH terminal, starting its pane if absent.
+
+    ``system_prompt`` is a carry-forward comms is still holding — a switch's
+    handover or a rotation's seed — and the pane answers it as its first user
+    turn. With none, a conversation that has never spoken opens on its
+    composed system prompt as queued standing context instead.
+    """
     del harness_sid
     state = SESSIONS.get(session_id)
     if state is not None and state.get("in_flight"):
         raise PtyUnavailable("a chat turn is still running for this conversation")
 
-    pane_env = _pane_env(model, client_ref, owner_type, owner_ref)
+    if extra_env:
+        PANE_CONVERSATION_ENV[session_id] = dict(extra_env)
+    pane_env = _pane_env(model, client_ref, owner_type, owner_ref,
+                         PANE_CONVERSATION_ENV.get(session_id))
     context_file: Path | None = None
+    as_turn = False
     if not TERMINALS.alive(session_id):
-        opening_context = system_prompt
-        if not opening_context and not _session_persisted(conversation_id) and state is not None:
-            opening_context = str(state.get("system_prompt") or "")
+        standing = ""
+        if not _session_persisted(conversation_id) and state is not None:
+            standing = str(state.get("system_prompt") or "")
+        if system_prompt.strip():
+            # The soul still leads a conversation's first turn, the way the
+            # chat path composes it; the handover is what gets answered.
+            opening_context = (f"{standing}{transcript.SEPARATOR}{system_prompt}"
+                               if standing else system_prompt)
+            as_turn = True
+        else:
+            opening_context = standing
         context_file = _terminal_context_file(opening_context)
     try:
         TERMINALS.start(
             session_id,
-            _terminal_argv(conversation_id, context_file),
+            _terminal_argv(conversation_id, context_file,
+                           context_as_turn=as_turn and context_file is not None),
             env_overrides=pane_env,
             cols=cols,
             rows=rows,
@@ -417,7 +448,8 @@ def _rotate_pty(
             # supposed to keep alive.
             _terminal_argv(new_claude_sid, context_file,
                            context_as_turn=bool(user_prompt) and context_file is not None),
-            env_overrides=_pane_env(model, client_ref, owner_type, owner_ref),
+            env_overrides=_pane_env(model, client_ref, owner_type, owner_ref,
+                                    PANE_CONVERSATION_ENV.get(session_id)),
         )
     except Exception:
         if context_file is not None:
@@ -427,6 +459,22 @@ def _rotate_pty(
     log_event(log, "session.pty.rotated", mind_id=MIND_ID, mind_name=NAME,
               session_id=session_id, conversation_id=new_claude_sid)
     return True
+
+
+def transcript_path(claude_sid: str, harness_sid: str | None = None) -> Path | None:
+    """Where this conversation's session log is, for a handover to read.
+
+    dsh adopts the gateway's id, so the id names the log — compressed or not,
+    whichever dsh wrote. None when it has written neither.
+    """
+    del harness_sid
+    if not claude_sid:
+        return None
+    directory = DSH_HOME / "sessions" / _project_key(_spawn_cwd()) / _encode_segment(claude_sid)
+    for name in ("session.jsonl.zstd", "session.jsonl"):
+        if (directory / name).exists():
+            return directory / name
+    return None
 
 
 #: The permission mode every spawn runs under, unless the mind names another.
@@ -523,7 +571,7 @@ def _first_env(names: tuple[str, ...]) -> str:
     return ""
 
 
-def _model_env(model: str) -> dict[str, str]:
+def _model_env(model: str, conversation_window: str | int | None = None) -> dict[str, str]:
     """The model, its provider route, that route's endpoint and its credential.
 
     The hive profile defaults nothing: these are what it reads. The model is
@@ -549,7 +597,15 @@ def _model_env(model: str) -> dict[str, str]:
     # the ceiling. Omitting it would hand the harness a fallback nobody picked,
     # so the harness refuses the boot; refusing here instead names the field and
     # the file the operator actually edits.
-    window = RUNTIME.get("context_window")
+    #
+    # A mind whose default harness is another has no `context_window` line of
+    # its own; its conversation on dsh is sized by its model's own window, as
+    # the proxy declares it and the mind server hands it down. The file's
+    # value still wins where there is one: it is the ceiling this mind's
+    # operator chose to serve under.
+    window = RUNTIME.get("context_window") or (
+        conversation_window if str(conversation_window or "0") != "0" else None
+    )
     if not window:
         raise RuntimeError(
             "runtime.yaml needs context_window: it sizes every model this mind's "
@@ -645,7 +701,16 @@ async def list_sessions() -> list[dict]:
 
 @app.post("/sessions")
 async def create_session(req: Request) -> Any:
-    body = await req.json()
+    return await start_session(await req.json())
+
+
+async def start_session(body: dict) -> Any:
+    """Record this session from a gateway spawn payload; turns spawn later.
+
+    ``opening_turn`` is a switch's handover, put in front of the next user
+    message; ``conversation_env`` is what the mind server composed for this
+    conversation and rides into every turn's environment.
+    """
     # No default, on either field. The gateway mints the conversation id when
     # it writes the session row and resolves the model from this mind's broker
     # row; a mind inventing either has lost the one it was supposed to use,
@@ -695,6 +760,8 @@ async def create_session(req: Request) -> Any:
         "client_ref": client_ref,
         "owner_type": owner_type,
         "owner_ref": owner_ref,
+        "opening_turn": body.get("opening_turn") or "",
+        "conversation_env": dict(body.get("conversation_env") or {}),
     })
     state.setdefault("proc", None)
     log.info("%s session %s initialised (model=%s conversation=%s persisted=%s)",
@@ -836,7 +903,8 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
     # system prompt submitted to nothing reaches no transcript.
     conversation_id = state["conversation_id"]
     flags = _conversation_flags(conversation_id)
-    task = content if flags[0] == "--resume" else f"{state['system_prompt']}\n\n---\n\n{content}"
+    message = transcript.with_opening_turn(state, content)
+    task = message if flags[0] == "--resume" else f"{state['system_prompt']}\n\n---\n\n{message}"
 
     if images:
         # Said out loud rather than logged: a model answering the text as if
@@ -854,7 +922,10 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
     env = os.environ.copy()
     env.update({k: str(v) for k, v in RUNTIME_ENV.items()})
     try:
-        env.update(_model_env(state["model"]))
+        env.update(_model_env(
+            state["model"],
+            (state.get("conversation_env") or {}).get("HIVE_MODEL_CONTEXT_WINDOW"),
+        ))
     except RuntimeError as exc:
         # Said out loud, like the spawn failures below. This raises on a mind
         # whose own configuration cannot size a model request, and an unhandled
@@ -875,6 +946,7 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
                       ("owner_ref", "OWNER_REF")):
         if state.get(key):
             env[name] = state[key]
+    env.update(state.get("conversation_env") or {})
 
     # The task travels in a file: MAX_ARG_STRLEN caps one argv entry at 128 KiB
     # regardless of total command-line room, and a composed prompt plus a turn
@@ -1116,7 +1188,11 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
 
 @app.post("/sessions/{sid}/message")
 async def send_message(sid: str, req: Request) -> Any:
-    body = await req.json()
+    return await send(sid, await req.json())
+
+
+async def send(sid: str, body: dict) -> Any:
+    """Run one dsh turn for this session and stream it back."""
     content = body.get("content", "")
     images = body.get("images")
     if sid not in SESSIONS:
@@ -1199,6 +1275,7 @@ async def kill_session(sid: str) -> dict:
         sess["killed"] = True
         await _reap_proc(sess.get("proc"))
     teardown_pty(sid)
+    PANE_CONVERSATION_ENV.pop(sid, None)
     log.info("Killed %s session %s", NAME, sid)
     log_event(log, "session.closed", mind_id=MIND_ID, mind_name=NAME, session_id=sid)
     return {"session_id": sid, "status": "closed"}
