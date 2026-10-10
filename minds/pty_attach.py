@@ -552,7 +552,7 @@ class _PtyHandle:
     the terminal currently looks like.
     """
 
-    __slots__ = ("session_id", "terminals", "tmux_name", "conversation_id", "model",
+    __slots__ = ("session_id", "terminals", "tmux_name", "conversation_id", "model", "effort",
                  "proc", "master_fd", "cols", "rows", "queue", "detached_at", "alive",
                  "loop")
 
@@ -572,6 +572,8 @@ class _PtyHandle:
         # rotation replaces the conversation, never the model — so when one
         # arrives without an explicit model, this is the answer.
         self.model = model
+        # Likewise the effort it started at, carried across a rotation.
+        self.effort: str | None = None
         self.cols, self.rows = clamp_winsize(cols, rows)
         self.proc: subprocess.Popen | None = None   # the attached tmux client
         self.master_fd: int | None = None
@@ -796,6 +798,7 @@ def _open_session_pty(session_id, spawn, terminals, **spawn_kwargs) -> _PtyHandl
                             spawn_kwargs.get("conversation_id") or "", cols, rows,
                             model=spawn_kwargs.get("model") or "")
         PTYS[session_id] = handle
+    handle.effort = spawn_kwargs.get("effort") or None
 
     proc, master_fd = spawn(session_id=session_id, **spawn_kwargs)
     handle.proc = proc
@@ -872,6 +875,7 @@ def install_pty_attach(
                 # which would silently switch a live terminal's model the
                 # moment someone edited that default in the console.
                 model=body.get("model") or handle.model,
+                effort=body.get("effort") or getattr(handle, "effort", None),
                 system_prompt=body.get("system_prompt") or "",
                 # The staged seed with the user's own typed message on the
                 # end. It enters the harness as an opening *user* turn rather
@@ -913,6 +917,7 @@ def install_pty_attach(
         client_ref: str | None = None,
         owner_type: str | None = None,
         owner_ref: str | None = None,
+        effort: str | None = None,
     ) -> None:
         """Bidirectional raw-byte bridge between a browser tile and this
         session's interactive harness CLI.
@@ -992,7 +997,7 @@ def install_pty_attach(
                 session_id, spawn, terminals, model=model, conversation_id=resume_sid,
                 harness_sid=harness_sid, cols=cols, rows=rows,
                 client_ref=client_ref, owner_type=owner_type, owner_ref=owner_ref,
-                system_prompt=carry_forward,
+                system_prompt=carry_forward, effort=effort or None,
             )
         except PtyUnavailable as exc:
             log.info("attach-pty refused for %s session %s: %s", mind_name, session_id, exc)

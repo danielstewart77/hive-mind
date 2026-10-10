@@ -355,7 +355,7 @@ def _spawn_pty(
     *, session_id: str, model: str, conversation_id: str, cols: int, rows: int,
     harness_sid: str | None = None, client_ref: str | None = None,
     owner_type: str | None = None, owner_ref: str | None = None,
-    system_prompt: str = "",
+    system_prompt: str = "", effort: str | None = None,
 ) -> tuple[Any, int]:
     """Attach to this session's DSH terminal, starting its pane if absent."""
     del harness_sid
@@ -397,6 +397,7 @@ def _rotate_pty(
     *, session_id: str, new_claude_sid: str, model: str = "", system_prompt: str = "",
     user_prompt: str = "", client_ref: str | None = None,
     owner_type: str | None = None, owner_ref: str | None = None,
+    effort: str | None = None,
 ) -> bool:
     """Respawn a live pane onto a fresh gateway-owned DSH conversation."""
     if not TERMINALS.alive(session_id):

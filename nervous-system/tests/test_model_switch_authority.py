@@ -240,7 +240,7 @@ def test_the_lock_is_held_for_the_whole_switch_not_just_tested():
                     return result
                 return record
 
-            with patch.object(mgr, "mind_offers_model", new=recording("offer", True)), \
+            with patch.object(mgr, "mind_model_row", new=recording("offer", {"name": "claude-sonnet-5"})), \
                     patch.object(mgr, "_kill_process", new=recording("kill")), \
                     patch.object(mgr, "_spawn", new=recording("spawn")), \
                     patch.object(mgr, "_routing_for", new=AsyncMock(return_value={})):
@@ -328,6 +328,289 @@ def test_an_autopilot_toggle_holds_the_lock_through_kill_and_respawn():
             # leaves the row claiming autopilot over a process without it.
             assert spawned["autopilot"] is True
             assert spawned["resume_sid"] == "conv-1"
+            await mgr.shutdown()
+
+    _run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# Effort
+# ---------------------------------------------------------------------------
+
+OFFERED = [
+    {"name": "claude-opus-5", "effort_levels": ["low", "medium", "high", "max"]},
+    {"name": "claude-sonnet-5", "effort_levels": ["low", "high"]},
+    {"name": "qwen35-131k", "effort_levels": []},
+]
+
+
+def _offering(mgr):
+    return patch.object(mgr, "mind_models", new=AsyncMock(return_value=OFFERED))
+
+
+def _quiet(mgr):
+    return (
+        patch.object(mgr, "_kill_process", new=AsyncMock()),
+        patch.object(mgr, "_routing_for", new=AsyncMock(return_value={})),
+    )
+
+
+async def _mind(mgr):
+    """A real mind row, so `_spawn` itself runs and the wire is observable."""
+    mgr._get_mind_row = AsyncMock(return_value={
+        "gateway_url": "http://mind:8420", "name": "ada",
+    })
+    mgr.mind_auth_headers = AsyncMock(return_value={})
+
+
+def _wire():
+    """The mind's spawn route, recording each body it is posted."""
+    posted: list[dict] = []
+
+    class _Resp:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def text(self):
+            return ""
+
+    class _Http:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        def post(self, url, json=None, **kwargs):
+            posted.append(json)
+            return _Resp()
+
+    return posted, patch("aiohttp.ClientSession", lambda *a, **k: _Http())
+
+
+def test_setting_an_offered_effort_records_it_and_respawns_with_it():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr, "claude-opus-5")
+            await _mind(mgr)
+            posted, wired = _wire()
+            kill, routing = _quiet(mgr)
+            with _offering(mgr), kill as killed, routing, wired:
+                await mgr.set_effort("sess-1", "High")
+            row = await mgr._get_row("sess-1")
+            assert row["effort"] == "high"
+            assert killed.await_count == 1
+            assert [body["effort"] for body in posted] == ["high"]
+            assert posted[0]["resume_sid"] == "conv-1"
+            await mgr.shutdown()
+
+    _run(scenario())
+
+
+@pytest.mark.parametrize("model,level", [
+    ("claude-opus-5", "xhigh"),     # a level this model does not list
+    ("qwen35-131k", "high"),        # a model that takes no effort at all
+])
+def test_an_effort_the_model_does_not_offer_is_refused_and_nothing_moves(model, level):
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr, model)
+            await mgr._db.execute("UPDATE sessions SET effort = 'low' WHERE id = 'sess-1'")
+            await mgr._db.commit()
+            kill, routing = _quiet(mgr)
+            with _offering(mgr), kill as killed, routing, \
+                    patch.object(mgr, "_spawn", new=AsyncMock()) as spawned:
+                with pytest.raises(ValueError):
+                    await mgr.set_effort("sess-1", level)
+            assert killed.await_count == 0
+            assert spawned.await_count == 0
+            assert (await mgr._get_row("sess-1"))["effort"] == "low"
+            await mgr.shutdown()
+
+    _run(scenario())
+
+
+def test_an_effort_change_mid_answer_is_refused():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr, "claude-opus-5")
+            kill, routing = _quiet(mgr)
+            lock = mgr._locks.setdefault("sess-1", asyncio.Lock())
+            async with lock:
+                with _offering(mgr), kill as killed, routing, \
+                        patch.object(mgr, "_spawn", new=AsyncMock()) as spawned:
+                    with pytest.raises(ValueError):
+                        await asyncio.wait_for(mgr.set_effort("sess-1", "high"), 5)
+                assert killed.await_count == 0
+                assert spawned.await_count == 0
+            assert (await mgr._get_row("sess-1"))["effort"] is None
+            await mgr.shutdown()
+
+    _run(scenario())
+
+
+def test_an_effort_change_holds_the_lock_through_kill_and_respawn():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr, "claude-opus-5")
+            held: dict[str, bool] = {}
+
+            def recording(step):
+                async def record(*args, **kwargs):
+                    held[step] = mgr._locks["sess-1"].locked()
+                    await asyncio.sleep(0)
+                return record
+
+            with _offering(mgr), \
+                    patch.object(mgr, "_kill_process", new=recording("kill")), \
+                    patch.object(mgr, "_spawn", new=recording("spawn")), \
+                    patch.object(mgr, "_routing_for", new=AsyncMock(return_value={})):
+                await mgr.set_effort("sess-1", "max")
+
+            assert held == {"kill": True, "spawn": True}
+            assert mgr._locks["sess-1"].locked() is False
+            await mgr.shutdown()
+
+    _run(scenario())
+
+
+@pytest.mark.parametrize("target,kept", [
+    ("claude-sonnet-5", "low"),     # offers the current level: kept
+    ("qwen35-131k", None),          # offers none: back to the model's default
+])
+def test_a_model_switch_keeps_the_effort_only_where_the_new_model_offers_it(target, kept):
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr, "claude-opus-5")
+            await mgr._db.execute("UPDATE sessions SET effort = 'low' WHERE id = 'sess-1'")
+            await mgr._db.commit()
+            await _mind(mgr)
+            posted, wired = _wire()
+            kill, routing = _quiet(mgr)
+            with _offering(mgr), kill, routing, wired:
+                await mgr.switch_model("sess-1", target)
+            assert (await mgr._get_row("sess-1"))["effort"] == kept
+            assert [body["effort"] for body in posted] == [kept]
+            await mgr.shutdown()
+
+    _run(scenario())
+
+
+def test_a_respawn_from_nothing_carries_the_conversations_effort():
+    """After a service restart nothing in memory remembers the level; the
+    next spawn has to read it off the conversation."""
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr, "claude-opus-5")
+            await mgr._db.execute("UPDATE sessions SET effort = 'max' WHERE id = 'sess-1'")
+            await mgr._db.commit()
+            await _mind(mgr)
+            posted, wired = _wire()
+            with wired:
+                await mgr._spawn("sess-1", "claude-opus-5", resume_sid="conv-1", mind_id="ada")
+            assert posted[0]["effort"] == "max"
+            await mgr.shutdown()
+
+    _run(scenario())
+
+
+def test_a_rotation_successor_inherits_the_effort():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr, "claude-opus-5")
+            await mgr._db.execute("UPDATE sessions SET effort = 'high' WHERE id = 'sess-1'")
+            await mgr._db.commit()
+            await _mind(mgr)
+            posted, wired = _wire()
+            with wired, \
+                    patch("comms.broker.get_mind_by_id", new=AsyncMock(return_value={"name": "ada"})), \
+                    patch("comms.bootstrap_loader.compose_prompt_blocks", new=AsyncMock(return_value="")):
+                new = await mgr.create_session(
+                    owner_type="telegram", owner_ref="123", client_ref="123",
+                    model="claude-opus-5", mind_id="ada", rotated_from="sess-1",
+                )
+            assert (await mgr._get_row(new["id"]))["effort"] == "high"
+            assert posted[-1]["effort"] == "high"
+            await mgr.shutdown()
+
+    _run(scenario())
+
+
+def test_the_effort_options_are_the_models_levels_and_the_current_one():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr, "claude-opus-5")
+            await mgr._db.execute("UPDATE sessions SET effort = 'medium' WHERE id = 'sess-1'")
+            await mgr._db.commit()
+            with _offering(mgr):
+                options = await mgr.effort_options("sess-1")
+            assert options["levels"] == ["low", "medium", "high", "max"]
+            assert options["current"] == "medium"
+            await mgr.shutdown()
+
+    _run(scenario())
+
+
+def test_an_unreadable_model_list_is_said_rather_than_read_as_no_effort():
+    """An empty listing is a mind or proxy that could not be asked."""
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr, "claude-opus-5")
+            with patch.object(mgr, "mind_models", new=AsyncMock(return_value=[])):
+                with pytest.raises(ValueError, match="Couldn't read") as unreadable:
+                    await mgr.effort_options("sess-1")
+                assert "no longer offered" not in str(unreadable.value)
+                with pytest.raises(ValueError, match="Couldn't read"):
+                    await mgr.set_effort("sess-1", "high")
+            await mgr.shutdown()
+
+    _run(scenario())
+
+
+def test_a_model_no_longer_offered_is_said_rather_than_read_as_unreadable():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr, "claude-opus-4-8")
+            with _offering(mgr):
+                with pytest.raises(ValueError, match="no longer offered") as withdrawn:
+                    await mgr.effort_options("sess-1")
+                assert "Couldn't read" not in str(withdrawn.value)
+            await mgr.shutdown()
+
+    _run(scenario())
+
+
+def test_default_hands_the_conversation_back_to_the_harnesss_own_level():
+    """Without it a chosen level could never be undone, and every rotation
+    after it would inherit it."""
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr, "claude-opus-5")
+            await mgr._db.execute("UPDATE sessions SET effort = 'max' WHERE id = 'sess-1'")
+            await mgr._db.commit()
+            await _mind(mgr)
+            posted, wired = _wire()
+            kill, routing = _quiet(mgr)
+            with _offering(mgr), kill, routing, wired:
+                await mgr.set_effort("sess-1", "default")
+            assert (await mgr._get_row("sess-1"))["effort"] is None
+            assert [body["effort"] for body in posted] == [None]
             await mgr.shutdown()
 
     _run(scenario())
