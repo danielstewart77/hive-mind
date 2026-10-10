@@ -329,7 +329,7 @@ def test_the_harness_report_refuses_a_caller_without_the_admin_token(homes):
 
 @pytest.mark.parametrize("harness", ["claude", "codex", "dsh"])
 def test_a_chat_session_runs_on_the_adapter_its_harness_names(
-    homes, proxy, monkeypatch, harness,
+    equipped, proxy, monkeypatch, harness,
 ):
     proxy({})
     spawner = _Spawner(harness)
@@ -356,7 +356,7 @@ def test_a_chat_session_runs_on_the_adapter_its_harness_names(
     assert all("row-1" not in adapter.SESSIONS for adapter in others)
 
 
-def test_the_handover_is_delivered_once_not_on_every_turn(homes, proxy, monkeypatch):
+def test_the_handover_is_delivered_once_not_on_every_turn(equipped, proxy, monkeypatch):
     proxy({})
     spawner = _Spawner("codex")
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawner)
@@ -707,7 +707,7 @@ FAILED_CODEX_TURN = [_line({"type": "thread.started", "thread_id": "thread-f"}),
                      _line({"type": "turn.failed", "error": {"message": "boom"}})]
 
 
-def test_the_handover_is_held_until_a_turn_completes_without_error(homes, proxy, monkeypatch):
+def test_the_handover_is_held_until_a_turn_completes_without_error(equipped, proxy, monkeypatch):
     """A failed first turn must not spend the handover: codex starts a fresh
     thread after a failure, and that thread would open on nothing."""
     proxy({})
@@ -728,7 +728,7 @@ def test_the_handover_is_held_until_a_turn_completes_without_error(homes, proxy,
     assert delivered[2] == "three"
 
 
-def test_a_resumed_codex_thread_also_gets_the_held_opening_turn(homes, proxy, monkeypatch):
+def test_a_resumed_codex_thread_also_gets_the_held_opening_turn(equipped, proxy, monkeypatch):
     proxy({})
     spawner = _Spawner("codex")
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawner)
@@ -930,7 +930,7 @@ def test_a_harness_whose_adapter_failed_to_load_is_not_offered(equipped, monkeyp
     assert "failed to load" in rows["dsh"]["reason"]
 
 
-def test_a_dsh_launch_carries_the_agents_patch_only_when_it_exists(homes, proxy, monkeypatch):
+def test_a_dsh_launch_carries_the_agents_patch_only_when_it_exists(equipped, proxy, monkeypatch):
     proxy({})
     spawner = _Spawner("dsh")
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawner)
@@ -939,7 +939,7 @@ def test_a_dsh_launch_carries_the_agents_patch_only_when_it_exists(homes, proxy,
         "session_id": "g8", "resume_sid": "conv-g8", "model": "qwen", "harness": "dsh"})
 
     client.post("/sessions/g8/message", headers=SESSION, json={"content": "one"})
-    patch = homes["dsh"] / "agents.patch.yml"
+    patch = equipped["dsh"] / "agents.patch.yml"
     patch.write_text("agents: []\n")
     client.post("/sessions/g8/message", headers=SESSION, json={"content": "two"})
 
@@ -978,3 +978,177 @@ def test_the_skills_page_answers_for_the_harness_it_names(homes, monkeypatch):
     client.get("/skills", headers=ADMIN)
 
     assert [name.removesuffix("_cli") for name in seen] == ["codex", "claude"]
+
+
+# ---------------------------------------------------------------------------
+# Grill round 2
+# ---------------------------------------------------------------------------
+
+def test_a_codex_spawn_resumes_the_thread_the_gateway_names(equipped, proxy, monkeypatch):
+    """The restore path after a failed switch hands back the old thread."""
+    proxy({"codex": [{"id": "gpt-5"}]})
+    spawner = _Spawner("codex")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawner)
+    codex_cli.THREADS["h1"] = "thread-stale"
+    client = TestClient(mind_server.app)
+    client.post("/sessions", headers=SESSION, json={
+        "session_id": "h1", "resume_sid": "conv-h1", "model": "gpt-5",
+        "harness": "codex", "harness_sid": "thread-gateway"})
+
+    client.post("/sessions/h1/message", headers=SESSION, json={"content": "hi"})
+
+    assert spawner.calls[0]["argv"][-3:] == ["resume", "thread-gateway", "-"]
+
+
+@pytest.mark.parametrize("harness,model,breakage", [
+    ("codex", "gpt-5", "cli"),
+    ("codex", "gpt-5", "login"),
+    ("codex", "not-offered", None),
+    ("dsh", "qwen", "login"),
+    ("dsh", "not-offered", None),
+])
+def test_a_codex_or_dsh_start_that_cannot_run_is_refused_not_held(
+    equipped, proxy, monkeypatch, harness, model, breakage,
+):
+    proxy({"codex": [{"id": "gpt-5"}], "dsh": [{"id": "qwen"}]})
+    if breakage == "cli":
+        os.environ["PATH"] = "/nonexistent"
+    elif breakage == "login" and harness == "codex":
+        (equipped["codex"] / "auth.json").unlink()
+    elif breakage == "login":
+        monkeypatch.delenv("DSH_API_KEY")
+
+    resp = TestClient(mind_server.app).post("/sessions", headers=SESSION, json={
+        "session_id": "h2", "resume_sid": "conv-h2", "model": model, "harness": harness})
+
+    assert resp.status_code >= 400
+    assert "h2" not in mind_server.ADAPTERS[harness].SESSIONS
+
+
+@pytest.mark.parametrize("harness,model", [("codex", "gpt-5"), ("dsh", "qwen")])
+def test_a_codex_or_dsh_start_that_can_run_is_held(equipped, proxy, harness, model):
+    proxy({"codex": [{"id": "gpt-5"}], "dsh": [{"id": "qwen"}]})
+
+    resp = TestClient(mind_server.app).post("/sessions", headers=SESSION, json={
+        "session_id": "h3", "resume_sid": "conv-h3", "model": model, "harness": harness})
+
+    assert resp.status_code == 200, resp.text
+    assert "h3" in mind_server.ADAPTERS[harness].SESSIONS
+
+
+@pytest.mark.parametrize("harness,attr", [("codex", "CODEX_HOME"), ("dsh", "DSH_HOME")])
+def test_an_undeclared_home_makes_a_harness_unavailable_and_unspawnable(
+    equipped, proxy, monkeypatch, tmp_path, harness, attr,
+):
+    proxy({"codex": [{"id": "gpt-5"}], "dsh": [{"id": "qwen"}]})
+    monkeypatch.setattr(mind_server.ADAPTERS[harness], attr, tmp_path / "never-made")
+
+    row = _report()[harness]
+    resp = TestClient(mind_server.app).post("/sessions", headers=SESSION, json={
+        "session_id": "h4", "resume_sid": "conv-h4",
+        "model": "gpt-5" if harness == "codex" else "qwen", "harness": harness})
+
+    assert row["available"] is False
+    assert f"no {harness} home declared for this mind" in row["reason"]
+    assert resp.status_code >= 400
+
+
+def test_startup_runs_the_skills_start_check_and_survives_its_failure(homes, monkeypatch):
+    ran: list[str] = []
+
+    def check_at_start(**kw):
+        ran.append("ran")
+        raise RuntimeError("render pass fell over")
+
+    async def no_secrets():
+        return None
+
+    monkeypatch.setattr(mind_server.skills_api, "check_at_start", check_at_start, raising=False)
+    for adapter in mind_server.ADAPTERS.values():
+        monkeypatch.setattr(adapter, "_fetch_secrets_on_startup", no_secrets)
+    monkeypatch.delenv("COMMS_URL", raising=False)
+
+    with TestClient(mind_server.app) as client:
+        assert client.get("/health").status_code == 200
+
+    assert ran == ["ran"]
+
+
+def test_an_unmeasured_models_window_is_omitted_not_zero(homes, proxy, monkeypatch):
+    proxy({"claude": [{"id": "claude-opus-5"}]})
+    spawner = _Spawner("claude")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawner)
+
+    TestClient(mind_server.app).post("/sessions", headers=SESSION, json={
+        "session_id": "h5", "resume_sid": "conv-h5", "model": "claude-opus-5",
+        "harness": "claude"})
+
+    assert "HIVE_MODEL_CONTEXT_WINDOW" not in spawner.calls[0]["env"]
+    assert "HIVE_ROTATION_THRESHOLD_TOKENS" not in spawner.calls[0]["env"]
+
+
+def test_a_dsh_turn_points_the_hook_bridge_at_the_minds_hooks(homes, proxy, monkeypatch):
+    proxy({})
+    monkeypatch.delenv("DSH_HOOKS_CONFIG", raising=False)
+    spawner = _Spawner("dsh")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawner)
+    monkeypatch.setattr(mind_server, "preflight", lambda harness, model: _none(), raising=False)
+    client = TestClient(mind_server.app)
+    client.post("/sessions", headers=SESSION, json={
+        "session_id": "h6", "resume_sid": "conv-h6", "model": "qwen", "harness": "dsh"})
+
+    client.post("/sessions/h6/message", headers=SESSION, json={"content": "one"})
+    (homes["dsh"] / "hooks.json").write_text(json.dumps(_all_hooks()))
+    client.post("/sessions/h6/message", headers=SESSION, json={"content": "two"})
+
+    assert "DSH_HOOKS_CONFIG" not in spawner.calls[0]["env"]
+    assert spawner.calls[1]["env"]["DSH_HOOKS_CONFIG"] == str(homes["dsh"] / "hooks.json")
+
+
+async def _none():
+    return None
+
+
+def test_claude_spends_the_handover_once_it_is_written_into_the_live_process(
+    homes, proxy, monkeypatch,
+):
+    """The live process holds it in its transcript now; an errored result does
+    not mean the handover was lost, and repeating it would duplicate it."""
+    proxy({})
+    spawner = _Spawner("claude", outputs=[[
+        _line({"type": "result", "session_id": "conv-h7", "is_error": True}),
+        _line({"type": "result", "session_id": "conv-h7", "is_error": False}),
+    ]])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawner)
+    client = TestClient(mind_server.app)
+    client.post("/sessions", headers=SESSION, json={
+        "session_id": "h7", "resume_sid": "conv-h7", "model": "claude-opus-5",
+        "harness": "claude", "opening_turn": "HANDOVER"})
+
+    client.post("/sessions/h7/message", headers=SESSION, json={"content": "one"})
+    client.post("/sessions/h7/message", headers=SESSION, json={"content": "two"})
+
+    sent = [json.loads(line)["message"]["content"][0]["text"]
+            for line in spawner.calls[0]["proc"].stdin_bytes.decode().splitlines()]
+    assert sent == ["HANDOVER\n\n---\n\none", "two"]
+
+
+def test_a_prior_handover_with_no_transcript_yet_is_handed_over_not_refused(homes):
+    resp = _handover(TestClient(mind_server.app), harness="claude", claude_sid="conv-h8",
+                     had_turns=False, prior_handover="PRIOR HANDOVER TEXT",
+                     budget_bytes=8_000)
+
+    assert resp.status_code == 200
+    assert "PRIOR HANDOVER TEXT" in resp.json()["text"]
+
+
+def test_a_prior_handover_rides_ahead_of_whatever_transcript_exists(homes):
+    target = pty_attach.claude_transcript_path("conv-h9", claude_cli.PROJECT_DIR,
+                                               homes["claude"])
+    target.parent.mkdir(parents=True)
+    shutil.copy(FIXTURES / "claude.jsonl", target)
+
+    text = _handover(TestClient(mind_server.app), harness="claude", claude_sid="conv-h9",
+                     prior_handover="PRIOR HANDOVER TEXT").json()["text"]
+
+    assert text.index("PRIOR HANDOVER TEXT") < text.index("User: hey, i have two versions")

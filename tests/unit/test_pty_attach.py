@@ -809,8 +809,10 @@ class TestCodexCliThreads:
     turn a `codex exec resume <uuid>` against a thread that never existed."""
 
     @pytest.fixture
-    def codex(self):
+    def codex(self, monkeypatch, tmp_path):
         import minds.harness.codex_cli as impl
+        # The mind's own codex home; without one codex is refused outright.
+        monkeypatch.setattr(impl, "CODEX_HOME", tmp_path)
         return impl
 
     def test_the_routes_are_mounted(self, codex):

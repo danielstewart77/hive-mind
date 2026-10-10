@@ -148,8 +148,8 @@ async def conversation_env(harness: str, model: str) -> dict[str, str]:
     conversation switched to another model (or another harness) has that
     model's room, not the default's, so every process a conversation runs in
     is told its window, and the threshold that window gives at this mind's
-    percentage. Zero means nobody has measured the model, which the hook reads
-    as "fall back", never as a window of no tokens.
+    percentage. A model nobody has measured gets neither, and the hook falls
+    back to the file.
     """
     key = (harness, model)
     cached = _WINDOWS.get(key)
@@ -161,7 +161,12 @@ async def conversation_env(harness: str, model: str) -> dict[str, str]:
         except Exception:  # noqa: BLE001 — a spawn must not fail for a listing
             window = None
         _WINDOWS[key] = (time.monotonic(), window)
-    env = {"HIVE_HARNESS": harness, "HIVE_MODEL_CONTEXT_WINDOW": str(window or 0)}
+    env = {"HIVE_HARNESS": harness}
+    # Omitted, not zero, when nobody has measured the model: a hook reading
+    # zero would have to know it means "fall back", and one that forgot would
+    # rotate on every turn.
+    if window:
+        env["HIVE_MODEL_CONTEXT_WINDOW"] = str(window)
     try:
         percent = int(_live_runtime().get("rotation_threshold_percent"))
     except (TypeError, ValueError):
@@ -174,6 +179,19 @@ async def conversation_env(harness: str, model: str) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 # Which harnesses this mind can offer
 # ---------------------------------------------------------------------------
+
+def _home_check(harness: str) -> str | None:
+    """None when the harness has a home of this mind's own to run in.
+
+    Never a fallback to the user's own ``~/.codex`` or ``~/.dsh``: those are
+    another login and another set of threads. Claude's config directory is
+    the container's, declared by its compose file.
+    """
+    adapter = ADAPTERS[harness]
+    if not hasattr(adapter, "home_declared") or adapter.home_declared():
+        return None
+    return f"no {harness} home declared for this mind"
+
 
 def _cli_check(harness: str) -> str | None:
     """None when the harness's CLI is installed here, else why not."""
@@ -213,9 +231,11 @@ def _hook_config(harness: str) -> tuple[dict | None, str]:
         if harness == "codex":
             path = ADAPTERS["codex"].CODEX_HOME / "config.toml"
             return tomllib.loads(path.read_text()), str(path)
-        # Named by the environment the dsh bridge reads, else beside the
-        # profiles under DSH_HOME — resolved the way the adapter resolves it.
-        named = os.environ.get("DSH_HOOKS_CONFIG") or str(ADAPTERS["dsh"].DSH_HOME / "hooks.json")
+        # The same rule the adapter hands its bridge: the environment's file,
+        # else the mind's own under DSH_HOME.
+        named = ADAPTERS["dsh"].hooks_config()
+        if not named:
+            return None, f"DSH_HOOKS_CONFIG or {ADAPTERS['dsh'].DSH_HOME / 'hooks.json'}"
         return json.loads(Path(named).read_text()), named
     except (OSError, ValueError) as exc:
         return None, f"{exc}"
@@ -268,10 +288,46 @@ def _login_check(harness: str) -> str | None:
 #: are worth reading. Replaceable: a deployment whose login lives elsewhere
 #: swaps the one check rather than forking the route.
 CHECKS: list[tuple[str, Callable[[str], str | None]]] = [
+    ("home", _home_check),
     ("cli", _cli_check),
     ("hooks", _hooks_check),
     ("login", _login_check),
 ]
+
+
+#: The harnesses whose spawn answers before any process runs: one turn later
+#: is too late for the gateway to put a failed switch back. Claude's spawn
+#: starts its process, which fails where it can be seen.
+PREFLIGHT_HARNESSES = ("codex", "dsh")
+
+
+async def preflight(harness: str, model: str) -> str | None:
+    """Why this harness cannot run this model here, or None.
+
+    Its home, CLI and login, and the model in that harness's listing. A
+    listing that comes back empty says nothing — the proxy unreachable, or a
+    mind whose codex logs in by its own account — so only a listing that names
+    other models and not this one refuses.
+    """
+    reasons = []
+    for label, check in CHECKS:
+        if label == "hooks":
+            continue
+        try:
+            reason = check(harness)
+        except Exception as exc:  # noqa: BLE001
+            reason = f"check failed: {exc}"
+        if reason:
+            reasons.append(reason)
+    if not reasons:
+        try:
+            names = {row.get("name") for row in
+                     await models_api.build_catalog(RUNTIME_PATH, harness=harness)}
+        except Exception:  # noqa: BLE001 — a listing failure is not a refusal
+            names = set()
+        if names and model not in names:
+            reasons.append(f"{harness} does not offer {model} to this mind")
+    return "; ".join(reasons) or None
 
 
 def harness_report() -> dict:
@@ -326,6 +382,15 @@ async def _startup() -> None:
     asyncio.ensure_future(runtime_api.registration_loop(
         RUNTIME_PATH, mind_name=MIND_NAME, mind_id=MIND_ID, log=log
     ))
+    # The skills render pass, once per start: every harness finds its copies
+    # current before the first conversation. Off the loop and never fatal — a
+    # render that falls over costs stale skills, not a mind that will not boot.
+    check_at_start = getattr(skills_api, "check_at_start", None)
+    if check_at_start is not None:
+        try:
+            await asyncio.to_thread(check_at_start)
+        except Exception:  # noqa: BLE001
+            log.exception("The skills render pass failed at start")
     log.info("%s ready (mind_id=%s, harnesses=%s, default=%s)",
              NAME, MIND_ID, ",".join(ADAPTERS), default_harness())
 
@@ -359,13 +424,22 @@ async def create_session(req: Request) -> Any:
             status_code=400,
         )
     sid = str(body.get("session_id") or "")
+    model = str(body.get("model") or "").strip()
+    if harness in PREFLIGHT_HARNESSES:
+        # Answered now, while the gateway can still undo a switch: a codex or
+        # dsh spawn holds nothing until the first turn, and a 200 here would
+        # report a session that is going to fail on its first word.
+        refusal = await preflight(harness, model)
+        if refusal:
+            log_event(log, "session.refused", level=logging.WARNING, mind_id=MIND_ID,
+                      session_id=sid or None, harness=harness, reason=refusal)
+            return JSONResponse({"error": refusal}, status_code=503)
     previous = HARNESS_OF.get(sid)
     if sid and previous and previous != harness:
         # The gateway kills before it respawns on a switch; a session still
         # held by its old adapter here is one whose kill never arrived, and
         # leaving it would put two harnesses on one conversation.
         await ADAPTERS[previous].kill_session(sid)
-    model = str(body.get("model") or "").strip()
     if model:
         body = {**body, "conversation_env": await conversation_env(harness, model)}
     response = await adapter.start_session(body)
@@ -468,6 +542,7 @@ async def handover(request: Request) -> Any:
         return JSONResponse({"error": f"{harness or 'no harness'} is not a harness"},
                             status_code=400)
     summary = str(body.get("summary") or "")
+    prior = str(body.get("prior_handover") or "")
     try:
         budget = int(body.get("budget_bytes") or transcript.MAX_HANDOVER_BYTES)
     except (TypeError, ValueError):
@@ -491,10 +566,11 @@ async def handover(request: Request) -> Any:
     except transcript.Unreadable as exc:
         log_event(log, "session.handover.unreadable", level=logging.WARNING,
                   mind_id=MIND_ID, harness=harness, error=str(exc))
-        if not summary.strip():
+        if not summary.strip() and not prior.strip():
             return JSONResponse({"detail": "unreadable"}, status_code=422)
         blocks = []
-    text = transcript.render(blocks, summary=summary, budget_bytes=budget)
+    text = transcript.render(blocks, summary=summary, budget_bytes=budget,
+                             prior_handover=prior)
     log_event(log, "session.handover.rendered", mind_id=MIND_ID, harness=harness,
               blocks=len(blocks), bytes=len(text.encode("utf-8")))
     return {"text": text}
