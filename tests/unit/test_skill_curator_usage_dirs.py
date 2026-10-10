@@ -120,3 +120,17 @@ def test_the_minds_declared_homes_count_without_being_named(tmp_path, capsys, mo
 
     assert json.loads(capsys.readouterr().out)["counts"]["archived"] == 0
     assert curator.telemetry.load_usage(claude)["used-under-dsh"]["state"] == curator.STATE_ACTIVE
+
+
+# Q12
+def test_the_curators_own_directory_is_never_counted_twice(tmp_path, monkeypatch):
+    curator = _load(SCRIPT_PATH, "skill_curator_usage_self")
+    now = datetime.now(timezone.utc)
+    claude = tmp_path / "claude"
+    _seed(curator, claude, "mine", created_by="agent", use_count=2, created_at=now.isoformat())
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude))
+
+    dirs = curator.declared_usage_dirs(claude, [claude])
+    row = curator.eligible_skill_rows(claude, dirs)[0]
+
+    assert row["use_count"] == 2
