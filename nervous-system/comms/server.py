@@ -1157,7 +1157,15 @@ async def _handle_command(cmd: str, parts: list[str], body: CommandRequest):
         if len(parts) < 2:
             if not active:
                 return {"error": "No active session. Use /new first."}
-            return {"models": await session_mgr.mind_models(active["mind_id"])}
+            # The conversation's own model travels with the listing. A surface
+            # drawing a picker has no other way to mark where it already is,
+            # and the mind's configured default is a different fact — on an
+            # edge install it is a pre-proxy alias that matches no deployment
+            # name in the catalog at all, so marking that marked nothing.
+            return {
+                "models": await session_mgr.mind_models(active["mind_id"]),
+                "current": active.get("model"),
+            }
         model_name = parts[1]
         if not active:
             return {"error": "No active session. Use /new first."}

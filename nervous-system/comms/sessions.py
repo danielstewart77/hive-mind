@@ -2162,48 +2162,65 @@ class SessionManager:
     # ------------------------------------------------------------------
     # Model switching
     # ------------------------------------------------------------------
+    def _claim_turn_lock(self, session_id: str) -> asyncio.Lock:
+        """Take the session's turn lock for an operation that respawns in place.
+
+        A switch or an autopilot toggle kills the harness process and starts a
+        new one. Done while a turn is streaming, that destroys the answer being
+        written and leaves the surface awaiting a stream with nothing behind
+        it — on Telegram a typing indicator that never stops, indistinguishable
+        from a mind still thinking.
+
+        The lock is *taken*, not merely tested. Testing it and proceeding is
+        check-then-act across the `/models` round trip that follows, which runs
+        to ten seconds: a message typed in that window passes `send_message`'s
+        own idle check, takes this lock and starts streaming, and the switch
+        then kills it anyway. Worse, `send_message` decides whether to respawn
+        on `session_id not in self._procs`, which `_kill_process` has just
+        emptied — so that turn spawns a second harness process on the same
+        conversation, untracked and therefore never reaped.
+
+        Acquiring an uncontended `asyncio.Lock` does not yield, so there is no
+        window between finding it free and holding it.
+        """
+        lock = self._locks.setdefault(session_id, asyncio.Lock())
+        if lock.locked():
+            raise ValueError(
+                "This conversation is mid-answer. Let it finish, or interrupt "
+                "it, then try again."
+            )
+        return lock
+
     async def switch_model(self, session_id: str, model: str) -> dict:
         """Switch model mid-session: kill process, respawn with --resume."""
         session = await self._get_row(session_id)
         if not session:
             raise ValueError(f"Session not found: {session_id}")
 
-        # A switch kills the harness process and respawns it. Done while a turn
-        # is streaming, that destroys the answer being written and leaves the
-        # surface awaiting a stream with nothing behind it — which on Telegram
-        # is a typing indicator that never stops, indistinguishable from a mind
-        # still thinking. The turn lock is the only record the gateway keeps of
-        # a turn in flight, so it is what gets asked, and the refusal comes
-        # before anything is torn down.
-        lock = self._locks.get(session_id)
-        if lock is not None and lock.locked():
-            raise ValueError(
-                "This conversation is mid-answer. Let it finish, or interrupt "
-                "it, then switch."
+        lock = self._claim_turn_lock(session_id)
+        async with lock:
+            if not await self.mind_offers_model(session["mind_id"], model):
+                raise ValueError(
+                    f"Model {model!r} is not one this mind may run. "
+                    "Its provider decides that, not the hive."
+                )
+
+            await self._kill_process(session_id)
+            await self._db.execute(
+                "UPDATE sessions SET model = ?, status = 'running' WHERE id = ?",
+                (model, session_id),
             )
+            await self._db.commit()
 
-        if not await self.mind_offers_model(session["mind_id"], model):
-            raise ValueError(
-                f"Model {model!r} is not one this mind may run. "
-                "Its provider decides that, not the hive."
+            routing = await self._routing_for(session)
+            await self._spawn(
+                session_id,
+                model,
+                autopilot=bool(session["autopilot"]),
+                resume_sid=session["claude_sid"],
+                mind_id=session["mind_id"],
+                **routing,
             )
-
-        await self._kill_process(session_id)
-        await self._db.execute(
-            "UPDATE sessions SET model = ?, status = 'running' WHERE id = ?",
-            (model, session_id),
-        )
-        await self._db.commit()
-
-        routing = await self._routing_for(session)
-        await self._spawn(
-            session_id,
-            model,
-            autopilot=bool(session["autopilot"]),
-            resume_sid=session["claude_sid"],
-            mind_id=session["mind_id"],
-            **routing,
-        )
 
         return await self._session_dict(session_id)
 
@@ -2216,23 +2233,29 @@ class SessionManager:
         if not session:
             raise ValueError(f"Session not found: {session_id}")
 
-        new_autopilot = 0 if session["autopilot"] else 1
-        await self._kill_process(session_id)
-        await self._db.execute(
-            "UPDATE sessions SET autopilot = ?, status = 'running' WHERE id = ?",
-            (new_autopilot, session_id),
-        )
-        await self._db.commit()
+        # Same teardown-and-respawn as a model switch, and the same hole: an
+        # `/autopilot` typed while a turn was streaming destroyed the answer
+        # outright, with no race to lose — which is strictly easier to hit than
+        # the switch it was fixed alongside.
+        lock = self._claim_turn_lock(session_id)
+        async with lock:
+            new_autopilot = 0 if session["autopilot"] else 1
+            await self._kill_process(session_id)
+            await self._db.execute(
+                "UPDATE sessions SET autopilot = ?, status = 'running' WHERE id = ?",
+                (new_autopilot, session_id),
+            )
+            await self._db.commit()
 
-        routing = await self._routing_for(session)
-        await self._spawn(
-            session_id,
-            session["model"],
-            autopilot=bool(new_autopilot),
-            resume_sid=session["claude_sid"],
-            mind_id=session["mind_id"],
-            **routing,
-        )
+            routing = await self._routing_for(session)
+            await self._spawn(
+                session_id,
+                session["model"],
+                autopilot=bool(new_autopilot),
+                resume_sid=session["claude_sid"],
+                mind_id=session["mind_id"],
+                **routing,
+            )
         return await self._session_dict(session_id)
 
     # ------------------------------------------------------------------
