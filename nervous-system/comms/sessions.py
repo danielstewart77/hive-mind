@@ -2168,6 +2168,20 @@ class SessionManager:
         if not session:
             raise ValueError(f"Session not found: {session_id}")
 
+        # A switch kills the harness process and respawns it. Done while a turn
+        # is streaming, that destroys the answer being written and leaves the
+        # surface awaiting a stream with nothing behind it — which on Telegram
+        # is a typing indicator that never stops, indistinguishable from a mind
+        # still thinking. The turn lock is the only record the gateway keeps of
+        # a turn in flight, so it is what gets asked, and the refusal comes
+        # before anything is torn down.
+        lock = self._locks.get(session_id)
+        if lock is not None and lock.locked():
+            raise ValueError(
+                "This conversation is mid-answer. Let it finish, or interrupt "
+                "it, then switch."
+            )
+
         if not await self.mind_offers_model(session["mind_id"], model):
             raise ValueError(
                 f"Model {model!r} is not one this mind may run. "
