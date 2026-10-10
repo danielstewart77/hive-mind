@@ -32,7 +32,7 @@ from telegram.ext import (
 from hive_surfaces.config import config, photo_root
 from hive_surfaces.bot_utils import claim_picker, get_lock, get_queue, time_ago
 from hive_surfaces.gateway_client import GatewayClient
-from hive_surfaces import hitl, model_picker, rename_prompt, session_picker, voice_routing
+from hive_surfaces import effort_picker, hitl, model_picker, rename_prompt, session_picker, voice_routing
 from hive_surfaces.skills import get_skills
 from hive_surfaces.hive_logging import configure_logging, log_event
 
@@ -600,6 +600,8 @@ async def _handle_server_command(content: str, user_id: int, chat_id: int) -> st
         return f"Session cleared. New: {result.get('id', '?')[:8]}"
     if cmd == "/model":
         return format_model_result(result)
+    if cmd == "/effort":
+        return effort_picker.format_effort_result(result)
     if cmd == "/autopilot":
         on = result.get("autopilot", False)
         summary = _conversation_caption(result)
@@ -844,8 +846,10 @@ async def on_session_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # The fallback is reached when Telegram hands back an inaccessible message
     # — which is the late-delivery case this mark exists for — so it has to be
     # right for whichever picker was tapped, not just the conversation one.
-    default_header = ("Pick a model:" if action == model_picker.CB_PICK
-                      else "Your conversations:")
+    default_header = {
+        model_picker.CB_PICK: "Pick a model:",
+        effort_picker.CB_EFFORT: "Pick an effort:",
+    }.get(action, "Your conversations:")
     header = getattr(query.message, "text", None) or default_header
     try:
         await query.edit_message_text(f"{header}\n\n{mark} {msg}")
@@ -856,6 +860,19 @@ async def on_session_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     await _deliver(context.bot, chat_id, msg)
+
+    if not worked and action == effort_picker.CB_EFFORT:
+        # Same reasoning as a refused model tap: a fresh list of the thing
+        # that was tapped, never the conversation picker.
+        try:
+            await _send_effort_picker(context.bot, user_id, chat_id)
+        except Exception as exc:  # noqa: BLE001
+            log_event(
+                log, "surface.picker.redraw.failed", level=logging.WARNING,
+                surface="telegram", user_id=user_id, client_ref=chat_id,
+                error=str(exc),
+            )
+        return
 
     if not worked and action == model_picker.CB_PICK:
         # A refused model tap gets a fresh *model* list. Redrawing the
@@ -948,6 +965,11 @@ async def _run_session_button(
         # refused — a model withdrawn since the picker was drawn, or a turn
         # still streaming — is reported as the refusal it is.
         msg = await _handle_server_command(f"/model {target}", user_id, chat_id)
+        return not msg.startswith("Error:"), msg
+    if action == effort_picker.CB_EFFORT and target:
+        # Resolved against the conversation's model as it is now, so a level
+        # the model has stopped taking is refused rather than applied.
+        msg = await _handle_server_command(f"/effort {target}", user_id, chat_id)
         return not msg.startswith("Error:"), msg
     if action == session_picker.CB_SWITCH and target:
         # The id travels whole, so the gateway resolves it against what exists
@@ -1184,6 +1206,59 @@ async def _send_model_picker(bot, user_id: int, chat_id: int) -> None:
     )
     await _deliver(
         bot, chat_id, "Couldn't draw the model list \u2014 send /model to try again.",
+    )
+
+
+async def cmd_effort(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """`/effort` draws the levels this conversation's model takes;
+    `/effort <level>` sets one directly."""
+    if not await _auth_check(update):
+        return
+    level = " ".join(context.args).strip() if context.args else ""
+    if not level:
+        await _send_effort_picker(
+            context.bot, update.effective_user.id, update.effective_chat.id
+        )
+        return
+    msg = await _handle_server_command(
+        f"/effort {level}", update.effective_user.id, update.effective_chat.id
+    )
+    await _reply_chunked(update, msg)
+
+
+async def _send_effort_picker(bot, user_id: int, chat_id: int) -> None:
+    """Draw the effort levels the conversation's current model takes."""
+    result = await gateway.server_command(user_id, chat_id, "/effort")
+    problem = (result.get("error") or result.get("detail")) if isinstance(result, dict) else None
+    if problem:
+        await _deliver(bot, chat_id, f"Error: {problem}")
+        return
+    keyboard = effort_picker.build_effort_keyboard(result)
+    if keyboard is None:
+        model = result.get("model") if isinstance(result, dict) else None
+        await _deliver(
+            bot, chat_id, f"{model or 'This model'} takes no effort setting.",
+        )
+        return
+    model = result.get("model") if isinstance(result, dict) else None
+    header = f"Effort for {model}:" if model else "Pick an effort:"
+    last: Exception | None = None
+    for attempt in range(_DELIVER_ATTEMPTS):
+        try:
+            await bot.send_message(chat_id=chat_id, text=header, reply_markup=keyboard)
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            if attempt + 1 < _DELIVER_ATTEMPTS:
+                await asyncio.sleep(_DELIVER_BACKOFF_S * (attempt + 1))
+    log_event(
+        log, "surface.picker.send.failed", level=logging.WARNING, surface="telegram",
+        user_id=user_id, client_ref=chat_id, error=str(last),
+    )
+    await _deliver(
+        bot, chat_id, "Couldn't draw the effort list \u2014 send /effort to try again.",
     )
 
 
@@ -1876,6 +1951,7 @@ COMMANDS: tuple[tuple[str, str, object], ...] = (
     ("clear", "Clear this conversation and start over", cmd_clear),
     ("status", "Server port, default model, sessions running", cmd_status),
     ("model", "Pick a model for this conversation", cmd_model),
+    ("effort", "Pick a reasoning effort for this conversation", cmd_effort),
     ("models", "List the models this mind can be pointed at", cmd_models),
     ("autopilot", "Toggle autopilot for this conversation", cmd_autopilot),
     ("switch", "Resume a conversation: /switch <id>", cmd_switch),
@@ -2060,6 +2136,9 @@ def _build_application(token: str):
     # tappable in scrollback would switch a conversation weeks later.
     app.add_handler(CallbackQueryHandler(
         with_typing(on_session_button), pattern=model_picker.CALLBACK_PATTERN,
+    ))
+    app.add_handler(CallbackQueryHandler(
+        with_typing(on_session_button), pattern=effort_picker.CALLBACK_PATTERN,
     ))
     app.add_handler(MessageHandler(filters.PHOTO, with_typing(handle_photo)))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, with_typing(handle_text)))
