@@ -87,6 +87,9 @@ def test_a_model_the_mind_offers_is_switched_to():
             assert killed.await_count == 1
             assert spawned.await_count == 1
             assert spawned.await_args.args[1] == "claude-sonnet-5"
+            # Same conversation, new model: a respawn without the transcript
+            # is a blank conversation reporting a successful switch.
+            assert spawned.await_args.kwargs["resume_sid"] == "conv-1"
             await mgr.shutdown()
 
     _run(scenario())
@@ -131,7 +134,11 @@ def test_a_switch_while_the_turn_is_still_streaming_is_refused():
                         patch.object(mgr, "_spawn", new=AsyncMock()) as spawned, \
                         patch.object(mgr, "_routing_for", new=AsyncMock(return_value={})):
                     with pytest.raises(ValueError):
-                        await mgr.switch_model("sess-1", "claude-sonnet-5")
+                        # Bounded: a guard that queued behind the lock instead
+                        # of refusing would otherwise hang the suite.
+                        await asyncio.wait_for(
+                            mgr.switch_model("sess-1", "claude-sonnet-5"), 5,
+                        )
                 assert killed.await_count == 0
                 assert spawned.await_count == 0
             row = await mgr._get_row("sess-1")
@@ -171,7 +178,12 @@ def test_a_switch_once_the_turn_has_finished_goes_through():
     _run(scenario())
 
 
-def test_a_name_that_is_merely_a_prefix_of_an_offered_model_is_refused():
+@pytest.mark.parametrize("requested", [
+    "claude-opus-5",        # a prefix of what is offered
+    "claude-opus-5-5-x",    # what is offered is a prefix of it
+    "Claude-Opus-5-5",      # the offered name in another case
+])
+def test_a_name_that_is_not_exactly_an_offered_model_is_refused(requested):
     """The check is an exact name, never a prefix.
 
     `mind_offers_model` compares the requested name against what the proxy
@@ -192,7 +204,7 @@ def test_a_name_that_is_merely_a_prefix_of_an_offered_model_is_refused():
             ), patch.object(mgr, "_kill_process", new=AsyncMock()) as killed, \
                     patch.object(mgr, "_spawn", new=AsyncMock()) as spawned:
                 with pytest.raises(ValueError):
-                    await mgr.switch_model("sess-1", "claude-opus-5")
+                    await mgr.switch_model("sess-1", requested)
             assert killed.await_count == 0
             assert spawned.await_count == 0
             row = await mgr._get_row("sess-1")
@@ -217,22 +229,24 @@ def test_the_lock_is_held_for_the_whole_switch_not_just_tested():
         with tempfile.TemporaryDirectory() as tmp:
             mgr = await _manager(tmp)
             await _seed(mgr, "claude-opus-5")
-            held: list[bool] = []
+            held: dict[str, bool] = {}
 
-            async def slow_offer(mind_id, model):
-                # Stands in for the ten-second `/models` call. What matters is
-                # that the lock is already ours while this awaits.
-                held.append(mgr._locks["sess-1"].locked())
-                await asyncio.sleep(0)
-                return True
+            def recording(step, result=None):
+                async def record(*args, **kwargs):
+                    # Each await is where a turn could slip in; the lock has
+                    # to be ours at every one of them.
+                    held[step] = mgr._locks["sess-1"].locked()
+                    await asyncio.sleep(0)
+                    return result
+                return record
 
-            with patch.object(mgr, "mind_offers_model", new=slow_offer), \
-                    patch.object(mgr, "_kill_process", new=AsyncMock()), \
-                    patch.object(mgr, "_spawn", new=AsyncMock()), \
+            with patch.object(mgr, "mind_offers_model", new=recording("offer", True)), \
+                    patch.object(mgr, "_kill_process", new=recording("kill")), \
+                    patch.object(mgr, "_spawn", new=recording("spawn")), \
                     patch.object(mgr, "_routing_for", new=AsyncMock(return_value={})):
                 await mgr.switch_model("sess-1", "claude-sonnet-5")
 
-            assert held == [True]
+            assert held == {"offer": True, "kill": True, "spawn": True}
             # And released afterwards, or the conversation can never take
             # another turn.
             assert mgr._locks["sess-1"].locked() is False
@@ -257,7 +271,7 @@ def test_an_autopilot_toggle_while_the_turn_is_streaming_is_refused():
                         patch.object(mgr, "_spawn", new=AsyncMock()) as spawned, \
                         patch.object(mgr, "_routing_for", new=AsyncMock(return_value={})):
                     with pytest.raises(ValueError):
-                        await mgr.toggle_autopilot("sess-1")
+                        await asyncio.wait_for(mgr.toggle_autopilot("sess-1"), 5)
                 assert killed.await_count == 0
                 assert spawned.await_count == 0
             row = await mgr._get_row("sess-1")
@@ -280,6 +294,40 @@ def test_an_autopilot_toggle_with_nothing_running_still_flips_and_respawns():
             assert row["autopilot"] == 1
             assert killed.await_count == 1
             assert spawned.await_count == 1
+            await mgr.shutdown()
+
+    _run(scenario())
+
+
+def test_an_autopilot_toggle_holds_the_lock_through_kill_and_respawn():
+    """Taken, not tested — the same race the switch closed."""
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr, "claude-opus-5")
+            held: dict[str, bool] = {}
+            spawned: dict = {}
+
+            async def kill(*args, **kwargs):
+                held["kill"] = mgr._locks["sess-1"].locked()
+                await asyncio.sleep(0)
+
+            async def spawn(*args, **kwargs):
+                held["spawn"] = mgr._locks["sess-1"].locked()
+                spawned.update(kwargs)
+                await asyncio.sleep(0)
+
+            with patch.object(mgr, "_kill_process", new=kill), \
+                    patch.object(mgr, "_spawn", new=spawn), \
+                    patch.object(mgr, "_routing_for", new=AsyncMock(return_value={})):
+                await mgr.toggle_autopilot("sess-1")
+
+            assert held == {"kill": True, "spawn": True}
+            assert mgr._locks["sess-1"].locked() is False
+            # The process runs what the row says: a respawn on the old setting
+            # leaves the row claiming autopilot over a process without it.
+            assert spawned["autopilot"] is True
+            assert spawned["resume_sid"] == "conv-1"
             await mgr.shutdown()
 
     _run(scenario())
