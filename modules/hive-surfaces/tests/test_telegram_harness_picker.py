@@ -8,7 +8,9 @@ operator would see and on what the bot sends back.
 """
 
 import re
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
+
+import discord
 
 import pytest
 
@@ -210,6 +212,23 @@ class TestTheTelegramPicker:
         assert "harness" in [name for name, _description in tb.valid_menu_entries()]
 
 
+    @pytest.mark.asyncio
+    async def test_a_harness_tap_then_a_model_tap_on_the_same_picker_switches(self):
+        """The harness tap navigates; it must leave the picker for the model tap."""
+        gateway, asked = _gateway(
+            ("/harness codex", CODEX_MODELS), ("/harness codex gpt-5.6-terra", SWITCHED),
+        )
+
+        with patch.object(tb, "gateway", gateway), patch.object(tb, "_deliver", new=AsyncMock()):
+            await tb.on_harness_button(*_tap(harness_picker.encode_harness("codex"), message_id=99))
+            await tb.on_session_button(
+                *_tap(harness_picker.encode_model("codex", "gpt-5.6-terra"), message_id=99))
+
+        assert [c.args[2] for c in asked.await_args_list] == [
+            "/harness codex", "/harness codex gpt-5.6-terra",
+        ]
+
+
 class TestASpentHarnessPicker:
     """Test 29: a second tap on a spent harness picker sends nothing."""
 
@@ -278,3 +297,40 @@ class TestDiscord:
         assert asked.await_args.args[2] == "/harness codex gpt-5.6-terra"
         assert "codex" in msg and "gpt-5.6-terra" in msg
 
+    @pytest.mark.asyncio
+    async def test_the_registered_slash_command_sends_the_harness_and_model(self):
+        interaction = MagicMock()
+        interaction.user.id = 7
+        interaction.channel_id = 2
+        interaction.response.defer = AsyncMock()
+        interaction.followup.send = AsyncMock()
+        gateway, asked = _gateway(("/harness codex gpt-5.6-terra", SWITCHED))
+        configure(SurfaceConfig(discord_allowed_users=[7]))
+
+        with patch.object(db, "gateway", gateway):
+            await db.bot.tree.get_command("harness").callback(
+                interaction, name="codex", model="gpt-5.6-terra")
+
+        assert [c.args[2] for c in asked.await_args_list] == ["/harness codex gpt-5.6-terra"]
+        assert "Switched to codex" in interaction.followup.send.await_args.args[0]
+
+    @pytest.mark.asyncio
+    async def test_a_typed_harness_message_is_a_command_not_a_prompt(self):
+        message = MagicMock()
+        message.author.id = 7
+        message.content = "/harness codex gpt-5.6-terra"
+        message.channel = MagicMock(spec=discord.DMChannel)
+        message.channel.id = 2
+        message.channel.typing.return_value.__aenter__ = AsyncMock()
+        message.channel.typing.return_value.__aexit__ = AsyncMock(return_value=False)
+        message.mentions = []
+        message.reply = AsyncMock()
+        gateway, asked = _gateway(("/harness codex gpt-5.6-terra", SWITCHED))
+        configure(SurfaceConfig(discord_allowed_users=[7]))
+
+        with patch.object(db, "gateway", gateway), \
+                patch.object(type(db.bot), "user", new_callable=PropertyMock,
+                             return_value=MagicMock(id=1)):
+            await db.on_message(message)
+
+        assert [c.args[2] for c in asked.await_args_list] == ["/harness codex gpt-5.6-terra"]
