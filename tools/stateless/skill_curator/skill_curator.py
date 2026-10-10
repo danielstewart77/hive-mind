@@ -857,6 +857,23 @@ def maybe_notify(config_dir: Path, summary: Dict[str, Any]) -> Optional[List[str
 # CLI
 # ---------------------------------------------------------------------------
 
+def declared_usage_dirs(config_dir: Path, extra: Iterable[Path] = ()) -> List[Path]:
+    """Every other harness home this mind declares, plus any named.
+
+    A mind's skills are rendered into each harness it can switch to, so the
+    homes it declares are where its usage is recorded; a caller that forgets
+    to name one must not archive a skill used every day under it.
+    """
+    mine = Path(config_dir).resolve()
+    dirs: List[Path] = []
+    declared = [os.environ.get(v) for v in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "DSH_HOME")]
+    for candidate in [*extra, *(Path(d) for d in declared if d)]:
+        resolved = Path(candidate).resolve()
+        if resolved != mine and resolved not in dirs:
+            dirs.append(resolved)
+    return dirs
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Deterministic per-mind skill-lifecycle curator"
@@ -868,7 +885,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--usage-dir", action="append", default=[], type=Path,
         help="Another harness's config dir whose usage sidecar counts as activity "
-             "(repeatable: the mind's .codex and dsh homes)",
+             "(repeatable). The mind's declared CLAUDE_CONFIG_DIR, CODEX_HOME and "
+             "DSH_HOME are always included.",
     )
     parser.add_argument(
         "--consolidate", action="store_true",
@@ -888,7 +906,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     summary = run(
         Path(args.config_dir), args.harness,
         consolidate=consolidate_arg, dry_run=args.dry_run,
-        usage_dirs=args.usage_dir,
+        usage_dirs=declared_usage_dirs(Path(args.config_dir), args.usage_dir),
     )
     if args.notify and not args.dry_run:
         maybe_notify(Path(args.config_dir), summary)

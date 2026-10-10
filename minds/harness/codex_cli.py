@@ -216,6 +216,7 @@ async def _startup() -> None:
     asyncio.ensure_future(runtime_api.registration_loop(
         RUNTIME_PATH, mind_name=MIND_NAME, mind_id=MIND_ID, log=log
     ))
+    asyncio.ensure_future(skills_api.check_at_start(log, MIND_ID))
     log.info("%s ready (mind_id=%s, codex_home=%s)", NAME, MIND_ID, CODEX_HOME)
 
 
