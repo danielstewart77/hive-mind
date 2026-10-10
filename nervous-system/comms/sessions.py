@@ -231,6 +231,8 @@ MAX_SESSION_NAME_CHARS = 40
 # The most a handover may weigh, in bytes. The same ceiling a terminal
 # rotation's seed is trimmed to, because a handover travels the same way.
 HANDOVER_MAX_BYTES = 120_000
+# And the least, however small the window or large the soul.
+HANDOVER_MIN_BYTES = 8_000
 
 # A tile colour is a free hex value picked in the browser, and it is assigned
 # straight into a style attribute on the way back out. Validated here rather
@@ -258,20 +260,25 @@ def normalise_harness(value: str | None) -> str:
     return str(value or "").strip().lower().split("_", 1)[0]
 
 
-def handover_budget_bytes(context_window: Any) -> int:
+def handover_budget_bytes(context_window: Any, system_prompt_blocks: str = "") -> int:
     """How much rendered transcript a handover may carry into `context_window`.
 
-    Half the window at four bytes a token, and never past the byte ceiling a
-    single opening turn can be delivered at; a window nobody measured gets
-    the ceiling.
+    Half the window at four bytes a token, less the soul that rides beside it
+    as the system prompt, and never past the byte ceiling a single opening
+    turn can be delivered at; a window nobody measured gets the ceiling less
+    the soul. Never below the floor, or a small window would hand over
+    nothing worth having.
     """
+    soul = len((system_prompt_blocks or "").encode("utf-8"))
     try:
         window = int(context_window or 0)
     except (TypeError, ValueError):
         window = 0
     if window <= 0:
-        return HANDOVER_MAX_BYTES
-    return min(HANDOVER_MAX_BYTES, window * 4 // 2)
+        budget = HANDOVER_MAX_BYTES - soul
+    else:
+        budget = min(HANDOVER_MAX_BYTES, window * 4 // 2 - soul)
+    return max(HANDOVER_MIN_BYTES, budget)
 
 
 def _public_session_row(row) -> dict:
@@ -2435,23 +2442,37 @@ class SessionManager:
 
             old_harness = await self.conversation_harness(session)
             await self._check_skills_on_mind(mind_id)
+            # Composed before the render: the soul rides beside the handover
+            # in the same window, so the handover is sized around it.
+            routing = await self._routing_for(session)
+            system_prompt_blocks = await self._compose_soul(
+                mind_id, routing["client_ref"]
+            )
+            # Switched again before any turn: the previous handover never
+            # reached a transcript, so the mind is handed it to render in
+            # front of whatever the current conversation has written, and the
+            # conversation has had no turns of its own — the row's ledger
+            # holds those of the conversation that handover replaced.
+            prior = await self.get_carry_forward(
+                session_id, session.get("claude_sid") or ""
+            ) or ""
+            undelivered = (
+                session.get("carry_forward_sid")
+                and session.get("carry_forward_sid") == session.get("claude_sid")
+            )
             handover = await self._render_handover_on_mind(
                 mind_id,
                 harness=old_harness,
                 claude_sid=session.get("claude_sid") or "",
                 harness_sid=session.get("harness_sid") or "",
                 summary=await self._latest_session_memory(session),
-                budget_bytes=handover_budget_bytes(offered.get("context_window")),
-                had_turns=await self._had_turns(session_id),
+                budget_bytes=handover_budget_bytes(
+                    offered.get("context_window"), system_prompt_blocks
+                ),
+                had_turns=not undelivered and await self._had_turns(session_id),
+                prior_handover=prior,
                 session_id=session_id,
             )
-            # Switched again before any turn: the previous handover never
-            # reached a transcript, so nothing on disk renders it. It is
-            # still the conversation, so it travels on.
-            if not handover.strip():
-                handover = await self.get_carry_forward(
-                    session_id, session.get("claude_sid") or ""
-                ) or handover
 
             await self._kill_process(session_id, forget_thread=True)
             new_claude_sid = str(uuid.uuid4())
@@ -2468,15 +2489,6 @@ class SessionManager:
             )
             await self._db.commit()
 
-            routing = await self._routing_for(session)
-            from comms import bootstrap_loader  # noqa: PLC0415
-            mind_row = await self._get_mind_row(mind_id)
-            system_prompt_blocks = await bootstrap_loader.compose_prompt_blocks(
-                mind_id=mind_id,
-                mind_name=(mind_row or {}).get("name") or mind_id,
-                client_ref=routing["client_ref"],
-                db=self._db,
-            )
             try:
                 await self._spawn(
                     session_id,
@@ -2492,14 +2504,21 @@ class SessionManager:
                     "harness switch: %s failed to start for session %s; restoring %s: %s",
                     target, session_id, old_harness, exc,
                 )
-                await self._kill_process(session_id, forget_thread=True)
+                # Not forgetting the thread: the old harness resumes its own.
+                await self._kill_process(session_id)
+                # Everything the switch wrote goes back, the rotation and an
+                # undelivered handover included — the conversation is where it
+                # was, owed what it was owed.
                 await self._db.execute(
                     "UPDATE sessions SET harness = ?, model = ?, effort = ?, "
-                    "claude_sid = ?, harness_sid = ?, carry_forward = NULL, "
-                    "carry_forward_sid = NULL, carry_forward_at = NULL WHERE id = ?",
+                    "claude_sid = ?, harness_sid = ?, rotation_armed = ?, "
+                    "carry_forward = ?, carry_forward_sid = ?, carry_forward_at = ? "
+                    "WHERE id = ?",
                     (session.get("harness") or old_harness or None, session["model"],
                      session.get("effort"), session["claude_sid"],
-                     session.get("harness_sid"), session_id),
+                     session.get("harness_sid"), session.get("rotation_armed") or 0,
+                     session.get("carry_forward"), session.get("carry_forward_sid"),
+                     session.get("carry_forward_at"), session_id),
                 )
                 await self._db.commit()
                 try:
@@ -2508,6 +2527,8 @@ class SessionManager:
                         session["model"],
                         autopilot=bool(session["autopilot"]),
                         resume_sid=session["claude_sid"],
+                        harness_sid=session.get("harness_sid"),
+                        system_prompt_blocks=system_prompt_blocks,
                         mind_id=mind_id,
                         **routing,
                     )
@@ -2571,6 +2592,20 @@ class SessionManager:
             return text.strip() if isinstance(text, str) else ""
         return raw.strip()
 
+    async def _compose_soul(self, mind_id: str, client_ref: str | None) -> str:
+        """The system-prompt blocks a new harness process opens on."""
+        from comms import bootstrap_loader  # noqa: PLC0415
+        try:
+            mind_row = await self._get_mind_row(mind_id)
+        except Exception:
+            mind_row = None
+        return await bootstrap_loader.compose_prompt_blocks(
+            mind_id=mind_id,
+            mind_name=(mind_row or {}).get("name") or mind_id,
+            client_ref=client_ref,
+            db=self._db,
+        )
+
     async def _had_turns(self, session_id: str) -> bool:
         """Whether this session's ledger holds any turn at all."""
         cur = await self._db.execute(
@@ -2588,8 +2623,13 @@ class SessionManager:
         """
         if not harness:
             return
-        listing = await self.mind_harnesses(mind_id)
+        try:
+            listing = await self.mind_harnesses(mind_id)
+        except MindCallFailed as exc:
+            log.warning("not checking harness %s for mind %s: %s", harness, mind_id, exc)
+            return
         if not listing:
+            log.info("mind %s gave no harness listing; not checking %s", mind_id, harness)
             return
         entry = next(
             (h for h in listing["harnesses"] if h.get("name") == harness), None,
@@ -3049,6 +3089,11 @@ class SessionManager:
         # every spawn re-applies until a turn completes without error.
         harness = await self.conversation_harness(session_row) if session_row else ""
         opening_turn = await self.get_carry_forward(session_id, resume_sid) or ""
+        # An opening turn opens a process that has never seen the soul, so
+        # whichever path respawns it — a chat respawn, an activation, a retry
+        # — composes one if it was not handed one.
+        if opening_turn and not system_prompt_blocks:
+            system_prompt_blocks = await self._compose_soul(mind_id, client_ref)
         mind_url = row["gateway_url"]
         mind_name = row["name"]
         import aiohttp
@@ -3336,6 +3381,7 @@ class SessionManager:
         summary: str,
         budget_bytes: int,
         had_turns: bool = False,
+        prior_handover: str = "",
         session_id: str = "",
     ) -> str:
         """Ask the mind to render a conversation on ``harness`` as plain text.
@@ -3361,6 +3407,8 @@ class SessionManager:
                         # A conversation that took turns has a transcript;
                         # one missing then is unreadable, not empty.
                         "had_turns": had_turns,
+                        # A handover not yet delivered, rendered in front.
+                        "prior_handover": prior_handover,
                         # Lets a codex mind find the thread from its own map
                         # when the row holds no thread id.
                         "session_id": session_id,

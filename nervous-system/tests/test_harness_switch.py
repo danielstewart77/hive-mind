@@ -51,6 +51,7 @@ MODELS = {
          "effort_levels": ["low"]},
         {"name": "gpt-5.6-max", "context_window": 300_000,
          "effort_levels": ["high"]},
+        {"name": "gpt-5.6-nano", "context_window": 3_000, "effort_levels": []},
     ],
     "dsh": [{"name": "qwen35-131k", "context_window": 131_072, "effort_levels": []}],
     # Models for a harness the mind does not list: only the /harnesses check
@@ -120,7 +121,10 @@ class FakeMind:
         self.requests: list[dict] = []
         self.harnesses = HARNESSES
         self.models = MODELS
-        self.handover: tuple[int, dict] = (200, {"text": "HANDOVER: the old conversation"})
+        # What the mind can read off disk, by conversation id. /handover
+        # answers the way the mind's route does (see _render).
+        self.transcripts: dict[str, str] = {"conv-1": "HANDOVER: the old conversation"}
+        self.handover: tuple[int, dict] | None = None
         self.failing_spawns: set[str] = set()
         self.turn_events: list[dict] = [{"type": "result", "is_error": False, "result": "ok"}]
         self.checks_skills = True
@@ -135,11 +139,14 @@ class FakeMind:
             {"method": method, "path": path, "params": query, "json": json_body}
         )
         if method == "GET" and path == "/harnesses":
+            if not self.harnesses_status:
+                import aiohttp
+                raise aiohttp.ClientConnectionError("mind unreachable")
             return _Resp(self.harnesses_status, self.harnesses)
         if method == "GET" and path == "/models":
             return _Resp(200, {"models": self.models.get(query.get("harness"), [])})
         if method == "POST" and path == "/handover":
-            return _Resp(*self.handover)
+            return self._render(json_body or {})
         if method == "POST" and path == "/skills/check" and self.checks_skills:
             return _Resp(200, {"checked": True})
         if method == "POST" and path == "/sessions":
@@ -156,6 +163,19 @@ class FakeMind:
         if method == "DELETE":
             return _Resp(200, {})
         return _Resp(404, {"error": "no route"})
+
+    def _render(self, body: dict) -> _Resp:
+        """The /handover contract: summary, then any prior handover, then the
+        transcript; 422 only when a conversation that took turns has no
+        transcript and nothing else stands in for it."""
+        if self.handover is not None:
+            return _Resp(*self.handover)
+        transcript = self.transcripts.get(body.get("claude_sid"))
+        if (transcript is None and body.get("had_turns")
+                and not body.get("summary") and not body.get("prior_handover")):
+            return _Resp(422, {"detail": "unreadable"})
+        parts = [body.get("summary"), body.get("prior_handover"), transcript]
+        return _Resp(200, {"text": "\n\n".join(p for p in parts if p)})
 
     def wired(self):
         mind = self
@@ -378,7 +398,7 @@ def test_picking_a_harness_asks_the_mind_for_that_harnesss_models(app_client):
     asked = mind.sent("GET", "/models")
     assert [r["params"].get("harness") for r in asked] == ["codex"]
     assert body["harness"] == "codex"
-    assert [m["name"] for m in body["models"]] == ["gpt-5.6-terra", "gpt-5.6-mini", "gpt-5.6-max"]
+    assert [m["name"] for m in body["models"]] == ["gpt-5.6-terra", "gpt-5.6-mini", "gpt-5.6-max", "gpt-5.6-nano"]
 
 
 def test_bare_model_lists_the_conversations_own_harnesss_models(app_client):
@@ -389,7 +409,7 @@ def test_bare_model_lists_the_conversations_own_harnesss_models(app_client):
     with mind.wired():
         body = _command(client, "/model")
     assert [r["params"].get("harness") for r in mind.sent("GET", "/models")] == ["codex"]
-    assert [m["name"] for m in body["models"]] == ["gpt-5.6-terra", "gpt-5.6-mini", "gpt-5.6-max"]
+    assert [m["name"] for m in body["models"]] == ["gpt-5.6-terra", "gpt-5.6-mini", "gpt-5.6-max", "gpt-5.6-nano"]
 
 
 def test_effort_and_a_model_switch_check_against_the_conversations_own_harness():
@@ -511,7 +531,7 @@ def test_a_switch_keeps_the_row_and_opens_the_new_harness_on_the_handover():
             assert handover["json"]["claude_sid"] == "conv-1"
             assert handover["json"]["harness_sid"] == "thread-0"
             assert handover["json"]["summary"] == "We were fixing the boiler."
-            assert handover["json"]["budget_bytes"] == 40_000 * 4 // 2
+            assert handover["json"]["budget_bytes"] == 40_000 * 4 // 2 - len("SOUL-BLOCKS".encode())
             order = [(r["method"], r["path"]) for r in mind.requests]
             assert order.index(("POST", "/handover")) < order.index(("DELETE", "/sessions/sess-1"))
             # The mind's codex thread map forgets the old thread too.
@@ -522,7 +542,9 @@ def test_a_switch_keeps_the_row_and_opens_the_new_harness_on_the_handover():
             assert spawned["model"] == "gpt-5.6-terra"
             assert spawned["resume_sid"] == row["claude_sid"]
             assert spawned["harness_sid"] is None
-            assert spawned["opening_turn"] == "HANDOVER: the old conversation"
+            assert spawned["opening_turn"] == (
+                "We were fixing the boiler.\n\nHANDOVER: the old conversation"
+            )
             assert spawned["system_prompt_blocks"] == "SOUL-BLOCKS"
             await _close(mgr)
 
@@ -537,7 +559,9 @@ def test_an_unknown_window_budgets_the_handover_at_the_byte_ceiling():
             mind = FakeMind()
             with mind.wired(), _soul():
                 await mgr.switch_harness("sess-1", "codex", "gpt-5.6-mini")
-            assert mind.sent("POST", "/handover")[0]["json"]["budget_bytes"] == 120_000
+            assert mind.sent("POST", "/handover")[0]["json"]["budget_bytes"] == (
+                120_000 - len("SOUL-BLOCKS".encode())
+            )
             assert mind.sent("POST", "/handover")[0]["json"]["summary"] == ""
             await _close(mgr)
 
@@ -592,9 +616,14 @@ def test_an_unreadable_transcript_with_no_summary_refuses_and_the_old_harness_li
         with tempfile.TemporaryDirectory() as tmp:
             mgr = await _manager(tmp)
             await _seed(mgr, harness_sid="thread-0")
+            await mgr._db.execute(
+                "INSERT INTO session_turns (session_id, role, content, created_at) "
+                "VALUES ('sess-1', 'user', 'hi', ?)", (time.time(),),
+            )
+            await mgr._db.commit()
             before = await mgr._get_row("sess-1")
             mind = FakeMind()
-            mind.handover = (422, {"detail": "unreadable"})
+            mind.transcripts = {}
             with mind.wired(), _soul():
                 with pytest.raises(ValueError):
                     await mgr.switch_harness("sess-1", "codex", "gpt-5.6-terra")
@@ -615,6 +644,10 @@ def test_a_new_harness_that_fails_to_start_restores_and_respawns_the_old_one():
         with tempfile.TemporaryDirectory() as tmp:
             mgr = await _manager(tmp)
             await _seed(mgr, harness_sid="thread-0", effort="max")
+            await mgr._db.execute(
+                "UPDATE sessions SET rotation_armed = 1 WHERE id = 'sess-1'"
+            )
+            await mgr._db.commit()
             mind = FakeMind()
             mind.failing_spawns = {"codex"}
             with mind.wired(), _soul():
@@ -625,8 +658,10 @@ def test_a_new_harness_that_fails_to_start_restores_and_respawns_the_old_one():
                 "claude", "claude-opus-5", "conv-1", "thread-0", "max",
             )
             assert row["carry_forward"] is None
+            assert row["rotation_armed"] == 1
             assert [s["harness"] for s in mind.spawns()] == ["codex", "claude"]
             restored = mind.spawns()[-1]
+            assert restored["system_prompt_blocks"] == "SOUL-BLOCKS"
             assert restored["resume_sid"] == "conv-1"
             assert restored["harness_sid"] == "thread-0"
             assert restored["model"] == "claude-opus-5"
@@ -825,25 +860,123 @@ def test_the_handover_request_says_whether_the_conversation_ever_had_a_turn(turn
     _run(scenario())
 
 
-def test_a_switch_before_any_turn_hands_over_the_undelivered_handover():
+def test_a_switch_before_any_turn_sends_the_undelivered_handover_as_prior():
     """Switched twice before speaking: the first handover never reached a
-    transcript, so an empty render must not replace it with nothing."""
+    transcript. It goes to the mind as the prior handover, and the
+    conversation counts as having had no turns of its own — the row's ledger
+    holds the turns of the conversation that handover replaced."""
     async def scenario():
         with tempfile.TemporaryDirectory() as tmp:
             mgr = await _manager(tmp)
-            await _seed(mgr)
+            await _seed(mgr, claude_sid="conv-2")
+            await mgr._db.execute(
+                "INSERT INTO session_turns (session_id, role, content, created_at) "
+                "VALUES ('sess-1', 'user', 'from the replaced conversation', ?)",
+                (time.time(),),
+            )
             await mgr._db.execute(
                 "UPDATE sessions SET carry_forward = 'FIRST HANDOVER', "
-                "carry_forward_sid = 'conv-1', carry_forward_at = ? WHERE id = 'sess-1'",
+                "carry_forward_sid = 'conv-2', carry_forward_at = ? WHERE id = 'sess-1'",
                 (time.time(),),
             )
             await mgr._db.commit()
             mind = FakeMind()
-            mind.handover = (200, {"text": ""})
+            mind.transcripts = {}
             with mind.wired(), _soul():
                 await mgr.switch_harness("sess-1", "codex", "gpt-5.6-terra")
+            sent = mind.sent("POST", "/handover")[0]["json"]
+            assert sent["prior_handover"] == "FIRST HANDOVER"
+            assert sent["had_turns"] is False
             assert mind.spawns()[-1]["opening_turn"] == "FIRST HANDOVER"
-            assert (await mgr._get_row("sess-1"))["carry_forward"] == "FIRST HANDOVER"
+            await _close(mgr)
+
+    _run(scenario())
+
+
+def test_a_failed_switch_keeps_an_undelivered_handover():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr)
+            stored_at = time.time()
+            await mgr._db.execute(
+                "UPDATE sessions SET carry_forward = 'FIRST HANDOVER', "
+                "carry_forward_sid = 'conv-1', carry_forward_at = ? WHERE id = 'sess-1'",
+                (stored_at,),
+            )
+            await mgr._db.commit()
+            mind = FakeMind()
+            mind.failing_spawns = {"codex"}
+            with mind.wired(), _soul():
+                with pytest.raises(ValueError):
+                    await mgr.switch_harness("sess-1", "codex", "gpt-5.6-terra")
+            row = await mgr._get_row("sess-1")
+            assert (row["carry_forward"], row["carry_forward_sid"], row["carry_forward_at"]) == (
+                "FIRST HANDOVER", "conv-1", stored_at,
+            )
+            assert mind.spawns()[-1]["opening_turn"] == "FIRST HANDOVER"
+            await _close(mgr)
+
+    _run(scenario())
+
+
+def test_every_respawn_carrying_a_handover_carries_the_soul_too():
+    """A handover is an opening turn, and an opening turn opens a process
+    that has never seen the soul — the chat respawn included."""
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr)
+            mind = FakeMind()
+            with mind.wired(), _soul():
+                await mgr.switch_harness("sess-1", "codex", "gpt-5.6-terra")
+                mgr._procs.pop("sess-1")
+                [e async for e in mgr.send_message("sess-1", "hello")]
+                await mgr._db.execute(
+                    "UPDATE sessions SET carry_forward = 'H', carry_forward_sid = claude_sid, "
+                    "carry_forward_at = ?, status = 'idle' WHERE id = 'sess-1'", (time.time(),),
+                )
+                await mgr._db.commit()
+                mgr._procs.pop("sess-1")
+                await mgr.activate_session("sess-1", "telegram", "123")
+            respawns = mind.spawns()[1:]
+            assert [s["opening_turn"] for s in respawns] == [
+                "HANDOVER: the old conversation", "H",
+            ]
+            assert [s["system_prompt_blocks"] for s in respawns] == ["SOUL-BLOCKS"] * 2
+            await _close(mgr)
+
+    _run(scenario())
+
+
+@pytest.mark.parametrize("status", [401, 503, 404, 0])
+def test_a_harness_listing_that_cannot_be_read_never_refuses_a_new_conversation(status):
+    """Only an explicit "unavailable" refuses; 0 is a mind that cannot be reached."""
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp, harness="dsh_cli")
+            mind = FakeMind()
+            mind.harnesses_status = status
+            with mind.wired(), _soul():
+                born = await mgr.create_session(
+                    owner_type="telegram", owner_ref="123", client_ref="123", mind_id=MIND,
+                )
+            assert born["harness"] == "dsh"
+            assert [s["harness"] for s in mind.spawns()] == ["dsh"]
+            await _close(mgr)
+
+    _run(scenario())
+
+
+def test_a_small_window_budgets_the_handover_at_the_floor():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr)
+            mind = FakeMind()
+            with mind.wired(), _soul():
+                await mgr.switch_harness("sess-1", "codex", "gpt-5.6-nano")
+            assert mind.sent("POST", "/handover")[0]["json"]["budget_bytes"] == 8_000
             await _close(mgr)
 
     _run(scenario())
