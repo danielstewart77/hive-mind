@@ -2378,6 +2378,7 @@ class SessionManager:
                 effort = None
 
             old_harness = await self.conversation_harness(session)
+            await self._check_skills_on_mind(mind_id)
             handover = await self._render_handover_on_mind(
                 mind_id,
                 harness=old_harness,
@@ -3199,6 +3200,30 @@ class SessionManager:
             "harnesses": [h for h in body["harnesses"] if isinstance(h, dict) and h.get("name")],
             "default": body.get("default"),
         }
+
+    async def _check_skills_on_mind(self, mind_id: str) -> None:
+        """Have the mind fold any in-place skill edit back into its reference.
+
+        Run before the handover, so a skill tuned under the outgoing harness
+        is already rendered for the incoming one. Best-effort: a mind that
+        predates the route, or a check that fails, never blocks the switch —
+        the mind's own Stop hooks and start-up run the same check.
+        """
+        mind_row = await self._get_mind_row(mind_id)
+        gateway_url = str((mind_row or {}).get("gateway_url") or "").rstrip("/")
+        import aiohttp
+        try:
+            async with aiohttp.ClientSession() as http:
+                async with http.post(
+                    f"{gateway_url}/skills/check",
+                    headers=self._mind_admin_headers(),
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    await resp.read()
+                    if resp.status >= 400:
+                        log.info("skill check on mind %s answered %s", mind_id, resp.status)
+        except Exception as exc:
+            log.info("skill check on mind %s failed: %s", mind_id, exc)
 
     async def _render_handover_on_mind(
         self,

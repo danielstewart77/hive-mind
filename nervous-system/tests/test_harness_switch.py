@@ -118,6 +118,7 @@ class FakeMind:
         self.handover: tuple[int, dict] = (200, {"text": "HANDOVER: the old conversation"})
         self.failing_spawns: set[str] = set()
         self.turn_events: list[dict] = [{"type": "result", "is_error": False, "result": "ok"}]
+        self.checks_skills = True
 
     def _answer(self, method: str, url: str, params=None, json_body=None) -> _Resp:
         parts = urlsplit(url)
@@ -133,6 +134,8 @@ class FakeMind:
             return _Resp(200, {"models": self.models.get(query.get("harness"), [])})
         if method == "POST" and path == "/handover":
             return _Resp(*self.handover)
+        if method == "POST" and path == "/skills/check" and self.checks_skills:
+            return _Resp(200, {"checked": True})
         if method == "POST" and path == "/sessions":
             if (json_body or {}).get("harness") in self.failing_spawns:
                 return _Resp(500, {"error": "harness failed to start"})
@@ -736,6 +739,29 @@ def test_a_switch_leaves_other_conversations_and_the_minds_default_alone():
             assert mind.kills("sess-2") == []
             assert (await broker.get_mind_by_id(mgr.broker_db, MIND))["harness"] == "claude_cli"
             assert fresh["harness"] == "claude"
+            await _close(mgr)
+
+    _run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# Skills are reconciled before the conversation leaves its harness
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("checks_skills", [True, False])
+def test_a_switch_asks_the_mind_to_reconcile_skills_before_rendering_the_handover(checks_skills):
+    # A mind predating the route answers 404; the switch still goes through.
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr)
+            mind = FakeMind()
+            mind.checks_skills = checks_skills
+            with mind.wired(), _soul():
+                await mgr.switch_harness("sess-1", "codex", "gpt-5.6-terra")
+            paths = [(r["method"], r["path"]) for r in mind.requests]
+            assert paths.index(("POST", "/skills/check")) < paths.index(("POST", "/handover"))
+            assert (await mgr._get_row("sess-1"))["harness"] == "codex"
             await _close(mgr)
 
     _run(scenario())
