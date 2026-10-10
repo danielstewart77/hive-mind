@@ -3,8 +3,16 @@
 Every mind exposes an interactive harness CLI to the web terminal over
 `WS /sessions/{id}/attach-pty`, bridging raw bytes between an xterm.js tile
 and a real TUI. `minds/pty_attach.py` owns the plumbing; each harness
-(`minds/harness/claude_cli.py`, `minds/harness/codex_cli.py`) supplies the
-argv its own CLI needs.
+(`minds/harness/claude_cli.py`, `codex_cli.py`, `dsh_cli.py`) supplies the
+argv its own CLI needs. One mind server hosts panes of every harness at once:
+an attach names its conversation's harness in the `harness` query, a pane
+remembers which harness it runs, and a rotation addressed to another harness
+is refused rather than respawning the pane onto the wrong CLI. A pane still
+running the harness its conversation was switched away from is ended by the
+next attach, which opens the new harness's CLI on the stored handover as its
+first user turn. A carry-forward always enters a pane as a user turn, never
+as a system prompt, because a system prompt reaches no transcript and the
+next switch would find the handover gone.
 
 ## The conversation lives in tmux; a tile is a client
 

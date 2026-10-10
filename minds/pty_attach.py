@@ -37,8 +37,9 @@ import struct
 import subprocess
 import termios
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import NamedTuple
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
@@ -215,16 +216,24 @@ def ensure_tui_first_run_flags(config_dir: Path, project_dir: str) -> None:
     _merge_json_file(config_dir / "settings.json", _seed_settings)
 
 
-def claude_transcript_exists(conversation_id: str, project_dir: Path) -> bool:
-    """True if the claude CLI already has a transcript for this id.
+def claude_transcript_path(
+    conversation_id: str, project_dir: Path, config_dir: Path | None = None
+) -> Path:
+    """Where the claude CLI keeps (or will keep) this conversation's transcript.
 
     Claude Code stores conversations at
     ``<config>/projects/<slugified-cwd>/<id>.jsonl`` where the slug is the
     cwd path with every ``/``, ``_`` and ``.`` turned into ``-``.
     """
-    config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude"))
+    if config_dir is None:
+        config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude"))
     slug = str(project_dir).replace("/", "-").replace("_", "-").replace(".", "-")
-    return (config_dir / "projects" / slug / f"{conversation_id}.jsonl").exists()
+    return Path(config_dir) / "projects" / slug / f"{conversation_id}.jsonl"
+
+
+def claude_transcript_exists(conversation_id: str, project_dir: Path) -> bool:
+    """True if the claude CLI already has a transcript for this id."""
+    return claude_transcript_path(conversation_id, project_dir).exists()
 
 
 def claude_conversation_flags(conversation_id: str, project_dir: Path) -> list[str]:
@@ -553,8 +562,8 @@ class _PtyHandle:
     """
 
     __slots__ = ("session_id", "terminals", "tmux_name", "conversation_id", "model", "effort",
-                 "proc", "master_fd", "cols", "rows", "queue", "detached_at", "alive",
-                 "loop")
+                 "harness", "proc", "master_fd", "cols", "rows", "queue", "detached_at",
+                 "alive", "loop")
 
     def __init__(self, session_id: str, terminals: "TmuxTerminals",
                  conversation_id: str, cols: int = 80, rows: int = 24,
@@ -574,6 +583,10 @@ class _PtyHandle:
         self.model = model
         # Likewise the effort it started at, carried across a rotation.
         self.effort: str | None = None
+        # Which harness's CLI the pane runs. A mind server hosts panes of
+        # every harness at once, and a rotation has to reach the one this
+        # pane actually holds.
+        self.harness = ""
         self.cols, self.rows = clamp_winsize(cols, rows)
         self.proc: subprocess.Popen | None = None   # the attached tmux client
         self.master_fd: int | None = None
@@ -778,7 +791,8 @@ def _control_frame(handle: _PtyHandle, text: str) -> bool:
     return True
 
 
-def _open_session_pty(session_id, spawn, terminals, **spawn_kwargs) -> _PtyHandle:
+def _open_session_pty(session_id, spawn, terminals, harness: str = "",
+                      **spawn_kwargs) -> _PtyHandle:
     """Attach this tile to the session's terminal, starting one if needed.
 
     The harness process is keyed by session and reused; only the viewing
@@ -786,10 +800,20 @@ def _open_session_pty(session_id, spawn, terminals, **spawn_kwargs) -> _PtyHandl
     evicts it first — one conversation, one keyboard — and the eviction is
     announced before the old client dies so the displaced tile is told it
     was replaced rather than that the terminal exited.
+
+    A pane running a different harness from the one this attach names is
+    ended first. Its conversation was switched away from on another surface,
+    and attaching a tile to it would put the operator back on the harness
+    they left.
     """
     cols = spawn_kwargs["cols"]
     rows = spawn_kwargs["rows"]
     handle = PTYS.get(session_id)
+    if handle is not None and handle.harness != harness:
+        log.info("Session %s's terminal runs %s, not %s — ending it",
+                 session_id, handle.harness or "?", harness or "?")
+        teardown(session_id)
+        handle = None
     if handle is not None:
         handle.signal(_PTY_EVICTED)
         _detach_client(handle)
@@ -797,8 +821,14 @@ def _open_session_pty(session_id, spawn, terminals, **spawn_kwargs) -> _PtyHandl
         handle = _PtyHandle(session_id, terminals,
                             spawn_kwargs.get("conversation_id") or "", cols, rows,
                             model=spawn_kwargs.get("model") or "")
+        handle.harness = harness
         PTYS[session_id] = handle
     handle.effort = spawn_kwargs.get("effort") or None
+    # The model the attach names, not the one the pane was first opened on. A
+    # rotation sent without a model carries this forward, and a value cached
+    # at the first attach would turn a conversation switched since back to the
+    # model it left.
+    handle.model = spawn_kwargs.get("model") or handle.model
 
     proc, master_fd = spawn(session_id=session_id, **spawn_kwargs)
     handle.proc = proc
@@ -810,31 +840,63 @@ def _open_session_pty(session_id, spawn, terminals, **spawn_kwargs) -> _PtyHandl
     return handle
 
 
+class PaneAdapter(NamedTuple):
+    """One harness's terminal: where its panes live and how to start one."""
+
+    terminals: TmuxTerminals
+    spawn: Callable[..., tuple[subprocess.Popen, int]]
+    rotate: Callable[..., bool] | None = None
+
+
 def install_pty_attach(
     app: FastAPI,
     *,
     mind_name: str,
-    terminals: TmuxTerminals,
-    spawn: Callable[..., tuple[subprocess.Popen, int]],
+    terminals: TmuxTerminals | None = None,
+    spawn: Callable[..., tuple[subprocess.Popen, int]] | None = None,
     rotate: Callable[..., bool] | None = None,
     mind_dir: Path | None = None,
+    adapters: dict[str, PaneAdapter] | None = None,
+    default_harness: Callable[[], str] | str = "",
+    conversation_env: Callable[[str, str], Awaitable[dict[str, str]]] | None = None,
 ) -> None:
     """Mount the browser-terminal routes on a mind's app.
 
     ``spawn`` is called as ``spawn(session_id=, model=, conversation_id=,
-    harness_sid=, cols=, rows=, client_ref=, owner_type=, owner_ref=)`` and
-    returns ``(Popen, master_fd)`` for a tmux client on the session's
-    terminal; raising :class:`PtyUnavailable` refuses the attach with the
-    reason instead of opening a terminal on nothing.
+    harness_sid=, cols=, rows=, client_ref=, owner_type=, owner_ref=,
+    system_prompt=, effort=)`` and returns ``(Popen, master_fd)`` for a tmux
+    client on the session's terminal; raising :class:`PtyUnavailable` refuses
+    the attach with the reason instead of opening a terminal on nothing.
+    ``system_prompt`` is a carry-forward comms is still holding — a switch's
+    handover or a rotation's seed — and the pane opens on it as its first
+    user turn.
 
     ``rotate`` is called as ``rotate(session_id=, new_claude_sid=, model=,
     system_prompt=, user_prompt=, client_ref=, owner_type=, owner_ref=)`` and
     returns whether a live terminal was rotated in place. ``user_prompt``, when
     given, is the seed the successor opens on as a user turn; ``system_prompt``
     is standing context a fresh terminal takes.
+
+    A mind server running every harness passes ``adapters`` instead, keyed by
+    bare harness name, and each attach names its conversation's harness in
+    the ``harness`` query (``default_harness`` answers when it names none).
+    ``conversation_env``, when given, is asked for environment one
+    conversation's panes need — its model's window, for one — and its answer
+    reaches ``spawn`` as ``extra_env``.
     """
     global _TERMINALS
-    _TERMINALS = terminals
+    if adapters is None:
+        adapters = {"": PaneAdapter(terminals, spawn, rotate)}
+    _TERMINALS = next(iter(adapters.values())).terminals
+
+    def _resolve(asked: str | None) -> tuple[str, PaneAdapter | None]:
+        # A mind with one adapter serves every attach with it, whatever the
+        # attach calls its harness: that is a mind running one harness module.
+        if "" in adapters:
+            return "", adapters[""]
+        default = default_harness() if callable(default_harness) else default_harness
+        name = runtime_api.harness_name(asked) or runtime_api.harness_name(default)
+        return name, adapters.get(name)
 
     @app.on_event("startup")
     async def _start_pty_reaper() -> None:  # pragma: no cover - lifecycle glue
@@ -861,7 +923,20 @@ def install_pty_attach(
             return JSONResponse({"error": "new_claude_sid required"}, status_code=400)
 
         handle = PTYS.get(session_id)
-        if handle is None or rotate is None:
+        if handle is None:
+            return {"session_id": session_id, "rotated": False}
+        # A rotation turns over the conversation on the harness the pane
+        # already runs. One addressed to another harness is a pane that was
+        # switched away from, and respawning it onto the wrong CLI would undo
+        # the switch.
+        asked = runtime_api.harness_name(body.get("harness"))
+        if asked and handle.harness and asked != handle.harness:
+            log.warning("Refusing to rotate session %s's %s terminal as %s",
+                        session_id, handle.harness, asked)
+            return {"session_id": session_id, "rotated": False}
+        adapter = adapters.get(handle.harness) or adapters.get("")
+        rotate = adapter.rotate if adapter is not None else None
+        if rotate is None:
             return {"session_id": session_id, "rotated": False}
 
         try:
@@ -897,6 +972,8 @@ def install_pty_attach(
         # tmux client that survived the swap, so the handle carries over
         # untouched — only the conversation it is pinned to changed.
         handle.conversation_id = new_claude_sid
+        handle.model = body.get("model") or handle.model
+        handle.effort = body.get("effort") or handle.effort
         log.info("Rotated the conversation in session %s's terminal onto %s",
                  session_id, new_claude_sid)
         # The respawn took the pane's screen and scrollback with it. What was
@@ -918,6 +995,7 @@ def install_pty_attach(
         owner_type: str | None = None,
         owner_ref: str | None = None,
         effort: str | None = None,
+        harness: str = "",
     ) -> None:
         """Bidirectional raw-byte bridge between a browser tile and this
         session's interactive harness CLI.
@@ -973,6 +1051,18 @@ def install_pty_attach(
         # unique and stable for this conversation, so it doubles as the key.
         client_ref = client_ref or session_id
 
+        name, adapter = _resolve(harness)
+        if adapter is None:
+            log.warning("attach-pty for session %s named harness %r, which this "
+                        "mind does not run", session_id, harness)
+            await websocket.close(code=1008, reason=f"no {name or 'such'} terminal here")
+            return
+        terminals = adapter.terminals
+        existing = PTYS.get(session_id)
+        # A pane on another harness is about to be ended, so it is not live as
+        # far as this attach is concerned: the new one opens cold.
+        live = terminals.alive(session_id) and (existing is None or existing.harness == name)
+
         cols, rows = clamp_winsize(cols, rows)
         # A rotation that never got its first turn left its carry-forward
         # with comms and nowhere else. A live terminal is not asked about at
@@ -982,7 +1072,7 @@ def install_pty_attach(
         # Only a cold open can use an answer.
         carry_forward = ""
         try:
-            if not terminals.alive(session_id):
+            if not live:
                 carry_forward = await fetch_carry_forward(session_id, resume_sid)
             if carry_forward:
                 log.info("Seeding terminal for session %s with a stored "
@@ -992,12 +1082,22 @@ def install_pty_attach(
                         session_id, exc_info=True)
             carry_forward = ""
 
+        spawn_kwargs: dict = {}
+        if conversation_env is not None:
+            try:
+                spawn_kwargs["extra_env"] = await conversation_env(name, model)
+            except Exception:
+                log.warning("Could not compose the environment for session %s's "
+                            "terminal", session_id, exc_info=True)
+                spawn_kwargs["extra_env"] = {}
+
         try:
             handle = _open_session_pty(
-                session_id, spawn, terminals, model=model, conversation_id=resume_sid,
+                session_id, adapter.spawn, terminals, harness=name, model=model,
+                conversation_id=resume_sid,
                 harness_sid=harness_sid, cols=cols, rows=rows,
                 client_ref=client_ref, owner_type=owner_type, owner_ref=owner_ref,
-                system_prompt=carry_forward, effort=effort or None,
+                system_prompt=carry_forward, effort=effort or None, **spawn_kwargs,
             )
         except PtyUnavailable as exc:
             log.info("attach-pty refused for %s session %s: %s", mind_name, session_id, exc)

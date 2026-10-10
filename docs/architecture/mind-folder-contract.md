@@ -21,7 +21,7 @@ minds/<any_name>/
 
 ## The four invariants
 
-1. **Mind containers are full mini-services scoped to one mind.** Not "dumb sandboxes." Each runs a shared harness module (`minds/harness/claude_cli.py` or `codex_cli.py`) as its sole entry point, selected by the fragment's `command` and pointed at this folder via `MIND_NAME` — no per-mind service code, no "mind server" intermediary.
+1. **Mind containers are full mini-services scoped to one mind.** Not "dumb sandboxes." Each runs the shared mind server (`minds/mind_server.py`) as its sole entry point — the claude, codex and dsh adapters in one process, each conversation routed to the harness it names — pointed at this folder via `MIND_NAME`. No per-mind service code.
 2. **The folder is the unit of configuration and deployment.** No central directory of minds; a folder is the registration.
 3. **Gateway is the hive's only public-facing surface.** Everything else is internal to a mind.
 4. **Identity is the canonical UUID, not the short name.** `runtime.yaml` carries `mind_id: <uuid>`. The container ships `MIND_ID=<uuid>` for everything that talks to shared infrastructure and `MIND_NAME=<short>` for display, log paths, and the capitalized entity name used in graph queries.

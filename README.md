@@ -22,7 +22,7 @@ flowchart TD
     SC[Scheduler] --> GW
     GW --> SM[Session Manager]
     GW --> BR[Message Broker]
-    SM -->|HTTP| M1[Mind Container\nminds/harness/claude_cli.py or codex_cli.py\nAnthropic, OpenAI, or Ollama]
+    SM -->|HTTP| M1[Mind Container\nminds/mind_server.py: claude, codex and dsh\nAnthropic, OpenAI, or Ollama]
     SM -->|HTTP| M2[...additional minds]
     M1 & M2 -->|HTTP+bearer| LUC[hive-lucent\nVector store + KG]
     M1 & M2 -->|HTTP+bearer| EXT[hive-tools\nGmail · Calendar · Docker · HITL]
@@ -30,7 +30,7 @@ flowchart TD
     BR -->|wakeup via session_mgr| SM
 ```
 
-Each client is a thin HTTP wrapper. The gateway (nervous system) routes sessions to mind containers via HTTP. Each mind runs a shared harness module (`minds/harness/claude_cli.py` or `codex_cli.py`) selected by its compose fragment and pointed at its own `runtime.yaml` via `MIND_NAME` — no per-mind service code. Minds are isolated: scoped filesystems, scoped secrets (via NS secrets API), no shared state between containers.
+Each client is a thin HTTP wrapper. The gateway (nervous system) routes sessions to mind containers via HTTP. Each mind runs the shared mind server (`minds/mind_server.py`), which hosts the claude, codex and dsh adapters and routes each conversation to the harness it names, pointed at its own `runtime.yaml` via `MIND_NAME` — no per-mind service code. Minds are isolated: scoped filesystems, scoped secrets (via NS secrets API), no shared state between containers.
 
 ## Quick Start
 

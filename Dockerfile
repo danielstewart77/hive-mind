@@ -57,6 +57,11 @@ ENV PATH="/home/hivemind/.npm-global/bin:${PATH}"
 RUN npm install -g @openai/codex \
     && chown -R hivemind:hivemind /home/hivemind/.npm-global
 
+# dsh is the third harness every mind runs, and it is not installed here: the
+# harness is a built working copy of our fork, bind-mounted read-only at
+# /opt/dsh with DSH_BIN naming its launcher (see minds/example's fragment).
+# Node 22 above is what it needs from the image.
+
 # Python venv + deps — installed to /opt/venv so bind mounts don't clobber it
 RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --upgrade pip "setuptools<81" wheel
 COPY requirements.txt .

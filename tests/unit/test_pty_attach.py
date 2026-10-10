@@ -723,9 +723,11 @@ class TestClaudeCliWiring:
                           cols=100, rows=30, system_prompt="<soul>carried forward</soul>")
 
         # The seed travels in a file, never in the tmux command — so what the
-        # pane is handed is a shell that reads it back.
+        # pane is handed is a shell that reads it back. It enters as the
+        # opening user turn: a system prompt reaches no transcript, and a
+        # handover missing from the transcript is lost at the next switch.
         assert started["argv"][:2] == ["/bin/sh", "-c"]
-        assert "--append-system-prompt" in started["argv"][2]
+        assert "--append-system-prompt" not in started["argv"][2]
         seed_file = tmp_path / "rotation-seeds" / "conv-9.txt"
         assert seed_file.read_text() == "<soul>carried forward</soul>"
         assert str(seed_file) in started["argv"][2]
@@ -1012,11 +1014,14 @@ class TestCodexCliThreads:
         assert "the summary" in (
             tmp_path / "rotation-seeds" / "n7-conv-9.txt").read_text()
 
-    def test_kill_forgets_the_thread(self, codex):
+    def test_a_switch_kill_forgets_the_thread(self, codex):
+        """A harness switch kills with `forget_thread`: the conversation is
+        leaving codex, and a switch back must open on a handover rather than
+        resume the thread it left."""
         codex.SESSIONS.clear()
         codex.THREADS["n4"] = "codex-thread-9"
         client = TestClient(codex.app)
-        client.delete("/sessions/n4", headers=_session_auth())
+        client.delete("/sessions/n4?forget_thread=1", headers=_session_auth())
         assert "n4" not in codex.THREADS
 
 

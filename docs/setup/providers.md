@@ -2,7 +2,7 @@
 
 ## CLI-First Architecture
 
-Hive Mind does **not** use the Anthropic Python SDK or the Claude API directly. Instead, each mind wraps the **Claude CLI** or **Codex CLI** in subprocess mode, inside its own container, via a shared harness module (`minds/harness/claude_cli.py` or `codex_cli.py`). The gateway (`hive-comms`) never spawns a CLI subprocess itself — it dispatches HTTP requests to whichever mind's container owns the session, reading that mind's `gateway_url` from the mind registry.
+Hive Mind does **not** use the Anthropic Python SDK or the Claude API directly. Instead, each mind wraps the **Claude CLI** or **Codex CLI** in subprocess mode, inside its own container, via the shared mind server (`minds/mind_server.py`), which runs a claude, codex and dsh adapter and routes each conversation to the harness it names. The gateway (`hive-comms`) never spawns a CLI subprocess itself — it dispatches HTTP requests to whichever mind's container owns the session, reading that mind's `gateway_url` from the mind registry.
 
 ### Why CLI over SDK?
 
