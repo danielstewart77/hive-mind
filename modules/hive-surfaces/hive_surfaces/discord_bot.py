@@ -16,7 +16,7 @@ import aiohttp
 import discord
 from discord import app_commands
 
-from hive_surfaces import token_store, voice_routing
+from hive_surfaces import effort_picker, model_picker, token_store, voice_routing
 from hive_surfaces.config import config
 from hive_surfaces.gateway_client import GatewayClient
 from hive_surfaces.bot_utils import get_lock, time_ago
@@ -358,7 +358,9 @@ async def _stream_to_message(
 # ---------------------------------------------------------------------------
 # Server commands
 # ---------------------------------------------------------------------------
-SERVER_COMMANDS = {"/clear", "/model", "/autopilot", "/kill", "/status", "/sessions", "/switch", "/new"}
+SERVER_COMMANDS = {
+    "/clear", "/model", "/effort", "/autopilot", "/kill", "/status", "/sessions", "/switch", "/new",
+}
 
 
 async def _handle_server_command(content: str, user_id: int, channel_id: int) -> str:
@@ -392,16 +394,34 @@ async def _handle_server_command(content: str, user_id: int, channel_id: int) ->
     if cmd == "/clear":
         return f"Session cleared. New session: `{result.get('id', '?')[:8]}`"
     if cmd == "/model":
-        if isinstance(result, list):
+        # A bare `/model` answers `{"models": [...], "current": ...}`. Testing
+        # for a list read that dict as a switch and printed "Switched to None".
+        rows = model_picker.models_from(result)
+        if rows:
+            current = result.get("current") if isinstance(result, dict) else None
             lines = ["**Available models:**"]
-            for m in result:
-                lines.append(f"- `{m['name']}` ({m['provider']})")
+            for m in rows:
+                provider = m.get("provider_label") or m.get("provider")
+                mark = " \u2190 current" if m["name"] == current else ""
+                lines.append(f"- `{m['name']}`" + (f" ({provider})" if provider else "") + mark)
             lines.append("\n`/model <name>` to switch")
             return "\n".join(lines)
+        if not result.get("model"):
+            return "No model change was made \u2014 `/model` lists them."
         msg = f"Switched to **{result.get('model')}**"
         if result.get("warning"):
             msg += f"\n\u26a0\ufe0f {result['warning']}"
         return msg
+    if cmd == "/effort":
+        if "levels" in result:
+            levels = effort_picker.levels_from(result)
+            if not levels:
+                return f"{result.get('model') or 'This model'} takes no effort setting."
+            current = result.get("current")
+            marked = [f"**{lv}** \u2190 current" if lv == current else lv for lv in levels]
+            return (f"Effort for `{result.get('model')}`: " + ", ".join(marked)
+                    + "\n`/effort <level>` to set")
+        return effort_picker.format_effort_result(result)
     if cmd == "/autopilot":
         on = result.get("autopilot", False)
         summary = result.get("summary", "this session")
@@ -530,6 +550,18 @@ async def cmd_model(interaction: discord.Interaction, name: str = None):
         return
     await interaction.response.defer(ephemeral=True)
     cmd = f"/model {name}" if name else "/model"
+    msg = await _handle_server_command(cmd, interaction.user.id, interaction.channel_id)
+    await interaction.followup.send(msg, ephemeral=True)
+
+
+@bot.tree.command(name="effort", description="List or set this conversation's reasoning effort")
+@app_commands.describe(level="Effort level to set, or 'default' (omit to list)")
+async def cmd_effort(interaction: discord.Interaction, level: str = None):
+    if not _is_allowed_user(interaction.user.id):
+        await interaction.response.send_message("Not authorized.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    cmd = f"/effort {level}" if level else "/effort"
     msg = await _handle_server_command(cmd, interaction.user.id, interaction.channel_id)
     await interaction.followup.send(msg, ephemeral=True)
 
