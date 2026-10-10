@@ -47,7 +47,12 @@
 .kanban-band-over .kanban-drop-band, .kanban-drop-band.kanban-band-over { background:var(--console-accent, #c9a84c); }
 .kanban-nest-over { outline:2px solid var(--console-accent, #c9a84c); outline-offset:2px; }
 .kanban-item[data-collapsed="true"] > .kanban-children { display:none; }
-.kanban-toggle { min-width:2rem; padding:.2rem .4rem; }
+.kanban-toggle { display:inline-flex; align-items:center; justify-content:center; flex:0 0 1.5rem; width:1.5rem; min-width:1.5rem; height:1.5rem; padding:0; border:0; background:transparent; color:#77828a; box-shadow:none; transition:color .15s ease; }
+.kanban-toggle:hover:not(:disabled) { color:var(--console-cyan,#4cc9d9); background:transparent; }
+.kanban-toggle:disabled { opacity:1; color:transparent; }
+.kanban-toggle svg { width:15px; height:15px; transition:transform .15s ease; }
+.kanban-toggle[aria-expanded="false"] svg { transform:rotate(0deg); }
+.kanban-toggle[aria-expanded="true"] svg { transform:rotate(90deg); }
 .kanban-item-link { color:inherit; text-decoration:none; }
 .kanban-cols { display:flex; flex-direction:row; align-items:center; justify-content:flex-start; gap:.5rem; width:100%; min-width:0; text-align:left; }
 .kanban-col-num { font-variant-numeric:tabular-nums; font-weight:600; min-width:2.6rem; text-align:left; flex:0 0 auto; }
@@ -206,8 +211,8 @@
   function saveExpanded(set){try{localStorage.setItem(EXPANDED_KEY,JSON.stringify([...set]));}catch{}}
   let expandedIds=loadExpanded();
   function rememberState(node,id){if(!id)return;const on=node.dataset.collapsed!=='true';if(on)expandedIds.add(id);else expandedIds.delete(id);saveExpanded(expandedIds);}
-  function makeToggle(node,hasChildren){const t=el('button','button kanban-toggle','▾');t.type='button';t.disabled=!hasChildren;t.setAttribute('aria-label','Expand or collapse');t.setAttribute('aria-expanded','true');t.addEventListener('click',e=>{e.stopPropagation();setCollapsed(node,node.dataset.collapsed!=='true');rememberState(node,node.dataset.itemId);});return t;}
-  function setCollapsed(node,on){node.dataset.collapsed=String(on);const t=node.querySelector(':scope > .kanban-inline .kanban-toggle');if(t&&!t.disabled){t.setAttribute('aria-expanded',String(!on));t.textContent=on?'▸':'▾';}}
+  function makeToggle(node,hasChildren){const t=el('button','button kanban-toggle');t.type='button';t.disabled=!hasChildren;t.setAttribute('aria-label','Expand or collapse');t.setAttribute('aria-expanded',String(node.dataset.collapsed!=='true'));const icon=el('i','');icon.setAttribute('data-lucide','chevron-right');t.append(icon);t.addEventListener('click',e=>{e.stopPropagation();setCollapsed(node,node.dataset.collapsed!=='true');rememberState(node,node.dataset.itemId);});return t;}
+  function setCollapsed(node,on){node.dataset.collapsed=String(on);const t=node.querySelector(':scope > .kanban-inline .kanban-toggle');if(t&&!t.disabled)t.setAttribute('aria-expanded',String(!on));}
   function labelRow(node,row,label,hasChildren,id,meta){
     node.dataset.itemId=id||'';
     if(id&&hasChildren){setCollapsed(node,!expandedIds.has(id));}else if(hasChildren){setCollapsed(node,true);}
@@ -257,6 +262,7 @@
     };
     roots.forEach((r,ri)=>mount.append(build(r,1,`${ri+1}`)));
     if(!roots.length)mount.append(el('p','kanban-empty surface','No epics yet. Create one to get started.'));
+    if(window.lucide)window.lucide.createIcons({attrs:{'stroke-width':1.8}});
   }
   function render(){renderBoard();renderBacklog();}
   function show(which){const board=which==='board';$('board-view').hidden=!board;$('backlog-view').hidden=board;}
