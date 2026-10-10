@@ -88,9 +88,11 @@ through `minds/transcript.py` — one reader per harness, one renderer — and
 returns plain text: the summary whole in front, prose and tool calls whole,
 each tool result cut to its first lines and marked `[trimmed]`, oldest
 transcript dropped first to fit the byte budget (half the window at four bytes
-a token, never past 120,000). A transcript that cannot be read — absent, or
-undecodable — hands over the summary alone; with no summary either the switch
-is refused with 422 and the old harness keeps running. The
+a token, never past 120,000). A conversation with no transcript on disk has
+never had a turn and hands over the summary alone, or nothing; one whose
+transcript exists and cannot be read hands over the summary alone, and with no
+summary either the switch is refused with 422 and the old harness keeps
+running. The
 spawn that follows carries the text as `opening_turn`, which every adapter puts
 in front of the first user message it sends (`handover\n\n---\n\nmessage`) —
 stdin, stream-json or task file, never argv — so it lands in the new
