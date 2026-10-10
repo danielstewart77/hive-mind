@@ -30,9 +30,11 @@ from telegram.ext import (
 )
 
 from hive_surfaces.config import config, photo_root
-from hive_surfaces.bot_utils import claim_picker, get_lock, get_queue, time_ago
+from hive_surfaces.bot_utils import claim_picker, get_lock, get_queue, picker_spent, time_ago
 from hive_surfaces.gateway_client import GatewayClient
-from hive_surfaces import effort_picker, hitl, model_picker, rename_prompt, session_picker, voice_routing
+from hive_surfaces import (
+    effort_picker, harness_picker, hitl, model_picker, rename_prompt, session_picker, voice_routing,
+)
 from hive_surfaces.skills import get_skills
 from hive_surfaces.hive_logging import configure_logging, log_event
 
@@ -522,6 +524,33 @@ def format_model_result(result: object) -> str:
     return msg
 
 
+def format_harness_result(result: object) -> str:
+    """What a typed `/harness` answer says: a listing, a model list, or a switch.
+
+    Only an answer carrying both a harness and a model is a switch; the
+    gateway's listing of one harness's models carries the harness too, and
+    reporting that as "Switched" would claim a move nothing performed.
+    """
+    if isinstance(result, dict) and "harnesses" in result:
+        current = result.get("current")
+        lines = ["Harnesses:"]
+        for row in harness_picker.harnesses_from(result):
+            if row.get("available"):
+                lines.append(f"- {row['name']}" + (" (current)" if row["name"] == current else ""))
+        lines.extend(f"- {line}" for line in harness_picker.unavailable_lines(result))
+        lines.append("\nSend /harness to pick one.")
+        return "\n".join(lines)
+    if isinstance(result, dict) and "models" in result:
+        rows = model_picker.models_from(result)
+        harness = result.get("harness") or "this harness"
+        if not rows:
+            return f"No models offered for {harness} right now."
+        lines = [f"Models for {harness}:"] + [f"- {row['name']}" for row in rows]
+        lines.append(f"\nSend /harness {harness} <model> to switch.")
+        return "\n".join(lines)
+    return harness_picker.format_switch_result(result)
+
+
 def _format_status(data: dict) -> str:
     return (
         f"Server port: {data.get('server_port')}\n"
@@ -533,8 +562,6 @@ def _format_status(data: dict) -> str:
 # ---------------------------------------------------------------------------
 # Server command dispatcher
 # ---------------------------------------------------------------------------
-SERVER_COMMANDS = {"/clear", "/model", "/autopilot", "/kill", "/prune", "/status", "/sessions", "/switch", "/new", "/remember"}
-
 # Shown on the button itself the moment a tap is received, before any work
 # runs. Telegram renders it as a toast over the chat, which is the only
 # feedback available that costs no round trip of its own — answering the
@@ -602,6 +629,8 @@ async def _handle_server_command(content: str, user_id: int, chat_id: int) -> st
         return format_model_result(result)
     if cmd == "/effort":
         return effort_picker.format_effort_result(result)
+    if cmd == "/harness":
+        return format_harness_result(result)
     if cmd == "/autopilot":
         on = result.get("autopilot", False)
         summary = _conversation_caption(result)
@@ -849,6 +878,7 @@ async def on_session_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     default_header = {
         model_picker.CB_PICK: "Pick a model:",
         effort_picker.CB_EFFORT: "Pick an effort:",
+        harness_picker.CB_HARNESS_MODEL: "Pick a model:",
     }.get(action, "Your conversations:")
     header = getattr(query.message, "text", None) or default_header
     try:
@@ -866,6 +896,19 @@ async def on_session_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # that was tapped, never the conversation picker.
         try:
             await _send_effort_picker(context.bot, user_id, chat_id)
+        except Exception as exc:  # noqa: BLE001
+            log_event(
+                log, "surface.picker.redraw.failed", level=logging.WARNING,
+                surface="telegram", user_id=user_id, client_ref=chat_id,
+                error=str(exc),
+            )
+        return
+
+    if not worked and action == harness_picker.CB_HARNESS_MODEL:
+        # A refused switch gets a fresh harness list, starting the two steps
+        # over against what the mind offers now.
+        try:
+            await _send_harness_picker(context.bot, user_id, chat_id)
         except Exception as exc:  # noqa: BLE001
             log_event(
                 log, "surface.picker.redraw.failed", level=logging.WARNING,
@@ -971,6 +1014,15 @@ async def _run_session_button(
         # the model has stopped taking is refused rather than applied.
         msg = await _handle_server_command(f"/effort {target}", user_id, chat_id)
         return not msg.startswith("Error:"), msg
+    if action == harness_picker.CB_HARNESS_MODEL and target:
+        # Both names travel whole and are checked by the gateway against what
+        # the mind offers now. The switch carries the conversation over in a
+        # handover, so a refusal is reported and the conversation is where it
+        # was.
+        harness, model = harness_picker.split_target(target)
+        if harness and model:
+            msg = await _handle_server_command(f"/harness {harness} {model}", user_id, chat_id)
+            return not msg.startswith("Error:"), msg
     if action == session_picker.CB_SWITCH and target:
         # The id travels whole, so the gateway resolves it against what exists
         # now rather than against the order this message was drawn in. A
@@ -1260,6 +1312,148 @@ async def _send_effort_picker(bot, user_id: int, chat_id: int) -> None:
     await _deliver(
         bot, chat_id, "Couldn't draw the effort list \u2014 send /effort to try again.",
     )
+
+
+async def cmd_harness(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Bare, it offers the harnesses as buttons; `/harness <name>` offers that
+    harness's models; `/harness <name> <model>` switches directly."""
+    if not await _auth_check(update):
+        return
+    args = [a for a in (context.args or []) if a.strip()]
+    user_id, chat_id = update.effective_user.id, update.effective_chat.id
+    if not args:
+        await _send_harness_picker(context.bot, user_id, chat_id)
+        return
+    if len(args) == 1:
+        await _send_harness_models(context.bot, user_id, chat_id, args[0])
+        return
+    msg = await _handle_server_command(f"/harness {args[0]} {args[1]}", user_id, chat_id)
+    await _reply_chunked(update, msg)
+
+
+async def _send_picker_message(bot, user_id: int, chat_id: int, text: str, keyboard,
+                               fallback: str) -> None:
+    """Send one picker, retried, and say so in the chat if it never lands."""
+    last: Exception | None = None
+    for attempt in range(_DELIVER_ATTEMPTS):
+        try:
+            await bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            if attempt + 1 < _DELIVER_ATTEMPTS:
+                await asyncio.sleep(_DELIVER_BACKOFF_S * (attempt + 1))
+    log_event(
+        log, "surface.picker.send.failed", level=logging.WARNING, surface="telegram",
+        user_id=user_id, client_ref=chat_id, error=str(last),
+    )
+    await _deliver(bot, chat_id, fallback)
+
+
+async def _send_harness_picker(bot, user_id: int, chat_id: int) -> None:
+    """Draw the harnesses this mind can run, with those it cannot named."""
+    result = await gateway.server_command(user_id, chat_id, "/harness")
+    problem = (result.get("error") or result.get("detail")) if isinstance(result, dict) else None
+    if problem:
+        await _deliver(bot, chat_id, f"Error: {problem}")
+        return
+    keyboard = harness_picker.build_harness_keyboard(result)
+    if keyboard is None:
+        await _deliver(bot, chat_id, "\n".join([
+            "No harness can be offered for this mind right now.",
+            *harness_picker.unavailable_lines(result),
+        ]))
+        return
+    await _send_picker_message(
+        bot, user_id, chat_id, harness_picker.harness_header(result), keyboard,
+        "Couldn't draw the harness list \u2014 send /harness to try again.",
+    )
+
+
+async def _harness_models(user_id: int, chat_id: int, harness: str):
+    """The gateway's model list for one harness, as ``(header, keyboard)``.
+
+    The keyboard is ``None`` and the header is the sentence to say instead
+    when the gateway refused or the harness offers nothing.
+    """
+    result = await gateway.server_command(user_id, chat_id, f"/harness {harness}")
+    problem = (result.get("error") or result.get("detail")) if isinstance(result, dict) else None
+    if problem:
+        return f"Error: {problem}", None
+    keyboard = harness_picker.build_model_keyboard(harness, result)
+    if keyboard is None:
+        return f"No models offered for {harness} right now.", None
+    return f"Pick a model for {harness}:", keyboard
+
+
+async def _send_harness_models(bot, user_id: int, chat_id: int, harness: str) -> None:
+    """Draw one harness's models as a fresh picker, for a typed `/harness <name>`."""
+    header, keyboard = await _harness_models(user_id, chat_id, harness)
+    if keyboard is None:
+        await _deliver(bot, chat_id, header)
+        return
+    await _send_picker_message(
+        bot, user_id, chat_id, header, keyboard,
+        f"Couldn't draw the model list \u2014 send /harness {harness} to try again.",
+    )
+
+
+async def on_harness_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """A tapped harness: the picker becomes that harness's models, in place.
+
+    Nothing is switched here, so the picker is not claimed — the model tap
+    that follows lands on this same message and is the tap that spends it.
+    A picker already spent is refused before the gateway is asked anything.
+    """
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    if not _is_allowed_user(user_id):
+        log_event(
+            log, "surface.auth.rejected", level=logging.WARNING, surface="telegram",
+            user_id=user_id, client_ref=chat_id,
+        )
+        try:
+            await query.answer("Not authorized.", show_alert=True)
+        except Exception:  # noqa: BLE001
+            pass
+        return
+    try:
+        await query.answer(ACK_TEXT)
+    except Exception as exc:  # noqa: BLE001
+        log_event(
+            log, "surface.button.answer.failed", level=logging.WARNING,
+            surface="telegram", user_id=user_id, client_ref=chat_id, error=str(exc),
+        )
+    picker_id = getattr(query.message, "message_id", None)
+    if picker_id is None or picker_spent(chat_id, picker_id):
+        log_event(
+            log, "surface.button.spent", surface="telegram",
+            command=harness_picker.CB_HARNESS, user_id=user_id, client_ref=chat_id,
+        )
+        await _deliver(context.bot, chat_id,
+                       "That list has already been used \u2014 send /harness for a fresh one.")
+        return
+    _, harness = session_picker.decode(query.data or "")
+    try:
+        header, keyboard = await _harness_models(user_id, chat_id, harness)
+    except Exception as exc:  # noqa: BLE001
+        log_event(
+            log, "surface.button.failed", level=logging.ERROR, surface="telegram",
+            command=harness_picker.CB_HARNESS, user_id=user_id, client_ref=chat_id,
+            error=str(exc),
+        )
+        header, keyboard = "That didn't go through \u2014 the gateway didn't answer.", None
+    try:
+        await query.edit_message_text(header, reply_markup=keyboard)
+    except Exception as exc:  # noqa: BLE001
+        log_event(
+            log, "surface.button.caption.failed", level=logging.WARNING,
+            surface="telegram", user_id=user_id, client_ref=chat_id, error=str(exc),
+        )
+        await _deliver(context.bot, chat_id, header)
 
 
 async def cmd_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1952,6 +2146,7 @@ COMMANDS: tuple[tuple[str, str, object], ...] = (
     ("status", "Server port, default model, sessions running", cmd_status),
     ("model", "Pick a model for this conversation", cmd_model),
     ("effort", "Pick a reasoning effort for this conversation", cmd_effort),
+    ("harness", "Move this conversation to another harness", cmd_harness),
     ("models", "List the models this mind can be pointed at", cmd_models),
     ("autopilot", "Toggle autopilot for this conversation", cmd_autopilot),
     ("switch", "Resume a conversation: /switch <id>", cmd_switch),
@@ -2139,6 +2334,15 @@ def _build_application(token: str):
     ))
     app.add_handler(CallbackQueryHandler(
         with_typing(on_session_button), pattern=effort_picker.CALLBACK_PATTERN,
+    ))
+    # A harness tap only redraws its message, so it has a handler of its own;
+    # the model tap that follows is the one that switches, so it goes through
+    # the claim like every other picker's.
+    app.add_handler(CallbackQueryHandler(
+        with_typing(on_harness_button), pattern=harness_picker.HARNESS_PATTERN,
+    ))
+    app.add_handler(CallbackQueryHandler(
+        with_typing(on_session_button), pattern=harness_picker.MODEL_PATTERN,
     ))
     app.add_handler(MessageHandler(filters.PHOTO, with_typing(handle_photo)))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, with_typing(handle_text)))
