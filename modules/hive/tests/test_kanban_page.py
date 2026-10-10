@@ -36,11 +36,12 @@ def test_backlog_uses_collapsible_items_and_drag_drop_hooks(signed_in):
     assert 'id="expand-level"' in body.text
     assert "const target=[3,2,1][level]" in body.text
     assert "const target=[1,2,3][level]" in body.text
-    assert 'href="/kanban/backlog"' in body.text
-    assert 'href="/kanban/board"' in body.text
-    assert 'aria-current="page"' in body.text
-    assert 'href="/kanban/backlog" class="is-active" aria-current="page"' in body.text
-    assert "aria-current=\"page\"" in body.text
+    assert '<nav class="kanban-toolbar"' not in body.text
+    assert body.text.count('href="/kanban/backlog"') == 1
+    assert body.text.count('href="/kanban/board"') == 1
+    assert 'class="console-nav-flyout"' in body.text
+    assert 'href="/kanban/backlog" class="console-nav-sublink is-active"' in body.text
+    assert 'href="/kanban/board" class="console-nav-sublink "' in body.text
     assert "board-toggle" not in body.text
     assert "backlog-toggle" not in body.text
     assert "Move work forward on the board" not in body.text

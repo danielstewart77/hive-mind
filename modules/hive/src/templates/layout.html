@@ -60,7 +60,13 @@
             <a href="/harness-runs" class="console-nav-link {% if path == '/harness-runs' %}is-active{% endif %}"><i data-lucide="flask-conical"></i><span>Harness runs</span></a>
 
             <p class="console-nav-label">Workspace</p>
-            <a href="/kanban" class="console-nav-link {% if path.startswith('/kanban') %}is-active{% endif %}"><i data-lucide="square-kanban"></i><span>Kanban</span></a>
+            <div class="console-nav-flyout">
+                <a href="/kanban" class="console-nav-link {% if path.startswith('/kanban') %}is-active{% endif %}"><i data-lucide="square-kanban"></i><span>Kanban</span><i class="nav-flyout-caret" data-lucide="chevron-right"></i></a>
+                <div class="console-nav-submenu">
+                    <a href="/kanban/backlog" class="console-nav-sublink {% if path == '/kanban/backlog' %}is-active{% endif %}">Backlog</a>
+                    <a href="/kanban/board" class="console-nav-sublink {% if path == '/kanban/board' %}is-active{% endif %}">Board</a>
+                </div>
+            </div>
             <a href="/canvas" class="console-nav-link {% if path == '/canvas' %}is-active{% endif %}"><i data-lucide="pencil-ruler"></i><span>Canvas</span></a>
             <a href="/design" class="console-nav-link {% if path.startswith('/design') %}is-active{% endif %}"><i data-lucide="drafting-compass"></i><span>Design</span></a>
             <a href="https://terminal.sparktobloom.com" target="_blank" rel="noopener noreferrer" class="console-nav-link"><i data-lucide="square-terminal"></i><span>Terminal</span><i class="nav-external" data-lucide="external-link"></i></a>

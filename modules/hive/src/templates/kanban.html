@@ -78,10 +78,6 @@
 @media(max-width:800px){.kanban-board{grid-template-columns:1fr}.kanban-lane{min-height:0}.kanban-drop{min-height:110px}}
 </style>
 <main class="page kanban-page" id="kanban-page">
-  <nav class="kanban-toolbar" aria-label="Kanban view">
-    <a href="/kanban/backlog" class="{% if view == 'backlog' %}is-active{% endif %}" {% if view == 'backlog' %}aria-current="page"{% endif %}>Backlog</a>
-    <a href="/kanban/board" class="{% if view == 'board' %}is-active{% endif %}" {% if view == 'board' %}aria-current="page"{% endif %}>Board</a>
-  </nav>
   <p id="kanban-feedback" class="kanban-error" role="status" aria-live="polite">Loading Kanban…</p>
   <section id="board-view" aria-label="Kanban board" {% if view != 'board' %}hidden{% endif %}><div class="kanban-board" id="board-mount"></div></section>
   <section id="backlog-view" aria-label="Kanban backlog" {% if view != 'backlog' %}hidden{% endif %}><div class="kanban-inline" role="group" aria-label="Expand or collapse backlog levels"><button class="button" type="button" id="collapse-level" aria-label="Collapse next level">−</button><button class="button" type="button" id="expand-level" aria-label="Expand next level">+</button></div><div id="backlog-mount" class="kanban-tree"></div></section>
