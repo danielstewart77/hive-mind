@@ -251,3 +251,38 @@ class TestRoundTwo:
         assert len(text.encode("utf-8")) <= 6_000
         assert "PRIOR-END" in text and "PRIOR-START" not in text
         assert text.index("PRIOR-END") < text.index("after the switch")
+
+
+class TestRoundThree:
+    def test_settling_the_opening_turn_drops_it_only_on_success(self):
+        kept, dropped = {"opening_turn": "H"}, {"opening_turn": "H"}
+
+        transcript.settle_opening_turn(kept, ok=False)
+        transcript.settle_opening_turn(dropped, ok=True)
+
+        assert (kept, dropped) == ({"opening_turn": "H"}, {})
+
+    def test_a_block_too_small_to_cut_does_not_end_the_walk(self):
+        """Somewhere in this range of budgets the middle block has no room
+        worth cutting into and is dropped; the small older one must still fill
+        what is left rather than the walk stopping there."""
+        older = {"role": "assistant", "kind": "text", "text": "ok", "name": ""}
+        big = {"role": "user", "kind": "text", "text": "B" * 5_000, "name": ""}
+        newest = {"role": "user", "kind": "text", "text": "N" * 1_000, "name": ""}
+        floor = len(transcript.render([newest]).encode("utf-8"))
+
+        outcomes = {transcript.render([older, big, newest], budget_bytes=b)
+                    for b in range(floor, floor + 400)}
+
+        assert any("BBB" not in t and "NNN" in t and "Assistant: ok" in t for t in outcomes)
+
+    def test_a_log_whose_last_frame_is_broken_reads_everything_before_it(self):
+        """The live log's last frame can be cut mid-header; what came before
+        it is the conversation, and must not be lost with it."""
+        broken = FIXTURES / "dsh" / "session-open-frame.jsonl.zstd"
+        whole = transcript.read_dsh(DSH_ZSTD)
+
+        blocks = transcript.read_dsh(broken)
+
+        assert len(blocks) >= len(whole) - 1
+        assert blocks == whole[: len(blocks)]

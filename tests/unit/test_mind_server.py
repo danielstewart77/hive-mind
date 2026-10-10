@@ -1152,3 +1152,95 @@ def test_a_prior_handover_rides_ahead_of_whatever_transcript_exists(homes):
                      prior_handover="PRIOR HANDOVER TEXT").json()["text"]
 
     assert text.index("PRIOR HANDOVER TEXT") < text.index("User: hey, i have two versions")
+
+
+# ---------------------------------------------------------------------------
+# Grill round 3
+# ---------------------------------------------------------------------------
+
+def test_claude_holds_the_handover_again_when_its_process_dies_before_answering(
+    equipped, proxy, monkeypatch,
+):
+    proxy({})
+    spawner = _Spawner("claude", outputs=[[]])  # EOF: the process died
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawner)
+    client = TestClient(mind_server.app)
+    client.post("/sessions", headers=SESSION, json={
+        "session_id": "q1", "resume_sid": "conv-q1", "model": "claude-opus-5",
+        "harness": "claude", "opening_turn": "HANDOVER"})
+    proc = spawner.calls[0]["proc"]
+    original_write = proc.stdin.write
+
+    def write_then_die(data):
+        original_write(data)
+        proc.returncode = 1
+
+    proc.stdin.write = write_then_die
+    client.post("/sessions/q1/message", headers=SESSION, json={"content": "one"})
+
+    assert claude_cli.SESSIONS["q1"]["opening_turn"] == "HANDOVER"
+
+
+def test_dsh_holds_the_handover_through_a_turn_that_did_not_complete(
+    equipped, proxy, monkeypatch,
+):
+    proxy({})
+    errored = [_line({"sessionId": "conv-q2", "outcome": "error", "text": "",
+                      "traffic": {}})]
+    spawner = _Spawner("dsh", outputs=[errored])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawner)
+    client = TestClient(mind_server.app)
+    client.post("/sessions", headers=SESSION, json={
+        "session_id": "q2", "resume_sid": "conv-q2", "model": "qwen",
+        "harness": "dsh", "opening_turn": "HANDOVER"})
+
+    client.post("/sessions/q2/message", headers=SESSION, json={"content": "one"})
+    client.post("/sessions/q2/message", headers=SESSION, json={"content": "two"})
+    client.post("/sessions/q2/message", headers=SESSION, json={"content": "three"})
+
+    delivered = [_delivered("dsh", call) for call in spawner.calls]
+    assert delivered[1].endswith("HANDOVER\n\n---\n\ntwo")
+    assert delivered[2].endswith("three") and "HANDOVER" not in delivered[2]
+
+
+def test_a_resumed_codex_thread_holds_the_handover_until_a_turn_succeeds(
+    equipped, proxy, monkeypatch,
+):
+    proxy({})
+    spawner = _Spawner("codex", outputs=[FAILED_CODEX_TURN])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawner)
+    codex_cli.THREADS["q3"] = "thread-resumed"
+    client = TestClient(mind_server.app)
+    client.post("/sessions", headers=SESSION, json={
+        "session_id": "q3", "resume_sid": "conv-q3", "model": "gpt-5",
+        "harness": "codex", "opening_turn": "HANDOVER"})
+
+    for content in ("one", "two", "three"):
+        client.post("/sessions/q3/message", headers=SESSION, json={"content": content})
+
+    delivered = [_delivered("codex", call) for call in spawner.calls]
+    assert "resume" in spawner.calls[0]["argv"]
+    assert delivered[0] == "HANDOVER\n\n---\n\none"
+    assert delivered[1].endswith("HANDOVER\n\n---\n\ntwo")
+    assert delivered[2].endswith("three") and "HANDOVER" not in delivered[2]
+
+
+def test_an_attach_while_a_chat_turn_is_running_is_refused_and_the_turn_kept(
+    panes, monkeypatch,
+):
+    from starlette.testclient import WebSocketDenialResponse
+
+    spawner = _Spawner("claude")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawner)
+    client = TestClient(mind_server.app)
+    client.post("/sessions", headers=SESSION, json={
+        "session_id": "q4", "resume_sid": "conv-q4", "model": "claude-opus-5",
+        "harness": "claude"})
+    claude_cli.SESSIONS["q4"]["in_flight"] = True
+
+    with pytest.raises(WebSocketDenialResponse) as refused:
+        _attach(client, "q4", "claude", "claude-opus-5", "", monkeypatch)
+
+    assert refused.value.status_code == 409
+    assert "q4" in claude_cli.SESSIONS
+    assert panes["claude"]["start"] == []
