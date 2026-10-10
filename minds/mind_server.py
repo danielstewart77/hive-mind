@@ -493,20 +493,24 @@ async def kill_session(sid: str, forget_thread: bool = False) -> dict:
     return {"session_id": sid, "status": "closed"}
 
 
-async def release_idle_chat(sid: str) -> None:
+async def release_idle_chat(sid: str) -> str | None:
     """End an idle chat process before a terminal opens on the conversation.
 
     One live harness process per conversation: a pane and a chat process on
-    one transcript is two writers. A turn in flight is left alone — each
-    adapter's attach decides what to do about it — and the handover the chat
-    process was holding needs no moving: the pane takes it from comms'
-    carry-forward, which outlives both.
+    one transcript is two writers. A turn in flight is never torn down for a
+    pane — the reason returned refuses the attach, and the turn goes on. The
+    handover an idle chat process was holding needs no moving: the pane takes
+    it from comms' carry-forward, which outlives both.
     """
     for adapter in ADAPTERS.values():
         state = adapter.SESSIONS.get(sid)
-        if state is not None and not state.get("in_flight"):
+        if state is not None and state.get("in_flight"):
+            return "a chat turn is still running for this conversation"
+    for adapter in ADAPTERS.values():
+        if sid in adapter.SESSIONS:
             await adapter.release_session(sid, "stream")
             HARNESS_OF.pop(sid, None)
+    return None
 
 
 @app.get("/harnesses")

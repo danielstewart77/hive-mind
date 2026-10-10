@@ -859,7 +859,7 @@ def install_pty_attach(
     adapters: dict[str, PaneAdapter] | None = None,
     default_harness: Callable[[], str] | str = "",
     conversation_env: Callable[[str, str], Awaitable[dict[str, str]]] | None = None,
-    before_attach: Callable[[str], Awaitable[None]] | None = None,
+    before_attach: Callable[[str], Awaitable[str | None]] | None = None,
 ) -> None:
     """Mount the browser-terminal routes on a mind's app.
 
@@ -886,7 +886,8 @@ def install_pty_attach(
     reaches ``spawn`` as ``extra_env``. ``before_attach``, when given, is
     awaited with the session id before a terminal is opened — where a mind
     ends an idle chat process, so one conversation never has two harness
-    processes on one transcript.
+    processes on one transcript — and a reason it returns refuses the attach
+    with 409.
     """
     global _TERMINALS
     if adapters is None:
@@ -1028,6 +1029,22 @@ def install_pty_attach(
                 await runtime_api.refuse_session_websocket(websocket, denied)
                 return
 
+        # Before the accept, so a refusal is a real status: a turn running on
+        # this conversation's chat process is never torn down to make room
+        # for a pane — the attach is refused with 409 and the turn goes on.
+        if before_attach is not None:
+            try:
+                refusal = await before_attach(session_id)
+            except Exception:
+                log.warning("Could not release session %s's chat process before "
+                            "its terminal opened", session_id, exc_info=True)
+                refusal = None
+            if refusal:
+                log.info("attach-pty for session %s refused: %s", session_id, refusal)
+                await runtime_api.refuse_session_websocket(
+                    websocket, JSONResponse({"error": refusal}, status_code=409))
+                return
+
         # Echo the subprotocol back when one was offered. A browser that
         # offers subprotocols and gets a response carrying none fails the
         # handshake in both Chrome and Firefox — so without this, the one
@@ -1089,13 +1106,6 @@ def install_pty_attach(
             log.warning("Could not read a stored carry-forward for session %s",
                         session_id, exc_info=True)
             carry_forward = ""
-
-        if before_attach is not None:
-            try:
-                await before_attach(session_id)
-            except Exception:
-                log.warning("Could not release session %s's chat process before "
-                            "its terminal opened", session_id, exc_info=True)
 
         spawn_kwargs: dict = {}
         if conversation_env is not None:

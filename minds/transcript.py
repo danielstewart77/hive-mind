@@ -261,21 +261,39 @@ def _dsh_lines(path: Path) -> list[str]:
         import zstandard
     except ImportError:
         return _dsh_lines_via_harness(path)
-    decoded = bytearray()
     try:
-        with open(path, "rb") as stream:
-            reader = zstandard.ZstdDecompressor().stream_reader(stream, read_across_frames=True)
-            while True:
-                chunk = reader.read(65536)
-                if not chunk:
-                    break
-                decoded += chunk
+        decoded = _zstd_decode(path, zstandard, 65536)
     except OSError as exc:
         raise Unreadable(f"cannot read {path}: {exc}") from exc
-    except zstandard.ZstdError as exc:
-        if not decoded:
-            raise Unreadable(f"cannot decompress {path}: {exc}") from exc
+    except zstandard.ZstdError:
+        # A last frame cut off mid-header raises inside the read that reaches
+        # it, and that read's whole output goes with the exception — at the
+        # fast chunk size, that is the entire log. Read again in small chunks
+        # and keep everything decoded before the break.
+        decoded = bytearray()
+        try:
+            decoded = _zstd_decode(path, zstandard, 256, keep=decoded)
+        except zstandard.ZstdError as exc:
+            if not decoded:
+                raise Unreadable(f"cannot decompress {path}: {exc}") from exc
+        except OSError as exc:
+            raise Unreadable(f"cannot read {path}: {exc}") from exc
     return decoded.decode("utf-8", errors="replace").splitlines()
+
+
+def _zstd_decode(path: Path, zstandard, chunk_size: int,
+                 keep: bytearray | None = None) -> bytearray:
+    """Decode a frame container into ``keep``, which holds what was read if
+    this raises."""
+    decoded = keep if keep is not None else bytearray()
+    with open(path, "rb") as stream:
+        reader = zstandard.ZstdDecompressor().stream_reader(stream, read_across_frames=True)
+        while True:
+            chunk = reader.read(chunk_size)
+            if not chunk:
+                break
+            decoded += chunk
+    return decoded
 
 
 def _dsh_lines_via_harness(path: Path) -> list[str]:
