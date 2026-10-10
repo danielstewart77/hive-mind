@@ -46,13 +46,17 @@ _TIMEOUT = aiohttp.ClientTimeout(total=6)
 _BASE_URL_VARS = ("INFERENCE_PROXY_URL", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL")
 _KEY_VARS = ("MIND_PROXY_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY")
 
-#: The listing endpoint each harness may address. A claude CLI can only speak
-#: Anthropic Messages; everything else speaks the OpenAI shape.
-_LISTING_PATH = {"claude": "/v1/models?harness=claude", "codex": "/v1/models"}
+#: One listing, filtered by the proxy to what the named harness can send:
+#: claude gets Anthropic and Ollama, codex gets OpenAI and Ollama, dsh gets
+#: everything. Which models a mind may run is the harness's limit, not the
+#: mind's — and unnamed, the proxy returns the union, offering models the
+#: harness cannot speak to.
+_LISTING_PATH = "/v1/models"
 
 
 def _harness_family(harness: str) -> str:
-    return "claude" if str(harness or "").startswith("claude") else "codex"
+    name = str(harness or "")
+    return name[: -len("_cli")] if name.endswith("_cli") else name
 
 
 def _proxy_root(base_url: str) -> str:
@@ -111,8 +115,8 @@ async def build_catalog(path: Path) -> list[dict]:
     key = _first_env(_KEY_VARS, env)
     if not base_url or not key:
         return []
-    listing = _LISTING_PATH[_harness_family(str(runtime.get("harness") or ""))]
-    url = f"{_proxy_root(base_url)}{listing}"
+    family = _harness_family(str(runtime.get("harness") or ""))
+    url = f"{_proxy_root(base_url)}{_LISTING_PATH}?harness={family}"
     try:
         async with aiohttp.ClientSession(
             headers={"Authorization": f"Bearer {key}"}
