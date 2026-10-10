@@ -13,20 +13,23 @@
 .relation-row select { min-width:0; max-width:100%; }
 @media(max-width:800px){.item-layout{grid-template-columns:minmax(0,1fr)}}
 .item-field { display:grid; gap:.4rem; }
-.item-field textarea { min-height:110px; width:100%; }
+.item-field textarea { width:100%; overflow:hidden; resize:none; }
+.item-form-header { display:flex; justify-content:flex-end; align-items:center; gap:.75rem; margin-bottom:.25rem; }
+.item-title-input { font-size:1.4rem; font-weight:650; padding:.3rem .4rem; width:100%; }
 .item-actions { display:flex; gap:.5rem; align-items:center; }
 .item-feedback { min-height:1.5em; }
 </style>
 <main class="page item-page" id="item-page" data-item-id="{{ item.id }}" data-item-kind="{{ item.kind }}" data-item-subtype="{{ item.subtype or '' }}">
   <nav><a href="/kanban/backlog">Back to backlog</a></nav>
-  <header><h1>{{ item.title }}</h1><p>{{ item.kind | capitalize }}</p></header>
+  <p>{{ item.kind | capitalize }}</p>
   <div class="item-layout">
   <form id="item-form" class="surface item-field">
+    <div class="item-actions item-form-header"><button class="button" type="submit">Save</button><span id="item-feedback" class="item-feedback" role="status" aria-live="polite"></span></div>
+    <label class="item-field">Title<input class="item-title-input" type="text" name="title" value="{{ item.title }}" required></label>
     <label class="item-field">Description<textarea name="description">{{ item.description }}</textarea></label>
     <label class="item-field">Requirements<textarea name="requirements">{{ item.requirements }}</textarea></label>
     <label class="item-field">Acceptance criteria<textarea name="acceptance_criteria">{{ item.acceptance_criteria }}</textarea></label>
     <label class="item-field">QA tests<textarea name="qa_tests">{{ item.qa_tests }}</textarea></label>
-    <div class="item-actions"><button class="button" type="submit">Save</button><span id="item-feedback" class="item-feedback" role="status" aria-live="polite"></span></div>
   </form>
   <aside class="surface item-relations" id="item-relations" aria-label="Parent and children">
     <h2>Type</h2>
@@ -51,6 +54,10 @@
   const kinds = {epic: 'epics', feature: 'features', story: 'stories'};
   const itemId = page.dataset.itemId;
   const kindName = {epic: 'Epic', feature: 'Feature', story: 'Story'};
+  function autoGrow(el){el.style.height='auto';el.style.height=`${el.scrollHeight}px`;}
+  const growers = form.querySelectorAll('textarea');
+  for (const t of growers) { autoGrow(t); t.addEventListener('input', () => autoGrow(t)); }
+  window.addEventListener('resize', () => { for (const t of growers) autoGrow(t); });
   async function loadRelations(){
     const r = await (await fetch(`/api/kanban/relations/${encodeURIComponent(itemId)}`, {headers: {'Accept': 'application/json'}})).json();
     const parentSlot = document.getElementById('parent-slot');
