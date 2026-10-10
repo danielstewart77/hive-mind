@@ -200,3 +200,86 @@ def test_a_name_that_is_merely_a_prefix_of_an_offered_model_is_refused():
             await mgr.shutdown()
 
     _run(scenario())
+
+
+def test_the_lock_is_held_for_the_whole_switch_not_just_tested():
+    """A turn arriving mid-switch must wait, not race the teardown.
+
+    Testing the lock and proceeding is check-then-act across the `/models`
+    round trip that follows, which runs to ten seconds. A message typed in
+    that window passed `send_message`'s own idle check, took the lock and
+    started streaming, and the switch killed it anyway — and because
+    `send_message` decides whether to respawn on `session_id not in _procs`,
+    which `_kill_process` had just emptied, that turn also spawned a second
+    harness process on the same conversation.
+    """
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr, "claude-opus-5")
+            held: list[bool] = []
+
+            async def slow_offer(mind_id, model):
+                # Stands in for the ten-second `/models` call. What matters is
+                # that the lock is already ours while this awaits.
+                held.append(mgr._locks["sess-1"].locked())
+                await asyncio.sleep(0)
+                return True
+
+            with patch.object(mgr, "mind_offers_model", new=slow_offer), \
+                    patch.object(mgr, "_kill_process", new=AsyncMock()), \
+                    patch.object(mgr, "_spawn", new=AsyncMock()), \
+                    patch.object(mgr, "_routing_for", new=AsyncMock(return_value={})):
+                await mgr.switch_model("sess-1", "claude-sonnet-5")
+
+            assert held == [True]
+            # And released afterwards, or the conversation can never take
+            # another turn.
+            assert mgr._locks["sess-1"].locked() is False
+            await mgr.shutdown()
+
+    _run(scenario())
+
+
+def test_an_autopilot_toggle_while_the_turn_is_streaming_is_refused():
+    """The same teardown-and-respawn, and it had no guard at all.
+
+    `/autopilot` typed during a streaming turn destroyed the answer with no
+    race to lose, which is strictly easier to reach than the switch.
+    """
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr, "claude-opus-5")
+            lock = mgr._locks.setdefault("sess-1", asyncio.Lock())
+            async with lock:
+                with patch.object(mgr, "_kill_process", new=AsyncMock()) as killed, \
+                        patch.object(mgr, "_spawn", new=AsyncMock()) as spawned, \
+                        patch.object(mgr, "_routing_for", new=AsyncMock(return_value={})):
+                    with pytest.raises(ValueError):
+                        await mgr.toggle_autopilot("sess-1")
+                assert killed.await_count == 0
+                assert spawned.await_count == 0
+            row = await mgr._get_row("sess-1")
+            assert row["autopilot"] == 0
+            await mgr.shutdown()
+
+    _run(scenario())
+
+
+def test_an_autopilot_toggle_with_nothing_running_still_flips_and_respawns():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr, "claude-opus-5")
+            with patch.object(mgr, "_kill_process", new=AsyncMock()) as killed, \
+                    patch.object(mgr, "_spawn", new=AsyncMock()) as spawned, \
+                    patch.object(mgr, "_routing_for", new=AsyncMock(return_value={})):
+                await mgr.toggle_autopilot("sess-1")
+            row = await mgr._get_row("sess-1")
+            assert row["autopilot"] == 1
+            assert killed.await_count == 1
+            assert spawned.await_count == 1
+            await mgr.shutdown()
+
+    _run(scenario())
