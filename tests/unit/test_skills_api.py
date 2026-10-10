@@ -8,7 +8,8 @@ whichever it is talking to.
 
 Nothing here monkeypatches `repo_root` or `installed_root`. Which directory
 a harness reads *is* the contract, so the fixtures move `PROJECT_DIR` and
-the environment and let the real code resolve the paths.
+the environment and let the real code resolve the paths. The proxy listing
+and the notifier are transports and are the only things stubbed.
 """
 
 from __future__ import annotations
@@ -20,13 +21,14 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from minds import runtime_api, skills_api
+from minds import runtime_api, skill_reference, skills_api
 
 ADMIN_TOKEN = "test-admin-token"  # secret-guard: allow
 REPO_ROOT = Path(__file__).resolve().parents[2]
+SENT: list[str] = []
 
 
-def _write_skill(root: Path, name: str, body: str, **extra: str) -> None:
+def _write_skill(root, name: str, body: str, **extra: str) -> None:
     """A skill is a directory; `extra` puts sibling files beside the markdown."""
     directory = root / name
     directory.mkdir(parents=True, exist_ok=True)
@@ -37,22 +39,28 @@ def _write_skill(root: Path, name: str, body: str, **extra: str) -> None:
 
 def _build(monkeypatch, tmp_path, harness: str):
     project = tmp_path / "project"
-    config = tmp_path / "config"
-    (project / "specs" / "skills" / "claude").mkdir(parents=True)
-    (project / "specs" / "skills" / "codex").mkdir(parents=True)
-    (config / "skills").mkdir(parents=True)
+    homes = {h: tmp_path / h for h in skill_reference.HARNESSES}
+    (project / "specs" / "skills").mkdir(parents=True)
+    for home in homes.values():
+        (home / "skills").mkdir(parents=True)
 
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
-    monkeypatch.setenv("CODEX_HOME", str(config))
+    monkeypatch.setenv("MIND_NAME", "example")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(homes["claude"]))
+    monkeypatch.setenv("CODEX_HOME", str(homes["codex"]))
+    monkeypatch.setenv("DSH_HOME", str(homes["dsh"]))
     monkeypatch.setattr(skills_api, "PROJECT_DIR", project, raising=True)
+    monkeypatch.setattr(skill_reference, "PROJECT_DIR", project, raising=True)
     monkeypatch.setattr(runtime_api, "admin_token", lambda: ADMIN_TOKEN, raising=True)
+    SENT.clear()
+    monkeypatch.setattr(skill_reference, "proxy_catalog", lambda *a: (lambda h: None))
+    monkeypatch.setattr(skill_reference, "telegram_notifier", lambda *a: SENT.append)
 
     app = FastAPI()
     skills_api.install_skills_routes(app, harness=harness, mind_id="test-mind", log=None)
     return (
         TestClient(app, raise_server_exceptions=False),
-        skills_api.repo_root(harness),
-        config / "skills",
+        skills_api.repo_root(),
+        skills_api.installed_root(harness),
     )
 
 
@@ -70,14 +78,16 @@ def _auth() -> dict:
     return {"Authorization": f"Bearer {ADMIN_TOKEN}"}
 
 
-def test_the_skills_route_reports_both_sides_and_every_state(mind):
+def test_the_skills_route_reports_every_state(mind):
+    """All four states, computed by the real state machine."""
     client, repo, installed = mind
     _write_skill(repo, "in-sync", "shared\n")
-    _write_skill(installed, "in-sync", "shared\n")
     _write_skill(repo, "edited", "repo body\n")
-    _write_skill(installed, "edited", "mind body\n")
     _write_skill(repo, "absent-here", "repo only\n")
     _write_skill(installed, "mind-only", "mind only\n")
+    client.post("/skills/in-sync/install", headers=_auth())
+    client.post("/skills/edited/install", headers=_auth())
+    (installed / "edited" / "SKILL.md").write_text("---\nname: edited\n---\nmind body\n")
 
     body = client.get("/skills", headers=_auth()).json()
 
@@ -85,42 +95,53 @@ def test_the_skills_route_reports_both_sides_and_every_state(mind):
     rows = {row["name"]: row for row in body["skills"]}
     assert rows["in-sync"]["state"] == skills_api.STATE_SAME
     assert rows["edited"]["state"] == skills_api.STATE_DIFFERS
+    assert rows["edited"]["copy"] == "edited"
     assert rows["absent-here"]["state"] == skills_api.STATE_NOT_INSTALLED
     assert rows["mind-only"]["state"] == skills_api.STATE_LOCAL_ONLY
     assert rows["edited"]["repo"] == "repo body\n"
-    assert rows["edited"]["installed"] == "mind body\n"
+    assert rows["edited"]["installed"] == "---\nname: edited\n---\nmind body\n"
 
 
-def test_a_codex_mind_reads_the_codex_directories(codex_mind, tmp_path):
+def test_the_harness_named_on_the_request_picks_the_copy_reported(codex_mind, tmp_path):
+    """A codex mind reports codex by default, and any harness when asked."""
     client, repo, _ = codex_mind
-    assert repo == tmp_path / "project" / "specs" / "skills" / "codex"
-    _write_skill(repo, "codex-skill", "for codex\n")
-    _write_skill(tmp_path / "project" / "specs" / "skills" / "claude", "claude-skill", "x\n")
+    _write_skill(repo, "notes", "---\nname: notes\ndescription: d\nharness:\n  claude:\n    tools: Bash\n---\nbody\n")
+    client.post("/skills/notes/install", headers=_auth())
+    (tmp_path / "dsh" / "skills" / "loose").mkdir()
+    (tmp_path / "dsh" / "skills" / "loose" / "SKILL.md").write_text("only under dsh\n")
 
-    body = client.get("/skills", headers=_auth()).json()
+    default = client.get("/skills", headers=_auth()).json()
+    claude = client.get("/skills?harness=claude", headers=_auth()).json()
+    dsh = client.get("/skills?harness=dsh", headers=_auth()).json()
 
-    assert body["harness"] == "codex"
-    assert [row["name"] for row in body["skills"]] == ["codex-skill"]
+    assert default["harness"] == "codex"
+    assert "tools" not in default["skills"][0]["installed"]
+    assert claude["harness"] == "claude"
+    assert "tools: Bash" in claude["skills"][0]["installed"]
+    assert [row["name"] for row in dsh["skills"]] == ["loose", "notes"]
 
 
 def test_a_sibling_file_drifting_is_not_reported_as_in_sync(mind):
+    """State is the whole directory. A matching SKILL.md is not enough."""
     client, repo, installed = mind
     _write_skill(repo, "memory", "same markdown\n", **{"helper.py": "repo version\n"})
-    _write_skill(installed, "memory", "same markdown\n", **{"helper.py": "mind version\n"})
+    client.post("/skills/memory/install", headers=_auth())
+    (installed / "memory" / "helper.py").write_text("mind version\n")
 
-    assert client.get("/skills", headers=_auth()).json()["skills"][0]["state"] == (
-        skills_api.STATE_DIFFERS
-    )
+    row = client.get("/skills", headers=_auth()).json()["skills"][0]
+
+    assert row["state"] == skills_api.STATE_DIFFERS
 
 
-def test_installing_moves_the_whole_directory_not_just_the_markdown(mind):
+def test_installing_moves_the_whole_directory_into_every_harness(mind, tmp_path):
     client, repo, installed = mind
     _write_skill(repo, "memory", "body\n", **{"helper.py": "repo version\n"})
     _write_skill(installed, "memory", "body\n", **{"helper.py": "mind version\n"})
 
     client.post("/skills/memory/install", headers=_auth())
 
-    assert (installed / "memory" / "helper.py").read_text() == "repo version\n"
+    for h in skill_reference.HARNESSES:
+        assert (tmp_path / h / "skills" / "memory" / "helper.py").read_text() == "repo version\n"
 
 
 def test_the_diff_names_both_sides_and_shows_the_change(mind):
@@ -136,20 +157,82 @@ def test_the_diff_names_both_sides_and_shows_the_change(mind):
     assert "+mind line" in diff
 
 
-def test_write_back_and_remove_answer_the_shape_the_console_expects(mind):
+def test_write_back_and_remove_answer_the_shape_the_console_expects(mind, tmp_path):
     client, repo, installed = mind
     _write_skill(repo, "memory", "repo body\n")
-    _write_skill(installed, "memory", "mind body\n")
+    _write_skill(installed, "memory", "---\nname: memory\ndescription: d\n---\nmind body\n")
 
     written = client.post("/skills/memory/write-back", headers=_auth())
     assert written.status_code == 200
     assert written.json()["skill"]["state"] == skills_api.STATE_SAME
-    assert (repo / "memory" / "SKILL.md").read_text() == "mind body\n"
+    assert (repo / "memory" / "SKILL.md").read_text().endswith("mind body\n")
+    assert (tmp_path / "dsh" / "skills" / "memory" / "SKILL.md").read_text().endswith("mind body\n")
 
     removed = client.delete("/skills/memory", headers=_auth())
     assert removed.status_code == 200
-    assert not (installed / "memory").exists()
+    for h in skill_reference.HARNESSES:
+        assert not (tmp_path / h / "skills" / "memory").exists()
     assert (repo / "memory" / "SKILL.md").exists()
+
+
+def test_a_write_back_over_a_newer_reference_answers_409(mind, tmp_path):
+    client, repo, installed = mind
+    _write_skill(repo, "memory", "original\n")
+    client.post("/skills/memory/install", headers=_auth())
+    reference = tmp_path / "project" / "minds" / "example" / "reference" / "skills" / "memory" / "SKILL.md"
+    reference.write_text(reference.read_text().replace("original", "newer"))
+    copy = installed / "memory" / "SKILL.md"
+    copy.write_text(copy.read_text().replace("original", "edited"))
+
+    response = client.post("/skills/memory/write-back", headers=_auth())
+
+    assert response.status_code == 409
+    assert (repo / "memory" / "SKILL.md").read_text() == "original\n"
+    assert "newer" in reference.read_text()
+    assert "edited" in copy.read_text()
+
+
+def test_a_harness_with_no_declared_home_is_a_409_not_a_missing_route(mind, monkeypatch):
+    client, _, _ = mind
+    monkeypatch.delenv("CODEX_HOME")
+
+    response = client.get("/skills?harness=codex", headers=_auth())
+
+    assert response.status_code == 409
+    assert "no codex home declared" in response.json()["error"]
+
+
+def test_the_resolve_route_makes_the_named_copy_win(mind, tmp_path):
+    client, repo, installed = mind
+    _write_skill(repo, "memory", "original\n")
+    client.post("/skills/memory/install", headers=_auth())
+    reference = tmp_path / "project" / "minds" / "example" / "reference" / "skills" / "memory" / "SKILL.md"
+    reference.write_text(reference.read_text().replace("original", "newer"))
+    codex = tmp_path / "codex" / "skills" / "memory" / "SKILL.md"
+    codex.write_text(codex.read_text().replace("original", "from codex"))
+
+    response = client.post("/skills/memory/resolve?from=codex", headers=_auth())
+
+    assert response.status_code == 200
+    assert "from codex" in reference.read_text()
+    assert "from codex" in (installed / "memory" / "SKILL.md").read_text()
+
+
+def test_mind_start_renders_the_references_and_never_raises(mind, tmp_path, monkeypatch):
+    """The start-up pass: off the event loop, and a failure is logged, not fatal."""
+    import asyncio
+
+    _, repo, installed = mind
+    _write_skill(tmp_path / "project" / "minds" / "example" / "reference" / "skills", "memory", "body\n")
+
+    asyncio.run(skills_api.check_at_start(None, "test-mind"))
+    assert (tmp_path / "dsh" / "skills" / "memory" / "SKILL.md").exists()
+
+    def _boom(**_):
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(skills_api, "check_all", _boom)
+    asyncio.run(skills_api.check_at_start(None, "test-mind"))
 
 
 def test_an_unreadable_skill_is_not_reported_as_an_absent_one(mind):
@@ -167,7 +250,7 @@ def test_an_unreadable_skill_is_not_reported_as_an_absent_one(mind):
 
 
 def test_an_unreadable_skills_directory_is_not_reported_as_an_empty_one(mind):
-    client, _, installed = mind
+    client, repo, installed = mind
     installed.chmod(0o000)
     try:
         response = client.get("/skills", headers=_auth())
@@ -179,7 +262,7 @@ def test_an_unreadable_skills_directory_is_not_reported_as_an_empty_one(mind):
 
 
 def test_a_symlinked_skill_can_be_removed_and_replaced(mind, tmp_path):
-    """The curator maintains plugin skills in CONFIG_DIR/skills as symlinks."""
+    """hive_mind's curator maintains plugin skills as symlinks."""
     client, repo, installed = mind
     real = tmp_path / "plugin" / "notify"
     real.mkdir(parents=True)
@@ -189,18 +272,32 @@ def test_a_symlinked_skill_can_be_removed_and_replaced(mind, tmp_path):
 
     assert client.post("/skills/notify/install", headers=_auth()).status_code == 200
     assert not (installed / "notify").is_symlink()
+    assert (installed / "notify" / "SKILL.md").read_text().endswith("from the repo\n")
     assert (real / "SKILL.md").read_text() == "from a plugin\n"
 
     assert client.delete("/skills/notify", headers=_auth()).status_code == 200
 
 
-def test_a_skill_carrying_a_build_directory_is_refused_rather_than_copied(mind):
+def test_a_skill_carrying_a_build_directory_travels_without_it(mind):
+    """A venv is what a skill built, not the skill: it never reaches the repo."""
     client, repo, installed = mind
     _write_skill(installed, "heavy", "body\n")
     (installed / "heavy" / "venv").mkdir()
     (installed / "heavy" / "venv" / "blob").write_bytes(
         b"x" * (skills_api.MAX_SKILL_BYTES + 1)
     )
+
+    response = client.post("/skills/heavy/write-back", headers=_auth())
+
+    assert response.status_code == 200
+    assert (repo / "heavy" / "SKILL.md").exists()
+    assert not (repo / "heavy" / "venv").exists()
+
+
+def test_a_skill_past_the_size_limit_is_refused_rather_than_copied(mind):
+    client, repo, installed = mind
+    _write_skill(installed, "heavy", "body\n")
+    (installed / "heavy" / "blob").write_bytes(b"x" * (skills_api.MAX_SKILL_BYTES + 1))
 
     response = client.post("/skills/heavy/write-back", headers=_auth())
 
@@ -220,6 +317,7 @@ def test_every_route_requires_the_admin_bearer(mind):
         lambda: client.post("/skills/memory/install"),
         lambda: client.post("/skills/memory/write-back"),
         lambda: client.delete("/skills/memory"),
+        lambda: client.post("/skills/memory/resolve?from=claude"),
     ):
         assert call().status_code == 401
 
