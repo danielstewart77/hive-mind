@@ -2,7 +2,7 @@
 
 A mind can switch harness mid-conversation, so its skills and agents have to
 exist in every harness's form at once — Claude's markdown, Codex's SKILL.md
-and agent TOML, dsh's skill directories and agent presets. Keeping three hand
+and agent TOML, dsh's skill directories and delegate tools. Keeping three hand
 copies in step is the drift `skills_sync` already reports between two; so
 each skill and agent has exactly one reference copy on the mind's own disk
 (`minds/<name>/reference/{skills,agents}/`), and every harness copy is
@@ -20,6 +20,15 @@ delegates to, and an optional per-harness block:
 A harness's block lands only in that harness's copy, and each copy carries
 only the frontmatter its harness reads. A harness with no model named runs
 the skill on the conversation's model.
+
+A dsh agent is not a file of its own. dsh's `subagent` tool cannot pick a
+named preset — a child always joins its parent's composition — so a named
+delegate is one `@deepseek-ai/dsh-tool-subagent` row whose `toolName` is the
+agent's name and whose `persona` is its body. Every agent's row is rendered
+into one overlay the mind owns, `$DSH_HOME/agents.patch.yml`, which the dsh
+adapter hands the CLI as `--patch`; dsh's shipped presets and the profile's
+own `cordis.patch.yml` are never edited. Each row is that agent's copy, and
+its fingerprint is the row's, not the file's.
 
 There are two independent implementations of this — this one for the
 container minds and the edge repo's — and they never share code.
@@ -76,12 +85,23 @@ SPAWNING_PHRASES = ("Agent tool", "subagent_type", "spawn_agent", "Task tool")
 
 _NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 # dsh refuses to load a skill whose name is outside this grammar
-# (`@deepseek-ai/dsh-skill`'s SKILL_NAME), and a preset directory whose id is
-# outside the second is skipped by discovery outright.
+# (`@deepseek-ai/dsh-skill`'s SKILL_NAME).
 _DSH_SKILL_NAME = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
-_DSH_PRESET_ID = re.compile(r"[a-z0-9][a-z0-9-]*")
+# A delegate's tool name: what the model calls, and an identifier in dsh's
+# code mode, so snake case — the shape of every tool dsh ships
+# (`subagent_fork`, `subagent_claude_code`).
+_DSH_TOOL_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
+# Tool names a delegate must not shadow: dsh's own delegation and follow-up
+# tools, and the name code mode reserves.
+_DSH_RESERVED_TOOLS = frozenset({
+    "run_code", "subagent", "subagent_fork", "subagent_codex",
+    "subagent_claude_code", "send_message", "report", "list_agents",
+    "job_output", "job_kill",
+})
 
-_DSH_PERSONA_ROW = "@deepseek-ai/dsh-persona"
+_DSH_SUBAGENT_ROW = "@deepseek-ai/dsh-tool-subagent"
+#: The overlay every reference agent is rendered into, under `$DSH_HOME`.
+DSH_AGENTS_OVERLAY = "agents.patch.yml"
 
 # Claude Code resolves these itself. They are harness syntax for "a model of
 # this tier" or "the conversation's", not names the proxy lists.
@@ -96,7 +116,8 @@ _SHARED_RENDERED: dict[tuple[str, str], tuple[str, ...]] = {
     (KIND_SKILL, "dsh"): ("name", "description"),
     (KIND_AGENT, "claude"): ("name", "description"),
     (KIND_AGENT, "codex"): ("name", "description"),
-    (KIND_AGENT, "dsh"): ("name", "description"),
+    # A delegate tool row has no field a description could ride in.
+    (KIND_AGENT, "dsh"): (),
 }
 
 # Which of a harness's own fields its copy carries. None means whatever the
@@ -109,7 +130,7 @@ _OWN_RENDERED: dict[tuple[str, str], tuple[str, ...] | None] = {
     (KIND_SKILL, "dsh"): ("whenToUse", "disable-model-invocation", "user-invocable", "metadata"),
     (KIND_AGENT, "claude"): None,
     (KIND_AGENT, "codex"): ("model", "model_reasoning_effort"),
-    (KIND_AGENT, "dsh"): ("complete", "includeRuntimeContext"),
+    (KIND_AGENT, "dsh"): ("model",),
 }
 
 Catalog = Callable[[str], "Iterable[str] | None"]
@@ -198,9 +219,8 @@ def copy_path(kind: str, name: str, harness: str) -> Path:
         return home / "agents" / f"{name}.md"
     if h == "codex":
         return home / "agents" / f"{name}.toml"
-    # A preset is a directory: the roster mounts `agent.cordis.yml` and reads
-    # display text from `preset.yml` beside it.
-    return home / ".agent-presets" / name
+    # One overlay holds every agent's delegate row.
+    return home / DSH_AGENTS_OVERLAY
 
 
 def reference_root(mind_name: str | None = None) -> Path:
@@ -433,14 +453,122 @@ def render_files(ref: Reference, harness: str) -> dict[str, str]:
                  ("name", "description", "model", "model_reasoning_effort") if key in fm]
         lines.append(f"developer_instructions = {_toml_string(ref.body)}")
         return {"": "\n".join(lines) + "\n"}
-    config = {"text": ref.body}
-    config.update({k: fm[k] for k in ("complete", "includeRuntimeContext") if k in fm})
-    preset = {k: fm[k] for k in ("name", "description") if k in fm}
-    persona = {"id": "persona", "name": _DSH_PERSONA_ROW, "config": config}
-    return {
-        "agent.cordis.yml": _dump_yaml([persona]),
-        "preset.yml": _dump_yaml(preset),
+    return {"": _dump_yaml(dsh_row(ref))}
+
+
+def dsh_tool_name(name: str) -> str:
+    """The delegate tool an agent is called by under dsh."""
+    return re.sub(r"[^a-z0-9_]", "_", name.lower())
+
+
+def _dsh_row_id(name: str) -> str:
+    return f"agent-{name}"
+
+
+def dsh_row(ref: Reference) -> dict:
+    """One agent as a dsh delegate: a `tool-subagent` row named for it.
+
+    `spawn` is the in-process provider every dsh bundle loads, and the one
+    that honours a per-tool persona. A model named in the agent's dsh block
+    pins the child; none named runs it on the conversation's model.
+    """
+    config: dict = {
+        "provider": "spawn",
+        "toolName": dsh_tool_name(ref.name),
+        "persona": ref.body,
     }
+    model = _own_fields(ref, "dsh").get("model")
+    if model:
+        config["agentOptions"] = {"model": str(model)}
+    return {"id": _dsh_row_id(ref.name), "name": _DSH_SUBAGENT_ROW, "config": config}
+
+
+def _dsh_template_refusal(ref: Reference) -> str | None:
+    """dsh renders a persona as a strict template with no escape syntax.
+
+    Any `{{` followed later by `}}` is read as a variable reference and fails
+    the child's first request; a lone `{{` is literal prose.
+    """
+    opened = ref.body.find("{{")
+    if opened >= 0 and "}}" in ref.body[opened + 2:]:
+        return (
+            f"agent {ref.name}: its body holds a {{{{...}}}} group, which dsh reads as "
+            "a prompt variable and cannot escape; the dsh delegate was left as it was"
+        )
+    return None
+
+
+# ---------------------------------------------------------------------------
+# The dsh overlay
+# ---------------------------------------------------------------------------
+
+_OVERLAY_HEADER = """\
+# Rendered from this mind's reference agents by skill_reference: one dsh
+# delegate tool per agent. Edit a row's persona or model and the next check
+# merges it into the reference; the dsh adapter loads this with --patch.
+"""
+
+
+def _overlay_rows(path: Path) -> dict[str, dict]:
+    """The delegate rows in the overlay, by row id."""
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except yaml.YAMLError as exc:
+        raise RenderError(f"{path} is not valid YAML: {exc}") from exc
+    rows: dict[str, dict] = {}
+    for entry in data or []:
+        if not isinstance(entry, dict):
+            continue
+        for row in entry.get("insert") or []:
+            if isinstance(row, dict) and row.get("id"):
+                rows[str(row["id"])] = row
+    return rows
+
+
+def _write_overlay(path: Path, rows: dict[str, dict]) -> None:
+    ordered = [rows[key] for key in sorted(rows)]
+    text = _OVERLAY_HEADER + _dump_yaml([{"insert": ordered}] if ordered else [])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def _row_fingerprint(row: dict) -> str:
+    digest = hashlib.sha256(b"row\0")
+    digest.update(json.dumps(row, sort_keys=True, ensure_ascii=False).encode())
+    return digest.hexdigest()
+
+
+def _is_overlay_copy(kind: str, harness: str) -> bool:
+    return kind == KIND_AGENT and normalize_harness(harness) == "dsh"
+
+
+def copy_fingerprint(kind: str, name: str, harness: str) -> str | None:
+    """One copy's fingerprint: its file or directory, or its overlay row."""
+    path = copy_path(kind, name, harness)
+    if _is_overlay_copy(kind, harness):
+        row = _overlay_rows(path).get(_dsh_row_id(name))
+        return _row_fingerprint(row) if row is not None else None
+    return fingerprint(path)
+
+
+def _remove_copy(kind: str, name: str, harness: str) -> None:
+    path = copy_path(kind, name, harness)
+    if _is_overlay_copy(kind, harness):
+        rows = _overlay_rows(path)
+        if rows.pop(_dsh_row_id(name), None) is not None:
+            _write_overlay(path, rows)
+        return
+    _replace(path)
 
 
 def _skip_reason(ref: Reference, harness: str) -> str | None:
@@ -449,8 +577,12 @@ def _skip_reason(ref: Reference, harness: str) -> str | None:
         return None
     if ref.kind == KIND_SKILL and not _DSH_SKILL_NAME.fullmatch(ref.name):
         return f"dsh loads no skill named {ref.name!r} (lowercase words joined by '-')"
-    if ref.kind == KIND_AGENT and not _DSH_PRESET_ID.fullmatch(ref.name):
-        return f"dsh discovers no preset named {ref.name!r}"
+    if ref.kind == KIND_AGENT:
+        tool = dsh_tool_name(ref.name)
+        if not _DSH_TOOL_NAME.fullmatch(tool):
+            return f"agent {ref.name!r} makes no dsh tool name ({tool!r})"
+        if tool in _DSH_RESERVED_TOOLS:
+            return f"agent {ref.name!r} would shadow dsh's own {tool!r} tool"
     return None
 
 
@@ -630,6 +762,24 @@ def _render_into(
                 _notify_once(entry, "blocked", reason, notify)
                 continue
         entry.pop("blocked", None)
+        if _is_overlay_copy(ref.kind, h):
+            template = _dsh_template_refusal(ref)
+            if template:
+                outcome.blocked.append({"item": label, "harness": h, "reason": template})
+                _notify_once(entry, "refused", template, notify)
+                continue
+            entry.pop("refused", None)
+            row = dsh_row(ref)
+            new_hash = _row_fingerprint(row)
+            if new_hash != copy_fingerprint(ref.kind, ref.name, h):
+                path = copy_path(ref.kind, ref.name, h)
+                rows = _overlay_rows(path)
+                rows[row["id"]] = row
+                _write_overlay(path, rows)
+                wrote = True
+            entry["fingerprint"] = new_hash
+            entry["reference"] = ref_hash
+            continue
         target = copy_path(ref.kind, ref.name, h)
         staging, staged = _stage(ref, h, source if ref.kind == KIND_SKILL else None)
         try:
@@ -687,19 +837,13 @@ def _read_copy(kind: str, name: str, harness: str) -> tuple[dict, str]:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
         body = str(data.pop("developer_instructions", ""))
         return data, body
-    rows = yaml.safe_load((path / "agent.cordis.yml").read_text(encoding="utf-8")) or []
-    persona = next(
-        (r for r in rows if isinstance(r, dict) and r.get("name") == _DSH_PERSONA_ROW), {}
-    )
-    config = dict(persona.get("config") or {})
-    body = str(config.pop("text", ""))
-    try:
-        preset = yaml.safe_load((path / "preset.yml").read_text(encoding="utf-8")) or {}
-    except FileNotFoundError:
-        preset = {}
-    fields = {k: v for k, v in preset.items() if k in ("name", "description")}
-    fields.update(config)
-    return fields, body
+    row = _overlay_rows(path).get(_dsh_row_id(name)) or {}
+    config = row.get("config") or {}
+    fields = {}
+    model = (config.get("agentOptions") or {}).get("model")
+    if model:
+        fields["model"] = model
+    return fields, str(config.get("persona") or "")
 
 
 def merged_reference(ref: Reference, harness: str) -> Reference:
@@ -754,7 +898,7 @@ def _sync_item(
         entry = item.get(h) or {}
         if not entry.get("fingerprint"):
             continue
-        current = fingerprint(copy_path(kind, name, h))
+        current = copy_fingerprint(kind, name, h)
         if current is not None and current != entry["fingerprint"]:
             edited.append(h)
 
@@ -791,7 +935,7 @@ def _sync_item(
         ref_hash = fingerprint(reference_path(kind, name, mind_name))
         # The edited copy is what the reference now says, whether or not
         # rendering it back changes a byte.
-        item[h]["fingerprint"] = fingerprint(copy_path(kind, name, h))
+        item[h]["fingerprint"] = copy_fingerprint(kind, name, h)
         item[h]["reference"] = ref_hash
         outcome.merged.append(f"{label} ({h})")
 
@@ -860,7 +1004,7 @@ def adopt(
     if load_reference(kind, name, mind_name) is not None:
         raise RenderError(f"{kind} {name} already has a reference copy")
     source = copy_path(kind, name, h)
-    if fingerprint(source) is None:
+    if copy_fingerprint(kind, name, h) is None:
         raise RenderError(f"No {h} copy of {kind} {name} to adopt")
     empty = Reference(kind, name, {"name": name}, {}, "")
     ref = merged_reference(empty, h)
@@ -877,7 +1021,7 @@ def adopt(
         _write_reference(ref, source if kind == KIND_SKILL else None, mind_name)
         item = records[kind].setdefault(name, {})
         item[h] = {
-            "fingerprint": fingerprint(source),
+            "fingerprint": copy_fingerprint(kind, name, h),
             "reference": fingerprint(reference_path(kind, name, mind_name)),
         }
         outcome.adopted.append(f"{kind} {name} ({h})")
@@ -894,7 +1038,7 @@ def remove(kind: str, name: str, mind_name: str | None = None) -> None:
         item = records[kind].pop(name, {})
         for h in HARNESSES:
             if (item.get(h) or {}).get("fingerprint"):
-                _replace(copy_path(kind, name, h))
+                _remove_copy(kind, name, h)
         _replace(reference_path(kind, name, mind_name))
         save_records(records, mind_name)
 
@@ -911,7 +1055,7 @@ def forget_record(kind: str, name: str, mind_name: str | None = None) -> None:
 def copy_status(kind: str, name: str, harness: str, mind_name: str | None = None) -> str:
     """`rendered`, `edited`, `stale`, `missing` or `unmanaged` for one copy."""
     h = normalize_harness(harness)
-    current = fingerprint(copy_path(kind, name, h))
+    current = copy_fingerprint(kind, name, h)
     entry = (load_records(mind_name)[kind].get(name) or {}).get(h) or {}
     if current is None:
         return "missing"

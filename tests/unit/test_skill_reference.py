@@ -120,37 +120,44 @@ def test_a_reference_skill_renders_each_harness_only_the_frontmatter_it_reads_an
         assert rows["notes"].state == skills_api.STATE_SAME
 
 
+def _dsh_rows(mind):
+    """The delegate rows dsh would load from the mind's agents overlay."""
+    overlay = yaml.safe_load((mind["homes"]["dsh"] / "agents.patch.yml").read_text())
+    return {row["config"]["toolName"]: row for entry in overlay for row in entry["insert"]}
+
+
 # 32
-def test_a_reference_agent_renders_a_claude_file_a_codex_toml_and_a_dsh_preset(mind):
+def test_a_reference_agent_renders_a_claude_file_a_codex_toml_and_a_dsh_delegate(mind):
     body = "You review diffs.\nBe terse.\n"
-    _write_reference_agent(mind, "reviewer", {
-        "name": "reviewer",
+    _write_reference_agent(mind, "code-reviewer", {
+        "name": "code-reviewer",
         "description": "Reviews a diff.",
         "harness": {
             "claude": {"tools": "Read, Grep"},
             "codex": {"model_reasoning_effort": "high"},
+            "dsh": {"model": "qwen3-coder"},
         },
     }, body)
 
     _check(mind)
 
-    claude_fm, claude_body = _frontmatter(mind["homes"]["claude"] / "agents" / "reviewer.md")
-    assert claude_fm == {"name": "reviewer", "description": "Reviews a diff.", "tools": "Read, Grep"}
+    claude_fm, claude_body = _frontmatter(mind["homes"]["claude"] / "agents" / "code-reviewer.md")
+    assert claude_fm == {"name": "code-reviewer", "description": "Reviews a diff.", "tools": "Read, Grep"}
     assert claude_body == body
 
-    toml = tomllib.loads((mind["homes"]["codex"] / "agents" / "reviewer.toml").read_text())
+    toml = tomllib.loads((mind["homes"]["codex"] / "agents" / "code-reviewer.toml").read_text())
     assert toml == {
-        "name": "reviewer",
+        "name": "code-reviewer",
         "description": "Reviews a diff.",
         "model_reasoning_effort": "high",
         "developer_instructions": body,
     }
 
-    preset = mind["homes"]["dsh"] / ".agent-presets" / "reviewer"
-    rows = yaml.safe_load((preset / "agent.cordis.yml").read_text())
-    persona = [row for row in rows if row["name"] == "@deepseek-ai/dsh-persona"]
-    assert persona[0]["config"]["text"] == body
-    assert yaml.safe_load((preset / "preset.yml").read_text())["description"] == "Reviews a diff."
+    row = _dsh_rows(mind)["code_reviewer"]
+    assert row["name"] == "@deepseek-ai/dsh-tool-subagent"
+    assert row["config"]["persona"] == body
+    assert row["config"]["agentOptions"] == {"model": "qwen3-coder"}
+    assert not (mind["homes"]["dsh"] / ".agent-presets").exists()
 
 
 # 33
@@ -172,7 +179,7 @@ def test_a_model_named_for_one_harness_lands_only_in_that_copy(mind):
     assert toml["model"] == "gpt-5.6-terra"
     claude_agent, _ = _frontmatter(mind["homes"]["claude"] / "agents" / "builder.md")
     assert "model" not in claude_agent
-    assert "model" not in (mind["homes"]["dsh"] / ".agent-presets" / "builder" / "agent.cordis.yml").read_text()
+    assert "agentOptions" not in _dsh_rows(mind)["builder"]["config"]
 
     claude_skill, _ = _frontmatter(mind["homes"]["claude"] / "skills" / "plan" / "SKILL.md")
     assert claude_skill["model"] == "claude-sonnet-5"
@@ -281,3 +288,45 @@ def test_a_skill_naming_a_missing_agent_or_a_spawning_phrase_is_refused_and_no_c
     assert {h: _snapshot(p) for h, p in copies.items()} == before
     assert len(outcome.refused) == 1 and named in outcome.refused[0]["reason"]
     assert len(mind["sent"]) == 1 and named in mind["sent"][0]
+
+
+# 35
+def test_an_edited_dsh_delegate_row_merges_its_persona_into_the_body(mind):
+    _write_reference_agent(mind, "builder", {
+        "name": "builder",
+        "description": "Builds.",
+        "harness": {"codex": {"model": "gpt-5.6-terra"}},
+    }, "Build it.\n")
+    _check(mind)
+    overlay = mind["homes"]["dsh"] / "agents.patch.yml"
+    edited = yaml.safe_load(overlay.read_text())
+    config = edited[0]["insert"][0]["config"]
+    config["persona"] = "Build it in small steps.\n"
+    config["agentOptions"] = {"model": "qwen3-coder"}
+    overlay.write_text(yaml.safe_dump(edited))
+
+    outcome = _check(mind)
+
+    assert outcome.merged == ["agent builder (dsh)"]
+    ref = skill_reference.load_reference("agent", "builder")
+    assert ref.body == "Build it in small steps.\n"
+    assert ref.harness == {"codex": {"model": "gpt-5.6-terra"}, "dsh": {"model": "qwen3-coder"}}
+    assert "Build it in small steps." in (mind["homes"]["claude"] / "agents" / "builder.md").read_text()
+    assert skill_reference.copy_status("agent", "builder", "dsh") == "rendered"
+
+
+# 37
+def test_a_body_dsh_would_read_as_a_template_leaves_the_dsh_delegate_and_notifies(mind):
+    path = _write_reference_agent(mind, "builder", {"name": "builder", "description": "Builds."},
+                                  "Build it.\n")
+    _check(mind)
+    overlay = mind["homes"]["dsh"] / "agents.patch.yml"
+    before = overlay.read_bytes()
+
+    path.write_text(path.read_text().replace("Build it.", "Build {{target}}."))
+    outcome = _check(mind)
+
+    assert overlay.read_bytes() == before
+    assert "Build {{target}}." in (mind["homes"]["claude"] / "agents" / "builder.md").read_text()
+    assert outcome.blocked[0]["harness"] == "dsh" and "{{" in outcome.blocked[0]["reason"]
+    assert len(mind["sent"]) == 1 and "dsh" in mind["sent"][0]
