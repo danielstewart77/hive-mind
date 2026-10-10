@@ -75,24 +75,32 @@ one write, or refuses and writes nothing.
 
 `GET /harnesses` (admin-guarded) reports each harness as offered or not, with
 the reason: its adapter loaded (one that fails to import costs that harness,
-not the server), its CLI on PATH (dsh: the launcher in the mounted tree), its
+not the server), a home of the mind's own (codex and dsh: `CODEX_HOME` /
+`DSH_HOME` declared, else `minds/<name>/.codex` / `.dsh` existing — never the
+user's `~/.codex`; otherwise "no <harness> home declared for this mind" and
+the adapter refuses to spawn it), its CLI on PATH (dsh: the launcher in the mounted tree), its
 hooks configured (Stop carrying `auto_remember` and `rotation_check`, plus a
 UserPromptSubmit hook — read from claude's `settings.json`, codex's
-`config.toml`, or `DSH_HOOKS_CONFIG` falling back to `$DSH_HOME/hooks.json`),
+`config.toml`, or `DSH_HOOKS_CONFIG` falling back to `$DSH_HOME/hooks.json` —
+the same file every dsh spawn hands its bridge),
 and a login (claude's credentials file or token, codex's `auth.json` or key,
 dsh's proxy key *and* proxy URL). The checks are a list, `mind_server.CHECKS`,
 so a deployment whose login lives elsewhere replaces one. `GET /models?harness=`
 relays that harness's listing. `/skills` and `/files` answer for the harness a
 request names (`?harness=`, the default's otherwise), and `POST /skills/check`
 runs the skills render pass — refused with 501, never faked, where it is not
-installed.
+installed; the server also runs it once at start, off the loop and never
+fatal. A codex or dsh spawn is preflighted before it answers — home, CLI,
+login, and the model in that harness's listing (an empty listing refuses
+nothing) — so a switch the gateway must undo fails while it still can.
 
 A switch hands the old conversation over as **history, not a session**:
 `POST /handover` (admin-guarded) reads the outgoing harness's own transcript
 through `minds/transcript.py` — one reader per harness, one renderer — and
-returns plain text: the summary whole in front, prose and tool calls whole,
-each tool result cut to its first lines and marked `[trimmed]`, newest first
-into the byte budget (half the window at four bytes a token, never past
+returns plain text: the summary in front (at most half the budget, keeping its
+tail), prose and tool calls whole, each tool result cut to its first lines and
+marked `[trimmed]`, newest first into the byte budget, which the output never
+exceeds (half the window at four bytes a token, never past
 120,000). A block too large for what is left is cut to half the remaining room
 and marked — prose keeps its tail, a tool call or result its head — and the
 walk goes on to older blocks, so a previous handover inside the transcript is
@@ -100,12 +108,16 @@ trimmed rather than dropped. A conversation with no transcript and no turns
 (`had_turns` false) hands over the summary alone, or nothing; a transcript
 missing after turns, or one that cannot be read, hands over the summary alone,
 and with no summary either the switch is refused with 422 and the old harness
-keeps running. Codex's rollout is found by `harness_sid`, or the mind's own
+keeps running. A `prior_handover` — one the conversation was opened on and
+never answered — leads the transcript as the user turn it was going to be, and
+stands in for a transcript the same way a summary does. Codex's rollout is found by `harness_sid`, or the mind's own
 thread for `session_id` when the gateway has none. The spawn that follows
 carries the text as `opening_turn`, which every adapter puts in front of each
 user message (`handover\n\n---\n\nmessage`) — stdin, stream-json or task file,
-never argv — until a turn completes without error, so a failed first turn
-does not spend it. It lands in the new transcript and survives the next
+never argv. Codex and dsh hold it until a turn completes without error, since
+a failed turn starts a fresh thread that needs it; claude's live process
+spends it once it is written in — it is in that transcript now — and holds it
+again only if the process dies before answering. It lands in the new transcript and survives the next
 switch. A pane takes a carry-forward the same
 way, as its first user turn, and an attach first ends the session's idle chat
 process: one live harness process per conversation. `DELETE /sessions/{id}?forget_thread=1` also
@@ -115,7 +127,7 @@ rejoins its thread.
 Each process a conversation runs in is told its own model's window
 (`HIVE_MODEL_CONTEXT_WINDOW`, and `HIVE_ROTATION_THRESHOLD_TOKENS` at this
 mind's `rotation_threshold_percent`), looked up from the proxy for that
-conversation's harness and model. `model_context_window` in the file is the
+conversation's harness and model, and omitted when nobody has measured it. `model_context_window` in the file is the
 default model's, which is the wrong room for a conversation switched to
 another; a rotation hook reads the environment first. A dsh conversation on a
 mind with no `context_window` line is sized by the same window, and a dsh
@@ -127,9 +139,9 @@ harness tree is a built working copy, bind-mounted read-only at `/opt/dsh`
 with `DSH_BIN` naming its launcher, the pattern Cypher established. Baking it
 would mean a monorepo build inside the image and a harness frozen at each
 rebuild. A host without the tree gets dsh reported unavailable, not a mind
-that fails to start. Codex and dsh keep their own homes (`CODEX_HOME`,
-`DSH_HOME`, defaulting to `minds/<name>/.codex` and `.dsh`); a mind's
-`runtime_config_dir` is read only by the harness it was written for.
+that fails to start. A codex spawn resumes the thread the gateway names (`harness_sid`) over its
+own map, which is what lets a failed switch put the conversation back. A
+mind's `runtime_config_dir` is read only by the harness it was written for.
 
 ### What a dsh mind needs that the other two do not
 

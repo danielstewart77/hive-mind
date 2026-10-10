@@ -38,6 +38,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from minds.harness.empty_turn_diagnostic import compose_empty_turn_diagnostic
 from minds.proactive import make_proactive_router
 from minds.pty_attach import (
+    PtyUnavailable,
     TmuxTerminals,
     install_pty_attach,
     mirror_turn,
@@ -76,12 +77,19 @@ NS_URL = os.environ.get("HIVE_MIND_SERVER_URL", "http://server:8420")
 # `runtime_config_dir` is codex's: one mind server runs every harness, and on
 # a claude mind that key names the claude config directory, which codex must
 # never be pointed at.
-CODEX_HOME = Path(
-    os.environ.get("CODEX_HOME")
-    or (RUNTIME.get("runtime_config_dir")
-        if runtime_api.harness_name(RUNTIME.get("harness")) == "codex" else None)
-    or str(MIND_DIR / ".codex")
+_DECLARED_CODEX_HOME = os.environ.get("CODEX_HOME") or (
+    RUNTIME.get("runtime_config_dir")
+    if runtime_api.harness_name(RUNTIME.get("harness")) == "codex" else None
 )
+#: The mind's own codex home. Never ``~/.codex``: a home that is not this
+#: mind's is another mind's login and threads. Where nothing declares one, the
+#: per-mind directory counts only if somebody made it — see `home_declared`.
+CODEX_HOME = Path(_DECLARED_CODEX_HOME or str(MIND_DIR / ".codex"))
+
+
+def home_declared() -> bool:
+    """Whether this mind has a codex home of its own to run codex in."""
+    return CODEX_HOME.is_dir()
 
 app = FastAPI(title=f"Mind: {NAME}", docs_url=None, redoc_url=None, openapi_url=None)
 install_fastapi_logging(app, log, f"mind:{NAME}")
@@ -110,6 +118,11 @@ app.include_router(make_proactive_router(PROACTIVE_BUFFER, PROACTIVE_TOKEN))
 
 
 def _setup_codex_home() -> None:
+    # Only a declared home is created. The per-mind default is a directory
+    # somebody provisions — with its login and hooks — and making it empty
+    # here would report codex as installed on a mind that never had it.
+    if not _DECLARED_CODEX_HOME:
+        return
     try:
         CODEX_HOME.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -259,6 +272,15 @@ async def start_session(body: dict) -> Any:
             {"error": "model required — the gateway resolves it per session"},
             status_code=400,
         )
+    if not home_declared():
+        return JSONResponse(
+            {"error": "no codex home declared for this mind"}, status_code=503,
+        )
+    # The thread the gateway holds for this session wins over this process's
+    # map: it is the durable copy, and a switch that failed and is being
+    # undone hands back the thread the conversation was on.
+    if body.get("harness_sid"):
+        THREADS[sid] = str(body["harness_sid"])
     # The gateway's conversation id. Codex cannot adopt it — see THREADS —
     # so it is never passed to the CLI; this session's thread is whatever
     # codex minted for it, if it has spoken at all.
@@ -492,6 +514,8 @@ def _spawn_pty(
     mints its own ids — the thread comes from ``harness_sid`` or THREADS.
     """
     del conversation_id  # codex mints its own ids; see THREADS
+    if not home_declared():
+        raise PtyUnavailable("no codex home declared for this mind")
     thread_id = _resumable_thread(session_id, harness_sid)
     pane_env = {**_pane_env(client_ref, owner_type, owner_ref), **(extra_env or {})}
 
@@ -667,6 +691,7 @@ async def _run_codex_turn(sid: str, content: str, images: list[dict] | None) -> 
 
     env = os.environ.copy()
     env.update({k: str(v) for k, v in RUNTIME_ENV.items()})
+    env["CODEX_HOME"] = str(CODEX_HOME)
     # Per-spawn metadata for the rotation_check Stop hook. The hook reads
     # these to attribute the rotation summary to the right (mind_id,
     # client_ref) row in NS's session_memory table. Empty values stay

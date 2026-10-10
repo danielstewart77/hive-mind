@@ -76,12 +76,32 @@ NS_URL = os.environ.get("HIVE_MIND_SERVER_URL", "http://server:8420")
 #: DSH_HOME is dsh's own knob: profiles, sessions and credentials live under it.
 #: Only a dsh mind's `runtime_config_dir` is dsh's — on a mind whose default
 #: harness is another, that key names the other harness's directory.
-DSH_HOME = Path(
-    os.environ.get("DSH_HOME")
-    or (RUNTIME.get("runtime_config_dir")
-        if runtime_api.harness_name(RUNTIME.get("harness")) == "dsh" else None)
-    or str(MIND_DIR / ".dsh")
+_DECLARED_DSH_HOME = os.environ.get("DSH_HOME") or (
+    RUNTIME.get("runtime_config_dir")
+    if runtime_api.harness_name(RUNTIME.get("harness")) == "dsh" else None
 )
+#: Never ``~/.dsh``: where nothing declares a home, the per-mind directory
+#: counts only if somebody made it — see `home_declared`.
+DSH_HOME = Path(_DECLARED_DSH_HOME or str(MIND_DIR / ".dsh"))
+
+
+def home_declared() -> bool:
+    """Whether this mind has a dsh home of its own to run dsh in."""
+    return DSH_HOME.is_dir()
+
+
+def hooks_config() -> str:
+    """The hook file dsh's bridge reads, or "" for none.
+
+    The environment's when it names one, else the mind's own
+    ``$DSH_HOME/hooks.json`` when that exists. The availability check asks
+    this same function, so "offered" and "runs with hooks" cannot disagree.
+    """
+    named = os.environ.get("DSH_HOOKS_CONFIG", "")
+    if named:
+        return named
+    default = DSH_HOME / "hooks.json"
+    return str(default) if default.is_file() else ""
 
 #: The profile whose bundle layers mount the resumable surface. A profile is
 #: the only thing that composes a dsh process, so naming the wrong one is a
@@ -164,6 +184,10 @@ _SAFE_SEGMENT_CHAR = re.compile(r"[A-Za-z0-9._-]")
 
 
 def _setup_dsh_home() -> None:
+    # Only a declared home is created, for the reason codex's is: an empty
+    # per-mind default would report dsh installed on a mind that never had it.
+    if not _DECLARED_DSH_HOME:
+        return
     try:
         DSH_HOME.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -360,6 +384,8 @@ def _pane_env(
     env["DSH_HOME"] = str(DSH_HOME)
     env["DSH_PERMISSION_MODE"] = _permission_mode()
     env["HIVE_SURFACE"] = "terminal"
+    if hooks_config():
+        env["DSH_HOOKS_CONFIG"] = hooks_config()
     # The pane prints its own prompt and banner, and the interactive surface
     # ships to every dsh mind — so it reads the name from here rather than
     # carrying one mind's name in code every other install would be lying with.
@@ -388,6 +414,8 @@ def _spawn_pty(
     composed system prompt as queued standing context instead.
     """
     del harness_sid
+    if not home_declared():
+        raise PtyUnavailable("no dsh home declared for this mind")
     state = SESSIONS.get(session_id)
     if state is not None and state.get("in_flight"):
         raise PtyUnavailable("a chat turn is still running for this conversation")
@@ -747,6 +775,8 @@ async def start_session(body: dict) -> Any:
             {"error": "model required — the gateway resolves it per session"},
             status_code=400,
         )
+    if not home_declared():
+        return JSONResponse({"error": "no dsh home declared for this mind"}, status_code=503)
     system_prompt_blocks = body.get("system_prompt_blocks") or ""
     surface_prompt = body.get("surface_prompt")
     # Spawn-env metadata for the rotation hook, which reads it to attribute the
@@ -956,6 +986,8 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
         return
     env["DSH_HOME"] = str(DSH_HOME)
     env["DSH_PERMISSION_MODE"] = _permission_mode()
+    if hooks_config():
+        env["DSH_HOOKS_CONFIG"] = hooks_config()
     for key, name in (("client_ref", "CLIENT_REF"), ("owner_type", "OWNER_TYPE"),
                       ("owner_ref", "OWNER_REF")):
         if state.get(key):

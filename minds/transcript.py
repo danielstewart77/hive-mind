@@ -208,7 +208,7 @@ def read_claude(path: Path) -> list[dict]:
 #: was said by anyone.
 _CODEX_INJECTED = (
     "<environment_context", "<user_instructions", "<permissions instructions",
-    "# AGENTS.md instructions",
+    "<recommended_plugins", "# AGENTS.md instructions",
 )
 
 
@@ -394,17 +394,38 @@ def _omitted(count: int) -> str:
     return f"[{count} earlier entries omitted]"
 
 
-def render(blocks: list[dict], *, summary: str = "", budget_bytes: int | None = None) -> str:
-    """The handover: summary whole in front, then as much transcript as fits.
+def _summary_head(summary: str, room: int) -> str:
+    """The summary section, cut to its tail when it would take more than ``room``."""
+    summary = summary.strip()
+    if not summary:
+        return ""
+    head = f"{_SUMMARY_HEADING}\n{summary}"
+    if len(head.encode("utf-8")) <= room:
+        return head
+    prefix = f"{_SUMMARY_HEADING}\n{TRIMMED}\n"
+    keep = max(0, room - len(prefix.encode("utf-8")))
+    tail = summary.encode("utf-8")[-keep:].decode("utf-8", errors="ignore") if keep else ""
+    return prefix + tail
 
-    The budget is in bytes, and never more than :data:`MAX_HANDOVER_BYTES`.
-    The oldest blocks go first and the summary never does — it is the one part
-    written to stand in for everything before it.
+
+def render(blocks: list[dict], *, summary: str = "", budget_bytes: int | None = None,
+           prior_handover: str = "") -> str:
+    """The handover: summary in front, then as much transcript as fits.
+
+    The budget is in bytes, never more than :data:`MAX_HANDOVER_BYTES`, and the
+    output never exceeds it. The summary takes at most half, keeping its tail
+    when it must be cut; the transcript has the rest, newest first.
+
+    ``prior_handover`` is a handover the conversation was opened on and never
+    answered — a switch made before any turn. It leads the transcript as the
+    user turn it was going to be, and like any prose keeps its tail when cut.
     """
     budget = min(MAX_HANDOVER_BYTES, budget_bytes or MAX_HANDOVER_BYTES)
     if budget <= 0:
         budget = MAX_HANDOVER_BYTES
-    head = f"{_SUMMARY_HEADING}\n{summary.strip()}" if summary.strip() else ""
+    if prior_handover.strip():
+        blocks = [_block("user", "text", prior_handover.strip())] + list(blocks)
+    head = _summary_head(summary, budget // 2)
     rendered = [render_block(b) for b in blocks]
 
     def size(text: str) -> int:

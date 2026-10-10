@@ -214,3 +214,40 @@ class TestReaderEdges:
 
         assert rendered.endswith(transcript.TRIMMED)
         assert len(rendered.encode("utf-8")) <= transcript.RESULT_BYTES + 64
+
+
+SCAFFOLDED = FIXTURES / "rollout-2026-10-10T14-17-31-01a1262d-156a-77e3-90c9-6f1621d96390.jsonl"
+
+
+class TestRoundTwo:
+    def test_codex_scaffolding_never_reads_as_something_the_user_said(self):
+        blocks = transcript.read_codex(SCAFFOLDED)
+        said = [b["text"] for b in blocks if b["role"] == "user" and b["kind"] == "text"]
+
+        assert said[0].startswith("[Saturday, October 10, 2026 at 9:17 AM CDT]\nNope, remove")
+        assert any(t.startswith("[Saturday, October 10, 2026 at 10:08 AM CDT]") for t in said)
+        joined = "\n".join(said)
+        assert "<recommended_plugins>" not in joined
+        assert "# AGENTS.md instructions" not in joined
+
+    def test_an_oversized_summary_keeps_its_tail_within_half_the_budget(self):
+        summary = "SUMMARY-START " + "s" * 40_000 + " SUMMARY-END"
+        blocks = [{"role": "user", "kind": "text", "text": "the latest question", "name": ""}]
+
+        text = transcript.render(blocks, summary=summary, budget_bytes=10_000)
+
+        assert len(text.encode("utf-8")) <= 10_000
+        assert "SUMMARY-END" in text and "SUMMARY-START" not in text
+        assert transcript.TRIMMED in text.split("Transcript of")[0]
+        assert "User: the latest question" in text
+        assert text.index("SUMMARY-END") < text.index("the latest question")
+
+    def test_a_prior_handover_leads_the_transcript_and_keeps_its_tail(self):
+        prior = "PRIOR-START " + "p" * 30_000 + " PRIOR-END"
+        blocks = [{"role": "user", "kind": "text", "text": "after the switch", "name": ""}]
+
+        text = transcript.render(blocks, prior_handover=prior, budget_bytes=6_000)
+
+        assert len(text.encode("utf-8")) <= 6_000
+        assert "PRIOR-END" in text and "PRIOR-START" not in text
+        assert text.index("PRIOR-END") < text.index("after the switch")

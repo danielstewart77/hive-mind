@@ -704,8 +704,14 @@ async def send(sid: str, body: dict) -> Any:
     sess["in_flight"] = True
     proc.stdin.write(msg.encode() + b"\n")
     await proc.stdin.drain()
+    # Written into a live process, the handover is in that conversation's
+    # transcript now, whatever its first result says — repeating it would put
+    # it there twice. Held again only if the process dies before answering.
+    delivered = sess.pop("opening_turn", None)
+    finished = False
 
     async def stream() -> Any:
+        nonlocal finished
         stdout_lock = sess.get("stdout_lock")
         spoken: list[str] = []
         try:
@@ -722,7 +728,7 @@ async def send(sid: str, body: dict) -> Any:
                     event = json.loads(decoded)
                     spoken.extend(_assistant_texts(event))
                     if event.get("type") == "result":
-                        transcript.settle_opening_turn(sess, ok=not event.get("is_error"))
+                        finished = True
                         cs = event.get("session_id")
                         if cs:
                             sess["resume_sid"] = cs
@@ -730,6 +736,8 @@ async def send(sid: str, body: dict) -> Any:
                 except json.JSONDecodeError:
                     continue
         finally:
+            if delivered and not finished and proc.returncode is not None:
+                sess["opening_turn"] = delivered
             # A tile open on this session showed none of the above — its
             # harness process wasn't involved in the turn at all.
             mirror_turn(sid, mind_name=NAME, assistant_texts=spoken,
