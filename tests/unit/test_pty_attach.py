@@ -670,19 +670,6 @@ class TestClaudeCliWiring:
         assert "-p" not in cmd
         assert "--input-format" not in cmd
 
-    @pytest.mark.parametrize("effort,expected", [("max", ["--effort", "max"]), (None, [])])
-    def test_the_pane_and_its_rotation_run_at_the_conversations_effort(
-        self, claude, monkeypatch, effort, expected,
-    ):
-        """Unset passes nothing, leaving the harness its own configured level."""
-        monkeypatch.setattr(claude, "claude_conversation_flags",
-                            lambda cid, _dir: ["--session-id", cid])
-        for argv in (claude._terminal_argv("opus", "conv-9", effort),
-                     claude._rotation_argv("opus", "conv-9", effort)):
-            flag = argv[argv.index("--effort"):argv.index("--effort") + 2] \
-                if "--effort" in argv else []
-            assert flag == expected
-
     def test_rotation_starts_a_fresh_conversation_rather_than_resuming(self, claude):
         argv = claude._rotation_argv("sonnet", "conv-2")
         assert argv[argv.index("--session-id") + 1] == "conv-2"
@@ -993,15 +980,6 @@ class TestCodexCliThreads:
         for arg in codex._provider_args():
             assert arg in cmd
 
-    @pytest.mark.parametrize("effort,expected", [
-        ("high", ['-c', 'model_reasoning_effort="high"']), (None, []),
-    ])
-    def test_the_codex_pane_runs_at_the_conversations_effort(self, codex, effort, expected):
-        cmd = codex._terminal_argv("gpt-5.6-terra", "codex-thread-4", effort)
-
-        reasoning = [a for a in cmd if "model_reasoning_effort" in a]
-        assert (["-c", reasoning[0]] if reasoning else []) == expected
-
     def test_the_pane_carries_the_session_metadata_the_hooks_need(self, codex):
         env = codex._pane_env("chat-7", "telegram", "daniel")
         assert env["CLIENT_REF"] == "chat-7"
@@ -1190,3 +1168,52 @@ class TestSeedEntryPoint:
         done = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
         assert done.returncode == 0
         assert "harness-ran" in done.stdout
+
+
+def _pane_recorders(harness, monkeypatch):
+    """The tmux boundary of a harness's terminal, recording what each pane
+    is started and respawned with."""
+    seen: dict = {}
+    monkeypatch.setattr(harness.TERMINALS, "start",
+                        lambda sid, argv, **kw: seen.update(start=" ".join(argv)))
+    monkeypatch.setattr(harness.TERMINALS, "respawn",
+                        lambda sid, argv, **kw: seen.update(respawn=" ".join(argv)))
+    monkeypatch.setattr(harness.TERMINALS, "alive", lambda sid: True)
+    monkeypatch.setattr(
+        harness.TERMINALS, "attach",
+        lambda sid, **kw: (types_SimpleNamespace(pid=1, poll=lambda: None), -1),
+    )
+    return seen
+
+
+@pytest.mark.parametrize("harness_name,flag", [
+    ("claude", "--effort max"),
+    ("codex", 'model_reasoning_effort="max"'),
+])
+def test_a_pane_and_its_rotation_run_at_the_conversations_effort(
+    monkeypatch, tmp_path, harness_name, flag,
+):
+    """Fresh or rotated, the pane gets the level; unset, it gets none."""
+    import importlib
+
+    harness = importlib.import_module(f"minds.harness.{harness_name}_cli")
+    for attr in ("CONFIG_DIR", "CODEX_HOME"):
+        if hasattr(harness, attr):
+            monkeypatch.setattr(harness, attr, tmp_path)
+    if hasattr(harness, "THREADS"):
+        harness.THREADS.clear()
+    for name in ("_watch_for_new_thread_in_background", "_watch_for_new_thread"):
+        if hasattr(harness, name):
+            monkeypatch.setattr(harness, name, lambda *a, **k: None)
+    seen = _pane_recorders(harness, monkeypatch)
+
+    harness._spawn_pty(session_id="e1", model="opus", conversation_id="conv-1",
+                       cols=80, rows=24, effort="max")
+    harness._rotate_pty(session_id="e1", new_claude_sid="conv-2", model="opus",
+                        system_prompt="seed", effort="max")
+    assert flag in seen["start"]
+    assert flag in seen["respawn"]
+
+    harness._spawn_pty(session_id="e2", model="opus", conversation_id="conv-3",
+                       cols=80, rows=24)
+    assert flag.split()[0].split("=")[0] not in seen["start"]
