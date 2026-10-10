@@ -113,8 +113,8 @@ async def test_the_listing_is_fetched_with_this_minds_own_proxy_key(wire, runtim
 
 @pytest.mark.asyncio
 async def test_a_codex_mind_is_listed_the_shape_its_harness_speaks(wire, runtime_file):
-    """The endpoint identifies the harness; a codex mind asks the other one."""
-    seen = wire({"/v1/models": CODEX_ROWS})
+    """The listing is filtered to the harness, so a codex mind names codex."""
+    seen = wire({"/v1/models?harness=codex": CODEX_ROWS})
     path = runtime_file(harness="codex_cli", env={
         "INFERENCE_PROXY_URL": "http://proxy:8899",
         "OPENAI_API_KEY": "hmp-nagatha",
@@ -122,8 +122,26 @@ async def test_a_codex_mind_is_listed_the_shape_its_harness_speaks(wire, runtime
 
     rows = await models_api.build_catalog(path)
 
-    assert seen[0][0] == "http://proxy:8899/v1/models"
+    assert seen[0][0] == "http://proxy:8899/v1/models?harness=codex"
     assert [r["name"] for r in rows] == ["gpt-5.4"]
+
+
+@pytest.mark.asyncio
+async def test_a_dsh_mind_names_its_own_harness_rather_than_borrowing_codexs(
+    wire, runtime_file
+):
+    """dsh speaks every wire, so the proxy offers it everything — but only
+    when asked as dsh. Asked as codex, it would lose every Claude model."""
+    seen = wire({"/v1/models?harness=dsh": CLAUDE_ROWS})
+    path = runtime_file(harness="dsh_cli", env={
+        "INFERENCE_PROXY_URL": "http://proxy:8899",
+        "OPENAI_API_KEY": "hmp-bob",
+    })
+
+    rows = await models_api.build_catalog(path)
+
+    assert seen[0][0] == "http://proxy:8899/v1/models?harness=dsh"
+    assert [r["name"] for r in rows] == ["claude-opus-5", "qwen35-131k"]
 
 
 @pytest.mark.asyncio
