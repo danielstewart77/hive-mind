@@ -554,6 +554,18 @@ async def cmd_model(interaction: discord.Interaction, name: str = None):
     await interaction.followup.send(msg, ephemeral=True)
 
 
+@bot.tree.command(name="effort", description="List or set this conversation's reasoning effort")
+@app_commands.describe(level="Effort level to set, or 'default' (omit to list)")
+async def cmd_effort(interaction: discord.Interaction, level: str = None):
+    if not _is_allowed_user(interaction.user.id):
+        await interaction.response.send_message("Not authorized.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    cmd = f"/effort {level}" if level else "/effort"
+    msg = await _handle_server_command(cmd, interaction.user.id, interaction.channel_id)
+    await interaction.followup.send(msg, ephemeral=True)
+
+
 @bot.tree.command(name="autopilot", description="Toggle autopilot mode")
 async def cmd_autopilot(interaction: discord.Interaction):
     if not _is_allowed_user(interaction.user.id):

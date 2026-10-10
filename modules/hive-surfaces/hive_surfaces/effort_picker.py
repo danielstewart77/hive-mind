@@ -33,8 +33,13 @@ def levels_from(result: object) -> list[str]:
     return [str(level) for level in levels if isinstance(level, str) and level]
 
 
+#: The level that hands the conversation back to the harness's own setting.
+DEFAULT = "default"
+
+
 def build_effort_keyboard(result: object) -> InlineKeyboardMarkup | None:
-    """One button per level in the model's order, the current one ticked.
+    """One button per level in the model's order, the current one ticked,
+    then one that returns the conversation to the harness's own level.
 
     ``None`` when the model takes no effort setting — the caller says so in a
     sentence rather than drawing an empty keyboard.
@@ -43,18 +48,23 @@ def build_effort_keyboard(result: object) -> InlineKeyboardMarkup | None:
     if not levels:
         return None
     current = result.get("current") if isinstance(result, dict) else None
-    return InlineKeyboardMarkup([
+    rows = [
         [InlineKeyboardButton(
-            f"{level} ✓" if level == current else level,
+            f"{level} \u2713" if level == current else level,
             callback_data=encode(level),
         )]
         for level in levels
-    ])
+    ]
+    rows.append([InlineKeyboardButton(
+        f"{DEFAULT} \u2713" if not current else DEFAULT, callback_data=encode(DEFAULT),
+    )])
+    return InlineKeyboardMarkup(rows)
 
 
 def format_effort_result(result: object) -> str:
     """What a typed `/effort <level>` reports once the gateway answers."""
-    effort = result.get("effort") if isinstance(result, dict) else None
-    if not effort:
-        return "No effort change was made — send /effort to pick one."
-    return f"Effort set to {effort}"
+    if not isinstance(result, dict) or "effort" not in result:
+        return "No effort change was made \u2014 send /effort to pick one."
+    if not result.get("effort"):
+        return "Effort back to the harness default"
+    return f"Effort set to {result['effort']}"

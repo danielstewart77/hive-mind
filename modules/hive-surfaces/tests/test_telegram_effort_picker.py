@@ -74,8 +74,19 @@ class TestTheKeyboard:
 
         assert asked.await_args.args[2] == "/effort"
         markup = context.bot.send_message.await_args.kwargs["reply_markup"]
-        assert _payloads(markup) == [effort_picker.encode(lv) for lv in LEVELS["levels"]]
+        assert _payloads(markup) == [effort_picker.encode(lv) for lv in [*LEVELS["levels"], "default"]]
         assert [lb for lb in _labels(markup) if "✓" in lb] == ["high ✓"]
+
+    @pytest.mark.asyncio
+    async def test_a_conversation_on_no_chosen_level_has_default_ticked(self):
+        update, context = _update()
+
+        with patch.object(tb, "gateway", MagicMock(server_command=AsyncMock(
+                    return_value=dict(LEVELS, current=None)))):
+            await tb.cmd_effort(update, context)
+
+        markup = context.bot.send_message.await_args.kwargs["reply_markup"]
+        assert [lb for lb in _labels(markup) if "\u2713" in lb] == ["default \u2713"]
 
     @pytest.mark.asyncio
     async def test_a_model_taking_no_effort_gets_a_sentence_and_no_keyboard(self):
@@ -115,6 +126,7 @@ class TestTheKeyboard:
 
     def test_a_set_reports_the_level_the_gateway_recorded(self):
         assert effort_picker.format_effort_result({"effort": "max"}) == "Effort set to max"
+        assert "default" in effort_picker.format_effort_result({"effort": None})
         assert "No effort change" in effort_picker.format_effort_result({})
 
 
