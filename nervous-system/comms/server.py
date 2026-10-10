@@ -57,15 +57,15 @@ session_mgr = SessionManager()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await session_mgr.start()
-
     # Broker DB init + startup recovery. broker.minds IS the mind
     # registry — there is no in-memory cache. Every lookup queries the
-    # DB directly. Single source of truth.
+    # DB directly. Single source of truth. Wired before the session
+    # manager starts, whose migrations read each mind's registration.
     _broker_db_path = os.environ.get("BROKER_DB_PATH", str(PROJECT_DIR / "data" / "broker.db"))
     Path(_broker_db_path).parent.mkdir(parents=True, exist_ok=True)
     app.state.broker_db = await broker.init_db(_broker_db_path)
     session_mgr.broker_db = app.state.broker_db
+    await session_mgr.start()
 
     pending = await broker.recover_stranded_messages(app.state.broker_db)
     for msg in pending:

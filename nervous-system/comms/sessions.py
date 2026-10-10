@@ -448,6 +448,7 @@ class SessionManager:
             await self._db.commit()
         except Exception:
             pass  # Column already exists
+        await self._backfill_harness()
         # Backfill: every session owns a conversation id. Rows created before
         # the id was minted at session creation may still be blank — those are
         # sessions that never finished a turn, so there is no conversation on
@@ -467,6 +468,31 @@ class SessionManager:
         await self._db.commit()
         self._dashboard_sweep_task = asyncio.create_task(self._dashboard_sweep_loop())
         log.info("Session manager started (db=%s)", db_path)
+
+    async def _backfill_harness(self) -> None:
+        """Give every row from before the harness column its mind's harness.
+
+        Settled here, once, from each mind's registration at the time the
+        column arrived — never re-derived later from a default that may have
+        changed under a live conversation. Needs the broker wired before
+        `start`; a row whose mind is not registered stays NULL.
+        """
+        if self.broker_db is None:
+            return
+        try:
+            cur = await self.broker_db.execute("SELECT mind_id, harness FROM minds")
+            minds = await cur.fetchall()
+        except Exception:
+            log.exception("harness backfill: could not read broker minds")
+            return
+        for mind_id, harness in minds:
+            name = normalise_harness(harness)
+            if name:
+                await self._db.execute(
+                    "UPDATE sessions SET harness = ? WHERE mind_id = ? AND harness IS NULL",
+                    (name, mind_id),
+                )
+        await self._db.commit()
 
     async def shutdown(self):
         """Kill all subprocesses and close DB."""
@@ -529,6 +555,11 @@ class SessionManager:
                     f"no model: caller did not specify and mind_id={mind_id} "
                     "is not in broker.minds (or has no model column set)"
                 )
+
+        if not rotated_from:
+            await self._refuse_unavailable_harness(
+                mind_id, normalise_harness((mind_row or {}).get("harness"))
+            )
 
         session_id = str(uuid.uuid4())
         # The conversation id is minted HERE and nowhere else. A session owns
@@ -1184,11 +1215,16 @@ class SessionManager:
         # old conversation after the new seed has been written. Unscoped, that
         # straggler clears a seed composed after it, for a conversation it
         # never saw, and the pane it was meant for opens bare.
+        #
+        # A codex hook knows only the thread codex minted, which the row
+        # holds as `harness_sid` beside the gateway's own id; either names
+        # the current conversation.
         if claude_sid:
             await self._db.execute(
                 "UPDATE sessions SET carry_forward = NULL, carry_forward_sid = NULL, carry_forward_at = NULL "
-                "WHERE id = ? AND carry_forward_sid = ?",
-                (active["id"], claude_sid),
+                "WHERE id = ? AND (carry_forward_sid = ? "
+                "OR (harness_sid = ? AND carry_forward_sid = claude_sid))",
+                (active["id"], claude_sid, claude_sid),
             )
         else:
             await self._db.execute(
@@ -1383,7 +1419,9 @@ class SessionManager:
         # The hook reports the conversation the message was typed into. A
         # straggling hook process from before an earlier swap would otherwise
         # fire this one's rotation against a pane that has already moved on.
-        if claude_sid and active.get("claude_sid") and claude_sid != active["claude_sid"]:
+        # A codex hook reports codex's thread id rather than the gateway's.
+        current = {active.get("claude_sid"), active.get("harness_sid")} - {None, ""}
+        if claude_sid and current and claude_sid not in current:
             return {"ok": False, "error": "stale conversation", "session_id": session_id}
 
         # What the successor opens on: the seed and the typed message as one
@@ -1855,6 +1893,12 @@ class SessionManager:
             await self._db.commit()
 
             if session["status"] == "idle" and session_id not in self._procs:
+                # A row that never took a turn is a new conversation in all
+                # but name, and is held to the same rule as one.
+                if not await self._had_turns(session_id):
+                    await self._refuse_unavailable_harness(
+                        session["mind_id"], await self.conversation_harness(session)
+                    )
                 routing = await self._routing_for(session)
                 await self._spawn(
                     session_id,
@@ -2350,6 +2394,18 @@ class SessionManager:
         mind_id = session["mind_id"]
         target = normalise_harness(harness)
 
+        # A pane's harness lives in tmux, out of reach of the kill below: a
+        # switch under it would leave the old CLI running on the transcript
+        # beside the new one.
+        if (session.get("owner_type") or "").split(":", 1)[0] == TERMINAL_OWNER_TYPE:
+            raise ValueError(
+                "the conversation is open in a terminal; close it or /switch "
+                "to chat first"
+            )
+        # The same harness is not a handover: its own transcript resumes.
+        if target == await self.conversation_harness(session):
+            return await self.switch_model(session_id, model)
+
         lock = self._claim_turn_lock(session_id)
         async with lock:
             listing = await self.mind_harnesses(mind_id)
@@ -2384,9 +2440,18 @@ class SessionManager:
                 harness=old_harness,
                 claude_sid=session.get("claude_sid") or "",
                 harness_sid=session.get("harness_sid") or "",
-                summary=await self._latest_session_memory(session_id),
+                summary=await self._latest_session_memory(session),
                 budget_bytes=handover_budget_bytes(offered.get("context_window")),
+                had_turns=await self._had_turns(session_id),
+                session_id=session_id,
             )
+            # Switched again before any turn: the previous handover never
+            # reached a transcript, so nothing on disk renders it. It is
+            # still the conversation, so it travels on.
+            if not handover.strip():
+                handover = await self.get_carry_forward(
+                    session_id, session.get("claude_sid") or ""
+                ) or handover
 
             await self._kill_process(session_id, forget_thread=True)
             new_claude_sid = str(uuid.uuid4())
@@ -2471,18 +2536,31 @@ class SessionManager:
         )
         return await self._session_dict(session_id)
 
-    async def _latest_session_memory(self, session_id: str) -> str:
-        """The latest rotation summary written for this session, as text.
+    async def _latest_session_memory(self, session: dict) -> str:
+        """The latest rotation summary written for this conversation, as text.
 
-        Rows are a JSON envelope whose ``carry_forward`` is the rendered
-        summary; older rows are the summary itself.
+        The rotation hook files its summary under the conversation id it
+        knows — the gateway's ``claude_sid``, or codex's own thread id — so
+        those are asked first, newest wins; a summary filed under the row's
+        id is the fallback. Rows are a JSON envelope whose ``carry_forward``
+        is the rendered summary; older rows are the summary itself.
         """
-        cur = await self._db.execute(
-            "SELECT body FROM session_memory WHERE session_id = ? "
-            "ORDER BY created_at DESC, id DESC LIMIT 1",
-            (session_id,),
-        )
-        row = await cur.fetchone()
+        row = None
+        for keys in (
+            [k for k in (session.get("claude_sid"), session.get("harness_sid")) if k],
+            [session["id"]],
+        ):
+            if not keys:
+                continue
+            marks = ",".join("?" for _ in keys)
+            cur = await self._db.execute(
+                f"SELECT body FROM session_memory WHERE session_id IN ({marks}) "
+                "ORDER BY created_at DESC, id DESC LIMIT 1",
+                keys,
+            )
+            row = await cur.fetchone()
+            if row:
+                break
         raw = (row["body"] if row else "") or ""
         try:
             envelope = json.loads(raw)
@@ -2493,13 +2571,43 @@ class SessionManager:
             return text.strip() if isinstance(text, str) else ""
         return raw.strip()
 
+    async def _had_turns(self, session_id: str) -> bool:
+        """Whether this session's ledger holds any turn at all."""
+        cur = await self._db.execute(
+            "SELECT 1 FROM session_turns WHERE session_id = ? LIMIT 1", (session_id,)
+        )
+        return await cur.fetchone() is not None
+
+    async def _refuse_unavailable_harness(self, mind_id: str, harness: str) -> None:
+        """Refuse a new conversation on a harness the mind reports unavailable.
+
+        Never moved to another harness: the mind's default is the operator's
+        choice, and a quiet substitute is how a wrong harness goes unnoticed.
+        A mind that cannot answer — one predating the listing among them —
+        is not refused here; its spawn reports its own failure.
+        """
+        if not harness:
+            return
+        listing = await self.mind_harnesses(mind_id)
+        if not listing:
+            return
+        entry = next(
+            (h for h in listing["harnesses"] if h.get("name") == harness), None,
+        )
+        if entry is not None and not entry.get("available"):
+            raise ValueError(
+                f"{harness} isn't available on this mind: "
+                f"{entry.get('reason') or 'no reason given'}."
+            )
+
     async def conversation_harness(self, session: dict) -> str:
         """The harness this conversation runs on, as a bare name.
 
-        A row written before the column existed carries none; it is resolved
-        from the mind's registration and written back, so the answer is
-        settled once rather than re-derived from a default that can change
-        under a live conversation. Empty when the mind cannot be resolved.
+        Every row carries one: written at creation, and filled by the
+        start-up backfill for rows from before the column. A row the
+        backfill could not settle — its mind was not registered then — is
+        answered from the mind's registration now, without writing it.
+        Empty when the mind cannot be resolved.
         """
         if session.get("harness"):
             return session["harness"]
@@ -2507,14 +2615,7 @@ class SessionManager:
             mind_row = await self._get_mind_row(session["mind_id"])
         except Exception:
             return ""
-        harness = normalise_harness((mind_row or {}).get("harness"))
-        if harness and session.get("id"):
-            await self._db.execute(
-                "UPDATE sessions SET harness = ? WHERE id = ? AND harness IS NULL",
-                (harness, session["id"]),
-            )
-            await self._db.commit()
-        return harness
+        return normalise_harness((mind_row or {}).get("harness"))
 
     # ------------------------------------------------------------------
     # Effort
@@ -3234,6 +3335,8 @@ class SessionManager:
         harness_sid: str,
         summary: str,
         budget_bytes: int,
+        had_turns: bool = False,
+        session_id: str = "",
     ) -> str:
         """Ask the mind to render a conversation on ``harness`` as plain text.
 
@@ -3255,6 +3358,12 @@ class SessionManager:
                         "harness_sid": harness_sid,
                         "summary": summary,
                         "budget_bytes": budget_bytes,
+                        # A conversation that took turns has a transcript;
+                        # one missing then is unreadable, not empty.
+                        "had_turns": had_turns,
+                        # Lets a codex mind find the thread from its own map
+                        # when the row holds no thread id.
+                        "session_id": session_id,
                     },
                     headers=self._mind_admin_headers(),
                     timeout=aiohttp.ClientTimeout(total=30),
