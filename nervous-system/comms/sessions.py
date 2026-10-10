@@ -158,7 +158,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     context_window INTEGER,
     context_observed_at REAL,
     effort        TEXT,
-    harness       TEXT
+    harness       TEXT,
+    terminal_held INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS active_sessions (
@@ -448,14 +449,26 @@ class SessionManager:
         # The harness this conversation runs on, as a bare name. A property
         # of the conversation like its model: written at creation from the
         # mind's default, carried by a rotation, changed only by a switch.
-        # Rows from before the column are resolved from the mind's
-        # registration on first use (see conversation_harness).
+        # Rows from before the column are filled from the mind's
+        # registration right after (see _backfill_harness).
         try:
             await self._db.execute("ALTER TABLE sessions ADD COLUMN harness TEXT")
             await self._db.commit()
         except Exception:
             pass  # Column already exists
         await self._backfill_harness()
+        # Whether a browser pane holds this conversation's harness. Set on
+        # adoption into a terminal and cleared when that pane is released or
+        # the conversation closes — not read off `owner_type`, which a
+        # conversation adopted while keeping its chat ownership does not
+        # change, and whose pane a harness switch could not kill.
+        try:
+            await self._db.execute(
+                "ALTER TABLE sessions ADD COLUMN terminal_held INTEGER NOT NULL DEFAULT 0"
+            )
+            await self._db.commit()
+        except Exception:
+            pass  # Column already exists
         # Backfill: every session owns a conversation id. Rows created before
         # the id was minted at session creation may still be blank — those are
         # sessions that never finished a turn, so there is no conversation on
@@ -916,6 +929,13 @@ class SessionManager:
             raise MindCallFailed(
                 f"could not release {surface} for session {session_id}: {exc}"
             ) from exc
+        if surface == "terminal":
+            # Released, or nothing there to release: either way no pane holds
+            # it now.
+            await self._db.execute(
+                "UPDATE sessions SET terminal_held = 0 WHERE id = ?", (session_id,)
+            )
+            await self._db.commit()
         if released and surface == "terminal":
             await self._downgrade_staged_rotation(session_id)
         return released
@@ -1799,7 +1819,7 @@ class SessionManager:
         async with lock:
             await self._db.execute(
                 """UPDATE sessions
-                      SET owner_type = ?, owner_ref = ?,
+                      SET owner_type = ?, owner_ref = ?, terminal_held = 1,
                           rotation_armed = CASE rotation_armed
                               WHEN ? THEN 0 ELSE rotation_armed END
                     WHERE id = ?""",
@@ -2404,7 +2424,10 @@ class SessionManager:
         # A pane's harness lives in tmux, out of reach of the kill below: a
         # switch under it would leave the old CLI running on the transcript
         # beside the new one.
-        if (session.get("owner_type") or "").split(":", 1)[0] == TERMINAL_OWNER_TYPE:
+        if (
+            session.get("terminal_held")
+            or (session.get("owner_type") or "").split(":", 1)[0] == TERMINAL_OWNER_TYPE
+        ):
             raise ValueError(
                 "the conversation is open in a terminal; close it or /switch "
                 "to chat first"
@@ -2956,7 +2979,8 @@ class SessionManager:
             await self._db.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
         else:
             await self._db.execute(
-                "UPDATE sessions SET status = 'closed' WHERE id = ?", (session_id,)
+                "UPDATE sessions SET status = 'closed', terminal_held = 0 WHERE id = ?",
+                (session_id,),
             )
             await self._db.execute(
                 "DELETE FROM active_sessions WHERE session_id = ?", (session_id,)

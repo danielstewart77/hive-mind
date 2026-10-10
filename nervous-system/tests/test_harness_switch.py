@@ -1140,3 +1140,85 @@ def test_a_window_over_240k_is_budgeted_at_the_byte_ceiling():
             await _close(mgr)
 
     _run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# Round 3
+# ---------------------------------------------------------------------------
+
+def test_a_claude_conversations_summary_filed_under_its_conversation_id_is_handed_over(app_client):
+    client, server_module = app_client
+    mgr = server_module.session_mgr
+    _run(_seed(mgr))
+    assert client.post("/sessions/conv-1/rotation-memory", json={
+        "mind_id": MIND, "client_ref": "123",
+        "body": json.dumps({"carry_forward": "filed under the claude conversation id"}),
+    }).status_code == 200
+    mind = FakeMind()
+    with mind.wired(), _soul():
+        body = _command(client, "/harness codex gpt-5.6-terra")
+    assert body.get("harness") == "codex", body
+    assert mind.sent("POST", "/handover")[0]["json"]["summary"] == (
+        "filed under the claude conversation id"
+    )
+
+
+def test_the_backfill_never_overwrites_a_row_that_already_has_a_harness():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp, harness="claude_cli")
+            await _seed(mgr, harness="codex", model="gpt-5.6-terra")
+            await _close(mgr)
+
+            restarted = SessionManager()
+            restarted.broker_db = await broker.init_db(os.path.join(tmp, "broker.db"))
+            await restarted.start()
+            _OPEN.append(restarted)
+            assert (await restarted._get_row("sess-1"))["harness"] == "codex"
+            await _close(restarted)
+
+    _run(scenario())
+
+
+async def _adopted_but_chat_owned(mgr):
+    """Adopted into a pane, with the row still naming the chat as its owner."""
+    await mgr.adopt_into_terminal("sess-1")
+    await mgr._db.execute(
+        "UPDATE sessions SET owner_type = 'telegram', owner_ref = '123' WHERE id = 'sess-1'"
+    )
+    await mgr._db.commit()
+
+
+def test_a_pane_holding_a_chat_owned_conversation_refuses_a_switch_until_released():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr)
+            mind = FakeMind()
+            with mind.wired(), _soul():
+                await _adopted_but_chat_owned(mgr)
+                with pytest.raises(ValueError, match="open in a terminal"):
+                    await mgr.switch_harness("sess-1", "codex", "gpt-5.6-terra")
+                assert mind.sent("POST", "/handover") == []
+
+                await mgr.release_on_mind("sess-1", "terminal")
+                await mgr.switch_harness("sess-1", "codex", "gpt-5.6-terra")
+            assert (await mgr._get_row("sess-1"))["harness"] == "codex"
+            await _close(mgr)
+
+    _run(scenario())
+
+
+def test_closing_a_conversation_clears_its_pane_hold():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr)
+            mind = FakeMind()
+            with mind.wired(), _soul():
+                await _adopted_but_chat_owned(mgr)
+                await mgr.kill_session("sess-1")
+            assert (await mgr._get_row("sess-1"))["terminal_held"] == 0
+            await _close(mgr)
+
+    _run(scenario())
