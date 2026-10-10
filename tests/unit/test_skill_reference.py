@@ -695,3 +695,107 @@ def test_a_codex_agent_field_added_in_place_round_trips_into_the_reference(mind)
     assert skill_reference.load_reference("agent", "builder").harness["codex"] == {
         "sandbox_mode": "read-only"
     }
+
+
+# Q10 / S9
+def test_a_copy_is_staged_beside_its_target(mind, monkeypatch):
+    _render_skill(mind)
+    reference = mind["reference"] / "skills" / "notes" / "SKILL.md"
+    reference.write_text(reference.read_text().replace("Body.", "Moved."))
+    renames = []
+    real_rename = os.rename
+
+    def spy(src, dst):
+        renames.append((os.fspath(src), os.fspath(dst)))
+        return real_rename(src, dst)
+
+    monkeypatch.setattr(os, "rename", spy)
+    _check(mind)
+
+    into_targets = [(s, d) for s, d in renames if d.endswith("/skills/notes")]
+    assert into_targets
+    assert all(os.path.dirname(s) == os.path.dirname(d) for s, d in into_targets)
+
+
+# Q10 / S9
+def test_a_failed_swap_puts_the_old_copy_back(mind, monkeypatch):
+    _render_skill(mind)
+    reference = mind["reference"] / "skills" / "notes" / "SKILL.md"
+    reference.write_text(reference.read_text().replace("Body.", "Moved."))
+    target = mind["homes"]["claude"] / "skills" / "notes"
+    real_rename = os.rename
+
+    def failing(src, dst):
+        if os.fspath(dst) == os.fspath(target) and ".incoming." in os.fspath(src):
+            raise OSError("disk full")
+        return real_rename(src, dst)
+
+    monkeypatch.setattr(os, "rename", failing)
+    _check(mind)
+
+    assert (target / "SKILL.md").read_text().endswith("Body.\n")
+
+
+# Q10 / S10
+def test_an_item_finished_before_the_pass_dies_stays_recorded(mind):
+    _write_reference_skill(mind["reference"] / "skills", "a-first", {"name": "a-first", "description": "d"}, "A.\n")
+    _write_reference_skill(mind["reference"] / "skills", "b-second",
+                           {"name": "b-second", "description": "d", "agents": ["ghost"]}, "B.\n")
+
+    def killed(_message):
+        raise SystemExit("mind stopped mid-pass")
+
+    with pytest.raises(SystemExit):
+        skill_reference.check(catalog=mind["proxy"], notify=killed)
+
+    records = json.loads((mind["reference"] / ".rendered.json").read_text())
+    assert records["skill"]["a-first"]["claude"]["fingerprint"]
+
+
+# Q11 / S8
+def test_an_unchanged_pass_stages_nothing(mind, monkeypatch):
+    _render_skill(mind)
+    import shutil
+    copies = []
+    real_copytree = shutil.copytree
+    monkeypatch.setattr(shutil, "copytree", lambda *a, **k: copies.append(a) or real_copytree(*a, **k))
+
+    _check(mind)
+
+    assert copies == []
+
+
+# Q11 / S3
+def test_a_record_that_is_json_but_not_an_object_refuses_the_pass(mind):
+    _render_skill(mind)
+    (mind["reference"] / ".rendered.json").write_text("[]")
+
+    with pytest.raises(skill_reference.RecordsCorrupt):
+        _check(mind)
+
+
+# Q11 / S7
+def test_an_excluded_harness_reports_excluded_and_stays_empty(mind):
+    _render_skill(mind)
+    import shutil
+    shutil.rmtree(mind["homes"]["dsh"] / "skills" / "notes")
+    reference = mind["reference"] / "skills" / "notes" / "SKILL.md"
+    reference.write_text(reference.read_text().replace("Body.", "Moved."))
+
+    _check(mind)
+    _check(mind)
+
+    assert skill_reference.copy_status("skill", "notes", "dsh") == "excluded"
+    assert not (mind["homes"]["dsh"] / "skills" / "notes").exists()
+    assert "Moved." in (mind["homes"]["codex"] / "skills" / "notes" / "SKILL.md").read_text()
+
+
+# Q11 / S9
+def test_an_agent_whose_name_makes_no_dsh_tool_name_is_refused_for_dsh(mind):
+    _write_reference_agent(mind, "9lives", {"name": "9lives", "description": "d"}, "Work.\n")
+
+    outcome = _check(mind)
+
+    assert outcome.blocked[0]["harness"] == "dsh" and "9lives" in outcome.blocked[0]["reason"]
+    assert not (mind["homes"]["dsh"] / "agents.patch.yml").exists()
+    assert (mind["homes"]["claude"] / "agents" / "9lives.md").exists()
