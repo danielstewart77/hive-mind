@@ -588,20 +588,24 @@ def _rotate_pty(
     return True
 
 
-def transcript_path(claude_sid: str, harness_sid: str | None = None) -> Path | None:
+def transcript_path(
+    claude_sid: str, harness_sid: str | None = None, session_id: str = "",
+) -> Path | None:
     """Where this conversation's rollout is, for a handover to read.
 
     Codex names its rollout by the thread it minted, so the gateway's id is no
-    help: the thread is ``harness_sid``, the gateway's durable copy of it. No
-    thread, or none on this volume, is a conversation codex never spoke in
-    here — the same verdict ``_rollout_exists`` gives a terminal.
+    help: the thread is ``harness_sid``, the gateway's durable copy of it, or
+    this process's own map for the session when the gateway has not heard of
+    it yet. No thread, or none on this volume, is no transcript here — the
+    same verdict ``_rollout_exists`` gives a terminal.
     """
     del claude_sid
-    if not harness_sid:
+    thread_id = harness_sid or THREADS.get(session_id or "")
+    if not thread_id:
         return None
     for path in _existing_rollout_paths():
         match = _ROLLOUT_UUID_RE.search(path.name)
-        if match and match.group(1).lower() == harness_sid.lower():
+        if match and match.group(1).lower() == thread_id.lower():
             return path
     return None
 
@@ -773,6 +777,7 @@ async def _run_codex_turn(sid: str, content: str, images: list[dict] | None) -> 
             elif item_type:
                 last_other_item_type = item_type
         elif etype == "turn.completed":
+            transcript.settle_opening_turn(state, ok=True)
             if not saw_agent_message:
                 yield _empty_turn_frame()
             await _reap_proc(proc)

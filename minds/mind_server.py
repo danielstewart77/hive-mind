@@ -29,6 +29,7 @@ as it does for each adapter.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import logging
 import os
@@ -38,6 +39,7 @@ import tomllib
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -52,20 +54,47 @@ from minds import (
     surface_token_api,
     transcript,
 )
-from minds.harness import claude_cli, codex_cli, dsh_cli
 from minds.proactive import make_proactive_router
 from minds.pty_attach import PaneAdapter, install_pty_attach
 
-MIND_NAME = claude_cli.MIND_NAME
-MIND_DIR = claude_cli.MIND_DIR
-RUNTIME_PATH = claude_cli.RUNTIME_PATH
-NAME: str = claude_cli.NAME
-MIND_ID: str = claude_cli.MIND_ID
+MIND_NAME = os.environ.get("MIND_NAME", "example")
+MIND_DIR = Path(__file__).resolve().parent / MIND_NAME
+RUNTIME_PATH = MIND_DIR / "runtime.yaml"
+_BOOT_RUNTIME = runtime_api.load_runtime(RUNTIME_PATH)
+NAME: str = _BOOT_RUNTIME["name"]
+MIND_ID: str = _BOOT_RUNTIME["mind_id"]
 
 log = configure_logging(f"hive-mind.minds.{MIND_NAME}")
 
-#: Each harness's adapter module, by bare name.
-ADAPTERS: dict[str, Any] = {"claude": claude_cli, "codex": codex_cli, "dsh": dsh_cli}
+#: Where each harness's adapter lives.
+ADAPTER_MODULES = {
+    "claude": "minds.harness.claude_cli",
+    "codex": "minds.harness.codex_cli",
+    "dsh": "minds.harness.dsh_cli",
+}
+
+
+def load_adapters(modules: dict[str, str]) -> tuple[dict[str, Any], dict[str, str]]:
+    """Import each adapter, keeping the ones that load and why the rest did not.
+
+    One adapter that fails to import — a mind's file missing a field the
+    adapter reads at import, say — must cost that harness and nothing else: a
+    mind server that would not start over it takes every conversation down
+    with it.
+    """
+    loaded: dict[str, Any] = {}
+    failed: dict[str, str] = {}
+    for name, module in modules.items():
+        try:
+            loaded[name] = importlib.import_module(module)
+        except Exception as exc:  # noqa: BLE001 — any failure is this harness's
+            failed[name] = f"{type(exc).__name__}: {exc}"
+            log.exception("The %s adapter failed to load", name)
+    return loaded, failed
+
+
+#: Each harness's adapter module, by bare name, and the ones that would not load.
+ADAPTERS, LOAD_FAILURES = load_adapters(ADAPTER_MODULES)
 
 #: Which adapter holds each live session. A session not in here is looked for
 #: in every adapter's own table, which is what a mind that restarted under a
@@ -78,7 +107,8 @@ install_fastapi_logging(app, log, f"mind:{NAME}")
 # Only the claude adapter has an idle stream to drain into this buffer; the
 # per-turn harnesses leave it empty, as they do when run alone.
 app.include_router(make_proactive_router(
-    claude_cli.PROACTIVE_BUFFER, os.environ.get("COMMS_BEARER_TOKEN") or None,
+    getattr(ADAPTERS.get("claude"), "PROACTIVE_BUFFER", []),
+    os.environ.get("COMMS_BEARER_TOKEN") or None,
 ))
 
 
@@ -88,18 +118,14 @@ def default_harness() -> str:
     Read per call rather than at import: the console writes it while this
     process serves, and the next new conversation is what it is for.
     """
-    try:
-        loaded = runtime_api.load_runtime(RUNTIME_PATH)
-    except ValueError:
-        loaded = claude_cli.RUNTIME
-    return runtime_api.harness_name(loaded.get("harness")) or "claude"
+    return runtime_api.harness_name(_live_runtime().get("harness")) or "claude"
 
 
 def _live_runtime() -> dict:
     try:
         return runtime_api.load_runtime(RUNTIME_PATH)
     except ValueError:
-        return claude_cli.RUNTIME
+        return _BOOT_RUNTIME
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +178,7 @@ async def conversation_env(harness: str, model: str) -> dict[str, str]:
 def _cli_check(harness: str) -> str | None:
     """None when the harness's CLI is installed here, else why not."""
     if harness == "dsh":
-        launcher = dsh_cli.DSH_BIN
+        launcher = ADAPTERS["dsh"].DSH_BIN
         if os.sep in launcher:
             return None if Path(launcher).is_file() else f"dsh launcher {launcher} not found"
         return None if shutil.which(launcher) else f"{launcher} not on PATH"
@@ -182,14 +208,14 @@ def _hook_config(harness: str) -> tuple[dict | None, str]:
     """The harness's hook configuration and where it was read from."""
     try:
         if harness == "claude":
-            path = claude_cli.CONFIG_DIR / "settings.json"
+            path = ADAPTERS["claude"].CONFIG_DIR / "settings.json"
             return json.loads(path.read_text()), str(path)
         if harness == "codex":
-            path = codex_cli.CODEX_HOME / "config.toml"
+            path = ADAPTERS["codex"].CODEX_HOME / "config.toml"
             return tomllib.loads(path.read_text()), str(path)
-        named = os.environ.get("DSH_HOOKS_CONFIG", "")
-        if not named:
-            return None, "DSH_HOOKS_CONFIG"
+        # Named by the environment the dsh bridge reads, else beside the
+        # profiles under DSH_HOME — resolved the way the adapter resolves it.
+        named = os.environ.get("DSH_HOOKS_CONFIG") or str(ADAPTERS["dsh"].DSH_HOME / "hooks.json")
         return json.loads(Path(named).read_text()), named
     except (OSError, ValueError) as exc:
         return None, f"{exc}"
@@ -208,8 +234,9 @@ def _hooks_check(harness: str) -> str | None:
 
 
 def _env_value(names: tuple[str, ...]) -> str:
+    declared = _BOOT_RUNTIME.get("env") or {}
     for name in names:
-        value = str(claude_cli.RUNTIME_ENV.get(name) or os.environ.get(name) or "").strip()
+        value = str(declared.get(name) or os.environ.get(name) or "").strip()
         if value:
             return value
     return ""
@@ -218,18 +245,23 @@ def _env_value(names: tuple[str, ...]) -> str:
 def _login_check(harness: str) -> str | None:
     """None when the harness has a credential to log in with."""
     if harness == "claude":
-        if (claude_cli.CONFIG_DIR / ".credentials.json").is_file() or _env_value(
+        if (ADAPTERS["claude"].CONFIG_DIR / ".credentials.json").is_file() or _env_value(
             ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
         ):
             return None
         return "claude has no login: no .credentials.json and no API token"
     if harness == "codex":
-        if (codex_cli.CODEX_HOME / "auth.json").is_file() or _env_value(("OPENAI_API_KEY",)):
+        if (ADAPTERS["codex"].CODEX_HOME / "auth.json").is_file() or _env_value(("OPENAI_API_KEY",)):
             return None
         return "codex has no login: no auth.json and no OPENAI_API_KEY"
-    if dsh_cli._first_env(dsh_cli._PROXY_KEY_SOURCES):
-        return None
-    return "dsh has no proxy key: " + ", ".join(dsh_cli._PROXY_KEY_SOURCES) + " all unset"
+    # dsh logs in to the proxy, which takes both halves: an endpoint and a key.
+    dsh = ADAPTERS["dsh"]
+    missing = []
+    if not dsh._first_env(dsh._PROXY_KEY_SOURCES):
+        missing.append("proxy key (" + ", ".join(dsh._PROXY_KEY_SOURCES) + ")")
+    if not dsh._first_env(dsh._PROXY_URL_SOURCES):
+        missing.append("proxy URL (" + ", ".join(dsh._PROXY_URL_SOURCES) + ")")
+    return "dsh has no login: no " + " and no ".join(missing) if missing else None
 
 
 #: The checks a harness must pass to be offered, in the order their reasons
@@ -245,7 +277,12 @@ CHECKS: list[tuple[str, Callable[[str], str | None]]] = [
 def harness_report() -> dict:
     """Every harness, whether it can be offered, and if not, why not."""
     rows = []
-    for name in ADAPTERS:
+    for name in runtime_api.HARNESSES:
+        if name not in ADAPTERS:
+            reason = LOAD_FAILURES.get(name, "no adapter")
+            rows.append({"name": name, "available": False,
+                         "reason": f"adapter failed to load: {reason}"})
+            continue
         reasons = []
         for _label, check in CHECKS:
             try:
@@ -277,7 +314,9 @@ def _adapter_for(sid: str):
 @app.on_event("startup")
 async def _startup() -> None:
     # One fetch serves every adapter: they share this process's environment.
-    await claude_cli._fetch_secrets_on_startup()
+    fetcher = next(iter(ADAPTERS.values()), None)
+    if fetcher is not None:
+        await fetcher._fetch_secrets_on_startup()
     # After the shared fetch, never before: this mind's own GitHub token wins
     # over the hive's. Never fatal, like every other thing on this path.
     try:
@@ -372,10 +411,28 @@ async def kill_session(sid: str, forget_thread: bool = False) -> dict:
     later switch back would resume instead of opening on its handover.
     """
     HARNESS_OF.pop(sid, None)
-    await claude_cli.kill_session(sid)
-    await codex_cli.kill_session(sid, forget_thread=forget_thread)
-    await dsh_cli.kill_session(sid)
+    for name, adapter in ADAPTERS.items():
+        if name == "codex":
+            await adapter.kill_session(sid, forget_thread=forget_thread)
+        else:
+            await adapter.kill_session(sid)
     return {"session_id": sid, "status": "closed"}
+
+
+async def release_idle_chat(sid: str) -> None:
+    """End an idle chat process before a terminal opens on the conversation.
+
+    One live harness process per conversation: a pane and a chat process on
+    one transcript is two writers. A turn in flight is left alone — each
+    adapter's attach decides what to do about it — and the handover the chat
+    process was holding needs no moving: the pane takes it from comms'
+    carry-forward, which outlives both.
+    """
+    for adapter in ADAPTERS.values():
+        state = adapter.SESSIONS.get(sid)
+        if state is not None and not state.get("in_flight"):
+            await adapter.release_session(sid, "stream")
+            HARNESS_OF.pop(sid, None)
 
 
 @app.get("/harnesses")
@@ -391,12 +448,13 @@ async def get_harnesses(request: Request) -> Any:
 async def handover(request: Request) -> Any:
     """The named (outgoing) harness's conversation, rendered for the next one.
 
-    A conversation with no transcript on disk has never had a turn: it is
-    empty, not unreadable, and hands over as the summary alone or nothing —
-    its harness would declare the id fresh on its next spawn anyway. A
-    transcript that exists and cannot be read is different: with no summary
-    to stand in for it, the switch would lose the conversation it was moving,
-    so it is refused and the old harness keeps running.
+    A conversation with no transcript on disk and no turns behind it
+    (``had_turns``) is empty: it hands over as the summary alone, or nothing,
+    so a conversation is switchable before its first turn. A transcript
+    missing after turns were had, or one that exists and cannot be read, is
+    unreadable: it hands over the summary alone, and with no summary either
+    the switch would lose the conversation it was moving, so it is refused
+    and the old harness keeps running.
     """
     denied = runtime_api.authorize_admin(request)
     if denied is not None:
@@ -414,10 +472,22 @@ async def handover(request: Request) -> Any:
         budget = int(body.get("budget_bytes") or transcript.MAX_HANDOVER_BYTES)
     except (TypeError, ValueError):
         budget = transcript.MAX_HANDOVER_BYTES
-    try:
+    had_turns = bool(body.get("had_turns"))
+
+    def read() -> list[dict]:
+        # Off the event loop: a rollout search walks CODEX_HOME and a dsh log
+        # is decompressed, and this loop serves every session on the mind.
         path = adapter.transcript_path(str(body.get("claude_sid") or ""),
-                                       str(body.get("harness_sid") or "") or None)
-        blocks = transcript.READERS[harness](path) if path is not None else []
+                                       str(body.get("harness_sid") or "") or None,
+                                       session_id=str(body.get("session_id") or ""))
+        if path is None:
+            if had_turns:
+                raise transcript.Unreadable("no transcript on disk after turns were had")
+            return []
+        return transcript.READERS[harness](path)
+
+    try:
+        blocks = await asyncio.to_thread(read)
     except transcript.Unreadable as exc:
         log_event(log, "session.handover.unreadable", level=logging.WARNING,
                   mind_id=MIND_ID, harness=harness, error=str(exc))
@@ -438,19 +508,76 @@ install_pty_attach(
     },
     default_harness=default_harness,
     conversation_env=conversation_env,
+    before_attach=release_idle_chat,
 )
 runtime_api.install_session_guard(app, mind_dir=MIND_DIR)
 runtime_api.install_runtime_routes(app, path=RUNTIME_PATH, mind_id=MIND_ID, log=log)
 models_api.install_models_route(app, path=RUNTIME_PATH, mind_id=MIND_ID, log=log)
 surface_token_api.install_surface_token_routes(app, mind_id=MIND_ID, log=log)
 github_token_api.install_github_token_routes(app, mind_id=MIND_ID, log=log)
-# The skills and files pages act on the harness whose directories they read.
-# Until they take the harness per request they answer for the default one,
-# which is what each harness module mounted for itself when it ran alone.
-_PAGES_HARNESS = {"claude": "claude_cli", "codex": "codex_cli"}.get(default_harness())
-if _PAGES_HARNESS:
-    skills_api.install_skills_routes(app, harness=_PAGES_HARNESS, mind_id=MIND_ID, log=log)
-    files_api.install_files_routes(app, harness=_PAGES_HARNESS, mind_id=MIND_ID, log=log)
+
+
+@app.post("/skills/check")
+async def skills_check(request: Request) -> Any:
+    """Run the skills render pass: merge in-place edits, render everywhere.
+
+    The gateway calls it before a switch so the incoming harness finds the
+    mind's skills and agents already in its own form. Refused, never faked,
+    where the render pass is not installed: a 200 that rendered nothing would
+    let a switch go ahead on stale copies with every surface reporting fine.
+    """
+    denied = runtime_api.authorize_admin(request)
+    if denied is not None:
+        return denied
+    check_all = getattr(skills_api, "check_all", None)
+    if check_all is None:
+        return JSONResponse({"error": "this mind has no skills render pass"},
+                            status_code=501)
+    try:
+        return await asyncio.to_thread(check_all)
+    except (ValueError, OSError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+def _pages_app(harness: str) -> FastAPI:
+    """The skills and files pages for one harness's directories."""
+    pages = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    skills_api.install_skills_routes(pages, harness=f"{harness}_cli", mind_id=MIND_ID, log=log)
+    files_api.install_files_routes(pages, harness=f"{harness}_cli", mind_id=MIND_ID, log=log)
+    return pages
+
+
+#: The skills and files pages, one set per harness: every harness reads its
+#: own skills and hooks directories, and a request names whose (``?harness=``),
+#: the default harness's when it names none.
+PAGES = {name: _pages_app(name) for name in ADAPTERS}
+
+
+class _PagesByHarness:
+    """Send `/skills` and `/files` requests to the named harness's pages."""
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    async def __call__(self, scope, receive, send):
+        path = scope.get("path", "") if scope.get("type") == "http" else ""
+        if (path == "/skills" or path.startswith(("/skills/", "/files/"))) \
+                and path != "/skills/check":
+            query = parse_qs((scope.get("query_string") or b"").decode("latin-1"))
+            name = runtime_api.harness_name((query.get("harness") or [""])[0]) \
+                or default_harness()
+            pages = PAGES.get(name)
+            if pages is None:
+                response = JSONResponse({"error": f"no {name} pages on this mind"},
+                                        status_code=404)
+                await response(scope, receive, send)
+                return
+            await pages(scope, receive, send)
+            return
+        await self.inner(scope, receive, send)
+
+
+app.add_middleware(_PagesByHarness)
 
 
 def main() -> None:

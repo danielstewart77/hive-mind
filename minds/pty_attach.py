@@ -859,6 +859,7 @@ def install_pty_attach(
     adapters: dict[str, PaneAdapter] | None = None,
     default_harness: Callable[[], str] | str = "",
     conversation_env: Callable[[str, str], Awaitable[dict[str, str]]] | None = None,
+    before_attach: Callable[[str], Awaitable[None]] | None = None,
 ) -> None:
     """Mount the browser-terminal routes on a mind's app.
 
@@ -882,7 +883,10 @@ def install_pty_attach(
     the ``harness`` query (``default_harness`` answers when it names none).
     ``conversation_env``, when given, is asked for environment one
     conversation's panes need — its model's window, for one — and its answer
-    reaches ``spawn`` as ``extra_env``.
+    reaches ``spawn`` as ``extra_env``. ``before_attach``, when given, is
+    awaited with the session id before a terminal is opened — where a mind
+    ends an idle chat process, so one conversation never has two harness
+    processes on one transcript.
     """
     global _TERMINALS
     if adapters is None:
@@ -933,7 +937,11 @@ def install_pty_attach(
         if asked and handle.harness and asked != handle.harness:
             log.warning("Refusing to rotate session %s's %s terminal as %s",
                         session_id, handle.harness, asked)
-            return {"session_id": session_id, "rotated": False}
+            return JSONResponse(
+                {"session_id": session_id, "rotated": False,
+                 "error": f"this terminal runs {handle.harness}, not {asked}"},
+                status_code=409,
+            )
         adapter = adapters.get(handle.harness) or adapters.get("")
         rotate = adapter.rotate if adapter is not None else None
         if rotate is None:
@@ -1081,6 +1089,13 @@ def install_pty_attach(
             log.warning("Could not read a stored carry-forward for session %s",
                         session_id, exc_info=True)
             carry_forward = ""
+
+        if before_attach is not None:
+            try:
+                await before_attach(session_id)
+            except Exception:
+                log.warning("Could not release session %s's chat process before "
+                            "its terminal opened", session_id, exc_info=True)
 
         spawn_kwargs: dict = {}
         if conversation_env is not None:
