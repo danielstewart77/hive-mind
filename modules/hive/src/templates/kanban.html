@@ -60,7 +60,6 @@
 
 .kanban-row { display:block; }
 .kanban-actions { display:flex; flex-wrap:wrap; gap:.4rem; margin-top:.35rem; }
-.kanban-col-order { font-variant-numeric:tabular-nums; opacity:.8; flex:0 0 auto; text-align:left; }
 .kanban-col-type { font-size:.8rem; opacity:.8; flex:0 0 auto; text-align:left; }
 
 .kanban-col-title { flex:1 1 auto; min-width:0; overflow-wrap:anywhere; font-weight:600; display:block; text-align:left; margin:0; }
@@ -216,14 +215,12 @@
   function labelRow(node,row,label,hasChildren,id,meta){
     node.dataset.itemId=id||'';
     if(id&&hasChildren){setCollapsed(node,!expandedIds.has(id));}else if(hasChildren){setCollapsed(node,true);}
-    const dot=label.indexOf(' ');const order=dot>0?label.slice(0,dot):'';const name=dot>0?label.slice(dot+1):label;
+    const name=label;
     const title=row.querySelector('.kanban-item-title');
     const actions=Array.from(row.children).filter(c=>c!==title);
     const cols=el('div','kanban-cols');
     cols.append(makeToggle(node,hasChildren));
-    cols.append(el('span','kanban-col-order',order));
     cols.append(el('span','kanban-col-type',meta.type));
-    cols.append(el('span','kanban-col-num',meta.number));
     const t=el('span','kanban-col-title');
     if(meta.inProgress)t.append(el('span','kanban-dot','●'));
     title.textContent=name;t.append(title);cols.append(t);
