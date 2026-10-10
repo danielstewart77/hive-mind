@@ -120,6 +120,18 @@ def claim_picker(chat_id: int, message_id: int) -> bool:
     return True
 
 
+def picker_spent(chat_id: int, message_id: int) -> bool:
+    """Whether a picker has already had its one action, without taking it.
+
+    For a tap that only navigates — the harness picker's first step redraws
+    its own message into a model list — and so must neither act on a spent
+    picker nor spend a live one before the tap that actually acts.
+    """
+    if not _loaded:
+        _load()
+    return (int(chat_id), int(message_id)) in _spent_pickers
+
+
 def _reset_pickers() -> None:
     """Test helper — forget every claim so a test starts from a clean slate."""
     global _loaded

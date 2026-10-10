@@ -16,7 +16,7 @@ import aiohttp
 import discord
 from discord import app_commands
 
-from hive_surfaces import effort_picker, model_picker, token_store, voice_routing
+from hive_surfaces import effort_picker, harness_picker, model_picker, token_store, voice_routing
 from hive_surfaces.config import config
 from hive_surfaces.gateway_client import GatewayClient
 from hive_surfaces.bot_utils import get_lock, time_ago
@@ -359,7 +359,7 @@ async def _stream_to_message(
 # Server commands
 # ---------------------------------------------------------------------------
 SERVER_COMMANDS = {
-    "/clear", "/model", "/effort", "/autopilot", "/kill", "/status", "/sessions", "/switch", "/new",
+    "/clear", "/model", "/effort", "/harness", "/autopilot", "/kill", "/status", "/sessions", "/switch", "/new",
 }
 
 
@@ -422,6 +422,36 @@ async def _handle_server_command(content: str, user_id: int, channel_id: int) ->
             return (f"Effort for `{result.get('model')}`: " + ", ".join(marked)
                     + "\n`/effort <level>` to set")
         return effort_picker.format_effort_result(result)
+    if cmd == "/harness":
+        # Three answers on one command: the harnesses, one harness's models,
+        # or the switched session. Only the last carries a model, and only it
+        # is reported as a switch.
+        if "harnesses" in result:
+            current = result.get("current")
+            lines = ["**Harnesses:**"]
+            for row in harness_picker.harnesses_from(result):
+                if row.get("available"):
+                    mark = " \u2190 current" if row["name"] == current else ""
+                    lines.append(f"- `{row['name']}`{mark}")
+            unavailable = harness_picker.unavailable_lines(result)
+            if unavailable:
+                lines.append("**Not available here:**")
+                lines.extend(f"- {line}" for line in unavailable)
+            lines.append("\n`/harness <name>` lists its models")
+            return "\n".join(lines)
+        if "models" in result:
+            harness = result.get("harness") or "this harness"
+            rows = model_picker.models_from(result)
+            if not rows:
+                return f"No models offered for `{harness}` right now."
+            current = result.get("current")
+            lines = [f"**Models for {harness}:**"]
+            for m in rows:
+                mark = " \u2190 current" if m["name"] == current else ""
+                lines.append(f"- `{m['name']}`{mark}")
+            lines.append(f"\n`/harness {harness} <model>` to switch")
+            return "\n".join(lines)
+        return harness_picker.format_switch_result(result)
     if cmd == "/autopilot":
         on = result.get("autopilot", False)
         summary = result.get("summary", "this session")
@@ -562,6 +592,22 @@ async def cmd_effort(interaction: discord.Interaction, level: str = None):
         return
     await interaction.response.defer(ephemeral=True)
     cmd = f"/effort {level}" if level else "/effort"
+    msg = await _handle_server_command(cmd, interaction.user.id, interaction.channel_id)
+    await interaction.followup.send(msg, ephemeral=True)
+
+
+@bot.tree.command(name="harness", description="List harnesses, or move this conversation to one")
+@app_commands.describe(
+    name="Harness to list models for, or switch to (omit to list harnesses)",
+    model="Model to run on that harness (omit to list its models)",
+)
+async def cmd_harness(interaction: discord.Interaction, name: str = None, model: str = None):
+    if not _is_allowed_user(interaction.user.id):
+        await interaction.response.send_message("Not authorized.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    # A model means nothing without the harness it is for.
+    cmd = "/harness" if not name else f"/harness {name} {model}" if model else f"/harness {name}"
     msg = await _handle_server_command(cmd, interaction.user.id, interaction.channel_id)
     await interaction.followup.send(msg, ephemeral=True)
 
