@@ -13,9 +13,10 @@ becomes selectable here with no code change. A mind that invented its own
 provider labels, or pasted in a house list of short aliases, would be offering
 choices nothing downstream honours.
 
-Which endpoint carries the listing is decided by the harness and nothing else:
-a claude CLI speaks Anthropic Messages and a codex CLI the Responses shape, so
-the endpoint a listing is requested on is what tells the proxy who is asking.
+Which models a listing carries is decided by the harness and nothing else, and
+the harness is named on the request (`?harness=claude`, `codex` or `dsh`). A
+mind runs all three, so the caller names the conversation's harness; the
+file's default harness answers only when it names none.
 
 This lives beside ``runtime_api`` and ``skills_api`` for the reason those do: a
 container in this stack, a bare-metal mind on this host and a mind on another
@@ -100,7 +101,7 @@ def _mind_env(path: Path) -> dict[str, str]:
     return merged
 
 
-async def build_catalog(path: Path) -> list[dict]:
+async def build_catalog(path: Path, harness: str | None = None) -> list[dict]:
     """Every model this mind may be pointed at, as the proxy reports it.
 
     Each row carries the deployment name that gets written to configuration,
@@ -108,6 +109,10 @@ async def build_catalog(path: Path) -> list[dict]:
     proxy yields an empty list rather than raising: the console distinguishes
     "nothing offered" from "the mind is down", and the two need different words
     on screen.
+
+    ``harness`` names whose listing is wanted. A mind runs every harness, and
+    a conversation's models are its own harness's, not the default's — so the
+    file's `harness` is only the answer when the caller names none.
     """
     runtime = load_runtime(path)
     env = _mind_env(path)
@@ -115,7 +120,7 @@ async def build_catalog(path: Path) -> list[dict]:
     key = _first_env(_KEY_VARS, env)
     if not base_url or not key:
         return []
-    family = _harness_family(str(runtime.get("harness") or ""))
+    family = _harness_family(str(harness or runtime.get("harness") or ""))
     url = f"{_proxy_root(base_url)}{_LISTING_PATH}?harness={family}"
     try:
         async with aiohttp.ClientSession(
@@ -163,6 +168,20 @@ async def build_catalog(path: Path) -> list[dict]:
     return rows
 
 
+async def context_window(path: Path, harness: str, model: str) -> int | None:
+    """The window the proxy declares for one model on one harness, or None.
+
+    None for a model nobody has measured, an unreachable proxy, or a model the
+    harness does not offer: each is "no window known", and a guessed one is a
+    rotation threshold sized for room the conversation does not have.
+    """
+    for row in await build_catalog(path, harness=harness):
+        if row.get("name") == model:
+            window = row.get("context_window")
+            return window if isinstance(window, int) and window > 0 else None
+    return None
+
+
 def install_models_route(
     app: FastAPI,
     *,
@@ -178,12 +197,12 @@ def install_models_route(
     """
 
     @app.get("/models")
-    async def get_models(request: Request) -> Any:
+    async def get_models(request: Request, harness: str = "") -> Any:
         refusal = authorize_admin(request)
         if refusal is not None:
             return refusal
         try:
-            models = await build_catalog(path)
+            models = await build_catalog(path, harness=harness or None)
         except Exception as exc:  # noqa: BLE001
             log_event(
                 log, "mind.models.failed", level=logging.WARNING,

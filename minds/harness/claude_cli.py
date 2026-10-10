@@ -33,6 +33,7 @@ from minds.proactive import idle_drain, make_proactive_router
 from minds.pty_attach import (
     TmuxTerminals,
     claude_conversation_flags,
+    claude_transcript_path,
     ensure_tui_first_run_flags,
     install_pty_attach,
     mirror_turn,
@@ -46,6 +47,7 @@ from minds import (
     runtime_api,
     skills_api,
     surface_token_api,
+    transcript,
 )
 from core.hive_logging import configure_logging, install_fastapi_logging, log_event
 
@@ -214,6 +216,7 @@ async def _spawn_proc(
     client_ref: str = "",
     owner_ref: str = "",
     effort: str | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> asyncio.subprocess.Process:
     blocks = system_prompt_blocks or ""
     if blocks and surface_prompt:
@@ -257,6 +260,7 @@ async def _spawn_proc(
         env["HIVEMIND_OWNER_TYPE"] = owner_type
     if owner_ref:
         env["HIVEMIND_OWNER_REF"] = owner_ref
+    env.update(extra_env or {})
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -374,6 +378,7 @@ def _spawn_pty(
     harness_sid: str | None = None, client_ref: str | None = None,
     owner_type: str | None = None, owner_ref: str | None = None,
     system_prompt: str = "", effort: str | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[Any, int]:
     """Attach a pty to this session's interactive `claude`, starting it if needed.
 
@@ -390,11 +395,14 @@ def _spawn_pty(
     """
     del harness_sid  # claude adopts the gateway's id; nothing else to track
     ensure_tui_first_run_flags(CONFIG_DIR, str(PROJECT_DIR))
-    pane_env = _pane_env(client_ref, owner_type, owner_ref)
-    # ``system_prompt`` is a carry-forward comms is still holding: a rotation
-    # seeded this conversation and no turn ever landed on it, so the seed has
-    # to be applied again or the context the rotation composed is gone.
-    # ``start`` no-ops on a live terminal, so a reattach never re-seeds.
+    pane_env = {**_pane_env(client_ref, owner_type, owner_ref), **(extra_env or {})}
+    # ``system_prompt`` is a carry-forward comms is still holding: a switch's
+    # handover or a rotation's seed, with no turn landed on it yet, so it has
+    # to be applied again or the context composed for it is gone. It opens the
+    # pane as the first user turn rather than as a system prompt, because a
+    # system prompt reaches no transcript — and a handover that is not in the
+    # transcript is lost at the next switch. ``start`` no-ops on a live
+    # terminal, so a reattach never re-seeds.
     TERMINALS.start(
         session_id,
         seeded_pane_command(
@@ -402,6 +410,7 @@ def _spawn_pty(
             system_prompt,
             CONFIG_DIR / "rotation-seeds" / f"{conversation_id}.txt",
             seed_flag="--append-system-prompt",
+            as_user_turn=True,
         ),
         env_overrides=pane_env, cols=cols, rows=rows,
     )
@@ -461,6 +470,22 @@ def _rotate_pty(
     log_event(log, "session.pty.rotated", mind_id=MIND_ID, mind_name=NAME,
               session_id=session_id, conversation_id=new_claude_sid)
     return True
+
+
+def transcript_path(
+    claude_sid: str, harness_sid: str | None = None, session_id: str = "",
+) -> Path | None:
+    """Where this conversation's transcript is, for a handover to read.
+
+    The conversation id is the gateway's, which claude adopts, so the id
+    alone names the file. None when claude has written none — the same test
+    ``claude_conversation_flags`` uses to declare the id fresh.
+    """
+    del harness_sid, session_id
+    if not claude_sid:
+        return None
+    path = claude_transcript_path(claude_sid, PROJECT_DIR, CONFIG_DIR)
+    return path if path.exists() else None
 
 
 install_pty_attach(app, mind_name=NAME, terminals=TERMINALS,
@@ -535,7 +560,17 @@ async def list_sessions() -> list[dict]:
 
 @app.post("/sessions")
 async def create_session(req: Request) -> Any:
-    body = await req.json()
+    return await start_session(await req.json())
+
+
+async def start_session(body: dict) -> Any:
+    """Spawn this session's harness process from a gateway spawn payload.
+
+    ``opening_turn`` is a switch's handover: held here and put in front of the
+    first user message this process is sent. ``conversation_env`` is what the
+    mind server composed for this conversation — its model's window — and
+    rides into the process environment.
+    """
     sid = body.get("session_id") or str(uuid4())
     # No default. A spawn that arrives without a model has already lost the
     # one the gateway resolved from this mind's broker row, and quietly
@@ -569,11 +604,13 @@ async def create_session(req: Request) -> Any:
             client_ref=client_ref,
             owner_ref=owner_ref,
             effort=body.get("effort") or None,
+            extra_env=body.get("conversation_env") or None,
         )
         session = {
             "proc": proc,
             "model": model,
             "resume_sid": resume_sid,
+            "opening_turn": body.get("opening_turn") or "",
             # client_ref is the surface's chat id (Telegram chat_id). Persist it
             # so unsolicited (proactive) turns can be routed back to the user.
             "chat_id": client_ref,
@@ -621,7 +658,11 @@ def _assistant_texts(event: dict) -> list[str]:
 
 @app.post("/sessions/{sid}/message")
 async def send_message(sid: str, req: Request) -> Any:
-    body = await req.json()
+    return await send(sid, await req.json())
+
+
+async def send(sid: str, body: dict) -> Any:
+    """Run one turn on this session's process and stream it back."""
     content = body.get("content", "")
     sess = SESSIONS.get(sid)
     if not sess:
@@ -644,7 +685,9 @@ async def send_message(sid: str, req: Request) -> Any:
         return JSONResponse({"error": "Process not running"}, status_code=500)
 
     images = body.get("images") or []
-    content_blocks: list[dict] = [{"type": "text", "text": content}]
+    content_blocks: list[dict] = [
+        {"type": "text", "text": transcript.with_opening_turn(sess, content)}
+    ]
     for img in images:
         content_blocks.append({
             "type": "image",
@@ -661,8 +704,14 @@ async def send_message(sid: str, req: Request) -> Any:
     sess["in_flight"] = True
     proc.stdin.write(msg.encode() + b"\n")
     await proc.stdin.drain()
+    # Written into a live process, the handover is in that conversation's
+    # transcript now, whatever its first result says — repeating it would put
+    # it there twice. Held again only if the process dies before answering.
+    delivered = sess.pop("opening_turn", None)
+    finished = False
 
     async def stream() -> Any:
+        nonlocal finished
         stdout_lock = sess.get("stdout_lock")
         spoken: list[str] = []
         try:
@@ -679,6 +728,7 @@ async def send_message(sid: str, req: Request) -> Any:
                     event = json.loads(decoded)
                     spoken.extend(_assistant_texts(event))
                     if event.get("type") == "result":
+                        finished = True
                         cs = event.get("session_id")
                         if cs:
                             sess["resume_sid"] = cs
@@ -686,6 +736,8 @@ async def send_message(sid: str, req: Request) -> Any:
                 except json.JSONDecodeError:
                     continue
         finally:
+            if delivered and not finished and proc.returncode is not None:
+                sess["opening_turn"] = delivered
             # A tile open on this session showed none of the above — its
             # harness process wasn't involved in the turn at all.
             mirror_turn(sid, mind_name=NAME, assistant_texts=spoken,

@@ -36,7 +36,7 @@ Complete reference for all Hive Mind Docker services. Load this spec when buildi
 
 ### Mind containers
 
-Not listed individually here — each mind is `include:`-ed from its own `minds/<name>/container/compose.yaml` fragment (see [docs/architecture/mind-folder-contract.md](../docs/architecture/mind-folder-contract.md)). Every mind runs the same shared harness image/command (`minds.harness.claude_cli` or `minds.harness.codex_cli`), selected per-fragment, pointed at that mind's own `runtime.yaml` via `MIND_NAME`. No hardening is applied to mind containers in `docker-compose.example.yml` today.
+Not listed individually here — each mind is `include:`-ed from its own `minds/<name>/container/compose.yaml` fragment (see [docs/architecture/mind-folder-contract.md](../docs/architecture/mind-folder-contract.md)). Every mind runs the same image and command (`minds.mind_server`, which hosts every harness), pointed at that mind's own `runtime.yaml` via `MIND_NAME`. No hardening is applied to mind containers in `docker-compose.example.yml` today.
 
 ### telegram-bot
 

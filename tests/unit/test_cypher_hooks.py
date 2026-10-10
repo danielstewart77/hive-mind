@@ -18,6 +18,12 @@ import pytest
 
 HOOKS_DIR = Path(__file__).resolve().parents[2] / "minds" / "cypher" / "hooks"
 
+# Her hooks are per-install and untracked, like every deployment mind's folder:
+# a fresh clone has none to test.
+pytestmark = pytest.mark.skipif(
+    not HOOKS_DIR.is_dir(), reason="Cypher's hooks live only on the host that runs her"
+)
+
 
 def _load(name: str):
     """Import one of Cypher's hook modules by path.
