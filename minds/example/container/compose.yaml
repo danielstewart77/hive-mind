@@ -35,13 +35,25 @@ services:
       # business. An edge mind shares a home with the person who owns the
       # machine and must never be given this.
       - GITHUB_TOKEN_CONFIGURES_TOOLS=1
+      # The dsh launcher, inside the harness tree mounted below. dsh is a
+      # built working copy rather than an npm install, so it is mounted, not
+      # baked into the image; a host without the tree leaves dsh reported
+      # unavailable by GET /harnesses rather than the mind refusing to start.
+      - DSH_BIN=/opt/dsh/apps/cli/lib/bin.js
     volumes:
       - ${HOST_PROJECT_DIR:-.}:/usr/src/app:rw
       - ${HOST_CLAUDE_DIR:-~/.claude}:/home/hivemind/.host-claude:ro
       - ${HOST_PROJECT_DIR:-.}/minds/example/.claude:/home/hivemind/.claude-config:rw
+      # The dsh harness tree, read-only: a launcher must not rewrite the tree
+      # it boots from.
+      - ${HOST_DSH_DIR:-/opt/dsh}:/opt/dsh:ro
     restart: unless-stopped
     networks:
       - hivemind
     tmpfs:
-      - /tmp
-    command: ["/opt/venv/bin/python3", "-m", "minds.harness.claude_cli"]
+      # exec, which Docker's tmpfs default is not: dsh's native loader dlopens
+      # a copy of its addon from /tmp (see CLAUDE.md, "What a dsh mind needs").
+      - /tmp:exec,mode=1777
+    # One mind server runs claude, codex and dsh, and routes each conversation
+    # to the harness it names; runtime.yaml's `harness` is only the default.
+    command: ["/opt/venv/bin/python3", "-m", "minds.mind_server"]

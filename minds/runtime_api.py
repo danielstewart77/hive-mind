@@ -58,6 +58,18 @@ PUBLIC_FIELDS = (
 )
 
 
+#: The harnesses a mind server runs, by their bare names. A runtime.yaml written
+#: before the names were bare says `claude_cli`; both spellings mean the same
+#: harness, and every reader goes through `harness_name` so neither is wrong.
+HARNESSES: tuple[str, ...] = ("claude", "codex", "dsh")
+
+
+def harness_name(raw: Any) -> str:
+    """A harness's bare name, whichever spelling it arrived in."""
+    name = str(raw or "").strip()
+    return name[: -len("_cli")] if name.endswith("_cli") else name
+
+
 def load_runtime(path: Path) -> dict[str, Any]:
     """A mind's runtime.yaml as a dict. Raises if absent or malformed."""
     try:
@@ -103,6 +115,11 @@ WRITABLE_FIELDS = {
     # and writing a model's nominal window over it is how a model save breaks
     # a mind's next start.
     "model_context_window": re.compile(r"[0-9]{1,9}"),
+    # The harness a new conversation starts on. Checked against the harnesses
+    # that exist as well as the pattern, and never written without a model
+    # that harness offers: a default harness whose default model it cannot
+    # run is a mind whose every new conversation fails at its first turn.
+    "harness": re.compile(r"[a-z]{1,16}"),
 }
 
 #: The subset a `PATCH /runtime` body may name. `context_window` is writable
@@ -110,6 +127,7 @@ WRITABLE_FIELDS = {
 #: its caller: a window taken off a request is a number nobody measured, and
 #: the rotation threshold is derived from it.
 CONSOLE_FIELDS: tuple[str, ...] = (
+    "harness",
     "default_model",
     "provider",
     "voice",
@@ -173,6 +191,9 @@ def update_runtime_fields(path: Path, fields: dict[str, str]) -> dict[str, Any]:
     for field, value in fields.items():
         if not WRITABLE_FIELDS[field].fullmatch(value or ""):
             raise ValueError(f"{field} contains unsupported characters")
+    harness = fields.get("harness")
+    if harness is not None and harness not in HARNESSES:
+        raise ValueError(f"{harness} is not a harness: " + ", ".join(HARNESSES))
     engine = fields.get("voice_engine")
     if engine is not None and engine not in VOICE_ENGINES:
         raise ValueError(
@@ -784,7 +805,9 @@ async def registration_loop(
 
 
 
-async def _declared_context_window(path: Path, model: str) -> int | None:
+async def _declared_context_window(
+    path: Path, model: str, harness: str | None = None
+) -> int | None:
     """The chosen model's context window, as this mind's proxy reports it.
 
     Imported at call time: `models_api` reads this module, and the catalog is
@@ -794,13 +817,21 @@ async def _declared_context_window(path: Path, model: str) -> int | None:
     try:
         from minds import models_api
 
-        for row in await models_api.build_catalog(path):
+        for row in await models_api.build_catalog(path, harness=harness):
             if str(row.get("name")) == model:
                 window = row.get("context_window")
                 return window if isinstance(window, int) and window > 0 else None
     except Exception:
         return None
     return None
+
+
+async def _harness_offers(path: Path, harness: str, model: str) -> bool:
+    """Whether this mind's proxy key may run `model` on `harness`."""
+    from minds import models_api
+
+    rows = await models_api.build_catalog(path, harness=harness)
+    return any(str(row.get("name")) == model for row in rows)
 
 
 def install_runtime_routes(app: FastAPI, *, path: Path, mind_id: str, log) -> None:
@@ -851,6 +882,29 @@ def install_runtime_routes(app: FastAPI, *, path: Path, mind_id: str, log) -> No
                 {"error": "provider requires the default_model it hosts"},
                 status_code=400,
             )
+        # A default harness travels with a default model it offers, in one
+        # write, or not at all. Either half alone leaves the next new
+        # conversation on a harness that cannot run the model beside it; the
+        # check is the proxy's listing for that harness, which is the same
+        # fact as whether the proxy would serve the request.
+        harness = harness_name(fields.get("harness", ""))
+        if harness:
+            fields["harness"] = harness
+            if not model:
+                return JSONResponse(
+                    {"error": "harness requires a default_model that harness offers"},
+                    status_code=400,
+                )
+            if harness not in HARNESSES:
+                return JSONResponse(
+                    {"error": f"{harness} is not a harness: " + ", ".join(HARNESSES)},
+                    status_code=400,
+                )
+            if not await _harness_offers(path, harness, model):
+                return JSONResponse(
+                    {"error": f"{harness} does not offer {model} to this mind"},
+                    status_code=409,
+                )
         # The window travels with the model, in the same write. Asked of the
         # proxy here because this mind holds the key the proxy answers for,
         # and cached in the file because the thing that needs it is a per-turn
@@ -858,7 +912,7 @@ def install_runtime_routes(app: FastAPI, *, path: Path, mind_id: str, log) -> No
         # whose window nobody has declared leaves the cached value alone
         # rather than writing a guess over it.
         if model:
-            window = await _declared_context_window(path, model)
+            window = await _declared_context_window(path, model, harness or None)
             # Zero when the proxy declares none. Leaving the previous model's
             # window in place is worse than having none: the rotation hook
             # multiplies a percentage by it, so a move from a 1M model to one
@@ -875,6 +929,7 @@ def install_runtime_routes(app: FastAPI, *, path: Path, mind_id: str, log) -> No
             )
         log_event(
             log, "mind.runtime.updated", mind_id=mind_id,
+            harness=harness or None,
             default_model=model or None, provider=provider or None,
             voice=fields.get("voice") or None,
             voice_engine=fields.get("voice_engine") or None,

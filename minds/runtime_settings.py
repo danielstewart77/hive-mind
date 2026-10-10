@@ -195,13 +195,19 @@ _TEXT_RE = re.compile(r"[^\x00-\x1f\x7f-\x9f]{0,500}")
 _NEEDS_QUOTING = set(":#{}[]&*!|>%@`\"',")
 
 
+def _bare(harness: str) -> str:
+    """`dsh_cli` and `dsh` are one harness: older files carry the suffix."""
+    name = str(harness or "").strip()
+    return name[: -len("_cli")] if name.endswith("_cli") else name
+
+
 def settings_for_harness(harness: str) -> tuple[Setting, ...]:
     """The settings this harness's runner actually honours."""
-    name = str(harness or "").strip()
+    name = _bare(harness)
     return tuple(
         setting
         for setting in SETTINGS
-        if not setting.harnesses or name in setting.harnesses
+        if not setting.harnesses or name in {_bare(h) for h in setting.harnesses}
     )
 
 

@@ -38,6 +38,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from minds.harness.empty_turn_diagnostic import compose_empty_turn_diagnostic
 from minds.proactive import make_proactive_router
 from minds.pty_attach import (
+    PtyUnavailable,
     TmuxTerminals,
     install_pty_attach,
     mirror_turn,
@@ -51,6 +52,7 @@ from minds import (
     runtime_api,
     skills_api,
     surface_token_api,
+    transcript,
 )
 from core.hive_logging import configure_logging, install_fastapi_logging, log_event
 
@@ -71,12 +73,23 @@ RUNTIME_ENV: dict[str, Any] = RUNTIME.get("env", {}) or {}
 NS_URL = os.environ.get("HIVE_MIND_SERVER_URL", "http://server:8420")
 
 # CODEX_HOME is codex's canonical knob and the container already exports it;
-# runtime.yaml is the fallback for a bare invocation.
-CODEX_HOME = Path(
-    os.environ.get("CODEX_HOME")
-    or RUNTIME.get("runtime_config_dir")
-    or str(MIND_DIR / ".codex")
+# runtime.yaml is the fallback for a bare invocation. Only a codex mind's
+# `runtime_config_dir` is codex's: one mind server runs every harness, and on
+# a claude mind that key names the claude config directory, which codex must
+# never be pointed at.
+_DECLARED_CODEX_HOME = os.environ.get("CODEX_HOME") or (
+    RUNTIME.get("runtime_config_dir")
+    if runtime_api.harness_name(RUNTIME.get("harness")) == "codex" else None
 )
+#: The mind's own codex home. Never ``~/.codex``: a home that is not this
+#: mind's is another mind's login and threads. Where nothing declares one, the
+#: per-mind directory counts only if somebody made it — see `home_declared`.
+CODEX_HOME = Path(_DECLARED_CODEX_HOME or str(MIND_DIR / ".codex"))
+
+
+def home_declared() -> bool:
+    """Whether this mind has a codex home of its own to run codex in."""
+    return CODEX_HOME.is_dir()
 
 app = FastAPI(title=f"Mind: {NAME}", docs_url=None, redoc_url=None, openapi_url=None)
 install_fastapi_logging(app, log, f"mind:{NAME}")
@@ -105,6 +118,11 @@ app.include_router(make_proactive_router(PROACTIVE_BUFFER, PROACTIVE_TOKEN))
 
 
 def _setup_codex_home() -> None:
+    # Only a declared home is created. The per-mind default is a directory
+    # somebody provisions — with its login and hooks — and making it empty
+    # here would report codex as installed on a mind that never had it.
+    if not _DECLARED_CODEX_HOME:
+        return
     try:
         CODEX_HOME.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -234,7 +252,16 @@ async def list_sessions() -> list[dict]:
 
 @app.post("/sessions")
 async def create_session(req: Request) -> Any:
-    body = await req.json()
+    return await start_session(await req.json())
+
+
+async def start_session(body: dict) -> Any:
+    """Record this session from a gateway spawn payload; turns spawn later.
+
+    ``opening_turn`` is a switch's handover, put in front of the first user
+    message; ``conversation_env`` is what the mind server composed for this
+    conversation and rides into every turn's environment.
+    """
     sid = body.get("session_id") or str(uuid4())
     # No default. A spawn that arrives without a model has already lost the
     # one the gateway resolved from this mind's broker row, and quietly
@@ -245,6 +272,15 @@ async def create_session(req: Request) -> Any:
             {"error": "model required — the gateway resolves it per session"},
             status_code=400,
         )
+    if not home_declared():
+        return JSONResponse(
+            {"error": "no codex home declared for this mind"}, status_code=503,
+        )
+    # The thread the gateway holds for this session wins over this process's
+    # map: it is the durable copy, and a switch that failed and is being
+    # undone hands back the thread the conversation was on.
+    if body.get("harness_sid"):
+        THREADS[sid] = str(body["harness_sid"])
     # The gateway's conversation id. Codex cannot adopt it — see THREADS —
     # so it is never passed to the CLI; this session's thread is whatever
     # codex minted for it, if it has spoken at all.
@@ -272,6 +308,8 @@ async def create_session(req: Request) -> Any:
             "client_ref": client_ref,
             "owner_type": owner_type,
             "owner_ref": owner_ref,
+            "opening_turn": body.get("opening_turn") or "",
+            "conversation_env": dict(body.get("conversation_env") or {}),
         }
         log.info("%s session %s initialised (model=%s conversation=%s thread=%s)",
                  NAME, sid, model, resume_sid or "none", THREADS.get(sid) or "new")
@@ -462,6 +500,7 @@ def _spawn_pty(
     harness_sid: str | None = None, client_ref: str | None = None,
     owner_type: str | None = None, owner_ref: str | None = None,
     system_prompt: str = "", effort: str | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[Any, int]:
     """Attach a pty to this session's interactive `codex`, starting it if needed.
 
@@ -475,15 +514,17 @@ def _spawn_pty(
     mints its own ids — the thread comes from ``harness_sid`` or THREADS.
     """
     del conversation_id  # codex mints its own ids; see THREADS
+    if not home_declared():
+        raise PtyUnavailable("no codex home declared for this mind")
     thread_id = _resumable_thread(session_id, harness_sid)
-    pane_env = _pane_env(client_ref, owner_type, owner_ref)
+    pane_env = {**_pane_env(client_ref, owner_type, owner_ref), **(extra_env or {})}
 
     fresh = not TERMINALS.alive(session_id) and not thread_id
     before = _existing_rollout_paths() if fresh else set()
-    # ``system_prompt`` is a carry-forward comms is still holding: a rotation
-    # seeded this conversation and no turn ever landed on it. Codex has no
-    # system-prompt flag, so it rides in as the opening turn — the same
-    # channel a rotation uses. ``start`` no-ops on a live terminal, so a
+    # ``system_prompt`` is a carry-forward comms is still holding — a switch's
+    # handover or a rotation's seed — with no turn landed on it yet. It rides
+    # in as the opening user turn, the same channel a rotation uses (codex has
+    # no system-prompt flag anyway). ``start`` no-ops on a live terminal, so a
     # reattach never re-seeds.
     TERMINALS.start(
         session_id,
@@ -571,6 +612,28 @@ def _rotate_pty(
     return True
 
 
+def transcript_path(
+    claude_sid: str, harness_sid: str | None = None, session_id: str = "",
+) -> Path | None:
+    """Where this conversation's rollout is, for a handover to read.
+
+    Codex names its rollout by the thread it minted, so the gateway's id is no
+    help: the thread is ``harness_sid``, the gateway's durable copy of it, or
+    this process's own map for the session when the gateway has not heard of
+    it yet. No thread, or none on this volume, is no transcript here — the
+    same verdict ``_rollout_exists`` gives a terminal.
+    """
+    del claude_sid
+    thread_id = harness_sid or THREADS.get(session_id or "")
+    if not thread_id:
+        return None
+    for path in _existing_rollout_paths():
+        match = _ROLLOUT_UUID_RE.search(path.name)
+        if match and match.group(1).lower() == thread_id.lower():
+            return path
+    return None
+
+
 install_pty_attach(app, mind_name=NAME, terminals=TERMINALS,
                    spawn=_spawn_pty, rotate=_rotate_pty, mind_dir=MIND_DIR)
 runtime_api.install_session_guard(app, mind_dir=MIND_DIR)
@@ -603,7 +666,7 @@ async def _run_codex_turn(sid: str, content: str, images: list[dict] | None) -> 
             thread_id,
             "-",
         ]
-        stdin_content = content
+        stdin_content = transcript.with_opening_turn(state, content)
     else:
         cmd = [
             "codex",
@@ -616,7 +679,10 @@ async def _run_codex_turn(sid: str, content: str, images: list[dict] | None) -> 
             *_provider_args(),
             "-",
         ]
-        stdin_content = f"{state['system_prompt']}\n\n---\n\n{content}"
+        stdin_content = (
+            f"{state['system_prompt']}\n\n---\n\n"
+            f"{transcript.with_opening_turn(state, content)}"
+        )
 
     if images:
         log.warning("%s session %s: image input not supported, ignoring", NAME, sid)
@@ -625,6 +691,7 @@ async def _run_codex_turn(sid: str, content: str, images: list[dict] | None) -> 
 
     env = os.environ.copy()
     env.update({k: str(v) for k, v in RUNTIME_ENV.items()})
+    env["CODEX_HOME"] = str(CODEX_HOME)
     # Per-spawn metadata for the rotation_check Stop hook. The hook reads
     # these to attribute the rotation summary to the right (mind_id,
     # client_ref) row in NS's session_memory table. Empty values stay
@@ -636,6 +703,7 @@ async def _run_codex_turn(sid: str, content: str, images: list[dict] | None) -> 
         env["OWNER_TYPE"] = state["owner_type"]
     if state.get("owner_ref"):
         env["OWNER_REF"] = state["owner_ref"]
+    env.update(state.get("conversation_env") or {})
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -734,6 +802,7 @@ async def _run_codex_turn(sid: str, content: str, images: list[dict] | None) -> 
             elif item_type:
                 last_other_item_type = item_type
         elif etype == "turn.completed":
+            transcript.settle_opening_turn(state, ok=True)
             if not saw_agent_message:
                 yield _empty_turn_frame()
             await _reap_proc(proc)
@@ -775,7 +844,11 @@ async def _run_codex_turn(sid: str, content: str, images: list[dict] | None) -> 
 
 @app.post("/sessions/{sid}/message")
 async def send_message(sid: str, req: Request) -> Any:
-    body = await req.json()
+    return await send(sid, await req.json())
+
+
+async def send(sid: str, body: dict) -> Any:
+    """Run one codex turn for this session and stream it back."""
     content = body.get("content", "")
     images = body.get("images")
     if sid not in SESSIONS:
@@ -839,12 +912,21 @@ async def release_session(sid: str, surface: str) -> Any:
 
 
 @app.delete("/sessions/{sid}")
-async def kill_session(sid: str) -> dict:
+async def kill_session(sid: str, forget_thread: bool = False) -> dict:
+    """End this session's processes; with ``forget_thread``, its thread too.
+
+    The thread map outlives a kill on purpose: a respawn of the same session
+    rejoins its thread rather than starting a second one. A harness switch is
+    the one kill that must not — the conversation is leaving codex, and a
+    switch back later is a fresh thread opened on a handover, never a resume
+    of the one left behind.
+    """
     sess = SESSIONS.pop(sid, None)
     # The terminal is a separate process from the per-turn subprocess, so a
     # kill has to reach both or the TUI outlives its own conversation.
     teardown_pty(sid)
-    THREADS.pop(sid, None)
+    if forget_thread:
+        THREADS.pop(sid, None)
     if sess is not None:
         await _reap_proc(sess.get("proc"))
     log.info("Killed %s session %s", NAME, sid)
