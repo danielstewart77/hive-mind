@@ -2303,7 +2303,11 @@ class SessionManager:
         async with lock:
             offered = await self._current_model_row(session)
             levels = effort_levels_of(offered)
-            if level not in levels:
+            # "default" hands the conversation back to the harness's own
+            # configured level; without it a chosen level could never be undone.
+            if level == "default":
+                level = None
+            elif level not in levels:
                 if not levels:
                     raise ValueError(
                         f"{session['model']} takes no effort setting."

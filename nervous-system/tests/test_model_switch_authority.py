@@ -593,3 +593,24 @@ def test_a_model_no_longer_offered_is_said_rather_than_read_as_unreadable():
             await mgr.shutdown()
 
     _run(scenario())
+
+
+def test_default_hands_the_conversation_back_to_the_harnesss_own_level():
+    """Without it a chosen level could never be undone, and every rotation
+    after it would inherit it."""
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr, "claude-opus-5")
+            await mgr._db.execute("UPDATE sessions SET effort = 'max' WHERE id = 'sess-1'")
+            await mgr._db.commit()
+            await _mind(mgr)
+            posted, wired = _wire()
+            kill, routing = _quiet(mgr)
+            with _offering(mgr), kill, routing, wired:
+                await mgr.set_effort("sess-1", "default")
+            assert (await mgr._get_row("sess-1"))["effort"] is None
+            assert [body["effort"] for body in posted] == [None]
+            await mgr.shutdown()
+
+    _run(scenario())
