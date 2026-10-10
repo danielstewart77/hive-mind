@@ -192,6 +192,21 @@ def test_a_write_back_over_a_newer_reference_answers_409(mind, tmp_path):
     assert "edited" in copy.read_text()
 
 
+def test_the_check_route_renders_a_reference_edited_on_disk(mind, tmp_path):
+    """What the gateway calls before a switch: the same pass the hooks run."""
+    client, repo, installed = mind
+    _write_skill(repo, "memory", "first\n")
+    client.post("/skills/memory/install", headers=_auth())
+    reference = tmp_path / "project" / "minds" / "example" / "reference" / "skills" / "memory" / "SKILL.md"
+    reference.write_text(reference.read_text().replace("first", "second"))
+
+    response = client.post("/skills/check", headers=_auth())
+
+    assert response.status_code == 200
+    assert response.json()["rendered"] == ["skill memory"]
+    assert (tmp_path / "dsh" / "skills" / "memory" / "SKILL.md").read_text().endswith("second\n")
+
+
 def test_an_unreadable_skill_is_not_reported_as_an_absent_one(mind):
     """The remedy offered for "absent" overwrites the directory."""
     client, repo, installed = mind
@@ -262,6 +277,7 @@ def test_every_route_requires_the_admin_bearer(mind):
         lambda: client.post("/skills/memory/install"),
         lambda: client.post("/skills/memory/write-back"),
         lambda: client.delete("/skills/memory"),
+        lambda: client.post("/skills/check"),
     ):
         assert call().status_code == 401
 
