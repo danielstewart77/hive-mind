@@ -131,3 +131,28 @@ async def test_codex_reasoning_reaches_the_surface_as_readable_thinking():
     # voice surface speaks it in that order.
     kinds = [event.get("type") for event in events]
     assert kinds.index("stream_event") < kinds.index("assistant")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("effort,expected", [
+    ("high", ['-c', 'model_reasoning_effort="high"']),
+    (None, []),
+])
+async def test_a_chat_turn_runs_at_the_conversations_effort(effort, expected):
+    """Unset passes nothing, leaving the profile's own level in force."""
+    from minds.harness import codex_cli as codex_impl
+
+    codex_impl.SESSIONS.clear()
+    codex_impl.SESSIONS["sess-1"] = {
+        "system_prompt": "system", "thread_id": None, "model": "gpt-5", "effort": effort,
+    }
+    lines = [json.dumps({"type": "turn.completed"}).encode() + b"\n"]
+
+    with patch("minds.harness.codex_cli.asyncio.create_subprocess_exec",
+               return_value=_FakeProcess(lines)) as spawned:
+        [event async for event in codex_impl._run_codex_turn("sess-1", "hello", None)]
+
+    cmd = list(spawned.call_args.args)
+    reasoning = [a for a in cmd if "model_reasoning_effort" in a]
+    assert (["-c", reasoning[0]] if reasoning else []) == expected
+    codex_impl.SESSIONS.clear()

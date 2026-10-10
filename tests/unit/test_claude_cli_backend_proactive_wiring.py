@@ -155,3 +155,23 @@ class _JsonRequest:
 
     async def json(self):
         return self._body
+
+
+@pytest.mark.parametrize("effort,expected", [("max", ["--effort", "max"]), (None, [])])
+async def test_a_chat_session_runs_at_the_conversations_effort(backend, effort, expected):
+    """The gateway's effort reaches claude's argv; unset passes nothing."""
+    seen: dict = {}
+
+    async def _exec(*cmd, **kwargs):
+        seen["cmd"] = list(cmd)
+        return _FakeProc([])
+
+    with patch.object(backend.asyncio, "create_subprocess_exec", new=_exec):
+        await backend.create_session(_JsonRequest({
+            "session_id": "s-eff", "client_ref": "1", "model": "opus",
+            "resume_sid": "conv-1", "effort": effort,
+        }))
+
+    cmd = seen["cmd"]
+    flag = cmd[cmd.index("--effort"):cmd.index("--effort") + 2] if "--effort" in cmd else []
+    assert flag == expected
