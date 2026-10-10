@@ -251,7 +251,7 @@ class TestTheCachedContextWindow:
     def test_a_model_save_caches_the_window_the_proxy_declared(
         self, client, dsh_file, monkeypatch
     ):
-        async def catalog(_path):
+        async def catalog(_path, harness=None):
             return [
                 {"name": "glm-5.3:cloud", "context_window": 1_048_576},
                 {"name": "other", "context_window": 1024},
@@ -276,7 +276,7 @@ class TestTheCachedContextWindow:
         unmeasured one rotates the conversation at room it does not have."""
         runtime_api.update_runtime_fields(dsh_file, {"model_context_window": "131072"})
 
-        async def catalog(_path):
+        async def catalog(_path, harness=None):
             return [{"name": "mystery", "context_window": None}]
 
         from minds import models_api
@@ -429,7 +429,7 @@ class TestTheDshServingCeilingIsNotTheModelsWindow:
     def test_the_cached_window_does_not_touch_the_dsh_ceiling(
         self, client, dsh_file, monkeypatch
     ):
-        async def catalog(_path):
+        async def catalog(_path, harness=None):
             return [{"name": "glm-5.3:cloud", "context_window": 1_048_576}]
 
         from minds import models_api

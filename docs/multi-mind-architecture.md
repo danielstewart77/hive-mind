@@ -137,19 +137,23 @@ The gateway scans `minds/` on startup. For each subdirectory containing a `runti
 
 ---
 
-## Shared Harness Modules
+## The Mind Server and Its Harness Adapters
 
-The in-container service is shared, tracked code in `minds/harness/`:
+The in-container service is shared, tracked code. `minds/mind_server.py` is
+the process every mind container runs; it mounts one adapter per harness from
+`minds/harness/` and routes each session to the harness that session names:
 
 | Module | Harness |
 |---|---|
-| `minds/harness/claude_cli.py` | Long-lived Claude CLI subprocess per session, stream-json. Anthropic- or Ollama-backed via `runtime.yaml` `env`. |
-| `minds/harness/codex_cli.py` | One Codex CLI subprocess per turn. OpenAI- or Ollama-backed via `runtime.yaml` `provider`. |
+| `minds/harness/claude_cli.py` | Long-lived Claude CLI subprocess per session, stream-json. |
+| `minds/harness/codex_cli.py` | One Codex CLI subprocess per turn. |
+| `minds/harness/dsh_cli.py` | One dsh process per turn, through the resumable surface in the mounted dsh tree. |
 
-A mind folder holds configuration only; its fragment's `command` selects the
-harness module and `MIND_NAME` points it at `minds/<name>/runtime.yaml`.
-Because the deployed minds run these exact modules, the shipped harness never
-drifts from production.
+A conversation runs on one harness and can be switched to another; the
+mind's `runtime.yaml` `harness` is only where a new conversation starts. A
+mind folder holds configuration only, and `MIND_NAME` points the server at
+`minds/<name>/runtime.yaml`. Because the deployed minds run these exact
+modules, the shipped harness never drifts from production.
 
 ---
 
@@ -158,27 +162,31 @@ drifts from production.
 ### Mind Containers
 
 A mind container is a sandboxed environment — not a cloned nervous system. It contains:
-- The shared harness module (`minds/harness/claude_cli.py` or `codex_cli.py`) — runs as PID 1 and IS the in-container service (FastAPI app + harness subprocess management), configured by the mind's `runtime.yaml`
-- The harness CLI (claude, codex) — spawned as a subprocess by the harness module
+- The mind server (`minds/mind_server.py`) — runs as PID 1 and IS the in-container service (FastAPI app + every harness adapter's subprocess management), configured by the mind's `runtime.yaml`
+- The harness CLIs (claude, codex, dsh) — spawned as subprocesses by their adapters
 - Scoped filesystem mounts — only the directories this mind is allowed to access
 - Skill files — read from the project mount
 
 A mind container does NOT contain: `server.py`, the broker, SQLite databases, the mind registry, secret storage, HITL, or any nervous system component.
 
-There is no separate `mind_server.py` intermediary. The harness module is the complete in-container service: FastAPI routes, in-memory session table, and harness lifecycle in one module shared by every mind of that harness.
+Each adapter keeps its own in-memory session table and process handling; the
+mind server adds only a map from session id to harness.
 
 ### The In-Container Service
 
-Each harness module exposes the following routes:
+The mind server exposes the following routes:
 
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/health` | `{"name": ..., "mind_id": ..., "ok": true, "sessions": <count>}` |
-| `POST` | `/sessions` | Spawn the harness subprocess for this session |
-| `POST` | `/sessions/{id}/message` | Send content to harness stdin, stream response as SSE |
-| `POST` | `/sessions/{id}/interrupt` | Send SIGINT to the harness without killing |
-| `DELETE` | `/sessions/{id}` | Kill the harness subprocess |
-| `GET` | `/sessions` | List active sessions (in-memory) |
+| `POST` | `/sessions` | Start this session on the harness the payload names (`harness`), holding its `opening_turn` |
+| `POST` | `/sessions/{id}/message` | Run a turn on the session's harness, stream response as SSE |
+| `POST` | `/sessions/{id}/interrupt` | Stop the turn in flight without ending the conversation |
+| `DELETE` | `/sessions/{id}` | Kill the session's processes; `?forget_thread=1` also drops codex's thread |
+| `GET` | `/sessions` | List active sessions (in-memory), each with its harness |
+| `GET` | `/harnesses` | Which harnesses can be offered (CLI, hooks, login), and why not the rest |
+| `GET` | `/models?harness=` | One harness's listing from the inference proxy |
+| `POST` | `/handover` | The outgoing harness's conversation rendered as plain text for the next one |
 
 No broker, no database, no mind registry, no secret scoping. Sessions are tracked in memory. On startup the file reads its own `runtime.yaml`, fetches its soul from the KG (via the NS gateway), and fetches its scoped secrets — same protocol as before, only the host code is now per-mind.
 

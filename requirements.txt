@@ -25,6 +25,10 @@ pytest-asyncio
 mypy
 ruff
 
+# A dsh session log is a concatenated Zstandard container; a harness switch
+# reads it to hand the conversation over (minds/transcript.py).
+zstandard
+
 # Gateway server
 fastapi
 uvicorn[standard]
