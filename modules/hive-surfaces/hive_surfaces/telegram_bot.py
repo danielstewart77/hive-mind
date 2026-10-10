@@ -515,7 +515,8 @@ def format_model_result(result: object) -> str:
     switched = result.get("model") if isinstance(result, dict) else None
     if not switched:
         return "No model change was made \u2014 send /model to pick one."
-    msg = f"Switched to {switched}"
+    where = session_picker.caption_for(result) if isinstance(result, dict) else ""
+    msg = f"Switched to {switched}" + (f' in "{where}"' if where and where != "Untitled" else "")
     if isinstance(result, dict) and result.get("warning"):
         msg += f"\n\u26a0\ufe0f {result['warning']}"
     return msg
@@ -840,7 +841,12 @@ async def on_session_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # permanently reading "done: that didn't go through", which is a lie told
     # in scrollback long after the operator could check.
     mark = "\u2705" if worked else "\u26a0\ufe0f"
-    header = getattr(query.message, "text", None) or "Your conversations:"
+    # The fallback is reached when Telegram hands back an inaccessible message
+    # — which is the late-delivery case this mark exists for — so it has to be
+    # right for whichever picker was tapped, not just the conversation one.
+    default_header = ("Pick a model:" if action == model_picker.CB_PICK
+                      else "Your conversations:")
+    header = getattr(query.message, "text", None) or default_header
     try:
         await query.edit_message_text(f"{header}\n\n{mark} {msg}")
     except Exception as exc:  # noqa: BLE001
@@ -850,6 +856,21 @@ async def on_session_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     await _deliver(context.bot, chat_id, msg)
+
+    if not worked and action == model_picker.CB_PICK:
+        # A refused model tap gets a fresh *model* list. Redrawing the
+        # conversation picker here handed the operator a single-use keyboard
+        # they never asked for, whose rows retarget ownership and end a
+        # browser terminal.
+        try:
+            await _send_model_picker(context.bot, user_id, chat_id)
+        except Exception as exc:  # noqa: BLE001
+            log_event(
+                log, "surface.picker.redraw.failed", level=logging.WARNING,
+                surface="telegram", user_id=user_id, client_ref=chat_id,
+                error=str(exc),
+            )
+        return
 
     if not worked:
         # The list this tap came from is spent for good — that is what stops a
@@ -1123,16 +1144,46 @@ async def _send_model_picker(bot, user_id: int, chat_id: int) -> None:
         if problem:
             await _deliver(bot, chat_id, f"Error: {problem}")
             return
-    keyboard = model_picker.build_model_keyboard(result, config.default_model)
+    # The conversation's own model, not the mind's configured default: that
+    # default is a different fact, and on an edge install it is a pre-proxy
+    # alias matching no deployment name in the catalog, so marking it marked
+    # nothing at all.
+    current = result.get("current") if isinstance(result, dict) else None
+    offered = model_picker.models_from(result)
+    keyboard = model_picker.build_model_keyboard(result, current)
     if keyboard is None:
-        await _deliver(
-            bot, chat_id,
-            "No models offered \u2014 this mind cannot reach its provider right now.",
-        )
+        # No cause named. A 404 from a mind predating `/models` and a 500 from
+        # a proxy that retired the listing path both arrive here as an empty
+        # list, and naming the provider sends the operator at the one thing
+        # that may be perfectly healthy.
+        await _deliver(bot, chat_id, "No models offered for this mind right now.")
         return
-    await bot.send_message(
-        chat_id=chat_id, text="Pick a model for this conversation:",
-        reply_markup=keyboard,
+    # Said rather than silently dropped: the cap is reached by adding two
+    # Ollama tags, and the proxy's listing order carries no property that
+    # makes the survivors the right ones to keep.
+    shown = len(keyboard.inline_keyboard)
+    header = ("Pick a model:" if shown >= len(offered)
+              else f"Pick a model \u2014 {shown} of {len(offered)}, /models lists them all:")
+    # Retried, for the reason `_send_session_picker` is: a bare send fails into
+    # `_on_error`, which logs a transient network error at INFO and returns, so
+    # during an outage the picker never appears and says nothing.
+    last: Exception | None = None
+    for attempt in range(_DELIVER_ATTEMPTS):
+        try:
+            await bot.send_message(chat_id=chat_id, text=header, reply_markup=keyboard)
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            if attempt + 1 < _DELIVER_ATTEMPTS:
+                await asyncio.sleep(_DELIVER_BACKOFF_S * (attempt + 1))
+    log_event(
+        log, "surface.picker.send.failed", level=logging.WARNING, surface="telegram",
+        user_id=user_id, client_ref=chat_id, error=str(last),
+    )
+    await _deliver(
+        bot, chat_id, "Couldn't draw the model list \u2014 send /model to try again.",
     )
 
 

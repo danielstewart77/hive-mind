@@ -58,10 +58,10 @@ def encode(name: str) -> str:
     return f"{CB_PICK}{CB_SEP}{name}"
 
 
-def decode(payload: str) -> str:
-    """The model a tapped payload names, or empty when it names none."""
-    action, _, name = (payload or "").partition(CB_SEP)
-    return name if action == CB_PICK else ""
+# No `decode` here. The handler these buttons are registered on decodes with
+# `session_picker.decode`, and a second inverse living beside `encode` is a
+# function nothing runs — tested, it proves nothing about the bot, and the
+# day the two disagree the tested one is the one that still passes.
 
 
 def models_from(result: object) -> list[dict]:

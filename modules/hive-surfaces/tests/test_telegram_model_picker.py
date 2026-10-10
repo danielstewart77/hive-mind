@@ -10,12 +10,14 @@ not one, so the listing fell through to the switch-report branch and read a
 `model` field the answer does not carry.
 """
 
+import re
+
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 import hive_surfaces.telegram_bot as tb
-from hive_surfaces import model_picker
+from hive_surfaces import model_picker, session_picker
 from hive_surfaces.config import SurfaceConfig, config, configure
 
 GATEWAY_ANSWER = {
@@ -90,12 +92,18 @@ class TestTheKeyboard:
         assert asked.await_args.args[2] == "/model"
 
     @pytest.mark.asyncio
-    async def test_the_minds_own_default_is_marked_on_its_button(self) -> None:
-        _allow(default_model="claude-sonnet-5-5")
+    async def test_the_model_this_conversation_is_on_is_the_one_marked(self) -> None:
+        """Not the mind's configured default. That is a different fact, and on
+        an edge install it is a pre-proxy alias ("opus") matching no deployment
+        name in the catalog ("claude-opus-5") — so marking it marked nothing,
+        and this test used to pass only by injecting a deployment name where
+        production supplies an alias."""
+        _allow(default_model="opus")
         update, context = _authorized_update()
+        answer = dict(GATEWAY_ANSWER, current="claude-sonnet-5-5")
 
         with patch.object(tb, "gateway",
-                          MagicMock(server_command=AsyncMock(return_value=GATEWAY_ANSWER))):
+                          MagicMock(server_command=AsyncMock(return_value=answer))):
             await tb.cmd_model(update, context)
 
         marked = [
@@ -103,6 +111,56 @@ class TestTheKeyboard:
             if "✓" in label
         ]
         assert marked == ["claude-sonnet-5-5 · Azure ✓"]
+
+    @pytest.mark.asyncio
+    async def test_a_gateway_naming_no_current_model_marks_nothing(self) -> None:
+        """An older gateway answers the listing alone. A tick invented from the
+        mind's default would mark a button the conversation is not on."""
+        _allow(default_model="claude-opus-5-5")
+        update, context = _authorized_update()
+
+        with patch.object(tb, "gateway",
+                          MagicMock(server_command=AsyncMock(return_value=GATEWAY_ANSWER))):
+            await tb.cmd_model(update, context)
+
+        labels = _labels(context.bot.send_message.await_args.kwargs["reply_markup"])
+        assert not any("✓" in label for label in labels)
+
+    @pytest.mark.asyncio
+    async def test_a_truncated_keyboard_says_how_many_it_is_showing(self) -> None:
+        """The cap is two Ollama tags away on this hive, and the proxy's order
+        carries no property that makes the survivors the right ones to keep."""
+        _allow()
+        update, context = _authorized_update()
+        many = {"models": [
+            {"name": f"model-{i}"} for i in range(model_picker.MAX_PICKER_ROWS + 5)
+        ]}
+
+        with patch.object(tb, "gateway",
+                          MagicMock(server_command=AsyncMock(return_value=many))):
+            await tb.cmd_model(update, context)
+
+        header = context.bot.send_message.await_args.kwargs["text"]
+        assert str(model_picker.MAX_PICKER_ROWS) in header
+        assert str(model_picker.MAX_PICKER_ROWS + 5) in header
+
+    @pytest.mark.asyncio
+    async def test_a_send_that_fails_every_attempt_says_so_rather_than_nothing(self) -> None:
+        """A bare send fails into the error handler, which logs a transient
+        network error at INFO and returns — so the operator taps the command
+        and sees absolutely nothing."""
+        _allow()
+        update, context = _authorized_update()
+        context.bot.send_message = AsyncMock(side_effect=RuntimeError("Bad Gateway"))
+
+        with patch.object(tb, "gateway",
+                          MagicMock(server_command=AsyncMock(return_value=GATEWAY_ANSWER))), \
+                patch.object(tb, "_deliver", new=AsyncMock()) as delivered, \
+                patch.object(tb, "_DELIVER_BACKOFF_S", 0):
+            await tb.cmd_model(update, context)
+
+        assert context.bot.send_message.await_count == tb._DELIVER_ATTEMPTS
+        assert "model list" in delivered.await_args.args[2].lower()
 
     @pytest.mark.asyncio
     async def test_a_mind_offering_nothing_gets_a_sentence_and_no_keyboard(self) -> None:
@@ -184,12 +242,24 @@ class TestTappingAButton:
         assert worked is False
         assert "mid-answer" in msg
 
-    def test_a_model_payload_decodes_to_its_own_name_and_nothing_elses(self) -> None:
-        assert model_picker.decode(model_picker.encode("gpt-5.6-terra")) == "gpt-5.6-terra"
-        # A session-picker payload must never resolve to a model: both travel
-        # through one callback handler.
-        assert model_picker.decode("sw:4f1c-not-a-model") == ""
-        assert model_picker.decode("new") == ""
+    def test_the_decode_the_handler_runs_keeps_a_colon_bearing_name_whole(self) -> None:
+        """Ollama deployment names carry a tag separator, and the callback
+        payload uses the same character — so the decode that actually runs
+        (`session_picker.decode`, which both pickers share) has to hand back
+        the whole name, not the part before the second colon."""
+        name = "qwen3:30b-a3b-instruct-2507-q4_K_M"
+
+        action, target = session_picker.decode(model_picker.encode(name))
+
+        assert action == model_picker.CB_PICK
+        assert target == name
+
+    def test_neither_pickers_pattern_captures_the_others_payloads(self) -> None:
+        """Both are registered on one handler; a session payload resolving as
+        a model would switch a model named after a conversation id."""
+        assert re.match(model_picker.CALLBACK_PATTERN, "sw:4f1c-abc") is None
+        assert re.match(model_picker.CALLBACK_PATTERN, "new") is None
+        assert re.match(session_picker.CALLBACK_PATTERN, model_picker.encode("opus")) is None
 
 
 class TestTheSwitchReport:
@@ -217,3 +287,37 @@ class TestTheSwitchReport:
         reported = tb.format_model_result({"model": "claude-opus-5-5"})
 
         assert reported == "Switched to claude-opus-5-5"
+
+
+class TestARefusedTap:
+    @pytest.mark.asyncio
+    async def test_a_refused_model_tap_redraws_models_not_conversations(self) -> None:
+        """A picker is spent by its one tap and never given back, so a failed
+        tap is handed a fresh list. Handing back the *conversation* list gave
+        the operator a single-use keyboard they never asked for, whose rows
+        retarget ownership and end a browser terminal."""
+        _allow()
+        query = MagicMock()
+        query.data = model_picker.encode("qwen3-coder")
+        query.answer = AsyncMock()
+        query.message.message_id = 99
+        query.message.text = "Pick a model:"
+        query.edit_message_reply_markup = AsyncMock()
+        query.edit_message_text = AsyncMock()
+        update = MagicMock()
+        update.callback_query = query
+        update.effective_user.id = 123
+        update.effective_chat.id = 456
+        context = MagicMock()
+        context.bot = MagicMock()
+
+        with patch.object(tb, "_handle_server_command",
+                          new=AsyncMock(return_value="Error: mid-answer")), \
+                patch.object(tb, "claim_picker", return_value=True), \
+                patch.object(tb, "_deliver", new=AsyncMock()), \
+                patch.object(tb, "_send_model_picker", new=AsyncMock()) as models, \
+                patch.object(tb, "_send_session_picker", new=AsyncMock()) as sessions:
+            await tb.on_session_button(update, context)
+
+        assert models.await_count == 1
+        assert sessions.await_count == 0
