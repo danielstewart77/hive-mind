@@ -571,8 +571,9 @@ def test_an_unreadable_model_list_is_said_rather_than_read_as_no_effort():
             mgr = await _manager(tmp)
             await _seed(mgr, "claude-opus-5")
             with patch.object(mgr, "mind_models", new=AsyncMock(return_value=[])):
-                with pytest.raises(ValueError, match="Couldn't read"):
+                with pytest.raises(ValueError, match="Couldn't read") as unreadable:
                     await mgr.effort_options("sess-1")
+                assert "no longer offered" not in str(unreadable.value)
                 with pytest.raises(ValueError, match="Couldn't read"):
                     await mgr.set_effort("sess-1", "high")
             await mgr.shutdown()
@@ -586,8 +587,9 @@ def test_a_model_no_longer_offered_is_said_rather_than_read_as_unreadable():
             mgr = await _manager(tmp)
             await _seed(mgr, "claude-opus-4-8")
             with _offering(mgr):
-                with pytest.raises(ValueError, match="no longer offered"):
+                with pytest.raises(ValueError, match="no longer offered") as withdrawn:
                     await mgr.effort_options("sess-1")
+                assert "Couldn't read" not in str(withdrawn.value)
             await mgr.shutdown()
 
     _run(scenario())

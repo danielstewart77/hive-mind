@@ -134,17 +134,18 @@ async def test_codex_reasoning_reaches_the_surface_as_readable_thinking():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("thread_id", [None, "thread-9"])   # first turn, and every later one
 @pytest.mark.parametrize("effort,expected", [
     ("high", ['-c', 'model_reasoning_effort="high"']),
     (None, []),
 ])
-async def test_a_chat_turn_runs_at_the_conversations_effort(effort, expected):
+async def test_a_chat_turn_runs_at_the_conversations_effort(effort, expected, thread_id):
     """Unset passes nothing, leaving the profile's own level in force."""
     from minds.harness import codex_cli as codex_impl
 
     codex_impl.SESSIONS.clear()
     codex_impl.SESSIONS["sess-1"] = {
-        "system_prompt": "system", "thread_id": None, "model": "gpt-5", "effort": effort,
+        "system_prompt": "system", "thread_id": thread_id, "model": "gpt-5", "effort": effort,
     }
     lines = [json.dumps({"type": "turn.completed"}).encode() + b"\n"]
 
