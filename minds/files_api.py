@@ -39,7 +39,13 @@ from core.hive_logging import log_event
 from minds import skill_reference
 from minds.runtime_api import authorize_admin
 
-from minds.skills_api import SKILL_FILE, SkillError, SkillUnavailable, harness_directory
+from minds.skills_api import (
+    SKILL_FILE,
+    SkillError,
+    SkillHarnessUndeclared,
+    SkillUnavailable,
+    harness_directory,
+)
 
 # The two directories a harness reads. Not a general file browser: every
 # other path on the mind's disk is out of reach by construction rather than
@@ -96,7 +102,10 @@ class FileUnavailable(SkillUnavailable):
 
 def harness_home(harness: str) -> Path:
     """The config home this harness reads, from the environment at call time."""
-    return skill_reference.harness_home(harness_directory(harness))
+    try:
+        return skill_reference.harness_home(harness_directory(harness))
+    except skill_reference.HarnessUndeclared as exc:
+        raise SkillHarnessUndeclared(str(exc)) from exc
 
 
 def tree_root(harness: str, tree: str) -> Path:

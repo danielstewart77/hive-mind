@@ -192,19 +192,47 @@ def test_a_write_back_over_a_newer_reference_answers_409(mind, tmp_path):
     assert "edited" in copy.read_text()
 
 
-def test_the_check_route_renders_a_reference_edited_on_disk(mind, tmp_path):
-    """What the gateway calls before a switch: the same pass the hooks run."""
+def test_a_harness_with_no_declared_home_is_a_409_not_a_missing_route(mind, monkeypatch):
+    client, _, _ = mind
+    monkeypatch.delenv("CODEX_HOME")
+
+    response = client.get("/skills?harness=codex", headers=_auth())
+
+    assert response.status_code == 409
+    assert "no codex home declared" in response.json()["error"]
+
+
+def test_the_resolve_route_makes_the_named_copy_win(mind, tmp_path):
     client, repo, installed = mind
-    _write_skill(repo, "memory", "first\n")
+    _write_skill(repo, "memory", "original\n")
     client.post("/skills/memory/install", headers=_auth())
     reference = tmp_path / "project" / "minds" / "example" / "reference" / "skills" / "memory" / "SKILL.md"
-    reference.write_text(reference.read_text().replace("first", "second"))
+    reference.write_text(reference.read_text().replace("original", "newer"))
+    codex = tmp_path / "codex" / "skills" / "memory" / "SKILL.md"
+    codex.write_text(codex.read_text().replace("original", "from codex"))
 
-    response = client.post("/skills/check", headers=_auth())
+    response = client.post("/skills/memory/resolve?from=codex", headers=_auth())
 
     assert response.status_code == 200
-    assert response.json()["rendered"] == ["skill memory"]
-    assert (tmp_path / "dsh" / "skills" / "memory" / "SKILL.md").read_text().endswith("second\n")
+    assert "from codex" in reference.read_text()
+    assert "from codex" in (installed / "memory" / "SKILL.md").read_text()
+
+
+def test_mind_start_renders_the_references_and_never_raises(mind, tmp_path, monkeypatch):
+    """The start-up pass: off the event loop, and a failure is logged, not fatal."""
+    import asyncio
+
+    _, repo, installed = mind
+    _write_skill(tmp_path / "project" / "minds" / "example" / "reference" / "skills", "memory", "body\n")
+
+    asyncio.run(skills_api.check_at_start(None, "test-mind"))
+    assert (tmp_path / "dsh" / "skills" / "memory" / "SKILL.md").exists()
+
+    def _boom(**_):
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(skills_api, "check_all", _boom)
+    asyncio.run(skills_api.check_at_start(None, "test-mind"))
 
 
 def test_an_unreadable_skill_is_not_reported_as_an_absent_one(mind):
@@ -250,14 +278,26 @@ def test_a_symlinked_skill_can_be_removed_and_replaced(mind, tmp_path):
     assert client.delete("/skills/notify", headers=_auth()).status_code == 200
 
 
-def test_a_skill_carrying_a_build_directory_is_refused_rather_than_copied(mind):
-    """Following a venv into the repo is hundreds of megabytes git ignores."""
+def test_a_skill_carrying_a_build_directory_travels_without_it(mind):
+    """A venv is what a skill built, not the skill: it never reaches the repo."""
     client, repo, installed = mind
     _write_skill(installed, "heavy", "body\n")
     (installed / "heavy" / "venv").mkdir()
     (installed / "heavy" / "venv" / "blob").write_bytes(
         b"x" * (skills_api.MAX_SKILL_BYTES + 1)
     )
+
+    response = client.post("/skills/heavy/write-back", headers=_auth())
+
+    assert response.status_code == 200
+    assert (repo / "heavy" / "SKILL.md").exists()
+    assert not (repo / "heavy" / "venv").exists()
+
+
+def test_a_skill_past_the_size_limit_is_refused_rather_than_copied(mind):
+    client, repo, installed = mind
+    _write_skill(installed, "heavy", "body\n")
+    (installed / "heavy" / "blob").write_bytes(b"x" * (skills_api.MAX_SKILL_BYTES + 1))
 
     response = client.post("/skills/heavy/write-back", headers=_auth())
 
@@ -277,7 +317,7 @@ def test_every_route_requires_the_admin_bearer(mind):
         lambda: client.post("/skills/memory/install"),
         lambda: client.post("/skills/memory/write-back"),
         lambda: client.delete("/skills/memory"),
-        lambda: client.post("/skills/check"),
+        lambda: client.post("/skills/memory/resolve?from=claude"),
     ):
         assert call().status_code == 401
 
