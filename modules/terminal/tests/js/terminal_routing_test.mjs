@@ -18,7 +18,8 @@ const {
     pickReattachTarget, isActive, retryDelayMs, socketIsStale, permanentClose, attemptsAfterSocket, attachExhausted, contrastText, pendingImeText, shouldResetImeAccumulator, pageScrollLines,
     pageScrollAction, wheelReport, dragWheelSteps, parseOpenFragment, formatOpenFragment,
     detachSocket, speakable,
-    composeIsSubmittable, composeSubmitBytes, composeLocked,
+    composeIsSubmittable, composeSubmitBytes, composeLocked, paneTakesFocusOnOpen,
+    composeBoxWanted,
 } = globalThis.TerminalRouting;
 
 const tests = {
@@ -461,6 +462,21 @@ const tests = {
     // the box — read-only on a focused textarea drops the soft keyboard, and
     // standing down is the *longest* outage (a lift, a tunnel), which is
     // exactly when someone needs to keep typing.
+    // A focused editable is what a phone re-raises its keyboard for, so a
+    // touch device gets no automatic focus. Width is not the question: the
+    // compose box's narrow arm is true for a mouse at 800px and for a 1280px
+    // window at 175% zoom, and withholding focus there leaves an ordinary
+    // desktop window silently refusing every keystroke.
+    "only a pointer that is not coarse gets the cursor put in the pane"() {
+        assert.equal(paneTakesFocusOnOpen({coarsePointer: true}), false);
+        assert.equal(paneTakesFocusOnOpen({coarsePointer: false}), true);
+        // The narrow desktop window the compose box does claim.
+        assert.equal(composeBoxWanted({narrow: true, coarsePointer: false}), true);
+        assert.equal(paneTakesFocusOnOpen({narrow: true, coarsePointer: false}), true);
+        assert.equal(paneTakesFocusOnOpen({}), true);
+        assert.equal(paneTakesFocusOnOpen(null), true);
+    },
+
     "only a conversation that is gone locks the box"() {
         assert.equal(composeLocked({attachState: "session ended"}), true);
         assert.equal(composeLocked({attachState: "session suspended"}), true);
