@@ -131,9 +131,10 @@ token is held by every surface bot.
 `context_observed_at`, all nullable and all written by the reporting Mind.
 Nothing on this side can compute them: the count is the turn's last model
 request on the machine running it — the provider's own figure (`kind`
-"usage") or the harness's estimate ("estimated") — and the threshold is that
-Mind's `rotation_threshold_percent` of the window of the model the turn ran
-on.
+"usage") or the harness's estimate ("estimated") — and the threshold is the
+window of the model the turn ran on times that model's
+`rotation_threshold_percent`, both written on the inference proxy's row for
+the model.
 
 Null stays null. A zero draws a conversation sitting at 138k as having its
 whole window free, which is the one wrong answer that looks like good news.
@@ -156,8 +157,10 @@ under `idle`, each with the same `context` reading.
 
 `switch_model` resumes the conversation under its own id only when the new
 model can hold it: its last measured size at or under the new model's
-threshold (the Mind's percentage, asked of `GET /runtime/settings`, of the
-window the Mind's model listing gives), and no images on a model whose
+threshold (the `rotation_threshold_percent` and `context_window` on that
+model's row of the Mind's model listing, which relays the proxy's; a row
+without a percentage falls back to the ratio the conversation's own last
+report implied), and no images on a model whose
 listing says it takes none or does not say. A size nobody measured, on a
 conversation that has had turns, is never assumed to fit. Otherwise the
 conversation is handed over, the way a harness switch hands one over: the
