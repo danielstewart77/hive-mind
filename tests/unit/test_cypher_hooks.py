@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import importlib.util
 import io
-import os
 import json
 import sys
 from pathlib import Path
@@ -269,7 +268,8 @@ class _Gateway:
 
 @pytest.fixture
 def mind(tmp_path, monkeypatch):
-    """Her runtime.yaml, her notify tool and a gateway, all under tmp_path.
+    """Her runtime.yaml, her notify tool and a gateway, all under tmp_path,
+    and the threshold the mind server spawned her with.
 
     The notify tool is a script that writes down what it was asked to send:
     the process boundary is where the hook stops being ours.
@@ -278,7 +278,7 @@ def mind(tmp_path, monkeypatch):
     root = tmp_path / "app"
     (root / "minds" / "cypher").mkdir(parents=True)
     (root / "minds" / "cypher" / "runtime.yaml").write_text(
-        "name: cypher\nrotation_threshold_percent: 80\n")
+        "name: cypher\n")
     tool = root / "tools" / "stateless" / "notify"
     tool.mkdir(parents=True)
     sent = tmp_path / "sent.jsonl"
@@ -292,6 +292,7 @@ def mind(tmp_path, monkeypatch):
     monkeypatch.setenv("OWNER_TYPE", "telegram")
     monkeypatch.setenv("CLIENT_REF", "chat-1")
     monkeypatch.setenv("HIVE_HARNESS", "dsh")
+    monkeypatch.setenv("HIVE_ROTATION_THRESHOLD_TOKENS", "80000")
     for var in ("HIVE_SURFACE", "HIVE_GOAL_RUN", "HIVEMIND_GROUP_SESSION", "ROTATION_SPAWN"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(check, "LOG_DIR", tmp_path / "log")
@@ -401,17 +402,18 @@ class TestMeasurement:
 
 
 class TestThreshold:
-    def test_the_threshold_is_the_minds_percentage_of_the_models_listed_window(self, mind):
-        """50% of a 400k window is 200k on any harness but claude: no other
-        harness pins a window, so nothing caps it at a 200k model's figure."""
+    def test_the_threshold_is_the_one_the_process_was_spawned_with(self, mind, monkeypatch):
+        """The share belongs to the model, so the mind server reads it off the
+        proxy's row and hands over the product. On any harness but claude it
+        stands uncapped: no other harness pins a window, so nothing holds it
+        to a 200k model's figure."""
         check, gateway, _ = mind
         gateway.windows["gpt-5.6-terra"] = 400_000
-        (Path(os.environ["HIVE_PROJECT_DIR"]) / "minds" / "cypher" / "runtime.yaml").write_text(
-            "name: cypher\nrotation_threshold_percent: 50\n")
+        monkeypatch.setenv("HIVE_ROTATION_THRESHOLD_TOKENS", str(400_000 * 75 // 100))
 
         threshold = check._threshold_for_model(check._cfg(), "gpt-5.6-terra", "")
 
-        assert threshold == 400_000 * 50 // 100
+        assert threshold == 400_000 * 75 // 100
 
     def test_a_conversation_switched_to_another_model_is_held_to_that_models_window(
         self, mind, tmp_path, monkeypatch,
@@ -433,8 +435,7 @@ class TestThreshold:
 
         assessed = check._assess(_stop(dsh.materialize(log)))
 
-        assert (assessed["window"], assessed["threshold"], assessed["rotate"]) == (
-            128_000, 128_000 * 80 // 100, False)
+        assert assessed["window"] == 128_000
 
 
 class TestReport:
@@ -497,6 +498,24 @@ class TestUnknownWindow:
         assert assessed is None
         assert report["tokens"] == 900_000
         assert "window" not in report and "threshold" not in report
+
+    def test_a_model_spawned_with_no_threshold_is_reported_without_one_and_not_rotated(
+        self, mind, tmp_path, monkeypatch,
+    ):
+        """The proxy listed a window but declared no share of it: the window is
+        known and reported, and no percentage stands in for the missing one."""
+        check, gateway, _ = mind
+        gateway.windows["qwen"] = 131_072
+        monkeypatch.delenv("HIVE_ROTATION_THRESHOLD_TOKENS")
+        log = _dsh_log(tmp_path / "session.jsonl", [_turn_start(1)])
+
+        assessed = check._assess(_stop(
+            log, context={"model": "qwen", "tokens": 130_000, "kind": "usage"}))
+
+        report = gateway.reports[-1]
+        assert assessed is None
+        assert report["window"] == 131_072
+        assert "threshold" not in report
 
     def test_a_claude_model_on_the_claude_harness_falls_back_to_its_known_ceiling(
         self, mind, monkeypatch,

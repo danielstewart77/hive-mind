@@ -75,8 +75,7 @@ class TestWhichControlsAppear:
         operator sets it and nothing happens, with no way to tell."""
         view = runtime_settings.settings_view(runtime_api.load_runtime(claude_file))
         offered = {entry["key"] for entry in view["settings"]}
-        assert "description" in offered
-        assert "rotation_threshold_percent" in offered
+        assert {"description", "on_harness_error"} <= offered
         assert offered.isdisjoint(
             {"turn_timeout_seconds", "goal_rounds", "stop_on_failed_call", "dsh_profile"}
         )
@@ -86,7 +85,7 @@ class TestWhichControlsAppear:
     ):
         view = runtime_settings.settings_view(runtime_api.load_runtime(dsh_file))
         entry = next(
-            e for e in view["settings"] if e["key"] == "rotation_threshold_percent"
+            e for e in view["settings"] if e["key"] == "on_harness_error"
         )
         assert entry["present"] is False
         assert entry["value"] is None
@@ -117,10 +116,10 @@ class TestWritingASetting:
 
     def test_a_setting_with_no_line_yet_is_created_with_its_comment(self, dsh_file):
         loaded = runtime_api.update_settings(
-            dsh_file, {"rotation_threshold_percent": 30}
+            dsh_file, {"on_harness_error": "session"}
         )
-        assert loaded["rotation_threshold_percent"] == 30
-        assert "# How full the context window gets" in dsh_file.read_text()
+        assert loaded["on_harness_error"] == "session"
+        assert "# Where a harness failure goes." in dsh_file.read_text()
 
     def test_a_false_switch_reads_back_as_false_and_not_as_a_string(self, dsh_file):
         """Python's `False` rendered with `str()` is the string "False", which
@@ -148,7 +147,7 @@ class TestWritingASetting:
     def test_a_number_out_of_range_leaves_the_file_untouched(self, dsh_file):
         before = dsh_file.read_text()
         with pytest.raises(ValueError):
-            runtime_api.update_settings(dsh_file, {"rotation_threshold_percent": 150})
+            runtime_api.update_settings(dsh_file, {"goal_rounds": 500})
         assert dsh_file.read_text() == before
 
     def test_one_bad_value_refuses_the_whole_save(self, dsh_file):

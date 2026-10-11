@@ -66,25 +66,6 @@ SETTINGS: tuple[Setting, ...] = (
         help="What this Mind is for. Shown wherever Minds are listed.",
     ),
     Setting(
-        key="rotation_threshold_percent",
-        label="Rotation threshold",
-        kind=NUMBER,
-        minimum=5,
-        maximum=95,
-        help=(
-            "How full the context window gets before a conversation rotates."
-            " A percentage rather than a token count, because the count stops"
-            " being right the moment the model changes."
-        ),
-        comment=(
-            "# How full the context window gets before a conversation rotates,"
-            " as a",
-            "# percentage of the model's own window. A token count would be"
-            " wrong the",
-            "# moment the model changed under it.",
-        ),
-    ),
-    Setting(
         key="on_harness_error",
         label="When a turn fails",
         kind=CHOICE,

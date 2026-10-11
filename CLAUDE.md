@@ -125,16 +125,23 @@ drops codex's thread for the session; a plain kill keeps it, so a respawn
 rejoins its thread.
 
 Each process a conversation runs in is told its own model's window
-(`HIVE_MODEL_CONTEXT_WINDOW`, and `HIVE_ROTATION_THRESHOLD_TOKENS` at this
-mind's `rotation_threshold_percent`), looked up from the proxy for that
-conversation's harness and model; a lookup that finds nothing is not
-remembered, so the next spawn asks again. A dsh turn runs under that window,
+(`HIVE_MODEL_CONTEXT_WINDOW`) and rotation threshold
+(`HIVE_ROTATION_THRESHOLD_TOKENS`, the window times the model's
+`rotation_threshold_percent`), both read off the proxy's row for that
+conversation's harness and model. The percentage is the model's, never the
+mind's: no mind's file carries one. A model the proxy declares no window for
+gets neither variable, and one with a window and no percentage gets no
+threshold; a lookup missing either is not remembered, so the next spawn asks
+again. A dsh turn runs under that window,
 or — with none composed for it, as on Cypher's standalone adapter — under the
 window the proxy lists for its model, asked per turn; a model with no window
-is refused rather than run behind a guessed one. The rotation hook trusts
-none of these: it takes the model from the turn's own transcript entry and
-asks the proxy for that model's window, so a conversation switched to another
-model is held to that model's threshold from its next turn. A dsh
+is refused rather than run behind a guessed one. The rotation hook takes the
+model from the turn's own transcript entry and asks the proxy for that
+model's window, which it reports; its threshold is the one its process was
+spawned with. A process spawned with none does not rotate on size and
+reports its threshold as unknown, as it does an unknown window — except a
+Claude model on the claude harness, whose ceiling without the `[1m]` pin is
+known. A dsh
 launch adds `--patch $DSH_HOME/agents.patch.yml` when the skills render has
 written one.
 
@@ -235,8 +242,8 @@ only thing that knows, and `PATCH /runtime` writes it in the same write as the
 model. A model the proxy declares no window for cannot be saved — the route
 refuses with 409 and writes nothing — and no request body may name the field:
 a window taken off a request is a number nobody measured. Nothing sizes a
-rotation from it; every turn's threshold comes from the window of the model
-that turn ran on.
+rotation from it; a conversation's threshold comes from the window and
+percentage the proxy declares for the model it was spawned on.
 
 A write reads the document back before it replaces the file, and compares each
 value against what was asked for. One-line substitution cannot express every
