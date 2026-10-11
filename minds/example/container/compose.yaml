@@ -40,6 +40,11 @@ services:
       # baked into the image; a host without the tree leaves dsh reported
       # unavailable by GET /harnesses rather than the mind refusing to start.
       - DSH_BIN=/opt/dsh/apps/cli/lib/bin.js
+      # Codex's and dsh's homes, this mind's own. Never ~/.codex or ~/.dsh: an
+      # undeclared home leaves that harness unavailable rather than borrowing
+      # someone else's login and history.
+      - CODEX_HOME=/usr/src/app/minds/example/.codex
+      - DSH_HOME=/usr/src/app/minds/example/.dsh
     volumes:
       - ${HOST_PROJECT_DIR:-.}:/usr/src/app:rw
       - ${HOST_CLAUDE_DIR:-~/.claude}:/home/hivemind/.host-claude:ro
