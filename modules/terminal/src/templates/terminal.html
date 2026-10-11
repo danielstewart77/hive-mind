@@ -80,6 +80,24 @@
     const openPanels = new Map(); // sessionId -> panel
     let focusedPanel = null;
 
+    // Whether opening a tile puts the cursor in the pane.
+    //
+    // A phone re-raises its soft keyboard for a focused editable on any later
+    // tap anywhere on the page, so a tile that focuses its own hidden
+    // textarea on open turns every subsequent tap into a keyboard — PgUp
+    // included, which only scrolls and sends nothing. Withholding that
+    // automatic focus is what keeps the keyboard down; a tap on the pane
+    // still focuses it, because xterm focuses its own textarea on a tap.
+    //
+    // The gate is the pointer alone and never the width — see
+    // TerminalRouting.paneTakesFocusOnOpen.
+    const coarsePointerMedia = window.matchMedia("(hover: none) and (pointer: coarse)");
+    function paneTakesCursor() {
+        return TerminalRouting.paneTakesFocusOnOpen({
+            coarsePointer: coarsePointerMedia.matches,
+        });
+    }
+
     const contrastText = TerminalRouting.contrastText;
     // only the focused tile paints its whole header bar; refresh both the
     // outgoing and incoming panel so the color follows focus, not just labels
@@ -613,7 +631,11 @@
             rotatedEl.hidden = true;
             rotatedBody.textContent = "";
             doFit();
-            term.focus();
+            // Dismissing a banner is not a request to type. On a phone this
+            // focus does land (the stage is up by the time a banner can be
+            // closed), so it is one of the paths that raises the keyboard
+            // over a conversation the user is only reading.
+            if (paneTakesCursor()) term.focus();
         });
         // A tile that has stopped trying — evicted by another window, refused
         // by the mind, or out of reattach window — must still have a way
@@ -1784,7 +1806,16 @@
                 };
             },
             checkLiveness: function () { reattachIfStale(FOREGROUND_STALE_MS); },
-            focus: function () { setFocusedPanel(panel); term.focus(); },
+            // setFocusedPanel unconditionally, term.focus() only where a
+            // cursor does not cost a keyboard. They are not one decision:
+            // focusedPanel is what paints the header bar and what the key row
+            // routes to, so dropping it on touch devices would send Ctrl+C to
+            // whichever tile happens to be first in the Map — with no tile
+            // painted as focused to say so.
+            focus: function () {
+                setFocusedPanel(panel);
+                if (paneTakesCursor()) term.focus();
+            },
             refreshLabel: applyLabel,
             scrollPage: function (dir) {
                 const action = TerminalRouting.pageScrollAction({
@@ -1900,10 +1931,16 @@
         gridEl.appendChild(panel.el);
         relayoutGrid();
         panel.mount();
-        panel.focus();
         saveOpenSet();
         renderCards(lastRows);
+        // The stage before the focus. focus() on an element in a display:none
+        // subtree is a silent no-op, and below the 859px breakpoint the stage
+        // is still hidden at this point — which is how a narrow *desktop*
+        // window ended up opening tiles that accepted no typing at all:
+        // nothing focused, no keydown listener on the page to catch the
+        // keystrokes, and an unfocused xterm cursor as the only cue.
         if (!isWide()) showView("stage");
+        panel.focus();
         acquireWakeLock();
     }
 
@@ -2285,6 +2322,17 @@
         // taller than the screen had nothing to reach the rest of it with.
         // Where that scrolling happens depends on which buffer is up —
         // see TerminalRouting.pageScrollAction — so the panel decides.
+        // Leave no editable holding the cursor. Withholding the automatic
+        // focus covers the tile nobody has touched; this covers the one they
+        // have, because a tap on the pane legitimately focuses it and from
+        // then on every key-row tap re-raises the keyboard over the reply
+        // being read. The keys do not need it: sendBytes writes the socket,
+        // and scrollPage either writes the socket or scrolls xterm's own
+        // buffer. Only the pane's hidden textarea, never the compose box —
+        // interrupting a running turn mid-follow-up must not take the
+        // keyboard off a half-written message.
+        const active = document.activeElement;
+        if (active && active.classList.contains("xterm-helper-textarea")) active.blur();
         if (btn.dataset.scroll) {
             target.scrollPage(Number(btn.dataset.scroll));
             return;

@@ -315,6 +315,35 @@
     }
 
     /**
+     * Whether opening a tile should put the cursor in the pane itself.
+     *
+     * Deliberately *not* `composeBoxWanted`. That one is `narrow ||
+     * coarsePointer`, and its narrow arm exists for a desktop window dragged
+     * small — a mouse at 800px, or a 1280px window at 175% zoom, which
+     * shrinks the CSS viewport the same way. Reusing it here would stop a
+     * perfectly ordinary desktop window accepting typing at all: nothing
+     * focused, no keydown listener on the page to catch the keystrokes, and
+     * the only cue an unfocused xterm cursor, which is an outline instead of
+     * a block.
+     *
+     * The question here is only ever "does this device paint a keyboard over
+     * the page", because that keyboard is what the cursor costs: a focused
+     * editable is what a phone re-raises its keyboard for, on any later tap
+     * anywhere. So it is the pointer arm alone, and width never enters.
+     *
+     * A touch device still reaches the pane by tapping it — xterm focuses its
+     * own textarea on a tap. What this withholds is the *automatic* focus
+     * nobody asked for.
+     *
+     * @param {Object} env  {coarsePointer: boolean}
+     * @returns {boolean}
+     */
+    function paneTakesFocusOnOpen(env) {
+        var e = env || {};
+        return !e.coarsePointer;
+    }
+
+    /**
      * Whether the box should refuse typing, given the tile's attach state.
      *
      * Only the two states where the conversation itself is gone: ended, and
@@ -550,6 +579,7 @@
         composeSubmitBytes: composeSubmitBytes,
         composeIsSubmittable: composeIsSubmittable,
         composeBoxWanted: composeBoxWanted,
+        paneTakesFocusOnOpen: paneTakesFocusOnOpen,
         composeLocked: composeLocked,
     };
 })(typeof globalThis !== "undefined" ? globalThis : this);
