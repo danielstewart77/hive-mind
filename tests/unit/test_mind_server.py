@@ -622,8 +622,10 @@ def test_a_conversations_rotation_threshold_follows_its_own_models_window(
 def test_a_dsh_pane_is_sized_by_its_models_own_window(
     panes, monkeypatch, proxy,
 ):
-    """A dsh pane runs at its model's own window, as the proxy declares it."""
+    """A dsh pane runs at its model's own window, as the proxy declares it —
+    not at a serving ceiling the mind's own file still names."""
     proxy({"dsh": [{"id": "qwen35-131k", "context_window": 131_072}]})
+    monkeypatch.setitem(dsh_cli.RUNTIME, "context_window", 1_000_000)
 
     _attach(TestClient(mind_server.app), "p6", "dsh", "qwen35-131k", "", monkeypatch)
 
@@ -1337,3 +1339,97 @@ async def test_a_window_lookup_that_found_nothing_is_asked_again(proxy, tmp_path
 
     assert "HIVE_MODEL_CONTEXT_WINDOW" not in first
     assert second["HIVE_MODEL_CONTEXT_WINDOW"] == "131072"
+
+
+# ---------------------------------------------------------------------------
+# A codex failure reported before the turn ended
+# ---------------------------------------------------------------------------
+
+OVERFLOW_SENTENCE = ("Codex ran out of room in the model's context window. Start a new"
+                     " thread or clear earlier history before retrying.")
+
+
+@pytest.mark.parametrize("ending", [
+    [_line({"type": "turn.failed", "error": {}})],
+    [],
+], ids=["turn-failed-without-a-message", "stream-ended"])
+def test_a_codex_overflow_said_in_an_error_event_is_coded_on_either_ending(
+    equipped, proxy, monkeypatch, ending,
+):
+    """Codex says what went wrong in an `error` event, and the event that ends
+    the turn need not repeat it — so the code comes from whichever said it."""
+    proxy({})
+    output = [_line({"type": "thread.started", "thread_id": "thread-e"}),
+              _line({"type": "error", "message": OVERFLOW_SENTENCE}), *ending]
+    spawner = _Spawner("codex", outputs=[output])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawner)
+    client = TestClient(mind_server.app)
+    client.post("/sessions", headers=SESSION, json={
+        "session_id": "e1", "resume_sid": "conv-e1", "model": "gpt-5", "harness": "codex"})
+
+    reply = client.post("/sessions/e1/message", headers=SESSION, json={"content": "one"})
+
+    results = [json.loads(line[len("data: "):]) for line in reply.text.splitlines()
+               if line.startswith("data: ") and '"type": "result"' in line]
+    assert results[-1]["error_code"] == "CONTEXT_WINDOW_EXCEEDED"
+    _, checks = _codex_turns_and_checks(spawner)
+    assert json.loads(checks[0]["proc"].stdin_bytes)["error_code"] == "CONTEXT_WINDOW_EXCEEDED"
+
+
+# ---------------------------------------------------------------------------
+# A claude turn refused for size
+# ---------------------------------------------------------------------------
+
+def test_a_claude_turn_refused_for_size_is_reported_as_an_overflow(
+    equipped, proxy, monkeypatch,
+):
+    """The CLI reports it as a failed result saying the prompt is too long; the
+    gateway rotates on one code for every harness and never reads the text."""
+    proxy({})
+    spawner = _Spawner("claude", outputs=[[
+        _line({"type": "result", "subtype": "success", "is_error": True,
+               "result": "Prompt is too long", "session_id": "conv-c1"}),
+    ]])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawner)
+    client = TestClient(mind_server.app)
+    client.post("/sessions", headers=SESSION, json={
+        "session_id": "c1", "resume_sid": "conv-c1", "model": "claude-opus-5",
+        "harness": "claude"})
+
+    reply = client.post("/sessions/c1/message", headers=SESSION, json={"content": "one"})
+
+    results = [json.loads(line[len("data: "):]) for line in reply.text.splitlines()
+               if line.startswith("data: ") and '"type": "result"' in line]
+    assert results[-1]["error_code"] == "CONTEXT_WINDOW_EXCEEDED"
+
+
+# ---------------------------------------------------------------------------
+# A replaced conversation's rotation marker
+# ---------------------------------------------------------------------------
+
+def _markers(root: Path, sid: str) -> list[Path]:
+    return [root / f"rotation-staged-{sid}.json", root / f"bgtasks-{sid}.json",
+            root / f"rotation-{sid}.lock"]
+
+
+@pytest.mark.parametrize("app", ["mind_server", "dsh_cli"])
+def test_the_gateway_drops_a_replaced_conversations_rotation_marker(
+    tmp_path, monkeypatch, app,
+):
+    """After a handover the old conversation's marker would otherwise outlive
+    it on the mind's disk, where only the mind can reach it. Only that
+    conversation's files go; absent ones are already gone."""
+    monkeypatch.setenv("AUTO_REMEMBER_LOG_DIR", str(tmp_path))
+    for path in _markers(tmp_path, "old-conv") + _markers(tmp_path, "live-conv"):
+        path.write_text("{}")
+    client = TestClient({"mind_server": mind_server.app, "dsh_cli": dsh_cli.app}[app])
+
+    gone = client.delete("/sessions/row-1/rotation-marker?claude_sid=old-conv",
+                         headers=SESSION)
+    again = client.delete("/sessions/row-1/rotation-marker?claude_sid=old-conv",
+                          headers=SESSION)
+    refused = client.delete("/sessions/row-1/rotation-marker?claude_sid=old-conv")
+
+    assert (gone.status_code, again.status_code, refused.status_code) == (204, 204, 401)
+    assert not any(p.exists() for p in _markers(tmp_path, "old-conv"))
+    assert all(p.exists() for p in _markers(tmp_path, "live-conv"))

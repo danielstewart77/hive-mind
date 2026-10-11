@@ -49,6 +49,7 @@ from minds import (
     files_api,
     github_token_api,
     models_api,
+    rotation_marker_api,
     runtime_api,
     skills_api,
     surface_token_api,
@@ -595,6 +596,7 @@ install_pty_attach(
     before_attach=release_idle_chat,
 )
 runtime_api.install_session_guard(app, mind_dir=MIND_DIR)
+rotation_marker_api.install_rotation_marker_route(app, mind_dir=MIND_DIR)
 runtime_api.install_runtime_routes(app, path=RUNTIME_PATH, mind_id=MIND_ID, log=log)
 models_api.install_models_route(app, path=RUNTIME_PATH, mind_id=MIND_ID, log=log)
 surface_token_api.install_surface_token_routes(app, mind_id=MIND_ID, log=log)

@@ -44,7 +44,16 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from minds.proactive import make_proactive_router
-from minds import github_token_api, models_api, runtime_api, surface_token_api, transcript
+from minds import (
+    context_overflow,
+    failed_turn,
+    github_token_api,
+    models_api,
+    rotation_marker_api,
+    runtime_api,
+    surface_token_api,
+    transcript,
+)
 from minds.pty_attach import (
     PtyUnavailable,
     TmuxTerminals,
@@ -941,6 +950,32 @@ def _delta_frame(line: str) -> dict | None:
         "type": "content_block_delta", "index": 0, "delta": inner}}
 
 
+def _rotation_check_command() -> list[str] | None:
+    """The mind's own rotation check, as the hook file dsh's bridge reads
+    registers it for Stop."""
+    path = hooks_config()
+    if not path:
+        return None
+    try:
+        config = json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return None
+    hooks = config.get("hooks") if isinstance(config, dict) else None
+    return failed_turn.rotation_check_command((hooks or {}).get("Stop"))
+
+
+async def _check_failed_turn(state: dict, conversation_id: str, env: dict[str, str],
+                             error_code: str) -> None:
+    """dsh fires Stop only from a turn it ended itself. One that timed out, was
+    killed, crashed or wrote no readable report fired none, and what it read
+    before it stopped is in the conversation all the same."""
+    await failed_turn.run(
+        _rotation_check_command(), session_id=conversation_id,
+        transcript=transcript_path(conversation_id), cwd=SPAWN_DIR,
+        model=state.get("model") or "", error_code=error_code, env=env, log=log,
+    )
+
+
 def _no_text_diagnostic(report: dict) -> str:
     """What to show for a turn that completed without assistant text.
 
@@ -1184,6 +1219,7 @@ async def _run_dsh_turn(
                 pass
 
     if timed_out:
+        await _check_failed_turn(state, conversation_id, env, "TURN_TIMEOUT")
         yield {
             "type": "assistant",
             "message": {"role": "assistant", "content": [{
@@ -1201,6 +1237,7 @@ async def _run_dsh_turn(
     if report is None and state.get("killed"):
         # Stopped on purpose — a kill, or a release to another surface. The
         # crash sentence below would read as the harness falling over.
+        await _check_failed_turn(state, conversation_id, env, "TURN_KILLED")
         yield {"type": "result", "session_id": conversation_id,
                "stop_reason": "stopped", "is_error": False}
         return
@@ -1211,6 +1248,7 @@ async def _run_dsh_turn(
         detail = stderr.decode(errors="replace").strip()[-2000:]
         log.error("%s session %s: dsh wrote no turn report (rc=%s) %s",
                   NAME, sid, returncode, detail)
+        await _check_failed_turn(state, conversation_id, env, "NO_TURN_REPORT")
         yield {
             "type": "assistant",
             "message": {"role": "assistant", "content": [{
@@ -1281,6 +1319,10 @@ async def _run_dsh_turn(
     if error:
         result["error_code"] = error.get("code")
         result["error"] = error.get("message")
+        # One code for an overflow on every harness, whatever words the
+        # provider used; the gateway rotates on it and never reads the text.
+        if context_overflow.is_overflow(error.get("code"), error.get("message")):
+            result["error_code"] = context_overflow.CONTEXT_WINDOW_EXCEEDED
     yield result
 
 
@@ -1391,6 +1433,7 @@ async def kill_session(sid: str) -> dict:
 install_pty_attach(app, mind_name=NAME, terminals=TERMINALS,
                    spawn=_spawn_pty, rotate=_rotate_pty, mind_dir=MIND_DIR)
 runtime_api.install_session_guard(app, mind_dir=MIND_DIR)
+rotation_marker_api.install_rotation_marker_route(app, mind_dir=MIND_DIR)
 runtime_api.install_runtime_routes(app, path=RUNTIME_PATH, mind_id=MIND_ID, log=log)
 models_api.install_models_route(app, path=RUNTIME_PATH, mind_id=MIND_ID, log=log)
 surface_token_api.install_surface_token_routes(app, mind_id=MIND_ID, log=log)

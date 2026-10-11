@@ -10,6 +10,7 @@ the hook functions whose answers change because of it.
 from __future__ import annotations
 
 import importlib.util
+import io
 import os
 import json
 import sys
@@ -377,16 +378,24 @@ class TestMeasurement:
         turn is noise. A real count re-arms it, and so does another model."""
         check, gateway, notices = mind
         gateway.windows.update(luna=128_000, qwen=128_000)
-        log = _dsh_log(tmp_path / "session.jsonl", [_turn_start(1)])
+        dsh = _load("dsh_transcript")
+        # An earlier turn was counted; a count from before this turn is not one.
+        log = _dsh_log(tmp_path / "session.jsonl", [
+            _turn_start(1),
+            _assistant(2, {"inputTokens": 40_000, "outputTokens": 100}, model="luna"),
+            _measured(3, "luna", 40_100, "usage"),
+            _turn_start(4),
+        ])
         silent = {"model": "luna", "kind": "none"}
 
-        check._assess(_stop(log, context=silent))
-        check._assess(_stop(log, context=silent))
+        check._assess(_stop(dsh.materialize(log), context=silent))
+        check._assess(_stop(dsh.materialize(log), context=silent))
         after_two = len(notices())
-        check._assess(_stop(log, context={"model": "qwen", "kind": "none"}))
+        check._assess(_stop(dsh.materialize(log), context={"model": "qwen", "kind": "none"}))
         after_switch = len(notices())
-        check._assess(_stop(log, context={"model": "luna", "tokens": 9_000, "kind": "usage"}))
-        check._assess(_stop(log, context=silent))
+        check._assess(_stop(dsh.materialize(log),
+                            context={"model": "luna", "tokens": 9_000, "kind": "usage"}))
+        check._assess(_stop(dsh.materialize(log), context=silent))
 
         assert (after_two, after_switch, len(notices())) == (1, 2, 3)
 
@@ -405,12 +414,15 @@ class TestThreshold:
         assert threshold == 400_000 * 50 // 100
 
     def test_a_conversation_switched_to_another_model_is_held_to_that_models_window(
-        self, mind, tmp_path,
+        self, mind, tmp_path, monkeypatch,
     ):
         """The model is taken from the turn's own entry, not from the spawn: a
         switch inside the conversation is the model the next turn ran on."""
         check, gateway, _ = mind
         gateway.windows.update(big=1_000_000, small=128_000)
+        # The process was spawned on the model it has since left.
+        monkeypatch.setattr(check, "_SPAWN_MODEL_ARG", "big")
+        monkeypatch.setenv("HIVE_MODEL_CONTEXT_WINDOW", "1000000")
         dsh = _load("dsh_transcript")
         log = _dsh_log(tmp_path / "session.jsonl", [
             _turn_start(1),
@@ -467,3 +479,132 @@ class TestGoalRound:
         inside = check._hook_output(over, check._assess(over))
 
         assert (outside, inside) == ({}, {"rotate": True})
+
+
+class TestUnknownWindow:
+    def test_a_model_with_no_listed_window_is_reported_without_one_and_not_rotated(
+        self, mind, tmp_path,
+    ):
+        """Zero would read as a window with no room in it; a guessed one rotates
+        a conversation at room it may not have."""
+        check, gateway, _ = mind
+        log = _dsh_log(tmp_path / "session.jsonl", [_turn_start(1)])
+
+        assessed = check._assess(_stop(
+            log, context={"model": "unlisted", "tokens": 900_000, "kind": "usage"}))
+
+        report = gateway.reports[-1]
+        assert assessed is None
+        assert report["tokens"] == 900_000
+        assert "window" not in report and "threshold" not in report
+
+    def test_a_claude_model_on_the_claude_harness_falls_back_to_its_known_ceiling(
+        self, mind, monkeypatch,
+    ):
+        """Its ceiling without the [1m] pin is known, so it alone is not left
+        without a threshold."""
+        check, _, _ = mind
+        monkeypatch.setenv("HIVE_HARNESS", "claude")
+        cfg = check._cfg()
+
+        assert check._threshold_for_model(cfg, "claude-opus-5", "") == cfg["THRESHOLD_NO_1M"]
+
+
+class TestFailedTurns:
+    def test_a_failed_terminal_turn_is_not_written_to_the_turn_ledger(
+        self, mind, tmp_path, monkeypatch,
+    ):
+        """It has no answer to ledger, and the overflow path re-sends its
+        message — a ledgered copy would be read back as a turn that happened."""
+        check, gateway, _ = mind
+        gateway.windows["qwen"] = 200_000
+        monkeypatch.setenv("HIVE_SURFACE", "terminal")
+        recorded: list[str] = []
+        original = gateway.__call__
+
+        def route(req, timeout=None):
+            if req.full_url.endswith("/sessions/record-turn"):
+                recorded.append(json.loads(req.data)["role"])
+                return original(_Req(req.full_url.replace("record-turn", "context"),
+                                     b"{}"), timeout)
+            return original(req, timeout)
+
+        monkeypatch.setattr(check.urllib.request, "urlopen", route)
+        dsh = _load("dsh_transcript")
+        log = dsh.materialize(_dsh_log(tmp_path / "session.jsonl", [
+            _turn_start(1), _user(2, "hello"),
+            _assistant(3, {"inputTokens": 1_000, "outputTokens": 10}, text="hi", model="qwen"),
+        ]))
+
+        check._assess(_stop(log, stop_reason="error", error_code="LLM_ERROR"))
+        failed = list(recorded)
+        check._assess(_stop(log))
+
+        assert (failed, recorded) == ([], ["user", "assistant"])
+
+
+class _Req:
+    def __init__(self, url, data):
+        self.full_url, self.data = url, data
+
+
+class TestGoalRoundAnswer:
+    def test_a_goal_round_answered_with_rotate_composes_nothing(
+        self, mind, tmp_path, monkeypatch, capsys,
+    ):
+        """dsh ends the run and the gateway rotates it; minutes of Ollama for a
+        second, competing rotation from here would race it."""
+        check, gateway, _ = mind
+        gateway.windows["qwen"] = 100_000
+        monkeypatch.setenv("HIVE_GOAL_RUN", "1")
+        log = _dsh_log(tmp_path / "session.jsonl", [_turn_start(1)])
+        event = _stop(log, context={"model": "qwen", "tokens": 90_000, "kind": "usage"})
+        monkeypatch.setattr(check.sys, "stdin", io.StringIO(json.dumps(event)))
+        forks: list[bool] = []
+
+        def fork():
+            forks.append(True)
+            return 1  # the parent's side: the child would compose
+
+        monkeypatch.setattr(check.os, "fork", fork)
+
+        check.main()
+
+        assert json.loads(capsys.readouterr().out) == {"rotate": True}
+        assert forks == []
+
+
+class TestArmStartedAt:
+    def test_an_arm_says_when_the_conversation_it_measured_began(
+        self, mind, tmp_path, monkeypatch,
+    ):
+        """The gateway refuses an arm for a conversation that began before the
+        session's last rotation: the hook measured the one it replaced."""
+        check, _, _ = mind
+        dsh = _load("dsh_transcript")
+        first = {"type": "turn/start", "seq": 1, "time": 1_791_042_190_658, "data": {}}
+        log = dsh.materialize(_dsh_log(tmp_path / "session.jsonl", [first, _turn_start(2)]))
+        armed: list[dict] = []
+
+        def urlopen(req, timeout=None):
+            armed.append(json.loads(req.data))
+
+            class _Resp:
+                def read(self):
+                    return b'{"ok": true, "session_id": "row-1"}'
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *exc):
+                    return False
+
+            return _Resp()
+
+        monkeypatch.setattr(check.urllib.request, "urlopen", urlopen)
+
+        check._comms_arm_rotation(check._cfg(), client_type="telegram", client_ref="chat-1",
+                                  claude_sid="conv-1",
+                                  started_at=check._transcript_started_at(log))
+
+        assert armed[0]["started_at"] == 1_791_042_190_658 / 1000
