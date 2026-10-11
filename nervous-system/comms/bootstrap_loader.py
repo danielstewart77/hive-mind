@@ -199,12 +199,19 @@ async def compose_prompt_blocks(
     mind_name: str,
     client_ref: str | None,
     db: aiosqlite.Connection,
+    max_bytes: int | None = None,
 ) -> str:
     """Build the full system-prompt content for a new session.
 
     Returns the four data blocks concatenated. Empty blocks are dropped.
     Never raises — every fetch is best-effort and logs on failure. A
     missing component degrades the prompt but never blocks spawn.
+
+    ``max_bytes`` is the room a rotation's successor has for all of it,
+    sized from that model's threshold. Only the session memory gives way —
+    it is the one block whose size is the conversation's, not the mind's —
+    and it keeps its tail, where the latest exchange and anything still
+    pending sit.
     """
     blocks: list[str] = []
 
@@ -217,7 +224,25 @@ async def compose_prompt_blocks(
         blocks.append(recent)
 
     session_memory = await _fetch_session_memory(db, mind_id=mind_id, client_ref=client_ref)
+    if session_memory and max_bytes is not None:
+        fixed = len("\n\n".join(blocks + [""]).encode("utf-8"))
+        session_memory = _keep_tail(session_memory, max_bytes - fixed)
     if session_memory:
         blocks.append(session_memory)
 
     return "\n\n".join(blocks)
+
+
+SESSION_MEMORY_TRIMMED = "<session-memory>\n[earlier carry-forward trimmed to fit the model]\n"
+
+
+def _keep_tail(block: str, room: int) -> str:
+    """``block`` cut to its last ``room`` bytes, marked, or nothing at all."""
+    data = block.encode("utf-8")
+    if len(data) <= room:
+        return block
+    room -= len(SESSION_MEMORY_TRIMMED.encode("utf-8"))
+    if room <= 0:
+        return ""
+    tail = data[-room:].decode("utf-8", errors="ignore")
+    return SESSION_MEMORY_TRIMMED + tail
