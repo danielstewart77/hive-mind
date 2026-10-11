@@ -126,14 +126,15 @@ token is held by every surface bot.
 
 ## Context figures
 
-`sessions` carries `context_tokens`, `context_threshold`, `context_window`
-and `context_observed_at`, all nullable and all written by the reporting
-Mind. Nothing on this side can compute them: the count is summed from the
-harness transcript's `message.usage` on the machine running it, and the
-threshold is read off that Mind's spawn arguments — the same model caps in
-two different places depending on whether the long-context pin was on the
-command line, so a gateway deriving it from a model name would be wrong for
-half the hive.
+`sessions` carries `context_tokens`, `context_threshold`, `context_window`,
+`context_kind`, `context_has_images`, `context_model` and
+`context_observed_at`, all nullable and all written by the reporting Mind.
+Nothing on this side can compute them: the count is the turn's last model
+request on the machine running it — the provider's own figure (`kind`
+"usage") or the harness's estimate ("estimated") — and the threshold is the
+window of the model the turn ran on times that model's
+`rotation_threshold_percent`, both written on the inference proxy's row for
+the model.
 
 Null stays null. A zero draws a conversation sitting at 138k as having its
 whole window free, which is the one wrong answer that looks like good news.
@@ -143,9 +144,57 @@ completed turn and is therefore never live.
 `POST /sessions/context` takes the Stop hook's own addressing — surface and
 conversation, as `/sessions/record-turn` already does — since the hook knows
 which conversation it is bound to, not which row the gateway filed it under.
-A rotation clears both the stored count and the feed's buffered text: they
-belong to a transcript that no longer exists, and left in place they render a
-fresh conversation as one already at its rotation point.
+A report naming a `conversation_id` the row no longer runs is dropped: a Stop
+hook finishing after a switch or rotation would otherwise write the old
+transcript's size over the new one. A rotation clears the stored count and
+the feed's buffered text for the same reason.
+
+`GET /sessions/live` returns the producing conversations under `sessions` and
+every other open one — bound to a surface, neither closed nor suspended —
+under `idle`, each with the same `context` reading.
+
+## A conversation always fits its model
+
+`switch_model` resumes the conversation under its own id only when the new
+model can hold it: its last measured size at or under the new model's
+threshold (the `rotation_threshold_percent` and `context_window` on that
+model's row of the Mind's model listing, which relays the proxy's; a row
+without a percentage falls back to the ratio the conversation's own last
+report implied), and no images on a model whose
+listing says it takes none or does not say. A size nobody measured, on a
+conversation that has had turns, is never assumed to fit. Otherwise the
+conversation is handed over, the way a harness switch hands one over: the
+Mind renders it through `/handover`, sized so the handover, the composed
+prompt and the next message sit under the new threshold, and the same row
+opens a fresh conversation id on it. A live pane is respawned onto it in
+place; anything else gets a process on it, never a new id with nothing
+running it. The armed rotation, the stored carry-forward and the Mind's
+on-disk marker (`DELETE /sessions/{id}/rotation-marker`) go with the old
+conversation. The answer carries a `warning` saying why, and the row takes
+the new model's window and threshold at once either way.
+
+A turn whose result carries `error_code: CONTEXT_WINDOW_EXCEEDED` is replaced
+the same way, at once, with the user turn taken back out of the ledger and a
+`<failed-turn>` note listing the tool calls that attempt completed — or, for a
+harness that reports only a tally, how many — and the same message, with its
+images and `goal_rounds`, is sent again on the fresh conversation inside the
+same turn lock, so nothing typed meanwhile overtakes it. A row that never
+reported a window is sized from the model's listing. That pending re-send is
+held on the row (`resend_content`, `resend_images`, `resend_goal_rounds`)
+until it goes out, so a restart in between sends it at start-up; it is
+stamped when dispatched, so a restart mid-answer does not send it twice, and
+cleared when the Mind answers, error included. A re-send that overflows again
+is reported and stops. A goal run that ends with `stop_reason:
+rotation_needed` and its `goal` (objective, `roundsLeft`) is replaced once
+and the objective dispatched again with `goal_rounds` set to the rounds it
+had left. A rotation's composed prompt is trimmed — session memory first,
+keeping its tail — to the threshold of the conversation it replaces.
+
+Every replacement dates the conversation (`conversation_started_at`). A
+rotation arm naming no conversation is refused when the conversation began
+after the hook did (`started_at`), or, with no start given, within the
+longest a composition runs. A reported window or threshold of zero is
+ignored rather than written.
 
 ## Identity convention
 

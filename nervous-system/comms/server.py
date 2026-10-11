@@ -81,6 +81,11 @@ async def lifespan(app: FastAPI):
             metadata=json.loads(msg["metadata"]) if msg.get("metadata") else None,
         ))
 
+    # A message owed a re-send after an overflow, interrupted by a restart
+    # before it went out. Background, like the stranded broker messages:
+    # each is a whole turn.
+    asyncio.create_task(session_mgr.resume_pending_resends())
+
     log_event(log, "service.started", component="hive-comms", port=config.server_port)
     try:
         yield
@@ -151,6 +156,9 @@ class ImageAttachment(BaseModel):
 class MessageRequest(BaseModel):
     content: str
     images: list[ImageAttachment] = []
+    # Set only by a dispatch that asks for a goal: how many rounds the
+    # harness may drive it for. Absent is one turn, which is every chat.
+    goal_rounds: int | None = None
 
 
 class ModelSwitchRequest(BaseModel):
@@ -232,6 +240,14 @@ class ClientContextReportRequest(BaseModel):
     tokens: int | None = None
     threshold: int | None = None
     window: int | None = None
+    # "usage" (the provider's own count), "estimated" (the harness's) or
+    # "none"; whether the transcript holds images; the model the measured
+    # turn ran on; and the conversation measured, so a report for one the
+    # row has since replaced is dropped rather than written over the new one.
+    kind: str | None = None
+    has_images: bool | None = None
+    model: str | None = None
+    conversation_id: str | None = None
 
 
 class ContextReportRequest(BaseModel):
@@ -246,6 +262,10 @@ class ContextReportRequest(BaseModel):
     tokens: int | None = None
     threshold: int | None = None
     window: int | None = None
+    kind: str | None = None
+    has_images: bool | None = None
+    model: str | None = None
+    conversation_id: str | None = None
 
 
 class SetSessionNameRequest(BaseModel):
@@ -390,9 +410,7 @@ async def report_context_for_client(body: ClientContextReportRequest):
     return await session_mgr.report_context_for_client(
         body.client_type,
         body.client_ref,
-        tokens=body.tokens,
-        threshold=body.threshold,
-        window=body.window,
+        **body.model_dump(exclude={"client_type", "client_ref"}),
     )
 
 
@@ -404,12 +422,7 @@ async def report_session_context(session_id: str, body: ContextReportRequest):
     knows its own rotation threshold — that figure is read off the spawn
     arguments, not derived from the model name.
     """
-    return await session_mgr.report_context(
-        session_id,
-        tokens=body.tokens,
-        threshold=body.threshold,
-        window=body.window,
-    )
+    return await session_mgr.report_context(session_id, **body.model_dump())
 
 
 @app.get("/sessions/late-turns")
@@ -434,6 +447,9 @@ class ArmRotationRequest(BaseModel):
     # The conversation the hook measured. An arm for one a harness switch
     # has since replaced is ignored; absent means a hook predating it.
     claude_sid: str = ""
+    # When the hook began, as epoch seconds. Lets an arm that names no
+    # conversation be checked against a conversation replaced since.
+    started_at: float | None = None
 
 
 class FireRotationRequest(BaseModel):
@@ -474,7 +490,7 @@ async def arm_rotation(body: ArmRotationRequest):
     """
     return await session_mgr.arm_rotation(
         body.client_type, body.client_ref, surface=body.surface,
-        claude_sid=body.claude_sid,
+        claude_sid=body.claude_sid, started_at=body.started_at,
     )
 
 
@@ -630,7 +646,9 @@ async def send_message(session_id: str, body: MessageRequest):
     t0 = time.monotonic()
 
     async def event_stream():
-        async for event in session_mgr.send_message(session_id, body.content, images=images):
+        async for event in session_mgr.send_message(
+            session_id, body.content, images=images, goal_rounds=body.goal_rounds,
+        ):
             yield f"data: {json.dumps(event)}\n\n"
         log.info("message: done session=%s elapsed=%.1fs", session_id, time.monotonic() - t0)
 
