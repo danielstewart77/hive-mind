@@ -11,6 +11,22 @@ def fresh_store():
     importlib.reload(store)
 
 
+def test_full_backlog_numbers_follow_sibling_reorders():
+    first = store.create_epic("First")
+    second = store.create_epic("Second")
+    feature = store.create_feature(first["id"], "Feature")
+    story = store.create_story("Story", feature_id=feature["id"])
+    numbers = store.backlog_numbers()
+    assert numbers == {first["id"]: "2", second["id"]: "1", feature["id"]: "2.1", story["id"]: "2.1.1"}
+
+    store.update_epic(first["id"], before_id=second["id"])
+    numbers = store.backlog_numbers()
+    assert numbers[first["id"]] == "1"
+    assert numbers[second["id"]] == "2"
+    assert numbers[feature["id"]] == "1.1"
+    assert numbers[story["id"]] == "1.1.1"
+
+
 def test_moving_feature_at_drop_position_reorders_target_and_source_siblings():
     source = store.create_epic("Source")
     target = store.create_epic("Target")

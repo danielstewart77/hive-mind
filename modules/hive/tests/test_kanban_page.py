@@ -103,10 +103,15 @@ def test_done_cards_on_the_board_carry_a_trash_control(signed_in):
     assert "status==='done'" in body
 
 
-def test_board_card_markup_includes_a_selectable_item_id(signed_in):
+def test_board_data_and_renderer_include_the_full_backlog_number(signed_in):
+    epic = signed_in.post("/api/kanban/epics", json={"title": "Numbered epic"}).json()
+    feature = signed_in.post("/api/kanban/features", json={"epic_id": epic["id"], "title": "Numbered feature"}).json()
+    story = signed_in.post("/api/kanban/stories", json={"title": "Numbered story", "feature_id": feature["id"], "status": "committed"}).json()
+    numbers = signed_in.get("/api/kanban/numbers").json()
+    assert numbers[story["id"]] == "1.1.1"
     body = signed_in.get("/kanban/board").text
-    assert "kanban-card-id" in body
-    assert "el('span','kanban-card-id',s.id)" in body
+    assert "kanban-card-number" in body
+    assert "state.numbers[s.id]" in body
 
 
 def test_board_cards_link_to_the_item_details_page(signed_in):

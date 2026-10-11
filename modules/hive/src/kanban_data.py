@@ -296,19 +296,52 @@ def _write(connection: sqlite3.Connection) -> sqlite3.Connection:
 # --- reads -----------------------------------------------------------------
 
 
-def get_data() -> dict[str, list[dict[str, Any]]]:
-    """The whole board.
+def _backlog_numbers(connection: sqlite3.Connection) -> dict[str, str]:
+    """Compute current full hierarchy numbers using the same sibling order as the backlog."""
+    rows = connection.execute(_SELECT + " ORDER BY item.position, item.rowid").fetchall()
+    records = [_row_to_record(row) | {"kind": row["kind"]} for row in rows]
+    by_id = {record["id"]: record for record in records}
+    children: dict[str | None, list[dict[str, Any]]] = {}
+    for record in records:
+        parent_id = record.get("parent_id") or record.get("feature_id") or record.get("epic_id")
+        children.setdefault(parent_id, []).append(record)
 
-    All three keys always, even on an empty board: the page builds its lanes
-    from `state.epics` and friends before anything is on it, and a missing
-    key is a TypeError in the browser with nothing on screen to explain it.
-    """
+    numbers: dict[str, str] = {}
+    def number_tree(parent_id: str | None, prefix: str = "") -> None:
+        for index, record in enumerate(children.get(parent_id, []), start=1):
+            number = f"{prefix}.{index}" if prefix else str(index)
+            numbers[record["id"]] = number
+            number_tree(record["id"], number)
+
+    number_tree(None)
+    for item_id in by_id:
+        numbers.setdefault(item_id, "")
+    return numbers
+
+
+def backlog_numbers() -> dict[str, str]:
+    """Return current hierarchy numbers without changing the board record shape."""
+    with _session() as connection, _snapshot(connection):
+        return _backlog_numbers(connection)
+
+
+def get_data() -> dict[str, list[dict[str, Any]]]:
+    """The whole board with the three established record collections."""
     with _session() as connection, _snapshot(connection):
         return {
             "epics": _list(connection, "epic"),
             "features": _list(connection, "feature"),
             "stories": _list(connection, "story"),
         }
+
+
+def get_backlog_number(record_id: str) -> str:
+    """Return one item's current full hierarchy number from the live board order."""
+    with _session() as connection, _snapshot(connection):
+        numbers = _backlog_numbers(connection)
+        if record_id not in numbers:
+            raise KeyError(f"Item not found: {record_id}")
+        return numbers[record_id]
 
 
 def find_item(record_id: str) -> dict[str, Any]:
@@ -319,6 +352,7 @@ def find_item(record_id: str) -> dict[str, Any]:
         record = _row_to_record(row)
     # The item page builds its API URL from this kind; the record itself does not carry it.
     record["kind"] = row["kind"]
+    record["backlog_number"] = get_backlog_number(record_id)
     return record
 
 

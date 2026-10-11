@@ -23,10 +23,10 @@
 .item-back-nav a { color:var(--console-cyan, #4cc9d9); text-decoration:none; font-size:.9rem; }
 .item-back-nav a:hover { text-decoration:underline; }
 </style>
-<main class="page item-page" id="item-page" data-item-id="{{ item.id }}" data-item-kind="{{ item.kind }}" data-item-subtype="{{ item.subtype or '' }}" data-item-status="{{ item.status or '' }}">
+<main class="page item-page" id="item-page" data-item-id="{{ item.id }}" data-item-kind="{{ item.kind }}" data-item-subtype="{{ item.subtype or '' }}" data-item-status="{{ item.status or '' }}" data-item-number="{{ item.backlog_number }}">
   <nav class="item-back-nav"><a href="/kanban/backlog">Back to backlog</a></nav>
   <p>{{ item.kind | capitalize }}</p>
-  <p class="item-id" aria-label="Item ID">{{ item.id }}</p>
+  <p class="item-number" id="item-number" aria-label="Backlog item number"></p>
   <div class="item-layout">
   <form id="item-form" class="surface item-field">
     <div class="item-actions item-form-header"><select id="status-choice" aria-label="Status" hidden></select><button class="button" type="submit">Save</button><span id="item-feedback" class="item-feedback" role="status" aria-live="polite"></span></div>
@@ -58,6 +58,11 @@
   const page = document.getElementById('item-page');
   const kinds = {epic: 'epics', feature: 'features', story: 'stories'};
   const itemId = page.dataset.itemId;
+  async function loadBacklogNumber(){
+    const response = await fetch('/api/kanban/numbers', {headers: {'Accept': 'application/json'}});
+    const numbers = await response.json();
+    document.getElementById('item-number').textContent = numbers[itemId] || '';
+  }
   const kindName = {epic: 'Epic', feature: 'Feature', story: 'Story'};
   function autoGrow(el){el.style.height='auto';el.style.height=`${el.scrollHeight}px`;}
   const growers = form.querySelectorAll('textarea');
@@ -136,6 +141,7 @@
   }
   fillTypes();
   fillStatus();
+  loadBacklogNumber();
   loadRelations();
 
   form.addEventListener('submit', async (event) => {

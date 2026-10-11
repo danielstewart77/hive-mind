@@ -609,6 +609,12 @@ async def api_kanban_data(user: dict = Depends(require_auth)):
     return await _kanban_call(kanban_data.get_data)
 
 
+@app.get("/api/kanban/numbers")
+async def api_kanban_numbers(user: dict = Depends(require_auth)):
+    del user
+    return await _kanban_call(kanban_data.backlog_numbers)
+
+
 _COLLECTION_KIND = {"epics": "epic", "features": "feature", "stories": "story"}
 _PLURAL = {"epic": "epics", "feature": "features", "story": "stories"}
 _SINGULAR = {"epics": "epic", "features": "feature", "stories": "story"}
