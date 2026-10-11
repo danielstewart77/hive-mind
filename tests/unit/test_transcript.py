@@ -9,6 +9,7 @@ own tests and reads nothing in production.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from minds import transcript
@@ -299,3 +300,55 @@ class TestRoundThree:
 
         assert len(blocks) >= len(whole) - 1
         assert blocks == whole[: len(blocks)]
+
+
+class TestPaneOpenedOnAHandover:
+    """A switch respawns a pane with the handover as its opening turn, so the
+    next switch reads the whole earlier conversation out of that one turn."""
+
+    def _handover(self) -> str:
+        # What a pane is opened on after a chat-surface switch: the planted
+        # turn, then an opening turn joined to its message by the separator.
+        return transcript.render([
+            {"role": "user", "kind": "text", "text": "Remember the codeword plumzq77.",
+             "name": ""},
+            {"role": "assistant", "kind": "text", "text": "OK", "name": ""},
+            {"role": "user", "kind": "text",
+             "text": f"an earlier handover{transcript.SEPARATOR}What was the codeword?",
+             "name": ""},
+            {"role": "assistant", "kind": "text", "text": "plumzq77", "name": ""},
+        ])
+
+    def test_a_dsh_pane_s_opening_context_is_handed_over(self, tmp_path):
+        log = tmp_path / "session.jsonl"
+        log.write_text("\n".join(json.dumps(e) for e in [
+            {"type": "session", "version": 0, "id": "c1", "cwd": "/usr/src/app"},
+            {"type": "user/message", "seq": 1, "data": {
+                "content": [{"type": "text", "text": self._handover()}],
+                "source": {"kind": "plugin", "plugin": "hive-terminal-context"}}},
+            {"type": "assistant/message", "seq": 2, "data": {
+                "message": {"content": [{"type": "text", "text": "Understood."}]}}},
+        ]) + "\n")
+
+        text = transcript.render(transcript.read_dsh(log))
+
+        assert "Remember the codeword plumzq77." in text
+        assert "Assistant: Understood." in text
+
+    def test_a_codex_pane_opened_on_a_handover_keeps_what_precedes_its_separators(
+        self, tmp_path,
+    ):
+        rollout = tmp_path / "rollout-2026-10-11T16-00-00-019e0000-0000-7000-8000-000000000001.jsonl"
+        rollout.write_text("\n".join(json.dumps(e) for e in [
+            {"type": "response_item", "payload": {
+                "type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": self._handover()}]}},
+            {"type": "response_item", "payload": {
+                "type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "Understood."}]}},
+        ]) + "\n")
+
+        text = transcript.render(transcript.read_codex(rollout))
+
+        assert "Remember the codeword plumzq77." in text
+        assert "What was the codeword?" in text

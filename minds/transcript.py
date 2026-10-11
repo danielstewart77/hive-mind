@@ -56,6 +56,9 @@ TRIMMED = "[trimmed]"
 #: the new harness's system prompt and has no business in the history twice.
 SEPARATOR = "\n\n---\n\n"
 
+#: The source dsh stamps on a pane's opening context (``--context-file``).
+TERMINAL_CONTEXT_PLUGIN = "hive-terminal-context"
+
 #: The harness's own log reader for a compressed dsh log, used when the
 #: Python decoder is not installed.
 DEFAULT_DSH_READ_LOG_CLI = (
@@ -157,10 +160,18 @@ def _read_lines(path: Path) -> list[str]:
 
 
 def _strip_composed_prompt(blocks: list[dict]) -> list[dict]:
-    """Drop the system prompt a composed first turn carries in front of it."""
+    """Drop the system prompt a composed first turn carries in front of it.
+
+    A pane opened on a switch has a handover as its first turn and nothing
+    folded in front of it. A handover holds separators of its own — every
+    opening turn it records is a handover and a message joined by one — so
+    cutting at the first would drop the oldest half of the history.
+    """
     for block in blocks:
         if block["role"] == "user" and block["kind"] == "text":
-            if SEPARATOR in block["text"]:
+            opening = block["text"].lstrip()
+            if (SEPARATOR in block["text"]
+                    and not opening.startswith((_SUMMARY_HEADING, _TRANSCRIPT_HEADING))):
                 block["text"] = block["text"].split(SEPARATOR, 1)[1]
             break
     return [b for b in blocks if b["kind"] != "text" or b["text"].strip()]
@@ -333,7 +344,9 @@ def read_dsh(path: Path) -> list[dict]:
 
     User messages are read only when the user sent them: plugins splice their
     own context in as user messages (the sandbox policy, the skill catalog),
-    and none of that was said. ``tool/call`` events repeat the call the
+    and none of that was said. The one plugin message that is history is a
+    pane's opening context — the handover or carry-forward the terminal was
+    opened on, which is everything the conversation held before it. ``tool/call`` events repeat the call the
     assistant message already carries, so the call is read from the message.
     """
     blocks: list[dict] = []
@@ -341,8 +354,9 @@ def read_dsh(path: Path) -> list[dict]:
         kind = event.get("type")
         data = event.get("data") or {}
         if kind == "user/message":
-            source = (data.get("source") or {}).get("kind")
-            if source not in (None, "user"):
+            source = data.get("source") or {}
+            if (source.get("kind") not in (None, "user")
+                    and source.get("plugin") != TERMINAL_CONTEXT_PLUGIN):
                 continue
             blocks.append(_block("user", "text", _text(data.get("content"))))
         elif kind == "assistant/message":
