@@ -14,6 +14,7 @@ gateway wrote and the requests it sent.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 import time
@@ -185,32 +186,51 @@ def test_a_conversation_just_under_the_new_threshold_resumes_under_its_own_id():
     assert (row["context_window"], row["context_threshold"]) == (200_000, 200_000 * PERCENT // 100)
 
 
-def test_a_conversation_over_the_new_threshold_is_handed_over_not_resumed():
+def test_a_chat_over_the_new_threshold_is_handed_over_under_the_same_row():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr)
+            await _measured(mgr, tokens=100_001, window=1_000_000, threshold=500_000)
+            await mgr._db.execute("UPDATE sessions SET rotation_armed = 1 WHERE id = 'sess-1'")
+            await mgr._db.commit()
+            mind = Mind()
+            result = await _switch(mgr, mind, "claude-sonnet-5")
+            row = await mgr._get_row("sess-1")
+            cur = await mgr._db.execute("SELECT COUNT(*) FROM sessions")
+            rows = (await cur.fetchone())[0]
+            await _close(mgr)
+            return result, row, rows, mind
+
+    result, row, rows, mind = _run(scenario())
+    assert result["id"] == "sess-1"
+    assert rows == 1
+    assert row["status"] != "closed"
+    assert row["claude_sid"] != "conv-1"
+    assert all(s["resume_sid"] != "conv-1" for s in mind.spawns())
+    assert mind.spawns()[-1]["resume_sid"] == row["claude_sid"]
+    assert row["carry_forward"] and row["carry_forward_sid"] == row["claude_sid"]
+    assert mind.spawns()[-1]["opening_turn"] == row["carry_forward"]
+    assert row["model"] == "claude-sonnet-5"
+    assert (row["context_window"], row["context_threshold"]) == (200_000, 200_000 * PERCENT // 100)
+    assert row["context_tokens"] is None
+    assert row["rotation_armed"] == 0
+    assert "100,001" in result["warning"]
+
+
+def test_a_handover_asks_the_mind_to_drop_the_replaced_conversations_rotation_marker():
     async def scenario():
         with tempfile.TemporaryDirectory() as tmp:
             mgr = await _manager(tmp)
             await _seed(mgr)
             await _measured(mgr, tokens=100_001, window=1_000_000, threshold=500_000)
             mind = Mind()
-            result = await _switch(mgr, mind, "claude-sonnet-5")
-            old = await mgr._get_row("sess-1")
-            new = await mgr._get_row(result["id"])
+            await _switch(mgr, mind, "claude-sonnet-5")
             await _close(mgr)
-            return result, old, new, mind
+            return mind
 
-    result, old, new, mind = _run(scenario())
-    assert result["id"] != "sess-1"
-    assert new["rotated_from"] == "sess-1"
-    assert old["status"] == "closed"
-    assert all(s["resume_sid"] != "conv-1" for s in mind.spawns()[1:])
-    assert new["claude_sid"] != "conv-1"
-    assert new["carry_forward"] and new["carry_forward_sid"] == new["claude_sid"]
-    assert mind.spawns()[-1]["opening_turn"] == new["carry_forward"]
-    assert new["model"] == "claude-sonnet-5"
-    assert (new["context_window"], new["context_threshold"]) == (200_000, 200_000 * PERCENT // 100)
-    assert new["context_tokens"] is None
-    assert new["rotation_armed"] == 0
-    assert "100,001" in result["warning"]
+    cleared = _run(scenario()).sent("DELETE", "/sessions/sess-1/rotation-marker")
+    assert [c["params"].get("claude_sid") for c in cleared] == ["conv-1"]
 
 
 def test_an_unmeasured_conversation_that_has_had_turns_is_never_assumed_to_fit():
@@ -220,12 +240,13 @@ def test_an_unmeasured_conversation_that_has_had_turns_is_never_assumed_to_fit()
             await _seed(mgr)
             await _measured(mgr, tokens=None)
             mind = Mind()
-            result = await _switch(mgr, mind, "claude-sonnet-5")
+            await _switch(mgr, mind, "claude-sonnet-5")
+            row = await mgr._get_row("sess-1")
             await _close(mgr)
-            return result, mind
+            return row, mind
 
-    result, mind = _run(scenario())
-    assert result["id"] != "sess-1"
+    row, mind = _run(scenario())
+    assert row["claude_sid"] != "conv-1"
     assert len(mind.sent("POST", "/handover")) == 1
 
 
@@ -236,12 +257,12 @@ def test_images_on_a_text_only_model_hand_over_even_when_the_size_fits():
             await _seed(mgr)
             await _measured(mgr, tokens=1_000)
             await mgr.report_context("sess-1", has_images=True, conversation_id="conv-1")
-            mind = Mind()
-            text_only = await _switch(mgr, mind, "text-only")
+            await _switch(mgr, Mind(), "text-only")
+            row = await mgr._get_row("sess-1")
             await _close(mgr)
-            return text_only
+            return row
 
-    assert _run(scenario())["id"] != "sess-1"
+    assert _run(scenario())["claude_sid"] != "conv-1"
 
 
 def test_images_on_a_model_whose_image_support_is_unknown_hand_over():
@@ -250,11 +271,12 @@ def test_images_on_a_model_whose_image_support_is_unknown_hand_over():
             mgr = await _manager(tmp)
             await _seed(mgr)
             await _measured(mgr, tokens=1_000, has_images=1)
-            unknown = await _switch(mgr, Mind(), "unknown-eyes")
+            await _switch(mgr, Mind(), "unknown-eyes")
+            row = await mgr._get_row("sess-1")
             await _close(mgr)
-            return unknown
+            return row
 
-    assert _run(scenario())["id"] != "sess-1"
+    assert _run(scenario())["claude_sid"] != "conv-1"
 
 
 def test_a_conversation_with_no_images_resumes_on_a_text_only_model():
@@ -263,11 +285,14 @@ def test_a_conversation_with_no_images_resumes_on_a_text_only_model():
             mgr = await _manager(tmp)
             await _seed(mgr)
             await _measured(mgr, tokens=1_000, has_images=0)
-            result = await _switch(mgr, Mind(), "text-only")
+            await _switch(mgr, Mind(), "text-only")
+            row = await mgr._get_row("sess-1")
             await _close(mgr)
-            return result
+            return row
 
-    assert _run(scenario())["id"] == "sess-1"
+    row = _run(scenario())
+    assert row["claude_sid"] == "conv-1"
+    assert row["model"] == "text-only"
 
 
 def test_a_terminal_handed_over_keeps_its_row_and_respawns_its_pane_on_the_handover():
@@ -297,6 +322,35 @@ def test_a_terminal_handed_over_keeps_its_row_and_respawns_its_pane_on_the_hando
     assert row["carry_forward_sid"] == row["claude_sid"]
     assert row["rotation_armed"] == 0
     assert (row["context_window"], row["context_threshold"]) == (200_000, 100_000)
+
+
+class NoPane(Mind):
+    def _answer(self, method, url, params=None, json_body=None):
+        if method == "POST" and url.endswith("/rotate-pty"):
+            self.requests.append({"method": method, "path": "/rotate-pty",
+                                  "params": {}, "json": json_body})
+            return _Resp(200, {"rotated": False})
+        return super()._answer(method, url, params, json_body)
+
+
+def test_a_terminal_whose_pane_is_gone_gets_a_process_on_the_new_conversation():
+    """A new conversation id is written only with something running it."""
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr)
+            await _measured(mgr, tokens=150_000, window=1_000_000, threshold=500_000)
+            await mgr._db.execute("UPDATE sessions SET terminal_held = 1 WHERE id = 'sess-1'")
+            await mgr._db.commit()
+            mind = NoPane()
+            await _switch(mgr, mind, "claude-sonnet-5")
+            row = await mgr._get_row("sess-1")
+            await _close(mgr)
+            return row, mind
+
+    row, mind = _run(scenario())
+    assert row["claude_sid"] != "conv-1"
+    assert [s["resume_sid"] for s in mind.spawns()] == [row["claude_sid"]]
 
 
 def test_a_handover_seed_leaves_room_for_the_soul_under_a_small_models_threshold():
@@ -362,33 +416,136 @@ TOOL_TURN = [
 ]
 
 
-def test_an_overflowed_turn_rotates_and_sends_the_same_message_once_on_the_new_conversation():
+def _db_path(mgr) -> str:
+    import os
+    return os.environ["SESSIONS_DB_PATH"]
+
+
+class Watching(Mind):
+    """Reads the row, through its own connection, the moment a turn arrives."""
+
+    def __init__(self, *a, db_path: str = "", **k):
+        super().__init__(*a, **k)
+        self.db_path = db_path
+        self.rows_at_message: list[dict] = []
+
+    def _answer(self, method, url, params=None, json_body=None):
+        if method == "POST" and url.endswith("/message"):
+            import sqlite3
+            with sqlite3.connect(self.db_path) as db:
+                db.row_factory = sqlite3.Row
+                row = db.execute("SELECT * FROM sessions WHERE id = 'sess-1'").fetchone()
+                self.rows_at_message.append(dict(row))
+        return super()._answer(method, url, params, json_body)
+
+
+def test_an_overflowed_turn_rotates_and_sends_the_same_message_once_on_the_same_row():
     async def scenario():
         with tempfile.TemporaryDirectory() as tmp:
             mgr = await _manager(tmp)
             await _seed(mgr)
             await _measured(mgr, tokens=180_000)
-            mind = Mind(turns=[TOOL_TURN, [DONE]])
+            mind = Watching(turns=[TOOL_TURN, [DONE]], db_path=_db_path(mgr))
             events = await _turn(mgr, mind, "ship it")
-            successor = (await mgr.get_active_session("telegram", "123"))
-            new = await mgr._get_row(successor["id"])
-            old_ledger = await mgr.get_session_turns("sess-1")
+            row = await mgr._get_row("sess-1")
+            ledger = await mgr.get_session_turns("sess-1")
             await _close(mgr)
-            return events, new, old_ledger, mind
+            return events, row, ledger, mind
 
-    events, new, old_ledger, mind = _run(scenario())
-    assert new["id"] != "sess-1" and new["rotated_from"] == "sess-1"
+    events, row, ledger, mind = _run(scenario())
     sent = mind.messages()
-    assert [r["path"] for r in sent] == ["/sessions/sess-1/message",
-                                         f"/sessions/{new['id']}/message"]
+    assert [r["path"] for r in sent] == ["/sessions/sess-1/message"] * 2
     assert sent[1]["json"]["content"].endswith("\nship it")
-    assert [t["content"] for t in old_ledger] == ["an earlier turn"]
-    opening = [s for s in mind.spawns() if s["session_id"] == new["id"]][0]["opening_turn"]
+    assert row["claude_sid"] != "conv-1"
+    assert [t["content"] for t in ledger].count("ship it") == 1
+    opening = [s for s in mind.spawns() if s["resume_sid"] == row["claude_sid"]][0]["opening_turn"]
     assert 'Bash {"command": "make deploy"} (done)' in opening
     assert "/never" not in opening
+    # The re-send was on record before it went out, and settled once answered.
+    assert mind.rows_at_message[1]["resend_content"] == "ship it"
+    assert row["resend_content"] is None
     assert "ran out of room" in _text(events)
     assert events[-1] == DONE
-    assert new["resend_content"] is None
+
+
+def test_a_message_typed_during_an_overflow_waits_behind_the_resend():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr)
+            await _measured(mgr, tokens=180_000)
+            mind = Mind(turns=[[OVERFLOW], [DONE], [DONE]])
+            with mind.wired(), _soul():
+                async def drain(text):
+                    return [e async for e in mgr.send_message("sess-1", text)]
+                first = asyncio.create_task(drain("ship it"))
+                await asyncio.sleep(0)
+                second = asyncio.create_task(drain("and then?"))
+                results = await asyncio.gather(first, second)
+            await _close(mgr)
+            return results, mind
+
+    results, mind = _run(scenario())
+    contents = [m["json"]["content"].rsplit("\n", 1)[-1] for m in mind.messages()]
+    assert contents == ["ship it", "ship it", "and then?"]
+    assert results[1][-1] == DONE
+
+
+def test_an_overflowed_turn_is_resent_with_its_images_and_goal_rounds():
+    picture = [{"media_type": "image/png", "data": "AAAA"}]
+
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr)
+            await _measured(mgr, tokens=180_000)
+            mind = Mind(turns=[[OVERFLOW], [DONE]])
+            await _turn(mgr, mind, "look", images=picture, goal_rounds=4)
+            await _close(mgr)
+            return mind
+
+    resent = _run(scenario()).messages()[1]["json"]
+    assert resent["images"] == picture
+    assert resent["goal_rounds"] == 4
+
+
+def test_a_harness_that_only_tallies_its_calls_is_not_said_to_have_run_none():
+    tallied = {**OVERFLOW, "traffic": {"emitted": 3, "succeeded": 2, "failed": 1}}
+
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr, harness="dsh")
+            await _measured(mgr, tokens=180_000)
+            mind = Mind(turns=[[tallied], [DONE]])
+            await _turn(mgr, mind, "ship it")
+            row = await mgr._get_row("sess-1")
+            await _close(mgr)
+            return row, mind
+
+    row, mind = _run(scenario())
+    opening = [s for s in mind.spawns() if s["resume_sid"] == row["claude_sid"]][0]["opening_turn"]
+    assert "completed 2 tool call" in opening
+    assert "no tool calls" not in opening
+
+
+def test_an_overflow_on_a_row_that_never_reported_is_sized_from_the_models_listing():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr, model="bilby-32k")
+            await _measured(mgr, tokens=None, window=None, threshold=None)
+            mind = Mind(turns=[[OVERFLOW], [DONE]])
+            await _turn(mgr, mind, "ship it")
+            row = await mgr._get_row("sess-1")
+            await _close(mgr)
+            return row, mind
+
+    row, mind = _run(scenario())
+    threshold = 32_000 * PERCENT // 100
+    budget = mind.sent("POST", "/handover")[0]["json"]["budget_bytes"]
+    assert budget <= threshold * 4
+    assert (row["context_window"], row["context_threshold"]) == (32_000, threshold)
 
 
 def test_a_resent_message_that_overflows_again_is_reported_and_not_rotated_again():
@@ -399,25 +556,25 @@ def test_a_resent_message_that_overflows_again_is_reported_and_not_rotated_again
             await _measured(mgr, tokens=180_000)
             mind = Mind(turns=[[OVERFLOW], [OVERFLOW], [DONE]])
             events = await _turn(mgr, mind, "ship it")
-            cur = await mgr._db.execute("SELECT COUNT(*) FROM sessions")
-            rows = (await cur.fetchone())[0]
             await _close(mgr)
-            return events, rows, mind
+            return events, mind
 
-    events, rows, mind = _run(scenario())
-    assert rows == 2
+    events, mind = _run(scenario())
+    assert len(mind.sent("POST", "/handover")) == 1
     assert len(mind.messages()) == 2
     assert events[-1]["is_error"] is True
     assert "again" in _text(events)
 
 
-def test_a_resend_interrupted_by_a_restart_goes_out_once():
+def test_a_resend_interrupted_by_a_restart_goes_out_once_with_what_it_carried():
     async def scenario():
         with tempfile.TemporaryDirectory() as tmp:
             mgr = await _manager(tmp)
             await _seed(mgr)
             await mgr._db.execute(
-                "UPDATE sessions SET resend_content = 'ship it' WHERE id = 'sess-1'"
+                "UPDATE sessions SET resend_content = 'ship it', resend_images = ?, "
+                "resend_goal_rounds = 2 WHERE id = 'sess-1'",
+                (json.dumps([{"media_type": "image/png", "data": "AAAA"}]),),
             )
             await mgr._db.commit()
             mind = Mind()
@@ -429,7 +586,122 @@ def test_a_resend_interrupted_by_a_restart_goes_out_once():
 
     first, second, mind = _run(scenario())
     assert (first, second) == (1, 0)
+    [sent] = mind.messages()
+    assert sent["json"]["content"].endswith("\nship it")
+    assert sent["json"]["images"] == [{"media_type": "image/png", "data": "AAAA"}]
+    assert sent["json"]["goal_rounds"] == 2
+
+
+def test_a_resend_whose_answer_never_arrives_is_stamped_and_not_sent_again():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr)
+            await _measured(mgr, tokens=180_000)
+            mind = Mind(turns=[[OVERFLOW], []])
+            await _turn(mgr, mind, "ship it")
+            row = await mgr._get_row("sess-1")
+            owed = await mgr.pending_resends()
+            await _close(mgr)
+            return row, owed
+
+    row, owed = _run(scenario())
+    assert row["resend_content"] == "ship it"
+    assert row["resend_dispatched_at"] is not None
+    assert owed == []
+
+
+class Refusing(Mind):
+    def _answer(self, method, url, params=None, json_body=None):
+        if method == "POST" and url.endswith("/message"):
+            self.requests.append({"method": method, "path": "/x/message",
+                                  "params": {}, "json": json_body})
+            return _Resp(500, {"error": "harness fell over"})
+        return super()._answer(method, url, params, json_body)
+
+
+def test_a_resend_the_mind_answers_with_an_error_is_no_longer_owed():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr)
+            await mgr._db.execute(
+                "UPDATE sessions SET resend_content = 'ship it' WHERE id = 'sess-1'"
+            )
+            await mgr._db.commit()
+            with Refusing().wired(), _soul():
+                await mgr.resume_pending_resends()
+            row = await mgr._get_row("sess-1")
+            await _close(mgr)
+            return row
+
+    row = _run(scenario())
+    assert row["resend_content"] is None
+    assert row["resend_dispatched_at"] is None
+
+
+def test_the_gateway_sends_an_owed_resend_when_it_starts(tmp_path, monkeypatch):
+    import os
+    from comms import broker as broker_mod
+    from comms import server as server_module
+    import importlib
+
+    monkeypatch.setenv("BROKER_DB_PATH", str(tmp_path / "broker.db"))
+    monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "sessions.db"))
+
+    async def before_the_restart():
+        mgr = SessionManager()
+        os.environ["SESSIONS_DB_PATH"] = str(tmp_path / "sessions.db")
+        await mgr.start()
+        mgr.broker_db = await broker_mod.init_db(str(tmp_path / "broker.db"))
+        await broker_mod.register_mind(
+            mgr.broker_db, mind_id=MIND, name="ada", gateway_url="http://mind.test:8420",
+            model="claude-opus-5", harness="claude_cli",
+        )
+        await _seed(mgr)
+        await mgr._db.execute(
+            "UPDATE sessions SET resend_content = 'ship it' WHERE id = 'sess-1'"
+        )
+        await mgr._db.commit()
+        await mgr.broker_db.close()
+        await mgr.shutdown()
+
+    _run(before_the_restart())
+    mind = Mind()
+    importlib.reload(server_module)
+    with mind.wired(), _soul(), TestClient(server_module.app):
+        deadline = time.time() + 5
+        while not mind.messages() and time.time() < deadline:
+            time.sleep(0.05)
     assert [m["json"]["content"].endswith("\nship it") for m in mind.messages()] == [True]
+
+
+def test_goal_rounds_reach_the_mind_through_the_message_route(tmp_path, monkeypatch):
+    import importlib
+    from comms import server as server_module
+
+    monkeypatch.setenv("BROKER_DB_PATH", str(tmp_path / "broker.db"))
+    monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "sessions.db"))
+    monkeypatch.delenv("COMMS_BEARER_TOKEN", raising=False)
+    importlib.reload(server_module)
+    mind = Mind()
+    with TestClient(server_module.app) as client:
+        mgr = server_module.session_mgr
+        from comms import broker as broker_mod
+        _run_in(client, broker_mod.register_mind(
+            mgr.broker_db, mind_id=MIND, name="ada", gateway_url="http://mind.test:8420",
+            model="claude-opus-5", harness="claude_cli",
+        ))
+        _run_in(client, _seed(mgr))
+        with mind.wired(), _soul():
+            client.post("/sessions/sess-1/message",
+                        json={"content": "build it", "goal_rounds": 4}).read()
+    assert mind.messages()[0]["json"]["goal_rounds"] == 4
+
+
+def _run_in(client, coro):
+    """Run on the app's own loop, where its database connection lives."""
+    return client.portal.call(lambda: coro)
 
 
 # ---------------------------------------------------------------------------
@@ -447,20 +719,95 @@ def test_a_goal_stopped_for_rotation_is_redispatched_once_with_its_rounds_left()
             await _measured(mgr, tokens=100_500)
             mind = Mind(turns=[[stopped], [DONE]])
             events = await _turn(mgr, mind, "build the widget", goal_rounds=5)
-            cur = await mgr._db.execute("SELECT id FROM sessions WHERE rotated_from = 'sess-1'")
-            successors = [r[0] for r in await cur.fetchall()]
+            row = await mgr._get_row("sess-1")
             await _close(mgr)
-            return events, successors, mind
+            return events, row, mind
 
-    events, successors, mind = _run(scenario())
-    assert len(successors) == 1
+    events, row, mind = _run(scenario())
+    assert len(mind.sent("POST", "/handover")) == 1
+    assert row["claude_sid"] != "conv-1"
     sent = mind.messages()
-    assert [r["path"] for r in sent] == ["/sessions/sess-1/message",
-                                         f"/sessions/{successors[0]}/message"]
+    assert [r["path"] for r in sent] == ["/sessions/sess-1/message"] * 2
     assert sent[0]["json"]["goal_rounds"] == 5
     assert sent[1]["json"]["goal_rounds"] == 3
     assert sent[1]["json"]["content"].endswith("\nbuild the widget")
     assert events[-1] == DONE
+
+
+# ---------------------------------------------------------------------------
+# A rotation arm, and a report, that would write over the wrong thing
+# ---------------------------------------------------------------------------
+
+async def _just_rotated(mgr) -> float:
+    began = time.time()
+    await mgr._db.execute(
+        "UPDATE sessions SET conversation_started_at = ? WHERE id = 'sess-1'", (began,)
+    )
+    await mgr._db.commit()
+    return began
+
+
+def test_an_arm_naming_no_conversation_from_a_hook_older_than_the_conversation_is_refused():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr)
+            began = await _just_rotated(mgr)
+            answer = await mgr.arm_rotation("telegram", "123", started_at=began - 60)
+            row = await mgr._get_row("sess-1")
+            await _close(mgr)
+            return answer, row
+
+    answer, row = _run(scenario())
+    assert answer["ok"] is False
+    assert row["rotation_armed"] == 0
+
+
+def test_an_arm_naming_neither_conversation_nor_start_is_refused_on_a_fresh_conversation():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr)
+            await _just_rotated(mgr)
+            answer = await mgr.arm_rotation("telegram", "123")
+            row = await mgr._get_row("sess-1")
+            await _close(mgr)
+            return answer, row
+
+    answer, row = _run(scenario())
+    assert answer["ok"] is False
+    assert row["rotation_armed"] == 0
+
+
+def test_a_handover_dates_the_new_conversation_so_a_late_arm_is_refused():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr)
+            await _measured(mgr, tokens=100_001, window=1_000_000, threshold=500_000)
+            hook_started = time.time() - 1
+            await _switch(mgr, Mind(), "claude-sonnet-5")
+            answer = await mgr.arm_rotation("telegram", "123", started_at=hook_started)
+            await _close(mgr)
+            return answer
+
+    assert _run(scenario())["ok"] is False
+
+
+def test_a_report_of_a_zero_window_leaves_the_known_window_alone():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr)
+            await _measured(mgr, tokens=1_000)
+            await mgr.report_context("sess-1", tokens=2_000, window=0, threshold=0)
+            row = await mgr._get_row("sess-1")
+            await _close(mgr)
+            return row
+
+    row = _run(scenario())
+    assert (row["context_tokens"], row["context_window"], row["context_threshold"]) == (
+        2_000, 200_000, 100_000)
 
 
 # ---------------------------------------------------------------------------

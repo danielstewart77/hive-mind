@@ -161,7 +161,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     context_has_images INTEGER,
     context_model TEXT,
     resend_content TEXT,
+    resend_images TEXT,
+    resend_goal_rounds INTEGER,
     resend_dispatched_at REAL,
+    conversation_started_at REAL,
     effort        TEXT,
     harness       TEXT,
     terminal_held INTEGER NOT NULL DEFAULT 0
@@ -215,6 +218,7 @@ CREATE INDEX IF NOT EXISTS idx_session_turns_lookup
 # bot or mind container that holds it.
 _PRIVATE_SESSION_COLUMNS = (
     "carry_forward", "carry_forward_sid", "carry_forward_at", "resend_content",
+    "resend_images",
 )
 
 # The two armed values are not interchangeable, and nothing may test
@@ -389,11 +393,16 @@ def completed_tool_calls(events: list[dict]) -> list[str]:
     return [calls[tool_id] for tool_id in done]
 
 
-def failed_turn_note(tool_calls: list[str]) -> str:
+def failed_turn_note(tool_calls: list[str], traffic: Any = None) -> str:
     """What a conversation replacing an overflowed one is told about the turn.
 
     The message is re-sent after this, so the note's job is the part the
     message cannot say: what the failed attempt already did.
+
+    Only Claude's stream and codex's observer frames itemise calls. A
+    harness that reports only a tally (dsh's ``traffic``) gets the tally,
+    and one reporting neither gets no claim at all — "no tool calls ran" said
+    of a turn nobody could see into would have the work done twice.
     """
     lines = [
         "<failed-turn>",
@@ -407,8 +416,13 @@ def failed_turn_note(tool_calls: list[str]) -> str:
             "do not run them again:"
         )
         lines.extend(f"- {call} (done)" for call in tool_calls)
-    else:
-        lines.append("That attempt ran no tool calls to completion.")
+    elif isinstance(traffic, dict) and _positive_int(traffic.get("succeeded")):
+        lines.append(
+            f"That attempt completed {int(traffic['succeeded'])} tool call(s) that "
+            "are not itemised here. Check what they changed before doing it again."
+        )
+    elif isinstance(traffic, dict) and traffic.get("emitted") == 0:
+        lines.append("That attempt ran no tool calls.")
     lines.append("</failed-turn>")
     return "\n".join(lines)
 
@@ -444,6 +458,9 @@ class SessionManager:
     # enough that a seed whose clearing signal was lost cannot resurface on
     # top of a conversation that has moved on. See get_carry_forward.
     CARRY_FORWARD_TTL_SECONDS = 7 * 86400
+    # The longest a rotation hook spends composing before it arms: what an
+    # arm naming no conversation, and no start time, is held to.
+    ARM_COMPOSITION_SECONDS = 15 * 60
 
     def __init__(self):
         self._db: aiosqlite.Connection | None = None
@@ -592,7 +609,9 @@ class SessionManager:
         # rather than in memory so a gateway restart between the rotation and
         # the re-send does not lose the message; the dispatch stamp is what
         # keeps a restart mid-re-send from sending it a second time.
-        for column in ("resend_content TEXT", "resend_dispatched_at REAL"):
+        for column in ("resend_content TEXT", "resend_images TEXT",
+                       "resend_goal_rounds INTEGER", "resend_dispatched_at REAL",
+                       "conversation_started_at REAL"):
             try:
                 await self._db.execute(f"ALTER TABLE sessions ADD COLUMN {column}")
                 await self._db.commit()
@@ -786,12 +805,12 @@ class SessionManager:
 
         await self._db.execute(
             """INSERT INTO sessions (id, owner_type, owner_ref, model, claude_sid, created_at, last_active, status, mind_id, rotated_from, name, color, effort, harness,
-                                     carry_forward, carry_forward_sid, carry_forward_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                     carry_forward, carry_forward_sid, carry_forward_at, conversation_started_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (session_id, owner_type, owner_ref, model, claude_sid, now, now, mind_id, rotated_from,
              inherited_name, inherited_color, inherited_effort, harness or None,
              carry_forward or None, claude_sid if carry_forward else None,
-             now if carry_forward else None),
+             now if carry_forward else None, now),
         )
         await self._db.execute(
             """INSERT OR REPLACE INTO active_sessions (client_type, client_ref, session_id)
@@ -1298,6 +1317,11 @@ class SessionManager:
         ):
             if value is None:
                 continue
+            # A window or threshold of nothing is a model nobody measured,
+            # not a model with no room; written, it would erase the real one
+            # and draw every count as over.
+            if column != "context_tokens" and int(value) <= 0:
+                continue
             updates.append(f"{column} = ?")
             params.append(int(value))
         if kind:
@@ -1552,7 +1576,7 @@ class SessionManager:
     # ------------------------------------------------------------------
     async def arm_rotation(
         self, client_type: str, client_ref: str, surface: str = "",
-        claude_sid: str = "",
+        claude_sid: str = "", started_at: float | None = None,
     ) -> dict:
         """Prepare the active session for (client_type, client_ref) to rotate.
 
@@ -1575,8 +1599,15 @@ class SessionManager:
         switch replaces the conversation under the row while that hook's
         composition can still be running, and its arm would rotate a
         conversation that has only just begun — so an arm for any
-        conversation but the current one is ignored. Absent means a hook
-        that predates the field.
+        conversation but the current one is ignored.
+
+        A hook that names no conversation cannot be checked that way, so it
+        is checked by time: an arm from a hook that started before the
+        conversation under the row did is about the one replaced. A hook that
+        gives no start either is held to the longest a composition runs —
+        a conversation replaced more recently than that may be the one the
+        arm was composed for, or may not, and arming the wrong one rotates a
+        conversation that has only just begun.
         """
         active = await self.get_active_session(client_type, client_ref)
         if not active:
@@ -1589,6 +1620,19 @@ class SessionManager:
                 claude_sid, active["id"],
             )
             return {"ok": False, "error": "stale conversation", "session_id": active["id"]}
+        if not claude_sid:
+            began = (await self._get_row(active["id"]) or {}).get("conversation_started_at")
+            if began is not None:
+                cutoff = started_at if started_at is not None else (
+                    time.time() - self.ARM_COMPOSITION_SECONDS
+                )
+                if began > cutoff:
+                    log.info(
+                        "ignoring id-less rotation arm on session %s, whose "
+                        "conversation began after the hook did", active["id"],
+                    )
+                    return {"ok": False, "error": "stale conversation",
+                            "session_id": active["id"]}
         if surface == "terminal":
             return await self._stage_terminal_rotation(active, client_ref)
         await self._db.execute(
@@ -1746,8 +1790,8 @@ class SessionManager:
         await self._db.execute(
             "UPDATE sessions SET claude_sid = ?, harness_sid = NULL, "
             "carry_forward = ?, carry_forward_sid = ?, carry_forward_at = ?, "
-            "rotation_armed = 0, last_active = ? WHERE id = ?",
-            (new_claude_sid, delivered, new_claude_sid, _now, _now, session_id),
+            "rotation_armed = 0, last_active = ?, conversation_started_at = ? WHERE id = ?",
+            (new_claude_sid, delivered, new_claude_sid, _now, _now, _now, session_id),
         )
         await self._db.commit()
         # The conversation under this row is a different one now. Its stored
@@ -2216,429 +2260,466 @@ class SessionManager:
         rounds it had left, onto the fresh one.
         """
         lock = self._locks.setdefault(session_id, asyncio.Lock())
-        replaced: dict | None = None
+        # The lock is held across the replacement and the turn that follows
+        # it. The conversation is replaced under this same row, so a message
+        # typed meanwhile queues behind the re-send rather than overtaking it
+        # onto the fresh conversation.
         async with lock:
-            session = await self._get_row(session_id)
-            if not session:
-                raise ValueError(f"Session not found: {session_id}")
-
-            # Refuse to send to deliberately-closed sessions. Without this
-            # guard, the respawn path below would resurrect the session
-            # (with its old claude_sid as --resume) and the rotation cycle
-            # never actually transitions the conversation to a fresh one.
-            if session.get("status") in ("closed", "suspended"):
-                status = session["status"]
-                log.info("send_message: refusing %s session=%s", status, session_id)
-                raise ValueError(f"Session {session_id} is {status}")
-
-            # Pending rotation finalizes HERE, on the user's turn. The Stop
-            # hook armed this session after writing the carry-forward; swap to
-            # a fresh session now and dispatch this turn to it, so the user's
-            # message is the new session's first turn. Never fires for
-            # un-armed sessions, so normal delivery is unchanged — and never
-            # for a *staged terminal*, whose swap keeps this row. Retiring it
-            # for a successor would destroy the permanent session id, its
-            # label and its ledger binding, which is exactly what in-place
-            # rotation exists to prevent. Hence the equality test: a bare
-            # truth test would finalize a 2.
-            if session.get("rotation_armed") == ROTATION_ARMED_CHAT:
-                new_id = await self._finalize_rotation(session)
-                if new_id and new_id != session_id:
-                    async for event in self._forward_to_session(new_id, content, images):
-                        yield event
+            while True:
+                outcome: dict = {}
+                async for event in self._send_locked(
+                    session_id, content, images, goal_rounds=goal_rounds,
+                    resend=resend, outcome=outcome,
+                ):
+                    yield event
+                follow = outcome.get("next")
+                if not follow:
                     return
-                # new_id is None → disarmed (no client_ref); fall through and
-                # deliver on this session as usual.
+                content = follow["content"]
+                images = follow.get("images")
+                goal_rounds = follow.get("goal_rounds")
+                resend = bool(follow.get("resend"))
 
-            mind_id = session["mind_id"]
-            log.info("send_message: start session=%s mind=%s", session_id, mind_id)
-            log_event(
-                log, "turn.started", session_id=session_id, mind_id=mind_id,
-                content_chars=len(content), image_count=len(images or []),
+    async def _send_locked(
+        self,
+        session_id: str,
+        content: str,
+        images: list[dict] | None,
+        *,
+        goal_rounds: int | None,
+        resend: bool,
+        outcome: dict,
+    ):
+        """One turn of `send_message`, under its lock.
+
+        A turn ending in a replacement leaves what to send next in
+        ``outcome["next"]``.
+        """
+        replaced: dict | None = None
+        session = await self._get_row(session_id)
+        if not session:
+            raise ValueError(f"Session not found: {session_id}")
+
+        # Refuse to send to deliberately-closed sessions. Without this
+        # guard, the respawn path below would resurrect the session
+        # (with its old claude_sid as --resume) and the rotation cycle
+        # never actually transitions the conversation to a fresh one.
+        if session.get("status") in ("closed", "suspended"):
+            status = session["status"]
+            log.info("send_message: refusing %s session=%s", status, session_id)
+            raise ValueError(f"Session {session_id} is {status}")
+
+        # Pending rotation finalizes HERE, on the user's turn. The Stop
+        # hook armed this session after writing the carry-forward; swap to
+        # a fresh session now and dispatch this turn to it, so the user's
+        # message is the new session's first turn. Never fires for
+        # un-armed sessions, so normal delivery is unchanged — and never
+        # for a *staged terminal*, whose swap keeps this row. Retiring it
+        # for a successor would destroy the permanent session id, its
+        # label and its ledger binding, which is exactly what in-place
+        # rotation exists to prevent. Hence the equality test: a bare
+        # truth test would finalize a 2.
+        if session.get("rotation_armed") == ROTATION_ARMED_CHAT:
+            new_id = await self._finalize_rotation(session)
+            if new_id and new_id != session_id:
+                async for event in self._forward_to_session(new_id, content, images):
+                    yield event
+                return
+            # new_id is None → disarmed (no client_ref); fall through and
+            # deliver on this session as usual.
+
+        mind_id = session["mind_id"]
+        log.info("send_message: start session=%s mind=%s", session_id, mind_id)
+        log_event(
+            log, "turn.started", session_id=session_id, mind_id=mind_id,
+            content_chars=len(content), image_count=len(images or []),
+        )
+        t0 = time.monotonic()
+
+        # Respawn if needed
+        needs_respawn = session_id not in self._procs
+        if not needs_respawn:
+            proc_or_state = self._procs[session_id]
+            # CLI processes have returncode; SDK state dicts do not
+            if hasattr(proc_or_state, "returncode") and proc_or_state.returncode is not None:
+                needs_respawn = True
+
+        if needs_respawn:
+            log.info("send_message: respawn session=%s mind=%s model=%s", session_id, mind_id, session["model"])
+            log_event(log, "session.respawn.started", session_id=session_id,
+                      mind_id=mind_id, model=session["model"])
+            routing = await self._routing_for(session)
+            await self._spawn(
+                session_id,
+                session["model"],
+                autopilot=bool(session["autopilot"]),
+                resume_sid=session["claude_sid"],
+                mind_id=mind_id,
+                **routing,
             )
-            t0 = time.monotonic()
-
-            # Respawn if needed
-            needs_respawn = session_id not in self._procs
-            if not needs_respawn:
-                proc_or_state = self._procs[session_id]
-                # CLI processes have returncode; SDK state dicts do not
-                if hasattr(proc_or_state, "returncode") and proc_or_state.returncode is not None:
-                    needs_respawn = True
-
-            if needs_respawn:
-                log.info("send_message: respawn session=%s mind=%s model=%s", session_id, mind_id, session["model"])
-                log_event(log, "session.respawn.started", session_id=session_id,
-                          mind_id=mind_id, model=session["model"])
-                routing = await self._routing_for(session)
-                await self._spawn(
-                    session_id,
-                    session["model"],
-                    autopilot=bool(session["autopilot"]),
-                    resume_sid=session["claude_sid"],
-                    mind_id=mind_id,
-                    **routing,
-                )
-                await self._db.execute(
-                    "UPDATE sessions SET status = 'running' WHERE id = ?",
-                    (session_id,),
-                )
-                await self._db.commit()
-
-            # Prepend current datetime so Claude always has temporal context
-            tz = ZoneInfo(os.environ.get("TZ", "America/Chicago"))
-            now_str = datetime.now(tz).strftime("%A, %B %-d, %Y at %-I:%M %p %Z")
-            stamped_content = f"[{now_str}]\n{content}"
-
-            # Mark this conversation active and running for the duration
             await self._db.execute(
-                "UPDATE sessions SET last_active = ?, status = 'running' WHERE id = ?",
+                "UPDATE sessions SET status = 'running' WHERE id = ?",
+                (session_id,),
+            )
+            await self._db.commit()
+
+        # Prepend current datetime so Claude always has temporal context
+        tz = ZoneInfo(os.environ.get("TZ", "America/Chicago"))
+        now_str = datetime.now(tz).strftime("%A, %B %-d, %Y at %-I:%M %p %Z")
+        stamped_content = f"[{now_str}]\n{content}"
+
+        # Mark this conversation active and running for the duration
+        await self._db.execute(
+            "UPDATE sessions SET last_active = ?, status = 'running' WHERE id = ?",
+            (time.time(), session_id),
+        )
+        await self._db.commit()
+
+        # Update summary + seed context on first message
+        if session["summary"] == "New session":
+            summary = content[:100].strip()
+            await self._db.execute(
+                "UPDATE sessions SET summary = ? WHERE id = ?",
+                (summary, session_id),
+            )
+            await self._db.commit()
+
+            # Memory-3: prepend relevant past memories to first message
+            loop = asyncio.get_event_loop()
+            seeded = await loop.run_in_executor(None, _fetch_memories_sync, content, mind_id)
+            if seeded:
+                stamped_content = f"{seeded}\n\n{stamped_content}"
+                log.debug("Context seeding injected %d chars", len(seeded))
+
+        await self._publish_session_event(
+            session_id,
+            {
+                "type": "user",
+                "session_id": session_id,
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": content}],
+                },
+            },
+        )
+
+        ledger = await self._db.execute(
+            "INSERT INTO session_turns (session_id, role, content, created_at) VALUES (?, 'user', ?, ?)",
+            (session_id, content, time.time()),
+        )
+        user_turn_rowid = ledger.lastrowid
+        if resend:
+            # Dispatched: from here a gateway restart must not send it
+            # again, since the mind may already be answering it.
+            await self._db.execute(
+                "UPDATE sessions SET resend_dispatched_at = ? WHERE id = ?",
                 (time.time(), session_id),
             )
-            await self._db.commit()
+        await self._db.commit()
 
-            # Update summary + seed context on first message
-            if session["summary"] == "New session":
-                summary = content[:100].strip()
+        # Route message to mind container via HTTP, stream SSE response
+        proc_info = self._procs.get(session_id)
+        if not proc_info or not proc_info.get("_mind_url"):
+            raise ValueError(f"No mind container URL for session {session_id}")
+
+        mind_url = proc_info["_mind_url"]
+
+        import aiohttp
+        retried = False
+        _assistant_buf: list[str] = []
+        _pinned_sid = session.get("claude_sid") or None
+        _harness_sid = session.get("harness_sid") or None
+        _sid_warned = False
+        _turn_events: list[dict] = []
+        body = {"content": stamped_content, "images": images}
+        if goal_rounds:
+            body["goal_rounds"] = int(goal_rounds)
+        while True:
+            try:
+                async with aiohttp.ClientSession(read_bufsize=10 * 1024 * 1024) as http:
+                    async with http.post(
+                        f"{mind_url}/sessions/{session_id}/message",
+                        json=body,
+                        headers=await self._mind_auth_headers_for_session(
+                            session_id, mind_id
+                        ),
+                        # Long Claude turns (heavy thinking + tool use) can exceed 10 min.
+                        # Cap on no-data-received instead of total elapsed so we don't
+                        # truncate legitimate long turns (which the bot then sees as
+                        # ClientPayloadError / TransferEncodingError).
+                        timeout=aiohttp.ClientTimeout(total=None, sock_read=600),
+                    ) as resp:
+                        if resp.status == 404:
+                            # Session doesn't exist on mind container.
+                            # If the session was deliberately closed
+                            # (e.g. by rotation), don't resurrect it —
+                            # raising lets the caller fall through to
+                            # ensure_session and pick up the new one.
+                            # Otherwise (idle eviction etc.) respawn once.
+                            fresh = await self._get_row(session_id)
+                            if fresh and fresh.get("status") == "closed":
+                                log.info(
+                                    "Session %s is closed; not respawning (rotation killed it)",
+                                    session_id,
+                                )
+                                raise ValueError(
+                                    f"Session {session_id} closed — caller should pick up the new active session"
+                                )
+                            if not retried:
+                                retried = True
+                                log.info("Session %s not found on %s, respawning", session_id, mind_url)
+                                routing = await self._routing_for(session)
+                                await self._spawn(
+                                    session_id, session["model"],
+                                    autopilot=bool(session["autopilot"]),
+                                    resume_sid=session.get("claude_sid"),
+                                    mind_id=mind_id,
+                                    **routing,
+                                )
+                                continue
+                            raise ValueError(f"Session {session_id} not found after respawn")
+
+                        if resp.status == 401:
+                            # The mind is up and said no. Reported as
+                            # itself: a credential the broker never
+                            # learned, or one that has since rotated,
+                            # looks nothing like a mind that is down and
+                            # must not be diagnosed as one.
+                            await resp.read()
+                            log.error(
+                                "Mind %s refused the gateway's credential "
+                                "for session %s", mind_id, session_id,
+                            )
+                            err_event = {
+                                "type": "result",
+                                "subtype": "error",
+                                "is_error": True,
+                                "result": (
+                                    f"Mind '{mind_id}' refused this "
+                                    f"gateway's credential. Re-register "
+                                    f"the mind so the broker holds its "
+                                    f"current session token."
+                                ),
+                            }
+                            await self._publish_session_event(session_id, err_event)
+                            if resend:
+                                # The mind answered with an error, so the
+                                # re-send is settled, not pending: a
+                                # restart sending it again would answer a
+                                # message the operator was told failed.
+                                await self._clear_resend(session_id)
+                            yield err_event
+                            return
+
+                        if resp.status != 200:
+                            # Any other error from the mind: surface the
+                            # real failure instead of silently ending the
+                            # stream (the SSE line-reader below would find
+                            # no `data:` lines in a JSON error body and
+                            # yield nothing, so the surface shows a
+                            # useless generic error).
+                            body_text = await resp.text()
+                            try:
+                                detail = json.loads(body_text).get("error", body_text)
+                            except (json.JSONDecodeError, AttributeError):
+                                detail = body_text
+                            detail = detail or f"HTTP {resp.status}"
+                            log.error(
+                                "Mind %s returned HTTP %s for session %s: %s",
+                                mind_id, resp.status, session_id, detail,
+                            )
+                            err_event = {
+                                "type": "result",
+                                "subtype": "error",
+                                "is_error": True,
+                                "result": (
+                                    f"ERROR from mind '{mind_id}' "
+                                    f"(HTTP {resp.status}): {detail}"
+                                ),
+                            }
+                            await self._publish_session_event(session_id, err_event)
+                            if resend:
+                                # The mind answered with an error, so the
+                                # re-send is settled, not pending: a
+                                # restart sending it again would answer a
+                                # message the operator was told failed.
+                                await self._clear_resend(session_id)
+                            yield err_event
+                            return
+
+                        async for line in resp.content:
+                            line = line.decode().strip()
+                            if not line or not line.startswith("data: "):
+                                continue
+                            data = line[6:]  # strip "data: " prefix
+                            try:
+                                event = json.loads(data)
+                            except json.JSONDecodeError:
+                                continue
+
+                            observer_only = bool(event.pop("_observer_only", False))
+                            _turn_events.append(event)
+
+                            ending = self._replacing_ending(event, resend)
+                            if ending:
+                                replaced = {**ending, "session": session,
+                                            "events": _turn_events,
+                                            "goal_rounds": goal_rounds,
+                                            "user_turn_rowid": user_turn_rowid}
+                                break
+
+                            # Codex cannot adopt claude_sid. Its structured
+                            # observer event is the authoritative moment a
+                            # provider thread is minted; retain that second
+                            # identity before hiding the observer-only event
+                            # from chat surfaces.
+                            if event.get("type") == "codex_event":
+                                raw_event = event.get("event") or {}
+                                if raw_event.get("type") == "thread.started":
+                                    thread_id = (raw_event.get("thread_id") or "").strip()
+                                    if thread_id:
+                                        await self.set_harness_sid(session_id, thread_id)
+                                        _harness_sid = thread_id
+
+                            # Detect stale --resume
+                            if (
+                                not retried
+                                and event.get("type") == "result"
+                                and event.get("is_error")
+                                and any(
+                                    "No conversation found" in e
+                                    for e in event.get("errors", [])
+                                )
+                            ):
+                                log.warning("Stale resume for session %s — retrying", session_id)
+                                retried = True
+                                await self._kill_process(session_id)
+                                # Mint the replacement here rather than
+                                # blanking the column and letting the mind
+                                # invent one: a session is never without a
+                                # conversation id, not even for the width
+                                # of a respawn.
+                                fresh_sid = str(uuid.uuid4())
+                                await self._db.execute(
+                                    "UPDATE sessions SET claude_sid = ?, "
+                                    "conversation_started_at = ? WHERE id = ?",
+                                    (fresh_sid, time.time(), session_id),
+                                )
+                                await self._db.commit()
+                                _pinned_sid = fresh_sid
+                                _sid_warned = False
+                                routing = await self._routing_for(session)
+                                await self._spawn(
+                                    session_id, session["model"],
+                                    autopilot=bool(session["autopilot"]),
+                                    resume_sid=fresh_sid,
+                                    mind_id=mind_id,
+                                    **routing,
+                                )
+                                break
+
+                            await self._publish_session_event(session_id, event)
+                            if observer_only:
+                                continue
+                            yield event
+
+                            # Accumulate assistant text for turn storage
+                            if event.get("type") == "assistant":
+                                msg = event.get("message") or {}
+                                _content = msg.get("content") or event.get("content") or event.get("delta") or event.get("text") or ""
+                                if isinstance(_content, list):
+                                    _content = "".join(c.get("text", "") for c in _content if isinstance(c, dict) and c.get("type") == "text")
+                                if isinstance(_content, str) and _content:
+                                    _assistant_buf.append(_content)
+
+                            now = time.time()
+                            await self._db.execute(
+                                "UPDATE sessions SET last_active = ? WHERE id = ?",
+                                (now, session_id),
+                            )
+
+                            # The harness echoes the conversation id we
+                            # pinned it to. It is not news, and it is not
+                            # authority: the row was written at session
+                            # creation. Log a divergence, never follow it.
+                            event_sid = event.get("session_id")
+                            if (
+                                event_sid
+                                and event_sid not in (_pinned_sid, _harness_sid)
+                                and not _sid_warned
+                            ):
+                                _sid_warned = True
+                                log.warning(
+                                    "Mind %s reported conversation %s for session %s, "
+                                    "which is pinned to %s — ignoring",
+                                    mind_id, event_sid, session_id, _pinned_sid,
+                                )
+
+                            if event.get("type") == "result":
+                                if resend:
+                                    # The re-send got its answer, or its
+                                    # error: either way it is not owed.
+                                    await self._clear_resend(session_id)
+                                if _assistant_buf:
+                                    await self._db.execute(
+                                        "INSERT INTO session_turns (session_id, role, content, created_at) VALUES (?, 'assistant', ?, ?)",
+                                        (session_id, "".join(_assistant_buf), now),
+                                    )
+                                # Same reasoning as record_turn: a completed
+                                # turn is the evidence the rotation took. The
+                                # terminal Stop hook is not the only way a
+                                # rotated conversation gets its first turn —
+                                # a `/switch` hands the conversation to a chat
+                                # surface, and without this the seed would
+                                # outlive it and be re-applied on top of the
+                                # transcript the next time a tile opened cold.
+                                #
+                                # Only a turn that completed without error:
+                                # a handover the harness choked on has not
+                                # landed, and the next spawn must carry it
+                                # again.
+                                if _pinned_sid and not event.get("is_error"):
+                                    await self._db.execute(
+                                        "UPDATE sessions SET carry_forward = NULL, "
+                                        "carry_forward_sid = NULL, "
+                                        "carry_forward_at = NULL "
+                                        "WHERE id = ? AND carry_forward_sid = ?",
+                                        (session_id, _pinned_sid),
+                                    )
+                                await self._db.commit()
+                                elapsed = time.monotonic() - t0
+                                log.info("send_message: result session=%s elapsed=%.1fs", session_id, elapsed)
+                                log_event(
+                                    log, "turn.completed", session_id=session_id,
+                                    mind_id=mind_id, elapsed_ms=round(elapsed * 1000, 1),
+                                )
+                                if elapsed > 30:
+                                    log.warning("send_message: slow response session=%s mind=%s elapsed=%.1fs", session_id, mind_id, elapsed)
+                                return
+                        else:
+                            return  # stream exhausted
+            except aiohttp.ClientError as exc:
+                log.error("Mind container %s unreachable for session %s: %s", mind_url, session_id, exc)
+                if resend:
+                    await self._clear_resend(session_id)
+                yield {"type": "result", "is_error": True, "errors": [f"Mind container unreachable: {exc}"]}
+                return
+            break  # exit retry loop on success
+
+        if replaced is not None:
+            if replaced["kind"] == "goal" and _assistant_buf:
                 await self._db.execute(
-                    "UPDATE sessions SET summary = ? WHERE id = ?",
-                    (summary, session_id),
+                    "INSERT INTO session_turns (session_id, role, content, created_at) "
+                    "VALUES (?, 'assistant', ?, ?)",
+                    (session_id, "".join(_assistant_buf), time.time()),
                 )
                 await self._db.commit()
+            settled = await self._settle_replacing_ending(replaced, content, images)
+            for notice in settled.get("notices") or []:
+                yield notice
+            if settled.get("next"):
+                outcome["next"] = settled["next"]
 
-                # Memory-3: prepend relevant past memories to first message
-                loop = asyncio.get_event_loop()
-                seeded = await loop.run_in_executor(None, _fetch_memories_sync, content, mind_id)
-                if seeded:
-                    stamped_content = f"{seeded}\n\n{stamped_content}"
-                    log.debug("Context seeding injected %d chars", len(seeded))
-
-            await self._publish_session_event(
-                session_id,
-                {
-                    "type": "user",
-                    "session_id": session_id,
-                    "message": {
-                        "role": "user",
-                        "content": [{"type": "text", "text": content}],
-                    },
-                },
-            )
-
-            ledger = await self._db.execute(
-                "INSERT INTO session_turns (session_id, role, content, created_at) VALUES (?, 'user', ?, ?)",
-                (session_id, content, time.time()),
-            )
-            user_turn_rowid = ledger.lastrowid
-            if resend:
-                # Dispatched: from here a gateway restart must not send it
-                # again, since the mind may already be answering it.
-                await self._db.execute(
-                    "UPDATE sessions SET resend_dispatched_at = ? WHERE id = ?",
-                    (time.time(), session_id),
-                )
-            await self._db.commit()
-
-            # Route message to mind container via HTTP, stream SSE response
-            proc_info = self._procs.get(session_id)
-            if not proc_info or not proc_info.get("_mind_url"):
-                raise ValueError(f"No mind container URL for session {session_id}")
-
-            mind_url = proc_info["_mind_url"]
-
-            import aiohttp
-            retried = False
-            _assistant_buf: list[str] = []
-            _pinned_sid = session.get("claude_sid") or None
-            _harness_sid = session.get("harness_sid") or None
-            _sid_warned = False
-            _turn_events: list[dict] = []
-            body = {"content": stamped_content, "images": images}
-            if goal_rounds:
-                body["goal_rounds"] = int(goal_rounds)
-            while True:
-                try:
-                    async with aiohttp.ClientSession(read_bufsize=10 * 1024 * 1024) as http:
-                        async with http.post(
-                            f"{mind_url}/sessions/{session_id}/message",
-                            json=body,
-                            headers=await self._mind_auth_headers_for_session(
-                                session_id, mind_id
-                            ),
-                            # Long Claude turns (heavy thinking + tool use) can exceed 10 min.
-                            # Cap on no-data-received instead of total elapsed so we don't
-                            # truncate legitimate long turns (which the bot then sees as
-                            # ClientPayloadError / TransferEncodingError).
-                            timeout=aiohttp.ClientTimeout(total=None, sock_read=600),
-                        ) as resp:
-                            if resp.status == 404:
-                                # Session doesn't exist on mind container.
-                                # If the session was deliberately closed
-                                # (e.g. by rotation), don't resurrect it —
-                                # raising lets the caller fall through to
-                                # ensure_session and pick up the new one.
-                                # Otherwise (idle eviction etc.) respawn once.
-                                fresh = await self._get_row(session_id)
-                                if fresh and fresh.get("status") == "closed":
-                                    log.info(
-                                        "Session %s is closed; not respawning (rotation killed it)",
-                                        session_id,
-                                    )
-                                    raise ValueError(
-                                        f"Session {session_id} closed — caller should pick up the new active session"
-                                    )
-                                if not retried:
-                                    retried = True
-                                    log.info("Session %s not found on %s, respawning", session_id, mind_url)
-                                    routing = await self._routing_for(session)
-                                    await self._spawn(
-                                        session_id, session["model"],
-                                        autopilot=bool(session["autopilot"]),
-                                        resume_sid=session.get("claude_sid"),
-                                        mind_id=mind_id,
-                                        **routing,
-                                    )
-                                    continue
-                                raise ValueError(f"Session {session_id} not found after respawn")
-
-                            if resp.status == 401:
-                                # The mind is up and said no. Reported as
-                                # itself: a credential the broker never
-                                # learned, or one that has since rotated,
-                                # looks nothing like a mind that is down and
-                                # must not be diagnosed as one.
-                                await resp.read()
-                                log.error(
-                                    "Mind %s refused the gateway's credential "
-                                    "for session %s", mind_id, session_id,
-                                )
-                                err_event = {
-                                    "type": "result",
-                                    "subtype": "error",
-                                    "is_error": True,
-                                    "result": (
-                                        f"Mind '{mind_id}' refused this "
-                                        f"gateway's credential. Re-register "
-                                        f"the mind so the broker holds its "
-                                        f"current session token."
-                                    ),
-                                }
-                                await self._publish_session_event(session_id, err_event)
-                                yield err_event
-                                return
-
-                            if resp.status != 200:
-                                # Any other error from the mind: surface the
-                                # real failure instead of silently ending the
-                                # stream (the SSE line-reader below would find
-                                # no `data:` lines in a JSON error body and
-                                # yield nothing, so the surface shows a
-                                # useless generic error).
-                                body_text = await resp.text()
-                                try:
-                                    detail = json.loads(body_text).get("error", body_text)
-                                except (json.JSONDecodeError, AttributeError):
-                                    detail = body_text
-                                detail = detail or f"HTTP {resp.status}"
-                                log.error(
-                                    "Mind %s returned HTTP %s for session %s: %s",
-                                    mind_id, resp.status, session_id, detail,
-                                )
-                                err_event = {
-                                    "type": "result",
-                                    "subtype": "error",
-                                    "is_error": True,
-                                    "result": (
-                                        f"ERROR from mind '{mind_id}' "
-                                        f"(HTTP {resp.status}): {detail}"
-                                    ),
-                                }
-                                await self._publish_session_event(session_id, err_event)
-                                yield err_event
-                                return
-
-                            async for line in resp.content:
-                                line = line.decode().strip()
-                                if not line or not line.startswith("data: "):
-                                    continue
-                                data = line[6:]  # strip "data: " prefix
-                                try:
-                                    event = json.loads(data)
-                                except json.JSONDecodeError:
-                                    continue
-
-                                observer_only = bool(event.pop("_observer_only", False))
-                                _turn_events.append(event)
-
-                                ending = self._replacing_ending(event, resend)
-                                if ending:
-                                    replaced = {**ending, "session": session,
-                                                "events": _turn_events,
-                                                "user_turn_rowid": user_turn_rowid}
-                                    break
-
-                                # Codex cannot adopt claude_sid. Its structured
-                                # observer event is the authoritative moment a
-                                # provider thread is minted; retain that second
-                                # identity before hiding the observer-only event
-                                # from chat surfaces.
-                                if event.get("type") == "codex_event":
-                                    raw_event = event.get("event") or {}
-                                    if raw_event.get("type") == "thread.started":
-                                        thread_id = (raw_event.get("thread_id") or "").strip()
-                                        if thread_id:
-                                            await self.set_harness_sid(session_id, thread_id)
-                                            _harness_sid = thread_id
-
-                                # Detect stale --resume
-                                if (
-                                    not retried
-                                    and event.get("type") == "result"
-                                    and event.get("is_error")
-                                    and any(
-                                        "No conversation found" in e
-                                        for e in event.get("errors", [])
-                                    )
-                                ):
-                                    log.warning("Stale resume for session %s — retrying", session_id)
-                                    retried = True
-                                    await self._kill_process(session_id)
-                                    # Mint the replacement here rather than
-                                    # blanking the column and letting the mind
-                                    # invent one: a session is never without a
-                                    # conversation id, not even for the width
-                                    # of a respawn.
-                                    fresh_sid = str(uuid.uuid4())
-                                    await self._db.execute(
-                                        "UPDATE sessions SET claude_sid = ? WHERE id = ?",
-                                        (fresh_sid, session_id),
-                                    )
-                                    await self._db.commit()
-                                    _pinned_sid = fresh_sid
-                                    _sid_warned = False
-                                    routing = await self._routing_for(session)
-                                    await self._spawn(
-                                        session_id, session["model"],
-                                        autopilot=bool(session["autopilot"]),
-                                        resume_sid=fresh_sid,
-                                        mind_id=mind_id,
-                                        **routing,
-                                    )
-                                    break
-
-                                await self._publish_session_event(session_id, event)
-                                if observer_only:
-                                    continue
-                                yield event
-
-                                # Accumulate assistant text for turn storage
-                                if event.get("type") == "assistant":
-                                    msg = event.get("message") or {}
-                                    _content = msg.get("content") or event.get("content") or event.get("delta") or event.get("text") or ""
-                                    if isinstance(_content, list):
-                                        _content = "".join(c.get("text", "") for c in _content if isinstance(c, dict) and c.get("type") == "text")
-                                    if isinstance(_content, str) and _content:
-                                        _assistant_buf.append(_content)
-
-                                now = time.time()
-                                await self._db.execute(
-                                    "UPDATE sessions SET last_active = ? WHERE id = ?",
-                                    (now, session_id),
-                                )
-
-                                # The harness echoes the conversation id we
-                                # pinned it to. It is not news, and it is not
-                                # authority: the row was written at session
-                                # creation. Log a divergence, never follow it.
-                                event_sid = event.get("session_id")
-                                if (
-                                    event_sid
-                                    and event_sid not in (_pinned_sid, _harness_sid)
-                                    and not _sid_warned
-                                ):
-                                    _sid_warned = True
-                                    log.warning(
-                                        "Mind %s reported conversation %s for session %s, "
-                                        "which is pinned to %s — ignoring",
-                                        mind_id, event_sid, session_id, _pinned_sid,
-                                    )
-
-                                if event.get("type") == "result":
-                                    if resend:
-                                        # The re-send got its answer, or its
-                                        # error: either way it is not owed.
-                                        await self._db.execute(
-                                            "UPDATE sessions SET resend_content = NULL, "
-                                            "resend_dispatched_at = NULL WHERE id = ?",
-                                            (session_id,),
-                                        )
-                                    if _assistant_buf:
-                                        await self._db.execute(
-                                            "INSERT INTO session_turns (session_id, role, content, created_at) VALUES (?, 'assistant', ?, ?)",
-                                            (session_id, "".join(_assistant_buf), now),
-                                        )
-                                    # Same reasoning as record_turn: a completed
-                                    # turn is the evidence the rotation took. The
-                                    # terminal Stop hook is not the only way a
-                                    # rotated conversation gets its first turn —
-                                    # a `/switch` hands the conversation to a chat
-                                    # surface, and without this the seed would
-                                    # outlive it and be re-applied on top of the
-                                    # transcript the next time a tile opened cold.
-                                    #
-                                    # Only a turn that completed without error:
-                                    # a handover the harness choked on has not
-                                    # landed, and the next spawn must carry it
-                                    # again.
-                                    if _pinned_sid and not event.get("is_error"):
-                                        await self._db.execute(
-                                            "UPDATE sessions SET carry_forward = NULL, "
-                                            "carry_forward_sid = NULL, "
-                                            "carry_forward_at = NULL "
-                                            "WHERE id = ? AND carry_forward_sid = ?",
-                                            (session_id, _pinned_sid),
-                                        )
-                                    await self._db.commit()
-                                    elapsed = time.monotonic() - t0
-                                    log.info("send_message: result session=%s elapsed=%.1fs", session_id, elapsed)
-                                    log_event(
-                                        log, "turn.completed", session_id=session_id,
-                                        mind_id=mind_id, elapsed_ms=round(elapsed * 1000, 1),
-                                    )
-                                    if elapsed > 30:
-                                        log.warning("send_message: slow response session=%s mind=%s elapsed=%.1fs", session_id, mind_id, elapsed)
-                                    return
-                            else:
-                                return  # stream exhausted
-                except aiohttp.ClientError as exc:
-                    log.error("Mind container %s unreachable for session %s: %s", mind_url, session_id, exc)
-                    yield {"type": "result", "is_error": True, "errors": [f"Mind container unreachable: {exc}"]}
-                    return
-                break  # exit retry loop on success
-
-            if replaced is not None:
-                if replaced["kind"] == "goal" and _assistant_buf:
-                    await self._db.execute(
-                        "INSERT INTO session_turns (session_id, role, content, created_at) "
-                        "VALUES (?, 'assistant', ?, ?)",
-                        (session_id, "".join(_assistant_buf), time.time()),
-                    )
-                    await self._db.commit()
-                replaced = await self._settle_replacing_ending(replaced, content)
-
-        # Outside the lock: the conversation now lives on another row, or on
-        # this one under a new conversation id, and the turn that follows
-        # takes whichever lock that is.
-        if replaced is None:
-            return
-        for notice in replaced.get("notices") or []:
-            yield notice
-        if replaced.get("forward_to"):
-            async for event in self._forward_to_session(
-                replaced["forward_to"], replaced["content"], images,
-                **replaced.get("forward_kwargs", {}),
-            ):
-                yield event
 
     @staticmethod
     def _replacing_ending(event: dict, resend: bool) -> dict | None:
@@ -2665,11 +2746,15 @@ class SessionManager:
                         "rounds": rounds}
         return None
 
-    async def _settle_replacing_ending(self, replaced: dict, content: str) -> dict | None:
+    async def _settle_replacing_ending(
+        self, replaced: dict, content: str, images: list[dict] | None,
+    ) -> dict:
         """Replace the conversation a turn ended needing replaced.
 
-        Returns what the caller yields and where it sends the turn next. Runs
-        under the old session's lock, so nothing is dispatched from here.
+        Returns the notices to yield and, under ``next``, the turn to send
+        on the fresh conversation. Runs under the session's lock, and the
+        replacement keeps the row, so the caller sends that turn under the
+        same lock.
         """
         session = replaced["session"]
         session_id = session["id"]
@@ -2684,11 +2769,7 @@ class SessionManager:
             )
             await self._db.commit()
         if kind == "overflow_again":
-            await self._db.execute(
-                "UPDATE sessions SET resend_content = NULL, resend_dispatched_at = NULL "
-                "WHERE id = ?", (session_id,),
-            )
-            await self._db.commit()
+            await self._clear_resend(session_id)
             row = await self._get_row(session_id) or {}
             size = len(content.encode("utf-8")) // 4
             threshold = row.get("context_threshold")
@@ -2710,14 +2791,31 @@ class SessionManager:
 
         window = _positive_int(session.get("context_window"))
         threshold = _positive_int(session.get("context_threshold"))
+        if not window:
+            # A conversation that never reported still has a model, and the
+            # model has a window: the listing is where it is written down.
+            try:
+                offered = await self.mind_model_row(
+                    session["mind_id"], model,
+                    harness=await self.conversation_harness(session),
+                )
+            except MindCallFailed:
+                offered = None
+            window = _positive_int((offered or {}).get("context_window"))
+            if window and not threshold:
+                percent = await self._rotation_percent(session)
+                threshold = window * percent // 100 if percent else None
         if kind == "overflow":
-            note = failed_turn_note(completed_tool_calls(replaced["events"]))
+            note = failed_turn_note(
+                completed_tool_calls(replaced["events"]),
+                (replaced["result"] or {}).get("traffic"),
+            )
             message = content
         else:
             note = ""
             message = replaced["objective"]
         try:
-            new_id = await self._replace_conversation(
+            await self._replace_conversation(
                 session, model=model, effort=session.get("effort"), window=window,
                 threshold=threshold, note=note, message=message,
             )
@@ -2733,16 +2831,18 @@ class SessionManager:
             return {"notices": [notice, replaced["result"]]}
         if kind == "goal":
             log_event(log, "session.goal_rotated", session_id=session_id,
-                      successor_id=new_id, mind_id=session["mind_id"],
-                      rounds_left=replaced["rounds"])
-            return {"forward_to": new_id, "content": replaced["objective"],
-                    "forward_kwargs": {"goal_rounds": replaced["rounds"]}}
+                      mind_id=session["mind_id"], rounds_left=replaced["rounds"])
+            return {"next": {"content": replaced["objective"],
+                             "goal_rounds": replaced["rounds"]}}
 
         # Recorded before anything is sent, so a gateway that dies in the gap
-        # still knows the message is owed (see resume_pending_resends).
+        # still knows the message is owed (see resume_pending_resends) — and
+        # with everything it was sent with.
+        goal_rounds = replaced.get("goal_rounds")
         await self._db.execute(
-            "UPDATE sessions SET resend_content = ?, resend_dispatched_at = NULL "
-            "WHERE id = ?", (content, new_id),
+            "UPDATE sessions SET resend_content = ?, resend_images = ?, "
+            "resend_goal_rounds = ?, resend_dispatched_at = NULL WHERE id = ?",
+            (content, json.dumps(images) if images else None, goal_rounds, session_id),
         )
         await self._db.commit()
         tokens = session.get("context_tokens")
@@ -2753,20 +2853,38 @@ class SessionManager:
             "message is being sent again there."
         )
         log_event(log, "turn.overflow_rotated", session_id=session_id,
-                  successor_id=new_id, mind_id=session["mind_id"], model=model,
-                  tokens=tokens)
+                  mind_id=session["mind_id"], model=model, tokens=tokens)
         notice = _notice_event(text)
-        await self._publish_session_event(new_id, notice)
-        return {"notices": [notice], "forward_to": new_id, "content": content,
-                "forward_kwargs": {"resend": True}}
+        await self._publish_session_event(session_id, notice)
+        return {"notices": [notice],
+                "next": {"content": content, "images": images,
+                         "goal_rounds": goal_rounds, "resend": True}}
 
-    async def pending_resends(self) -> list[tuple[str, str]]:
+    async def _clear_resend(self, session_id: str) -> None:
+        """Nothing is owed a re-send on this row any more."""
+        await self._db.execute(
+            "UPDATE sessions SET resend_content = NULL, resend_images = NULL, "
+            "resend_goal_rounds = NULL, resend_dispatched_at = NULL WHERE id = ?",
+            (session_id,),
+        )
+        await self._db.commit()
+
+    async def pending_resends(self) -> list[dict]:
         """Messages owed a re-send that no gateway has dispatched yet."""
         cursor = await self._db.execute(
-            "SELECT id, resend_content FROM sessions WHERE resend_content IS NOT NULL "
-            "AND resend_dispatched_at IS NULL AND status NOT IN ('closed', 'suspended')"
+            "SELECT id, resend_content, resend_images, resend_goal_rounds FROM sessions "
+            "WHERE resend_content IS NOT NULL AND resend_dispatched_at IS NULL "
+            "AND status NOT IN ('closed', 'suspended')"
         )
-        return [(row["id"], row["resend_content"]) for row in await cursor.fetchall()]
+        owed = []
+        for row in await cursor.fetchall():
+            try:
+                images = json.loads(row["resend_images"]) if row["resend_images"] else None
+            except ValueError:
+                images = None
+            owed.append({"session_id": row["id"], "content": row["resend_content"],
+                         "images": images, "goal_rounds": row["resend_goal_rounds"]})
+        return owed
 
     async def resume_pending_resends(self) -> int:
         """Send every message a restart interrupted between rotation and re-send.
@@ -2778,13 +2896,16 @@ class SessionManager:
         is the failure the dispatch stamp exists to prevent.
         """
         count = 0
-        for session_id, content in await self.pending_resends():
+        for owed in await self.pending_resends():
             count += 1
             try:
-                async for _event in self.send_message(session_id, content, resend=True):
+                async for _event in self.send_message(
+                    owed["session_id"], owed["content"], images=owed["images"],
+                    goal_rounds=owed["goal_rounds"], resend=True,
+                ):
                     pass
             except Exception:
-                log.exception("re-send for session %s failed", session_id)
+                log.exception("re-send for session %s failed", owed["session_id"])
         return count
 
     # ------------------------------------------------------------------
@@ -2866,7 +2987,7 @@ class SessionManager:
                 )
                 log_event(
                     log, "session.model_handover", session_id=session_id,
-                    successor_id=new_id, mind_id=session["mind_id"],
+                    mind_id=session["mind_id"],
                     model=model, previous_model=session["model"],
                     tokens=session.get("context_tokens"), threshold=threshold,
                 )
@@ -2989,20 +3110,22 @@ class SessionManager:
         note: str = "",
         message: str = "",
     ) -> str:
-        """Start a fresh conversation carrying this one forward as a handover.
+        """Start a fresh conversation under this row, carrying this one forward.
 
         The handover is the same render a harness switch uses — the mind
         reads its own transcript and cuts it to size — sized so that it, the
         soul beside it and ``message`` together sit under ``threshold``.
         ``note`` goes on the end of it.
 
-        A terminal keeps its row: the pane is respawned onto the new
-        conversation in place, which is what keeps the tile, its name and its
-        ledger. A chat gets a successor row, the way a chat rotation does, so
-        a surface following ``rotated_to`` lands on it. Any rotation armed or
-        staged belonged to the conversation being replaced, and goes with it.
+        The row is kept, as a harness switch keeps it: its id, name and
+        ledger are the conversation's identity, and only the harness
+        conversation under it is new. A live pane is respawned onto the new
+        conversation in place; anything else is respawned the way a switch
+        respawns it. Any rotation armed or staged belonged to the
+        conversation being replaced, and goes with it — its on-disk marker
+        included, which only the mind can reach.
 
-        Returns the id of the session now carrying the conversation.
+        Returns the session id, which is unchanged.
         """
         session_id = session["id"]
         mind_id = session["mind_id"]
@@ -3036,56 +3159,8 @@ class SessionManager:
         held = bool(session.get("terminal_held")) or (
             (session.get("owner_type") or "").split(":", 1)[0] == TERMINAL_OWNER_TYPE
         )
-        if held or not routing["client_ref"]:
-            return await self._replace_in_place(
-                session, model=model, effort=effort, window=window,
-                threshold=threshold, handover=handover, held=held,
-                system_prompt_blocks=system_prompt_blocks, routing=routing,
-            )
-
-        new = await self.create_session(
-            owner_type=routing["owner_type"],
-            owner_ref=routing["owner_ref"],
-            client_ref=routing["client_ref"],
-            model=model,
-            mind_id=mind_id,
-            rotated_from=session_id,
-            carry_forward=handover,
-            effort=effort or "",
-            system_prompt_blocks=system_prompt_blocks,
-        )
-        await self._db.execute(
-            "UPDATE sessions SET context_window = ?, context_threshold = ?, "
-            "context_observed_at = ? WHERE id = ?",
-            (window, threshold, time.time(), new["id"]),
-        )
-        await self._db.commit()
-        await self.kill_session(session_id, rotated_to=new["id"])
-        return new["id"]
-
-    async def _replace_in_place(
-        self,
-        session: dict,
-        *,
-        model: str,
-        effort: str | None,
-        window: int | None,
-        threshold: int | None,
-        handover: str,
-        held: bool,
-        system_prompt_blocks: str,
-        routing: dict,
-    ) -> str:
-        """`_replace_conversation` under the same row.
-
-        A pane is respawned onto the new conversation with the handover as
-        its opening user turn; a mind holding no live pane for it leaves the
-        row owing the handover, which the next attach asks for. A chat with
-        nowhere to bind a successor is respawned the way a harness switch
-        respawns one.
-        """
-        session_id = session["id"]
         new_sid = str(uuid.uuid4())
+        respawned_pane = False
         if held:
             try:
                 await self._db.execute(
@@ -3093,9 +3168,9 @@ class SessionManager:
                     (model, effort, session_id),
                 )
                 await self._db.commit()
-                await self._rotate_pty_on_mind(
+                respawned_pane = await self._rotate_pty_on_mind(
                     session_id=session_id, new_claude_sid=new_sid, model=model,
-                    mind_id=session["mind_id"], user_prompt=handover,
+                    mind_id=mind_id, user_prompt=handover,
                     client_ref=routing["client_ref"],
                     owner_type=session.get("owner_type"),
                     owner_ref=session.get("owner_ref"),
@@ -3109,15 +3184,19 @@ class SessionManager:
                 raise ValueError(
                     f"Couldn't move the terminal onto {model}: {exc}"
                 ) from exc
-        else:
+        if not respawned_pane:
+            # No pane took the new conversation, so a process has to: a new
+            # id with nothing behind it would strand the row on a
+            # conversation that was never started.
             await self._kill_process(session_id)
+        old_sid = session.get("claude_sid") or ""
         now = time.time()
         await self._db.execute(
             "UPDATE sessions SET model = ?, effort = ?, claude_sid = ?, "
             "harness_sid = NULL, rotation_armed = 0, carry_forward = ?, "
             "carry_forward_sid = ?, carry_forward_at = ?, status = 'running', "
-            "last_active = ? WHERE id = ?",
-            (model, effort, new_sid, handover, new_sid, now, now, session_id),
+            "last_active = ?, conversation_started_at = ? WHERE id = ?",
+            (model, effort, new_sid, handover, new_sid, now, now, now, session_id),
         )
         await self._db.commit()
         await self.clear_context(session_id)
@@ -3128,16 +3207,49 @@ class SessionManager:
         )
         await self._db.commit()
         self.dashboard.forget(session_id)
-        if not held:
+        await self._clear_rotation_marker_on_mind(session_id, mind_id, old_sid)
+        if not respawned_pane:
             await self._spawn(
                 session_id, model,
                 autopilot=bool(session["autopilot"]),
                 resume_sid=new_sid,
-                mind_id=session["mind_id"],
+                mind_id=mind_id,
                 system_prompt_blocks=system_prompt_blocks,
                 **routing,
             )
         return session_id
+
+    async def _clear_rotation_marker_on_mind(
+        self, session_id: str, mind_id: str, claude_sid: str,
+    ) -> None:
+        """Have the mind drop a staged rotation's marker for a replaced conversation.
+
+        The marker lives on the mind's disk, keyed by the conversation it was
+        staged for. That conversation is gone; a marker left behind would
+        have the next typed message wait on a summary of it. Best-effort: a
+        mind predating the route answers 404, and the marker then expires on
+        its own.
+        """
+        if not claude_sid:
+            return
+        mind_url = await self._mind_url_for_session(session_id, mind_id)
+        if not mind_url:
+            return
+        import aiohttp
+        try:
+            async with aiohttp.ClientSession() as http:
+                async with http.delete(
+                    f"{mind_url}/sessions/{session_id}/rotation-marker",
+                    params={"claude_sid": claude_sid},
+                    headers=await self._mind_auth_headers_for_session(session_id, mind_id),
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    await resp.read()
+                    if resp.status >= 400:
+                        log.info("rotation-marker clear on mind %s answered %s",
+                                 mind_id, resp.status)
+        except Exception as exc:
+            log.info("rotation-marker clear on mind %s failed: %s", mind_id, exc)
 
     # ------------------------------------------------------------------
     # Harness switching
@@ -3252,9 +3364,10 @@ class SessionManager:
                 "UPDATE sessions SET harness = ?, model = ?, effort = ?, "
                 "claude_sid = ?, harness_sid = NULL, rotation_armed = 0, "
                 "carry_forward = ?, carry_forward_sid = ?, carry_forward_at = ?, "
-                "status = 'running', last_active = ? WHERE id = ?",
+                "status = 'running', last_active = ?, conversation_started_at = ? "
+                "WHERE id = ?",
                 (target, model, effort, new_claude_sid, handover, new_claude_sid,
-                 now, now, session_id),
+                 now, now, now, session_id),
             )
             await self._db.commit()
 
@@ -3281,13 +3394,14 @@ class SessionManager:
                 await self._db.execute(
                     "UPDATE sessions SET harness = ?, model = ?, effort = ?, "
                     "claude_sid = ?, harness_sid = ?, rotation_armed = ?, "
-                    "carry_forward = ?, carry_forward_sid = ?, carry_forward_at = ? "
-                    "WHERE id = ?",
+                    "carry_forward = ?, carry_forward_sid = ?, carry_forward_at = ?, "
+                    "conversation_started_at = ? WHERE id = ?",
                     (session.get("harness") or old_harness or None, session["model"],
                      session.get("effort"), session["claude_sid"],
                      session.get("harness_sid"), session.get("rotation_armed") or 0,
                      session.get("carry_forward"), session.get("carry_forward_sid"),
-                     session.get("carry_forward_at"), session_id),
+                     session.get("carry_forward_at"),
+                     session.get("conversation_started_at"), session_id),
                 )
                 await self._db.commit()
                 try:
