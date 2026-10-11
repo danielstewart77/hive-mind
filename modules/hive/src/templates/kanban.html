@@ -67,6 +67,7 @@
 .kanban-col-title { flex:1 1 auto; min-width:0; overflow-wrap:anywhere; font-weight:600; display:block; text-align:left; margin:0; }
 .kanban-col-title .kanban-item-title { display:inline; margin:0; text-align:left; flex:0 1 auto; }
 .kanban-col-state { font-size:.8rem; opacity:.85; flex:0 0 auto; text-align:left; }
+.kanban-item select { max-width:100%; display:inline-block; min-height:28px; line-height:28px; font-size:13px; margin-left:.4rem; vertical-align:middle; }
 .kanban-dot { color:#3fb950; margin-right:.35rem; font-size:.7rem; }
 @media(max-width:520px){.kanban-cols{column-gap:.3rem}.kanban-col-type{display:none}}
 .kanban-bug { border:2px solid #e05252 !important; }
@@ -174,7 +175,7 @@
     row.addEventListener('contextmenu',e=>{e.preventDefault();showMenu(e.clientX,e.clientY,list);});
     return row;
   }
-  function renderStory(s){const item=el('div','kanban-item surface');item.append(actionRow(s,'stories'));const select=el('select','');select.setAttribute('aria-label',`Status for ${s.title}`);for(const [value,label] of allStatuses){const option=el('option','',label);option.value=value;option.selected=value===s.status;select.append(option);}select.addEventListener('change',async()=>{const previous=s.status;try{const updated=await request(`/api/kanban/stories/${encodeURIComponent(s.id)}`,'PATCH',{status:select.value});Object.assign(s,updated);render();feedback.textContent='Story status updated.';}catch(err){select.value=previous;feedback.textContent=`Status not saved: ${err.message}`;await reload(feedback.textContent);}});item.append(select);return item;}
+  function renderStory(s){const item=el('div','kanban-item surface');const cols=el('div','kanban-cols');cols.append(makeToggle(item, true));cols.append(el('span','kanban-col-type',s.subtype||'story'));cols.append(el('span','kanban-col-title')); const title=el('span','kanban-col-title',s.title); cols.append(title); const select=el('select','');select.setAttribute('aria-label',`Status for ${s.title}`);for(const [value,label] of allStatuses){const option=el('option','',label);option.value=value;option.selected=value===s.status;select.append(option);}select.addEventListener('change',async()=>{const previous=s.status;try{const updated=await request(`/api/kanban/stories/${encodeURIComponent(s.id)}`,'PATCH',{status:select.value});Object.assign(s,updated);render();feedback.textContent='Story status updated.';}catch(err){select.value=previous;feedback.textContent=`Status not saved: ${err.message}`;await reload(feedback.textContent);}}); cols.append(select);item.append(actionRow(s,'stories'));item.append(cols);return item; }
   // Two drop zones on every row. The top band of a row is a reorder: a vertical line shows
   // where the item will land, and the dropped item takes the row's parent. The rest of the
   // row is a nest: a border shows the row will become the dropped item's parent.
