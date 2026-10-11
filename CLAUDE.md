@@ -85,7 +85,10 @@ UserPromptSubmit hook — read from claude's `settings.json`, codex's
 the same file every dsh spawn hands its bridge),
 and a login (claude's credentials file or token, codex's `auth.json` or key,
 dsh's proxy key *and* proxy URL). The checks are a list, `mind_server.CHECKS`,
-so a deployment whose login lives elsewhere replaces one. `GET /models?harness=`
+so a deployment whose login lives elsewhere replaces one. Codex runs a configured hook only once it has been trusted interactively,
+and a mind's codex never has anyone there to trust it, so every `codex exec`
+and every pane carries `--dangerously-bypass-hook-trust` — without it the
+hooks this check finds configured are skipped without a word. `GET /models?harness=`
 relays that harness's listing. `/skills` and `/files` answer for the harness a
 request names (`?harness=`, the default's otherwise), and `POST /skills/check`
 runs the skills render pass — refused with 501, never faked, where it is not

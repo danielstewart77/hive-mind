@@ -428,6 +428,39 @@ def _effort_args(effort: str | None) -> list[str]:
     return ["-c", f'model_reasoning_effort="{effort}"'] if effort else []
 
 
+#: Every codex this mind starts runs unattended: nobody is there to approve a
+#: command, and nobody is there to trust a hook. Codex runs a configured hook
+#: only once its definition has been trusted interactively and recorded in
+#: `config.toml`; without the second flag a hook written into a mind's config
+#: is skipped without a word, and the memory, rotation and per-turn context
+#: hooks never run. They are the mind's own hooks, which is the case the flag
+#: exists for.
+_UNATTENDED_FLAGS = (
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--dangerously-bypass-hook-trust",
+)
+
+
+def _exec_argv(model: str, thread_id: str | None, effort: str | None = None) -> list[str]:
+    """One chat turn's `codex exec`, resuming the thread when there is one.
+
+    The turn itself arrives on stdin (the trailing ``-``), never as an argument.
+    """
+    cmd = [
+        "codex",
+        "exec",
+        "--json",
+        *_UNATTENDED_FLAGS,
+        "--model",
+        model,
+        *_effort_args(effort),
+        *_provider_args(),
+    ]
+    if thread_id:
+        cmd += ["resume", thread_id]
+    return cmd + ["-"]
+
+
 def _terminal_argv(model: str, thread_id: str | None, effort: str | None = None) -> list[str]:
     """The interactive `codex` that runs inside the tmux pane.
 
@@ -440,7 +473,7 @@ def _terminal_argv(model: str, thread_id: str | None, effort: str | None = None)
     """
     cmd = [
         "codex",
-        "--dangerously-bypass-approvals-and-sandbox",
+        *_UNATTENDED_FLAGS,
         "--model", model,
         *_effort_args(effort),
         *_provider_args(),
@@ -686,33 +719,10 @@ async def _run_codex_turn(sid: str, content: str, images: list[dict] | None) -> 
         return
 
     thread_id = state.get("thread_id")
+    cmd = _exec_argv(state["model"], thread_id, state.get("effort"))
     if thread_id:
-        cmd = [
-            "codex",
-            "exec",
-            "--json",
-            "--dangerously-bypass-approvals-and-sandbox",
-            "--model",
-            state["model"],
-            *_effort_args(state.get("effort")),
-            *_provider_args(),
-            "resume",
-            thread_id,
-            "-",
-        ]
         stdin_content = transcript.with_opening_turn(state, content)
     else:
-        cmd = [
-            "codex",
-            "exec",
-            "--json",
-            "--dangerously-bypass-approvals-and-sandbox",
-            "--model",
-            state["model"],
-            *_effort_args(state.get("effort")),
-            *_provider_args(),
-            "-",
-        ]
         stdin_content = (
             f"{state['system_prompt']}\n\n---\n\n"
             f"{transcript.with_opening_turn(state, content)}"
