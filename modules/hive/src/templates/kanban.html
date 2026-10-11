@@ -258,7 +258,7 @@
       const sub=kids.length>0;
       if(r._kind==='stories'){
         const item=renderStory(r);item.dataset.level=String(level);item.dataset.id=r.id;
-        labelRow(item,item.querySelector(':scope > .kanban-inline'),label,false,r.id,{type:kindLabel(r),number,state:r.status,inProgress:r.status==='in_progress'});
+        // story rows are fully built by renderStory; no labelRow needed
         markBug(item,r);makeDraggable(item,'stories',r.id);enableDrop(item,'stories',parentOf(r),r.id);
         return item;
       }
