@@ -127,6 +127,17 @@ process: one live harness process per conversation. `DELETE /sessions/{id}?forge
 drops codex's thread for the session; a plain kill keeps it, so a respawn
 rejoins its thread.
 
+A switch of a conversation a pane holds is not a kill and a chat spawn: the
+gateway writes the row, then asks `rotate-pty` with `switch: true` and the new
+harness, and the new harness's adapter respawns the pane in place onto its own
+CLI, opened on the handover as its first user turn. Every adapter's panes live
+on the mind's one tmux socket under one session name, so the new adapter
+reaches the pane the old one started, and the attached client, pty, socket and
+tile are never disturbed. Without `switch`, a rotation naming a harness other
+than the pane's is refused with 409 as stale. A refusal puts the row back; a
+mind with no live pane leaves it switched with the handover stored, for the
+next attach to open the new harness on.
+
 Each process a conversation runs in is told its own model's window
 (`HIVE_MODEL_CONTEXT_WINDOW`) and rotation threshold
 (`HIVE_ROTATION_THRESHOLD_TOKENS`, the window times the model's

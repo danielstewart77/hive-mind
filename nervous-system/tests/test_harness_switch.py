@@ -129,6 +129,8 @@ class FakeMind:
         self.turn_events: list[dict] = [{"type": "result", "is_error": False, "result": "ok"}]
         self.checks_skills = True
         self.harnesses_status = 200
+        self.rotate_status = 200
+        self.rotate_body: dict = {"rotated": True}
 
     def _answer(self, method: str, url: str, params=None, json_body=None) -> _Resp:
         parts = urlsplit(url)
@@ -157,7 +159,7 @@ class FakeMind:
             lines = [f"data: {json.dumps(e)}\n".encode() for e in self.turn_events]
             return _Resp(200, None, lines)
         if method == "POST" and path.endswith("/rotate-pty"):
-            return _Resp(200, {"rotated": True})
+            return _Resp(self.rotate_status, self.rotate_body)
         if method == "POST" and path.endswith("/release"):
             return _Resp(200, {"released": True})
         if method == "DELETE":
@@ -982,20 +984,79 @@ def test_a_small_window_budgets_the_handover_at_the_floor():
     _run(scenario())
 
 
-def test_a_switch_while_a_terminal_holds_the_conversation_is_refused():
+def test_a_switch_on_a_conversation_in_a_pane_respawns_the_pane_onto_the_new_harness():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr, effort="high")
+            mind = FakeMind()
+            with mind.wired(), _soul():
+                await mgr.adopt_into_terminal("sess-1")
+                await mgr.switch_harness("sess-1", "codex", "gpt-5.6-terra")
+            row = await mgr._get_row("sess-1")
+            assert row["harness"] == "codex"
+            assert row["model"] == "gpt-5.6-terra"
+            assert row["claude_sid"] and row["claude_sid"] != "conv-1"
+            assert row["carry_forward"] == "HANDOVER: the old conversation"
+
+            rotation = mind.sent("POST", "/sessions/sess-1/rotate-pty")[0]["json"]
+            assert rotation["harness"] == "codex"
+            assert rotation["switch"] is True
+            assert rotation["model"] == "gpt-5.6-terra"
+            assert rotation["effort"] == "high"
+            assert rotation["new_claude_sid"] == row["claude_sid"]
+            # The pane opens on the handover as its first user turn.
+            assert rotation["user_prompt"] == "HANDOVER: the old conversation"
+            order = [(r["method"], r["path"]) for r in mind.requests]
+            assert order.index(("POST", "/handover")) < order.index(
+                ("POST", "/sessions/sess-1/rotate-pty"))
+            # The pane is respawned in place: nothing ends it, nothing beside it.
+            assert mind.kills("sess-1") == []
+            assert mind.spawns() == []
+            await _close(mgr)
+
+    _run(scenario())
+
+
+def test_a_pane_that_will_not_take_the_switch_leaves_the_conversation_where_it_was():
     async def scenario():
         with tempfile.TemporaryDirectory() as tmp:
             mgr = await _manager(tmp)
             await _seed(mgr)
             mind = FakeMind()
+            mind.rotate_status = 409
             with mind.wired(), _soul():
                 await mgr.adopt_into_terminal("sess-1")
                 before = await mgr._get_row("sess-1")
-                with pytest.raises(ValueError, match="open in a terminal"):
+                with pytest.raises(ValueError, match="terminal"):
                     await mgr.switch_harness("sess-1", "codex", "gpt-5.6-terra")
-            assert mind.kills("sess-1") == []
-            assert mind.sent("POST", "/handover") == []
+            # Asked, refused, and put back exactly as it was.
+            assert mind.sent("POST", "/sessions/sess-1/rotate-pty")
             assert await mgr._get_row("sess-1") == before
+            assert mind.kills("sess-1") == []
+            assert mind.spawns() == []
+            await _close(mgr)
+
+    _run(scenario())
+
+
+def test_a_switch_on_a_held_conversation_with_no_live_pane_waits_for_the_next_attach():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr)
+            mind = FakeMind()
+            mind.rotate_body = {"rotated": False}
+            with mind.wired(), _soul():
+                await mgr.adopt_into_terminal("sess-1")
+                await mgr.switch_harness("sess-1", "codex", "gpt-5.6-terra")
+            row = await mgr._get_row("sess-1")
+            assert row["harness"] == "codex"
+            # The next attach opens codex on the handover; no chat process is
+            # started beside the pane the conversation belongs to.
+            assert row["carry_forward"] == "HANDOVER: the old conversation"
+            assert row["carry_forward_sid"] == row["claude_sid"]
+            assert mind.spawns() == []
             await _close(mgr)
 
     _run(scenario())
@@ -1189,7 +1250,7 @@ async def _adopted_but_chat_owned(mgr):
     await mgr._db.commit()
 
 
-def test_a_pane_holding_a_chat_owned_conversation_refuses_a_switch_until_released():
+def test_a_pane_holding_a_chat_owned_conversation_is_switched_in_place():
     async def scenario():
         with tempfile.TemporaryDirectory() as tmp:
             mgr = await _manager(tmp)
@@ -1197,12 +1258,9 @@ def test_a_pane_holding_a_chat_owned_conversation_refuses_a_switch_until_release
             mind = FakeMind()
             with mind.wired(), _soul():
                 await _adopted_but_chat_owned(mgr)
-                with pytest.raises(ValueError, match="open in a terminal"):
-                    await mgr.switch_harness("sess-1", "codex", "gpt-5.6-terra")
-                assert mind.sent("POST", "/handover") == []
-
-                await mgr.release_on_mind("sess-1", "terminal")
                 await mgr.switch_harness("sess-1", "codex", "gpt-5.6-terra")
+            assert mind.sent("POST", "/sessions/sess-1/rotate-pty")[0]["json"]["harness"] == "codex"
+            assert mind.kills("sess-1") == []
             assert (await mgr._get_row("sess-1"))["harness"] == "codex"
             await _close(mgr)
 

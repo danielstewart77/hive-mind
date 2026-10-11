@@ -934,8 +934,13 @@ def install_pty_attach(
         # already runs. One addressed to another harness is a pane that was
         # switched away from, and respawning it onto the wrong CLI would undo
         # the switch.
+        # A harness switch is the one exception, and says so: it moves the pane
+        # onto the conversation's new harness, respawned in place by that
+        # harness's own adapter. Every pane lives on the mind's one tmux
+        # socket, so the new adapter reaches the pane the old one started.
         asked = runtime_api.harness_name(body.get("harness"))
-        if asked and handle.harness and asked != handle.harness:
+        switching = bool(body.get("switch")) and asked in adapters
+        if asked and handle.harness and asked != handle.harness and not switching:
             log.warning("Refusing to rotate session %s's %s terminal as %s",
                         session_id, handle.harness, asked)
             return JSONResponse(
@@ -943,7 +948,8 @@ def install_pty_attach(
                  "error": f"this terminal runs {handle.harness}, not {asked}"},
                 status_code=409,
             )
-        adapter = adapters.get(handle.harness) or adapters.get("")
+        target = asked if switching else handle.harness
+        adapter = adapters.get(target) or adapters.get("")
         rotate = adapter.rotate if adapter is not None else None
         if rotate is None:
             return {"session_id": session_id, "rotated": False}
@@ -981,6 +987,12 @@ def install_pty_attach(
         # tmux client that survived the swap, so the handle carries over
         # untouched — only the conversation it is pinned to changed.
         handle.conversation_id = new_claude_sid
+        if switching:
+            handle.harness = target
+            handle.terminals = adapter.terminals
+            # Switched onto another model: whatever effort the last one ran
+            # at is the gateway's to name again, not this pane's to keep.
+            handle.effort = body.get("effort") or None
         handle.model = body.get("model") or handle.model
         handle.effort = body.get("effort") or handle.effort
         log.info("Rotated the conversation in session %s's terminal onto %s",
