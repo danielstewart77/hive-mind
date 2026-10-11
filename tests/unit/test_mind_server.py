@@ -121,6 +121,10 @@ def homes(monkeypatch, tmp_path):
     codex_cli.THREADS.clear()
     mind_server.HARNESS_OF.clear()
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", ADMIN_TOKEN)
+    # A harness process running this suite carries its own model's figures,
+    # and a spawn inherits the environment it runs in.
+    for var in ("HIVE_MODEL_CONTEXT_WINDOW", "HIVE_ROTATION_THRESHOLD_TOKENS"):
+        monkeypatch.delenv(var, raising=False)
     yield paths
     for sid in list(pty_attach.PTYS):
         pty_attach.PTYS.pop(sid, None)
