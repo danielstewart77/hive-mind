@@ -1,8 +1,9 @@
-"""dsh harness — in-container FastAPI service for one mind.
+"""dsh harness adapter for one mind.
 
-Runs as the sole process inside the mind's container. The mind is selected by
-the ``MIND_NAME`` env var (set in the mind's ``container/compose.yaml``);
-everything mind-specific comes from ``minds/<MIND_NAME>/runtime.yaml``.
+``minds.mind_server`` imports this module beside the other harnesses' adapters
+and calls its session functions for every conversation that runs on it. The
+mind is selected by the ``MIND_NAME`` env var; everything mind-specific comes
+from ``minds/<MIND_NAME>/runtime.yaml``.
 
 dsh runs one process per chat turn and one persistent process for a browser
 terminal. Unlike codex it takes the conversation id it is handed, through the
@@ -40,27 +41,21 @@ from typing import Any
 
 import aiohttp
 import yaml
-from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from minds.proactive import make_proactive_router
 from minds import (
     context_overflow,
     failed_turn,
-    github_token_api,
     models_api,
-    rotation_marker_api,
     runtime_api,
-    surface_token_api,
     transcript,
 )
 from minds.pty_attach import (
     PtyUnavailable,
     TmuxTerminals,
-    install_pty_attach,
     teardown as teardown_pty,
 )
-from core.hive_logging import configure_logging, install_fastapi_logging, log_event
+from core.hive_logging import configure_logging, log_event
 
 MIND_NAME = os.environ.get("MIND_NAME", "example")
 MINDS_ROOT = Path(__file__).resolve().parent.parent
@@ -175,18 +170,8 @@ DSH_BIN = str(os.environ.get("DSH_BIN") or RUNTIME.get("dsh_bin") or "dsh")
 
 TERMINALS = TmuxTerminals(NAME, SPAWN_DIR)
 
-app = FastAPI(title=f"Mind: {NAME}", docs_url=None, redoc_url=None, openapi_url=None)
-install_fastapi_logging(app, log, f"mind:{NAME}")
-
 # session_id -> {"system_prompt": str, "model": str, "proc": Process | None, ...}
 SESSIONS: dict[str, dict] = {}
-
-# Proactive delivery endpoint. A per-turn harness has no idle stream to drain,
-# so the buffer stays empty and GET /proactive returns []. Mounted anyway so
-# this mind's bot polls it uniformly with the claude-CLI minds.
-PROACTIVE_BUFFER: list[dict] = []
-PROACTIVE_TOKEN = os.environ.get("COMMS_BEARER_TOKEN") or None
-app.include_router(make_proactive_router(PROACTIVE_BUFFER, PROACTIVE_TOKEN))
 
 #: One path segment of a dsh session artifact: everything outside this set is
 #: escaped as ``~XXXX``.
@@ -566,7 +551,6 @@ def _permission_mode() -> str:
 HEARTBEAT_SECONDS = 120.0
 
 
-
 def dsh_profile() -> str:
     """The profile this turn's spawn composes itself from, read per turn."""
     return str(live_runtime().get("dsh_profile") or "hive")
@@ -754,44 +738,6 @@ async def _reap_proc(proc: asyncio.subprocess.Process | None) -> None:
         await asyncio.wait_for(proc.wait(), timeout=5.0)
     except asyncio.TimeoutError:
         log.warning("dsh pid %s did not exit within 5s of SIGKILL", proc.pid)
-
-
-@app.on_event("startup")
-async def _startup() -> None:
-    await _fetch_secrets_on_startup()
-    # After the shared fetch, never before: this mind's own GitHub token
-    # wins over the hive's, and `GH_TOKEN` from that fetch would
-    # otherwise shadow it on every spawn. Logged and never fatal, like
-    # every other thing on this path: an exception in a startup event
-    # aborts startup, and `restart: unless-stopped` turns that into a
-    # crash loop over a credential file.
-    try:
-        github_token_api.adopt_stored_token()
-    except Exception:  # noqa: BLE001
-        log.exception("could not adopt this mind's own GitHub token")
-    asyncio.ensure_future(runtime_api.registration_loop(
-        RUNTIME_PATH, mind_name=MIND_NAME, mind_id=MIND_ID, log=log
-    ))
-    log.info("%s ready (mind_id=%s, dsh_home=%s, profile=%s)",
-             NAME, MIND_ID, DSH_HOME, DSH_PROFILE)
-
-
-@app.get("/health")
-async def health() -> dict:
-    return {"name": NAME, "mind_id": MIND_ID, "ok": True, "sessions": len(SESSIONS)}
-
-
-@app.get("/sessions")
-async def list_sessions() -> list[dict]:
-    return [
-        {"id": sid, "mind_id": MIND_ID, "model": s.get("model", "unknown"), "status": "running"}
-        for sid, s in SESSIONS.items()
-    ]
-
-
-@app.post("/sessions")
-async def create_session(req: Request) -> Any:
-    return await start_session(await req.json())
 
 
 async def start_session(body: dict) -> Any:
@@ -1326,11 +1272,6 @@ async def _run_dsh_turn(
     yield result
 
 
-@app.post("/sessions/{sid}/message")
-async def send_message(sid: str, req: Request) -> Any:
-    return await send(sid, await req.json())
-
-
 async def send(sid: str, body: dict) -> Any:
     """Run one dsh turn for this session and stream it back."""
     content = body.get("content", "")
@@ -1363,7 +1304,6 @@ async def send(sid: str, body: dict) -> Any:
     return StreamingResponse(stream(), media_type="text/event-stream")
 
 
-@app.post("/sessions/{sid}/interrupt")
 async def interrupt_session(sid: str) -> Any:
     """Stop the turn in flight and leave the conversation standing.
 
@@ -1393,7 +1333,6 @@ async def interrupt_session(sid: str) -> Any:
     return {"ok": True, "session_id": sid, "message": "interrupted"}
 
 
-@app.post("/sessions/{sid}/release")
 async def release_session(sid: str, surface: str) -> Any:
     """Stop one live surface. dsh's session lives on disk, so nothing is lost.
     """
@@ -1408,7 +1347,7 @@ async def release_session(sid: str, surface: str) -> Any:
         await _reap_proc(sess.get("proc"))
     return {"session_id": sid, "surface": surface, "released": sess is not None}
 
-@app.delete("/sessions/{sid}")
+
 async def kill_session(sid: str) -> dict:
     sess = SESSIONS.pop(sid, None)
     if sess is not None:
@@ -1420,33 +1359,3 @@ async def kill_session(sid: str) -> dict:
     log_event(log, "session.closed", mind_id=MIND_ID, mind_name=NAME, session_id=sid)
     return {"session_id": sid, "status": "closed"}
 
-
-# The console's model picker and the runtime writer are harness-agnostic: both
-# read this mind's own runtime.yaml. The skills and files pages are not mounted
-# yet — this harness reads its skills from a third directory nobody has taught
-# skills_sync about, and a route reporting the wrong one is worse than no route.
-# One middleware over every `/sessions` route rather than a decorator per
-# route, so a route added later cannot ship open by being forgotten. Without
-# it the gateway goes on presenting a token nobody reads, registration keeps
-# publishing a credential nobody checks, and every surface stays green while
-# anything that can reach the port can open, drive and kill conversations.
-install_pty_attach(app, mind_name=NAME, terminals=TERMINALS,
-                   spawn=_spawn_pty, rotate=_rotate_pty, mind_dir=MIND_DIR)
-runtime_api.install_session_guard(app, mind_dir=MIND_DIR)
-rotation_marker_api.install_rotation_marker_route(app, mind_dir=MIND_DIR)
-runtime_api.install_runtime_routes(app, path=RUNTIME_PATH, mind_id=MIND_ID, log=log)
-models_api.install_models_route(app, path=RUNTIME_PATH, mind_id=MIND_ID, log=log)
-surface_token_api.install_surface_token_routes(app, mind_id=MIND_ID, log=log)
-github_token_api.install_github_token_routes(app, mind_id=MIND_ID, log=log)
-
-
-def main() -> None:
-    import uvicorn
-
-    port = int(os.environ.get("MIND_SERVER_PORT", "8420"))
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info",
-                log_config=None, access_log=False)
-
-
-if __name__ == "__main__":
-    main()

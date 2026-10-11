@@ -1467,9 +1467,8 @@ def _markers(root: Path, sid: str) -> list[Path]:
             root / f"rotation-{sid}.lock"]
 
 
-@pytest.mark.parametrize("app", ["mind_server", "dsh_cli"])
 def test_the_gateway_drops_a_replaced_conversations_rotation_marker(
-    tmp_path, monkeypatch, app,
+    tmp_path, monkeypatch,
 ):
     """After a handover the old conversation's marker would otherwise outlive
     it on the mind's disk, where only the mind can reach it. Only that
@@ -1477,7 +1476,7 @@ def test_the_gateway_drops_a_replaced_conversations_rotation_marker(
     monkeypatch.setenv("AUTO_REMEMBER_LOG_DIR", str(tmp_path))
     for path in _markers(tmp_path, "old-conv") + _markers(tmp_path, "live-conv"):
         path.write_text("{}")
-    client = TestClient({"mind_server": mind_server.app, "dsh_cli": dsh_cli.app}[app])
+    client = TestClient(mind_server.app)
 
     gone = client.delete("/sessions/row-1/rotation-marker?claude_sid=old-conv",
                          headers=SESSION)

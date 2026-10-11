@@ -484,11 +484,11 @@ def _failure(exc: Exception) -> JSONResponse:
 def install_files_routes(app: FastAPI, *, harness: str, mind_id: str, log) -> None:
     """Mount the file-editor routes on a mind's FastAPI app.
 
-    Both harness servers call this, the same way both call
-    `install_skills_routes` and `install_runtime_routes`. The harness is
-    fixed for the life of the process, so it is passed in rather than
-    re-read per request — and it is what decides whether the two trees are
-    read out of `$CLAUDE_CONFIG_DIR` or `$CODEX_HOME`.
+    `minds.mind_server` calls this once per harness, on that harness's pages
+    app, beside `install_skills_routes`. The harness is fixed for the life of
+    the pages app, so it is passed in rather than re-read per request — and it
+    is what decides whether the two trees are read out of `$CLAUDE_CONFIG_DIR`
+    or `$CODEX_HOME`.
     """
 
     @app.get("/files/{tree}")

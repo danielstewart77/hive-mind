@@ -13,9 +13,8 @@ session to the harness it names; ``MIND_NAME`` points it at the folder:
 * ``minds.harness.dsh_cli`` — one dsh process per turn, through the
   resumable surface in the mounted dsh tree.
 
-Each module still serves as a one-harness app on its own, which is how the
-tests drive it.
-
-Because the deployed minds run these exact modules, the shipped harness can
-never drift from the wiring that is actually in production.
+None of them is a server: ``minds.mind_server`` owns the HTTP surface and
+calls each adapter's session functions. Because the deployed minds run these
+exact modules, the shipped harness can never drift from the wiring that is
+actually in production.
 """

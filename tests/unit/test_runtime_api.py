@@ -427,15 +427,16 @@ class TestRegistrationLoop:
 
         # The race fix is dead code unless startup actually schedules the
         # loop — deleting the ensure_future line must fail this test.
-        from minds.harness import claude_cli, codex_cli
+        from minds import mind_server
 
-        for harness in (claude_cli, codex_cli):
-            scheduled = AsyncMock()
-            with patch.object(runtime_api, "registration_loop", scheduled), \
-                    patch.object(harness, "_fetch_secrets_on_startup", AsyncMock()):
-                with TestClient(harness.app):
-                    pass
-            assert scheduled.called, f"{harness.NAME} never starts the loop"
+        scheduled = AsyncMock()
+        with patch.object(runtime_api, "registration_loop", scheduled), \
+                patch.object(mind_server.skills_api, "check_at_start", AsyncMock()), \
+                patch.object(next(iter(mind_server.ADAPTERS.values())),
+                             "_fetch_secrets_on_startup", AsyncMock()):
+            with TestClient(mind_server.app):
+                pass
+        assert scheduled.called, f"{mind_server.NAME} never starts the loop"
 
         outcomes: list[str] = []
         sleeps: list[float] = []
