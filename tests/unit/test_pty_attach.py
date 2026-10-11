@@ -654,11 +654,6 @@ class TestClaudeCliWiring:
         import minds.harness.claude_cli as impl
         return impl
 
-    def test_the_routes_are_mounted(self, claude):
-        paths = {getattr(r, "path", "") for r in claude.app.routes}
-        assert "/sessions/{session_id}/attach-pty" in paths
-        assert "/sessions/{session_id}/rotate-pty" in paths
-
     def test_pty_command_pins_the_gateway_conversation_id(self, claude, monkeypatch):
         monkeypatch.setattr(claude, "claude_conversation_flags",
                             lambda cid, _dir: ["--session-id", cid])
@@ -795,13 +790,6 @@ class TestClaudeCliWiring:
         assert claude._assistant_texts({"type": "result"}) == []
 
 
-def _session_auth() -> dict[str, str]:
-    """What the gateway presents on a mind's session routes."""
-    import os
-
-    return {"Authorization": f"Bearer {os.environ['MIND_SESSION_TOKEN']}"}
-
-
 class TestCodexCliThreads:
     """Codex will not adopt a conversation id it was handed, so the gateway's
     id and the codex thread are two different things and the mapping lives in
@@ -815,28 +803,23 @@ class TestCodexCliThreads:
         monkeypatch.setattr(impl, "CODEX_HOME", tmp_path)
         return impl
 
-    def test_the_routes_are_mounted(self, codex):
-        paths = {getattr(r, "path", "") for r in codex.app.routes}
-        assert "/sessions/{session_id}/attach-pty" in paths
-        assert "/sessions/{session_id}/rotate-pty" in paths
-
-    def test_gateway_conversation_id_is_not_used_as_a_codex_thread(self, codex):
+    @pytest.mark.asyncio
+    async def test_gateway_conversation_id_is_not_used_as_a_codex_thread(self, codex):
         codex.SESSIONS.clear()
         codex.THREADS.clear()
-        client = TestClient(codex.app)
-        client.post("/sessions", json={
+        await codex.start_session({
             "session_id": "n1", "resume_sid": "gateway-uuid", "model": "gpt-5",
-        }, headers=_session_auth())
+        })
         assert codex.SESSIONS["n1"]["thread_id"] is None
 
-    def test_a_known_thread_is_rejoined_on_respawn(self, codex):
+    @pytest.mark.asyncio
+    async def test_a_known_thread_is_rejoined_on_respawn(self, codex):
         codex.SESSIONS.clear()
         codex.THREADS.clear()
         codex.THREADS["n2"] = "codex-thread-7"
-        client = TestClient(codex.app)
-        client.post("/sessions", json={
+        await codex.start_session({
             "session_id": "n2", "resume_sid": "gateway-uuid", "model": "gpt-5",
-        }, headers=_session_auth())
+        })
         assert codex.SESSIONS["n2"]["thread_id"] == "codex-thread-7"
 
     @pytest.mark.asyncio
@@ -1016,14 +999,14 @@ class TestCodexCliThreads:
         assert "the summary" in (
             tmp_path / "rotation-seeds" / "n7-conv-9.txt").read_text()
 
-    def test_a_switch_kill_forgets_the_thread(self, codex):
+    @pytest.mark.asyncio
+    async def test_a_switch_kill_forgets_the_thread(self, codex):
         """A harness switch kills with `forget_thread`: the conversation is
         leaving codex, and a switch back must open on a handover rather than
         resume the thread it left."""
         codex.SESSIONS.clear()
         codex.THREADS["n4"] = "codex-thread-9"
-        client = TestClient(codex.app)
-        client.delete("/sessions/n4?forget_thread=1", headers=_session_auth())
+        await codex.kill_session("n4", forget_thread=True)
         assert "n4" not in codex.THREADS
 
 

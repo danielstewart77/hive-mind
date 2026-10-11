@@ -1,8 +1,9 @@
-"""Codex CLI harness — in-container FastAPI service for one mind.
+"""Codex CLI harness adapter for one mind.
 
-Runs as the sole process inside the mind's container. The mind is selected
-by the ``MIND_NAME`` env var (set in the mind's ``container/compose.yaml``);
-everything mind-specific comes from ``minds/<MIND_NAME>/runtime.yaml``.
+``minds.mind_server`` imports this module beside the other harnesses' adapters
+and calls its session functions for every conversation that runs on it. The
+mind is selected by the ``MIND_NAME`` env var; everything mind-specific comes
+from ``minds/<MIND_NAME>/runtime.yaml``.
 
 The Codex CLI runs one subprocess per turn. The session table holds
 metadata only (system prompt + last thread_id). On the first turn the
@@ -33,15 +34,12 @@ from uuid import uuid4
 
 import aiohttp
 import yaml
-from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from minds.harness.empty_turn_diagnostic import compose_empty_turn_diagnostic
-from minds.proactive import make_proactive_router
 from minds.pty_attach import (
     PtyUnavailable,
     TmuxTerminals,
-    install_pty_attach,
     mirror_turn,
     seeded_pane_command,
 )
@@ -49,15 +47,10 @@ from minds.pty_attach import teardown as teardown_pty
 from minds import (
     context_overflow,
     failed_turn,
-    files_api,
-    github_token_api,
-    models_api,
     runtime_api,
-    skills_api,
-    surface_token_api,
     transcript,
 )
-from core.hive_logging import configure_logging, install_fastapi_logging, log_event
+from core.hive_logging import configure_logging, log_event
 
 MIND_NAME = os.environ.get("MIND_NAME", "example")
 MINDS_ROOT = Path(__file__).resolve().parent.parent
@@ -94,8 +87,6 @@ def home_declared() -> bool:
     """Whether this mind has a codex home of its own to run codex in."""
     return CODEX_HOME.is_dir()
 
-app = FastAPI(title=f"Mind: {NAME}", docs_url=None, redoc_url=None, openapi_url=None)
-install_fastapi_logging(app, log, f"mind:{NAME}")
 
 # session_id -> {"system_prompt": str, "thread_id": str | None, "model": str}
 SESSIONS: dict[str, dict] = {}
@@ -110,14 +101,6 @@ SESSIONS: dict[str, dict] = {}
 # SESSIONS means a respawn of the same session (idle eviction, a gateway
 # restart) rejoins its thread instead of silently starting a second one.
 THREADS: dict[str, str] = {}
-
-# Proactive delivery endpoint. Codex minds run one subprocess per turn
-# (stdin closed, no idle stream), so there is no unsolicited output to drain —
-# the buffer stays empty and GET /proactive returns []. The endpoint is still
-# mounted so this mind's bot can poll it uniformly with the Claude-CLI minds.
-PROACTIVE_BUFFER: list[dict] = []
-PROACTIVE_TOKEN = os.environ.get("COMMS_BEARER_TOKEN") or None
-app.include_router(make_proactive_router(PROACTIVE_BUFFER, PROACTIVE_TOKEN))
 
 
 def _setup_codex_home() -> None:
@@ -219,44 +202,6 @@ async def _reap_proc(proc: asyncio.subprocess.Process | None) -> None:
         await asyncio.wait_for(proc.wait(), timeout=5.0)
     except asyncio.TimeoutError:
         log.warning("codex pid %s did not exit within 5s of SIGKILL", proc.pid)
-
-
-@app.on_event("startup")
-async def _startup() -> None:
-    await _fetch_secrets_on_startup()
-    # After the shared fetch, never before: this mind's own GitHub token
-    # wins over the hive's, and `GH_TOKEN` from that fetch would
-    # otherwise shadow it on every spawn. Logged and never fatal, like
-    # every other thing on this path: an exception in a startup event
-    # aborts startup, and `restart: unless-stopped` turns that into a
-    # crash loop over a credential file.
-    try:
-        github_token_api.adopt_stored_token()
-    except Exception:  # noqa: BLE001
-        log.exception("could not adopt this mind's own GitHub token")
-    asyncio.ensure_future(runtime_api.registration_loop(
-        RUNTIME_PATH, mind_name=MIND_NAME, mind_id=MIND_ID, log=log
-    ))
-    asyncio.ensure_future(skills_api.check_at_start(log, MIND_ID))
-    log.info("%s ready (mind_id=%s, codex_home=%s)", NAME, MIND_ID, CODEX_HOME)
-
-
-@app.get("/health")
-async def health() -> dict:
-    return {"name": NAME, "mind_id": MIND_ID, "ok": True, "sessions": len(SESSIONS)}
-
-
-@app.get("/sessions")
-async def list_sessions() -> list[dict]:
-    return [
-        {"id": sid, "mind_id": MIND_ID, "model": s.get("model", "unknown"), "status": "running"}
-        for sid, s in SESSIONS.items()
-    ]
-
-
-@app.post("/sessions")
-async def create_session(req: Request) -> Any:
-    return await start_session(await req.json())
 
 
 async def start_session(body: dict) -> Any:
@@ -671,17 +616,6 @@ def transcript_path(
     return None
 
 
-install_pty_attach(app, mind_name=NAME, terminals=TERMINALS,
-                   spawn=_spawn_pty, rotate=_rotate_pty, mind_dir=MIND_DIR)
-runtime_api.install_session_guard(app, mind_dir=MIND_DIR)
-runtime_api.install_runtime_routes(app, path=RUNTIME_PATH, mind_id=MIND_ID, log=log)
-skills_api.install_skills_routes(app, harness="codex_cli", mind_id=MIND_ID, log=log)
-files_api.install_files_routes(app, harness="codex_cli", mind_id=MIND_ID, log=log)
-models_api.install_models_route(app, path=RUNTIME_PATH, mind_id=MIND_ID, log=log)
-surface_token_api.install_surface_token_routes(app, mind_id=MIND_ID, log=log)
-github_token_api.install_github_token_routes(app, mind_id=MIND_ID, log=log)
-
-
 CONTEXT_WINDOW_EXCEEDED = context_overflow.CONTEXT_WINDOW_EXCEEDED
 
 
@@ -903,11 +837,6 @@ async def _run_codex_turn(sid: str, content: str, images: list[dict] | None) -> 
     yield result
 
 
-@app.post("/sessions/{sid}/message")
-async def send_message(sid: str, req: Request) -> Any:
-    return await send(sid, await req.json())
-
-
 async def send(sid: str, body: dict) -> Any:
     """Run one codex turn for this session and stream it back."""
     content = body.get("content", "")
@@ -950,14 +879,12 @@ async def send(sid: str, body: dict) -> Any:
     return StreamingResponse(stream(), media_type="text/event-stream")
 
 
-@app.post("/sessions/{sid}/interrupt")
 async def interrupt_session(sid: str) -> Any:
     if sid not in SESSIONS:
         return JSONResponse({"error": f"Session {sid} not found"}, status_code=404)
     return {"ok": True, "session_id": sid, "message": "codex_per_turn"}
 
 
-@app.post("/sessions/{sid}/release")
 async def release_session(sid: str, surface: str) -> Any:
     """Stop one live surface while retaining Codex's resumable thread id."""
     if surface == "terminal":
@@ -972,7 +899,6 @@ async def release_session(sid: str, surface: str) -> Any:
     return {"session_id": sid, "surface": surface, "released": released}
 
 
-@app.delete("/sessions/{sid}")
 async def kill_session(sid: str, forget_thread: bool = False) -> dict:
     """End this session's processes; with ``forget_thread``, its thread too.
 
@@ -993,14 +919,3 @@ async def kill_session(sid: str, forget_thread: bool = False) -> dict:
     log.info("Killed %s session %s", NAME, sid)
     log_event(log, "session.closed", mind_id=MIND_ID, mind_name=NAME, session_id=sid)
     return {"session_id": sid, "status": "closed"}
-
-
-def main() -> None:
-    import uvicorn
-
-    port = int(os.environ.get("MIND_SERVER_PORT", "8420"))
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info", log_config=None, access_log=False)
-
-
-if __name__ == "__main__":
-    main()

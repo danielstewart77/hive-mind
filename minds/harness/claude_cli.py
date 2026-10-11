@@ -1,8 +1,9 @@
-"""Claude CLI harness — in-container FastAPI service for one mind.
+"""Claude CLI harness adapter for one mind.
 
-Runs as the sole process inside the mind's container. The mind is selected
-by the ``MIND_NAME`` env var (set in the mind's ``container/compose.yaml``);
-everything mind-specific comes from ``minds/<MIND_NAME>/runtime.yaml``.
+``minds.mind_server`` imports this module beside the other harnesses' adapters
+and calls its session functions for every conversation that runs on it. The
+mind is selected by the ``MIND_NAME`` env var; everything mind-specific comes
+from ``minds/<MIND_NAME>/runtime.yaml``.
 Owns the Claude CLI subprocesses for the mind's sessions. An Ollama-backed
 mind is the same harness with ``ANTHROPIC_BASE_URL`` / ``ANTHROPIC_AUTH_TOKEN``
 set in ``runtime.yaml``'s ``env`` block.
@@ -26,31 +27,23 @@ from uuid import uuid4
 
 import aiohttp
 import yaml
-from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from minds.proactive import idle_drain, make_proactive_router
+from minds.proactive import idle_drain
 from minds.pty_attach import (
     TmuxTerminals,
     claude_conversation_flags,
     claude_transcript_path,
     ensure_tui_first_run_flags,
-    install_pty_attach,
     mirror_turn,
     seeded_pane_command,
 )
 from minds.pty_attach import teardown as teardown_pty
 from minds import (
     context_overflow,
-    files_api,
-    github_token_api,
-    models_api,
-    runtime_api,
-    skills_api,
-    surface_token_api,
     transcript,
 )
-from core.hive_logging import configure_logging, install_fastapi_logging, log_event
+from core.hive_logging import configure_logging, log_event
 
 MIND_NAME = os.environ.get("MIND_NAME", "example")
 MINDS_ROOT = Path(__file__).resolve().parent.parent
@@ -86,20 +79,14 @@ elif _MCP_DEFAULT.exists():
 else:
     MCP_CONFIG = ""
 
-app = FastAPI(title=f"Mind: {NAME}", docs_url=None, redoc_url=None, openapi_url=None)
-install_fastapi_logging(app, log, f"mind:{NAME}")
 
 # session_id -> {"proc": Process, "model": str, "resume_sid": str | None}
 SESSIONS: dict[str, dict] = {}
 
 # Proactive (unsolicited) delivery. The idle drain appends {"chat_id", "text"}
-# items here while no request is in flight; this mind's Telegram bot polls
-# GET /proactive to drain and deliver them. See minds/proactive.py.
+# items here while no request is in flight; mind_server serves it on
+# GET /proactive for this mind's Telegram bot. See minds/proactive.py.
 PROACTIVE_BUFFER: list[dict] = []
-# Shared bearer for the /proactive endpoint — the same token the backend
-# already trusts on the internal docker network.
-PROACTIVE_TOKEN = os.environ.get("COMMS_BEARER_TOKEN") or None
-app.include_router(make_proactive_router(PROACTIVE_BUFFER, PROACTIVE_TOKEN))
 
 
 # ---------------------------------------------------------------------------
@@ -489,17 +476,6 @@ def transcript_path(
     return path if path.exists() else None
 
 
-install_pty_attach(app, mind_name=NAME, terminals=TERMINALS,
-                   spawn=_spawn_pty, rotate=_rotate_pty, mind_dir=MIND_DIR)
-runtime_api.install_session_guard(app, mind_dir=MIND_DIR)
-runtime_api.install_runtime_routes(app, path=RUNTIME_PATH, mind_id=MIND_ID, log=log)
-skills_api.install_skills_routes(app, harness="claude_cli", mind_id=MIND_ID, log=log)
-files_api.install_files_routes(app, harness="claude_cli", mind_id=MIND_ID, log=log)
-models_api.install_models_route(app, path=RUNTIME_PATH, mind_id=MIND_ID, log=log)
-surface_token_api.install_surface_token_routes(app, mind_id=MIND_ID, log=log)
-github_token_api.install_github_token_routes(app, mind_id=MIND_ID, log=log)
-
-
 async def _drain_stderr(proc: asyncio.subprocess.Process, session_id: str) -> None:
     if proc.stderr is None:
         return
@@ -524,46 +500,8 @@ async def _kill_proc(proc: asyncio.subprocess.Process | None) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Routes
+# Sessions
 # ---------------------------------------------------------------------------
-
-@app.on_event("startup")
-async def _startup() -> None:
-    await _fetch_secrets_on_startup()
-    # After the shared fetch, never before: this mind's own GitHub token
-    # wins over the hive's, and `GH_TOKEN` from that fetch would
-    # otherwise shadow it on every spawn. Logged and never fatal, like
-    # every other thing on this path: an exception in a startup event
-    # aborts startup, and `restart: unless-stopped` turns that into a
-    # crash loop over a credential file.
-    try:
-        github_token_api.adopt_stored_token()
-    except Exception:  # noqa: BLE001
-        log.exception("could not adopt this mind's own GitHub token")
-    asyncio.ensure_future(runtime_api.registration_loop(
-        RUNTIME_PATH, mind_name=MIND_NAME, mind_id=MIND_ID, log=log
-    ))
-    asyncio.ensure_future(skills_api.check_at_start(log, MIND_ID))
-    log.info("%s ready (mind_id=%s)", NAME, MIND_ID)
-
-
-@app.get("/health")
-async def health() -> dict:
-    return {"name": NAME, "mind_id": MIND_ID, "ok": True, "sessions": len(SESSIONS)}
-
-
-@app.get("/sessions")
-async def list_sessions() -> list[dict]:
-    return [
-        {"id": sid, "mind_id": MIND_ID, "model": s.get("model", "unknown"), "status": "running"}
-        for sid, s in SESSIONS.items()
-    ]
-
-
-@app.post("/sessions")
-async def create_session(req: Request) -> Any:
-    return await start_session(await req.json())
-
 
 async def start_session(body: dict) -> Any:
     """Spawn this session's harness process from a gateway spawn payload.
@@ -656,11 +594,6 @@ def _assistant_texts(event: dict) -> list[str]:
         block["text"] for block in content
         if isinstance(block, dict) and block.get("type") == "text" and block.get("text")
     ]
-
-
-@app.post("/sessions/{sid}/message")
-async def send_message(sid: str, req: Request) -> Any:
-    return await send(sid, await req.json())
 
 
 def classify_result(event: dict) -> dict:
@@ -778,7 +711,6 @@ async def send(sid: str, body: dict) -> Any:
     return StreamingResponse(stream(), media_type="text/event-stream")
 
 
-@app.post("/sessions/{sid}/interrupt")
 async def interrupt_session(sid: str) -> Any:
     sess = SESSIONS.get(sid)
     if not sess:
@@ -794,7 +726,6 @@ async def interrupt_session(sid: str) -> Any:
     return {"ok": True, "session_id": sid}
 
 
-@app.post("/sessions/{sid}/release")
 async def release_session(sid: str, surface: str) -> Any:
     """Stop one live surface without forgetting the conversation."""
     if surface == "terminal":
@@ -812,7 +743,6 @@ async def release_session(sid: str, surface: str) -> Any:
     return {"session_id": sid, "surface": surface, "released": released}
 
 
-@app.delete("/sessions/{sid}")
 async def kill_session(sid: str) -> dict:
     sess = SESSIONS.pop(sid, None)
     # The terminal is a separate process from the tracked subprocess, so a
@@ -828,13 +758,3 @@ async def kill_session(sid: str) -> dict:
     log.info("Killed %s session %s", NAME, sid)
     log_event(log, "session.closed", mind_id=MIND_ID, mind_name=NAME, session_id=sid)
     return {"session_id": sid, "status": "closed"}
-
-
-def main() -> None:
-    import uvicorn
-    port = int(os.environ.get("MIND_SERVER_PORT", "8420"))
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info", log_config=None, access_log=False)
-
-
-if __name__ == "__main__":
-    main()

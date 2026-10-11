@@ -14,7 +14,7 @@ import time
 from unittest.mock import patch
 
 import pytest
-from fastapi import FastAPI, Request, WebSocket
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
@@ -473,35 +473,28 @@ def _refuse_to_spawn(**kwargs):
 # ---------------------------------------------------------------------------
 # The guard on the apps that actually ship
 # ---------------------------------------------------------------------------
-class TestTheDeployedAppsAreGuarded:
-    """`install_session_guard` is one line in each harness server, and every
-    other test of those apps supplies the credential. Without these, both files
-    that *are* the deployed minds can lose the guard and nothing says so."""
+class TestTheDeployedAppIsGuarded:
+    """`install_session_guard` is one line in `minds.mind_server`, and every
+    other test of that app supplies the credential. Without these, the file
+    that *is* the deployed mind can lose the guard and nothing says so."""
 
-    @pytest.mark.parametrize("module", ["claude_cli", "codex_cli", "dsh_cli"])
-    def test_an_uncredentialed_spawn_is_refused(self, module):
-        import importlib
+    def test_an_uncredentialed_spawn_is_refused(self):
+        from minds import mind_server
 
-        harness = importlib.import_module(f"minds.harness.{module}")
-        client = TestClient(harness.app)
-        response = client.post(
+        response = TestClient(mind_server.app).post(
             "/sessions",
             json={"session_id": "s1", "resume_sid": "c1", "model": "sonnet"},
         )
         assert response.status_code == 401
 
-    @pytest.mark.parametrize("module", ["claude_cli", "codex_cli", "dsh_cli"])
-    def test_an_uncredentialed_kill_is_refused(self, module):
-        import importlib
+    def test_an_uncredentialed_kill_is_refused(self):
+        from minds import mind_server
 
-        harness = importlib.import_module(f"minds.harness.{module}")
-        assert TestClient(harness.app).delete("/sessions/s1").status_code == 401
+        assert TestClient(mind_server.app).delete("/sessions/s1").status_code == 401
 
-    @pytest.mark.parametrize("module", ["claude_cli", "codex_cli", "dsh_cli"])
-    def test_the_config_surface_is_still_reachable(self, module):
+    def test_the_config_surface_is_still_reachable(self):
         """The guard is scoped to /sessions and must not have swallowed the
         routes the console reads."""
-        import importlib
+        from minds import mind_server
 
-        harness = importlib.import_module(f"minds.harness.{module}")
-        assert TestClient(harness.app).get("/runtime").status_code == 200
+        assert TestClient(mind_server.app).get("/runtime").status_code == 200

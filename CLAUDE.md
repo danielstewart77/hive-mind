@@ -147,7 +147,7 @@ mind's: no mind's file carries one. A model the proxy declares no window for
 gets neither variable, and one with a window and no percentage gets no
 threshold; a lookup missing either is not remembered, so the next spawn asks
 again. A dsh turn runs under that window,
-or — with none composed for it, as on Cypher's standalone adapter — under the
+or — with none composed for it — under the
 window the proxy lists for its model, asked per turn; a model with no window
 is refused rather than run behind a guessed one. The rotation hook takes the
 model from the turn's own transcript entry and asks the proxy for that
@@ -171,7 +171,7 @@ refused for size as `error_code: CONTEXT_WINDOW_EXCEEDED`
 leaves such a turn to the gateway's overflow path rather than arming a
 rotation of its own. After a handover the gateway calls `DELETE
 /sessions/{id}/rotation-marker?claude_sid=` (session-guarded, on the mind
-server and on dsh's standalone app), which drops that conversation's marker
+server), which drops that conversation's marker
 files under the mind's `data/auto-remember` and answers 204. `build_catalog` relays each model's `accepts_images` as
 the proxy gives it: true, false, or null for unknown.
 
