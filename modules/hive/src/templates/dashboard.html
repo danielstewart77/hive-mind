@@ -40,6 +40,12 @@
         <p class="dash-empty" id="dash-idle" hidden>No mind is producing output right now.</p>
     </section>
 
+    <section class="surface" aria-label="Idle conversations">
+        <div class="surface-header"><div><h2>Idle</h2></div></div>
+        <div class="data-table-wrap"><table class="data-table"><thead><tr><th>Mind</th><th>Conversation</th><th>Model</th><th>Size</th><th>Rotates at</th><th>Window</th><th>Measured</th></tr></thead><tbody id="dash-idle-rows"></tbody></table></div>
+        <p class="dash-empty" id="dash-idle-empty" hidden>No open conversations.</p>
+    </section>
+
 </main>
 <script src="{{ request.url_for('static', path='dashboard.js') }}?v={{ asset_versions['dashboard.js'] }}" defer></script>
 {% endblock %}

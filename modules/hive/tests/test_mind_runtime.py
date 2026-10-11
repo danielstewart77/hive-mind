@@ -168,7 +168,8 @@ def test_no_admin_token_refuses_the_write(monkeypatch):
 
 CATALOG = [
     {"name": "claude-opus-5", "label": "Opus 5", "provider": "anthropic",
-     "provider_label": "Anthropic"},
+     "provider_label": "Anthropic", "context_window": 1_000_000,
+     "rotation_threshold_percent": 30},
     {"name": "qwen35-131k", "label": "Qwen 3.5 9B (local, 131k)",
      "provider": "ollama", "provider_label": "Ollama"},
 ]
@@ -214,6 +215,16 @@ def test_each_offered_row_carries_its_label_and_provider(monkeypatch):
     assert rows["claude-opus-5"]["label"] == "Opus 5"
     assert rows["qwen35-131k"]["provider"] == "ollama"
     assert rows["qwen35-131k"]["provider_label"] == "Ollama"
+
+
+def test_each_offered_row_carries_its_models_rotation_percent_and_window(monkeypatch):
+    """The rotation threshold is the model's, so the picker shows it per row."""
+    rows = {row["name"]: row for row in _picker(
+        monkeypatch, harness="claude_cli", provider="anthropic"
+    )}
+    assert (rows["claude-opus-5"]["rotation_threshold_percent"],
+            rows["claude-opus-5"]["context_window"]) == (30, 1_000_000)
+    assert rows["qwen35-131k"]["rotation_threshold_percent"] is None
 
 
 # ---------------------------------------------------------------------------

@@ -857,3 +857,22 @@ class TestMachineDials:
         )
 
         assert "band" not in gpu["devices"][0]
+
+
+# --- The rotation point is the model's ------------------------------------
+
+
+class TestThresholdFromTheModel:
+    def test_a_threshold_the_mind_reported_is_drawn_as_reported(self):
+        assert dd.resolve_threshold(reported=137_000, window=1_000_000, percent=30) == 137_000
+
+    def test_an_unreported_threshold_is_the_models_percent_of_its_window(self):
+        assert dd.resolve_threshold(reported=None, window=1_000_000, percent=30) == 1_000_000 * 30 // 100
+
+    def test_without_a_percent_the_threshold_stays_unknown(self):
+        assert dd.resolve_threshold(reported=None, window=1_000_000, percent=None) is None
+
+    def test_a_percent_no_window_could_rotate_at_is_not_taken(self):
+        assert dd.threshold_percent({"rotation_threshold_percent": 150}) is None
+        assert dd.threshold_percent({"rotation_threshold_percent": 0}) is None
+        assert dd.threshold_percent({"rotation_threshold_percent": 70}) == 70

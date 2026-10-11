@@ -192,6 +192,42 @@ def window_for(model: str, catalog: dict[str, Optional[int]]) -> Optional[int]:
     return catalog.get(model)
 
 
+def _positive_int(value) -> Optional[int]:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
+def window_of(row: dict) -> Optional[int]:
+    """A model row's context window, or None when it declares none."""
+    return _positive_int(row.get("context_window"))
+
+
+def threshold_percent(row: dict) -> Optional[int]:
+    """A model row's rotation threshold, as a percentage of its window.
+
+    A property of the model, written on the proxy's row beside its window.
+    None when the row declares none, or declares one no window could rotate
+    at.
+    """
+    percent = _positive_int(row.get("rotation_threshold_percent"))
+    return percent if percent and percent <= 100 else None
+
+
+def resolve_threshold(
+    reported: Optional[int], window: Optional[int], percent: Optional[int]
+) -> Optional[int]:
+    """The rotation point to draw, preferring what the mind reported.
+
+    A mind reports the threshold its own process runs against. One that has
+    not is drawn at the model's percentage of the window; without both of
+    those it stays unknown rather than guessed.
+    """
+    if reported:
+        return reported
+    return window * percent // 100 if window and percent else None
+
+
 def resolve_window(
     reported: Optional[int], catalog_window: Optional[int]
 ) -> Optional[int]:
@@ -272,6 +308,12 @@ def context_reading(context: dict) -> dict:
         "bar_basis": bar_basis,
         "over": over,
 
+        # "usage" when the provider counted it, "estimated" when the
+        # harness did; a page that hid the difference would present a guess
+        # with the authority of a count.
+        "kind": context.get("kind"),
+        # The model's rotation percentage, when the proxy's row gives one.
+        "threshold_percent": context.get("threshold_percent"),
         "observed_at": context.get("observed_at"),
         "age_seconds": context.get("age_seconds"),
     }

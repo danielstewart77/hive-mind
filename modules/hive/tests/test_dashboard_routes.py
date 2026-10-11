@@ -67,7 +67,7 @@ PROVIDERS = {
         {"name": "openai", "reporting": False, "windows": []},
     ]
 }
-CATALOG = {"catalog": {"claude-opus-5": 1_000_000}}
+CATALOG = {"catalog": {"claude-opus-5": 1_000_000}, "percents": {"claude-opus-5": 30}}
 
 
 @pytest.fixture()
@@ -450,3 +450,58 @@ def test_an_allowance_window_reaches_the_page_carrying_its_band(
     body = client.get("/api/dashboard").json()
 
     assert body["providers"]["providers"][0]["windows"][0]["band"] == "hot"
+
+
+def test_an_idle_conversation_reaches_the_page_with_its_size_threshold_and_window(
+    tmp_path, monkeypatch, wired
+):
+    """T13. A conversation that is not producing is absent from the live
+    feed, and is still the one somebody is about to type into."""
+    live = copy.deepcopy(LIVE)
+    live["idle"] = [{
+        "session_id": "s2", "mind_id": "skippy", "model": "claude-opus-5",
+        "context": {"tokens": 42_000, "threshold": 100_000, "window": 200_000,
+                    "kind": "estimated", "observed_at": 10.0, "age_seconds": 30.0},
+    }]
+    monkeypatch.setattr(main_mod, "_live_sessions", AsyncMock(return_value=live))
+    client = _authed_client(tmp_path, monkeypatch)
+
+    body = client.get("/api/dashboard").json()
+
+    assert [row["session_id"] for row in body["columns"]] == ["s1"]
+    [idle] = body["idle"]
+    assert (idle["context"]["tokens"], idle["context"]["threshold"],
+            idle["context"]["window"]) == (42_000, 100_000, 200_000)
+    assert idle["context"]["fraction_of_threshold"] == 0.42
+    assert idle["context"]["kind"] == "estimated"
+
+
+def test_a_conversation_with_no_reported_threshold_rotates_at_its_models_percent(
+    tmp_path, monkeypatch, wired
+):
+    """The rotation percentage is on the proxy's row for the model, so a
+    conversation whose mind has not reported a threshold is drawn at that
+    percentage of the window, and the page is told the percentage."""
+    live = copy.deepcopy(LIVE)
+    live["sessions"][0]["context"]["threshold"] = None
+    monkeypatch.setattr(main_mod, "_live_sessions", AsyncMock(return_value=live))
+    client = _authed_client(tmp_path, monkeypatch)
+
+    context = client.get("/api/dashboard").json()["columns"][0]["context"]
+
+    assert context["threshold"] == 1_000_000 * 30 // 100
+    assert context["threshold_percent"] == 30
+    assert context["fraction_of_threshold"] == 150_000 / (1_000_000 * 30 // 100)
+
+
+def test_the_model_catalog_relays_each_models_rotation_percent(monkeypatch):
+    listing = {"data": [
+        {"id": "claude-opus-5", "context_window": 1_000_000, "rotation_threshold_percent": 30},
+        {"id": "gpt-5.6-terra", "context_window": 400_000},
+    ]}
+    monkeypatch.setattr(main_mod, "_proxy_json", AsyncMock(return_value=listing))
+
+    catalog = asyncio.run(main_mod._fetch_model_catalog())
+
+    assert catalog["catalog"] == {"claude-opus-5": 1_000_000, "gpt-5.6-terra": 400_000}
+    assert catalog["percents"] == {"claude-opus-5": 30, "gpt-5.6-terra": None}

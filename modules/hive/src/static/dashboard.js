@@ -26,6 +26,8 @@
   const providersEl = document.getElementById("dash-providers");
   const hostsEl = document.getElementById("dash-hosts");
   const idleEl = document.getElementById("dash-idle");
+  const idleRowsEl = document.getElementById("dash-idle-rows");
+  const idleEmptyEl = document.getElementById("dash-idle-empty");
   const errorEl = document.getElementById("dash-error");
   const observedEl = document.getElementById("dash-observed");
 
@@ -162,6 +164,14 @@
     return box;
   }
 
+  // The model's rotation percentage, from the proxy's row for it.
+  function percentOf(context) {
+    return typeof context.threshold_percent === "number" &&
+      context.threshold !== null && context.threshold !== undefined
+      ? ` (${context.threshold_percent}% of the window)`
+      : "";
+  }
+
   function contextLines(context) {
     const box = document.createElement("div");
     box.className = "dash-context";
@@ -175,7 +185,7 @@
       const threshold =
         context.threshold === null || context.threshold === undefined
           ? "no rotation point reported"
-          : `rotates at ${tokens(context.threshold)}`;
+          : `rotates at ${tokens(context.threshold)}` + percentOf(context);
       const denominator =
         context.window === null || context.window === undefined
           ? "window unknown"
@@ -183,6 +193,7 @@
       line.textContent = `${tokens(context.tokens)} ${denominator} · ${threshold} · measured ${ago(
         context.age_seconds
       )}`;
+      if (context.kind === "estimated") line.textContent += " · estimated";
       if (context.bar_basis === "threshold") {
         line.textContent += " · bar scaled to the rotation point (window unknown)";
       }
@@ -262,6 +273,36 @@
           .querySelector(".dash-context-gauge")
           .replaceWith(contextGauge(session.context || {}));
       }
+    });
+  }
+
+  function renderIdle(rows) {
+    idleRowsEl.replaceChildren();
+    idleEmptyEl.hidden = rows.length > 0;
+    rows.forEach((session) => {
+      const context = session.context || {};
+      const row = document.createElement("tr");
+      const size =
+        context.tokens === null || context.tokens === undefined
+          ? "unknown"
+          : tokens(context.tokens) +
+            (context.kind === "estimated" ? " (estimated)" : "") +
+            (context.over ? " (over)" : "");
+      [
+        session.mind_name || session.mind_id || "unknown mind",
+        session.name || session.summary || session.session_id,
+        session.model || "",
+        size,
+        tokens(context.threshold) + percentOf(context),
+        tokens(context.window),
+        ago(context.age_seconds),
+      ].forEach((text, index) => {
+        const cell = document.createElement("td");
+        cell.textContent = text;
+        if (index === 3 && context.over) cell.classList.add("is-over");
+        row.appendChild(cell);
+      });
+      idleRowsEl.appendChild(row);
     });
   }
 
@@ -524,6 +565,7 @@
         errorEl.hidden = true;
       }
       renderColumns(payload);
+      renderIdle(payload.idle || []);
       renderProviders(payload.providers);
       renderHosts(payload.hosts);
       observedEl.textContent = `updated ${new Date().toLocaleTimeString()}`;
