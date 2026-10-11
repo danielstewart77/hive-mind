@@ -175,7 +175,7 @@
     row.addEventListener('contextmenu',e=>{e.preventDefault();showMenu(e.clientX,e.clientY,list);});
     return row;
   }
-  function renderStory(s){const item=el('div','kanban-item surface');const cols=el('div','kanban-cols');cols.append(makeToggle(item, true));cols.append(el('span','kanban-col-type',s.subtype||'story'));cols.append(el('span','kanban-col-title')); const title=el('span','kanban-col-title',s.title); cols.append(title); const select=el('select','');select.setAttribute('aria-label',`Status for ${s.title}`);for(const [value,label] of allStatuses){const option=el('option','',label);option.value=value;option.selected=value===s.status;select.append(option);}select.addEventListener('change',async()=>{const previous=s.status;try{const updated=await request(`/api/kanban/stories/${encodeURIComponent(s.id)}`,'PATCH',{status:select.value});Object.assign(s,updated);render();feedback.textContent='Story status updated.';}catch(err){select.value=previous;feedback.textContent=`Status not saved: ${err.message}`;await reload(feedback.textContent);}}); cols.append(select);item.append(actionRow(s,'stories'));item.append(cols);return item; }
+  function renderStory(s){const item=el('div','kanban-item surface');const cols=el('div','kanban-cols');cols.append(makeToggle(item,true));cols.append(el('span','kanban-col-type',s.subtype||'story'));const titleSpan=el('span','kanban-col-title');titleSpan.append(safeTitle(s));cols.append(titleSpan);const select=el('select','');select.setAttribute('aria-label',`Status for ${s.title}`);for(const [value,label] of allStatuses){const option=el('option','',label);option.value=value;option.selected=value===s.status;select.append(option);}select.addEventListener('change',async()=>{const previous=s.status;try{const updated=await request(`/api/kanban/stories/${encodeURIComponent(s.id)}`,'PATCH',{status:select.value});Object.assign(s,updated);render();feedback.textContent='Story status updated.';}catch(err){select.value=previous;feedback.textContent=`Status not saved: ${err.message}`;await reload(feedback.textContent);}});cols.append(select);item.append(cols);return item;}
   // Two drop zones on every row. The top band of a row is a reorder: a vertical line shows
   // where the item will land, and the dropped item takes the row's parent. The rest of the
   // row is a nest: a border shows the row will become the dropped item's parent.
@@ -232,6 +232,17 @@
     row.classList.add('kanban-row');
     return row;
   }
+  // Wrap labelRow to pull following select into the same row for inline display
+  const _origLabelRow=labelRow;
+  labelRow=function(node,row,label,hasChildren,id,meta){
+    const result=_origLabelRow(node,row,label,hasChildren,id,meta);
+    const next=row.nextSibling;
+    if(next&&next.tagName&&next.tagName.toUpperCase()==='SELECT'){
+      const cols=row.querySelector('.kanban-cols');
+      if(cols) cols.append(next);
+    }
+    return result;
+  };
   function renderBacklog(){
     const mount=$('backlog-mount');mount.replaceChildren();
     mount.append(button('Add epic',async()=>{const title=promptTitle();if(title)await mutate('/api/kanban/epics','POST',{title},'Epic created.');}));
