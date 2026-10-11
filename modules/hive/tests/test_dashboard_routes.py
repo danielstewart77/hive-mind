@@ -450,3 +450,27 @@ def test_an_allowance_window_reaches_the_page_carrying_its_band(
     body = client.get("/api/dashboard").json()
 
     assert body["providers"]["providers"][0]["windows"][0]["band"] == "hot"
+
+
+def test_an_idle_conversation_reaches_the_page_with_its_size_threshold_and_window(
+    tmp_path, monkeypatch, wired
+):
+    """T13. A conversation that is not producing is absent from the live
+    feed, and is still the one somebody is about to type into."""
+    live = copy.deepcopy(LIVE)
+    live["idle"] = [{
+        "session_id": "s2", "mind_id": "skippy", "model": "claude-opus-5",
+        "context": {"tokens": 42_000, "threshold": 100_000, "window": 200_000,
+                    "kind": "estimated", "observed_at": 10.0, "age_seconds": 30.0},
+    }]
+    monkeypatch.setattr(main_mod, "_live_sessions", AsyncMock(return_value=live))
+    client = _authed_client(tmp_path, monkeypatch)
+
+    body = client.get("/api/dashboard").json()
+
+    assert [row["session_id"] for row in body["columns"]] == ["s1"]
+    [idle] = body["idle"]
+    assert (idle["context"]["tokens"], idle["context"]["threshold"],
+            idle["context"]["window"]) == (42_000, 100_000, 200_000)
+    assert idle["context"]["fraction_of_threshold"] == 0.42
+    assert idle["context"]["kind"] == "estimated"

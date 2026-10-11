@@ -609,6 +609,7 @@ a { color: inherit; }
 .dash-context-window { color: var(--console-muted); font-size: 0.76rem; margin-bottom: 0.3rem; }
 .dash-context-line { color: var(--console-muted); font-size: 0.76rem; margin-top: 0.3rem; font-variant-numeric: tabular-nums; }
 .dash-context-line.is-over { color: var(--console-red); }
+.data-table td.is-over { color: var(--console-red); }
 .dash-context-line.is-unknown { color: var(--console-faint); font-style: italic; }
 
 .dash-meter {

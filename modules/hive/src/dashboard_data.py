@@ -272,6 +272,10 @@ def context_reading(context: dict) -> dict:
         "bar_basis": bar_basis,
         "over": over,
 
+        # "usage" when the provider counted it, "estimated" when the
+        # harness did; a page that hid the difference would present a guess
+        # with the authority of a count.
+        "kind": context.get("kind"),
         "observed_at": context.get("observed_at"),
         "age_seconds": context.get("age_seconds"),
     }

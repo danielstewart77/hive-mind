@@ -1045,7 +1045,11 @@ async def api_dashboard(user: dict = Depends(require_auth)):
     )
     windows = catalog.get("catalog", {}) if isinstance(catalog, dict) else {}
     sessions = live.get("sessions", []) if isinstance(live, dict) else []
-    for session in sessions:
+    # Every open conversation that is not producing, read from the gateway's
+    # table: how close one is to its rotation point matters most before
+    # anyone types into it.
+    idle = live.get("idle", []) if isinstance(live, dict) else []
+    for session in [*sessions, *idle]:
         context = dict(session.get("context") or {})
         context["window"] = dashboard_data.resolve_window(
             context.get("window"), dashboard_data.window_for(session.get("model"), windows)
@@ -1057,6 +1061,7 @@ async def api_dashboard(user: dict = Depends(require_auth)):
     )
     return {
         "columns": columns,
+        "idle": dashboard_data.name_columns(idle, registry),
         "hosts": hosts if isinstance(hosts, dict) else {"hosts": [], "stale": True,
                                                         "error": str(hosts)},
         "providers": dashboard_data.annotate_providers(providers)

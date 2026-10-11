@@ -67,6 +67,10 @@ across rotations.
 `/dashboard` is the live view: every conversation producing output right now
 in its own column, each with how full its context is, above the machines the
 minds run on and how much of each provider's subscription allowance is spent.
+Below the columns, every other open conversation is a row with the size,
+rotation point and window its mind last reported, read from the gateway's
+table, so a conversation's room is visible before anyone types into it. A
+size the harness estimated rather than the provider counted is marked so.
 
 Four things are decided server-side rather than in the browser, so they can
 be tested. **Which conversations hold columns** — four fit, the rest are
