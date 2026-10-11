@@ -592,18 +592,22 @@ def test_a_default_harness_without_a_model_it_offers_is_refused_and_nothing_writ
 # 21. The rotation threshold a conversation runs under is its model's own
 # ---------------------------------------------------------------------------
 
-def test_a_conversations_rotation_threshold_follows_its_own_models_window(
+def test_a_conversations_rotation_threshold_is_its_own_models_share_of_its_window(
     homes, proxy, monkeypatch, tmp_path,
 ):
+    """Both the window and the share of it belong to the model, and both come
+    off the proxy's row for the conversation's own model — not the default
+    model's, and not the mind's."""
     runtime = tmp_path / "runtime.yaml"
     runtime.write_text(
         "name: example\nmind_id: example\nharness: claude_cli\n"
         "default_model: claude-sonnet-5\nmodel_context_window: 200000\n"
-        "rotation_threshold_percent: 10\n"
     )
     monkeypatch.setattr(mind_server, "RUNTIME_PATH", runtime)
-    proxy({"claude": [{"id": "claude-sonnet-5", "context_window": 200_000},
-                      {"id": "claude-opus-5", "context_window": 1_000_000}],
+    proxy({"claude": [{"id": "claude-sonnet-5", "context_window": 200_000,
+                       "rotation_threshold_percent": 60},
+                      {"id": "claude-opus-5", "context_window": 1_000_000,
+                       "rotation_threshold_percent": 15}],
            "dsh": [{"id": "qwen35-131k", "context_window": 131_072}]})
     spawner = _Spawner("claude")
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawner)
@@ -616,7 +620,20 @@ def test_a_conversations_rotation_threshold_follows_its_own_models_window(
 
     env = spawner.calls[0]["env"]
     assert env["HIVE_MODEL_CONTEXT_WINDOW"] == str(1_000_000)
-    assert env["HIVE_ROTATION_THRESHOLD_TOKENS"] == str(1_000_000 * 10 // 100)
+    assert env["HIVE_ROTATION_THRESHOLD_TOKENS"] == str(1_000_000 * 15 // 100)
+
+
+async def test_a_share_declared_after_a_spawn_is_picked_up_by_the_next(proxy):
+    """A row missing its share is not remembered for the TTL: the operator who
+    fills it in a minute later is not ignored for ten."""
+    fake = proxy({"dsh": [{"id": "qwen", "context_window": 131_072}]})
+
+    await mind_server.conversation_env("dsh", "qwen")
+    fake.listings["dsh"] = [{"id": "qwen", "context_window": 131_072,
+                             "rotation_threshold_percent": 50}]
+    second = await mind_server.conversation_env("dsh", "qwen")
+
+    assert second["HIVE_ROTATION_THRESHOLD_TOKENS"] == str(131_072 * 50 // 100)
 
 
 def test_a_dsh_pane_is_sized_by_its_models_own_window(
@@ -1329,7 +1346,7 @@ async def test_a_window_lookup_that_found_nothing_is_asked_again(proxy, tmp_path
     after the first spawn asked."""
     runtime = tmp_path / "runtime.yaml"
     runtime.write_text("name: example\nmind_id: example\nharness: dsh_cli\n"
-                       "default_model: qwen\nrotation_threshold_percent: 50\n")
+                       "default_model: qwen\n")
     monkeypatch.setattr(mind_server, "RUNTIME_PATH", runtime)
     fake = proxy({"dsh": [{"id": "qwen"}]})
 

@@ -4,10 +4,10 @@ Bilby on Codex.
 Each mind owns its copy of the check, untracked like every deployment mind's
 folder, so these tests import each copy by path and skip a mind this host
 does not carry. What they guard is the measurement every copy shares: a size
-from this turn's last call or an estimate past it, a threshold that is the
-mind's percentage of the window the proxy lists for the turn's own model, a
-report that leaves an unknown window out, and an overflowed turn left to the
-gateway.
+from this turn's last call or an estimate past it, the window the proxy lists
+for the turn's own model, a threshold that is the one the mind server spawned
+the process with and none when it named none, a report that leaves an unknown
+window or threshold out, and an overflowed turn left to the gateway.
 """
 
 from __future__ import annotations
@@ -73,7 +73,7 @@ class _Proxy:
 
 @pytest.fixture
 def hook(tmp_path, monkeypatch):
-    """Load one mind's copy with its runtime.yaml at 50% and a fake proxy."""
+    """Load one mind's copy with a fake proxy and no spawned threshold."""
 
     def load(name: str, windows: dict[str, int]):
         _, path = COPIES[name]
@@ -83,7 +83,7 @@ def hook(tmp_path, monkeypatch):
         spec.loader.exec_module(module)
         root = tmp_path / name
         root.mkdir()
-        (root / "runtime.yaml").write_text(f"name: {name}\nrotation_threshold_percent: 50\n")
+        (root / "runtime.yaml").write_text(f"name: {name}\n")
         monkeypatch.setattr(module, "MIND_ROOT", root)
         monkeypatch.setattr(module, "LOG_DIR", tmp_path / "log")
         monkeypatch.setattr(module, "NOTICES_FILE", tmp_path / "log" / "notices.json")
@@ -91,6 +91,7 @@ def hook(tmp_path, monkeypatch):
             monkeypatch.setattr(module, "_SPAWN_MODEL_ARG", "")
         monkeypatch.setenv("INFERENCE_PROXY_URL", "http://proxy.test")
         monkeypatch.setenv("MIND_PROXY_KEY", "hmp-test")
+        monkeypatch.delenv("HIVE_ROTATION_THRESHOLD_TOKENS", raising=False)
         proxy = _Proxy(windows)
         monkeypatch.setattr(module.urllib.request, "urlopen", proxy)
         return module, proxy
@@ -152,11 +153,12 @@ def test_a_codex_turn_is_sized_by_its_last_call_not_the_sessions_running_total(
 
 
 @pytest.mark.parametrize("name", _minds())
-def test_the_threshold_is_the_minds_share_of_the_turns_own_models_window(
-    hook, tmp_path, name,
+def test_the_threshold_is_the_spawned_one_against_the_turns_own_models_window(
+    hook, tmp_path, name, monkeypatch,
 ):
-    """Switching models moves the threshold at once: the window is the listed
-    one for the model the transcript says the turn ran on."""
+    """The share belongs to the model, so the mind server reads it off the
+    proxy's row and spawns the process with the product. The window is the
+    listed one for the model the transcript says the turn ran on."""
     harness, _ = COPIES[name]
     if harness == "claude":
         check, proxy = hook(name, {"claude-sonnet-5": 200_000})
@@ -165,12 +167,39 @@ def test_the_threshold_is_the_minds_share_of_the_turns_own_models_window(
     else:
         check, proxy = hook(name, {"gpt-5.6-terra": 400_000})
         log = _codex_rollout(tmp_path / "rollout.jsonl", "gpt-5.6-terra", 50_000)
+    monkeypatch.setenv("HIVE_ROTATION_THRESHOLD_TOKENS", "90000")
 
     assessed = check._assess(check._cfg(), {"session_id": "conv-1"}, log)
 
     assert (assessed["window"], assessed["threshold"]) == (
-        proxy.windows[assessed["model"]], proxy.windows[assessed["model"]] * 50 // 100)
+        proxy.windows[assessed["model"]], 90_000)
     assert proxy.listings[-1].endswith(f"harness={harness}")
+
+
+@pytest.mark.parametrize("name", _minds())
+def test_a_process_spawned_with_no_threshold_does_not_rotate_and_reports_none(
+    hook, tmp_path, name,
+):
+    """The proxy listed the model's window but declared no share of it. No
+    percentage stands in for the missing one: the window is reported, the
+    threshold is left out, and the turn does not rotate however full it is."""
+    harness, _ = COPIES[name]
+    check, proxy = hook(name, {"glm-5": 128_000})
+    if harness == "claude":
+        log = _claude_transcript(tmp_path / "t.jsonl", [
+            _claude_reply("glm-5", {"input_tokens": 127_000, "output_tokens": 10})])
+    else:
+        log = _codex_rollout(tmp_path / "rollout.jsonl", "glm-5", 127_000)
+    cfg = check._cfg()
+    assessed = check._assess(cfg, {"session_id": "conv-1"}, log)
+
+    check._report_context(cfg, client_type="telegram", client_ref="chat-1",
+                          conversation_id="conv-1", assessment=assessed)
+
+    report = proxy.reports[-1]
+    assert assessed["rotate"] is False
+    assert report["window"] == 128_000
+    assert "threshold" not in report
 
 
 @pytest.mark.parametrize("name", _minds())
