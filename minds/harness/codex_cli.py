@@ -309,8 +309,14 @@ def _report_thread(session_id: str, thread_id: str) -> None:
     process and dies with the container, while a browser tile reattaching
     after a redeploy is handed ``harness_sid`` from the session row.
     """
-    base_url = (NS_URL or "").rstrip("/")
+    # The gateway, not NS_URL: that names the retired monolith server, which
+    # no container resolves, so every report failed and a codex conversation
+    # a terminal started never reached the session row.
+    base_url = (os.environ.get("COMMS_URL") or os.environ.get("HIVEMIND_BROKER_URL")
+                or "").rstrip("/")
     if not base_url:
+        log.warning("Cannot report codex thread %s for session %s: COMMS_URL unset",
+                    thread_id, session_id)
         return
     token = os.environ.get("COMMS_BEARER_TOKEN", "")
     request = urllib.request.Request(

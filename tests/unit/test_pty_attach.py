@@ -885,6 +885,35 @@ class TestCodexCliThreads:
         assert "resume" not in started["argv"]
         assert watched["session_id"] == "n3"
 
+    def test_a_thread_a_terminal_started_is_reported_to_the_gateway(
+        self, codex, monkeypatch
+    ):
+        """The session row is where a reattach after a restart, and a switch
+        away, find the thread; the report has to reach hive-comms."""
+        monkeypatch.setenv("COMMS_URL", "http://hive-comms:8424")
+        monkeypatch.setenv("COMMS_BEARER_TOKEN", "svc")
+        sent = {}
+
+        class _Answer:
+            status = 200
+            def __enter__(self):
+                return self
+            def __exit__(self, *exc):
+                return False
+
+        def _urlopen(request, timeout=None):
+            sent.update(url=request.full_url, body=request.data,
+                        auth=request.get_header("Authorization"))
+            return _Answer()
+
+        monkeypatch.setattr(codex.urllib.request, "urlopen", _urlopen)
+
+        codex._report_thread("n9", "019e-thread")
+
+        assert sent["url"] == "http://hive-comms:8424/sessions/n9/harness-state"
+        assert json.loads(sent["body"]) == {"harness_sid": "019e-thread"}
+        assert sent["auth"] == "Bearer svc"
+
     def test_a_fresh_spawn_carries_the_seed_all_the_way_into_the_pane(
         self, codex, monkeypatch, tmp_path
     ):
