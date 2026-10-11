@@ -83,6 +83,12 @@ class _Proxy:
         return _Session()
 
 
+#: The dsh models the tests run, each with the window the proxy declares for it.
+#: A dsh conversation is sized by its model's window and runs on no other.
+DSH_WINDOWS = {"dsh": [{"id": model, "context_window": 131_072}
+                       for model in ("qwen", "qwen35-131k", "some-model")]}
+
+
 @pytest.fixture
 def proxy(monkeypatch):
     def install(listings: dict[str, list[dict]]) -> _Proxy:
@@ -331,7 +337,7 @@ def test_the_harness_report_refuses_a_caller_without_the_admin_token(homes):
 def test_a_chat_session_runs_on_the_adapter_its_harness_names(
     equipped, proxy, monkeypatch, harness,
 ):
-    proxy({})
+    proxy(DSH_WINDOWS)
     spawner = _Spawner(harness)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawner)
     client = TestClient(mind_server.app)
@@ -401,7 +407,7 @@ def _echo_client(**kwargs):
 @pytest.fixture
 def panes(monkeypatch, homes, proxy):
     """Every adapter's tmux server, recording what its panes run."""
-    proxy({})
+    proxy(DSH_WINDOWS)
     seen: dict[str, dict] = {}
     live: set[tuple[str, str]] = set()
     for name, adapter in mind_server.ADAPTERS.items():
@@ -586,18 +592,22 @@ def test_a_default_harness_without_a_model_it_offers_is_refused_and_nothing_writ
 # 21. The rotation threshold a conversation runs under is its model's own
 # ---------------------------------------------------------------------------
 
-def test_a_conversations_rotation_threshold_follows_its_own_models_window(
+def test_a_conversations_rotation_threshold_is_its_own_models_share_of_its_window(
     homes, proxy, monkeypatch, tmp_path,
 ):
+    """Both the window and the share of it belong to the model, and both come
+    off the proxy's row for the conversation's own model — not the default
+    model's, and not the mind's."""
     runtime = tmp_path / "runtime.yaml"
     runtime.write_text(
         "name: example\nmind_id: example\nharness: claude_cli\n"
         "default_model: claude-sonnet-5\nmodel_context_window: 200000\n"
-        "rotation_threshold_percent: 10\n"
     )
     monkeypatch.setattr(mind_server, "RUNTIME_PATH", runtime)
-    proxy({"claude": [{"id": "claude-sonnet-5", "context_window": 200_000},
-                      {"id": "claude-opus-5", "context_window": 1_000_000}],
+    proxy({"claude": [{"id": "claude-sonnet-5", "context_window": 200_000,
+                       "rotation_threshold_percent": 60},
+                      {"id": "claude-opus-5", "context_window": 1_000_000,
+                       "rotation_threshold_percent": 15}],
            "dsh": [{"id": "qwen35-131k", "context_window": 131_072}]})
     spawner = _Spawner("claude")
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawner)
@@ -610,16 +620,29 @@ def test_a_conversations_rotation_threshold_follows_its_own_models_window(
 
     env = spawner.calls[0]["env"]
     assert env["HIVE_MODEL_CONTEXT_WINDOW"] == str(1_000_000)
-    assert env["HIVE_ROTATION_THRESHOLD_TOKENS"] == str(1_000_000 * 10 // 100)
+    assert env["HIVE_ROTATION_THRESHOLD_TOKENS"] == str(1_000_000 * 15 // 100)
 
 
-def test_a_dsh_pane_on_a_mind_with_no_serving_ceiling_is_sized_by_its_model(
+async def test_a_share_declared_after_a_spawn_is_picked_up_by_the_next(proxy):
+    """A row missing its share is not remembered for the TTL: the operator who
+    fills it in a minute later is not ignored for ten."""
+    fake = proxy({"dsh": [{"id": "qwen", "context_window": 131_072}]})
+
+    await mind_server.conversation_env("dsh", "qwen")
+    fake.listings["dsh"] = [{"id": "qwen", "context_window": 131_072,
+                             "rotation_threshold_percent": 50}]
+    second = await mind_server.conversation_env("dsh", "qwen")
+
+    assert second["HIVE_ROTATION_THRESHOLD_TOKENS"] == str(131_072 * 50 // 100)
+
+
+def test_a_dsh_pane_is_sized_by_its_models_own_window(
     panes, monkeypatch, proxy,
 ):
-    """A claude mind's file has no `context_window`; its dsh conversation
-    runs at its model's own window rather than refusing to start."""
+    """A dsh pane runs at its model's own window, as the proxy declares it —
+    not at a serving ceiling the mind's own file still names."""
     proxy({"dsh": [{"id": "qwen35-131k", "context_window": 131_072}]})
-    monkeypatch.delitem(dsh_cli.RUNTIME, "context_window", raising=False)
+    monkeypatch.setitem(dsh_cli.RUNTIME, "context_window", 1_000_000)
 
     _attach(TestClient(mind_server.app), "p6", "dsh", "qwen35-131k", "", monkeypatch)
 
@@ -722,7 +745,9 @@ def test_the_handover_is_held_until_a_turn_completes_without_error(equipped, pro
     for content in ("one", "two", "three"):
         client.post("/sessions/g1/message", headers=SESSION, json={"content": content})
 
-    delivered = [_delivered("codex", call) for call in spawner.calls]
+    # A failed turn also runs the mind's rotation check; only codex is a turn.
+    turns = [call for call in spawner.calls if call["argv"][0] == "codex"]
+    delivered = [_delivered("codex", call) for call in turns]
     assert delivered[0].endswith("HANDOVER\n\n---\n\none")
     assert delivered[1].endswith("HANDOVER\n\n---\n\ntwo")
     assert delivered[2] == "three"
@@ -931,7 +956,7 @@ def test_a_harness_whose_adapter_failed_to_load_is_not_offered(equipped, monkeyp
 
 
 def test_a_dsh_launch_carries_the_agents_patch_only_when_it_exists(equipped, proxy, monkeypatch):
-    proxy({})
+    proxy(DSH_WINDOWS)
     spawner = _Spawner("dsh")
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawner)
     client = TestClient(mind_server.app)
@@ -1088,7 +1113,7 @@ def test_an_unmeasured_models_window_is_omitted_not_zero(homes, proxy, monkeypat
 
 
 def test_a_dsh_turn_points_the_hook_bridge_at_the_minds_hooks(homes, proxy, monkeypatch):
-    proxy({})
+    proxy(DSH_WINDOWS)
     monkeypatch.delenv("DSH_HOOKS_CONFIG", raising=False)
     spawner = _Spawner("dsh")
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawner)
@@ -1184,7 +1209,7 @@ def test_claude_holds_the_handover_again_when_its_process_dies_before_answering(
 def test_dsh_holds_the_handover_through_a_turn_that_did_not_complete(
     equipped, proxy, monkeypatch,
 ):
-    proxy({})
+    proxy(DSH_WINDOWS)
     errored = [_line({"sessionId": "conv-q2", "outcome": "error", "text": "",
                       "traffic": {}})]
     spawner = _Spawner("dsh", outputs=[errored])
@@ -1218,8 +1243,10 @@ def test_a_resumed_codex_thread_holds_the_handover_until_a_turn_succeeds(
     for content in ("one", "two", "three"):
         client.post("/sessions/q3/message", headers=SESSION, json={"content": content})
 
-    delivered = [_delivered("codex", call) for call in spawner.calls]
-    assert "resume" in spawner.calls[0]["argv"]
+    # A failed turn also runs the mind's rotation check; only codex is a turn.
+    turns = [call for call in spawner.calls if call["argv"][0] == "codex"]
+    delivered = [_delivered("codex", call) for call in turns]
+    assert "resume" in turns[0]["argv"]
     assert delivered[0] == "HANDOVER\n\n---\n\none"
     assert delivered[1].endswith("HANDOVER\n\n---\n\ntwo")
     assert delivered[2].endswith("three") and "HANDOVER" not in delivered[2]
@@ -1244,3 +1271,182 @@ def test_an_attach_while_a_chat_turn_is_running_is_refused_and_the_turn_kept(
     assert refused.value.status_code == 409
     assert "q4" in claude_cli.SESSIONS
     assert panes["claude"]["start"] == []
+
+
+# ---------------------------------------------------------------------------
+# A failed codex turn is still measured
+# ---------------------------------------------------------------------------
+
+def _codex_turns_and_checks(spawner: _Spawner) -> tuple[list[dict], list[dict]]:
+    """The codex turns a spawner saw, and the rotation checks run after them."""
+    turns = [c for c in spawner.calls if c["argv"][0] == "codex"]
+    checks = [c for c in spawner.calls if c["argv"][0] != "codex"]
+    return turns, checks
+
+
+@pytest.mark.parametrize("output", [
+    FAILED_CODEX_TURN,
+    # The stream ends with neither turn.completed nor turn.failed.
+    [_line({"type": "thread.started", "thread_id": "thread-f"})],
+], ids=["turn-failed", "stream-ended"])
+def test_a_failed_codex_turn_runs_the_minds_rotation_check(
+    equipped, proxy, monkeypatch, output,
+):
+    """Codex fires no Stop for a turn that failed, so a conversation that kept
+    failing would never be measured and never rotate. The adapter runs the
+    check the mind registered for Stop, handing it the turn as a Stop would."""
+    proxy({})
+    spawner = _Spawner("codex", outputs=[output])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawner)
+    client = TestClient(mind_server.app)
+    client.post("/sessions", headers=SESSION, json={
+        "session_id": "f1", "resume_sid": "conv-f1", "model": "gpt-5", "harness": "codex"})
+
+    client.post("/sessions/f1/message", headers=SESSION, json={"content": "one"})
+
+    _, checks = _codex_turns_and_checks(spawner)
+    assert [c["argv"] for c in checks] == [["rotation_check.sh"]]
+    payload = json.loads(checks[0]["proc"].stdin_bytes)
+    assert (payload["hook_event_name"], payload["session_id"], payload["stop_reason"]) == (
+        "Stop", "thread-f", "error")
+
+
+def test_a_codex_turn_refused_for_size_is_reported_as_an_overflow(
+    equipped, proxy, monkeypatch,
+):
+    """Every harness reports an overflow under one code, so the gateway has one
+    thing to recognise; codex says it in prose."""
+    proxy({})
+    overflow = [_line({"type": "thread.started", "thread_id": "thread-o"}),
+                _line({"type": "turn.failed", "error": {"message": (
+                    "Codex ran out of room in the model's context window. Start a new"
+                    " thread or clear earlier history before retrying.")}})]
+    spawner = _Spawner("codex", outputs=[overflow])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawner)
+    client = TestClient(mind_server.app)
+    client.post("/sessions", headers=SESSION, json={
+        "session_id": "f2", "resume_sid": "conv-f2", "model": "gpt-5", "harness": "codex"})
+
+    reply = client.post("/sessions/f2/message", headers=SESSION, json={"content": "one"})
+
+    results = [json.loads(line[len("data: "):]) for line in reply.text.splitlines()
+               if line.startswith("data: ") and '"type": "result"' in line]
+    assert results[-1]["error_code"] == "CONTEXT_WINDOW_EXCEEDED"
+    _, checks = _codex_turns_and_checks(spawner)
+    assert json.loads(checks[0]["proc"].stdin_bytes)["error_code"] == "CONTEXT_WINDOW_EXCEEDED"
+
+
+# ---------------------------------------------------------------------------
+# A window the proxy could not give is asked for again
+# ---------------------------------------------------------------------------
+
+async def test_a_window_lookup_that_found_nothing_is_asked_again(proxy, tmp_path, monkeypatch):
+    """A miss remembered for the whole TTL is every conversation on that model
+    sized by nothing — through a proxy blip, or a window filled in a minute
+    after the first spawn asked."""
+    runtime = tmp_path / "runtime.yaml"
+    runtime.write_text("name: example\nmind_id: example\nharness: dsh_cli\n"
+                       "default_model: qwen\n")
+    monkeypatch.setattr(mind_server, "RUNTIME_PATH", runtime)
+    fake = proxy({"dsh": [{"id": "qwen"}]})
+
+    first = await mind_server.conversation_env("dsh", "qwen")
+    fake.listings["dsh"] = [{"id": "qwen", "context_window": 131_072}]
+    second = await mind_server.conversation_env("dsh", "qwen")
+
+    assert "HIVE_MODEL_CONTEXT_WINDOW" not in first
+    assert second["HIVE_MODEL_CONTEXT_WINDOW"] == "131072"
+
+
+# ---------------------------------------------------------------------------
+# A codex failure reported before the turn ended
+# ---------------------------------------------------------------------------
+
+OVERFLOW_SENTENCE = ("Codex ran out of room in the model's context window. Start a new"
+                     " thread or clear earlier history before retrying.")
+
+
+@pytest.mark.parametrize("ending", [
+    [_line({"type": "turn.failed", "error": {}})],
+    [],
+], ids=["turn-failed-without-a-message", "stream-ended"])
+def test_a_codex_overflow_said_in_an_error_event_is_coded_on_either_ending(
+    equipped, proxy, monkeypatch, ending,
+):
+    """Codex says what went wrong in an `error` event, and the event that ends
+    the turn need not repeat it — so the code comes from whichever said it."""
+    proxy({})
+    output = [_line({"type": "thread.started", "thread_id": "thread-e"}),
+              _line({"type": "error", "message": OVERFLOW_SENTENCE}), *ending]
+    spawner = _Spawner("codex", outputs=[output])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawner)
+    client = TestClient(mind_server.app)
+    client.post("/sessions", headers=SESSION, json={
+        "session_id": "e1", "resume_sid": "conv-e1", "model": "gpt-5", "harness": "codex"})
+
+    reply = client.post("/sessions/e1/message", headers=SESSION, json={"content": "one"})
+
+    results = [json.loads(line[len("data: "):]) for line in reply.text.splitlines()
+               if line.startswith("data: ") and '"type": "result"' in line]
+    assert results[-1]["error_code"] == "CONTEXT_WINDOW_EXCEEDED"
+    _, checks = _codex_turns_and_checks(spawner)
+    assert json.loads(checks[0]["proc"].stdin_bytes)["error_code"] == "CONTEXT_WINDOW_EXCEEDED"
+
+
+# ---------------------------------------------------------------------------
+# A claude turn refused for size
+# ---------------------------------------------------------------------------
+
+def test_a_claude_turn_refused_for_size_is_reported_as_an_overflow(
+    equipped, proxy, monkeypatch,
+):
+    """The CLI reports it as a failed result saying the prompt is too long; the
+    gateway rotates on one code for every harness and never reads the text."""
+    proxy({})
+    spawner = _Spawner("claude", outputs=[[
+        _line({"type": "result", "subtype": "success", "is_error": True,
+               "result": "Prompt is too long", "session_id": "conv-c1"}),
+    ]])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawner)
+    client = TestClient(mind_server.app)
+    client.post("/sessions", headers=SESSION, json={
+        "session_id": "c1", "resume_sid": "conv-c1", "model": "claude-opus-5",
+        "harness": "claude"})
+
+    reply = client.post("/sessions/c1/message", headers=SESSION, json={"content": "one"})
+
+    results = [json.loads(line[len("data: "):]) for line in reply.text.splitlines()
+               if line.startswith("data: ") and '"type": "result"' in line]
+    assert results[-1]["error_code"] == "CONTEXT_WINDOW_EXCEEDED"
+
+
+# ---------------------------------------------------------------------------
+# A replaced conversation's rotation marker
+# ---------------------------------------------------------------------------
+
+def _markers(root: Path, sid: str) -> list[Path]:
+    return [root / f"rotation-staged-{sid}.json", root / f"bgtasks-{sid}.json",
+            root / f"rotation-{sid}.lock"]
+
+
+@pytest.mark.parametrize("app", ["mind_server", "dsh_cli"])
+def test_the_gateway_drops_a_replaced_conversations_rotation_marker(
+    tmp_path, monkeypatch, app,
+):
+    """After a handover the old conversation's marker would otherwise outlive
+    it on the mind's disk, where only the mind can reach it. Only that
+    conversation's files go; absent ones are already gone."""
+    monkeypatch.setenv("AUTO_REMEMBER_LOG_DIR", str(tmp_path))
+    for path in _markers(tmp_path, "old-conv") + _markers(tmp_path, "live-conv"):
+        path.write_text("{}")
+    client = TestClient({"mind_server": mind_server.app, "dsh_cli": dsh_cli.app}[app])
+
+    gone = client.delete("/sessions/row-1/rotation-marker?claude_sid=old-conv",
+                         headers=SESSION)
+    again = client.delete("/sessions/row-1/rotation-marker?claude_sid=old-conv",
+                          headers=SESSION)
+    refused = client.delete("/sessions/row-1/rotation-marker?claude_sid=old-conv")
+
+    assert (gone.status_code, again.status_code, refused.status_code) == (204, 204, 401)
+    assert not any(p.exists() for p in _markers(tmp_path, "old-conv"))
+    assert all(p.exists() for p in _markers(tmp_path, "live-conv"))

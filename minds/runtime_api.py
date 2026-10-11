@@ -104,16 +104,11 @@ WRITABLE_FIELDS = {
     # engine names a voice server nothing is listening on, and the mind would
     # go silent rather than refuse the save.
     "voice_engine": re.compile(r"[a-z]{1,32}"),
-    # Not a setting anybody types: the chosen model's own window, as the
-    # proxy reports it, cached so a per-turn hook can size a rotation
-    # threshold without a network call. Zero means the proxy declared none,
-    # which is how a stale window is cleared rather than left to be
-    # multiplied by a percentage.
-    #
-    # Deliberately not `context_window`. That key is dsh's own — the serving
-    # ceiling its profile declares, required at boot and read by compaction —
-    # and writing a model's nominal window over it is how a model save breaks
-    # a mind's next start.
+    # Not a setting anybody types: the default model's own window, as the
+    # proxy reports it, written with the model and shown beside the settings.
+    # A model with no declared window cannot be saved. It sizes nothing at
+    # runtime — every turn's threshold is taken from the window of the model
+    # that turn ran on, asked of the proxy then.
     "model_context_window": re.compile(r"[0-9]{1,9}"),
     # The harness a new conversation starts on. Checked against the harnesses
     # that exist as well as the pattern, and never written without a model
@@ -167,10 +162,8 @@ _FIELD_COMMENTS = {
         "# environment.",
     ),
     "model_context_window": (
-        "# The chosen model's own context window, as the inference proxy reports",
-        "# it. Written when the model is written, so the rotation threshold",
-        "# resolves from a percentage without a per-turn call to the proxy.",
-        "# Distinct from `context_window`, which is dsh's own serving ceiling.",
+        "# The default model's own context window, as the inference proxy",
+        "# reports it. Written when the model is written.",
     ),
 }
 
@@ -873,6 +866,11 @@ def install_runtime_routes(app: FastAPI, *, path: Path, mind_id: str, log) -> No
             )
         model = fields.get("default_model", "")
         provider = fields.get("provider", "")
+        # A name the file would refuse is refused as that, before the proxy is
+        # asked about it: "no window for `opus; rm -rf /`" is the wrong reason.
+        if model and not _MODEL_NAME_RE.fullmatch(model):
+            return JSONResponse(
+                {"error": "default_model contains unsupported characters"}, status_code=400)
         # A provider alone would leave this mind on an upstream that does not
         # host its model. The fields are individually optional so a voice can
         # be set without restating a model, but these two still travel
@@ -913,12 +911,18 @@ def install_runtime_routes(app: FastAPI, *, path: Path, mind_id: str, log) -> No
         # rather than writing a guess over it.
         if model:
             window = await _declared_context_window(path, model, harness or None)
-            # Zero when the proxy declares none. Leaving the previous model's
-            # window in place is worse than having none: the rotation hook
-            # multiplies a percentage by it, so a move from a 1M model to one
-            # nobody has measured would rotate at seven times the room this
-            # conversation actually has.
-            fields["model_context_window"] = str(window or 0)
+            # Refused, and nothing written, when the proxy declares none. A
+            # model without a window cannot be picked: zero would leave the
+            # mind's default on a model nothing can size a rotation for, and
+            # the previous model's figure would be a threshold sized for room
+            # the conversation does not have.
+            if not window:
+                return JSONResponse(
+                    {"error": f"no context window is known for {model}; "
+                              "a model without one cannot be picked"},
+                    status_code=409,
+                )
+            fields["model_context_window"] = str(window)
         try:
             configuration = update_runtime_fields(path, fields)
         except ValueError as exc:

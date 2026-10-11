@@ -49,6 +49,7 @@ from minds import (
     files_api,
     github_token_api,
     models_api,
+    rotation_marker_api,
     runtime_api,
     skills_api,
     surface_token_api,
@@ -132,46 +133,48 @@ def _live_runtime() -> dict:
 # A conversation's model window, for the rotation threshold
 # ---------------------------------------------------------------------------
 
-#: How long a model's window is trusted before the proxy is asked again. A
-#: window changes when the proxy's operator edits it, not per turn, and asking
-#: on every spawn would put the proxy between a message and its reply.
+#: How long a model's window and rotation share are trusted before the proxy
+#: is asked again. Both change when the proxy's operator edits the model, not
+#: per turn, and asking on every spawn would put the proxy between a message
+#: and its reply.
 WINDOW_TTL_SECONDS = 600.0
 
-_WINDOWS: dict[tuple[str, str], tuple[float, int | None]] = {}
+_WINDOWS: dict[tuple[str, str], tuple[float, int, int | None]] = {}
 
 
 async def conversation_env(harness: str, model: str) -> dict[str, str]:
-    """Environment naming this conversation's own model window.
+    """Environment naming this conversation's own model window and threshold.
 
-    The rotation hook sizes its threshold as a percentage of a window, and the
-    window it has always read is the file's — the default model's. A
-    conversation switched to another model (or another harness) has that
-    model's room, not the default's, so every process a conversation runs in
-    is told its window, and the threshold that window gives at this mind's
-    percentage. A model nobody has measured gets neither, and the hook falls
-    back to the file.
+    The window and the share of it a conversation fills before rotating both
+    belong to the model, and the proxy's row for that model is the only place
+    either is declared. A conversation switched to another model (or another
+    harness) has that model's room and that model's share, so every process
+    a conversation runs in is told both, as the window and the threshold they
+    give. A model the proxy has not measured gets neither; one with a window
+    and no share gets no threshold.
     """
     key = (harness, model)
     cached = _WINDOWS.get(key)
     if cached is not None and time.monotonic() - cached[0] < WINDOW_TTL_SECONDS:
-        window = cached[1]
+        window, percent = cached[1], cached[2]
     else:
         try:
-            window = await models_api.context_window(RUNTIME_PATH, harness, model)
+            window, percent = await models_api.model_sizing(RUNTIME_PATH, harness, model)
         except Exception:  # noqa: BLE001 — a spawn must not fail for a listing
-            window = None
-        _WINDOWS[key] = (time.monotonic(), window)
+            window, percent = None, None
+        # Only a whole answer is remembered. A miss — the proxy down for a
+        # moment, a model whose window or share was filled in a minute ago —
+        # remembered for the whole TTL is every conversation on that model
+        # sized by nothing until it expires.
+        if window and percent:
+            _WINDOWS[key] = (time.monotonic(), window, percent)
     env = {"HIVE_HARNESS": harness}
     # Omitted, not zero, when nobody has measured the model: a hook reading
     # zero would have to know it means "fall back", and one that forgot would
     # rotate on every turn.
     if window:
         env["HIVE_MODEL_CONTEXT_WINDOW"] = str(window)
-    try:
-        percent = int(_live_runtime().get("rotation_threshold_percent"))
-    except (TypeError, ValueError):
-        percent = 0
-    if window and percent > 0:
+    if window and percent:
         env["HIVE_ROTATION_THRESHOLD_TOKENS"] = str(window * percent // 100)
     return env
 
@@ -591,6 +594,7 @@ install_pty_attach(
     before_attach=release_idle_chat,
 )
 runtime_api.install_session_guard(app, mind_dir=MIND_DIR)
+rotation_marker_api.install_rotation_marker_route(app, mind_dir=MIND_DIR)
 runtime_api.install_runtime_routes(app, path=RUNTIME_PATH, mind_id=MIND_ID, log=log)
 models_api.install_models_route(app, path=RUNTIME_PATH, mind_id=MIND_ID, log=log)
 surface_token_api.install_surface_token_routes(app, mind_id=MIND_ID, log=log)
