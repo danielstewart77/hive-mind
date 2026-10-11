@@ -110,14 +110,6 @@ class _Spawn:
         return self.calls[-1]["env"]
 
 
-class _FakeRequest:
-    def __init__(self, body: dict) -> None:
-        self._body = body
-
-    async def json(self) -> dict:
-        return self._body
-
-
 def _report(**overrides: Any) -> str:
     report = {
         "sessionId": "conv-1",
@@ -262,8 +254,7 @@ async def test_an_id_needing_escaping_is_found_under_its_escaped_directory(
 
 
 async def test_a_turn_with_no_model_is_refused(dsh) -> None:
-    response = await dsh.create_session(
-        _FakeRequest({"session_id": "row-1", "resume_sid": "conv-1"}))
+    response = await dsh.start_session({"session_id": "row-1", "resume_sid": "conv-1"})
     assert response.status_code == 400
     assert dsh.SESSIONS == {}
 
@@ -272,8 +263,7 @@ async def test_a_turn_with_no_conversation_id_is_refused(dsh) -> None:
     """`resume_sid` is the conversation id comms minted; the session row's own
     id is a different thing, and a harness run under it would resume the
     context a rotation exists to drop."""
-    response = await dsh.create_session(
-        _FakeRequest({"session_id": "row-1", "model": "qwen35-131k"}))
+    response = await dsh.start_session({"session_id": "row-1", "model": "qwen35-131k"})
     assert response.status_code == 400
     assert dsh.SESSIONS == {}
 
@@ -281,10 +271,10 @@ async def test_a_turn_with_no_conversation_id_is_refused(dsh) -> None:
 async def test_the_turn_runs_in_the_conversation_the_gateway_minted(dsh, monkeypatch) -> None:
     """Not in the session row's id. A rotation keeps the row and replaces the
     conversation, so a harness pinned to the row would never see the reset."""
-    await dsh.create_session(_FakeRequest({
+    await dsh.start_session({
         "session_id": "row-1", "resume_sid": "conv-xyz", "model": "qwen35-131k",
         "system_prompt_blocks": "SOUL",
-    }))
+    })
     spawn = _Spawn([_report(sessionId="conv-xyz")])
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
     await _drain(dsh)
@@ -717,7 +707,7 @@ async def test_a_second_turn_on_a_busy_conversation_is_refused(dsh) -> None:
     """Two dsh processes resuming one session store is how a transcript ends up
     holding two interleaved turns and neither one's history intact."""
     _session(dsh)["in_flight"] = True
-    response = await dsh.send_message("row-1", _FakeRequest({"content": "hello"}))
+    response = await dsh.send("row-1", {"content": "hello"})
     assert response.status_code == 409
 
 
@@ -752,11 +742,11 @@ async def test_respawning_a_session_mid_turn_does_not_erase_the_turn_guard(
     numbering events from the same prefix make that log unloadable — after
     which dsh refuses both resume and create and the conversation is dead."""
     _session(dsh)["in_flight"] = True
-    await dsh.create_session(_FakeRequest({
+    await dsh.start_session({
         "session_id": "row-1", "resume_sid": "conv-1", "model": "qwen35-131k",
-    }))
+    })
     assert dsh.SESSIONS["row-1"]["in_flight"] is True
-    response = await dsh.send_message("row-1", _FakeRequest({"content": "hello"}))
+    response = await dsh.send("row-1", {"content": "hello"})
     assert response.status_code == 409
 
 

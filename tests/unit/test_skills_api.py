@@ -1,7 +1,7 @@
 """The contract a container mind's `/skills` API owes the console.
 
 There are two independent implementations of this API — this one, mounted
-by both harness servers here, and the edge repo's `skills_sync` — and they
+per harness by `minds.mind_server` here, and the edge repo's `skills_sync` — and they
 must never share code. So each proves the same contract separately: the
 console asks one set of questions and gets one shape of answer back,
 whichever it is talking to.
@@ -14,7 +14,6 @@ and the notifier are transports and are the only things stubbed.
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
@@ -320,19 +319,3 @@ def test_every_route_requires_the_admin_bearer(mind):
         lambda: client.post("/skills/memory/resolve?from=claude"),
     ):
         assert call().status_code == 401
-
-
-@pytest.mark.parametrize("harness", ["claude_cli", "codex_cli"])
-def test_both_harness_servers_mount_the_skills_routes(harness):
-    """Otherwise a mind ships with the API absent and nothing notices.
-
-    Read as source rather than imported: importing a harness server runs its
-    module-level setup, which wants a real mind directory and a running
-    gateway.
-    """
-    source = (REPO_ROOT / "minds" / "harness" / f"{harness}.py").read_text()
-
-    assert re.search(
-        r"skills_api\.install_skills_routes\(\s*app,\s*harness=\"" + harness + r"\"",
-        source,
-    ), f"{harness}.py does not mount the skills routes"

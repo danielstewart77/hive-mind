@@ -12,12 +12,10 @@ A mind that runs as a single bare-metal systemd service on its own host instead 
 
 Skippy is the canonical standalone mind. The repo branched from `hive-mind` and runs as one systemd unit hosting:
 
-- the mind backend (`mind_server.app`)
-- the gateway (`server.app`)
-- the embedded broker + session manager
-- the Telegram bot
+- the mind backend (`mind_server.app`), running every harness adapter
+- the Telegram and Discord surfaces (`hive-surfaces`)
 
-…all inside one Python launcher (`run_standalone.py`) that uses `asyncio.gather()` to host every FastAPI app and the bot in-process. One PID, one journal stream, `systemctl start <name>`.
+…all inside one Python launcher (`launch_mind_server_and_bots.py`) that uses `asyncio.gather()` to host the backend and the bots in-process. The gateway and broker are the shared `hive-comms` container. One PID, one journal stream, `systemctl start <name>`.
 
 ## Memory wiring
 
