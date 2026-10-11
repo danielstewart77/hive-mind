@@ -56,21 +56,24 @@ DONE = {"type": "result", "is_error": False, "result": "ok"}
 
 
 class Mind(FakeMind):
-    """The fake mind, answering each turn from a queue and saying its percent."""
+    """The fake mind, answering each turn from a queue. Its listing gives every
+    model ``percent`` as its rotation threshold, unless ``percents`` names one
+    per model; None leaves the field off the rows."""
 
-    def __init__(self, turns: list[list[dict]] | None = None, percent: int = PERCENT):
+    def __init__(self, turns: list[list[dict]] | None = None, percent: int | None = PERCENT,
+                 percents: dict[str, int] | None = None):
         super().__init__()
-        self.models = MODELS
+        self.models = {
+            harness: [
+                {**row, "rotation_threshold_percent": (percents or {}).get(row["name"], percent)}
+                if (percents or {}).get(row["name"], percent) is not None else dict(row)
+                for row in rows
+            ]
+            for harness, rows in MODELS.items()
+        }
         self.turns = list(turns or [])
-        self.percent = percent
 
     def _answer(self, method, url, params=None, json_body=None):
-        if method == "GET" and url.endswith("/runtime/settings"):
-            self.requests.append({"method": method, "path": "/runtime/settings",
-                                  "params": {}, "json": None})
-            return _Resp(200, {"settings": [
-                {"key": "rotation_threshold_percent", "value": self.percent},
-            ]})
         if method == "POST" and url.endswith("/message") and self.turns:
             self.turn_events = self.turns.pop(0)
         return super()._answer(method, url, params, json_body)
@@ -184,6 +187,38 @@ def test_a_conversation_just_under_the_new_threshold_resumes_under_its_own_id():
     assert mind.spawns()[-1]["resume_sid"] == "conv-1"
     assert row["claude_sid"] == "conv-1"
     assert (row["context_window"], row["context_threshold"]) == (200_000, 200_000 * PERCENT // 100)
+
+
+def test_a_switch_takes_its_threshold_from_the_new_models_own_percent():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr)
+            await _measured(mgr, tokens=10_000, window=1_000_000, threshold=500_000)
+            mind = Mind(percents={"claude-opus-5": 50, "claude-sonnet-5": 40})
+            await _switch(mgr, mind, "claude-sonnet-5")
+            row = await mgr._get_row("sess-1")
+            await _close(mgr)
+            return row
+
+    row = _run(scenario())
+    assert (row["context_window"], row["context_threshold"]) == (200_000, 200_000 * 40 // 100)
+
+
+def test_a_model_row_with_no_percent_falls_back_to_the_conversations_own_ratio():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr)
+            await _measured(mgr, tokens=10_000, window=1_000_000, threshold=300_000)
+            mind = Mind(percent=None)
+            await _switch(mgr, mind, "claude-sonnet-5")
+            row = await mgr._get_row("sess-1")
+            await _close(mgr)
+            return row
+
+    row = _run(scenario())
+    assert (row["context_window"], row["context_threshold"]) == (200_000, 200_000 * 30 // 100)
 
 
 def test_a_chat_over_the_new_threshold_is_handed_over_under_the_same_row():

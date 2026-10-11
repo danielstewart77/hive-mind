@@ -1281,8 +1281,8 @@ class SessionManager:
         The mind is the only party that can. The count comes from the turn's
         own last model request on the machine running it — the provider's
         figure when it gave one (``kind`` "usage"), the harness's estimate
-        when it did not ("estimated") — and the threshold is the mind's
-        percentage of the window of the model that turn ran on. A gateway
+        when it did not ("estimated") — and the threshold is the model's
+        rotation percentage of the window of the model that turn ran on. A gateway
         recomputing either would be guessing at numbers it cannot see.
 
         Fields arrive independently and only what is given is written: a
@@ -2803,7 +2803,7 @@ class SessionManager:
                 offered = None
             window = _positive_int((offered or {}).get("context_window"))
             if window and not threshold:
-                percent = await self._rotation_percent(session)
+                percent = self._rotation_percent(session, offered)
                 threshold = window * percent // 100 if percent else None
         if kind == "overflow":
             note = failed_turn_note(
@@ -2977,7 +2977,7 @@ class SessionManager:
                 effort = None
 
             window = _positive_int(offered.get("context_window"))
-            percent = await self._rotation_percent(session)
+            percent = self._rotation_percent(session, offered)
             threshold = window * percent // 100 if window and percent else None
             why = await self._why_it_will_not_fit(session, model, offered, threshold)
             if why:
@@ -3054,37 +3054,19 @@ class SessionManager:
             )
         return ""
 
-    async def _rotation_percent(self, session: dict) -> int | None:
-        """The mind's rotation threshold, as a percentage of a window.
+    @staticmethod
+    def _rotation_percent(session: dict, offered: dict | None) -> int | None:
+        """The rotation threshold of the model in ``offered``, as a percentage
+        of its window.
 
-        Asked of the mind, whose ``runtime.yaml`` is the truth about it. A
-        mind that cannot answer falls back to the ratio its own last report
-        on this conversation implied; neither gives None.
+        A property of the model, written on the inference proxy's row for it
+        beside ``context_window`` and relayed by the mind's listing. A row
+        that says nothing falls back to the ratio the conversation's own last
+        report implied; neither gives None.
         """
-        mind_row = None
-        try:
-            mind_row = await self._get_mind_row(session["mind_id"])
-        except Exception:
-            mind_row = None
-        gateway_url = str((mind_row or {}).get("gateway_url") or "").rstrip("/")
-        if gateway_url:
-            import aiohttp
-            try:
-                async with aiohttp.ClientSession() as http:
-                    async with http.get(
-                        f"{gateway_url}/runtime/settings",
-                        headers=self._mind_admin_headers(),
-                        timeout=aiohttp.ClientTimeout(total=10),
-                    ) as resp:
-                        body = await resp.json() if resp.status == 200 else None
-            except Exception:
-                body = None
-            settings = body.get("settings") if isinstance(body, dict) else None
-            for entry in settings if isinstance(settings, list) else []:
-                if isinstance(entry, dict) and entry.get("key") == "rotation_threshold_percent":
-                    percent = _positive_int(entry.get("value"))
-                    if percent:
-                        return percent
+        percent = _positive_int((offered or {}).get("rotation_threshold_percent"))
+        if percent:
+            return percent
         window = _positive_int(session.get("context_window"))
         threshold = _positive_int(session.get("context_threshold"))
         if window and threshold:
