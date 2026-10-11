@@ -438,6 +438,11 @@ def _rotate_pty(
                     session_id)
         return False
 
+    # A switch lands here from a pane codex or dsh started, so claude's own
+    # attach never ran. Its first-run gates would stand between the pane and
+    # the handover it was opened on, and an Enter typed into the trust prompt
+    # answers "No, exit" — the pane dies and takes the tile with it.
+    ensure_tui_first_run_flags(CONFIG_DIR, str(PROJECT_DIR))
     # A staged rotation's seed carries the user's own typed message, so it
     # enters as the opening user turn; a system prompt submits nothing and the
     # pane would come up at an empty prompt with what they typed gone.
