@@ -1085,14 +1085,14 @@ def test_an_undeclared_home_makes_a_harness_unavailable_and_unspawnable(
 def test_startup_runs_the_skills_start_check_and_survives_its_failure(homes, monkeypatch):
     ran: list[str] = []
 
-    def check_at_start(**kw):
+    def check_all():
         ran.append("ran")
         raise RuntimeError("render pass fell over")
 
     async def no_secrets():
         return None
 
-    monkeypatch.setattr(mind_server.skills_api, "check_at_start", check_at_start, raising=False)
+    monkeypatch.setattr(mind_server.skills_api, "check_all", check_all)
     for adapter in mind_server.ADAPTERS.values():
         monkeypatch.setattr(adapter, "_fetch_secrets_on_startup", no_secrets)
     monkeypatch.delenv("COMMS_URL", raising=False)
