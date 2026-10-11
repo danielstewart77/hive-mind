@@ -122,21 +122,20 @@ SETTINGS: tuple[Setting, ...] = (
     ),
     Setting(
         key="goal_rounds",
-        label="Goal rounds",
+        label="Goal rounds cap",
         kind=NUMBER,
         minimum=1,
         maximum=200,
         harnesses=("dsh_cli",),
         help=(
-            "How many times one dispatch re-enters the model before giving up."
-            " One makes every message a single reply, which is what a person"
-            " asking a question expects."
+            "The most rounds a dispatch that asks for a goal may be driven for."
+            " Only such a dispatch gets rounds; every other message is a single"
+            " reply. One turns goals off for this mind."
         ),
         comment=(
-            "# How many times one dispatch re-enters the model at an idle"
-            " checkpoint",
-            "# before giving up. One is a single reply, which is what a chat"
-            " mind wants.",
+            "# The most rounds a dispatch that asks for a goal may be driven"
+            " for. Only",
+            "# such a dispatch gets rounds; every other message is one reply.",
         ),
     ),
     Setting(
@@ -172,13 +171,8 @@ SETTINGS: tuple[Setting, ...] = (
 SETTINGS_BY_KEY: dict[str, Setting] = {s.key: s for s in SETTINGS}
 
 #: Reported beside the settings but never offered as one: the window belongs
-#: to the model, is read from the inference proxy, and is written into the
-#: file when the model is saved so a per-turn hook can multiply it by the
-#: rotation percentage without making a network call.
-#:
-#: Not `context_window`. That key is dsh's own serving ceiling, declared by a
-#: profile and required at its boot; one key carrying both meanings is how a
-#: model save stops a mind starting.
+#: to the default model, is read from the inference proxy, and is written into
+#: the file when the model is saved.
 CONTEXT_WINDOW_FIELD = "model_context_window"
 
 #: A text setting's value. Newlines are refused outright rather than escaped:

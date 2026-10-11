@@ -138,9 +138,55 @@ def dsh(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(dsh_cli, "PROJECT_DIR", Path("/work/app"))
     monkeypatch.setattr(dsh_cli, "SPAWN_DIR", Path("/work/app"))
     monkeypatch.setattr(dsh_cli, "SESSIONS", {})
-    # Every real mind sizes its own window; the route serves no model without it.
-    monkeypatch.setitem(dsh_cli.RUNTIME, "context_window", 131072)
+    # Each model is sized by the window the proxy lists for it, asked per turn.
+    proxy(monkeypatch, {"qwen35-131k": 131_072, "gpt-oss:20b-32k": 32_768})
     return dsh_cli
+
+
+class _Listing:
+    """The inference proxy's `/v1/models`, at the HTTP boundary."""
+
+    def __init__(self, windows: dict[str, int | None]) -> None:
+        self.windows = windows
+        self.urls: list[str] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        listing = self
+
+        class _Resp:
+            status = 200
+
+            async def __aenter__(self) -> Any:
+                return self
+
+            async def __aexit__(self, *exc: Any) -> bool:
+                return False
+
+            async def json(self) -> dict:
+                return {"data": [{"id": name, "context_window": window}
+                                 for name, window in listing.windows.items()]}
+
+        class _Session:
+            async def __aenter__(self) -> Any:
+                return self
+
+            async def __aexit__(self, *exc: Any) -> bool:
+                return False
+
+            def get(self, url: str, **kw: Any) -> Any:
+                listing.urls.append(url)
+                return _Resp()
+
+        return _Session()
+
+
+def proxy(monkeypatch, windows: dict[str, int | None]) -> _Listing:
+    """Answer the model listing with these windows, for this mind's key."""
+    monkeypatch.setenv("INFERENCE_PROXY_URL", "http://proxy.test")
+    monkeypatch.setenv("MIND_PROXY_KEY", "hmp-test")
+    fake = _Listing(windows)
+    monkeypatch.setattr(dsh_cli.models_api.aiohttp, "ClientSession", fake)
+    return fake
 
 
 def _persist(module, encoded_id: str) -> Path:
@@ -172,8 +218,9 @@ def _session(module, sid: str = "row-1", model: str = "qwen35-131k",
     return module.SESSIONS[sid]
 
 
-async def _drain(module, sid: str = "row-1", content: str = "do the thing") -> list[dict]:
-    return [event async for event in module._run_dsh_turn(sid, content, None)]
+async def _drain(module, sid: str = "row-1", content: str = "do the thing",
+                 goal_rounds: object = None) -> list[dict]:
+    return [event async for event in module._run_dsh_turn(sid, content, None, goal_rounds)]
 
 
 def _result(events: list[dict]) -> dict:
@@ -440,41 +487,55 @@ async def test_the_model_and_endpoint_come_from_the_minds_own_configuration(
 ) -> None:
     _session(dsh, model="gpt-oss:20b-32k")
     monkeypatch.setitem(dsh.RUNTIME_ENV, "OLLAMA_BASE_URL", "http://proxy:8899/v1/")
-    monkeypatch.setitem(dsh.RUNTIME, "context_window", 32768)
     spawn = _Spawn([_report()])
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
     await _drain(dsh)
     assert spawn.env["DSH_MODEL"] == "gpt-oss:20b-32k"
     assert spawn.env["DSH_PROXY_BASE_URL"] == "http://proxy:8899/v1"
+
+
+async def test_a_standalone_turn_is_sized_by_the_window_the_proxy_lists_for_its_model(
+    dsh, monkeypatch
+) -> None:
+    """Nothing composed this conversation's window for it, so the turn asks the
+    proxy — and a serving ceiling in the mind's own file does not stand in for
+    it, because one number for every model is room some of them do not have."""
+    _session(dsh, model="gpt-oss:20b-32k")
+    monkeypatch.setitem(dsh.RUNTIME, "context_window", 1_000_000)
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh)
     assert spawn.env["DSH_MODEL_CONTEXT_WINDOW"] == "32768"
 
 
-async def test_a_mind_that_never_sized_its_window_is_refused_rather_than_guessed_for(
+async def test_the_window_composed_for_the_conversation_wins_over_the_listing(
     dsh, monkeypatch
 ) -> None:
-    """The profile's one provider route lists no models, so this single number
-    sizes every model it serves and compaction reads it as the ceiling. A mind
-    that omits it is told which field in which file to set, instead of running
-    every model behind a capacity nobody picked."""
-    _session(dsh)
-    monkeypatch.delitem(dsh.RUNTIME, "context_window", raising=False)
-    with pytest.raises(RuntimeError, match="context_window"):
-        dsh._model_env("qwen35-131k")
+    """The mind server sized this conversation for the model it is on; the
+    turn runs under that, not under a second lookup or the mind's own file."""
+    session = _session(dsh, model="qwen35-131k")
+    session["conversation_env"] = {"HIVE_MODEL_CONTEXT_WINDOW": "65536"}
+    monkeypatch.setitem(dsh.RUNTIME, "context_window", 1_000_000)
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh)
+    assert spawn.env["DSH_MODEL_CONTEXT_WINDOW"] == "65536"
 
 
-async def test_a_misconfigured_mind_says_so_rather_than_answering_with_no_frames(
+async def test_a_model_the_proxy_lists_no_window_for_is_refused_and_the_operator_told(
     dsh, monkeypatch
 ) -> None:
-    """The refusal reaches the operator. It fires before the first yield, and
-    an unhandled one would end the response with zero frames — which the
-    gateway reports as a turn that produced nothing, leaving the one person who
-    can fix the configuration with nothing to go on."""
-    _session(dsh)
-    monkeypatch.delitem(dsh.RUNTIME, "context_window", raising=False)
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _Spawn([_report()]))
+    """A model without a window cannot be run: guessing one is how a
+    conversation overflows without ever rotating. The refusal fires before the
+    first yield, and an unhandled one would end the response with zero frames —
+    which the gateway reports as a turn that produced nothing."""
+    _session(dsh, model="mystery-model")
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
     events = await _drain(dsh)
-    assert "context_window" in _assistant_text(events)
+    assert "mystery-model" in _assistant_text(events)
     assert _result(events)["error_code"] == "MIND_MISCONFIGURED"
+    assert spawn.calls == []
 
 
 async def test_the_spawn_runs_under_a_mode_with_no_approval_wall_to_answer(
@@ -941,33 +1002,85 @@ async def test_a_chat_minds_dispatch_is_one_turn_and_names_no_rounds(
     assert "--goal-rounds" not in spawn.calls[0]["argv"]
 
 
-async def test_a_build_mind_drives_its_dispatch_for_the_rounds_it_declared(
+async def test_a_dispatch_that_asks_for_no_goal_is_one_turn_on_a_mind_that_names_rounds(
     dsh, monkeypatch
 ) -> None:
-    """A mind whose job is a long build names a round cap in its own
-    runtime.yaml, and then its first natural pause ends a round rather than the
-    job — which is the only thing that reliably stops a small model quitting at
-    the two-minute mark."""
+    """Rounds are not a property of the mind: the same mind is asked a question
+    in one conversation and handed a build in another. A number in its file
+    arms nothing by itself."""
     _session(dsh)
     _set_live(monkeypatch, dsh, "goal_rounds", 40)
     spawn = _Spawn([_report()])
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
     await _drain(dsh)
+    assert "--goal-rounds" not in spawn.calls[0]["argv"]
+
+
+async def test_a_dispatch_that_asks_for_a_goal_is_driven_for_the_rounds_it_carries(
+    dsh, monkeypatch
+) -> None:
+    """The build orchestrator's dispatch carries its round count, and then the
+    model's first natural pause ends a round rather than the job."""
+    _session(dsh)
+    _set_live(monkeypatch, dsh, "goal_rounds", None)
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    response = await dsh.send("row-1", {"content": "build the app", "goal_rounds": 40})
+    [chunk async for chunk in response.body_iterator]
     argv = spawn.calls[0]["argv"]
     assert argv[argv.index("--goal-rounds") + 1] == "40"
 
 
-async def test_a_round_cap_that_cannot_be_read_is_one_turn_not_a_crash(
+async def test_the_minds_own_round_count_caps_what_a_dispatch_may_ask_for(
     dsh, monkeypatch
 ) -> None:
-    """A hand-edited runtime.yaml holding nonsense costs the long-running
-    behaviour, not the mind: every turn still answers."""
     _session(dsh)
-    _set_live(monkeypatch, dsh, "goal_rounds", "lots")
+    _set_live(monkeypatch, dsh, "goal_rounds", 3)
     spawn = _Spawn([_report()])
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh, goal_rounds=40)
+    argv = spawn.calls[0]["argv"]
+    assert argv[argv.index("--goal-rounds") + 1] == "3"
+
+
+async def test_the_rotation_check_is_told_it_is_answering_a_goal_round(
+    dsh, monkeypatch
+) -> None:
+    """Only in a goal run does dsh act on the check's answer, so only there
+    does the check decide before it detaches and say "rotate" on stdout."""
+    _session(dsh)
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh, goal_rounds=40)
     await _drain(dsh)
+    assert spawn.calls[0]["env"].get("HIVE_GOAL_RUN") == "1"
+    assert "HIVE_GOAL_RUN" not in spawn.calls[1]["env"]
+
+
+async def test_a_round_count_that_cannot_be_read_is_one_turn_not_a_crash(
+    dsh, monkeypatch
+) -> None:
+    """A malformed dispatch costs the long-running behaviour, not the turn."""
+    _session(dsh)
+    spawn = _Spawn([_report()])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh, goal_rounds="lots")
     assert "--goal-rounds" not in spawn.calls[0]["argv"]
+
+
+async def test_a_goal_run_ended_for_rotation_reaches_the_gateway_with_its_goal(
+    dsh, monkeypatch
+) -> None:
+    """dsh never rotates itself. It ends the run and says what was left, and
+    the gateway carries the objective and the rounds onto a fresh conversation
+    — which it can only do if both arrive."""
+    _session(dsh)
+    goal = {"objective": "build the app", "roundsLeft": 2}
+    spawn = _Spawn([_report(outcome="rotation_needed", goal=goal)])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    result = _result(await _drain(dsh, goal_rounds=5))
+    assert result["stop_reason"] == "rotation_needed"
+    assert result["goal"] == goal
 
 
 async def test_the_turn_count_and_goal_phase_reach_the_gateway(dsh, monkeypatch) -> None:
@@ -988,14 +1101,13 @@ async def test_each_goal_round_crosses_the_socket_as_an_observer_frame(
     writes nothing is a mind that looks like it stopped answering. Observer-only
     because the chat surface wants the answer, not a running count."""
     _session(dsh)
-    _set_live(monkeypatch, dsh, "goal_rounds", 40)
     spawn = _Spawn([
         json.dumps({"progress": {"round": 1, "turns": 2, "toolCalls": 30}}) + "\n",
         json.dumps({"progress": {"round": 2, "turns": 3, "toolCalls": 51}}) + "\n",
         _report(turns=3),
     ])
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
-    events = await _drain(dsh)
+    events = await _drain(dsh, goal_rounds=40)
     rounds = [e for e in events if e.get("type") == "goal_progress"]
     assert [e["progress"]["round"] for e in rounds] == [1, 2]
     assert all(e["_observer_only"] for e in rounds)
@@ -1005,13 +1117,12 @@ async def test_a_progress_line_is_not_mistaken_for_the_turn_report(dsh, monkeypa
     """The report is identified by `sessionId` and is scanned for from the end,
     so a progress line carrying one would end the turn at the first round."""
     _session(dsh)
-    _set_live(monkeypatch, dsh, "goal_rounds", 40)
     spawn = _Spawn([
         _report(turns=1, text="the real answer"),
         json.dumps({"sessionId": "conv-1", "progress": {"round": 9}}) + "\n",
     ])
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
-    assert _assistant_text(await _drain(dsh)) == "the real answer"
+    assert _assistant_text(await _drain(dsh, goal_rounds=40)) == "the real answer"
 
 
 async def test_the_goal_objective_is_the_message_not_the_composed_prompt(
@@ -1021,7 +1132,6 @@ async def test_the_goal_objective_is_the_message_not_the_composed_prompt(
     with a conversation's opening task would spend the context window on forty
     copies of the soul and system prompt."""
     _session(dsh)
-    _set_live(monkeypatch, dsh, "goal_rounds", 40)
     seen: dict[str, str] = {}
     spawn = _Spawn([_report()])
 
@@ -1034,7 +1144,7 @@ async def test_the_goal_objective_is_the_message_not_the_composed_prompt(
         return await original(*argv, **kwargs)
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", capture)
-    await _drain(dsh, content="build the app")
+    await _drain(dsh, content="build the app", goal_rounds=40)
     assert seen["objective"] == "build the app"
     assert len(seen["task"]) > len(seen["objective"])
 
@@ -1045,7 +1155,6 @@ async def test_the_objective_file_is_cleaned_up_with_the_task_file(
     """One process owns both files; a turn that leaves them behind fills /tmp
     with composed prompts."""
     _session(dsh)
-    _set_live(monkeypatch, dsh, "goal_rounds", 40)
     paths: list[str] = []
     spawn = _Spawn([_report()])
     original = spawn.__call__
@@ -1056,7 +1165,7 @@ async def test_the_objective_file_is_cleaned_up_with_the_task_file(
         return await original(*argv, **kwargs)
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", capture)
-    await _drain(dsh)
+    await _drain(dsh, goal_rounds=40)
     assert paths and not [p for p in paths if Path(p).exists()]
 
 

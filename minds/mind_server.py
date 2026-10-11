@@ -137,7 +137,7 @@ def _live_runtime() -> dict:
 #: on every spawn would put the proxy between a message and its reply.
 WINDOW_TTL_SECONDS = 600.0
 
-_WINDOWS: dict[tuple[str, str], tuple[float, int | None]] = {}
+_WINDOWS: dict[tuple[str, str], tuple[float, int]] = {}
 
 
 async def conversation_env(harness: str, model: str) -> dict[str, str]:
@@ -148,8 +148,7 @@ async def conversation_env(harness: str, model: str) -> dict[str, str]:
     conversation switched to another model (or another harness) has that
     model's room, not the default's, so every process a conversation runs in
     is told its window, and the threshold that window gives at this mind's
-    percentage. A model nobody has measured gets neither, and the hook falls
-    back to the file.
+    percentage. A model nobody has measured gets neither.
     """
     key = (harness, model)
     cached = _WINDOWS.get(key)
@@ -160,7 +159,12 @@ async def conversation_env(harness: str, model: str) -> dict[str, str]:
             window = await models_api.context_window(RUNTIME_PATH, harness, model)
         except Exception:  # noqa: BLE001 — a spawn must not fail for a listing
             window = None
-        _WINDOWS[key] = (time.monotonic(), window)
+        # Only an answer is remembered. A miss — the proxy down for a moment,
+        # a model whose window was filled in a minute ago — remembered for the
+        # whole TTL is every conversation on that model sized by nothing until
+        # it expires.
+        if window:
+            _WINDOWS[key] = (time.monotonic(), window)
     env = {"HIVE_HARNESS": harness}
     # Omitted, not zero, when nobody has measured the model: a hook reading
     # zero would have to know it means "fall back", and one that forgot would

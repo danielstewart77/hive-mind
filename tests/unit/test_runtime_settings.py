@@ -268,29 +268,53 @@ class TestTheCachedContextWindow:
         assert response.status_code == 200
         assert runtime_api.load_runtime(dsh_file)["model_context_window"] == 1_048_576
 
-    def test_a_model_whose_window_nobody_declared_clears_the_previous_one(
+    def test_a_model_whose_window_nobody_declared_cannot_be_picked(
         self, client, dsh_file, monkeypatch
     ):
-        """A stale window is worse than none. The rotation hook multiplies a
-        percentage by it, so keeping the old model's figure after a move to an
-        unmeasured one rotates the conversation at room it does not have."""
+        """Refused, and nothing written. Zero would leave the mind's default on
+        a model nothing can size a rotation for, and keeping the old model's
+        figure would size it for room the conversation does not have."""
         runtime_api.update_runtime_fields(dsh_file, {"model_context_window": "131072"})
+        before = dsh_file.read_text()
+        listing = {"data": [{"id": "mystery", "context_window": None}]}
 
-        async def catalog(_path, harness=None):
-            return [{"name": "mystery", "context_window": None}]
+        class _Resp:
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def json(self):
+                return listing
+
+        class _Session:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            def get(self, url, **kwargs):
+                return _Resp()
 
         from minds import models_api
 
-        monkeypatch.setattr(models_api, "build_catalog", catalog)
+        monkeypatch.setenv("INFERENCE_PROXY_URL", "http://proxy.test")
+        monkeypatch.setenv("MIND_PROXY_KEY", "hmp-test")
+        monkeypatch.setattr(models_api.aiohttp, "ClientSession", _Session)
         response = client.patch(
             "/runtime",
             json={"default_model": "mystery"},
             headers={"Authorization": "Bearer s3cret"},
         )
-        assert response.status_code == 200
-        assert runtime_api.load_runtime(dsh_file)["model_context_window"] == 0
-        view = runtime_settings.settings_view(runtime_api.load_runtime(dsh_file))
-        assert view["context_window"] is None
+        assert response.status_code == 409
+        assert dsh_file.read_text() == before
 
     def test_a_caller_cannot_write_a_window_of_its_own(self, client, dsh_file):
         """The window is a measurement the proxy makes, and the rotation
