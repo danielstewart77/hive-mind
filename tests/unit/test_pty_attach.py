@@ -751,6 +751,26 @@ class TestClaudeCliWiring:
         assert "the summary" in (tmp_path / "rotation-seeds" / "conv-4.txt").read_text()
         assert respawned["env"]["env_overrides"]["HIVEMIND_CLIENT_REF"] == "a3"
 
+    def test_a_switch_onto_claude_answers_its_first_run_gates_before_the_respawn(
+        self, claude, monkeypatch, tmp_path
+    ):
+        """A pane that codex or dsh started never ran claude's attach, so a
+        switch is the first claude process in that config dir. Its onboarding
+        or trust prompt would hold the handover, and Enter answers "No, exit".
+        """
+        monkeypatch.setattr(claude, "CONFIG_DIR", tmp_path)
+        monkeypatch.setattr(claude.TERMINALS, "alive", lambda sid: True)
+        monkeypatch.setattr(claude.TERMINALS, "respawn", lambda sid, argv, **kw: None)
+
+        assert claude._rotate_pty(
+            session_id="a5", new_claude_sid="conv-6", model="sonnet",
+            user_prompt="the handover",
+        ) is True
+
+        state = json.loads((tmp_path / ".claude.json").read_text())
+        assert state["hasCompletedOnboarding"] is True
+        assert state["projects"][str(claude.PROJECT_DIR)]["hasTrustDialogAccepted"] is True
+
     def test_a_staged_rotation_reaches_claudes_pane_as_its_opening_turn(
         self, claude, monkeypatch, tmp_path
     ):
