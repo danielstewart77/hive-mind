@@ -1,10 +1,11 @@
 """Integration-ish tests for the claude_cli harness's proactive wiring.
 
-Exercises the real ``minds.harness.claude_cli`` FastAPI app (loaded with the
-tracked ``minds/example`` config when ``MIND_NAME`` is unset):
+Exercises the real ``minds.harness.claude_cli`` adapter (loaded with the
+tracked ``minds/example`` config when ``MIND_NAME`` is unset) and the
+``minds.mind_server`` app that serves its buffer:
 
-* ``GET /proactive`` is mounted and drains the module buffer;
-* ``create_session`` wires ``chat_id`` (from ``client_ref``), a ``stdout_lock``,
+* ``GET /proactive`` is mounted and drains the claude adapter's buffer;
+* ``start_session`` wires ``chat_id`` (from ``client_ref``), a ``stdout_lock``,
   ``in_flight`` and starts an idle-drain task;
 * the drain buffers unsolicited assistant text that then surfaces via
   ``/proactive``;
@@ -16,6 +17,7 @@ this is the wiring the codex harness deliberately lacks (per-turn spawn).
 
 import asyncio
 import json
+import os
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -64,13 +66,13 @@ def backend():
 
 def test_proactive_endpoint_mounted_and_drains(backend):
     backend.PROACTIVE_BUFFER.append({"chat_id": 9, "text": "hi"})
-    client = TestClient(backend.app)
-    # The router closes over the token captured at import time (PROACTIVE_TOKEN,
-    # from COMMS_BEARER_TOKEN). Present it when set; omit it when unset.
-    headers = (
-        {"Authorization": f"Bearer {backend.PROACTIVE_TOKEN}"}
-        if backend.PROACTIVE_TOKEN else {}
-    )
+    from minds import mind_server
+
+    client = TestClient(mind_server.app)
+    # The router closes over COMMS_BEARER_TOKEN as mind_server read it at
+    # import. Present it when set; omit it when unset.
+    token = os.environ.get("COMMS_BEARER_TOKEN")
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
     resp = client.get("/proactive", headers=headers)
     assert resp.status_code == 200
     assert resp.json() == [{"chat_id": 9, "text": "hi"}]
@@ -81,11 +83,11 @@ async def test_create_session_wires_drain_and_buffers_unsolicited_text(backend):
     fake = _FakeProc([_assistant_text("unsolicited text")])
 
     with patch.object(backend, "_spawn_proc", new=AsyncMock(return_value=fake)):
-        resp = await backend.create_session(_JsonRequest({
+        resp = await backend.start_session({
             "session_id": "s1",
             "client_ref": "12345",
             "model": "opus",
-        }))
+        })
 
     assert resp["status"] == "running"
     sess = backend.SESSIONS["s1"]
@@ -147,16 +149,6 @@ async def test_release_stream_stops_process_but_preserves_session(backend):
     kill.assert_awaited_once()
 
 
-class _JsonRequest:
-    """Minimal stand-in for starlette Request exposing ``.json()``."""
-
-    def __init__(self, body: dict):
-        self._body = body
-
-    async def json(self):
-        return self._body
-
-
 @pytest.mark.parametrize("effort,expected", [("max", ["--effort", "max"]), (None, [])])
 async def test_a_chat_session_runs_at_the_conversations_effort(backend, effort, expected):
     """The gateway's effort reaches claude's argv; unset passes nothing."""
@@ -167,10 +159,10 @@ async def test_a_chat_session_runs_at_the_conversations_effort(backend, effort, 
         return _FakeProc([])
 
     with patch.object(backend.asyncio, "create_subprocess_exec", new=_exec):
-        await backend.create_session(_JsonRequest({
+        await backend.start_session({
             "session_id": "s-eff", "client_ref": "1", "model": "opus",
             "resume_sid": "conv-1", "effort": effort,
-        }))
+        })
 
     cmd = seen["cmd"]
     flag = cmd[cmd.index("--effort"):cmd.index("--effort") + 2] if "--effort" in cmd else []

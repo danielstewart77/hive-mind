@@ -193,10 +193,10 @@ No broker, no database, no mind registry, no secret scoping. Sessions are tracke
 ### Communication Flow
 
 ```
-User → Telegram bot → NS gateway (:8420) → http://ada:8420 → implementation.py → claude CLI
-                                          → http://bob:8420 → implementation.py → claude CLI (ollama)
+User → Telegram bot → NS gateway (:8420) → http://ada:8420 → mind_server → claude_cli adapter → claude CLI
+                                          → http://bob:8420 → mind_server → claude_cli adapter → claude CLI (ollama)
 
-Ada → /send-message-to-mind → NS broker → http://nagatha:8420 → implementation.py → codex CLI
+Ada → /send-message-to-mind → NS broker → http://nagatha:8420 → mind_server → codex_cli adapter → codex CLI
 ```
 
 The NS session manager calls the mind's HTTP endpoints instead of spawning local subprocesses:
@@ -211,13 +211,13 @@ The NS session manager calls the mind's HTTP endpoints instead of spawning local
 
 ### Secrets Access
 
-Mind containers do not store secrets locally. At startup, the mind's `implementation.py` queries the NS for its scoped secret list (`GET /secrets/scopes/<mind_id>` — authenticated by network identity), fetches each secret, and injects them into the process environment. Harness subprocesses inherit these env vars.
+Mind containers do not store secrets locally. At startup, `minds/mind_server.py` queries the NS (once, through an adapter's `_fetch_secrets_on_startup`) for its scoped secret list (`GET /secrets/scopes/<mind_id>` — authenticated by network identity), fetches each secret, and injects them into the process environment. Harness subprocesses inherit these env vars.
 
 This means:
-- No hardcoded secret lists in `implementation.py` — the NS scoping policy is the source of truth
+- No hardcoded secret lists in the mind server — the NS scoping policy is the source of truth
 - New secrets are added by granting scope via `/add-mind` or `/update-mind`, then restarting the mind container
 - Secrets are held in memory only — never on disk inside the container
-- The `_ENV_MAP` in each `implementation.py` translates secret key names to env var names (e.g. `mcp_auth_token` → `MCP_AUTH_TOKEN`)
+- The `_ENV_MAP` in each harness adapter translates secret key names to env var names (e.g. `mcp_auth_token` → `MCP_AUTH_TOKEN`)
 
 ### Skills and Tools
 
@@ -227,7 +227,7 @@ Lucent (vector + KG) is accessed via HTTP+bearer at `hive-lucent`. External inte
 
 ### Compose Generation
 
-The `/generate-compose` skill scaffolds a per-mind Compose fragment at `minds/<name>/container/compose.yaml` (a complete document with one `services:` entry). Each fragment runs `python3 -m minds.<name>.implementation` (the mind's in-container service). Wire a fragment into the deployment by adding `- path: minds/<name>/container/compose.yaml` to the `include:` block at the top of the top-level `docker-compose.yml`. The skill does not touch the top-level compose — wiring is an explicit user step.
+The `/generate-compose` skill scaffolds a per-mind Compose fragment at `minds/<name>/container/compose.yaml` (a complete document with one `services:` entry). Each fragment runs `python3 -m minds.mind_server` with `MIND_NAME` set to the mind's folder. Wire a fragment into the deployment by adding `- path: minds/<name>/container/compose.yaml` to the `include:` block at the top of the top-level `docker-compose.yml`. The skill does not touch the top-level compose — wiring is an explicit user step.
 
 ---
 

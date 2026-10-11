@@ -1,7 +1,7 @@
 """Structural guards for the shared harness modules.
 
-The deployed minds run ``minds.harness.claude_cli``, ``codex_cli`` or
-``dsh_cli`` directly (selected by ``MIND_NAME``), so the shipped harness is the
+The deployed minds run ``minds.mind_server``, which imports ``minds.harness.claude_cli``,
+``codex_cli`` and ``dsh_cli`` (selected by ``MIND_NAME``), so the shipped harness is the
 production wiring by construction. These tests pin the contract that keeps it
 shippable: every module imports cleanly on a fresh clone (falling back to the tracked
 ``minds/example`` config when ``MIND_NAME`` is unset), and no deployment's
@@ -21,7 +21,6 @@ def test_claude_cli_imports_with_example_fallback() -> None:
 
     assert claude_cli.NAME == claude_cli.RUNTIME["name"]
     assert claude_cli.RUNTIME_PATH.is_file()
-    assert claude_cli.app.title == f"Mind: {claude_cli.NAME}"
 
 
 def test_codex_cli_imports_with_example_fallback() -> None:
@@ -29,7 +28,6 @@ def test_codex_cli_imports_with_example_fallback() -> None:
 
     assert codex_cli.NAME == codex_cli.RUNTIME["name"]
     assert codex_cli.RUNTIME_PATH.is_file()
-    assert codex_cli.app.title == f"Mind: {codex_cli.NAME}"
 
 
 def test_dsh_cli_imports_with_example_fallback() -> None:
@@ -37,7 +35,6 @@ def test_dsh_cli_imports_with_example_fallback() -> None:
 
     assert dsh_cli.NAME == dsh_cli.RUNTIME["name"]
     assert dsh_cli.RUNTIME_PATH.is_file()
-    assert dsh_cli.app.title == f"Mind: {dsh_cli.NAME}"
 
 
 def test_harness_sources_parse_and_bake_in_no_mind_names() -> None:
