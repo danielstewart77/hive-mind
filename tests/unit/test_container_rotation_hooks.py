@@ -7,7 +7,8 @@ does not carry. What they guard is the measurement every copy shares: a size
 from this turn's last call or an estimate past it, the window the proxy lists
 for the turn's own model, a threshold that is the one the mind server spawned
 the process with and none when it named none, a report that leaves an unknown
-window or threshold out, and an overflowed turn left to the gateway.
+window or threshold out, an overflowed turn left to the gateway, and a
+missing-count notice raised only for a final reply that carried no count.
 """
 
 from __future__ import annotations
@@ -149,7 +150,110 @@ def test_a_codex_turn_is_sized_by_its_last_call_not_the_sessions_running_total(
     check, _ = hook(name, {})
     log = _codex_rollout(tmp_path / "rollout.jsonl", "gpt-5.6-terra", 64_000)
 
-    assert check._measure(log, 4) == {"tokens": 64_000, "kind": "usage"}
+    measured = check._measure(log, 4)
+
+    assert (measured["tokens"], measured["kind"]) == (64_000, "usage")
+
+
+def _notices(check, monkeypatch) -> list[str]:
+    """What the hook's missing-count notice sent, caught at the notify tool."""
+    sent: list[str] = []
+    monkeypatch.setattr(check, "_notify", lambda message: sent.append(message) or True)
+    return sent
+
+
+def _notice(check, log: Path) -> None:
+    check._notice_missing_count(conversation_id="conv-1234abcd", model="m",
+                                measured=check._measure(log, 4))
+
+
+def _claude_uncounted_turn(path: Path) -> Path:
+    return _claude_transcript(path, [
+        _claude_reply("m", {"input_tokens": 100_000, "output_tokens": 10}),
+        {"type": "user", "message": {"role": "user", "content": "and then?"}},
+        _claude_reply("m", {"input_tokens": 0, "output_tokens": 0}),
+    ])
+
+
+def _claude_counted_then_more(path: Path) -> Path:
+    return _claude_transcript(path, [
+        _claude_reply("m", {"input_tokens": 100_000, "output_tokens": 10}),
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "content": "x" * 4_000}]}},
+    ])
+
+
+@pytest.mark.parametrize("name", _minds("claude"))
+def test_a_claude_final_reply_that_was_counted_is_not_reported_missing_for_what_followed_it(
+    hook, tmp_path, monkeypatch, name,
+):
+    """The count is there; a tool result after it makes the size an estimate,
+    not the model's count a missing one."""
+    check, _ = hook(name, {})
+    sent = _notices(check, monkeypatch)
+
+    _notice(check, _claude_counted_then_more(tmp_path / "t.jsonl"))
+
+    assert sent == []
+
+
+@pytest.mark.parametrize("name", _minds("claude"))
+def test_a_claude_final_reply_with_no_count_is_reported_again_after_a_counted_one_rearms(
+    hook, tmp_path, monkeypatch, name,
+):
+    check, _ = hook(name, {})
+    sent = _notices(check, monkeypatch)
+    log = tmp_path / "t.jsonl"
+
+    _notice(check, _claude_uncounted_turn(log))
+    _notice(check, _claude_counted_then_more(log))
+    _notice(check, _claude_uncounted_turn(log))
+
+    assert len(sent) == 2
+    assert "gave no token count for conversation conv-123" in sent[1]
+
+
+def _codex_item() -> dict:
+    return {"type": "response_item", "payload": {
+        "type": "message", "role": "assistant",
+        "content": [{"type": "output_text", "text": "x" * 4_000}]}}
+
+
+def _codex_uncounted_turn(path: Path) -> Path:
+    return _codex_rollout(path, "m", 64_000, after=[
+        {"type": "turn_context", "payload": {"model": "m"}},
+        _codex_item(),
+        {"type": "event_msg", "payload": {"type": "token_count", "info": {
+            "last_token_usage": {"total_tokens": 0}}}},
+    ])
+
+
+@pytest.mark.parametrize("name", _minds("codex"))
+def test_a_codex_turn_whose_last_call_was_counted_is_not_reported_missing_for_what_followed_it(
+    hook, tmp_path, monkeypatch, name,
+):
+    check, _ = hook(name, {})
+    sent = _notices(check, monkeypatch)
+
+    _notice(check, _codex_rollout(tmp_path / "r.jsonl", "m", 64_000, after=[_codex_item()]))
+
+    assert sent == []
+
+
+@pytest.mark.parametrize("name", _minds("codex"))
+def test_a_codex_turn_whose_last_call_had_no_count_is_reported_again_after_a_counted_one_rearms(
+    hook, tmp_path, monkeypatch, name,
+):
+    check, _ = hook(name, {})
+    sent = _notices(check, monkeypatch)
+    log = tmp_path / "r.jsonl"
+
+    _notice(check, _codex_uncounted_turn(log))
+    _notice(check, _codex_rollout(log, "m", 64_000, after=[_codex_item()]))
+    _notice(check, _codex_uncounted_turn(log))
+
+    assert len(sent) == 2
+    assert "gave no token count for conversation conv-123" in sent[1]
 
 
 @pytest.mark.parametrize("name", _minds())
