@@ -273,18 +273,6 @@ window.addEventListener("DOMContentLoaded", async function () {
         // The window belongs to the model and is read from the proxy, so it
         // is reported here and editable nowhere.
         rows.push(["Context window", state.context_window ? String(state.context_window) + " tokens" : "Not reported"]);
-        // The rotation threshold is a percentage of that window, so without
-        // one it resolves to nothing and the Mind falls back to its
-        // model-family default. Said here because the alternative is a
-        // setting that saves, displays the value it was given, and is ignored
-        // — with only an adjacent row reading "Not reported" to hint at it.
-        const threshold = (state.settings || []).find(function (entry) {
-            return entry.key === "rotation_threshold_percent";
-        });
-        if (threshold && threshold.present && !state.context_window) {
-            rows.push(["Rotation threshold", String(threshold.value) +
-                "% — not in effect until this Mind's model is saved, which is what caches the window"]);
-        }
         return rows;
     }
 
@@ -516,12 +504,24 @@ window.addEventListener("DOMContentLoaded", async function () {
     // whatever sorts first: silently swapping it means an operator who opened
     // this page for an unrelated reason and pressed Save rewrites the Mind's
     // model without ever seeing the change.
+    // The rotation threshold belongs to the model: a percentage of its
+    // window, written on the proxy's row for it.
+    function rotationNote(row) {
+        return row && row.rotation_threshold_percent ? " — rotates at " + row.rotation_threshold_percent + "%" : "";
+    }
+
+    function rotationThreshold(row) {
+        if (!row || !row.rotation_threshold_percent) return "Not reported by the proxy";
+        return row.rotation_threshold_percent + "% of the window" +
+            (row.context_window ? " (" + Math.floor(row.context_window * row.rotation_threshold_percent / 100).toLocaleString() + " tokens)" : "");
+    }
+
     function renderModelOptions(provider, preferred) {
         const select = document.getElementById("mind-default-model");
         const rows = modelRows.filter(function (row) { return row.provider === provider; });
         const missing = preferred && !rows.some(function (row) { return row.name === preferred; });
         select.innerHTML = (missing ? '<option value="' + h.escapeHtml(preferred) + '" selected>' + h.escapeHtml(preferred) + " — set now, no longer offered</option>" : "") + rows.map(function (row) {
-            return '<option value="' + h.escapeHtml(row.name) + '"' + (row.name === preferred ? " selected" : "") + ">" + h.escapeHtml(row.label || row.name) + "</option>";
+            return '<option value="' + h.escapeHtml(row.name) + '"' + (row.name === preferred ? " selected" : "") + ">" + h.escapeHtml((row.label || row.name) + rotationNote(row)) + "</option>";
         }).join("");
         if (!preferred && rows.length) select.selectedIndex = 0;
         return missing;
@@ -705,9 +705,11 @@ window.addEventListener("DOMContentLoaded", async function () {
         try {
             const configuration = await h.requestJson("/api/minds/" + encodeURIComponent(mind.name) + "/configuration");
             populateModelPicker(configuration.models || [], configuration.configuration.default_model || cfg.default_model || mind.model || "", configuration.configuration.provider || cfg.provider || "");
+            const currentModel = configuration.configuration.default_model || cfg.default_model || mind.model || "";
             paintSummary("mind-model-summary", [
-                ["Model", configuration.configuration.default_model || cfg.default_model || mind.model || "Unknown"],
-                ["Provider", configuration.configuration.provider || cfg.provider || "Not reported"]
+                ["Model", currentModel || "Unknown"],
+                ["Provider", configuration.configuration.provider || cfg.provider || "Not reported"],
+                ["Rotation threshold", rotationThreshold((configuration.models || []).find(function (row) { return row.name === currentModel; }))]
             ]);
         } catch (error) {
             document.getElementById("mind-model-form").hidden = true;

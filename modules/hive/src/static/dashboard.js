@@ -164,6 +164,14 @@
     return box;
   }
 
+  // The model's rotation percentage, from the proxy's row for it.
+  function percentOf(context) {
+    return typeof context.threshold_percent === "number" &&
+      context.threshold !== null && context.threshold !== undefined
+      ? ` (${context.threshold_percent}% of the window)`
+      : "";
+  }
+
   function contextLines(context) {
     const box = document.createElement("div");
     box.className = "dash-context";
@@ -177,7 +185,7 @@
       const threshold =
         context.threshold === null || context.threshold === undefined
           ? "no rotation point reported"
-          : `rotates at ${tokens(context.threshold)}`;
+          : `rotates at ${tokens(context.threshold)}` + percentOf(context);
       const denominator =
         context.window === null || context.window === undefined
           ? "window unknown"
@@ -285,7 +293,7 @@
         session.name || session.summary || session.session_id,
         session.model || "",
         size,
-        tokens(context.threshold),
+        tokens(context.threshold) + percentOf(context),
         tokens(context.window),
         ago(context.age_seconds),
       ].forEach((text, index) => {

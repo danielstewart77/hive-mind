@@ -71,6 +71,11 @@ Below the columns, every other open conversation is a row with the size,
 rotation point and window its mind last reported, read from the gateway's
 table, so a conversation's room is visible before anyone types into it. A
 size the harness estimated rather than the provider counted is marked so.
+The rotation point is a property of the model: the proxy's row for it carries
+`rotation_threshold_percent` beside `context_window`, the page shows that
+percentage beside the threshold, and a conversation whose mind reported no
+threshold is drawn at that percentage of its window. A Mind's model picker
+shows each model's percentage too.
 
 Four things are decided server-side rather than in the browser, so they can
 be tested. **Which conversations hold columns** — four fit, the rest are
@@ -102,7 +107,8 @@ connected" stay distinguishable.
 Both `/dashboard` and the `/api/dashboard` JSON behind it are login-guarded:
 the JSON carries context counts, a machine inventory and subscription spend.
 `INFERENCE_PROXY_KEY` is the console's own proxy client key, used to read the
-model catalog (for each model's context window) and the provider allowance.
+model catalog (for each model's context window and rotation threshold
+percentage) and the provider allowance.
 Without it the page still renders and those two panels report themselves as
 not configured.
 
