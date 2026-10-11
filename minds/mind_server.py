@@ -388,12 +388,7 @@ async def _startup() -> None:
     # The skills render pass, once per start: every harness finds its copies
     # current before the first conversation. Off the loop and never fatal — a
     # render that falls over costs stale skills, not a mind that will not boot.
-    check_at_start = getattr(skills_api, "check_at_start", None)
-    if check_at_start is not None:
-        try:
-            await asyncio.to_thread(check_at_start)
-        except Exception:  # noqa: BLE001
-            log.exception("The skills render pass failed at start")
+    await skills_api.check_at_start(log, MIND_ID)
     log.info("%s ready (mind_id=%s, harnesses=%s, default=%s)",
              NAME, MIND_ID, ",".join(ADAPTERS), default_harness())
 
