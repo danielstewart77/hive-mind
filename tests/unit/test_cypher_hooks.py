@@ -10,6 +10,7 @@ the hook functions whose answers change because of it.
 from __future__ import annotations
 
 import importlib.util
+import os
 import json
 import sys
 from pathlib import Path
@@ -95,9 +96,9 @@ class TestTranslatedUsage:
                            "cacheReadTokens": 103_000, "cacheWriteTokens": 100}),
         ])
 
-        measured = check._live_context_tokens(dsh.materialize(log), chars_per_token=4)
+        measured = check._measure({}, dsh.materialize(log), chars_per_token=4)
 
-        assert measured == 1_000 + 500 + 103_000 + 100
+        assert measured["tokens"] == 1_000 + 500 + 103_000 + 100
 
     def test_a_log_reporting_no_usage_refuses_rather_than_estimating_from_size(self, tmp_path):
         """A size-derived number is a confident wrong answer.
@@ -111,7 +112,7 @@ class TestTranslatedUsage:
         plain.write_text(json.dumps({"type": "assistant", "message": {"role": "assistant",
                                                                       "content": [{"type": "text", "text": "x" * 5_000}]}}) + "\n")
 
-        assert check._live_context_tokens(plain, chars_per_token=4) is None
+        assert check._measure({}, plain, chars_per_token=4)["tokens"] is None
 
 
 class TestTurnText:
@@ -150,26 +151,6 @@ class TestDelegateAttribution:
                        [_assistant(1, {"inputTokens": 1, "outputTokens": 1})])
 
         assert dsh.is_delegate_log(log) is False
-
-
-class TestThreshold:
-    def test_the_threshold_comes_off_the_model_s_window_not_the_serving_ceiling(self, tmp_path, monkeypatch):
-        """Her file carries both numbers, and they differ by a factor of eight.
-
-        `context_window` is what dsh serves a request under; a threshold taken
-        from it would rotate her at a tenth of the ceiling rather than a tenth
-        of the model's window.
-        """
-        check = _load("rotation_check")
-        mind = tmp_path / "minds" / "cypher"
-        mind.mkdir(parents=True)
-        (mind / "runtime.yaml").write_text(
-            "name: cypher\ncontext_window: 131072\n"
-            "model_context_window: 1000000\nrotation_threshold_percent: 10\n")
-        monkeypatch.setenv("HIVE_PROJECT_DIR", str(tmp_path))
-        monkeypatch.setenv("MIND_NAME", "cypher")
-
-        assert check._declared_threshold() == 1_000_000 * 10 // 100
 
 
 class TestBackgroundTasks:
@@ -225,3 +206,264 @@ class TestTypedPrompts:
 
         assert fire._is_typed("carry on", {"prompt_sources": ["user"]}) is True
 
+
+
+# ---------------------------------------------------------------------------
+# Measuring a turn, sizing its threshold, and telling the gateway
+# ---------------------------------------------------------------------------
+
+def _turn_start(seq: int) -> dict:
+    return {"type": "turn/start", "seq": seq, "data": {"turn": seq}}
+
+
+def _measured(seq: int, model: str, tokens: int, kind: str, window: int = 0) -> dict:
+    return {"type": "context/measured", "seq": seq,
+            "data": {"model": model, "tokens": tokens, "kind": kind, "window": window}}
+
+
+def _user(seq: int, text: str, extra: list | None = None) -> dict:
+    return {"type": "user/message", "seq": seq,
+            "data": {"content": [{"type": "text", "text": text}, *(extra or [])]}}
+
+
+def _tool_result(seq: int, text: str) -> dict:
+    return {"type": "tool/result", "seq": seq, "data": {"message": {
+        "source": {"kind": "tool", "callId": "c1"},
+        "content": [{"type": "tool-result", "toolCallId": "c1",
+                     "content": [{"type": "text", "text": text}]}]}}}
+
+
+class _Gateway:
+    """The proxy's model listing and the gateway's context route, at urlopen."""
+
+    def __init__(self, windows: dict[str, int]):
+        self.windows = windows
+        self.reports: list[dict] = []
+
+    def __call__(self, req, timeout=None):
+        url = req.full_url
+        if "/v1/models" in url:
+            body = {"data": [{"id": m, "context_window": w} for m, w in self.windows.items()]}
+        elif url.endswith("/sessions/context"):
+            self.reports.append(json.loads(req.data))
+            body = {"ok": True}
+        else:
+            raise AssertionError(f"unexpected request {url}")
+        payload = json.dumps(body).encode()
+
+        class _Resp:
+            status = 200
+
+            def read(self):
+                return payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        return _Resp()
+
+
+@pytest.fixture
+def mind(tmp_path, monkeypatch):
+    """Her runtime.yaml, her notify tool and a gateway, all under tmp_path.
+
+    The notify tool is a script that writes down what it was asked to send:
+    the process boundary is where the hook stops being ours.
+    """
+    check = _load("rotation_check")
+    root = tmp_path / "app"
+    (root / "minds" / "cypher").mkdir(parents=True)
+    (root / "minds" / "cypher" / "runtime.yaml").write_text(
+        "name: cypher\nrotation_threshold_percent: 80\n")
+    tool = root / "tools" / "stateless" / "notify"
+    tool.mkdir(parents=True)
+    sent = tmp_path / "sent.jsonl"
+    (tool / "notify.py").write_text(
+        "import json, sys\n"
+        f"open({str(sent)!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n")
+    monkeypatch.setenv("HIVE_PROJECT_DIR", str(root))
+    monkeypatch.setenv("MIND_NAME", "cypher")
+    monkeypatch.setenv("INFERENCE_PROXY_URL", "http://proxy.test")
+    monkeypatch.setenv("MIND_PROXY_KEY", "hmp-cypher")
+    monkeypatch.setenv("OWNER_TYPE", "telegram")
+    monkeypatch.setenv("CLIENT_REF", "chat-1")
+    monkeypatch.setenv("HIVE_HARNESS", "dsh")
+    for var in ("HIVE_SURFACE", "HIVE_GOAL_RUN", "HIVEMIND_GROUP_SESSION", "ROTATION_SPAWN"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(check, "LOG_DIR", tmp_path / "log")
+    monkeypatch.setattr(check, "_SPAWN_MODEL_ARG", "")
+    gateway = _Gateway({})
+    monkeypatch.setattr(check.urllib.request, "urlopen", gateway)
+
+    def notices() -> list[list[str]]:
+        if not sent.is_file():
+            return []
+        return [json.loads(line) for line in sent.read_text().splitlines()]
+
+    return check, gateway, notices
+
+
+def _stop(log: Path, **extra) -> dict:
+    return {"session_id": "conv-1", "transcript_path": str(log), **extra}
+
+
+class TestMeasurement:
+    def test_a_model_reporting_zeros_is_measured_by_the_harness_estimate_not_an_older_count(
+        self, tmp_path,
+    ):
+        """[gpt-oss counted 50k, luna 0/0, luna 0/0]. The zeros are not a size,
+        and neither is the 50k: it is the conversation as it was two turns and
+        another model ago."""
+        dsh = _load("dsh_transcript")
+        check = _load("rotation_check")
+        log = _dsh_log(tmp_path / "session.jsonl", [
+            _turn_start(1),
+            _assistant(2, {"inputTokens": 49_000, "outputTokens": 1_000}, model="gpt-oss"),
+            _measured(3, "gpt-oss", 50_000, "usage"),
+            _turn_start(4),
+            _assistant(5, {"inputTokens": 0, "outputTokens": 0}, model="luna"),
+            _measured(6, "luna", 61_000, "estimated"),
+            _turn_start(7),
+            _assistant(8, {"inputTokens": 0, "outputTokens": 0}, model="luna"),
+            _measured(9, "luna", 64_000, "estimated"),
+        ])
+
+        measured = check._measure({}, dsh.materialize(log), chars_per_token=4)
+
+        assert measured == {"tokens": 64_000, "kind": "estimated", "model": "luna"}
+
+    def test_a_failed_turn_counts_what_it_was_refused_over(self, mind, tmp_path):
+        """[counted 150k, a message, a 60k tool result, failure] on a 200k
+        window. The failed call reported nothing, but what it read is in the
+        conversation — rotating on the 150k alone would leave it overflowing."""
+        check, gateway, _ = mind
+        gateway.windows["qwen"] = 200_000
+        dsh = _load("dsh_transcript")
+        log = _dsh_log(tmp_path / "session.jsonl", [
+            _turn_start(1),
+            _assistant(2, {"inputTokens": 149_000, "outputTokens": 1_000}, model="qwen"),
+            _measured(3, "qwen", 150_000, "usage"),
+            _turn_start(4),
+            _user(5, "read the big file"),
+            _tool_result(6, "x" * 240_000),
+        ])
+        assessed = check._assess(_stop(dsh.materialize(log), stop_reason="error",
+                                       error_code="LLM_ERROR",
+                                       context={"model": "qwen", "kind": "none"}))
+
+        assert assessed["measured"]["tokens"] >= 150_000 + 60_000
+        assert assessed["rotate"] is True
+
+    def test_a_turn_refused_for_size_is_left_to_the_overflow_path(self, mind, tmp_path):
+        """The overflow path rotates it and re-sends the message; a rotation
+        composed from here as well would race it."""
+        check, gateway, _ = mind
+        gateway.windows["qwen"] = 200_000
+        log = _dsh_log(tmp_path / "session.jsonl", [_turn_start(1)])
+
+        assessed = check._assess(_stop(
+            log, stop_reason="error", error_code="CONTEXT_WINDOW_EXCEEDED",
+            context={"model": "qwen", "tokens": 199_000, "kind": "estimated"}))
+
+        assert assessed["rotate"] is False
+
+    def test_a_turn_with_no_size_tells_daniel_once_per_model_until_a_count_arrives(
+        self, mind, tmp_path,
+    ):
+        """A model that reports nothing reports nothing every turn; a notice per
+        turn is noise. A real count re-arms it, and so does another model."""
+        check, gateway, notices = mind
+        gateway.windows.update(luna=128_000, qwen=128_000)
+        log = _dsh_log(tmp_path / "session.jsonl", [_turn_start(1)])
+        silent = {"model": "luna", "kind": "none"}
+
+        check._assess(_stop(log, context=silent))
+        check._assess(_stop(log, context=silent))
+        after_two = len(notices())
+        check._assess(_stop(log, context={"model": "qwen", "kind": "none"}))
+        after_switch = len(notices())
+        check._assess(_stop(log, context={"model": "luna", "tokens": 9_000, "kind": "usage"}))
+        check._assess(_stop(log, context=silent))
+
+        assert (after_two, after_switch, len(notices())) == (1, 2, 3)
+
+
+class TestThreshold:
+    def test_the_threshold_is_the_minds_percentage_of_the_models_listed_window(self, mind):
+        """50% of a 400k window is 200k on any harness but claude: no other
+        harness pins a window, so nothing caps it at a 200k model's figure."""
+        check, gateway, _ = mind
+        gateway.windows["gpt-5.6-terra"] = 400_000
+        (Path(os.environ["HIVE_PROJECT_DIR"]) / "minds" / "cypher" / "runtime.yaml").write_text(
+            "name: cypher\nrotation_threshold_percent: 50\n")
+
+        threshold = check._threshold_for_model(check._cfg(), "gpt-5.6-terra", "")
+
+        assert threshold == 400_000 * 50 // 100
+
+    def test_a_conversation_switched_to_another_model_is_held_to_that_models_window(
+        self, mind, tmp_path,
+    ):
+        """The model is taken from the turn's own entry, not from the spawn: a
+        switch inside the conversation is the model the next turn ran on."""
+        check, gateway, _ = mind
+        gateway.windows.update(big=1_000_000, small=128_000)
+        dsh = _load("dsh_transcript")
+        log = _dsh_log(tmp_path / "session.jsonl", [
+            _turn_start(1),
+            _assistant(2, {"inputTokens": 90_000, "outputTokens": 10}, model="big"),
+            _turn_start(3),
+            _assistant(4, {"inputTokens": 100_000, "outputTokens": 10}, model="small"),
+        ])
+
+        assessed = check._assess(_stop(dsh.materialize(log)))
+
+        assert (assessed["window"], assessed["threshold"], assessed["rotate"]) == (
+            128_000, 128_000 * 80 // 100, False)
+
+
+class TestReport:
+    def test_each_turn_reports_its_size_against_the_threshold_and_window_it_was_held_to(
+        self, mind, tmp_path,
+    ):
+        """What the dashboard draws is what this check decided on, for the
+        conversation it measured — so a report that lands after a rotation can
+        be told apart, and a picture in the history is known before a switch."""
+        check, gateway, _ = mind
+        gateway.windows["qwen"] = 131_072
+        dsh = _load("dsh_transcript")
+        log = _dsh_log(tmp_path / "session.jsonl", [
+            _turn_start(1),
+            _user(2, "what is this", extra=[{"type": "image", "attachment": {"id": "a1"}}]),
+            _assistant(3, {"inputTokens": 20_000, "outputTokens": 500}, model="qwen"),
+            _measured(4, "qwen", 20_500, "usage", 131_072),
+        ])
+
+        assessed = check._assess(_stop(dsh.materialize(log)))
+
+        report = gateway.reports[-1]
+        assert {k: report[k] for k in ("tokens", "kind", "model", "conversation_id",
+                                       "has_images")} == {
+            "tokens": 20_500, "kind": "usage", "model": "qwen",
+            "conversation_id": "conv-1", "has_images": True}
+        assert (report["threshold"], report["window"]) == (
+            assessed["threshold"], assessed["window"])
+
+
+class TestGoalRound:
+    def test_a_goal_round_over_its_threshold_asks_dsh_to_end_the_run(
+        self, mind, tmp_path, monkeypatch,
+    ):
+        check, gateway, _ = mind
+        gateway.windows["qwen"] = 100_000
+        log = _dsh_log(tmp_path / "session.jsonl", [_turn_start(1)])
+        over = _stop(log, context={"model": "qwen", "tokens": 90_000, "kind": "usage"})
+
+        outside = check._hook_output(over, check._assess(over))
+        monkeypatch.setenv("HIVE_GOAL_RUN", "1")
+        inside = check._hook_output(over, check._assess(over))
+
+        assert (outside, inside) == ({}, {"rotate": True})

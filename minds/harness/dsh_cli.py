@@ -29,6 +29,7 @@ however much room the whole command line has.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import os
 import re
@@ -380,7 +381,8 @@ def _pane_env(
     """Environment the tmux pane needs for this conversation and model."""
     env = {k: str(v) for k, v in RUNTIME_ENV.items()}
     env.update(conversation_env or {})
-    env.update(_model_env(model, (conversation_env or {}).get("HIVE_MODEL_CONTEXT_WINDOW")))
+    env.update(_model_env(model, _pane_window(
+        model, (conversation_env or {}).get("HIVE_MODEL_CONTEXT_WINDOW"))))
     env["DSH_HOME"] = str(DSH_HOME)
     env["DSH_PERMISSION_MODE"] = _permission_mode()
     env["HIVE_SURFACE"] = "terminal"
@@ -561,23 +563,29 @@ def dsh_profile() -> str:
     return str(live_runtime().get("dsh_profile") or "hive")
 
 
-def _goal_rounds() -> int:
-    """How many goal rounds one dispatch to this mind may be driven for.
+def _goal_rounds(requested: object = None) -> int:
+    """How many goal rounds this dispatch is driven for; 1 is a single turn.
 
-    Declared per mind in ``runtime.yaml`` rather than guessed per turn, because
-    only the mind's own configuration knows what it is for. A chat mind leaves
-    it unset and every turn is one turn, which is what a person talking to it
-    expects. A mind whose job is a long build names a number, and then its own
-    decision to stop ends a round instead of the job — a small model treats the
-    first natural pause as the end of the work, and no prompt wording fixes
-    that reliably.
+    Only a dispatch that asks for a goal gets one — today the build
+    orchestrator's. Rounds are not a property of the mind: the same mind is
+    asked a question in one conversation and handed a build in another, and a
+    person asking a question expects it answered once rather than the model
+    carrying on talking to itself after it had already replied.
+
+    The mind's own ``goal_rounds``, when its runtime.yaml declares one, is the
+    most any dispatch may ask for. It arms nothing by itself.
     """
-    raw = live_runtime().get("goal_rounds")
     try:
-        rounds = int(raw)
+        rounds = int(requested)  # type: ignore[call-overload]
     except (TypeError, ValueError):
         return 1
-    return rounds if rounds > 1 else 1
+    if rounds <= 1:
+        return 1
+    try:
+        cap = int(live_runtime().get("goal_rounds"))
+    except (TypeError, ValueError):
+        return rounds
+    return max(1, min(rounds, cap))
 
 
 def _stop_on_failed_call() -> bool:
@@ -613,7 +621,46 @@ def _first_env(names: tuple[str, ...]) -> str:
     return ""
 
 
-def _model_env(model: str, conversation_window: str | int | None = None) -> dict[str, str]:
+def _declared(window: str | int | None) -> int | None:
+    """A window as a positive count, or None for "nobody said"."""
+    try:
+        value = int(window)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+async def _turn_window(model: str, conversation_window: str | int | None) -> int | None:
+    """The window this turn's model is served under.
+
+    The conversation's own, when the mind server sized it for this
+    conversation; otherwise this model's window as the inference proxy lists
+    it for dsh, asked per turn so a model switched since the last turn is
+    sized as itself. A failed lookup is None and is not remembered.
+    """
+    window = _declared(conversation_window)
+    if window:
+        return window
+    try:
+        return await models_api.context_window(RUNTIME_PATH, "dsh", model)
+    except Exception:  # noqa: BLE001 — a listing that cannot be read is no window
+        return None
+
+
+def _pane_window(model: str, conversation_window: str | int | None) -> int | None:
+    """`_turn_window` for the pane, which is started from synchronous code.
+
+    Run on a thread of its own: the pane may be started from inside the
+    server's event loop, which cannot run a second loop on its own thread.
+    """
+    window = _declared(conversation_window)
+    if window:
+        return window
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, _turn_window(model, None)).result()
+
+
+def _model_env(model: str, window: str | int | None) -> dict[str, str]:
     """The model, its provider route, that route's endpoint and its credential.
 
     The hive profile defaults nothing: these are what it reads. The model is
@@ -634,26 +681,18 @@ def _model_env(model: str, conversation_window: str | int | None = None) -> dict
     if key:
         env[PROXY_KEY_ENV] = key
     # Not optional either. The profile's one provider route lists no models, so
-    # this single number sizes every model the route ever serves — including the
-    # ones a subagent names that nobody configured — and compaction reads it as
-    # the ceiling. Omitting it would hand the harness a fallback nobody picked,
-    # so the harness refuses the boot; refusing here instead names the field and
-    # the file the operator actually edits.
-    #
-    # A mind whose default harness is another has no `context_window` line of
-    # its own; its conversation on dsh is sized by its model's own window, as
-    # the proxy declares it and the mind server hands it down. The file's
-    # value still wins where there is one: it is the ceiling this mind's
-    # operator chose to serve under.
-    window = RUNTIME.get("context_window") or (
-        conversation_window if str(conversation_window or "0") != "0" else None
-    )
-    if not window:
+    # this number is what sizes the request, and it is the window of the model
+    # this conversation is on right now. The mind's own file names none: one
+    # number for every model is a threshold sized for room some of them do not
+    # have. A model the proxy lists no window for cannot be
+    # run: guessing one is how a conversation overflows without ever rotating.
+    declared = _declared(window)
+    if not declared:
         raise RuntimeError(
-            "runtime.yaml needs context_window: it sizes every model this mind's "
-            "provider route serves, and compaction reads it as the ceiling"
+            f"the inference proxy declares no context window for {model}; "
+            "a model without one cannot be run"
         )
-    env["DSH_MODEL_CONTEXT_WINDOW"] = str(window)
+    env["DSH_MODEL_CONTEXT_WINDOW"] = str(declared)
     return env
 
 
@@ -931,7 +970,9 @@ def _no_text_diagnostic(report: dict) -> str:
     return "\n\n".join(parts)
 
 
-async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> Any:
+async def _run_dsh_turn(
+    sid: str, content: str, images: list[dict] | None, goal_rounds: object = None,
+) -> Any:
     state = SESSIONS.get(sid)
     if state is None:
         yield {"type": "result", "is_error": True}
@@ -965,11 +1006,12 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
 
     env = os.environ.copy()
     env.update({k: str(v) for k, v in RUNTIME_ENV.items()})
+    window = await _turn_window(
+        state["model"],
+        (state.get("conversation_env") or {}).get("HIVE_MODEL_CONTEXT_WINDOW"),
+    )
     try:
-        env.update(_model_env(
-            state["model"],
-            (state.get("conversation_env") or {}).get("HIVE_MODEL_CONTEXT_WINDOW"),
-        ))
+        env.update(_model_env(state["model"], window))
     except RuntimeError as exc:
         # Said out loud, like the spawn failures below. This raises on a mind
         # whose own configuration cannot size a model request, and an unhandled
@@ -1004,9 +1046,13 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
         with os.fdopen(handle, "w", encoding="utf-8") as fh:
             fh.write(task)
 
-        rounds = _goal_rounds()
+        rounds = _goal_rounds(goal_rounds)
         goal_flags: list[str] = []
         if rounds > 1:
+            # The rotation check answers a goal round's Stop on stdout, which
+            # dsh reads to end the run before a round the conversation has no
+            # room for. It does that only when it knows it is in one.
+            env["HIVE_GOAL_RUN"] = "1"
             # The objective travels separately from the task. A conversation's
             # first turn is the composed system prompt and the message together,
             # and the round driver quotes the objective into every round — so a
@@ -1227,6 +1273,11 @@ async def _run_dsh_turn(sid: str, content: str, images: list[dict] | None) -> An
         result["turns"] = report["turns"]
     if report.get("goalPhase") is not None:
         result["goal_phase"] = report["goalPhase"]
+    # A goal run dsh ended because the conversation reached its threshold.
+    # The objective and the rounds it had left are what the gateway needs to
+    # carry the goal onto a fresh conversation — dsh never rotates itself.
+    if isinstance(report.get("goal"), dict):
+        result["goal"] = report["goal"]
     if error:
         result["error_code"] = error.get("code")
         result["error"] = error.get("message")
@@ -1255,7 +1306,7 @@ async def send(sid: str, body: dict) -> Any:
 
     async def stream() -> Any:
         try:
-            async for event in _run_dsh_turn(sid, content, images):
+            async for event in _run_dsh_turn(sid, content, images, body.get("goal_rounds")):
                 yield f"data: {json.dumps(event)}\n\n"
         finally:
             # Every exit path: completion, client disconnect, exception. An

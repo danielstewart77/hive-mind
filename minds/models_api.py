@@ -156,6 +156,16 @@ async def build_catalog(path: Path, harness: str | None = None) -> list[dict]:
                     if isinstance(row.get("context_window"), int)
                     else None
                 ),
+                # Whether the model reads pictures: true, false, or None when
+                # the proxy does not know. Three states, relayed as they are,
+                # because "unknown" must not be read as "no" for a
+                # conversation that holds no images, nor as "yes" for one
+                # that does.
+                "accepts_images": (
+                    row.get("accepts_images")
+                    if isinstance(row.get("accepts_images"), bool)
+                    else None
+                ),
                 # The levels a picker may offer, in the proxy's order. Empty
                 # when the model takes no effort setting, or when an older
                 # proxy says nothing about it.

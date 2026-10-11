@@ -127,12 +127,26 @@ rejoins its thread.
 Each process a conversation runs in is told its own model's window
 (`HIVE_MODEL_CONTEXT_WINDOW`, and `HIVE_ROTATION_THRESHOLD_TOKENS` at this
 mind's `rotation_threshold_percent`), looked up from the proxy for that
-conversation's harness and model, and omitted when nobody has measured it. `model_context_window` in the file is the
-default model's, which is the wrong room for a conversation switched to
-another; a rotation hook reads the environment first. A dsh conversation on a
-mind with no `context_window` line is sized by the same window, and a dsh
+conversation's harness and model; a lookup that finds nothing is not
+remembered, so the next spawn asks again. A dsh turn runs under that window,
+or — with none composed for it, as on Cypher's standalone adapter — under the
+window the proxy lists for its model, asked per turn; a model with no window
+is refused rather than run behind a guessed one. The rotation hook trusts
+none of these: it takes the model from the turn's own transcript entry and
+asks the proxy for that model's window, so a conversation switched to another
+model is held to that model's threshold from its next turn. A dsh
 launch adds `--patch $DSH_HOME/agents.patch.yml` when the skills render has
 written one.
+
+A turn that fails is measured too. Codex fires no Stop for one, so
+`codex_cli` runs the Stop command the mind's `config.toml` registers for
+`rotation_check` itself after either failure exit, with `stop_reason: error`
+and the turn's `error_code`; a Claude mind registers the same check under
+`StopFailure`. Every adapter reports a turn refused for size as
+`error_code: CONTEXT_WINDOW_EXCEEDED` — codex's prose included — and the check
+leaves such a turn to the gateway's overflow path rather than arming a
+rotation of its own. `build_catalog` relays each model's `accepts_images` as
+the proxy gives it: true, false, or null for unknown.
 
 The image carries claude and codex; **dsh is mounted, not baked** — the
 harness tree is a built working copy, bind-mounted read-only at `/opt/dsh`
@@ -192,6 +206,14 @@ would otherwise be unreachable. Values are rendered per kind before anything
 is written: `str(False)` is a string a YAML reader loads as truthy, and a
 description holding a bare colon splits its line into a nested mapping.
 
+A dispatch is driven as a goal only when its message body carries
+`goal_rounds` — today the build orchestrator's; every other message is one
+turn. The file's `goal_rounds` arms nothing: it is the most rounds a dispatch
+to this mind may ask for. A goal run's Stop is answered before the rotation
+check detaches (`HIVE_GOAL_RUN=1` in the turn's environment), and an answer
+of `{"rotate": true}` has dsh end the run with outcome `rotation_needed`, which
+the adapter relays with the goal's objective and rounds left.
+
 `turn_timeout_seconds`, `goal_rounds` and `stop_on_failed_call` are re-read
 from the file on **every turn** (`dsh_cli.live_runtime`), so a value the
 console writes takes effect on the next turn rather than on the next container
@@ -202,20 +224,13 @@ zero as absent and handed back a tighter bound than the default it was trying
 to escape.
 
 `model_context_window` is reported beside the settings and is editable
-nowhere. The window belongs to the model, the inference proxy is the only
-thing that knows it, and `PATCH /runtime` writes it in the same write as the
-model — because what needs it is a per-turn hook sizing a rotation threshold
-from a percentage, and a hook that called the proxy would pay for it every
-turn. A model the proxy has not measured writes zero rather than leaving the
-previous model's figure to be multiplied by that percentage, and no request
-body may name the field: a window taken off a request is a number nobody
-measured.
-
-It is deliberately **not** `context_window`. That key is dsh's own — the
-serving ceiling its profile declares, required at the adapter's boot and read
-by its compaction — and it is a different number from a different source.
-Writing a model's nominal window over it is how a model save stops a mind
-starting.
+nowhere. It is the default model's window, which the inference proxy is the
+only thing that knows, and `PATCH /runtime` writes it in the same write as the
+model. A model the proxy declares no window for cannot be saved — the route
+refuses with 409 and writes nothing — and no request body may name the field:
+a window taken off a request is a number nobody measured. Nothing sizes a
+rotation from it; every turn's threshold comes from the window of the model
+that turn ran on.
 
 A write reads the document back before it replaces the file, and compares each
 value against what was asked for. One-line substitution cannot express every

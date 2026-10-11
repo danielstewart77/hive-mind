@@ -148,8 +148,62 @@ class TestAdminToken:
         assert runtime_api.admin_token() == ""
 
 
+class _Listing:
+    """The inference proxy's model listing, at the HTTP boundary."""
+
+    def __init__(self, rows):
+        self.rows = rows
+
+    def __call__(self, *args, **kwargs):
+        rows = self.rows
+
+        class _Resp:
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def json(self):
+                return {"data": rows}
+
+        class _Session:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            def get(self, url, **kw):
+                return _Resp()
+
+        return _Session()
+
+
+#: Every model these routes are asked to write, as the proxy lists it. A model
+#: with no window cannot be picked, so each one carries the window it holds.
+LISTED = [{"id": "opus", "context_window": 1_000_000},
+          {"id": "qwen35-131k", "context_window": 131_072}]
+
+
 @pytest.fixture()
-def client(runtime_file, monkeypatch):
+def listing(monkeypatch):
+    from minds import models_api
+
+    for var in ("INFERENCE_PROXY_URL", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL",
+                "MIND_PROXY_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("INFERENCE_PROXY_URL", "http://proxy.test")
+    monkeypatch.setenv("MIND_PROXY_KEY", "hmp-test")
+    fake = _Listing(list(LISTED))
+    monkeypatch.setattr(models_api.aiohttp, "ClientSession", fake)
+    return fake
+
+
+@pytest.fixture()
+def client(runtime_file, monkeypatch, listing):
     monkeypatch.setenv("MIND_ADMIN_TOKEN", "s3cret")
     app = FastAPI()
     import logging
