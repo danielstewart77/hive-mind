@@ -3261,17 +3261,12 @@ class SessionManager:
         mind_id = session["mind_id"]
         target = normalise_harness(harness)
 
-        # A pane's harness lives in tmux, out of reach of the kill below: a
-        # switch under it would leave the old CLI running on the transcript
-        # beside the new one.
-        if (
-            session.get("terminal_held")
-            or (session.get("owner_type") or "").split(":", 1)[0] == TERMINAL_OWNER_TYPE
-        ):
-            raise ValueError(
-                "the conversation is open in a terminal; close it or /switch "
-                "to chat first"
-            )
+        # A pane's harness lives in tmux, out of reach of the kill below, so a
+        # conversation a pane holds is moved by respawning that pane in place
+        # onto the new harness's CLI rather than by a kill and a chat spawn.
+        held = bool(session.get("terminal_held")) or (
+            (session.get("owner_type") or "").split(":", 1)[0] == TERMINAL_OWNER_TYPE
+        )
         # The same harness is not a handover: its own transcript resumes.
         if target == await self.conversation_harness(session):
             return await self.switch_model(session_id, model)
@@ -3336,6 +3331,21 @@ class SessionManager:
                 prior_handover=prior,
                 session_id=session_id,
             )
+
+            if held:
+                new_claude_sid = await self._switch_pane(
+                    session, target=target, model=model, effort=effort,
+                    handover=handover, routing=routing,
+                )
+                await self.clear_context(session_id)
+                self.dashboard.forget(session_id)
+                log_event(
+                    log, "session.harness_switched", session_id=session_id,
+                    conversation_id=new_claude_sid, mind_id=mind_id,
+                    harness=target, previous_harness=old_harness, model=model,
+                    surface=TERMINAL_OWNER_TYPE,
+                )
+                return await self._session_dict(session_id)
 
             await self._kill_process(session_id, forget_thread=True)
             new_claude_sid = str(uuid.uuid4())
@@ -3421,6 +3431,74 @@ class SessionManager:
             harness=target, previous_harness=old_harness, model=model,
         )
         return await self._session_dict(session_id)
+
+    async def _switch_pane(
+        self, session: dict, *, target: str, model: str, effort: str | None,
+        handover: str, routing: dict,
+    ) -> str:
+        """Move a pane-held conversation onto ``target`` without touching the tile.
+
+        The row is written first, because the pane rotation reads the
+        conversation's harness and effort off it. The mind then respawns the
+        pane in place onto the new harness's CLI, opened on the handover as
+        its first user turn — the tmux client, the pty and the browser tile
+        above it are left alone. A mind with no live pane leaves the row
+        switched and the handover stored, so the next attach opens the new
+        harness on it; no chat process is started beside a conversation a
+        pane owns. A mind that refuses or cannot be reached puts the row back
+        exactly as it was, and the pane keeps the old harness.
+
+        Returns the new conversation id.
+        """
+        session_id = session["id"]
+        mind_id = session["mind_id"]
+        new_claude_sid = str(uuid.uuid4())
+        now = time.time()
+        await self._db.execute(
+            "UPDATE sessions SET harness = ?, model = ?, effort = ?, "
+            "claude_sid = ?, harness_sid = NULL, rotation_armed = 0, "
+            "carry_forward = ?, carry_forward_sid = ?, carry_forward_at = ?, "
+            "last_active = ?, conversation_started_at = ? WHERE id = ?",
+            (target, model, effort, new_claude_sid, handover or None,
+             new_claude_sid if handover else None, now if handover else None,
+             now, now, session_id),
+        )
+        await self._db.commit()
+        try:
+            await self._rotate_pty_on_mind(
+                session_id=session_id, new_claude_sid=new_claude_sid, model=model,
+                mind_id=mind_id, user_prompt=handover,
+                client_ref=routing["client_ref"],
+                owner_type=session.get("owner_type"),
+                owner_ref=session.get("owner_ref"),
+                switch=True,
+            )
+        except MindCallFailed as exc:
+            await self._db.execute(
+                "UPDATE sessions SET harness = ?, model = ?, effort = ?, "
+                "claude_sid = ?, harness_sid = ?, rotation_armed = ?, "
+                "carry_forward = ?, carry_forward_sid = ?, carry_forward_at = ?, "
+                "last_active = ?, conversation_started_at = ? WHERE id = ?",
+                (session.get("harness"), session["model"], session.get("effort"),
+                 session["claude_sid"], session.get("harness_sid"),
+                 session.get("rotation_armed") or 0, session.get("carry_forward"),
+                 session.get("carry_forward_sid"), session.get("carry_forward_at"),
+                 session.get("last_active"), session.get("conversation_started_at"),
+                 session_id),
+            )
+            await self._db.commit()
+            raise ValueError(
+                f"Couldn't move the terminal onto {target}, so it stays where it "
+                f"was: {exc}"
+            ) from exc
+        await self._clear_rotation_marker_on_mind(
+            session_id, mind_id, session.get("claude_sid") or ""
+        )
+        log.info(
+            "harness switch: session %s's terminal now on %s/%s as conversation %s",
+            session_id, target, model, new_claude_sid,
+        )
+        return new_claude_sid
 
     async def _latest_session_memory(self, session: dict) -> str:
         """The latest rotation summary written for this conversation, as text.
@@ -4028,6 +4106,7 @@ class SessionManager:
         client_ref: str | None = None,
         owner_type: str | None = None,
         owner_ref: str | None = None,
+        switch: bool = False,
     ) -> bool:
         """Ask a mind to start a fresh conversation in a live terminal.
 
@@ -4042,6 +4121,12 @@ class SessionManager:
         the message the user typed, and a system prompt submits nothing and
         reaches no transcript, so the pane would open at an empty prompt with
         what they typed gone.
+
+        ``switch`` moves the pane onto the conversation's harness when it runs
+        another one; without it a mind refuses that as a stale rotation. A
+        refusal of a switch raises rather than answering False, since False
+        means "no live pane" and the pane would keep running the old harness
+        under a row that names the new one.
         """
         mind_url = await self._mind_url_for_session(session_id, mind_id)
         if not mind_url:
@@ -4072,6 +4157,7 @@ class SessionManager:
                         "surface": self._surface_label(owner_type or ""),
                         "harness": harness or None,
                         "effort": session_row.get("effort") or None,
+                        "switch": switch,
                     },
                     timeout=aiohttp.ClientTimeout(total=20),
                 ) as resp:
@@ -4091,6 +4177,12 @@ class SessionManager:
                             "rotate-pty on %s for session %s returned %s",
                             mind_url, session_id, resp.status,
                         )
+                        if switch:
+                            raise MindCallFailed(
+                                f"the mind would not move session {session_id}'s "
+                                f"terminal (HTTP {resp.status}: "
+                                f"{(await resp.text())[:200]})"
+                            )
                         return False
                     data = await resp.json()
         except MindCallFailed:

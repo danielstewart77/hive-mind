@@ -413,27 +413,28 @@ def panes(monkeypatch, homes, proxy):
     """Every adapter's tmux server, recording what its panes run."""
     proxy(DSH_WINDOWS)
     seen: dict[str, dict] = {}
-    live: set[tuple[str, str]] = set()
+    # One tmux server: every adapter's panes live on the mind's one socket,
+    # so a pane any adapter started is alive to all of them.
+    live: set[str] = set()
     for name, adapter in mind_server.ADAPTERS.items():
         record = seen.setdefault(name, {"start": [], "respawn": [], "killed": []})
 
-        def start(sid, argv, *, env_overrides, cols, rows, _r=record, _n=name):
+        def start(sid, argv, *, env_overrides, cols, rows, _r=record):
             _r["start"].append({"argv": argv, "env": env_overrides})
-            live.add((_n, sid))
+            live.add(sid)
 
         def respawn(sid, argv, *, env_overrides, _r=record):
             _r["respawn"].append({"argv": argv, "env": env_overrides})
 
-        def kill(sid, _r=record, _n=name):
+        def kill(sid, _r=record):
             _r["killed"].append(sid)
-            live.discard((_n, sid))
+            live.discard(sid)
             return True
 
         monkeypatch.setattr(adapter.TERMINALS, "start", start)
         monkeypatch.setattr(adapter.TERMINALS, "respawn", respawn)
         monkeypatch.setattr(adapter.TERMINALS, "kill", kill)
-        monkeypatch.setattr(adapter.TERMINALS, "alive",
-                            lambda sid, _n=name: (_n, sid) in live)
+        monkeypatch.setattr(adapter.TERMINALS, "alive", lambda sid: sid in live)
         monkeypatch.setattr(adapter.TERMINALS, "attach",
                             lambda sid, **kw: _echo_client(**kw))
     monkeypatch.setattr(codex_cli, "_watch_for_new_thread_in_background",
@@ -537,6 +538,39 @@ def test_a_rotation_addressed_to_another_harness_leaves_the_pane_alone(panes, mo
     assert resp.status_code == 409
     assert resp.json()["rotated"] is False
     assert panes["claude"]["respawn"] == [] and panes["codex"]["respawn"] == []
+
+
+@pytest.mark.parametrize("old,new,model", [
+    ("claude", "codex", "gpt-5"),
+    ("codex", "dsh", "qwen35-131k"),
+    ("dsh", "claude", "claude-opus-5"),
+])
+def test_a_switch_respawns_the_pane_in_place_onto_the_new_harness(
+    panes, monkeypatch, old, new, model,
+):
+    client = TestClient(mind_server.app)
+    first = {"claude": "claude-opus-5", "codex": "gpt-5", "dsh": "qwen35-131k"}[old]
+    _attach(client, "p6", old, first, "", monkeypatch)
+
+    resp = client.post("/sessions/p6/rotate-pty", headers=SESSION, json={
+        "new_claude_sid": "conv-s1", "harness": new, "model": model,
+        "user_prompt": "HANDOVER TEXT", "switch": True,
+    })
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["rotated"] is True
+    # Respawned in place by the new harness; the pane is never ended, so the
+    # tmux client and the tile above it carry on.
+    assert panes[old]["respawn"] == [] and panes[old]["killed"] == []
+    argv = panes[new]["respawn"][0]["argv"]
+    if new == "dsh":
+        assert argv[0] == dsh_cli.DSH_BIN
+        assert Path(argv[argv.index("--context-file") + 1]).read_text() == "HANDOVER TEXT"
+    else:
+        assert f"exec {new} " in argv[2]
+        assert _seed_in(argv).read_text() == "HANDOVER TEXT"
+    handle = pty_attach.PTYS["p6"]
+    assert (handle.harness, handle.conversation_id, handle.model) == (new, "conv-s1", model)
 
 
 # ---------------------------------------------------------------------------
