@@ -297,15 +297,35 @@ def _zstd_decode(path: Path, zstandard, chunk_size: int,
 
 
 def _dsh_lines_via_harness(path: Path) -> list[str]:
+    """The log through the harness's own reader, or the ``zstd`` binary.
+
+    The reader ships with the harness tree, which a host that never mounted it
+    does not have; the binary is the fallback. It exits non-zero on the frame
+    a running conversation leaves open, having already written every closed
+    one, so what it wrote is kept whatever its status.
+    """
     cli = os.environ.get("DSH_READ_LOG_CLI") or DEFAULT_DSH_READ_LOG_CLI
+    failure = ""
+    if Path(cli).is_file():
+        try:
+            done = subprocess.run(["node", cli, str(path)], capture_output=True,
+                                  text=True, timeout=30, check=False)
+        except (OSError, subprocess.SubprocessError) as exc:
+            failure = str(exc)
+        else:
+            if done.returncode == 0:
+                return done.stdout.splitlines()
+            failure = (done.stderr or "").strip() or f"read-log exited {done.returncode}"
+    else:
+        failure = f"no harness log reader at {cli}"
     try:
-        done = subprocess.run(["node", cli, str(path)], capture_output=True,
-                              text=True, timeout=30, check=False)
+        done = subprocess.run(["zstd", "-dc", "--", str(path)], capture_output=True,
+                              timeout=30, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
-        raise Unreadable(str(exc)) from exc
-    if done.returncode != 0:
-        raise Unreadable((done.stderr or "").strip() or f"read-log exited {done.returncode}")
-    return done.stdout.splitlines()
+        raise Unreadable(f"{failure}; zstd: {exc}") from exc
+    if not done.stdout:
+        raise Unreadable(f"{failure}; zstd: {done.stderr.decode(errors='replace').strip()}")
+    return done.stdout.decode("utf-8", errors="replace").splitlines()
 
 
 def read_dsh(path: Path) -> list[dict]:

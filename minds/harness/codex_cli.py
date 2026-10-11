@@ -21,7 +21,6 @@ import asyncio
 import json
 import os
 import re
-import shlex
 import signal
 import threading
 import time
@@ -48,6 +47,8 @@ from minds.pty_attach import (
 )
 from minds.pty_attach import teardown as teardown_pty
 from minds import (
+    context_overflow,
+    failed_turn,
     files_api,
     github_token_api,
     models_api,
@@ -648,81 +649,34 @@ surface_token_api.install_surface_token_routes(app, mind_id=MIND_ID, log=log)
 github_token_api.install_github_token_routes(app, mind_id=MIND_ID, log=log)
 
 
-#: The code every harness reports a turn refused for size under, so the gateway
-#: has one thing to recognise. Codex reports it as prose.
-CONTEXT_WINDOW_EXCEEDED = "CONTEXT_WINDOW_EXCEEDED"
-
-_OVERFLOW_RE = re.compile(
-    r"context[ _-]?window|context[ _-]?length[ _-]?exceeded|maximum context length",
-    re.IGNORECASE,
-)
+CONTEXT_WINDOW_EXCEEDED = context_overflow.CONTEXT_WINDOW_EXCEEDED
 
 
 def _error_code(message: str) -> str:
-    """The code a failed turn is reported under."""
-    return CONTEXT_WINDOW_EXCEEDED if _OVERFLOW_RE.search(message or "") else "TURN_FAILED"
+    """The code a failed turn is reported under: codex words an overflow as
+    prose, and the gateway recognises one code for every harness."""
+    return CONTEXT_WINDOW_EXCEEDED if context_overflow.is_overflow(message) else "TURN_FAILED"
 
 
 def _rotation_check_command() -> list[str] | None:
-    """The mind's own rotation check, as its codex config registers it.
-
-    Codex fires no Stop hook for a turn that failed, so a failed turn would
-    never be measured and a conversation that keeps failing would never
-    rotate. The adapter runs the check itself after one — the same command
-    the mind registered for Stop, read from the mind's config rather than
-    named here, because every mind owns its own copy of the check.
-    """
+    """The mind's own rotation check, as its codex config registers it for Stop."""
     try:
         config = tomllib.loads((CODEX_HOME / "config.toml").read_text())
     except (OSError, tomllib.TOMLDecodeError):
         return None
-    for group in (config.get("hooks") or {}).get("Stop") or []:
-        for hook in (group or {}).get("hooks") or []:
-            command = str((hook or {}).get("command") or "")
-            if "rotation_check" in command:
-                return shlex.split(command)
-    return None
+    return failed_turn.rotation_check_command((config.get("hooks") or {}).get("Stop"))
 
 
 async def _run_rotation_check(
     state: dict, sid: str, thread_id: str | None, env: dict[str, str], error_code: str,
 ) -> None:
-    """Hand a failed turn to the mind's rotation check, as a Stop would.
-
-    The payload is the one codex gives its Stop hooks, plus how the turn
-    ended, so the check can estimate past a turn that reported nothing and
-    leave an overflow to the path that recovers it. The check detaches its
-    own work, so this waits only for it to read its input.
-    """
-    command = _rotation_check_command()
-    if not command or not thread_id:
-        return
-    rollout = transcript_path("", harness_sid=thread_id, session_id=sid)
-    payload = json.dumps({
-        "hook_event_name": "Stop",
-        "session_id": thread_id,
-        "transcript_path": str(rollout) if rollout else "",
-        "cwd": str(PROJECT_DIR),
-        "model": state.get("model") or "",
-        "stop_reason": "error",
-        "error_code": error_code,
-    }).encode()
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *command,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-            env=env,
-            cwd=str(PROJECT_DIR),
-        )
-        if proc.stdin is not None:
-            proc.stdin.write(payload)
-            await proc.stdin.drain()
-            proc.stdin.close()
-        await asyncio.wait_for(proc.wait(), timeout=30)
-    except (OSError, asyncio.TimeoutError) as exc:
-        log.warning("%s session %s: rotation check did not run: %s", NAME, sid, exc)
+    """Codex fires no Stop for a failed turn, so the adapter runs the check."""
+    await failed_turn.run(
+        _rotation_check_command(), session_id=thread_id or "",
+        transcript=transcript_path("", harness_sid=thread_id, session_id=sid) if thread_id else None,
+        cwd=PROJECT_DIR, model=state.get("model") or "", error_code=error_code,
+        env=env, log=log,
+    )
 
 
 async def _run_codex_turn(sid: str, content: str, images: list[dict] | None) -> Any:

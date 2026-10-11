@@ -1440,3 +1440,85 @@ async def test_a_kind_this_adapter_does_not_know_is_not_relayed_as_the_answer(
     ]))
     events = await _drain(dsh)
     assert _streamed(events, "text_delta") == ["the answer"]
+
+
+# ---------------------------------------------------------------------------
+# A turn dsh fired no Stop for still gets the rotation check
+# ---------------------------------------------------------------------------
+
+class _CheckStdin:
+    def __init__(self) -> None:
+        self.data = b""
+
+    def write(self, data: bytes) -> None:
+        self.data += data
+
+    async def drain(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+class _HangingStdout:
+    async def readline(self) -> bytes:
+        await asyncio.sleep(30)
+        return b""
+
+
+@pytest.mark.parametrize("ending", ["timeout", "killed", "no-report", "unparseable"])
+async def test_a_turn_dsh_fired_no_stop_for_runs_the_minds_rotation_check(
+    dsh, monkeypatch, tmp_path, ending,
+) -> None:
+    """dsh fires Stop only from a turn it ended itself. One that timed out, was
+    killed, crashed or wrote nothing readable fired none, and what it read
+    before it stopped is in the conversation all the same — so the adapter
+    runs the check the mind registered for Stop, as a failed turn."""
+    hooks = tmp_path / "hooks.json"
+    hooks.write_text(json.dumps({"hooks": {"Stop": [{"hooks": [
+        {"type": "command", "command": "bash /minds/x/hooks/auto_remember.sh"},
+        {"type": "command", "command": "bash /minds/x/hooks/rotation_check.sh"},
+    ]}]}}))
+    monkeypatch.setenv("DSH_HOOKS_CONFIG", str(hooks))
+    state = _session(dsh)
+    if ending == "timeout":
+        monkeypatch.setattr(
+            dsh_cli, "live_runtime", lambda: {**dsh_cli.RUNTIME, "turn_timeout_seconds": 0.05})
+    checks: list[tuple[list[str], _CheckStdin]] = []
+
+    async def spawn(*argv: str, **kwargs: Any) -> _FakeProc:
+        if argv[0] != dsh_cli.DSH_BIN:
+            proc = _FakeProc([])
+            proc.stdin = _CheckStdin()
+            checks.append((list(argv), proc.stdin))
+            return proc
+        if ending == "timeout":
+            proc = _FakeProc([])
+            proc.stdout = _HangingStdout()
+            return proc
+        if ending == "killed":
+            state["killed"] = True
+            return _FakeProc([], returncode=-9)
+        if ending == "no-report":
+            return _FakeProc([], stderr="Segmentation fault", returncode=139)
+        return _FakeProc(["{not json\n"], returncode=0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    await _drain(dsh)
+
+    assert [argv for argv, _ in checks] == [["bash", "/minds/x/hooks/rotation_check.sh"]]
+    payload = json.loads(checks[0][1].data)
+    assert (payload["session_id"], payload["stop_reason"]) == ("conv-1", "error")
+
+
+async def test_an_overflow_dsh_words_its_own_way_is_reported_under_the_one_code(
+    dsh, monkeypatch
+) -> None:
+    """The gateway rotates on one code for every harness and never reads the
+    text, so a provider's own wording of an overflow is coded here."""
+    _session(dsh)
+    spawn = _Spawn([_report(outcome="error", error={
+        "code": "LLM_ERROR",
+        "message": "This model's maximum context length is 131072 tokens."})])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    assert _result(await _drain(dsh))["error_code"] == "CONTEXT_WINDOW_EXCEEDED"

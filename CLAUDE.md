@@ -138,14 +138,20 @@ model is held to that model's threshold from its next turn. A dsh
 launch adds `--patch $DSH_HOME/agents.patch.yml` when the skills render has
 written one.
 
-A turn that fails is measured too. Codex fires no Stop for one, so
-`codex_cli` runs the Stop command the mind's `config.toml` registers for
-`rotation_check` itself after either failure exit, with `stop_reason: error`
-and the turn's `error_code`; a Claude mind registers the same check under
-`StopFailure`. Every adapter reports a turn refused for size as
-`error_code: CONTEXT_WINDOW_EXCEEDED` — codex's prose included — and the check
+A turn that fails is measured too. A per-turn harness fires no Stop for a
+turn it did not end itself, so the adapter runs the Stop command the mind
+registers for `rotation_check` (`minds/failed_turn.py`) with `stop_reason:
+error` and the turn's `error_code`: codex after `turn.failed` or a stream that
+ended without one, read from `config.toml`; dsh after a timeout, a kill, a
+crash or an unreadable report, read from its hooks file. A Claude mind
+registers the same check under `StopFailure`. Every adapter reports a turn
+refused for size as `error_code: CONTEXT_WINDOW_EXCEEDED`
+(`minds/context_overflow.py` classifies each harness's wording), and the check
 leaves such a turn to the gateway's overflow path rather than arming a
-rotation of its own. `build_catalog` relays each model's `accepts_images` as
+rotation of its own. After a handover the gateway calls `DELETE
+/sessions/{id}/rotation-marker?claude_sid=` (session-guarded, on the mind
+server and on dsh's standalone app), which drops that conversation's marker
+files under the mind's `data/auto-remember` and answers 204. `build_catalog` relays each model's `accepts_images` as
 the proxy gives it: true, false, or null for unknown.
 
 The image carries claude and codex; **dsh is mounted, not baked** — the

@@ -28,3 +28,7 @@ startup:
 
 transport:
   type: cli_stream_json
+
+# How full the context window gets before a conversation rotates, as a
+# percentage of the window of the model the turn ran on.
+rotation_threshold_percent: 30
