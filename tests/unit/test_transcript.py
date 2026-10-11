@@ -69,6 +69,19 @@ class TestCodexRollout:
 
 
 class TestDshLog:
+    def test_a_host_without_the_decoder_or_the_harness_reader_reads_it_with_zstd(
+        self, monkeypatch, tmp_path,
+    ):
+        """A host that never mounted the harness tree and lacks the Python
+        decoder still has the binary; reporting the log unreadable there is a
+        refused switch on a conversation nothing is wrong with."""
+        import sys
+
+        monkeypatch.setitem(sys.modules, "zstandard", None)
+        monkeypatch.setenv("DSH_READ_LOG_CLI", str(tmp_path / "no-such-reader.js"))
+
+        assert transcript.read_dsh(DSH_ZSTD) == transcript.read_dsh(DSH_PLAIN)
+
     def test_a_compressed_dsh_log_renders_prose_and_calls_whole_and_results_trimmed(self):
         text = transcript.render(transcript.read_dsh(DSH_ZSTD))
 

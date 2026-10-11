@@ -41,6 +41,7 @@ from minds.pty_attach import (
 )
 from minds.pty_attach import teardown as teardown_pty
 from minds import (
+    context_overflow,
     files_api,
     github_token_api,
     models_api,
@@ -662,6 +663,23 @@ async def send_message(sid: str, req: Request) -> Any:
     return await send(sid, await req.json())
 
 
+def classify_result(event: dict) -> dict:
+    """A stream-json ``result`` event, coded when the turn overflowed the window.
+
+    The CLI reports an overflow as a failed result whose text is the API's
+    refusal ("Prompt is too long", or the input-plus-max_tokens wording). The
+    gateway rotates on ``error_code`` and never reads that text, so the code
+    is added here; every other event passes through untouched.
+    """
+    if event.get("type") != "result" or not event.get("is_error"):
+        return event
+    errors = event.get("errors")
+    if context_overflow.is_overflow(event.get("result"), event.get("error"),
+                                    *(errors if isinstance(errors, list) else [])):
+        return {**event, "error_code": context_overflow.CONTEXT_WINDOW_EXCEEDED}
+    return event
+
+
 async def send(sid: str, body: dict) -> Any:
     """Run one turn on this session's process and stream it back."""
     content = body.get("content", "")
@@ -724,9 +742,16 @@ async def send(sid: str, body: dict) -> Any:
                 decoded = line.decode().strip()
                 if not decoded:
                     continue
-                yield f"data: {decoded}\n\n"
                 try:
                     event = json.loads(decoded)
+                except json.JSONDecodeError:
+                    yield f"data: {decoded}\n\n"
+                    continue
+                coded = classify_result(event) if isinstance(event, dict) else event
+                if coded is not event:
+                    event, decoded = coded, json.dumps(coded)
+                yield f"data: {decoded}\n\n"
+                try:
                     spoken.extend(_assistant_texts(event))
                     if event.get("type") == "result":
                         finished = True
@@ -734,7 +759,7 @@ async def send(sid: str, body: dict) -> Any:
                         if cs:
                             sess["resume_sid"] = cs
                         break
-                except json.JSONDecodeError:
+                except (AttributeError, TypeError):
                     continue
         finally:
             if delivered and not finished and proc.returncode is not None:

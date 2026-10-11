@@ -24,6 +24,7 @@ import re
 import signal
 import threading
 import time
+import tomllib
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -46,6 +47,8 @@ from minds.pty_attach import (
 )
 from minds.pty_attach import teardown as teardown_pty
 from minds import (
+    context_overflow,
+    failed_turn,
     files_api,
     github_token_api,
     models_api,
@@ -646,6 +649,36 @@ surface_token_api.install_surface_token_routes(app, mind_id=MIND_ID, log=log)
 github_token_api.install_github_token_routes(app, mind_id=MIND_ID, log=log)
 
 
+CONTEXT_WINDOW_EXCEEDED = context_overflow.CONTEXT_WINDOW_EXCEEDED
+
+
+def _error_code(message: str) -> str:
+    """The code a failed turn is reported under: codex words an overflow as
+    prose, and the gateway recognises one code for every harness."""
+    return CONTEXT_WINDOW_EXCEEDED if context_overflow.is_overflow(message) else "TURN_FAILED"
+
+
+def _rotation_check_command() -> list[str] | None:
+    """The mind's own rotation check, as its codex config registers it for Stop."""
+    try:
+        config = tomllib.loads((CODEX_HOME / "config.toml").read_text())
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    return failed_turn.rotation_check_command((config.get("hooks") or {}).get("Stop"))
+
+
+async def _run_rotation_check(
+    state: dict, sid: str, thread_id: str | None, env: dict[str, str], error_code: str,
+) -> None:
+    """Codex fires no Stop for a failed turn, so the adapter runs the check."""
+    await failed_turn.run(
+        _rotation_check_command(), session_id=thread_id or "",
+        transcript=transcript_path("", harness_sid=thread_id, session_id=sid) if thread_id else None,
+        cwd=PROJECT_DIR, model=state.get("model") or "", error_code=error_code,
+        env=env, log=log,
+    )
+
+
 async def _run_codex_turn(sid: str, content: str, images: list[dict] | None) -> Any:
     state = SESSIONS.get(sid)
     if state is None:
@@ -731,6 +764,9 @@ async def _run_codex_turn(sid: str, content: str, images: list[dict] | None) -> 
     saw_agent_message = False
     last_reasoning_text = ""
     last_other_item_type = ""
+    # Codex reports a failure as an `error` event before the turn ends, and
+    # the turn's own failure event does not always repeat it.
+    last_error = ""
 
     def _empty_turn_frame() -> dict:
         return {
@@ -765,7 +801,9 @@ async def _run_codex_turn(sid: str, content: str, images: list[dict] | None) -> 
             "_observer_only": True,
         }
 
-        if etype == "thread.started":
+        if etype == "error":
+            last_error = str(event.get("message") or last_error)
+        elif etype == "thread.started":
             current_thread_id = event.get("thread_id")
             state["thread_id"] = current_thread_id
             if current_thread_id:
@@ -816,8 +854,9 @@ async def _run_codex_turn(sid: str, content: str, images: list[dict] | None) -> 
             }
             return
         elif etype == "turn.failed":
-            error_msg = event.get("error", {}).get("message", "Unknown error")
+            error_msg = (event.get("error") or {}).get("message") or last_error or "Unknown error"
             log.error("%s session %s: turn failed: %s", NAME, sid, error_msg)
+            code = _error_code(error_msg)
             # Clear the cached thread_id so the next turn starts fresh
             # rather than resuming a thread Codex still has an unanswered
             # turn sitting in (otherwise the next message gets the failed
@@ -828,7 +867,9 @@ async def _run_codex_turn(sid: str, content: str, images: list[dict] | None) -> 
                 yield _empty_turn_frame()
             await _reap_proc(proc)
             state["proc"] = None
-            yield {"type": "result", "is_error": True}
+            await _run_rotation_check(state, sid, current_thread_id, env, code)
+            yield {"type": "result", "stop_reason": "error", "is_error": True,
+                   "error_code": code, "error": error_msg}
             return
 
     # Stream ended without turn.completed or turn.failed — treat as
@@ -840,7 +881,16 @@ async def _run_codex_turn(sid: str, content: str, images: list[dict] | None) -> 
         yield _empty_turn_frame()
     await _reap_proc(proc)
     state["proc"] = None
-    yield {"type": "result", "session_id": current_thread_id, "is_error": False}
+    # No Stop fired for this turn either, and what it read before it stopped
+    # is in the conversation all the same.
+    await _run_rotation_check(state, sid, current_thread_id, env,
+                              _error_code(last_error) if last_error else "TURN_INCOMPLETE")
+    result: dict[str, Any] = {"type": "result", "session_id": current_thread_id,
+                              "is_error": False}
+    if last_error and _error_code(last_error) == CONTEXT_WINDOW_EXCEEDED:
+        result.update(is_error=True, stop_reason="error",
+                      error_code=CONTEXT_WINDOW_EXCEEDED, error=last_error)
+    yield result
 
 
 @app.post("/sessions/{sid}/message")

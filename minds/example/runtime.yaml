@@ -22,12 +22,6 @@ resume_policy: always
 # the voice server's own default.
 voice:
 
-# What the default model above actually holds. Required on a dsh_cli mind,
-# whose provider route lists no models and sizes every one of them from this:
-# compaction reads it as the ceiling, so a mind without it is refused rather
-# than run behind a capacity nobody picked.
-context_window: 200000
-
 startup:
   skip_host_credentials: false
   sync_repo_config: true

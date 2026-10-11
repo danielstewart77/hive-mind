@@ -156,6 +156,24 @@ async def build_catalog(path: Path, harness: str | None = None) -> list[dict]:
                     if isinstance(row.get("context_window"), int)
                     else None
                 ),
+                # The share of that window a conversation fills before it
+                # rotates, also the model's own and also the proxy's to say.
+                # Absent when the proxy names none or names one that is not a
+                # share: a conversation with no threshold does not rotate on
+                # one, which is better than rotating at a guessed one.
+                "rotation_threshold_percent": _percent(
+                    row.get("rotation_threshold_percent")
+                ),
+                # Whether the model reads pictures: true, false, or None when
+                # the proxy does not know. Three states, relayed as they are,
+                # because "unknown" must not be read as "no" for a
+                # conversation that holds no images, nor as "yes" for one
+                # that does.
+                "accepts_images": (
+                    row.get("accepts_images")
+                    if isinstance(row.get("accepts_images"), bool)
+                    else None
+                ),
                 # The levels a picker may offer, in the proxy's order. Empty
                 # when the model takes no effort setting, or when an older
                 # proxy says nothing about it.
@@ -168,18 +186,36 @@ async def build_catalog(path: Path, harness: str | None = None) -> list[dict]:
     return rows
 
 
-async def context_window(path: Path, harness: str, model: str) -> int | None:
-    """The window the proxy declares for one model on one harness, or None.
+def _percent(value: Any) -> int | None:
+    """A rotation share of a window, or None when it is not one."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if 0 < value < 100 else None
 
-    None for a model nobody has measured, an unreachable proxy, or a model the
-    harness does not offer: each is "no window known", and a guessed one is a
-    rotation threshold sized for room the conversation does not have.
+
+async def model_sizing(
+    path: Path, harness: str, model: str,
+) -> tuple[int | None, int | None]:
+    """The window and rotation percentage the proxy declares for one model.
+
+    Both come off the same row of the harness's listing, because both belong
+    to the model. Each is None when the proxy names none for it; both are None
+    for an unreachable proxy or a model the harness does not offer. A guessed
+    window or share is a rotation threshold sized for room the conversation
+    does not have.
     """
     for row in await build_catalog(path, harness=harness):
         if row.get("name") == model:
             window = row.get("context_window")
-            return window if isinstance(window, int) and window > 0 else None
-    return None
+            window = window if isinstance(window, int) and window > 0 else None
+            return window, row.get("rotation_threshold_percent")
+    return None, None
+
+
+async def context_window(path: Path, harness: str, model: str) -> int | None:
+    """The window the proxy declares for one model on one harness, or None."""
+    window, _ = await model_sizing(path, harness, model)
+    return window
 
 
 def install_models_route(

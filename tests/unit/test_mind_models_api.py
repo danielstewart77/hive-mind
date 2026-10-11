@@ -196,3 +196,48 @@ async def test_each_row_carries_the_effort_levels_the_proxy_declares(wire, runti
     assert rows["claude-opus-5"]["effort_levels"] == ["low", "medium", "high", "max"]
     assert rows["qwen35-131k"]["effort_levels"] == []
     assert rows["older-proxy-row"]["effort_levels"] == []
+
+
+@pytest.mark.asyncio
+async def test_whether_a_model_reads_images_is_relayed_in_three_states(wire, runtime_file):
+    """Yes, no, and unknown. Unknown must not arrive as "no" — that would hand
+    over every conversation switched to a model nobody has classified — nor
+    as "yes" for one that holds pictures it cannot read."""
+    wire({"/v1/models?harness=dsh": {"data": [
+        {"id": "sees", "accepts_images": True},
+        {"id": "blind", "accepts_images": False},
+        {"id": "unclassified"},
+    ]}})
+    path = runtime_file(harness="dsh_cli", env={
+        "INFERENCE_PROXY_URL": "http://proxy:8899", "MIND_PROXY_KEY": "hmp-cypher"})
+
+    rows = await models_api.build_catalog(path)
+
+    assert [(r["name"], r["accepts_images"]) for r in rows] == [
+        ("sees", True), ("blind", False), ("unclassified", None)]
+
+
+@pytest.mark.asyncio
+async def test_a_models_rotation_share_is_relayed_beside_its_window(wire, runtime_file):
+    """The share of the window a conversation fills before rotating belongs to
+    the model, so it is relayed off the same row as the window. Anything that
+    is not a share of a window — none, zero, a whole window, a word, a bool —
+    is relayed as unknown rather than as a threshold nobody declared."""
+    wire({"/v1/models?harness=dsh": {"data": [
+        {"id": "declared", "context_window": 131_072, "rotation_threshold_percent": 40},
+        {"id": "undeclared", "context_window": 131_072},
+        {"id": "zero", "rotation_threshold_percent": 0},
+        {"id": "whole", "rotation_threshold_percent": 100},
+        {"id": "word", "rotation_threshold_percent": "40"},
+        {"id": "flag", "rotation_threshold_percent": True},
+    ]}})
+    path = runtime_file(harness="dsh_cli", env={
+        "INFERENCE_PROXY_URL": "http://proxy:8899", "MIND_PROXY_KEY": "hmp-cypher"})
+
+    rows = await models_api.build_catalog(path)
+    sizing = await models_api.model_sizing(path, "dsh", "declared")
+
+    assert [(r["name"], r["rotation_threshold_percent"]) for r in rows] == [
+        ("declared", 40), ("undeclared", None), ("zero", None), ("whole", None),
+        ("word", None), ("flag", None)]
+    assert sizing == (131_072, 40)
