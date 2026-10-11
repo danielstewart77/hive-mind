@@ -447,6 +447,9 @@ class ArmRotationRequest(BaseModel):
     # The conversation the hook measured. An arm for one a harness switch
     # has since replaced is ignored; absent means a hook predating it.
     claude_sid: str = ""
+    # When the hook began, as epoch seconds. Lets an arm that names no
+    # conversation be checked against a conversation replaced since.
+    started_at: float | None = None
 
 
 class FireRotationRequest(BaseModel):
@@ -487,7 +490,7 @@ async def arm_rotation(body: ArmRotationRequest):
     """
     return await session_mgr.arm_rotation(
         body.client_type, body.client_ref, surface=body.surface,
-        claude_sid=body.claude_sid,
+        claude_sid=body.claude_sid, started_at=body.started_at,
     )
 
 
