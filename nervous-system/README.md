@@ -126,14 +126,14 @@ token is held by every surface bot.
 
 ## Context figures
 
-`sessions` carries `context_tokens`, `context_threshold`, `context_window`
-and `context_observed_at`, all nullable and all written by the reporting
-Mind. Nothing on this side can compute them: the count is summed from the
-harness transcript's `message.usage` on the machine running it, and the
-threshold is read off that Mind's spawn arguments — the same model caps in
-two different places depending on whether the long-context pin was on the
-command line, so a gateway deriving it from a model name would be wrong for
-half the hive.
+`sessions` carries `context_tokens`, `context_threshold`, `context_window`,
+`context_kind`, `context_has_images`, `context_model` and
+`context_observed_at`, all nullable and all written by the reporting Mind.
+Nothing on this side can compute them: the count is the turn's last model
+request on the machine running it — the provider's own figure (`kind`
+"usage") or the harness's estimate ("estimated") — and the threshold is that
+Mind's `rotation_threshold_percent` of the window of the model the turn ran
+on.
 
 Null stays null. A zero draws a conversation sitting at 138k as having its
 whole window free, which is the one wrong answer that looks like good news.
@@ -143,9 +143,42 @@ completed turn and is therefore never live.
 `POST /sessions/context` takes the Stop hook's own addressing — surface and
 conversation, as `/sessions/record-turn` already does — since the hook knows
 which conversation it is bound to, not which row the gateway filed it under.
-A rotation clears both the stored count and the feed's buffered text: they
-belong to a transcript that no longer exists, and left in place they render a
-fresh conversation as one already at its rotation point.
+A report naming a `conversation_id` the row no longer runs is dropped: a Stop
+hook finishing after a switch or rotation would otherwise write the old
+transcript's size over the new one. A rotation clears the stored count and
+the feed's buffered text for the same reason.
+
+`GET /sessions/live` returns the producing conversations under `sessions` and
+every other open one — bound to a surface, neither closed nor suspended —
+under `idle`, each with the same `context` reading.
+
+## A conversation always fits its model
+
+`switch_model` resumes the conversation under its own id only when the new
+model can hold it: its last measured size at or under the new model's
+threshold (the Mind's percentage, asked of `GET /runtime/settings`, of the
+window the Mind's model listing gives), and no images on a model whose
+listing says it takes none or does not say. A size nobody measured, on a
+conversation that has had turns, is never assumed to fit. Otherwise the
+conversation is handed over: the Mind renders it through `/handover`, sized
+so the handover, the composed prompt and the next message sit under the new
+threshold, and the fresh conversation opens on it. A terminal keeps its row
+and has its pane respawned onto the new conversation; a chat gets a successor
+row, as a chat rotation does. The answer carries a `warning` saying why.
+Either way the row takes the new model's window and threshold at once.
+
+A turn whose result carries `error_code: CONTEXT_WINDOW_EXCEEDED` is rotated
+the same way, at once, with the user turn taken back out of the ledger and a
+`<failed-turn>` note listing the tool calls that attempt already completed.
+The same message is then sent once on the fresh conversation; that pending
+re-send is held on the successor row (`resend_content`) until it goes out, so
+a restart in between sends it at start-up, and stamped when dispatched, so a
+restart mid-answer does not send it twice. A re-send that overflows again is
+reported and stops. A goal run that ends with `stop_reason: rotation_needed`
+and its `goal` (objective, `roundsLeft`) is rotated once and the objective
+dispatched again with `goal_rounds` set to the rounds it had left. A
+rotation's composed prompt is trimmed — session memory first, keeping its
+tail — to the threshold of the conversation it replaces.
 
 ## Identity convention
 

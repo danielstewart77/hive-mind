@@ -157,6 +157,11 @@ CREATE TABLE IF NOT EXISTS sessions (
     context_threshold INTEGER,
     context_window INTEGER,
     context_observed_at REAL,
+    context_kind  TEXT,
+    context_has_images INTEGER,
+    context_model TEXT,
+    resend_content TEXT,
+    resend_dispatched_at REAL,
     effort        TEXT,
     harness       TEXT,
     terminal_held INTEGER NOT NULL DEFAULT 0
@@ -208,7 +213,9 @@ CREATE INDEX IF NOT EXISTS idx_session_turns_lookup
 # Every listing route answers to the far weaker service token, so a
 # `SELECT *` that reached the wire would hand the same blob to any surface
 # bot or mind container that holds it.
-_PRIVATE_SESSION_COLUMNS = ("carry_forward", "carry_forward_sid", "carry_forward_at")
+_PRIVATE_SESSION_COLUMNS = (
+    "carry_forward", "carry_forward_sid", "carry_forward_at", "resend_content",
+)
 
 # The two armed values are not interchangeable, and nothing may test
 # `rotation_armed` for truth. A chat surface (1) is finalized by
@@ -280,6 +287,139 @@ def handover_budget_bytes(context_window: Any, system_prompt_blocks: str = "") -
     else:
         budget = min(HANDOVER_MAX_BYTES, window * 4 // 2 - soul)
     return max(HANDOVER_MIN_BYTES, budget)
+
+
+# The error code every adapter reports for a turn that hit its model's
+# context limit, whatever the harness or provider called it.
+CONTEXT_WINDOW_EXCEEDED = "CONTEXT_WINDOW_EXCEEDED"
+# The outcome a goal run reports when the rotation check asked it to stop
+# after a round so the conversation can be replaced under it.
+ROTATION_NEEDED = "rotation_needed"
+# The least a seed is rendered at. A budget of nothing reads as "no budget"
+# to the mind's renderer, which then renders at its ceiling.
+SEED_MIN_BYTES = 1_024
+# How much of one tool call's input the failed-turn ledger quotes.
+_TOOL_INPUT_CHARS = 300
+
+
+def _positive_int(value: Any) -> int | None:
+    """``value`` as a positive int, or None for anything else."""
+    if isinstance(value, bool):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def seed_budget_bytes(
+    threshold: Any, window: Any = None, system_prompt_blocks: str = "",
+    message: str = "",
+) -> int:
+    """How much carried text a fresh conversation may open on.
+
+    The seed, the system prompt it rides beside and the message it opens
+    with must together sit under the threshold of the model taking the
+    conversation — a seed that fills a small model's window rotates its
+    successor on the first turn, or overflows it outright. So the room is
+    that threshold at four bytes a token, less the other two, and never past
+    the ceiling one opening turn can be delivered at. A threshold nobody
+    measured falls back to half the window, and neither known to the
+    ceiling.
+    """
+    fixed = len((system_prompt_blocks or "").encode("utf-8")) + len(
+        (message or "").encode("utf-8")
+    )
+    try:
+        room = int(threshold or 0)
+    except (TypeError, ValueError):
+        room = 0
+    if room <= 0:
+        try:
+            room = int(window or 0) // 2
+        except (TypeError, ValueError):
+            room = 0
+    if room <= 0:
+        return max(SEED_MIN_BYTES, HANDOVER_MAX_BYTES - fixed)
+    return max(SEED_MIN_BYTES, min(HANDOVER_MAX_BYTES, room * 4 - fixed))
+
+
+def completed_tool_calls(events: list[dict]) -> list[str]:
+    """The tool calls a turn's events show as having run, one line each.
+
+    A call has run when its result came back: Claude's stream pairs a
+    ``tool_use`` block with a ``tool_result`` naming its id, and codex reports
+    a finished item on its observer frame. A call with no result may or may
+    not have done anything, and listing it as done would tell the next
+    conversation to skip work that never happened.
+    """
+    calls: dict[str, str] = {}
+    order: list[str] = []
+    done: list[str] = []
+    for event in events:
+        kind = event.get("type")
+        content = (event.get("message") or {}).get("content")
+        if kind == "assistant" and isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    payload = json.dumps(block.get("input"), sort_keys=True)
+                    if len(payload) > _TOOL_INPUT_CHARS:
+                        payload = payload[:_TOOL_INPUT_CHARS] + "…"
+                    calls[str(block.get("id"))] = f"{block.get('name')} {payload}"
+                    order.append(str(block.get("id")))
+        elif kind == "user" and isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    tool_id = str(block.get("tool_use_id"))
+                    if tool_id in calls and tool_id not in done:
+                        done.append(tool_id)
+        elif kind == "codex_event":
+            raw = event.get("event") or {}
+            item = raw.get("item") or {}
+            if raw.get("type") == "item.completed" and item.get("type") in (
+                "command_execution", "mcp_tool_call", "file_change", "web_search",
+            ):
+                detail = item.get("command") or item.get("tool") or item.get("changes") or ""
+                text = json.dumps(detail, sort_keys=True) if not isinstance(detail, str) else detail
+                if len(text) > _TOOL_INPUT_CHARS:
+                    text = text[:_TOOL_INPUT_CHARS] + "…"
+                done.append(f"codex:{len(done)}")
+                calls[done[-1]] = f"{item.get('type')} {text}"
+    return [calls[tool_id] for tool_id in done]
+
+
+def failed_turn_note(tool_calls: list[str]) -> str:
+    """What a conversation replacing an overflowed one is told about the turn.
+
+    The message is re-sent after this, so the note's job is the part the
+    message cannot say: what the failed attempt already did.
+    """
+    lines = [
+        "<failed-turn>",
+        "The previous conversation ran out of context while answering the "
+        "message that follows, so it was replaced by this one and the "
+        "message re-sent.",
+    ]
+    if tool_calls:
+        lines.append(
+            "These tool calls from that attempt already ran. They are done; "
+            "do not run them again:"
+        )
+        lines.extend(f"- {call} (done)" for call in tool_calls)
+    else:
+        lines.append("That attempt ran no tool calls to completion.")
+    lines.append("</failed-turn>")
+    return "\n".join(lines)
+
+
+def _notice_event(text: str) -> dict:
+    """A notice to the operator, shaped as assistant text every surface shows."""
+    return {
+        "type": "assistant",
+        "notice": True,
+        "message": {"role": "assistant", "content": [{"type": "text", "text": text}]},
+    }
 
 
 def _public_session_row(row) -> dict:
@@ -430,8 +570,14 @@ class SessionManager:
         # three stay null until a mind reports, and null renders as unknown:
         # a zero here draws a conversation at 138k as having all its room
         # left, which is the one wrong answer that looks reassuring.
+        # How the count was taken (the provider's own `usage`, or the
+        # harness's estimate), whether the transcript holds images, and the
+        # model the measured turn ran on. The image flag decides whether a
+        # switch to a text-only model can resume or has to hand over.
         for column in ("context_tokens INTEGER", "context_threshold INTEGER",
-                       "context_window INTEGER", "context_observed_at REAL"):
+                       "context_window INTEGER", "context_observed_at REAL",
+                       "context_kind TEXT", "context_has_images INTEGER",
+                       "context_model TEXT"):
             try:
                 await self._db.execute(f"ALTER TABLE sessions ADD COLUMN {column}")
                 await self._db.commit()
@@ -441,6 +587,17 @@ class SessionManager:
         # model's own default. A property of the conversation like its model:
         # every spawn reads it off the row, so a restart or a rotation cannot
         # quietly drop it back to the default.
+        # A message owed a re-send after its turn overflowed the window, on
+        # the conversation that replaced the one it overflowed. On the row
+        # rather than in memory so a gateway restart between the rotation and
+        # the re-send does not lose the message; the dispatch stamp is what
+        # keeps a restart mid-re-send from sending it a second time.
+        for column in ("resend_content TEXT", "resend_dispatched_at REAL"):
+            try:
+                await self._db.execute(f"ALTER TABLE sessions ADD COLUMN {column}")
+                await self._db.commit()
+            except Exception:
+                pass  # Column already exists
         try:
             await self._db.execute("ALTER TABLE sessions ADD COLUMN effort TEXT")
             await self._db.commit()
@@ -558,8 +715,20 @@ class SessionManager:
         *,
         mind_id: str,
         rotated_from: str | None = None,
+        carry_forward: str | None = None,
+        effort: str | None = None,
+        system_prompt_blocks: str | None = None,
     ) -> dict:
-        """Create a new session, spawn process, return session info."""
+        """Create a new session, spawn process, return session info.
+
+        ``carry_forward`` is a handover the new conversation opens on: stored
+        against the conversation id minted here, so the spawn below — and any
+        respawn until a turn lands — delivers it as the opening user turn.
+        ``effort`` overrides the one a successor would inherit, for a
+        successor on a different model whose effort was already checked
+        against it. ``system_prompt_blocks`` saves recomposing a prompt the
+        caller has just composed to size the handover around.
+        """
         # The mind's preferred model lives in broker.minds (set at registration
         # from each mind's own config). The caller can override per-session,
         # but absent that, the mind picks. No comms-wide silent fallback —
@@ -612,12 +781,17 @@ class SessionManager:
                     inherited_effort = parent.get("effort")
                 if parent.get("harness"):
                     harness = parent["harness"]
+        if effort is not None:
+            inherited_effort = effort or None
 
         await self._db.execute(
-            """INSERT INTO sessions (id, owner_type, owner_ref, model, claude_sid, created_at, last_active, status, mind_id, rotated_from, name, color, effort, harness)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO sessions (id, owner_type, owner_ref, model, claude_sid, created_at, last_active, status, mind_id, rotated_from, name, color, effort, harness,
+                                     carry_forward, carry_forward_sid, carry_forward_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (session_id, owner_type, owner_ref, model, claude_sid, now, now, mind_id, rotated_from,
-             inherited_name, inherited_color, inherited_effort, harness or None),
+             inherited_name, inherited_color, inherited_effort, harness or None,
+             carry_forward or None, claude_sid if carry_forward else None,
+             now if carry_forward else None),
         )
         await self._db.execute(
             """INSERT OR REPLACE INTO active_sessions (client_type, client_ref, session_id)
@@ -629,12 +803,15 @@ class SessionManager:
         # Graph is authoritative; MIND.md soul_seed is one-time bootstrap only
         soul_file = None
 
-        system_prompt_blocks = await bootstrap_loader.compose_prompt_blocks(
-            mind_id=mind_id,
-            mind_name=mind_name,
-            client_ref=client_ref,
-            db=self._db,
-        )
+        if system_prompt_blocks is None:
+            system_prompt_blocks = await bootstrap_loader.compose_prompt_blocks(
+                mind_id=mind_id,
+                mind_name=mind_name,
+                client_ref=client_ref,
+                db=self._db,
+                max_bytes=(await self._rotation_seed_budget(rotated_from))
+                if rotated_from else None,
+            )
 
         await self._spawn(
             session_id,
@@ -1074,23 +1251,44 @@ class SessionManager:
         tokens: int | None = None,
         threshold: int | None = None,
         window: int | None = None,
+        kind: str | None = None,
+        has_images: bool | None = None,
+        model: str | None = None,
+        conversation_id: str | None = None,
         now: float | None = None,
     ) -> dict:
         """Record how full a conversation's context is, as its mind measured it.
 
-        The mind is the only party that can. The count is summed from the
-        harness transcript's ``message.usage`` on the machine running it, and
-        the threshold is that mind's own — read off the spawn arguments
-        rather than derived from the model name, because the same model
-        caps in two different places depending on whether the conversation
-        was started with the long-context pin. A gateway recomputing either
-        would be guessing at numbers it cannot see.
+        The mind is the only party that can. The count comes from the turn's
+        own last model request on the machine running it — the provider's
+        figure when it gave one (``kind`` "usage"), the harness's estimate
+        when it did not ("estimated") — and the threshold is the mind's
+        percentage of the window of the model that turn ran on. A gateway
+        recomputing either would be guessing at numbers it cannot see.
 
         Fields arrive independently and only what is given is written: a
         reporter that knows the count but not the window must not blank a
         window some other reporter established.
+
+        ``conversation_id`` names the conversation measured. A report for one
+        this row no longer runs — a Stop hook finishing after a switch or a
+        rotation replaced it — is dropped: its count belongs to a transcript
+        left behind, and written here it would read as the fresh
+        conversation already being that full.
         """
         moment = time.time() if now is None else now
+        if conversation_id:
+            row = await self._get_row(session_id)
+            if not row:
+                return {"ok": False, "error": "session not found"}
+            current = {row.get("claude_sid"), row.get("harness_sid")} - {None, ""}
+            if current and conversation_id not in current:
+                log.info(
+                    "dropping context report for replaced conversation %s on session %s",
+                    conversation_id, session_id,
+                )
+                return {"ok": False, "error": "stale conversation",
+                        "session_id": session_id}
         updates: list[str] = []
         params: list[Any] = []
         for column, value in (
@@ -1102,6 +1300,15 @@ class SessionManager:
                 continue
             updates.append(f"{column} = ?")
             params.append(int(value))
+        if kind:
+            updates.append("context_kind = ?")
+            params.append(str(kind))
+        if has_images is not None:
+            updates.append("context_has_images = ?")
+            params.append(1 if has_images else 0)
+        if model:
+            updates.append("context_model = ?")
+            params.append(str(model))
         if not updates:
             return {"ok": False, "error": "nothing to record"}
         updates.append("context_observed_at = ?")
@@ -1118,10 +1325,7 @@ class SessionManager:
         self,
         client_type: str,
         client_ref: str,
-        *,
-        tokens: int | None = None,
-        threshold: int | None = None,
-        window: int | None = None,
+        **figures: Any,
     ) -> dict:
         """As `report_context`, addressed the way a mind's hook can address it.
 
@@ -1134,9 +1338,7 @@ class SessionManager:
         active = await self.get_active_session(client_type, client_ref)
         if not active:
             return {"ok": False, "error": "no active session"}
-        return await self.report_context(
-            active["id"], tokens=tokens, threshold=threshold, window=window
-        )
+        return await self.report_context(active["id"], **figures)
 
     async def clear_context(self, session_id: str) -> None:
         """Forget how full this conversation was — it is a different one now.
@@ -1149,22 +1351,50 @@ class SessionManager:
         """
         await self._db.execute(
             "UPDATE sessions SET context_tokens = NULL, context_threshold = NULL, "
-            "context_observed_at = NULL WHERE id = ?",
+            "context_observed_at = NULL, context_kind = NULL, "
+            "context_has_images = NULL, context_model = NULL WHERE id = ?",
             (session_id,),
         )
         await self._db.commit()
 
+    @staticmethod
+    def _context_reading(row: Any, moment: float) -> dict:
+        """A row's context figures as the dashboard reads them."""
+        observed_at = row["context_observed_at"]
+        has_images = row["context_has_images"]
+        return {
+            "tokens": row["context_tokens"],
+            "threshold": row["context_threshold"],
+            "window": row["context_window"],
+            "kind": row["context_kind"],
+            "has_images": None if has_images is None else bool(has_images),
+            "model": row["context_model"],
+            "observed_at": observed_at,
+            # The age is what stops a per-turn measurement being read as a
+            # live one. It is never zero-filled: a conversation whose mind has
+            # never reported has no count, which is a different claim from a
+            # count of nothing.
+            "age_seconds": (moment - observed_at) if observed_at else None,
+        }
+
     async def live_dashboard(self, now: float | None = None) -> dict:
-        """Every conversation producing right now, with its context figures.
+        """Every conversation producing right now, with its context figures,
+        and every other open conversation with the figures it last reported.
 
         The feed knows what is live; the table knows how full each one is.
         Joining them here rather than in the console keeps the console from
         needing a second round trip per column, and keeps "which sessions
         are generating" answered by the only process that can see it.
+
+        A conversation that is not producing is still somewhere between
+        empty and its threshold, and how close is the question the operator
+        asks before typing into it — so the idle ones come back too, under
+        their own key, read from the table alone.
         """
         moment = time.time() if now is None else now
         live = self.dashboard.live(now=moment)
         rows = []
+        live_ids: set[str] = set()
         for entry in live:
             row = await self._get_row(entry["session_id"])
             if not row:
@@ -1174,7 +1404,7 @@ class SessionManager:
                 # carrying it too.
                 self.dashboard.forget(entry["session_id"])
                 continue
-            observed_at = row["context_observed_at"]
+            live_ids.add(row["id"])
             rows.append(
                 {
                     **entry,
@@ -1182,21 +1412,34 @@ class SessionManager:
                     "model": row["model"],
                     "summary": row["summary"],
                     "owner_type": row["owner_type"],
-                    "context": {
-                        "tokens": row["context_tokens"],
-                        "threshold": row["context_threshold"],
-                        "window": row["context_window"],
-                        "observed_at": observed_at,
-                        # The age is what stops a per-turn measurement being
-                        # read as a live one. It is never zero-filled: a
-                        # conversation whose mind has never reported has no
-                        # count, which is a different claim from a count of
-                        # nothing.
-                        "age_seconds": (moment - observed_at) if observed_at else None,
-                    },
+                    "context": self._context_reading(row, moment),
                 }
             )
-        return {"sessions": rows, "observed_at": moment}
+        # Open means bound to a surface and neither closed nor suspended: a
+        # retired row is a conversation nobody can type into any more.
+        cursor = await self._db.execute(
+            "SELECT s.* FROM sessions s WHERE s.status NOT IN ('closed', 'suspended') "
+            "AND EXISTS (SELECT 1 FROM active_sessions a WHERE a.session_id = s.id) "
+            "ORDER BY s.last_active DESC"
+        )
+        idle = []
+        for row in await cursor.fetchall():
+            if row["id"] in live_ids:
+                continue
+            idle.append(
+                {
+                    "session_id": row["id"],
+                    "generating": False,
+                    "mind_id": row["mind_id"],
+                    "model": row["model"],
+                    "summary": row["summary"],
+                    "name": row["name"],
+                    "owner_type": row["owner_type"],
+                    "last_active": row["last_active"],
+                    "context": self._context_reading(row, moment),
+                }
+            )
+        return {"sessions": rows, "idle": idle, "observed_at": moment}
 
     async def record_turn(
         self, client_type: str, client_ref: str, role: str, content: str,
@@ -1386,6 +1629,7 @@ class SessionManager:
             mind_name=mind_name,
             client_ref=client_ref,
             db=self._db,
+            max_bytes=await self._rotation_seed_budget(session_id),
         )
 
         new_claude_sid = str(uuid.uuid4())
@@ -1613,13 +1857,15 @@ class SessionManager:
         await self.kill_session(old_id, rotated_to=new["id"])
         return new["id"]
 
-    async def _forward_to_session(self, session_id: str, content: str, images: list[dict] | None):
+    async def _forward_to_session(
+        self, session_id: str, content: str, images: list[dict] | None, **kwargs: Any,
+    ):
         """Re-dispatch a turn to another session, yielding its events.
 
         A thin seam over ``send_message`` so the armed-rotation redirect in
         ``send_message`` is a single call (and independently testable).
         """
-        async for event in self.send_message(session_id, content, images=images):
+        async for event in self.send_message(session_id, content, images=images, **kwargs):
             yield event
 
     async def stream_session_events(self, session_id: str):
@@ -1945,9 +2191,32 @@ class SessionManager:
     # ------------------------------------------------------------------
     # Messaging
     # ------------------------------------------------------------------
-    async def send_message(self, session_id: str, content: str, images: list[dict] | None = None):
-        """Send a message and yield NDJSON response events."""
+    async def send_message(
+        self,
+        session_id: str,
+        content: str,
+        images: list[dict] | None = None,
+        *,
+        goal_rounds: int | None = None,
+        resend: bool = False,
+    ):
+        """Send a message and yield NDJSON response events.
+
+        ``goal_rounds`` is passed to the mind for a dispatch that asks for a
+        goal. ``resend`` marks this turn as the one re-send a message gets
+        after its turn overflowed the window: a second overflow is reported
+        and stops, rather than rotating again.
+
+        Two endings replace the conversation before the caller sees an end.
+        A turn that overflowed its model's window is rotated straight away
+        and the same message sent again on the fresh conversation, so the
+        message is not lost to a conversation that can no longer take it. A
+        goal run that stopped after a round because the conversation reached
+        its threshold is rotated and the goal dispatched again, with the
+        rounds it had left, onto the fresh one.
+        """
         lock = self._locks.setdefault(session_id, asyncio.Lock())
+        replaced: dict | None = None
         async with lock:
             session = await self._get_row(session_id)
             if not session:
@@ -2056,10 +2325,18 @@ class SessionManager:
                 },
             )
 
-            await self._db.execute(
+            ledger = await self._db.execute(
                 "INSERT INTO session_turns (session_id, role, content, created_at) VALUES (?, 'user', ?, ?)",
                 (session_id, content, time.time()),
             )
+            user_turn_rowid = ledger.lastrowid
+            if resend:
+                # Dispatched: from here a gateway restart must not send it
+                # again, since the mind may already be answering it.
+                await self._db.execute(
+                    "UPDATE sessions SET resend_dispatched_at = ? WHERE id = ?",
+                    (time.time(), session_id),
+                )
             await self._db.commit()
 
             # Route message to mind container via HTTP, stream SSE response
@@ -2075,12 +2352,16 @@ class SessionManager:
             _pinned_sid = session.get("claude_sid") or None
             _harness_sid = session.get("harness_sid") or None
             _sid_warned = False
+            _turn_events: list[dict] = []
+            body = {"content": stamped_content, "images": images}
+            if goal_rounds:
+                body["goal_rounds"] = int(goal_rounds)
             while True:
                 try:
                     async with aiohttp.ClientSession(read_bufsize=10 * 1024 * 1024) as http:
                         async with http.post(
                             f"{mind_url}/sessions/{session_id}/message",
-                            json={"content": stamped_content, "images": images},
+                            json=body,
                             headers=await self._mind_auth_headers_for_session(
                                 session_id, mind_id
                             ),
@@ -2187,6 +2468,14 @@ class SessionManager:
                                     continue
 
                                 observer_only = bool(event.pop("_observer_only", False))
+                                _turn_events.append(event)
+
+                                ending = self._replacing_ending(event, resend)
+                                if ending:
+                                    replaced = {**ending, "session": session,
+                                                "events": _turn_events,
+                                                "user_turn_rowid": user_turn_rowid}
+                                    break
 
                                 # Codex cannot adopt claude_sid. Its structured
                                 # observer event is the authoritative moment a
@@ -2275,6 +2564,14 @@ class SessionManager:
                                     )
 
                                 if event.get("type") == "result":
+                                    if resend:
+                                        # The re-send got its answer, or its
+                                        # error: either way it is not owed.
+                                        await self._db.execute(
+                                            "UPDATE sessions SET resend_content = NULL, "
+                                            "resend_dispatched_at = NULL WHERE id = ?",
+                                            (session_id,),
+                                        )
                                     if _assistant_buf:
                                         await self._db.execute(
                                             "INSERT INTO session_turns (session_id, role, content, created_at) VALUES (?, 'assistant', ?, ?)",
@@ -2319,6 +2616,177 @@ class SessionManager:
                     return
                 break  # exit retry loop on success
 
+            if replaced is not None:
+                if replaced["kind"] == "goal" and _assistant_buf:
+                    await self._db.execute(
+                        "INSERT INTO session_turns (session_id, role, content, created_at) "
+                        "VALUES (?, 'assistant', ?, ?)",
+                        (session_id, "".join(_assistant_buf), time.time()),
+                    )
+                    await self._db.commit()
+                replaced = await self._settle_replacing_ending(replaced, content)
+
+        # Outside the lock: the conversation now lives on another row, or on
+        # this one under a new conversation id, and the turn that follows
+        # takes whichever lock that is.
+        if replaced is None:
+            return
+        for notice in replaced.get("notices") or []:
+            yield notice
+        if replaced.get("forward_to"):
+            async for event in self._forward_to_session(
+                replaced["forward_to"], replaced["content"], images,
+                **replaced.get("forward_kwargs", {}),
+            ):
+                yield event
+
+    @staticmethod
+    def _replacing_ending(event: dict, resend: bool) -> dict | None:
+        """Whether this event ends the turn by needing the conversation replaced.
+
+        An overflow, on any harness, arrives as a result carrying
+        ``CONTEXT_WINDOW_EXCEEDED``; a re-sent message overflowing again is
+        its own kind, because it is reported rather than rotated a second
+        time. A goal run asking to rotate says ``rotation_needed`` and names
+        the goal with the rounds it has left; one with none left is simply
+        finished.
+        """
+        if event.get("type") != "result":
+            return None
+        if event.get("error_code") == CONTEXT_WINDOW_EXCEEDED:
+            return {"kind": "overflow_again" if resend else "overflow", "result": event}
+        outcome = event.get("stop_reason") or event.get("outcome")
+        goal = event.get("goal")
+        if outcome == ROTATION_NEEDED and isinstance(goal, dict):
+            rounds = _positive_int(goal.get("roundsLeft", goal.get("rounds_left")))
+            objective = str(goal.get("objective") or "").strip()
+            if rounds and objective:
+                return {"kind": "goal", "result": event, "objective": objective,
+                        "rounds": rounds}
+        return None
+
+    async def _settle_replacing_ending(self, replaced: dict, content: str) -> dict | None:
+        """Replace the conversation a turn ended needing replaced.
+
+        Returns what the caller yields and where it sends the turn next. Runs
+        under the old session's lock, so nothing is dispatched from here.
+        """
+        session = replaced["session"]
+        session_id = session["id"]
+        model = session["model"]
+        kind = replaced["kind"]
+        if kind in ("overflow", "overflow_again"):
+            # The failed turn never happened as far as the conversation is
+            # concerned: the message is about to be sent again, and a ledger
+            # holding it twice puts it twice into any late-turn fold.
+            await self._db.execute(
+                "DELETE FROM session_turns WHERE rowid = ?", (replaced["user_turn_rowid"],)
+            )
+            await self._db.commit()
+        if kind == "overflow_again":
+            await self._db.execute(
+                "UPDATE sessions SET resend_content = NULL, resend_dispatched_at = NULL "
+                "WHERE id = ?", (session_id,),
+            )
+            await self._db.commit()
+            row = await self._get_row(session_id) or {}
+            size = len(content.encode("utf-8")) // 4
+            threshold = row.get("context_threshold")
+            text = (
+                f"{model} ran out of room again, on a fresh conversation, so I've "
+                f"stopped rather than rotate a second time. Your message is about "
+                f"{size:,} tokens on its own"
+                + (f" and this conversation rotates at {int(threshold):,}" if threshold else "")
+                + ". Nothing more was sent."
+            )
+            log_event(log, "turn.overflow_repeated", session_id=session_id,
+                      mind_id=session["mind_id"], model=model, message_tokens=size,
+                      threshold=threshold)
+            notice = _notice_event(text)
+            await self._publish_session_event(session_id, notice)
+            failed = {**replaced["result"], "result": text}
+            await self._publish_session_event(session_id, failed)
+            return {"notices": [notice, failed]}
+
+        window = _positive_int(session.get("context_window"))
+        threshold = _positive_int(session.get("context_threshold"))
+        if kind == "overflow":
+            note = failed_turn_note(completed_tool_calls(replaced["events"]))
+            message = content
+        else:
+            note = ""
+            message = replaced["objective"]
+        try:
+            new_id = await self._replace_conversation(
+                session, model=model, effort=session.get("effort"), window=window,
+                threshold=threshold, note=note, message=message,
+            )
+        except Exception as exc:
+            log.exception("could not replace the conversation of session %s", session_id)
+            what = "ran out of room" if kind == "overflow" else "reached its threshold mid-goal"
+            notice = _notice_event(
+                f"This conversation {what} on {model} and couldn't be moved to a "
+                f"fresh one: {exc}"
+            )
+            await self._publish_session_event(session_id, notice)
+            await self._publish_session_event(session_id, replaced["result"])
+            return {"notices": [notice, replaced["result"]]}
+        if kind == "goal":
+            log_event(log, "session.goal_rotated", session_id=session_id,
+                      successor_id=new_id, mind_id=session["mind_id"],
+                      rounds_left=replaced["rounds"])
+            return {"forward_to": new_id, "content": replaced["objective"],
+                    "forward_kwargs": {"goal_rounds": replaced["rounds"]}}
+
+        # Recorded before anything is sent, so a gateway that dies in the gap
+        # still knows the message is owed (see resume_pending_resends).
+        await self._db.execute(
+            "UPDATE sessions SET resend_content = ?, resend_dispatched_at = NULL "
+            "WHERE id = ?", (content, new_id),
+        )
+        await self._db.commit()
+        tokens = session.get("context_tokens")
+        text = (
+            f"{model} ran out of room for this conversation"
+            + (f" (about {int(tokens):,} tokens)" if tokens else "")
+            + ". It's moved to a fresh conversation carrying a summary, and your "
+            "message is being sent again there."
+        )
+        log_event(log, "turn.overflow_rotated", session_id=session_id,
+                  successor_id=new_id, mind_id=session["mind_id"], model=model,
+                  tokens=tokens)
+        notice = _notice_event(text)
+        await self._publish_session_event(new_id, notice)
+        return {"notices": [notice], "forward_to": new_id, "content": content,
+                "forward_kwargs": {"resend": True}}
+
+    async def pending_resends(self) -> list[tuple[str, str]]:
+        """Messages owed a re-send that no gateway has dispatched yet."""
+        cursor = await self._db.execute(
+            "SELECT id, resend_content FROM sessions WHERE resend_content IS NOT NULL "
+            "AND resend_dispatched_at IS NULL AND status NOT IN ('closed', 'suspended')"
+        )
+        return [(row["id"], row["resend_content"]) for row in await cursor.fetchall()]
+
+    async def resume_pending_resends(self) -> int:
+        """Send every message a restart interrupted between rotation and re-send.
+
+        The surface that sent it is no longer waiting on this stream, so the
+        answer reaches it the way every observer's does — the session's event
+        stream — and the ledger. One that was already dispatched is left
+        alone: the mind may well have answered it, and a message sent twice
+        is the failure the dispatch stamp exists to prevent.
+        """
+        count = 0
+        for session_id, content in await self.pending_resends():
+            count += 1
+            try:
+                async for _event in self.send_message(session_id, content, resend=True):
+                    pass
+            except Exception:
+                log.exception("re-send for session %s failed", session_id)
+        return count
+
     # ------------------------------------------------------------------
     # Model switching
     # ------------------------------------------------------------------
@@ -2352,7 +2820,20 @@ class SessionManager:
         return lock
 
     async def switch_model(self, session_id: str, model: str) -> dict:
-        """Switch model mid-session: kill process, respawn with --resume."""
+        """Move this conversation onto another model on the same harness.
+
+        A conversation the new model can hold resumes under the same id, the
+        way it always has. One it cannot is handed over instead: resumed, it
+        would either overflow on its first turn or rotate straight away, and
+        a model that takes no images would be handed a transcript full of
+        them. "Cannot hold" is the last measured size over the new model's
+        *threshold* — the point it would rotate at, not the hard limit — and
+        a size nobody measured is never assumed to fit.
+
+        Either way the row takes the new model's window and threshold now,
+        so the dashboard and the next rotation check read the room the
+        conversation actually has rather than the room it had.
+        """
         session = await self._get_row(session_id)
         if not session:
             raise ValueError(f"Session not found: {session_id}")
@@ -2374,10 +2855,34 @@ class SessionManager:
             if effort not in effort_levels_of(offered):
                 effort = None
 
+            window = _positive_int(offered.get("context_window"))
+            percent = await self._rotation_percent(session)
+            threshold = window * percent // 100 if window and percent else None
+            why = await self._why_it_will_not_fit(session, model, offered, threshold)
+            if why:
+                new_id = await self._replace_conversation(
+                    session, model=model, effort=effort, window=window,
+                    threshold=threshold,
+                )
+                log_event(
+                    log, "session.model_handover", session_id=session_id,
+                    successor_id=new_id, mind_id=session["mind_id"],
+                    model=model, previous_model=session["model"],
+                    tokens=session.get("context_tokens"), threshold=threshold,
+                )
+                answer = await self._session_dict(new_id) or {}
+                answer["warning"] = (
+                    f"{why} — so it moved to a fresh conversation on {model}, "
+                    f"carrying a summary of this one."
+                )
+                answer["handed_over"] = True
+                return answer
+
             await self._kill_process(session_id)
             await self._db.execute(
-                "UPDATE sessions SET model = ?, effort = ?, status = 'running' WHERE id = ?",
-                (model, effort, session_id),
+                "UPDATE sessions SET model = ?, effort = ?, status = 'running', "
+                "context_window = ?, context_threshold = ? WHERE id = ?",
+                (model, effort, window, threshold, session_id),
             )
             await self._db.commit()
 
@@ -2392,6 +2897,247 @@ class SessionManager:
             )
 
         return await self._session_dict(session_id)
+
+    async def _why_it_will_not_fit(
+        self, session: dict, model: str, offered: dict, threshold: int | None,
+    ) -> str:
+        """Why ``model`` cannot take this conversation as it stands, or "".
+
+        Images first: a model that does not take them cannot read the
+        transcript at all, whatever its size. A model whose image support
+        nobody has recorded is trusted only while the conversation is not
+        known to hold any.
+        """
+        if session.get("context_has_images") and offered.get("accepts_images") is not True:
+            return f"This conversation holds images and {model} doesn't take them"
+        tokens = session.get("context_tokens")
+        if tokens is None:
+            # Nothing measured. A conversation that has had no turn has
+            # nothing to outgrow anything; one that has is never assumed to
+            # fit, since the failure that assumption buys is an overflow.
+            if not await self._had_turns(session["id"]) and not session.get("carry_forward"):
+                return ""
+            return (
+                f"This conversation's size hasn't been measured, so there's "
+                f"no telling whether {model} can hold it"
+            )
+        if threshold is None:
+            return (
+                f"There's no knowing where {model} would rotate, so there's no "
+                f"telling whether it can hold this conversation"
+            )
+        if int(tokens) > threshold:
+            return (
+                f"This conversation is about {int(tokens):,} tokens and {model} "
+                f"rotates at {threshold:,}"
+            )
+        return ""
+
+    async def _rotation_percent(self, session: dict) -> int | None:
+        """The mind's rotation threshold, as a percentage of a window.
+
+        Asked of the mind, whose ``runtime.yaml`` is the truth about it. A
+        mind that cannot answer falls back to the ratio its own last report
+        on this conversation implied; neither gives None.
+        """
+        mind_row = None
+        try:
+            mind_row = await self._get_mind_row(session["mind_id"])
+        except Exception:
+            mind_row = None
+        gateway_url = str((mind_row or {}).get("gateway_url") or "").rstrip("/")
+        if gateway_url:
+            import aiohttp
+            try:
+                async with aiohttp.ClientSession() as http:
+                    async with http.get(
+                        f"{gateway_url}/runtime/settings",
+                        headers=self._mind_admin_headers(),
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as resp:
+                        body = await resp.json() if resp.status == 200 else None
+            except Exception:
+                body = None
+            settings = body.get("settings") if isinstance(body, dict) else None
+            for entry in settings if isinstance(settings, list) else []:
+                if isinstance(entry, dict) and entry.get("key") == "rotation_threshold_percent":
+                    percent = _positive_int(entry.get("value"))
+                    if percent:
+                        return percent
+        window = _positive_int(session.get("context_window"))
+        threshold = _positive_int(session.get("context_threshold"))
+        if window and threshold:
+            return max(1, round(threshold * 100 / window))
+        return None
+
+    async def _rotation_seed_budget(self, session_id: str | None) -> int | None:
+        """The room a rotation of this conversation has for its seed, or None
+        when nothing about its model's size is known."""
+        row = await self._get_row(session_id) if session_id else None
+        if not row or not (row.get("context_threshold") or row.get("context_window")):
+            return None
+        return seed_budget_bytes(row.get("context_threshold"), row.get("context_window"))
+
+    async def _replace_conversation(
+        self,
+        session: dict,
+        *,
+        model: str,
+        effort: str | None,
+        window: int | None,
+        threshold: int | None,
+        note: str = "",
+        message: str = "",
+    ) -> str:
+        """Start a fresh conversation carrying this one forward as a handover.
+
+        The handover is the same render a harness switch uses — the mind
+        reads its own transcript and cuts it to size — sized so that it, the
+        soul beside it and ``message`` together sit under ``threshold``.
+        ``note`` goes on the end of it.
+
+        A terminal keeps its row: the pane is respawned onto the new
+        conversation in place, which is what keeps the tile, its name and its
+        ledger. A chat gets a successor row, the way a chat rotation does, so
+        a surface following ``rotated_to`` lands on it. Any rotation armed or
+        staged belonged to the conversation being replaced, and goes with it.
+
+        Returns the id of the session now carrying the conversation.
+        """
+        session_id = session["id"]
+        mind_id = session["mind_id"]
+        harness = await self.conversation_harness(session)
+        routing = await self._routing_for(session)
+        system_prompt_blocks = await self._compose_soul(mind_id, routing["client_ref"])
+        prior = await self.get_carry_forward(
+            session_id, session.get("claude_sid") or ""
+        ) or ""
+        undelivered = (
+            session.get("carry_forward_sid")
+            and session.get("carry_forward_sid") == session.get("claude_sid")
+        )
+        handover = await self._render_handover_on_mind(
+            mind_id,
+            harness=harness,
+            claude_sid=session.get("claude_sid") or "",
+            harness_sid=session.get("harness_sid") or "",
+            summary=await self._latest_session_memory(session),
+            budget_bytes=seed_budget_bytes(
+                threshold, window, system_prompt_blocks,
+                f"{note}\n\n{message}" if note else message,
+            ),
+            had_turns=not undelivered and await self._had_turns(session_id),
+            prior_handover=prior,
+            session_id=session_id,
+        )
+        if note:
+            handover = f"{handover}\n\n{note}" if handover else note
+
+        held = bool(session.get("terminal_held")) or (
+            (session.get("owner_type") or "").split(":", 1)[0] == TERMINAL_OWNER_TYPE
+        )
+        if held or not routing["client_ref"]:
+            return await self._replace_in_place(
+                session, model=model, effort=effort, window=window,
+                threshold=threshold, handover=handover, held=held,
+                system_prompt_blocks=system_prompt_blocks, routing=routing,
+            )
+
+        new = await self.create_session(
+            owner_type=routing["owner_type"],
+            owner_ref=routing["owner_ref"],
+            client_ref=routing["client_ref"],
+            model=model,
+            mind_id=mind_id,
+            rotated_from=session_id,
+            carry_forward=handover,
+            effort=effort or "",
+            system_prompt_blocks=system_prompt_blocks,
+        )
+        await self._db.execute(
+            "UPDATE sessions SET context_window = ?, context_threshold = ?, "
+            "context_observed_at = ? WHERE id = ?",
+            (window, threshold, time.time(), new["id"]),
+        )
+        await self._db.commit()
+        await self.kill_session(session_id, rotated_to=new["id"])
+        return new["id"]
+
+    async def _replace_in_place(
+        self,
+        session: dict,
+        *,
+        model: str,
+        effort: str | None,
+        window: int | None,
+        threshold: int | None,
+        handover: str,
+        held: bool,
+        system_prompt_blocks: str,
+        routing: dict,
+    ) -> str:
+        """`_replace_conversation` under the same row.
+
+        A pane is respawned onto the new conversation with the handover as
+        its opening user turn; a mind holding no live pane for it leaves the
+        row owing the handover, which the next attach asks for. A chat with
+        nowhere to bind a successor is respawned the way a harness switch
+        respawns one.
+        """
+        session_id = session["id"]
+        new_sid = str(uuid.uuid4())
+        if held:
+            try:
+                await self._db.execute(
+                    "UPDATE sessions SET model = ?, effort = ? WHERE id = ?",
+                    (model, effort, session_id),
+                )
+                await self._db.commit()
+                await self._rotate_pty_on_mind(
+                    session_id=session_id, new_claude_sid=new_sid, model=model,
+                    mind_id=session["mind_id"], user_prompt=handover,
+                    client_ref=routing["client_ref"],
+                    owner_type=session.get("owner_type"),
+                    owner_ref=session.get("owner_ref"),
+                )
+            except MindCallFailed as exc:
+                await self._db.execute(
+                    "UPDATE sessions SET model = ?, effort = ? WHERE id = ?",
+                    (session["model"], session.get("effort"), session_id),
+                )
+                await self._db.commit()
+                raise ValueError(
+                    f"Couldn't move the terminal onto {model}: {exc}"
+                ) from exc
+        else:
+            await self._kill_process(session_id)
+        now = time.time()
+        await self._db.execute(
+            "UPDATE sessions SET model = ?, effort = ?, claude_sid = ?, "
+            "harness_sid = NULL, rotation_armed = 0, carry_forward = ?, "
+            "carry_forward_sid = ?, carry_forward_at = ?, status = 'running', "
+            "last_active = ? WHERE id = ?",
+            (model, effort, new_sid, handover, new_sid, now, now, session_id),
+        )
+        await self._db.commit()
+        await self.clear_context(session_id)
+        await self._db.execute(
+            "UPDATE sessions SET context_window = ?, context_threshold = ?, "
+            "context_observed_at = ? WHERE id = ?",
+            (window, threshold, now, session_id),
+        )
+        await self._db.commit()
+        self.dashboard.forget(session_id)
+        if not held:
+            await self._spawn(
+                session_id, model,
+                autopilot=bool(session["autopilot"]),
+                resume_sid=new_sid,
+                mind_id=session["mind_id"],
+                system_prompt_blocks=system_prompt_blocks,
+                **routing,
+            )
+        return session_id
 
     # ------------------------------------------------------------------
     # Harness switching
