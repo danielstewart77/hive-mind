@@ -39,6 +39,7 @@ from minds.pty_attach import (
     seeded_pane_command,
 )
 from minds.pty_attach import teardown as teardown_pty
+from minds.harness import chat_surface
 from minds import (
     context_overflow,
     transcript,
@@ -205,6 +206,7 @@ async def _spawn_proc(
     owner_ref: str = "",
     effort: str | None = None,
     extra_env: dict[str, str] | None = None,
+    surface: str = "",
 ) -> asyncio.subprocess.Process:
     blocks = system_prompt_blocks or ""
     if blocks and surface_prompt:
@@ -248,6 +250,10 @@ async def _spawn_proc(
         env["HIVEMIND_OWNER_TYPE"] = owner_type
     if owner_ref:
         env["HIVEMIND_OWNER_REF"] = owner_ref
+    # Set, or cleared: never one inherited from the container's own env.
+    env.pop("HIVE_SURFACE", None)
+    if surface:
+        env["HIVE_SURFACE"] = surface
     env.update(extra_env or {})
 
     proc = await asyncio.create_subprocess_exec(
@@ -550,6 +556,7 @@ async def start_session(body: dict) -> Any:
             owner_ref=owner_ref,
             effort=body.get("effort") or None,
             extra_env=body.get("conversation_env") or None,
+            surface=chat_surface(body),
         )
         session = {
             "proc": proc,
