@@ -22,6 +22,8 @@ from zoneinfo import ZoneInfo
 import aiosqlite
 
 from comms.dashboard import LiveFeed
+from fastapi import HTTPException
+
 from comms.config import PROJECT_DIR
 from hive_logging import log_event
 
@@ -47,6 +49,20 @@ class MindRefusedCredential(MindCallFailed):
     no live terminal, or a mind offering no models. Each of those has a
     remedy, and three of them are remedies applied to the wrong machine.
     """
+
+
+class SwitchWontFit(HTTPException):
+    """A switch whose new model cannot hold even the harness's own overhead
+    and the mind's soul under its threshold.
+
+    Refused before anything is torn down, so the conversation stays where it
+    is. An HTTP 409 wherever it surfaces: the conversation is fine, the move
+    is what cannot happen.
+    """
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(status_code=409, detail=f"{reason} It stays where it is.")
 
 
 class SessionGone(ValueError):
@@ -151,6 +167,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     carry_forward TEXT,
     carry_forward_sid TEXT,
     carry_forward_at REAL,
+    carry_forward_prompt_cap INTEGER,
     context_tokens INTEGER,
     context_threshold INTEGER,
     context_window INTEGER,
@@ -158,6 +175,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     context_kind  TEXT,
     context_has_images INTEGER,
     context_model TEXT,
+    context_opening_tokens INTEGER,
+    context_opening_surface TEXT,
     resend_content TEXT,
     resend_images TEXT,
     resend_goal_rounds INTEGER,
@@ -194,6 +213,22 @@ CREATE TABLE IF NOT EXISTS session_memory (
 
 CREATE INDEX IF NOT EXISTS idx_session_memory_lookup
     ON session_memory (mind_id, client_ref, created_at DESC);
+
+-- What a harness puts in front of a conversation before any of its text:
+-- its own system prompt, tool definitions and project instructions. Learned
+-- from each conversation's first provider count against the opening it was
+-- estimated at, per mind, harness, model and surface (a pane's interactive
+-- harness and a chat process ship different prompts). A first turn's own
+-- work only ever adds to that difference, so the least seen stands.
+CREATE TABLE IF NOT EXISTS context_overhead (
+    mind_id     TEXT NOT NULL,
+    harness     TEXT NOT NULL,
+    model       TEXT NOT NULL,
+    surface     TEXT NOT NULL,
+    tokens      INTEGER NOT NULL,
+    observed_at REAL NOT NULL,
+    PRIMARY KEY (mind_id, harness, model, surface)
+);
 
 CREATE TABLE IF NOT EXISTS session_turns (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -241,8 +276,6 @@ MAX_SESSION_NAME_CHARS = 40
 # The most a handover may weigh, in bytes. The same ceiling a terminal
 # rotation's seed is trimmed to, because a handover travels the same way.
 HANDOVER_MAX_BYTES = 120_000
-# And the least, however small the window or large the soul.
-HANDOVER_MIN_BYTES = 8_000
 
 # A tile colour is a free hex value picked in the browser, and it is assigned
 # straight into a style attribute on the way back out. Validated here rather
@@ -270,27 +303,6 @@ def normalise_harness(value: str | None) -> str:
     return str(value or "").strip().lower().split("_", 1)[0]
 
 
-def handover_budget_bytes(context_window: Any, system_prompt_blocks: str = "") -> int:
-    """How much rendered transcript a handover may carry into `context_window`.
-
-    Half the window at four bytes a token, less the soul that rides beside it
-    as the system prompt, and never past the byte ceiling a single opening
-    turn can be delivered at; a window nobody measured gets the ceiling less
-    the soul. Never below the floor, or a small window would hand over
-    nothing worth having.
-    """
-    soul = len((system_prompt_blocks or "").encode("utf-8"))
-    try:
-        window = int(context_window or 0)
-    except (TypeError, ValueError):
-        window = 0
-    if window <= 0:
-        budget = HANDOVER_MAX_BYTES - soul
-    else:
-        budget = min(HANDOVER_MAX_BYTES, window * 4 // 2 - soul)
-    return max(HANDOVER_MIN_BYTES, budget)
-
-
 # The error code every adapter reports for a turn that hit its model's
 # context limit, whatever the harness or provider called it.
 CONTEXT_WINDOW_EXCEEDED = "CONTEXT_WINDOW_EXCEEDED"
@@ -300,6 +312,31 @@ ROTATION_NEEDED = "rotation_needed"
 # How many characters of opening text are taken for a token when a
 # conversation's size is estimated before its first turn has been measured.
 ESTIMATED_CHARS_PER_TOKEN = 4
+# A harness's own overhead — system prompt, tool definitions, project
+# instructions — in tokens, used until this hive has measured one for a mind,
+# harness and model. Taken from the first measured reports on record after a
+# switch that opened on an empty handover, a 33-character message and a soul
+# of 80 to 780 tokens: claude 42,280 and 42,519 (haiku 4.5), dsh 18,873 and
+# 19,237 (haiku 4.5), codex 9,335 (gpt-5.6-luna, 780 of them soul). Rounded
+# up to the next thousand after the soul; a harness not listed takes the
+# largest.
+DEFAULT_HARNESS_OVERHEAD_TOKENS = {"claude": 43_000, "dsh": 20_000, "codex": 9_000}
+# What opened a conversation: a browser pane's interactive harness, handed
+# its opening as a user turn alone, or a chat process, which also takes the
+# composed prompt.
+PANE, PROCESS = "pane", "process"
+
+
+def measured_surface(reported: str | None) -> str | None:
+    """The surface a context report measured, as overhead is keyed: a pane
+    for ``terminal`` (what every pane's harness is stamped with), a process
+    for any surface a chat process serves, and None for a report that names
+    none — or ``local``, a harness nobody here opened — which teaches
+    nothing."""
+    value = (reported or "").strip().lower()
+    if not value or value == "local":
+        return None
+    return PANE if value == "terminal" else PROCESS
 # "Leave this column as it is", where None would write NULL.
 _KEEP = object()
 # The least a seed is rendered at. A budget of nothing reads as "no budget"
@@ -320,36 +357,45 @@ def _positive_int(value: Any) -> int | None:
     return number if number > 0 else None
 
 
+def opening_room_bytes(threshold: Any, window: Any = None, overhead: int = 0) -> int | None:
+    """The bytes a fresh conversation's own text may fill, or None when
+    nothing about its model's size is known.
+
+    The room is the threshold of the model taking the conversation — or,
+    where nobody knows it, half that model's window — less what the harness
+    itself puts in front of the conversation, at four bytes a token. Never
+    below nothing.
+    """
+    room = _positive_int(threshold)
+    if not room:
+        half = (_positive_int(window) or 0) // 2
+        room = half or None
+    if room is None:
+        return None
+    return max(0, room - max(0, int(overhead or 0))) * 4
+
+
 def seed_budget_bytes(
     threshold: Any, window: Any = None, system_prompt_blocks: str = "",
-    message: str = "",
+    message: str = "", overhead: int = 0,
 ) -> int:
     """How much carried text a fresh conversation may open on.
 
-    The seed, the system prompt it rides beside and the message it opens
-    with must together sit under the threshold of the model taking the
-    conversation — a seed that fills a small model's window rotates its
-    successor on the first turn, or overflows it outright. So the room is
-    that threshold at four bytes a token, less the other two, and never past
-    the ceiling one opening turn can be delivered at. A threshold nobody
-    measured falls back to half the window, and neither known to the
-    ceiling.
+    The seed, the system prompt it rides beside, the message it opens with
+    and the harness's own overhead must together sit under the threshold of
+    the model taking the conversation — a seed that fills a small model's
+    window rotates its successor on the first turn, or overflows it
+    outright. So the seed's room is what `opening_room_bytes` leaves less the
+    other two, never past the ceiling one opening turn can be delivered at,
+    and with neither threshold nor window known, the ceiling.
     """
     fixed = len((system_prompt_blocks or "").encode("utf-8")) + len(
         (message or "").encode("utf-8")
     )
-    try:
-        room = int(threshold or 0)
-    except (TypeError, ValueError):
-        room = 0
-    if room <= 0:
-        try:
-            room = int(window or 0) // 2
-        except (TypeError, ValueError):
-            room = 0
-    if room <= 0:
+    room = opening_room_bytes(threshold, window, overhead)
+    if room is None:
         return max(SEED_MIN_BYTES, HANDOVER_MAX_BYTES - fixed)
-    return max(SEED_MIN_BYTES, min(HANDOVER_MAX_BYTES, room * 4 - fixed))
+    return max(SEED_MIN_BYTES, min(HANDOVER_MAX_BYTES, room - fixed))
 
 
 def completed_tool_calls(events: list[dict]) -> list[str]:
@@ -597,7 +643,8 @@ class SessionManager:
         for column in ("context_tokens INTEGER", "context_threshold INTEGER",
                        "context_window INTEGER", "context_observed_at REAL",
                        "context_kind TEXT", "context_has_images INTEGER",
-                       "context_model TEXT"):
+                       "context_model TEXT", "context_opening_tokens INTEGER",
+                       "context_opening_surface TEXT", "carry_forward_prompt_cap INTEGER"):
             try:
                 await self._db.execute(f"ALTER TABLE sessions ADD COLUMN {column}")
                 await self._db.commit()
@@ -837,7 +884,7 @@ class SessionManager:
                 mind_name=mind_name,
                 client_ref=client_ref,
                 db=self._db,
-                max_bytes=(await self._rotation_seed_budget(rotated_from))
+                max_bytes=(await self._rotation_seed_budget(rotated_from, PROCESS))
                 if rotated_from else None,
             )
         if rotated_from:
@@ -847,6 +894,7 @@ class SessionManager:
             # that fails leaves a conversation with a size, not a blank.
             await self._open_conversation_size(
                 session_id, model, system_prompt_blocks or "",
+                mind_id=mind_id, harness=harness, surface=PROCESS,
                 threshold=inherited_threshold,
             )
 
@@ -1292,6 +1340,7 @@ class SessionManager:
         has_images: bool | None = None,
         model: str | None = None,
         conversation_id: str | None = None,
+        surface: str | None = None,
         now: float | None = None,
     ) -> dict:
         """Record how full a conversation's context is, as its mind measured it.
@@ -1314,8 +1363,8 @@ class SessionManager:
         conversation already being that full.
         """
         moment = time.time() if now is None else now
+        row = await self._get_row(session_id)
         if conversation_id:
-            row = await self._get_row(session_id)
             if not row:
                 return {"ok": False, "error": "session not found"}
             current = {row.get("claude_sid"), row.get("harness_sid")} - {None, ""}
@@ -1379,6 +1428,15 @@ class SessionManager:
         if not updates:
             return {"ok": False, "error": "nothing to record"}
         updates.append("context_observed_at = ?")
+        # Only a provider count naming the conversation now on the row: one
+        # naming none may be a straggler from the conversation it replaced.
+        teaches = tokens is not None and kind == "usage" and bool(conversation_id)
+        if teaches:
+            # The first provider count is the one that can say what the
+            # harness added to the opening; it is spent once read. A
+            # harness's own estimate counts the transcript and not what the
+            # harness sent, so it leaves the opening for a count that does.
+            updates.append("context_opening_tokens = NULL")
         params.extend([moment, session_id])
         cursor = await self._db.execute(
             f"UPDATE sessions SET {', '.join(updates)} WHERE id = ?", params
@@ -1386,6 +1444,8 @@ class SessionManager:
         await self._db.commit()
         if not cursor.rowcount:
             return {"ok": False, "error": "session not found"}
+        if teaches and row:
+            await self._learn_overhead(row, tokens, surface)
         return {"ok": True, "session_id": session_id, "observed_at": moment}
 
     async def report_context_for_client(
@@ -1407,9 +1467,82 @@ class SessionManager:
             return {"ok": False, "error": "no active session"}
         return await self.report_context(active["id"], **figures)
 
+    async def harness_overhead(
+        self, mind_id: str, harness: str, model: str, surface: str = PROCESS,
+    ) -> int:
+        """What ``harness`` puts in front of a conversation of this mind's on
+        ``model`` in ``surface``, in tokens.
+
+        Learned from this hive's own reports: the exact mind, harness, model
+        and surface first; then the same mind, harness and surface under any
+        model, the least learned — every learned figure is the harness's
+        overhead plus whatever its first turn added, so the least is the
+        closest, and one heavy first turn on one model cannot spread to every
+        other; and only then the harness's default.
+        """
+        harness = normalise_harness(harness)
+        for query, args in (
+            ("SELECT tokens FROM context_overhead WHERE mind_id = ? AND harness = ? "
+             "AND model = ? AND surface = ?", (mind_id, harness, model, surface)),
+            ("SELECT MIN(tokens) AS tokens FROM context_overhead WHERE mind_id = ? "
+             "AND harness = ? AND surface = ?", (mind_id, harness, surface)),
+        ):
+            cur = await self._db.execute(query, args)
+            found = await cur.fetchone()
+            if found and found["tokens"] is not None:
+                return int(found["tokens"])
+        return DEFAULT_HARNESS_OVERHEAD_TOKENS.get(
+            harness, max(DEFAULT_HARNESS_OVERHEAD_TOKENS.values())
+        )
+
+    async def _learn_overhead(self, row: dict, tokens: int, surface: str | None) -> None:
+        """Record what a conversation's first provider count says its harness
+        added to the opening it was estimated at.
+
+        Only from the conversation's first turn: a count taken later holds
+        everything said since. And the least difference seen stands, because
+        the first turn's own message, tool calls and reply only ever add to
+        it — a heavy first turn cannot inflate what later switches leave room
+        for, and a light one brings it down to the harness's real figure. A
+        difference of nothing or less says nothing about the harness.
+        """
+        opening = row.get("context_opening_tokens")
+        opened_on = row.get("context_opening_surface") or PROCESS
+        # Only the surface that opened the conversation can say what its
+        # harness added: a conversation opened in a process and first
+        # answered in a pane was measured on a different prompt.
+        if opening is None or measured_surface(surface) != opened_on:
+            return
+        cur = await self._db.execute(
+            "SELECT COUNT(*) FROM session_turns WHERE session_id = ? "
+            "AND role IN ('user', 'human') AND created_at >= ?",
+            (row["id"], row.get("conversation_started_at") or 0),
+        )
+        if (await cur.fetchone())[0] > 1:
+            return
+        overhead = int(tokens) - int(opening)
+        harness = normalise_harness(await self.conversation_harness(row))
+        # Keyed by the row's model, the name every lookup asks by; a report
+        # may carry the provider's longer name for the same model.
+        model = row.get("model") or ""
+        if overhead <= 0 or not harness or not model:
+            return
+        await self._db.execute(
+            "INSERT INTO context_overhead "
+            "(mind_id, harness, model, surface, tokens, observed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (mind_id, harness, model, surface) DO UPDATE SET "
+            "observed_at = CASE WHEN excluded.tokens < tokens "
+            "THEN excluded.observed_at ELSE observed_at END, "
+            "tokens = MIN(tokens, excluded.tokens)",
+            (row["mind_id"], harness, model, opened_on, overhead, time.time()),
+        )
+        await self._db.commit()
+
     async def _open_conversation_size(
         self, session_id: str, model: str, *opened_with: str,
-        threshold: int | None, window: Any = _KEEP,
+        mind_id: str, harness: str, surface: str, threshold: int | None,
+        window: Any = _KEEP, prompt_cap: int | None = None,
     ) -> None:
         """Start a new conversation's figures at the size of what it opened on.
 
@@ -1422,16 +1555,28 @@ class SessionManager:
         here: characters over four, marked as an estimate, which the first
         real report replaces.
 
+        The harness's own overhead is part of it: the conversation's first
+        measurement counts it, so an estimate without it would read as room
+        the conversation does not have. The opening's own size is kept
+        beside it, so that first measurement can say what the overhead was.
+
         One statement, so nothing ever reads the row between the old figure
         going and the new one arriving. ``threshold`` is the room of the
         model now running it; ``window`` is left as it stands unless given.
+        ``prompt_cap`` is the most the composed prompt may weigh when a
+        respawn recomposes it beside the same carry-forward.
         """
-        tokens = sum(len(text or "") for text in opened_with) // ESTIMATED_CHARS_PER_TOKEN
+        opening = sum(len(text or "") for text in opened_with) // ESTIMATED_CHARS_PER_TOKEN
+        tokens = opening + await self.harness_overhead(mind_id, harness, model, surface)
         columns = (
             "context_tokens = ?, context_kind = 'estimated', context_model = ?, "
-            "context_has_images = 0, context_observed_at = ?, context_threshold = ?"
+            "context_has_images = 0, context_observed_at = ?, context_threshold = ?, "
+            "context_opening_tokens = ?, context_opening_surface = ?, "
+            "carry_forward_prompt_cap = ?"
         )
-        params: list[Any] = [tokens, model, time.time(), threshold]
+        params: list[Any] = [
+            tokens, model, time.time(), threshold, opening, surface, prompt_cap,
+        ]
         if window is not _KEEP:
             columns += ", context_window = ?"
             params.append(window)
@@ -1732,7 +1877,7 @@ class SessionManager:
             mind_name=mind_name,
             client_ref=client_ref,
             db=self._db,
-            max_bytes=await self._rotation_seed_budget(session_id),
+            max_bytes=await self._rotation_seed_budget(session_id, PANE),
         )
 
         new_claude_sid = str(uuid.uuid4())
@@ -1861,7 +2006,8 @@ class SessionManager:
         # The model is the same one, so the point it rotates at still is.
         await self._open_conversation_size(
             session_id, active["model"], delivered,
-            threshold=(row or {}).get("context_threshold"),
+            mind_id=active["mind_id"], harness=await self.conversation_harness(row or active),
+            surface=PANE, threshold=(row or {}).get("context_threshold"),
         )
         self.dashboard.forget(session_id)
         # The pane was respawned, so the tile's screen and scrollback went
@@ -2823,10 +2969,8 @@ class SessionManager:
         session_id = session["id"]
         model = session["model"]
         kind = replaced["kind"]
-        if kind in ("overflow", "overflow_again"):
-            # The failed turn never happened as far as the conversation is
-            # concerned: the message is about to be sent again, and a ledger
-            # holding it twice puts it twice into any late-turn fold.
+        if kind == "overflow_again":
+            # Not sent again, and not answered: the turn never happened.
             await self._db.execute(
                 "DELETE FROM session_turns WHERE rowid = ?", (replaced["user_turn_rowid"],)
             )
@@ -2885,13 +3029,24 @@ class SessionManager:
         except Exception as exc:
             log.exception("could not replace the conversation of session %s", session_id)
             what = "ran out of room" if kind == "overflow" else "reached its threshold mid-goal"
+            why = exc.reason if isinstance(exc, SwitchWontFit) else str(exc)
             notice = _notice_event(
                 f"This conversation {what} on {model} and couldn't be moved to a "
-                f"fresh one: {exc}"
+                f"fresh one: {why}"
             )
             await self._publish_session_event(session_id, notice)
             await self._publish_session_event(session_id, replaced["result"])
             return {"notices": [notice, replaced["result"]]}
+        if kind == "overflow":
+            # The failed turn never happened as far as the conversation is
+            # concerned: the message is about to be sent again, and a ledger
+            # holding it twice puts it twice into any late-turn fold. Taken
+            # out only now the fresh conversation exists; a replacement that
+            # failed leaves the message on record where it was typed.
+            await self._db.execute(
+                "DELETE FROM session_turns WHERE rowid = ?", (replaced["user_turn_rowid"],)
+            )
+            await self._db.commit()
         if kind == "goal":
             log_event(log, "session.goal_rotated", session_id=session_id,
                       mind_id=session["mind_id"], rounds_left=replaced["rounds"])
@@ -3143,13 +3298,74 @@ class SessionManager:
             return max(1, round(threshold * 100 / window))
         return None
 
-    async def _rotation_seed_budget(self, session_id: str | None) -> int | None:
+    async def _rotation_seed_budget(
+        self, session_id: str | None, surface: str = PROCESS,
+    ) -> int | None:
         """The room a rotation of this conversation has for its seed, or None
-        when nothing about its model's size is known."""
+        when nothing about its model's size is known. The harness's own
+        overhead sits under the threshold beside it."""
         row = await self._get_row(session_id) if session_id else None
         if not row or not (row.get("context_threshold") or row.get("context_window")):
             return None
-        return seed_budget_bytes(row.get("context_threshold"), row.get("context_window"))
+        overhead = await self.harness_overhead(
+            row["mind_id"], await self.conversation_harness(row), row.get("model") or "",
+            surface,
+        )
+        return seed_budget_bytes(
+            row.get("context_threshold"), row.get("context_window"), overhead=overhead,
+        )
+
+    async def _plan_opening(
+        self, *, mind_id: str, client_ref: str | None, harness: str, model: str,
+        threshold: int | None, window: int | None, held: bool, message: str = "",
+    ) -> tuple[str, int]:
+        """Compose the prompt and size the handover a conversation about to
+        open on ``model`` will carry, or refuse the move.
+
+        The room is the new model's threshold (half its window where nobody
+        knows the threshold) less the harness's own overhead and the message
+        the conversation opens with. The handover is always sized as if the
+        composed prompt rides beside it, a pane's included: a pane can be
+        gone by the time it lands, or adopted by a chat surface later, and
+        either way a process opens on both. The prompt is trimmed — session
+        memory, then recent memory — to at most half the room; the soul is
+        never trimmed. The handover has whatever the prompt leaves.
+
+        A model with no room for the harness and the soul beside the least
+        handover worth sending is refused with ``SwitchWontFit`` before
+        anything is torn down. A conversation a pane holds is sized against
+        the larger of the pane's and the process's overhead. With nothing
+        about the model's size known, the prompt is whole and the handover
+        has the ceiling less it.
+
+        Returns the prompt and the handover's byte budget.
+        """
+        overhead = await self.harness_overhead(mind_id, harness, model, PROCESS)
+        if held:
+            overhead = max(overhead, await self.harness_overhead(mind_id, harness, model, PANE))
+        room = opening_room_bytes(threshold, window, overhead)
+        fixed = len((message or "").encode("utf-8"))
+        available = None if room is None else room - fixed
+        prompt = await self._compose_soul(
+            mind_id, client_ref,
+            max_bytes=None if available is None else max(0, available // 2),
+        )
+        carried = len(prompt.encode("utf-8"))
+        if available is None:
+            return prompt, max(SEED_MIN_BYTES, HANDOVER_MAX_BYTES - carried - fixed)
+        budget = available - carried
+        if budget < SEED_MIN_BYTES:
+            limit = (
+                f"rotates at {int(threshold):,} tokens" if _positive_int(threshold)
+                else f"has room for about {(_positive_int(window) or 0) // 2:,} tokens"
+            )
+            raise SwitchWontFit(
+                f"{model} can't take this conversation: it {limit}, {harness} "
+                f"puts about {overhead:,} in front of it, and the soul alone is "
+                f"about {carried // ESTIMATED_CHARS_PER_TOKEN:,}, which leaves no "
+                f"room for the conversation itself."
+            )
+        return prompt, min(HANDOVER_MAX_BYTES, budget)
 
     async def _replace_conversation(
         self,
@@ -3183,7 +3399,14 @@ class SessionManager:
         mind_id = session["mind_id"]
         harness = await self.conversation_harness(session)
         routing = await self._routing_for(session)
-        system_prompt_blocks = await self._compose_soul(mind_id, routing["client_ref"])
+        held = bool(session.get("terminal_held")) or (
+            (session.get("owner_type") or "").split(":", 1)[0] == TERMINAL_OWNER_TYPE
+        )
+        system_prompt_blocks, budget = await self._plan_opening(
+            mind_id=mind_id, client_ref=routing["client_ref"], harness=harness,
+            model=model, threshold=threshold, window=window, held=held,
+            message=f"{note}\n\n{message}" if note else message,
+        )
         prior = await self.get_carry_forward(
             session_id, session.get("claude_sid") or ""
         ) or ""
@@ -3197,10 +3420,7 @@ class SessionManager:
             claude_sid=session.get("claude_sid") or "",
             harness_sid=session.get("harness_sid") or "",
             summary=await self._latest_session_memory(session),
-            budget_bytes=seed_budget_bytes(
-                threshold, window, system_prompt_blocks,
-                f"{note}\n\n{message}" if note else message,
-            ),
+            budget_bytes=budget,
             had_turns=not undelivered and await self._had_turns(session_id),
             prior_handover=prior,
             session_id=session_id,
@@ -3208,9 +3428,6 @@ class SessionManager:
         if note:
             handover = f"{handover}\n\n{note}" if handover else note
 
-        held = bool(session.get("terminal_held")) or (
-            (session.get("owner_type") or "").split(":", 1)[0] == TERMINAL_OWNER_TYPE
-        )
         new_sid = str(uuid.uuid4())
         respawned_pane = False
         if held:
@@ -3253,10 +3470,15 @@ class SessionManager:
         await self._db.commit()
         # A pane is handed the handover alone; a process opens on the soul
         # beside it.
+        # The message a resend carries rides in as the first turn, so it is
+        # part of what the conversation opened on.
         await self._open_conversation_size(
             session_id, model,
             *((handover,) if respawned_pane else (system_prompt_blocks, handover)),
+            message,
+            mind_id=mind_id, harness=harness, surface=PANE if respawned_pane else PROCESS,
             window=window, threshold=threshold,
+            prompt_cap=len(system_prompt_blocks.encode("utf-8")),
         )
         self.dashboard.forget(session_id)
         await self._clear_rotation_marker_on_mind(session_id, mind_id, old_sid)
@@ -3374,13 +3596,17 @@ class SessionManager:
             threshold = window * percent // 100 if window and percent else None
 
             old_harness = await self.conversation_harness(session)
-            await self._check_skills_on_mind(mind_id)
-            # Composed before the render: the soul rides beside the handover
-            # in the same window, so the handover is sized around it.
+            # Composed before the render, and before anything else is asked
+            # of the mind: the soul and the new harness's own overhead sit
+            # beside the handover under the new model's threshold, so the
+            # handover is sized around them — and a model with no room for
+            # them is refused while nothing has moved.
             routing = await self._routing_for(session)
-            system_prompt_blocks = await self._compose_soul(
-                mind_id, routing["client_ref"]
+            system_prompt_blocks, budget = await self._plan_opening(
+                mind_id=mind_id, client_ref=routing["client_ref"], harness=target,
+                model=model, threshold=threshold, window=window, held=held,
             )
+            await self._check_skills_on_mind(mind_id)
             # Switched again before any turn: the previous handover never
             # reached a transcript, so the mind is handed it to render in
             # front of whatever the current conversation has written, and the
@@ -3399,18 +3625,7 @@ class SessionManager:
                 claude_sid=session.get("claude_sid") or "",
                 harness_sid=session.get("harness_sid") or "",
                 summary=await self._latest_session_memory(session),
-                # Sized under the new model's threshold, as a model handover
-                # is: a handover filling half the window would land over a
-                # model that rotates sooner than that. A model whose
-                # threshold nobody knows gets half its window.
-                # A pane is handed the handover alone, without the soul.
-                budget_bytes=(
-                    seed_budget_bytes(
-                        threshold, window, "" if held else system_prompt_blocks,
-                    )
-                    if threshold else
-                    handover_budget_bytes(window, "" if held else system_prompt_blocks)
-                ),
+                budget_bytes=budget,
                 had_turns=not undelivered and await self._had_turns(session_id),
                 prior_handover=prior,
                 session_id=session_id,
@@ -3422,7 +3637,9 @@ class SessionManager:
                     handover=handover, routing=routing,
                 )
                 await self._open_conversation_size(
-                    session_id, model, handover, window=window, threshold=threshold,
+                    session_id, model, handover, mind_id=mind_id, harness=target,
+                    surface=PANE, window=window, threshold=threshold,
+                    prompt_cap=len(system_prompt_blocks.encode("utf-8")),
                 )
                 self.dashboard.forget(session_id)
                 log_event(
@@ -3489,7 +3706,11 @@ class SessionManager:
                         autopilot=bool(session["autopilot"]),
                         resume_sid=session["claude_sid"],
                         harness_sid=session.get("harness_sid"),
-                        system_prompt_blocks=system_prompt_blocks,
+                        # The prompt the switch composed was trimmed for the
+                        # new model; the old one takes its own.
+                        system_prompt_blocks=await self._compose_soul(
+                            mind_id, routing["client_ref"]
+                        ),
                         mind_id=mind_id,
                         **routing,
                     )
@@ -3510,7 +3731,9 @@ class SessionManager:
             # this switch judges the new conversation, not a gap.
             await self._open_conversation_size(
                 session_id, model, system_prompt_blocks, handover,
+                mind_id=mind_id, harness=target, surface=PROCESS,
                 window=window, threshold=threshold,
+                prompt_cap=len(system_prompt_blocks.encode("utf-8")),
             )
         self.dashboard.forget(session_id)
         log.info(
@@ -3550,6 +3773,7 @@ class SessionManager:
             "UPDATE sessions SET harness = ?, model = ?, effort = ?, "
             "claude_sid = ?, harness_sid = NULL, rotation_armed = 0, "
             "carry_forward = ?, carry_forward_sid = ?, carry_forward_at = ?, "
+            "context_opening_tokens = NULL, "
             "last_active = ?, conversation_started_at = ? WHERE id = ?",
             (target, model, effort, new_claude_sid, handover or None,
              new_claude_sid if handover else None, now if handover else None,
@@ -3627,8 +3851,11 @@ class SessionManager:
             return text.strip() if isinstance(text, str) else ""
         return raw.strip()
 
-    async def _compose_soul(self, mind_id: str, client_ref: str | None) -> str:
-        """The system-prompt blocks a new harness process opens on."""
+    async def _compose_soul(
+        self, mind_id: str, client_ref: str | None, max_bytes: int | None = None,
+    ) -> str:
+        """The system-prompt blocks a new harness process opens on, trimmed
+        to ``max_bytes`` the way a rotation's successor prompt is."""
         from comms import bootstrap_loader  # noqa: PLC0415
         try:
             mind_row = await self._get_mind_row(mind_id)
@@ -3639,6 +3866,7 @@ class SessionManager:
             mind_name=(mind_row or {}).get("name") or mind_id,
             client_ref=client_ref,
             db=self._db,
+            max_bytes=max_bytes,
         )
 
     async def _had_turns(self, session_id: str) -> bool:
@@ -4129,7 +4357,17 @@ class SessionManager:
         # whichever path respawns it — a chat respawn, an activation, a retry
         # — composes one if it was not handed one.
         if opening_turn and not system_prompt_blocks:
-            system_prompt_blocks = await self._compose_soul(mind_id, client_ref)
+            # No larger than the prompt the switch that opened it composed,
+            # so a respawn never reopens the conversation on more than its
+            # handover was sized beside.
+            cap = (
+                session_row.get("carry_forward_prompt_cap")
+                if session_row and session_row.get("carry_forward_sid") == resume_sid
+                else None
+            )
+            system_prompt_blocks = await self._compose_soul(
+                mind_id, client_ref, max_bytes=cap,
+            )
         mind_url = row["gateway_url"]
         mind_name = row["name"]
         import aiohttp
