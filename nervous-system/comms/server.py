@@ -248,6 +248,8 @@ class ClientContextReportRequest(BaseModel):
     has_images: bool | None = None
     model: str | None = None
     conversation_id: str | None = None
+    # The surface the reporting harness serves (its HIVE_SURFACE).
+    surface: str | None = None
 
 
 class ContextReportRequest(BaseModel):
@@ -266,6 +268,9 @@ class ContextReportRequest(BaseModel):
     has_images: bool | None = None
     model: str | None = None
     conversation_id: str | None = None
+    # The surface the reporting harness serves (its HIVE_SURFACE):
+    # "terminal" for a pane, a chat surface's name for a process.
+    surface: str | None = None
 
 
 class SetSessionNameRequest(BaseModel):
@@ -1120,6 +1125,9 @@ async def route_command(body: CommandRequest):
         # exists to make legible.
         log.error("Command %s could not reach the mind: %s", cmd, exc)
         return {"error": str(exc)}
+    except sessions.SwitchWontFit as exc:
+        # A refused switch is an answer, not a fault: the surface shows why.
+        return {"error": exc.detail}
     except Exception:
         log.exception("Error handling command %s", cmd)
         return {"error": "Internal server error"}

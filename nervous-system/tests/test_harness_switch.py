@@ -25,7 +25,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from comms import broker
-from comms.sessions import SessionManager
+from comms.sessions import DEFAULT_HARNESS_OVERHEAD_TOKENS as OVERHEAD
+from comms.sessions import SessionManager, SwitchWontFit
 
 MIND = "11111111-1111-1111-1111-111111111111"
 MIND_URL = "http://mind.test:8420"
@@ -533,7 +534,10 @@ def test_a_switch_keeps_the_row_and_opens_the_new_harness_on_the_handover():
             assert handover["json"]["claude_sid"] == "conv-1"
             assert handover["json"]["harness_sid"] == "thread-0"
             assert handover["json"]["summary"] == "We were fixing the boiler."
-            assert handover["json"]["budget_bytes"] == 40_000 * 4 // 2 - len("SOUL-BLOCKS".encode())
+            # Half the window (no threshold is known), less the harness's own
+            # overhead and the soul beside the handover.
+            assert handover["json"]["budget_bytes"] == (
+                (40_000 // 2 - OVERHEAD["codex"]) * 4 - len("SOUL-BLOCKS".encode()))
             order = [(r["method"], r["path"]) for r in mind.requests]
             assert order.index(("POST", "/handover")) < order.index(("DELETE", "/sessions/sess-1"))
             # The mind's codex thread map forgets the old thread too.
@@ -970,15 +974,22 @@ def test_a_harness_listing_that_cannot_be_read_never_refuses_a_new_conversation(
     _run(scenario())
 
 
-def test_a_small_window_budgets_the_handover_at_the_floor():
+def test_a_switch_onto_a_model_with_no_room_for_the_harness_is_refused_and_nothing_moves():
     async def scenario():
         with tempfile.TemporaryDirectory() as tmp:
             mgr = await _manager(tmp)
-            await _seed(mgr)
+            await _seed(mgr, harness_sid="thread-0", effort="high")
+            before = await mgr._get_row("sess-1")
             mind = FakeMind()
             with mind.wired(), _soul():
-                await mgr.switch_harness("sess-1", "codex", "gpt-5.6-nano")
-            assert mind.sent("POST", "/handover")[0]["json"]["budget_bytes"] == 8_000
+                with pytest.raises(SwitchWontFit) as refused:
+                    await mgr.switch_harness("sess-1", "codex", "gpt-5.6-nano")
+            assert refused.value.status_code == 409
+            assert "gpt-5.6-nano" in refused.value.detail
+            assert await mgr._get_row("sess-1") == before
+            assert mind.kills("sess-1") == []
+            assert mind.spawns() == []
+            assert mind.sent("POST", "/handover") == []
             await _close(mgr)
 
     _run(scenario())
