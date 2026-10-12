@@ -291,21 +291,6 @@ def test_a_rotated_conversation_drops_the_replaced_ones_words():
     assert _run(scenario()) == []
 
 
-def test_clearing_the_context_forgets_the_replaced_conversations_fullness():
-    async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            await _session_row(mgr, "s1")
-            await mgr._publish_session_event("s1", TEXT_EVENT)
-            await mgr.report_context("s1", tokens=290_000, threshold=300_000, now=1.0)
-            await mgr.clear_context("s1")
-            return await mgr.live_dashboard(now=1.0)
-
-    context = _run(scenario())["sessions"][0]["context"]
-    assert context["tokens"] is None
-    assert context["threshold"] is None
-
-
 # --- a chat turn is framed, a terminal turn is not --------------------------
 
 

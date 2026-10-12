@@ -18,7 +18,9 @@ import asyncio
 import json
 import tempfile
 import time
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from fastapi.testclient import TestClient
 
@@ -248,7 +250,7 @@ def test_a_chat_over_the_new_threshold_is_handed_over_under_the_same_row():
     assert mind.spawns()[-1]["opening_turn"] == row["carry_forward"]
     assert row["model"] == "claude-sonnet-5"
     assert (row["context_window"], row["context_threshold"]) == (200_000, 200_000 * PERCENT // 100)
-    assert row["context_tokens"] is None
+    assert row["context_kind"] == "estimated"
     assert row["rotation_armed"] == 0
     assert "100,001" in result["warning"]
 
@@ -357,6 +359,9 @@ def test_a_terminal_handed_over_keeps_its_row_and_respawns_its_pane_on_the_hando
     assert row["carry_forward_sid"] == row["claude_sid"]
     assert row["rotation_armed"] == 0
     assert (row["context_window"], row["context_threshold"]) == (200_000, 100_000)
+    # The pane was handed the handover alone, and is sized by it.
+    assert row["context_tokens"] == len(rotated["user_prompt"]) // 4
+    assert row["context_kind"] == "estimated"
 
 
 class NoPane(Mind):
@@ -868,3 +873,290 @@ def test_an_idle_conversation_shows_its_size_threshold_and_window():
         42_000, 100_000, 200_000)
     assert context["kind"] == "usage"
     assert context["age_seconds"] == 30.0
+
+
+# ---------------------------------------------------------------------------
+# A conversation always knows its size: whatever starts a conversation over
+# under its row records the size of what it was opened with, as an estimate
+# ---------------------------------------------------------------------------
+
+SOUL = "<soul>" + "who I am. " * 400 + "</soul>"
+CODEX = [
+    {"name": "codex-200k", "context_window": 200_000, "accepts_images": True,
+     "effort_levels": [], "rotation_threshold_percent": 50},
+    {"name": "codex-other", "context_window": 200_000, "accepts_images": True,
+     "effort_levels": [], "rotation_threshold_percent": 50},
+    {"name": "codex-8k", "context_window": 8_000, "accepts_images": True,
+     "effort_levels": [], "rotation_threshold_percent": 50},
+    {"name": "codex-40k", "context_window": 40_000, "accepts_images": True,
+     "effort_levels": [], "rotation_threshold_percent": 30},
+]
+
+
+def _codex_mind() -> Mind:
+    mind = Mind()
+    mind.models["codex"] = [dict(row) for row in CODEX]
+    mind.transcripts["conv-1"] = "the old conversation. " * 1_000
+    return mind
+
+
+def _big_soul():
+    return patch("comms.bootstrap_loader.compose_prompt_blocks",
+                 new=AsyncMock(return_value=SOUL))
+
+
+async def _with_history(mgr) -> None:
+    """A conversation that has had turns and was measured, with a summary."""
+    await _measured(mgr, tokens=6_000, window=1_000_000, threshold=500_000)
+    await mgr._db.execute(
+        "INSERT INTO session_memory (mind_id, mind_name, client_ref, session_id, body, created_at) "
+        "VALUES (?, 'ada', '123', 'sess-1', ?, ?)",
+        (MIND, json.dumps({"carry_forward": "We were fixing the boiler."}), time.time()),
+    )
+    await mgr._db.commit()
+
+
+@pytest.mark.parametrize("in_pane", [False, True], ids=["chat", "pane"])
+def test_a_harness_switch_leaves_the_conversation_holding_an_estimate_of_what_it_opened_on(in_pane):
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr)
+            await _with_history(mgr)
+            mind = _codex_mind()
+            with mind.wired(), _big_soul():
+                if in_pane:
+                    await mgr.adopt_into_terminal("sess-1")
+                await mgr.switch_harness("sess-1", "codex", "codex-200k")
+            row = await mgr._get_row("sess-1")
+            board = await mgr.live_dashboard()
+            await _close(mgr)
+            return row, board, mind
+
+    row, board, mind = _run(scenario())
+    if in_pane:
+        # The pane is handed the handover alone, as its opening user turn.
+        opened_on = mind.sent("POST", "/sessions/sess-1/rotate-pty")[0]["json"]["user_prompt"]
+    else:
+        spawned = mind.spawns()[-1]
+        opened_on = spawned["system_prompt_blocks"] + spawned["opening_turn"]
+    assert row["context_tokens"] == len(opened_on) // 4
+    assert row["context_kind"] == "estimated"
+    assert row["context_model"] == "codex-200k"
+    assert (row["context_window"], row["context_threshold"]) == (200_000, 200_000 * 50 // 100)
+    # The dashboard draws that estimate, against the new model's room,
+    # rather than a blank.
+    shown = {s["session_id"]: s for s in board["sessions"] + board["idle"]}["sess-1"]["context"]
+    assert (shown["tokens"], shown["kind"], shown["window"]) == (
+        row["context_tokens"], "estimated", 200_000)
+
+
+def test_a_model_change_right_after_a_harness_switch_that_fits_stays_in_place():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr)
+            await _with_history(mgr)
+            mind = _codex_mind()
+            with mind.wired(), _big_soul():
+                await mgr.switch_harness("sess-1", "codex", "codex-200k")
+                first = await mgr._get_row("sess-1")
+                result = await mgr.switch_model("sess-1", "codex-other")
+            row = await mgr._get_row("sess-1")
+            await _close(mgr)
+            return first, result, row, mind
+
+    first, result, row, mind = _run(scenario())
+    assert "warning" not in result
+    assert row["model"] == "codex-other"
+    assert row["claude_sid"] == first["claude_sid"]
+    assert len(mind.sent("POST", "/handover")) == 1
+    assert row["carry_forward"] == first["carry_forward"]
+    assert mind.spawns()[-1]["resume_sid"] == first["claude_sid"]
+    assert mind.spawns()[-1]["opening_turn"] == first["carry_forward"]
+
+
+def test_a_model_change_right_after_a_harness_switch_that_does_not_fit_hands_over_by_size():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr)
+            await _with_history(mgr)
+            mind = _codex_mind()
+            with mind.wired(), _big_soul():
+                await mgr.switch_harness("sess-1", "codex", "codex-200k")
+                first = await mgr._get_row("sess-1")
+                mind.transcripts[first["claude_sid"]] = "a newer exchange"
+                result = await mgr.switch_model("sess-1", "codex-8k")
+            row = await mgr._get_row("sess-1")
+            await _close(mgr)
+            return first, result, row, mind
+
+    first, result, row, mind = _run(scenario())
+    assert first["context_tokens"] > 8_000 * 50 // 100
+    assert result["handed_over"] is True
+    assert f"about {first['context_tokens']:,} tokens" in result["warning"]
+    assert "hasn't been measured" not in result["warning"]
+    assert row["claude_sid"] not in (first["claude_sid"], "conv-1")
+    spawned = mind.spawns()[-1]
+    assert spawned["opening_turn"] == row["carry_forward"]
+    assert row["context_tokens"] == (
+        len(spawned["system_prompt_blocks"]) + len(spawned["opening_turn"])) // 4
+    assert row["context_tokens"] != first["context_tokens"]
+    assert (row["context_kind"], row["context_model"]) == ("estimated", "codex-8k")
+    assert row["context_threshold"] == 8_000 * 50 // 100
+
+
+def test_a_chat_rotations_successor_holds_an_estimate_of_its_opening_prompt():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr)
+            await _measured(mgr, tokens=90_000)
+            await mgr._db.execute(
+                "INSERT INTO session_memory (mind_id, mind_name, client_ref, session_id, body, created_at) "
+                "VALUES (?, 'ada', '123', 'sess-1', ?, ?)",
+                (MIND, json.dumps({"carry_forward": "We were fixing the boiler. " * 300}),
+                 time.time()),
+            )
+            await mgr._db.execute("UPDATE sessions SET rotation_armed = 1 WHERE id = 'sess-1'")
+            await mgr._db.commit()
+            mind = Mind()
+            with mind.wired(), \
+                    patch.object(bootstrap_loader, "_fetch_soul", return_value=SOUL), \
+                    patch.object(bootstrap_loader, "_fetch_recent_memory", return_value=""):
+                async for _ in mgr.send_message("sess-1", "hello"):
+                    pass
+            cur = await mgr._db.execute("SELECT * FROM sessions WHERE rotated_from = 'sess-1'")
+            successor = dict(await cur.fetchone())
+            await _close(mgr)
+            return successor, mind
+
+    successor, mind = _run(scenario())
+    spawned = [s for s in mind.spawns() if s["session_id"] == successor["id"]][0]
+    assert successor["context_tokens"] == len(spawned["system_prompt_blocks"]) // 4
+    assert successor["context_kind"] == "estimated"
+    assert successor["context_model"] == successor["model"]
+    # The same model, so the same room to draw the estimate against.
+    assert (successor["context_window"], successor["context_threshold"]) == (200_000, 100_000)
+
+
+def test_a_report_that_measured_nothing_leaves_the_estimate_in_place():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr)
+            await _with_history(mgr)
+            mind = _codex_mind()
+            with mind.wired(), _big_soul():
+                await mgr.switch_harness("sess-1", "codex", "codex-200k")
+            first = await mgr._get_row("sess-1")
+            await mgr.report_context("sess-1", tokens=0, kind="none",
+                                     conversation_id=first["claude_sid"])
+            row = await mgr._get_row("sess-1")
+            await _close(mgr)
+            return first, row
+
+    first, row = _run(scenario())
+    assert (row["context_tokens"], row["context_kind"]) == (first["context_tokens"], "estimated")
+
+
+@pytest.mark.parametrize("in_pane", [False, True], ids=["chat", "pane"])
+def test_a_harness_switch_onto_a_small_model_sizes_the_handover_under_its_threshold(in_pane):
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr)
+            await _with_history(mgr)
+            mind = _codex_mind()
+            with mind.wired(), _big_soul():
+                if in_pane:
+                    await mgr.adopt_into_terminal("sess-1")
+                await mgr.switch_harness("sess-1", "codex", "codex-40k")
+            await _close(mgr)
+            return mind
+
+    budget = _run(scenario()).sent("POST", "/handover")[0]["json"]["budget_bytes"]
+    # A process opens on the soul beside the handover; a pane on the handover alone.
+    soul = 0 if in_pane else len(SOUL.encode())
+    assert budget == 40_000 * 30 // 100 * 4 - soul
+
+
+def test_the_first_real_report_replaces_the_opening_estimate():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr)
+            await _with_history(mgr)
+            mind = _codex_mind()
+            with mind.wired(), _big_soul():
+                await mgr.switch_harness("sess-1", "codex", "codex-200k")
+            first = await mgr._get_row("sess-1")
+            await mgr.report_context("sess-1", tokens=first["context_tokens"] + 7_321,
+                                     kind="usage", has_images=True, model="codex-200k",
+                                     conversation_id=first["claude_sid"])
+            row = await mgr._get_row("sess-1")
+            await _close(mgr)
+            return first, row
+
+    first, row = _run(scenario())
+    assert first["context_kind"] == "estimated"
+    assert (row["context_tokens"], row["context_kind"], row["context_has_images"]) == (
+        first["context_tokens"] + 7_321, "usage", 1)
+
+
+def test_a_report_that_measured_nothing_on_a_row_with_no_size_still_records_it_as_none():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr)
+            await mgr.report_context("sess-1", tokens=0, kind="none", conversation_id="conv-1")
+            row = await mgr._get_row("sess-1")
+            await _close(mgr)
+            return row
+
+    row = _run(scenario())
+    assert (row["context_tokens"], row["context_kind"]) == (0, "none")
+    assert row["context_observed_at"] is not None
+
+
+def test_a_harness_switch_never_borrows_the_old_models_rotation_ratio():
+    """A model whose own row names no percentage has no known threshold; the
+    ratio the old model's reports implied belongs to the old model."""
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr)
+            await _measured(mgr, tokens=6_000, window=1_000_000, threshold=140_000)
+            mind = FakeMind()
+            with mind.wired(), _soul():
+                await mgr.switch_harness("sess-1", "codex", "gpt-5.6-terra")
+            row = await mgr._get_row("sess-1")
+            await _close(mgr)
+            return row, mind
+
+    row, mind = _run(scenario())
+    assert mind.sent("POST", "/handover")[0]["json"]["budget_bytes"] == (
+        40_000 * 4 // 2 - len("SOUL-BLOCKS".encode()))
+    assert (row["context_window"], row["context_threshold"]) == (40_000, None)
+
+
+def test_an_empty_conversation_switched_onto_a_model_of_unknown_room_changes_model_in_place():
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr)
+            mind = FakeMind()
+            mind.transcripts = {}
+            with mind.wired(), _soul():
+                await mgr.switch_harness("sess-1", "codex", "gpt-5.6-terra")
+                first = await mgr._get_row("sess-1")
+                result = await mgr.switch_model("sess-1", "gpt-5.6-mini")
+            row = await mgr._get_row("sess-1")
+            await _close(mgr)
+            return first, result, row
+
+    first, result, row = _run(scenario())
+    assert "warning" not in result
+    assert row["claude_sid"] == first["claude_sid"]
+    assert row["model"] == "gpt-5.6-mini"
