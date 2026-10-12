@@ -90,8 +90,14 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        await app.state.broker_db.close()
+        # Reverse of startup. The session manager's shutdown kills every
+        # live session, and each kill reads that mind's session token off
+        # the broker row to authenticate the call — so the broker DB has
+        # to outlive it. Closing the broker first makes every kill fail
+        # with "no active connection", leaving harness processes running
+        # on the minds while the gateway reports a clean stop.
         await session_mgr.shutdown()
+        await app.state.broker_db.close()
         log_event(log, "service.stopped", component="hive-comms")
 
 
