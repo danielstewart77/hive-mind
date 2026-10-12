@@ -366,6 +366,40 @@ def test_a_chat_session_runs_on_the_adapter_its_harness_names(
     assert all("row-1" not in adapter.SESSIONS for adapter in others)
 
 
+@pytest.mark.parametrize("harness", ["claude", "codex", "dsh"])
+@pytest.mark.parametrize("named,owner_type,expected", [
+    ("telegram", "api:11111111", "telegram"),
+    (None, "discord:22222222", "discord"),
+    ("terminal", "terminal:33333333", "console"),
+    (None, "web", "console"),
+    (None, "", None),
+])
+def test_a_chat_process_is_told_which_surface_it_serves(
+    equipped, proxy, monkeypatch, harness, named, owner_type, expected,
+):
+    """Its hooks read HIVE_SURFACE: the gateway learns a harness's overhead
+    only from a report naming the surface the conversation was opened in, and
+    the per-turn hooks tell the model where a message arrived. The gateway's
+    label wins; the owner type's prefix stands in for a gateway sending none.
+    A chat process is never told it is a pane, and never keeps a value the
+    container's own environment happened to carry."""
+    monkeypatch.setenv("HIVE_SURFACE", "stale-inherited")
+    proxy(DSH_WINDOWS)
+    spawner = _Spawner(harness)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawner)
+    client = TestClient(mind_server.app)
+    body = {"session_id": "row-9", "resume_sid": "conv-9", "model": "some-model",
+            "harness": harness, "client_ref": "123", "owner_type": owner_type,
+            "owner_ref": "123"}
+    if named:
+        body["surface"] = named
+
+    assert client.post("/sessions", headers=SESSION, json=body).status_code == 200
+    client.post("/sessions/row-9/message", headers=SESSION, json={"content": "hello"})
+
+    assert spawner.calls[-1]["env"].get("HIVE_SURFACE") == expected
+
+
 def test_the_handover_is_delivered_once_not_on_every_turn(equipped, proxy, monkeypatch):
     proxy({})
     spawner = _Spawner("codex")
