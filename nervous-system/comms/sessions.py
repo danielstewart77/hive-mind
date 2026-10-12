@@ -7,14 +7,12 @@ CLI subprocess via its harness module — this process never spawns one itself.
 """
 
 import asyncio
-import importlib
 import json
 import logging
 import os
 import re
 import signal
 import time
-import types
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -24,7 +22,7 @@ from zoneinfo import ZoneInfo
 import aiosqlite
 
 from comms.dashboard import LiveFeed
-from comms.config import PROJECT_DIR, config
+from comms.config import PROJECT_DIR
 from hive_logging import log_event
 
 _TRANSCRIPT_DIR = Path.home() / ".claude" / "projects" / "-usr-src-app"
@@ -299,6 +297,11 @@ CONTEXT_WINDOW_EXCEEDED = "CONTEXT_WINDOW_EXCEEDED"
 # The outcome a goal run reports when the rotation check asked it to stop
 # after a round so the conversation can be replaced under it.
 ROTATION_NEEDED = "rotation_needed"
+# How many characters of opening text are taken for a token when a
+# conversation's size is estimated before its first turn has been measured.
+ESTIMATED_CHARS_PER_TOKEN = 4
+# "Leave this column as it is", where None would write NULL.
+_KEEP = object()
 # The least a seed is rendered at. A budget of nothing reads as "no budget"
 # to the mind's renderer, which then renders at its ceiling.
 SEED_MIN_BYTES = 1_024
@@ -786,6 +789,7 @@ class SessionManager:
         # retired moments later and a read-through would inherit from a row
         # anything later cleaning up closed sessions is free to touch.
         inherited_name, inherited_color, inherited_effort = None, None, None
+        inherited_window, inherited_threshold = None, None
         # The mind's default harness is for a new conversation. A rotation
         # successor is the same conversation, so it stays on the harness its
         # parent was switched to.
@@ -798,6 +802,10 @@ class SessionManager:
                 # The effort travels with the model it was chosen for.
                 if parent.get("model") == model:
                     inherited_effort = parent.get("effort")
+                    # So does the room: the window and the point it rotates
+                    # at belong to the model, not to the conversation.
+                    inherited_window = parent.get("context_window")
+                    inherited_threshold = parent.get("context_threshold")
                 if parent.get("harness"):
                     harness = parent["harness"]
         if effort is not None:
@@ -805,12 +813,13 @@ class SessionManager:
 
         await self._db.execute(
             """INSERT INTO sessions (id, owner_type, owner_ref, model, claude_sid, created_at, last_active, status, mind_id, rotated_from, name, color, effort, harness,
-                                     carry_forward, carry_forward_sid, carry_forward_at, conversation_started_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                     carry_forward, carry_forward_sid, carry_forward_at, conversation_started_at,
+                                     context_window, context_threshold)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (session_id, owner_type, owner_ref, model, claude_sid, now, now, mind_id, rotated_from,
              inherited_name, inherited_color, inherited_effort, harness or None,
              carry_forward or None, claude_sid if carry_forward else None,
-             now if carry_forward else None, now),
+             now if carry_forward else None, now, inherited_window, inherited_threshold),
         )
         await self._db.execute(
             """INSERT OR REPLACE INTO active_sessions (client_type, client_ref, session_id)
@@ -830,6 +839,15 @@ class SessionManager:
                 db=self._db,
                 max_bytes=(await self._rotation_seed_budget(rotated_from))
                 if rotated_from else None,
+            )
+        if rotated_from:
+            # A successor opens on its composed prompt, which carries the
+            # conversation it replaces forward; that is its size until it
+            # has a reply of its own. Recorded before the spawn, so a spawn
+            # that fails leaves a conversation with a size, not a blank.
+            await self._open_conversation_size(
+                session_id, model, system_prompt_blocks or "",
+                threshold=inherited_threshold,
             )
 
         await self._spawn(
@@ -1310,6 +1328,31 @@ class SessionManager:
                         "session_id": session_id}
         updates: list[str] = []
         params: list[Any] = []
+        if kind == "none":
+            # The reporter could not read the transcript, so it measured
+            # nothing. A size already recorded — the estimate a fresh
+            # conversation opened with among them — stands, with its own age,
+            # model and images: a zero written over it would fit every model,
+            # and a fresh timestamp would make a stale figure look current.
+            # Only a row holding no size at all takes the report as before.
+            fills = (
+                "context_kind = CASE WHEN context_tokens IS NULL THEN 'none' ELSE context_kind END, "
+                "context_observed_at = CASE WHEN context_tokens IS NULL THEN ? "
+                "ELSE context_observed_at END, "
+                "context_tokens = COALESCE(context_tokens, ?)"
+            )
+            room = [(c, int(v)) for c, v in (("context_threshold", threshold),
+                                             ("context_window", window))
+                    if v is not None and int(v) > 0]
+            sets = ", ".join([fills] + [f"{c} = ?" for c, _ in room])
+            cursor = await self._db.execute(
+                f"UPDATE sessions SET {sets} WHERE id = ?",
+                (moment, int(tokens or 0), *[v for _, v in room], session_id),
+            )
+            await self._db.commit()
+            if not cursor.rowcount:
+                return {"ok": False, "error": "session not found"}
+            return {"ok": True, "session_id": session_id, "observed_at": moment}
         for column, value in (
             ("context_tokens", tokens),
             ("context_threshold", threshold),
@@ -1364,20 +1407,36 @@ class SessionManager:
             return {"ok": False, "error": "no active session"}
         return await self.report_context(active["id"], **figures)
 
-    async def clear_context(self, session_id: str) -> None:
-        """Forget how full this conversation was — it is a different one now.
+    async def _open_conversation_size(
+        self, session_id: str, model: str, *opened_with: str,
+        threshold: int | None, window: Any = _KEEP,
+    ) -> None:
+        """Start a new conversation's figures at the size of what it opened on.
 
-        A rotation replaces the conversation while keeping the session row,
-        so the stored count belongs to a transcript that no longer exists.
-        Left in place it reads as a fresh conversation already at its
-        threshold, which is the wrong direction to be wrong in: it is the
-        reading that would have somebody rotating a session that just started.
+        A conversation started over under its row — a harness switch, a model
+        handover, a rotation — is a different conversation, so the old one's
+        figures go. It has no measured size until its first reply, and a
+        size nobody knows is never assumed to fit: a model change in that
+        gap would hand a small conversation over as a summary. What it was
+        opened with is text this gateway composed, so its size is known
+        here: characters over four, marked as an estimate, which the first
+        real report replaces.
+
+        One statement, so nothing ever reads the row between the old figure
+        going and the new one arriving. ``threshold`` is the room of the
+        model now running it; ``window`` is left as it stands unless given.
         """
+        tokens = sum(len(text or "") for text in opened_with) // ESTIMATED_CHARS_PER_TOKEN
+        columns = (
+            "context_tokens = ?, context_kind = 'estimated', context_model = ?, "
+            "context_has_images = 0, context_observed_at = ?, context_threshold = ?"
+        )
+        params: list[Any] = [tokens, model, time.time(), threshold]
+        if window is not _KEEP:
+            columns += ", context_window = ?"
+            params.append(window)
         await self._db.execute(
-            "UPDATE sessions SET context_tokens = NULL, context_threshold = NULL, "
-            "context_observed_at = NULL, context_kind = NULL, "
-            "context_has_images = NULL, context_model = NULL WHERE id = ?",
-            (session_id,),
+            f"UPDATE sessions SET {columns} WHERE id = ?", (*params, session_id)
         )
         await self._db.commit()
 
@@ -1799,7 +1858,11 @@ class SessionManager:
         # feed is holding the replaced conversation's words — both would
         # render as a fresh conversation that is somehow already at its
         # rotation threshold.
-        await self.clear_context(session_id)
+        # The model is the same one, so the point it rotates at still is.
+        await self._open_conversation_size(
+            session_id, active["model"], delivered,
+            threshold=(row or {}).get("context_threshold"),
+        )
         self.dashboard.forget(session_id)
         # The pane was respawned, so the tile's screen and scrollback went
         # with it — the conversation it was showing is gone from the display
@@ -2961,6 +3024,9 @@ class SessionManager:
 
         lock = self._claim_turn_lock(session_id)
         async with lock:
+            # Read again under the lock: a switch that held it before this
+            # call took it has replaced the conversation the first read saw.
+            session = await self._get_row(session_id) or session
             offered = await self.mind_model_row(
                 session["mind_id"], model,
                 harness=await self.conversation_harness(session),
@@ -3043,6 +3109,10 @@ class SessionManager:
                 f"no telling whether {model} can hold it"
             )
         if threshold is None:
+            # Its size is the opening it was given, and with nothing in it
+            # there is nothing to carry over: it moves as it stands.
+            if not await self._had_turns(session["id"]) and not session.get("carry_forward"):
+                return ""
             return (
                 f"There's no knowing where {model} would rotate, so there's no "
                 f"telling whether it can hold this conversation"
@@ -3181,13 +3251,13 @@ class SessionManager:
             (model, effort, new_sid, handover, new_sid, now, now, now, session_id),
         )
         await self._db.commit()
-        await self.clear_context(session_id)
-        await self._db.execute(
-            "UPDATE sessions SET context_window = ?, context_threshold = ?, "
-            "context_observed_at = ? WHERE id = ?",
-            (window, threshold, now, session_id),
+        # A pane is handed the handover alone; a process opens on the soul
+        # beside it.
+        await self._open_conversation_size(
+            session_id, model,
+            *((handover,) if respawned_pane else (system_prompt_blocks, handover)),
+            window=window, threshold=threshold,
         )
-        await self._db.commit()
         self.dashboard.forget(session_id)
         await self._clear_rotation_marker_on_mind(session_id, mind_id, old_sid)
         if not respawned_pane:
@@ -3297,6 +3367,11 @@ class SessionManager:
             effort = session.get("effort")
             if effort not in effort_levels_of(offered):
                 effort = None
+            # The percentage is the new model's own. The row's ratio belongs
+            # to the model being left, which is never this one.
+            window = _positive_int(offered.get("context_window"))
+            percent = _positive_int(offered.get("rotation_threshold_percent"))
+            threshold = window * percent // 100 if window and percent else None
 
             old_harness = await self.conversation_harness(session)
             await self._check_skills_on_mind(mind_id)
@@ -3324,8 +3399,17 @@ class SessionManager:
                 claude_sid=session.get("claude_sid") or "",
                 harness_sid=session.get("harness_sid") or "",
                 summary=await self._latest_session_memory(session),
-                budget_bytes=handover_budget_bytes(
-                    offered.get("context_window"), system_prompt_blocks
+                # Sized under the new model's threshold, as a model handover
+                # is: a handover filling half the window would land over a
+                # model that rotates sooner than that. A model whose
+                # threshold nobody knows gets half its window.
+                # A pane is handed the handover alone, without the soul.
+                budget_bytes=(
+                    seed_budget_bytes(
+                        threshold, window, "" if held else system_prompt_blocks,
+                    )
+                    if threshold else
+                    handover_budget_bytes(window, "" if held else system_prompt_blocks)
                 ),
                 had_turns=not undelivered and await self._had_turns(session_id),
                 prior_handover=prior,
@@ -3337,7 +3421,9 @@ class SessionManager:
                     session, target=target, model=model, effort=effort,
                     handover=handover, routing=routing,
                 )
-                await self.clear_context(session_id)
+                await self._open_conversation_size(
+                    session_id, model, handover, window=window, threshold=threshold,
+                )
                 self.dashboard.forget(session_id)
                 log_event(
                     log, "session.harness_switched", session_id=session_id,
@@ -3417,9 +3503,15 @@ class SessionManager:
                     f"{old_harness}: {exc}"
                 ) from exc
 
-        # A different conversation under the same row: the old one's fullness
-        # and its words on the live feed belong to a transcript left behind.
-        await self.clear_context(session_id)
+            # A different conversation under the same row: the old one's
+            # fullness and its words on the live feed belong to a transcript
+            # left behind. What it holds now is what it was opened on —
+            # written before the lock goes, so a model change queued behind
+            # this switch judges the new conversation, not a gap.
+            await self._open_conversation_size(
+                session_id, model, system_prompt_blocks, handover,
+                window=window, threshold=threshold,
+            )
         self.dashboard.forget(session_id)
         log.info(
             "harness switch: session %s now on %s/%s as conversation %s",

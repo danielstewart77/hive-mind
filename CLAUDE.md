@@ -103,8 +103,11 @@ through `minds/transcript.py` — one reader per harness, one renderer — and
 returns plain text: the summary in front (at most half the budget, keeping its
 tail), prose and tool calls whole, each tool result cut to its first lines and
 marked `[trimmed]`, newest first into the byte budget, which the output never
-exceeds (half the window at four bytes a token, never past
-120,000). A block too large for what is left is cut to half the remaining room
+exceeds. The gateway sets that budget so the handover and the composed prompt
+beside it (a pane is handed the handover alone) sit under the new model's
+rotation threshold at four bytes a token — the rule a model handover follows,
+with the percentage taken from the new model's own row — or, for a model whose
+threshold nobody knows, half its window less the prompt; never past 120,000. A block too large for what is left is cut to half the remaining room
 and marked — prose keeps its tail, a tool call or result its head — and the
 walk goes on to older blocks, so a previous handover inside the transcript is
 trimmed rather than dropped. A conversation with no transcript and no turns
