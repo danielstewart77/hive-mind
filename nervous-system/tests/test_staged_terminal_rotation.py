@@ -21,6 +21,7 @@ import tempfile
 import time
 from unittest.mock import patch
 
+from comms.sessions import DEFAULT_HARNESS_OVERHEAD_TOKENS as OVERHEAD
 from comms.sessions import ROTATION_ARMED_TERMINAL, SessionManager
 
 SEED = "<soul>who you are</soul>\n<session-memory>what just happened</session-memory>"
@@ -221,6 +222,9 @@ def test_a_fired_rotation_leaves_the_new_conversation_with_an_estimate_of_what_i
             mgr = await _make_manager(tmp)
             try:
                 session_id = await _seed_terminal_session(mgr)
+                await mgr._db.execute(
+                    "UPDATE sessions SET harness = 'dsh' WHERE id = ?", (session_id,))
+                await mgr._db.commit()
                 await mgr.report_context(session_id, tokens=150_000, kind="usage",
                                          threshold=160_000, window=200_000,
                                          conversation_id="conv-old")
@@ -233,13 +237,16 @@ def test_a_fired_rotation_leaves_the_new_conversation_with_an_estimate_of_what_i
                     )
                 cur = await mgr._db.execute(
                     "SELECT context_tokens, context_kind, context_model, "
-                    "context_threshold FROM sessions "
+                    "context_threshold, context_opening_surface FROM sessions "
                     "WHERE id = ?", (session_id,),
                 )
                 row = dict(await cur.fetchone())
-                assert row["context_tokens"] == len(respawns[0]["user_prompt"]) // 4
+                assert row["context_tokens"] == (
+                    len(respawns[0]["user_prompt"]) // 4 + OVERHEAD["dsh"])
                 assert row["context_kind"] == "estimated"
                 assert row["context_model"] == "opus"
+                # Opened in the pane, so only the pane's report can teach.
+                assert row["context_opening_surface"] == "pane"
                 # Still the same model, so still the point it rotates at.
                 assert row["context_threshold"] == 160_000
             finally:

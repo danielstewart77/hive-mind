@@ -140,10 +140,43 @@ The one figure the gateway writes itself is a fresh conversation's opening
 size. Whatever starts a conversation over under a session — a harness
 switch, a model handover, a terminal rotation, a chat rotation's successor —
 opened it on text the gateway composed, so it records that text's size,
-characters over four, as `kind` "estimated" for the new model, with no
-images, before the first reply. A pane counts the handover it was handed; a
+characters over four, plus the harness's own overhead, as `kind` "estimated"
+for the new model, with no images, before the first reply. A pane counts the handover it was handed; a
 process counts the composed prompt beside it as well. The first report from
-a real turn replaces it. The old figures go and the estimate arrives in one write, so
+a real turn replaces it.
+
+The overhead is what a harness puts in front of a conversation before any of
+its text — its system prompt, tool definitions and project instructions — and
+it is learned. A conversation's first provider count (`kind` "usage") —
+from its first turn, naming the conversation now on the row, and reported
+from the surface the conversation was opened in (the hook sends its
+`HIVE_SURFACE`: `terminal` is a pane, a chat surface's name a process; a
+report naming none teaches nothing) — less the opening it was estimated at,
+a resent message included, is stored in `context_overhead` per mind,
+harness, model (the row's name for it) and surface, whose harnesses ship
+different prompts. That first turn's own work only adds to the difference, so
+the least seen stands, and a difference of nothing or less is ignored. Any
+other report leaves the opening for one that can teach. Until a mind has a
+figure for that harness and surface, the least it has under another model
+stands in, then a default per harness taken from the first measured reports
+on record after switches onto an empty handover: claude 43,000 tokens, dsh
+20,000, codex 9,000, and the largest for a harness not listed.
+
+Every opening is sized around it. The room is the model's threshold, or half
+its window where nobody knows the threshold, less the overhead (the larger of
+the pane's and the process's for a conversation a pane holds) and any message
+the conversation opens with. The composed prompt is trimmed — session memory
+first, keeping its tail, then recent memory, keeping its head; the soul is
+never trimmed — to at most half the room, and the handover has what the
+prompt leaves. That holds for a pane's handover too, though the pane is
+handed the handover alone, because a pane can be gone, or adopted by a chat
+surface, before the handover is spent. The prompt's size is stored beside
+the carry-forward (`carry_forward_prompt_cap`), and a respawn recomposes the
+prompt to no more than that. A rotation's seed is sized the same way. A
+switch or model handover onto a model with no room for the overhead and the
+soul beside the least handover worth sending is refused with 409
+(`SwitchWontFit`) before anything moves; `/command` returns its reason as the
+error, and an overflow it refuses keeps the message on the ledger. The old figures go and the estimate arrives in one write, so
 nothing reads the row between them. A report of `kind` "none" — a hook that
 could not read its transcript — measured nothing: a size already recorded
 stands with its own age, model and images, and only a row with no size at all

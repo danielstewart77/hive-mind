@@ -220,6 +220,11 @@ async def compose_prompt_blocks(
         blocks.append(soul)
 
     recent = _fetch_recent_memory(mind_id)
+    if recent and max_bytes is not None:
+        # Recent memory gives way only once session memory has nothing
+        # left to give: it keeps its head, where the strongest rows are.
+        fixed = len("\n\n".join(blocks + [""]).encode("utf-8"))
+        recent = _keep_head(recent, max_bytes - fixed)
     if recent:
         blocks.append(recent)
 
@@ -231,6 +236,20 @@ async def compose_prompt_blocks(
         blocks.append(session_memory)
 
     return "\n\n".join(blocks)
+
+
+RECENT_MEMORY_TRIMMED = "\n[less relevant recent memory trimmed to fit the model]\n</recent-memory>"
+
+
+def _keep_head(block: str, room: int) -> str:
+    """``block`` cut to its first ``room`` bytes, marked, or nothing at all."""
+    data = block.encode("utf-8")
+    if len(data) <= room:
+        return block
+    room -= len(RECENT_MEMORY_TRIMMED.encode("utf-8"))
+    if room <= 0:
+        return ""
+    return data[:room].decode("utf-8", errors="ignore") + RECENT_MEMORY_TRIMMED
 
 
 SESSION_MEMORY_TRIMMED = "<session-memory>\n[earlier carry-forward trimmed to fit the model]\n"
