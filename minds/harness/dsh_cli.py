@@ -43,6 +43,7 @@ import aiohttp
 import yaml
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from minds.harness import chat_surface
 from minds import (
     context_overflow,
     failed_turn,
@@ -798,6 +799,7 @@ async def start_session(body: dict) -> Any:
         "client_ref": client_ref,
         "owner_type": owner_type,
         "owner_ref": owner_ref,
+        "surface": chat_surface(body),
         "opening_turn": body.get("opening_turn") or "",
         "conversation_env": dict(body.get("conversation_env") or {}),
     })
@@ -1011,8 +1013,11 @@ async def _run_dsh_turn(
     env["DSH_PERMISSION_MODE"] = _permission_mode()
     if hooks_config():
         env["DSH_HOOKS_CONFIG"] = hooks_config()
+    # HIVE_SURFACE is set, or cleared: never one inherited from the
+    # container's own env.
+    env.pop("HIVE_SURFACE", None)
     for key, name in (("client_ref", "CLIENT_REF"), ("owner_type", "OWNER_TYPE"),
-                      ("owner_ref", "OWNER_REF")):
+                      ("owner_ref", "OWNER_REF"), ("surface", "HIVE_SURFACE")):
         if state.get(key):
             env[name] = state[key]
     env.update(state.get("conversation_env") or {})

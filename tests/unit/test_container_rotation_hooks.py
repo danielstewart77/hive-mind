@@ -337,3 +337,154 @@ def test_a_turn_that_failed_on_overflow_is_left_to_the_gateway(hook, tmp_path, n
              "error": "Prompt is too long"}
 
     assert check._assess(check._cfg(), event, tmp_path / "absent.jsonl") is None
+
+
+def _earlier_turn_then(current: list[dict]) -> list[dict]:
+    """A conversation with one completed turn, then ``current``."""
+    return [
+        {"type": "user", "message": {"role": "user", "content": "earlier"}},
+        {"type": "assistant", "message": {
+            "role": "assistant", "model": "glm-5", "stop_reason": "end_turn",
+            "usage": {"input_tokens": 30_000, "output_tokens": 10},
+            "content": [{"type": "text", "text": "earlier answer"}]}},
+        *current,
+    ]
+
+
+def _later(path, entries: list[dict], after: float = 0.4):
+    """A thread appending ``entries`` to the transcript ``after`` seconds on."""
+    import threading
+    import time as _time
+
+    def land():
+        _time.sleep(after)
+        with path.open("a") as fh:
+            for entry in entries:
+                fh.write(json.dumps(entry) + "\n")
+
+    thread = threading.Thread(target=land)
+    thread.start()
+    return thread
+
+
+def _final(model: str, tokens: int, stop_reason: str = "end_turn") -> dict:
+    return {"type": "assistant", "message": {
+        "role": "assistant", "model": model, "stop_reason": stop_reason,
+        "usage": {"input_tokens": tokens - 10, "output_tokens": 10},
+        "content": [{"type": "text", "text": "the answer"}]}}
+
+
+def _tool_result() -> dict:
+    return {"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t1", "content": "done"}]}}
+
+
+CLAUDE_COPIES = sorted(MINDS.glob("*/.claude/hooks/rotation_check.py"))
+_claude_copies = pytest.mark.parametrize(
+    "path",
+    [pytest.param(p, id=p.parents[2].name) for p in CLAUDE_COPIES]
+    or [pytest.param(None, marks=pytest.mark.skip(
+        reason="the minds' hooks live only on the host that runs them"))],
+)
+
+
+@pytest.fixture
+def claude_copy(hook, monkeypatch):
+    """One mind's Claude check, as a chat process runs it."""
+
+    def load(path: Path, wait: float = 5.0):
+        name = f"{path.parents[2].name}-claude"
+        monkeypatch.setitem(COPIES, name, ("claude", path))
+        check, proxy = hook(name, {"glm-5": 200_000})
+        monkeypatch.setattr(check, "REPLY_WAIT_SECONDS", wait, raising=False)
+        for var in ("HIVEMIND_GROUP_SESSION", "ROTATION_SPAWN"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("HIVEMIND_OWNER_TYPE", "telegram")
+        monkeypatch.setenv("HIVEMIND_CLIENT_REF", "chat-1")
+        return check, proxy
+
+    return load
+
+
+def _stop(check, log: Path, **event) -> None:
+    check._run({"session_id": "conv-1", "transcript_path": str(log), **event})
+
+
+@_claude_copies
+def test_a_stop_that_beats_the_reply_to_the_transcript_still_reports_its_count(
+    claude_copy, tmp_path, path,
+):
+    """Claude can fire Stop before it has written the turn's final reply, and
+    that reply carries the turn's only count. Measured without it, the
+    conversation reads as an earlier count plus everything since, an
+    estimate, when the provider's count lands a moment later."""
+    check, proxy = claude_copy(path)
+    log = _claude_transcript(tmp_path / "t.jsonl", _earlier_turn_then([
+        {"type": "user", "message": {"role": "user", "content": "hello " * 4_000}}]))
+    writer = _later(log, [_final("glm-5", 45_010)])
+    try:
+        _stop(check, log)
+    finally:
+        writer.join()
+
+    assert (proxy.reports[-1]["tokens"], proxy.reports[-1]["kind"]) == (45_010, "usage")
+
+
+@_claude_copies
+def test_a_reply_that_stopped_to_call_a_tool_is_not_the_turns_last(
+    claude_copy, tmp_path, path,
+):
+    check, proxy = claude_copy(path)
+    log = _claude_transcript(tmp_path / "t.jsonl", _earlier_turn_then([
+        {"type": "user", "message": {"role": "user", "content": "run it"}},
+        _final("glm-5", 40_000, stop_reason="tool_use")]))
+    writer = _later(log, [_tool_result(), _final("glm-5", 45_010)])
+    try:
+        _stop(check, log)
+    finally:
+        writer.join()
+
+    assert (proxy.reports[-1]["tokens"], proxy.reports[-1]["kind"]) == (45_010, "usage")
+
+
+@_claude_copies
+def test_the_wait_ends_when_the_next_message_is_typed(claude_copy, tmp_path, path):
+    """The next turn has begun, so this turn's reply is as written as it will
+    be; waiting on would measure the next turn under this one's Stop."""
+    import time as _time
+
+    check, _ = claude_copy(path, wait=5.0)
+    log = _claude_transcript(tmp_path / "t.jsonl", _earlier_turn_then([
+        {"type": "user", "message": {"role": "user", "content": "hello"}}]))
+    writer = _later(log, [{"type": "user", "message": {"role": "user", "content": "next"}}],
+                    after=0.2)
+    began = _time.monotonic()
+    try:
+        check._wait_for_reply(log, {"session_id": "conv-1"})
+    finally:
+        writer.join()
+
+    assert _time.monotonic() - began < 2.0
+
+
+@_claude_copies
+@pytest.mark.parametrize("event", [
+    {"hook_event_name": "StopFailure"}, {"stop_reason": "error"}])
+def test_a_failed_turn_is_not_waited_on_and_a_reply_that_never_lands_is_waited_on_no_longer(
+    claude_copy, tmp_path, path, event,
+):
+    import time as _time
+
+    check, _ = claude_copy(path, wait=0.5)
+    log = _claude_transcript(tmp_path / "t.jsonl", _earlier_turn_then([
+        {"type": "user", "message": {"role": "user", "content": "hello"}}]))
+
+    began = _time.monotonic()
+    check._wait_for_reply(log, {"session_id": "conv-1", **event})
+    failed = _time.monotonic() - began
+    began = _time.monotonic()
+    check._wait_for_reply(log, {"session_id": "conv-1"})
+    unanswered = _time.monotonic() - began
+
+    assert failed < 0.2
+    assert 0.5 <= unanswered < 2.0

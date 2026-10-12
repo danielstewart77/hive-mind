@@ -44,6 +44,7 @@ from minds.pty_attach import (
     seeded_pane_command,
 )
 from minds.pty_attach import teardown as teardown_pty
+from minds.harness import chat_surface
 from minds import (
     context_overflow,
     failed_turn,
@@ -257,6 +258,7 @@ async def start_session(body: dict) -> Any:
             "client_ref": client_ref,
             "owner_type": owner_type,
             "owner_ref": owner_ref,
+            "surface": chat_surface(body),
             "opening_turn": body.get("opening_turn") or "",
             "conversation_env": dict(body.get("conversation_env") or {}),
         }
@@ -687,6 +689,10 @@ async def _run_codex_turn(sid: str, content: str, images: list[dict] | None) -> 
         env["OWNER_TYPE"] = state["owner_type"]
     if state.get("owner_ref"):
         env["OWNER_REF"] = state["owner_ref"]
+    # Set, or cleared: never one inherited from the container's own env.
+    env.pop("HIVE_SURFACE", None)
+    if state.get("surface"):
+        env["HIVE_SURFACE"] = state["surface"]
     env.update(state.get("conversation_env") or {})
 
     proc = await asyncio.create_subprocess_exec(
