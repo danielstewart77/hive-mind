@@ -211,3 +211,38 @@ def test_a_chat_surface_adopting_a_staged_terminal_does_not_retire_its_session()
                 await mgr.shutdown()
 
     _run(scenario())
+
+
+def test_a_fired_rotation_leaves_the_new_conversation_with_an_estimate_of_what_it_was_handed() -> None:
+    """The pane's new conversation is sized from the opening turn it was
+    handed — the summary and the typed message — before its first reply."""
+    async def scenario() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _make_manager(tmp)
+            try:
+                session_id = await _seed_terminal_session(mgr)
+                await mgr.report_context(session_id, tokens=150_000, kind="usage",
+                                         threshold=160_000, window=200_000,
+                                         conversation_id="conv-old")
+                with _a_mind_with_a_live_pane():
+                    await mgr.arm_rotation("web", session_id, surface="terminal")
+                with _a_mind_with_a_live_pane() as respawns:
+                    await mgr.fire_rotation(
+                        "web", session_id,
+                        claude_sid="conv-old", prompt="what were we doing? " * 50,
+                    )
+                cur = await mgr._db.execute(
+                    "SELECT context_tokens, context_kind, context_model, "
+                    "context_threshold FROM sessions "
+                    "WHERE id = ?", (session_id,),
+                )
+                row = dict(await cur.fetchone())
+                assert row["context_tokens"] == len(respawns[0]["user_prompt"]) // 4
+                assert row["context_kind"] == "estimated"
+                assert row["context_model"] == "opus"
+                # Still the same model, so still the point it rotates at.
+                assert row["context_threshold"] == 160_000
+            finally:
+                await mgr.shutdown()
+
+    _run(scenario())
