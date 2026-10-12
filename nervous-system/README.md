@@ -128,13 +128,26 @@ token is held by every surface bot.
 
 `sessions` carries `context_tokens`, `context_threshold`, `context_window`,
 `context_kind`, `context_has_images`, `context_model` and
-`context_observed_at`, all nullable and all written by the reporting Mind.
-Nothing on this side can compute them: the count is the turn's last model
-request on the machine running it — the provider's own figure (`kind`
-"usage") or the harness's estimate ("estimated") — and the threshold is the
-window of the model the turn ran on times that model's
+`context_observed_at`, all nullable and written by the reporting Mind once a
+turn has run. Nothing on this side can measure a turn: the count is the
+turn's last model request on the machine running it — the provider's own
+figure (`kind` "usage") or the harness's estimate ("estimated") — and the
+threshold is the window of the model the turn ran on times that model's
 `rotation_threshold_percent`, both written on the inference proxy's row for
 the model.
+
+The one figure the gateway writes itself is a fresh conversation's opening
+size. Whatever starts a conversation over under a session — a harness
+switch, a model handover, a terminal rotation, a chat rotation's successor —
+opened it on text the gateway composed, so it records that text's size,
+characters over four, as `kind` "estimated" for the new model, with no
+images, before the first reply. A pane counts the handover it was handed; a
+process counts the composed prompt beside it as well. The first report from
+a real turn replaces it. The old figures go and the estimate arrives in one write, so
+nothing reads the row between them. A report of `kind` "none" — a hook that
+could not read its transcript — measured nothing: a size already recorded
+stands with its own age, model and images, and only a row with no size at all
+records it.
 
 Null stays null. A zero draws a conversation sitting at 138k as having its
 whole window free, which is the one wrong answer that looks like good news.
@@ -147,7 +160,10 @@ which conversation it is bound to, not which row the gateway filed it under.
 A report naming a `conversation_id` the row no longer runs is dropped: a Stop
 hook finishing after a switch or rotation would otherwise write the old
 transcript's size over the new one. A rotation clears the stored count and
-the feed's buffered text for the same reason.
+the feed's buffered text for the same reason, and records the new
+conversation's opening estimate in its place; the threshold stays, since the
+model is the same. A chat rotation's successor inherits its predecessor's
+window and threshold when it runs the same model.
 
 `GET /sessions/live` returns the producing conversations under `sessions` and
 every other open one — bound to a surface, neither closed nor suspended —
@@ -161,8 +177,11 @@ threshold (the `rotation_threshold_percent` and `context_window` on that
 model's row of the Mind's model listing, which relays the proxy's; a row
 without a percentage falls back to the ratio the conversation's own last
 report implied), and no images on a model whose
-listing says it takes none or does not say. A size nobody measured, on a
-conversation that has had turns, is never assumed to fit. Otherwise the
+listing says it takes none or does not say. A conversation just started over
+is judged on its opening estimate like any other size, so a model change
+straight after a harness switch stays in place when the handover fits. A
+size nobody measured, on a conversation that has had turns, is never assumed
+to fit. Otherwise the
 conversation is handed over, the way a harness switch hands one over: the
 Mind renders it through `/handover`, sized so the handover, the composed
 prompt and the next message sit under the new threshold, and the same row
