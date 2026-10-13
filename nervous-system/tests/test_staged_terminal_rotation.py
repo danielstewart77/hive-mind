@@ -253,3 +253,75 @@ def test_a_fired_rotation_leaves_the_new_conversation_with_an_estimate_of_what_i
                 await mgr.shutdown()
 
     _run(scenario())
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("pane_held_by", ["terminal_held", "terminal", "terminal:tab-7"])
+def test_an_arm_from_a_chat_turn_on_a_pane_held_conversation_stages_it(pane_held_by) -> None:
+    """A console message or a model change runs a chat process on a
+    conversation a pane holds, and its hook arms as that chat surface. Armed
+    for a chat surface, the next message would retire the row for a
+    successor — the pane's permanent row, its tile, label and ledger. The row
+    says a pane holds it, so the rotation is staged for the pane to fire."""
+    async def scenario() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _make_manager(tmp)
+            try:
+                session_id = await _seed_terminal_session(mgr)
+                if pane_held_by == "terminal_held":
+                    await mgr._db.execute(
+                        "UPDATE sessions SET terminal_held = 1 WHERE id = ?", (session_id,))
+                else:
+                    # A terminal owner, by its type alone: the owner_ref says
+                    # nothing about a pane.
+                    await mgr._db.execute(
+                        "UPDATE sessions SET owner_type = ?, owner_ref = 'tab-7' WHERE id = ?",
+                        (pane_held_by, session_id))
+                await mgr._db.commit()
+                with _a_mind_with_a_live_pane():
+                    result = await mgr.arm_rotation("web", session_id, surface="console")
+
+                assert result["staged"] is True
+                assert (await _row(mgr, session_id))["rotation_armed"] == ROTATION_ARMED_TERMINAL
+            finally:
+                await mgr.shutdown()
+
+    _run(scenario())
+
+
+@pytest.mark.parametrize("pane_held_by", ["terminal_held", "terminal:tab-7"])
+def test_a_message_never_retires_a_row_a_pane_holds_for_a_successor(pane_held_by) -> None:
+    """Whatever left a chat arm on it, a row a pane holds is the pane's
+    permanent session: the message is answered on it, not on a successor."""
+    async def scenario() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _make_manager(tmp)
+            try:
+                session_id = await _seed_terminal_session(mgr)
+                if pane_held_by == "terminal_held":
+                    await mgr._db.execute(
+                        "UPDATE sessions SET terminal_held = 1, rotation_armed = 1 WHERE id = ?",
+                        (session_id,))
+                else:
+                    await mgr._db.execute(
+                        "UPDATE sessions SET owner_type = ?, owner_ref = 'tab-7', "
+                        "rotation_armed = 1 WHERE id = ?", (pane_held_by, session_id))
+                await mgr._db.commit()
+
+                async def stop_spawn(*a, **k):
+                    raise RuntimeError("delivered on the row itself")
+
+                mgr._spawn = stop_spawn  # type: ignore[assignment]
+                with _a_mind_with_a_live_pane(), pytest.raises(RuntimeError, match="row itself"):
+                    async for _ in mgr.send_message(session_id, "hello"):
+                        pass
+
+                cur = await mgr._db.execute("SELECT id, status FROM sessions")
+                rows = [dict(r) for r in await cur.fetchall()]
+                assert rows == [{"id": session_id, "status": "running"}]
+            finally:
+                await mgr.shutdown()
+
+    _run(scenario())

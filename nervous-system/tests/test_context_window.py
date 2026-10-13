@@ -1766,3 +1766,55 @@ def test_an_overflow_the_model_has_no_room_to_take_keeps_the_message_and_says_wh
     said = _text(events)
     assert "bilby-32k can't take this conversation" in said
     assert "It stays where it is" not in said
+
+
+
+def test_a_pane_the_mind_refuses_to_rotate_is_left_running():
+    """Only a mind saying it holds no live pane means there is none. A
+    refusal is about a pane that may be running, and a model handover that
+    read it as "no pane" would end that pane to start a process instead."""
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr)
+            await _measured(mgr, tokens=150_000, window=1_000_000, threshold=500_000)
+            await mgr._db.execute("UPDATE sessions SET terminal_held = 1 WHERE id = 'sess-1'")
+            await mgr._db.commit()
+            before = await mgr._get_row("sess-1")
+            mind = Mind()
+            mind.rotate_status = 500
+            with pytest.raises(ValueError):
+                await _switch(mgr, mind, "claude-sonnet-5")
+            after = await mgr._get_row("sess-1")
+            await _close(mgr)
+            return before, after, mind
+
+    before, after, mind = _run(scenario())
+    assert mind.kills("sess-1") == []
+    assert mind.spawns() == []
+    assert (after["claude_sid"], after["model"]) == (before["claude_sid"], before["model"])
+
+
+@pytest.mark.parametrize("answer", [(200, []), (200, {}), (200, {"rotated": "false"})])
+def test_only_a_mind_saying_it_holds_no_pane_reads_as_no_pane(answer):
+    """An answer that says nothing about rotating leaves the pane alone rather
+    than ending it to start a process in its place."""
+    async def scenario():
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = await _manager(tmp)
+            await _seed(mgr)
+            await _measured(mgr, tokens=150_000, window=1_000_000, threshold=500_000)
+            await mgr._db.execute("UPDATE sessions SET terminal_held = 1 WHERE id = 'sess-1'")
+            await mgr._db.commit()
+            mind = Mind()
+            mind.rotate_status, mind.rotate_body = answer
+            with pytest.raises(ValueError):
+                await _switch(mgr, mind, "claude-sonnet-5")
+            after = await mgr._get_row("sess-1")
+            await _close(mgr)
+            return after, mind
+
+    after, mind = _run(scenario())
+    assert mind.kills("sess-1") == []
+    assert mind.spawns() == []
+    assert after["claude_sid"] == "conv-1"

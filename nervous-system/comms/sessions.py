@@ -1837,7 +1837,14 @@ class SessionManager:
                     )
                     return {"ok": False, "error": "stale conversation",
                             "session_id": active["id"]}
-        if surface == "terminal":
+        # The row decides as well as the hook. A conversation a pane holds is
+        # also answered by chat processes — the console's message route, a
+        # model change — whose hooks arm as a chat surface. Armed as one, the
+        # next message would retire the pane's permanent row for a successor;
+        # staged, only the pane's own fire swaps it, in place.
+        if surface == "terminal" or self._pane_holds(
+            await self._get_row(active["id"]) or {}
+        ):
             return await self._stage_terminal_rotation(active, client_ref)
         await self._db.execute(
             "UPDATE sessions SET rotation_armed = ? WHERE id = ?",
@@ -1974,7 +1981,7 @@ class SessionManager:
                 "ok": False,
                 "error": (
                     "mind refused the gateway's credential" if refused
-                    else "could not reach the mind to rotate its terminal"
+                    else f"the mind did not rotate its terminal: {exc}"
                 ),
                 "session_id": session_id,
             }
@@ -2066,6 +2073,13 @@ class SessionManager:
             # later one wins and the other is dropped.
             exchange[key] = turn["content"]
         return exchange
+
+    @staticmethod
+    def _pane_holds(session: dict) -> bool:
+        """Whether a browser pane holds this conversation's row."""
+        return bool(session.get("terminal_held")) or (
+            (session.get("owner_type") or "").split(":", 1)[0] == TERMINAL_OWNER_TYPE
+        )
 
     async def _finalize_rotation(self, session: dict) -> str | None:
         """Swap a chat session to a fresh one, carrying the rotation forward.
@@ -2528,7 +2542,11 @@ class SessionManager:
         # label and its ledger binding, which is exactly what in-place
         # rotation exists to prevent. Hence the equality test: a bare
         # truth test would finalize a 2.
-        if session.get("rotation_armed") == ROTATION_ARMED_CHAT:
+        # Never a row a pane holds, however it came to be armed: that row is
+        # the pane's permanent session, and a successor would retire it. Its
+        # turns go on to the current conversation until the pane fires.
+        if (session.get("rotation_armed") == ROTATION_ARMED_CHAT
+                and not self._pane_holds(session)):
             new_id = await self._finalize_rotation(session)
             if new_id and new_id != session_id:
                 async for event in self._forward_to_session(new_id, content, images):
@@ -4443,8 +4461,7 @@ class SessionManager:
         The mind respawns the pane's process on the new conversation, seeded
         with the carry-forward, leaving the tmux session, the pty, the
         proxied socket and the browser tile untouched. Returns False when the
-        mind holds no live terminal for this session (or is too old to have
-        the route).
+        mind holds no live terminal for this session.
 
         ``user_prompt``, when given, makes the seed the successor's opening
         *user* turn rather than its system prompt — a staged rotation carries
@@ -4453,14 +4470,18 @@ class SessionManager:
         what they typed gone.
 
         ``switch`` moves the pane onto the conversation's harness when it runs
-        another one; without it a mind refuses that as a stale rotation. A
-        refusal of a switch raises rather than answering False, since False
-        means "no live pane" and the pane would keep running the old harness
-        under a row that names the new one.
+        another one; without it a mind refuses that as a stale rotation. False
+        means only what the mind said with ``{"rotated": false}``: it holds no
+        live pane. Any other answer raises — a refusal is about a pane that may
+        be running, and a caller reading False as "no pane" would end it.
         """
         mind_url = await self._mind_url_for_session(session_id, mind_id)
         if not mind_url:
-            return False
+            # Not asked is not answered: a mind nobody could find has said
+            # nothing about its pane.
+            raise MindCallFailed(
+                f"no address for the mind holding session {session_id}'s terminal"
+            )
         # The pane respawns on the conversation's own harness and effort,
         # never on whatever the mind would default a fresh terminal to.
         session_row = await self._get_row(session_id) or {}
@@ -4507,13 +4528,17 @@ class SessionManager:
                             "rotate-pty on %s for session %s returned %s",
                             mind_url, session_id, resp.status,
                         )
-                        if switch:
-                            raise MindCallFailed(
-                                f"the mind would not move session {session_id}'s "
-                                f"terminal (HTTP {resp.status}: "
-                                f"{(await resp.text())[:200]})"
-                            )
-                        return False
+                        # Only a mind answering that it holds no live pane
+                        # means there is none. Any other refusal is about a
+                        # pane that may well be running, and the callers that
+                        # read False as "no pane" would end it to start a
+                        # process in its place.
+                        raise MindCallFailed(
+                            f"the mind would not "
+                            f"{'move' if switch else 'rotate'} session "
+                            f"{session_id}'s terminal (HTTP {resp.status}: "
+                            f"{(await resp.text())[:200]})"
+                        )
                     data = await resp.json()
         except MindCallFailed:
             raise
@@ -4523,7 +4548,12 @@ class SessionManager:
                 f"rotate-pty on {mind_url} for session {session_id} did not "
                 f"complete: {exc}"
             ) from exc
-        return bool(data.get("rotated"))
+        if not isinstance(data, dict) or not isinstance(data.get("rotated"), bool):
+            raise MindCallFailed(
+                f"rotate-pty on {mind_url} for session {session_id} answered "
+                f"{str(data)[:200]!r}, not whether it rotated"
+            )
+        return data["rotated"]
 
     def _mind_admin_headers(self) -> dict[str, str]:
         """The admin credential for a mind's operator routes."""
