@@ -78,7 +78,8 @@ class _Response:
         return self._body.encode()
 
     async def json(self) -> dict:
-        return {"released": True, "ok": True}
+        # Every route this suite drives reads its own field off one answer.
+        return {"released": True, "ok": True, "rotated": True}
 
     @property
     def content(self):

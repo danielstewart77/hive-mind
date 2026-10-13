@@ -196,7 +196,15 @@ transcript's size over the new one. A rotation clears the stored count and
 the feed's buffered text for the same reason, and records the new
 conversation's opening estimate in its place; the threshold stays, since the
 model is the same. A chat rotation's successor inherits its predecessor's
-window and threshold when it runs the same model.
+window and threshold when it runs the same model. A rotation armed on a
+conversation a pane holds (`terminal_held`, or a terminal owner) is staged,
+whichever process's hook armed it — the chat process that answers the
+console is never told it is a pane — and only the pane's own fire swaps it;
+`send_message` never finalizes such a row into a successor, and its chat
+turns go on to the current conversation until the pane fires. A mind's
+`rotate-pty` answer of `{"rotated": false}` is the only one read as "no
+pane"; any other refusal raises, so a caller never ends a pane that may be
+running.
 
 `GET /sessions/live` returns the producing conversations under `sessions` and
 every other open one — bound to a surface, neither closed nor suspended —
