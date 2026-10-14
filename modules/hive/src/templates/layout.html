@@ -22,6 +22,12 @@
                     redirecting = true;
                     window.location.assign("/login?next=" + encodeURIComponent(window.location.pathname + window.location.search));
                 }
+                // A user who must change their password is sent there by
+                // every route; a fetch follows that redirect silently.
+                if (resp && resp.redirected && !redirecting && new URL(resp.url).pathname === "/password") {
+                    redirecting = true;
+                    window.location.assign("/password");
+                }
                 return resp;
             });
         };
@@ -44,6 +50,7 @@
         <div class="console-nav" role="navigation" aria-label="Main navigation">
             <a href="/overview" class="console-nav-link {% if path == '/overview' %}is-active{% endif %}"><i data-lucide="layout-dashboard"></i><span>Overview</span></a>
             <a href="/minds" class="console-nav-link {% if path.startswith('/minds') %}is-active{% endif %}"><i data-lucide="brain-circuit"></i><span>Minds</span></a>
+            {% if current_user.is_admin %}
             <a href="/activity" class="console-nav-link {% if path == '/activity' %}is-active{% endif %}"><i data-lucide="activity"></i><span>Activity</span></a>
             <a href="/dashboard" class="console-nav-link {% if path == '/dashboard' %}is-active{% endif %}"><i data-lucide="radio-tower"></i><span>Dashboard</span></a>
 
@@ -69,15 +76,16 @@
             </div>
             <a href="/canvas" class="console-nav-link {% if path == '/canvas' %}is-active{% endif %}"><i data-lucide="pencil-ruler"></i><span>Canvas</span></a>
             <a href="/design" class="console-nav-link {% if path.startswith('/design') %}is-active{% endif %}"><i data-lucide="drafting-compass"></i><span>Design</span></a>
+            {% endif %}
             <a href="https://terminal.sparktobloom.com" target="_blank" rel="noopener noreferrer" class="console-nav-link"><i data-lucide="square-terminal"></i><span>Terminal</span><i class="nav-external" data-lucide="external-link"></i></a>
         </div>
 
         <div class="console-sidebar-footer">
-            <a href="/setup" class="setup-link {% if path == '/setup' %}is-active{% endif %}"><i data-lucide="circle-check-big"></i><span>Setup guide</span></a>
-            <a href="/settings/general" class="console-nav-link {% if path.startswith('/settings') %}is-active{% endif %}"><i data-lucide="settings"></i><span>Settings</span></a>
+            {% if current_user.is_admin %}<a href="/setup" class="setup-link {% if path == '/setup' %}is-active{% endif %}"><i data-lucide="circle-check-big"></i><span>Setup guide</span></a>{% endif %}
+            <a href="{{ '/settings/general' if current_user.is_admin else '/settings/access' }}" class="console-nav-link {% if path.startswith('/settings') %}is-active{% endif %}"><i data-lucide="settings"></i><span>Settings</span></a>
             <div class="console-user">
                 <img src="{{ request.url_for('static', path='images/cyborg_me.png') }}" alt="">
-                <span><strong>{{ current_user.username }}</strong><small>Owner</small></span>
+                <span><strong>{{ current_user.username }}</strong><small>{{ 'Admin' if current_user.is_admin else 'Member' }}</small></span>
                 <form action="/logout" method="post"><button class="icon-button" type="submit" title="Log out" aria-label="Log out"><i data-lucide="log-out"></i></button></form>
             </div>
         </div>
@@ -87,7 +95,7 @@
         <header class="console-mobile-header">
             <button class="icon-button" type="button" data-sidebar-open aria-label="Open navigation"><i data-lucide="menu"></i></button>
             <a href="/overview" class="mobile-brand"><img src="{{ request.url_for('static', path='favicon.svg') }}" alt="">Hive</a>
-            <a href="/settings/general" class="icon-button" aria-label="Settings"><i data-lucide="settings"></i></a>
+            <a href="{{ '/settings/general' if current_user.is_admin else '/settings/access' }}" class="icon-button" aria-label="Settings"><i data-lucide="settings"></i></a>
         </header>
         <div class="console-content">
             {% block content %}{% endblock %}
@@ -96,7 +104,7 @@
 </div>
 {% else %}
 {% block auth_content %}{% block content_unauth %}{% endblock %}{% endblock %}
-{% endif %}
+            {% endif %}
 <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
 <script src="{{ request.url_for('static', path='console.js') }}?v={{ asset_versions['console.js'] }}"></script>
 <script src="{{ request.url_for('static', path='scripts.js') }}?v={{ asset_versions['scripts.js'] }}"></script>

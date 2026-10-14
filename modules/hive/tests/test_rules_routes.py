@@ -8,6 +8,8 @@ from starlette.testclient import TestClient
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+import pytest
+
 import auth
 import main as main_mod
 
@@ -98,10 +100,12 @@ def test_seed_first_user_is_idempotent(tmp_path, monkeypatch):
     monkeypatch.setenv("HIVE_SEED_PASSWORD", "seed-pass")
 
     auth.seed_first_user()
-    seeded = auth.get_user_by_username("daniel")
-    assert seeded is not None
+    store = auth.BuiltinStore()
+    seeded = store.get_user("daniel")
+    assert seeded["is_admin"] is True
 
     monkeypatch.setenv("HIVE_SEED_PASSWORD", "different-pass")
     auth.seed_first_user()
-    assert auth.verify_user_credentials("daniel", "seed-pass") is not None
-    assert auth.verify_user_credentials("daniel", "different-pass") is None
+    assert store.sign_in("daniel", "seed-pass")[0]["username"] == "daniel"
+    with pytest.raises(auth.SignInRefused):
+        store.sign_in("daniel", "different-pass")

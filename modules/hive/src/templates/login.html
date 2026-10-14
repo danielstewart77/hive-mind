@@ -17,6 +17,9 @@
             <input id="password" name="password" type="password" autocomplete="current-password" required>
             <button type="submit" class="button button-primary">Sign in</button>
         </form>
+        {% for method in sign_in_methods or [] %}
+        <a class="button button-quiet login-method" href="{{ method.href }}">{{ method.label }}</a>
+        {% endfor %}
     </section>
 </main>
 {% endblock %}

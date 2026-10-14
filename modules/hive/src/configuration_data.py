@@ -241,6 +241,10 @@ def internal_mind_exists(name: str) -> bool:
     return (HIVE_MIND_MINDS_CONFIG_DIR / name / "runtime.yaml").is_file()
 
 
+# A console username as setup.sh and comms accept it.
+OWNER_RE = re.compile(r"[a-z0-9][a-z0-9._@-]{0,63}")
+
+
 def scaffold_internal_mind(
     name: str,
     *,
@@ -248,6 +252,7 @@ def scaffold_internal_mind(
     harness: str,
     provider: str,
     default_model: str,
+    owner: str,
     description: str = "",
     ollama_base_url: str = "",
     ollama_api_key: str = "",
@@ -264,6 +269,8 @@ def scaffold_internal_mind(
         raise ValueError("Unknown harness")
     if not _MODEL_NAME_RE.fullmatch(default_model):
         raise ValueError("Model name contains unsupported characters")
+    if not OWNER_RE.fullmatch(owner):
+        raise ValueError("Every Mind needs an owner: a lowercase username")
     mind_dir = HIVE_MIND_MINDS_CONFIG_DIR / name
     if (mind_dir / "runtime.yaml").exists():
         raise ValueError(f"minds/{name} already exists")
@@ -274,6 +281,9 @@ def scaffold_internal_mind(
     runtime: dict[str, Any] = {
         "name": name,
         "mind_id": mind_id,
+        # The user this Mind belongs to. Comms refuses a first registration
+        # without one; once registered, only an admin moves it.
+        "owner": owner,
         "gateway_url": f"http://{name}:8420",
         "remote": False,
         "description": description or f"{name.capitalize()} — Hive Mind.",

@@ -14,6 +14,7 @@
                 <div class="choice-grid edge-profile-grid"><div class="choice"><span class="choice-copy"><strong>Standard Edge Mind</strong><small>One connected mind runtime with the chosen harness, provider, and surfaces.</small></span></div></div>
                 <div class="form-grid">
                     <div class="field"><label for="edge-name">Mind name</label><input id="edge-name" name="name" type="text" pattern="[a-z](?:[a-z0-9]|-){1,31}" placeholder="atlas" required><small>Lowercase letters, numbers, and hyphens.</small></div>
+                    <div class="field"><label for="edge-owner">Owner</label><select id="edge-owner" name="owner"></select><small>The user this Mind belongs to.</small></div>
                     <div class="field"><label for="edge-port">Local port</label><input id="edge-port" name="port" type="number" min="1024" max="65535" value="8421" required></div>
                 </div>
                 <div class="field is-full"><label>Machine role</label><div class="choice-grid"><label class="choice"><input type="radio" name="role" value="operator" checked><span class="choice-copy"><strong>Operator</strong><small>Full host access for a machine you control.</small></span></label><label class="choice"><input type="radio" name="role" value="sandboxed"><span class="choice-copy"><strong>Sandboxed</strong><small>Conversation and memory without host control.</small></span></label></div></div>
@@ -95,6 +96,7 @@ window.addEventListener("DOMContentLoaded", function () {
         const errorBox = document.getElementById("edge-error"); errorBox.hidden = true;
         const body = {
             name: form.elements.name.value,
+            owner: form.elements.owner.value,
             profile: form.elements.profile.value,
             role: form.querySelector('[name="role"]:checked').value,
             deployment: form.elements.deployment.value,
@@ -127,6 +129,19 @@ window.addEventListener("DOMContentLoaded", function () {
         try { await h.requestJson("/api/edge-minds/verify", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)}); status.textContent = "Verified and registered. This Edge Mind is now part of the Hive."; }
         catch (error) { status.textContent = error.message; }
     });
+
+    // The user a new Mind belongs to; the admin creating it unless another is picked.
+    async function loadOwners(select, current) {
+        try {
+            const users = (await h.requestJson("/api/admin/users")).users || [];
+            select.innerHTML = users.filter(function (u) { return !u.disabled; }).map(function (u) {
+                return '<option value="' + h.escapeHtml(u.username) + '"' + (u.username === current ? " selected" : "") + '>' + h.escapeHtml(u.username) + '</option>';
+            }).join("");
+        } catch (error) {
+            select.innerHTML = '<option value="' + h.escapeHtml(current) + '">' + h.escapeHtml(current) + '</option>';
+        }
+    }
+    loadOwners(document.getElementById("edge-owner"), {{ current_user.username | tojson }});
     renderProviders();
     renderPreview();
 });

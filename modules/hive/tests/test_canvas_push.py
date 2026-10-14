@@ -96,11 +96,23 @@ def test_canvas_push_falls_back_to_comms_token(tmp_path, monkeypatch):
 # ── Render snapshot ──────────────────────────────────────────────────────────
 
 
-def test_canvas_render_svg_empty_board(tmp_path, monkeypatch):
-    monkeypatch.setattr(main_mod, "_canvas_elements", [])
-    client = TestClient(main_mod.app)
+_DRAWER = {"Authorization": "Bearer draw-token"}
 
-    response = client.get("/canvas/render.svg")
+
+def test_canvas_render_svg_refuses_anyone_without_an_admin_session_or_the_bearer(
+    tmp_path, monkeypatch
+):
+    client = _client(tmp_path, monkeypatch)
+
+    assert client.get("/canvas/render.svg").status_code == 401
+    wrong = client.get("/canvas/render.svg", headers={"Authorization": "Bearer nope"})
+    assert wrong.status_code == 401
+
+
+def test_canvas_render_svg_empty_board(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+
+    response = client.get("/canvas/render.svg", headers=_DRAWER)
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("image/svg+xml")
@@ -109,6 +121,7 @@ def test_canvas_render_svg_empty_board(tmp_path, monkeypatch):
 
 
 def test_canvas_render_svg_includes_elements(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
     monkeypatch.setattr(
         main_mod,
         "_canvas_elements",
@@ -117,9 +130,8 @@ def test_canvas_render_svg_includes_elements(tmp_path, monkeypatch):
             {"type": "text", "id": "t1", "x": 30, "y": 200, "content": "Capture", "color": "#2dd4bf"},
         ],
     )
-    client = TestClient(main_mod.app)
 
-    response = client.get("/canvas/render.svg")
+    response = client.get("/canvas/render.svg", headers=_DRAWER)
 
     assert response.status_code == 200
     assert "M10,10 L120,80" in response.text
@@ -128,14 +140,14 @@ def test_canvas_render_svg_includes_elements(tmp_path, monkeypatch):
 
 
 def test_canvas_render_svg_escapes_text(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
     monkeypatch.setattr(
         main_mod,
         "_canvas_elements",
         [{"type": "text", "id": "t1", "x": 0, "y": 0, "content": "a < b & c"}],
     )
-    client = TestClient(main_mod.app)
 
-    response = client.get("/canvas/render.svg")
+    response = client.get("/canvas/render.svg", headers=_DRAWER)
 
     assert "a &lt; b &amp; c" in response.text
 

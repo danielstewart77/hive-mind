@@ -9,6 +9,7 @@
     <div id="mind-error" class="error-state" hidden></div>
     <div class="overview-stack" id="mind-content">
         <section class="surface"><div class="surface-header"><h2>Overview</h2><span id="mind-status"></span></div><div class="surface-body"><dl class="detail-grid" id="mind-details"></dl></div></section>
+        {% if current_user.is_admin %}<section class="surface" id="mind-owner" hidden><div class="surface-header"><div><h2>Owner</h2><p>The user this Mind belongs to. They see it, and everything downstream of it, on their own console.</p></div></div><form class="surface-body overview-stack" id="mind-owner-form"><div class="field"><label for="mind-owner-user">Owner</label><select id="mind-owner-user" name="owner" required></select></div><div class="form-actions"><button class="button" type="submit">Move to this owner</button></div><small id="mind-owner-status"></small></form></section>{% endif %}
         <section class="surface" id="mind-editor" data-editable hidden><div class="surface-header"><div><h2>Default model</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-model-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-model-form"><p>Written to this Mind&#39;s runtime.yaml and its registry row. Applies to the next session it is asked for; conversations already running keep their model.</p><div class="field"><label for="mind-provider">Provider</label><select id="mind-provider" name="provider" required></select><small>The upstream hosting the model. This Mind's own proxy key decides which appear.</small></div><div class="field"><label for="mind-default-model">Model</label><select id="mind-default-model" name="default_model" required></select><small>Every model this Mind is permitted to run on the chosen provider.</small></div><div class="form-actions"><button class="button" type="submit" id="mind-model-save">Save model</button></div><small id="mind-model-status"></small></form></div></section>
         <section class="surface" id="mind-voice" data-editable hidden><div class="surface-header"><div><h2>Voice</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-voice-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-voice-form"><p>Written to this Mind&#39;s runtime.yaml and its registry row. In effect on the next spoken reply.</p><div class="field"><label for="mind-voice-engine">Engine</label><select id="mind-voice-engine" name="voice_engine" required></select><small id="mind-voice-engine-help"></small></div><div class="field"><label for="mind-voice-name">Voice</label><select id="mind-voice-name" name="voice" required></select><small id="mind-voice-description"></small><small id="mind-voice-help"></small></div><div class="form-actions"><button class="button" type="submit" id="mind-voice-save">Save voice</button><button class="button button-quiet" type="button" id="mind-voice-listen">Listen</button></div><small id="mind-voice-status"></small></form><form class="surface-body overview-stack" id="mind-clip-form" hidden><div class="field"><label for="mind-clip-file">Add a reference clip</label><input type="file" id="mind-clip-file" name="file" accept="audio/wav,.wav" required><small>A clean WAV recording. Added beside this Mind&#39;s existing clips; select it above to speak in it.</small></div><div class="form-actions"><button class="button button-quiet" type="submit" id="mind-clip-upload">Upload clip</button></div><small id="mind-clip-status"></small></form></div></section>
         <section class="surface" id="mind-settings" data-editable hidden><div class="surface-header"><div><h2>Settings</h2></div><button class="button button-quiet" type="button" data-edit-toggle>Edit</button></div><dl class="detail-grid surface-body" data-summary id="mind-settings-summary"></dl><div data-editor hidden><form class="surface-body overview-stack" id="mind-settings-form"><p>Written to this Mind&#39;s runtime.yaml. Which controls appear is decided by its harness.</p><div id="mind-settings-fields"></div><div class="form-actions"><button class="button" type="submit" id="mind-settings-save">Save settings</button></div><small id="mind-settings-status"></small></form></div></section>
@@ -421,6 +422,29 @@ window.addEventListener("DOMContentLoaded", async function () {
         paintMountRows();
     }
 
+    async function renderOwner(mind) {
+        const section = document.getElementById("mind-owner");
+        const select = document.getElementById("mind-owner-user");
+        const status = document.getElementById("mind-owner-status");
+        try {
+            const users = (await h.requestJson("/api/admin/users")).users || [];
+            select.innerHTML = (mind.owner ? "" : '<option value="" selected>No owner</option>') + users.map(function (u) {
+                return '<option value="' + h.escapeHtml(u.username) + '"' + (u.username === mind.owner ? " selected" : "") + '>' + h.escapeHtml(u.username) + (u.disabled ? " (disabled)" : "") + '</option>';
+            }).join("");
+        } catch (error) { status.textContent = error.message; }
+        section.hidden = false;
+        document.getElementById("mind-owner-form").onsubmit = async function (event) {
+            event.preventDefault();
+            if (!select.value) return;
+            status.textContent = "Saving…";
+            try {
+                await h.requestJson("/api/minds/" + encodeURIComponent(mind.name) + "/owner", {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({owner: select.value})});
+                mind.owner = select.value;
+                status.textContent = "Moved to " + select.value + ".";
+            } catch (error) { status.textContent = error.message; }
+        };
+    }
+
     async function renderMounts(name) {
         const section = document.getElementById("mind-mounts");
         section.dataset.mindName = name;
@@ -692,7 +716,7 @@ window.addEventListener("DOMContentLoaded", async function () {
         document.getElementById("mind-description").textContent = cfg.description || "Registered Hive mind";
         document.getElementById("mind-status").innerHTML = h.statusPill(mind.activity_status === "active", "Active session", "Registered");
         const details = [
-            ["Mind ID", mind.id || "Not reported"], ["Location", (!mind.local_config || cfg.remote) ? "Remote machine" : "Hive host"],
+            ["Mind ID", mind.id || "Not reported"], ["Owner", mind.owner || "None"], ["Location", (!mind.local_config || cfg.remote) ? "Remote machine" : "Hive host"],
             ["Harness", mind.harness || cfg.harness || "Unknown"], ["Provider", cfg.provider || "Not reported"],
             ["Model", mind.model || cfg.default_model || "Unknown"], ["Gateway", mind.gateway_url || cfg.gateway_url || "Not reported"],
             ["Last activity", h.formatTime(mind.last_activity)], ["Registry updated", h.formatTime(mind.last_seen)]
@@ -718,7 +742,8 @@ window.addEventListener("DOMContentLoaded", async function () {
         }
         await renderVoice(mind.name);
         await renderSettings(mind.name);
-        await renderMounts(mind.name);
+        {% if current_user.is_admin %}await renderMounts(mind.name);
+        await renderOwner(mind);{% endif %}
         await renderSurfaceToken(mind.name);
         await renderSkills(mind.name);
         const filesSection = document.getElementById("mind-files");

@@ -37,6 +37,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+import auth
 from auth import (
     clear_session_cookie,
     get_current_user_from_request,
@@ -44,8 +45,9 @@ from auth import (
     require_auth,
     seed_first_user,
     set_session_cookie,
-    verify_user_credentials,
 )
+import console_access
+import route_access
 from capability_install import (
     HIVE_TOOLS_PLACEMENT_NOTE,
     InstallInProgress,
@@ -63,6 +65,7 @@ from configuration_data import (
     internal_mind_exists,
     local_runtime_configuration,
     normalize_endpoint,
+    OWNER_RE,
     scaffold_internal_mind,
     set_capability_endpoint,
     set_edge_mind_metadata,
@@ -135,6 +138,9 @@ app = FastAPI(
     redoc_url=None,
     openapi_url=None,
 )
+# Authorization lives in one table (console_access.TABLE), enforced in front
+# of every route and websocket; a route the table does not name is admin-only.
+app.add_middleware(route_access.AccessMiddleware, table=console_access.TABLE)
 install_fastapi_logging(app, log, "hive-control-plane")
 
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
@@ -400,8 +406,11 @@ async def _lucent_request(
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
-    if not get_current_user_from_request(request):
+    user = get_current_user_from_request(request)
+    if not user:
         return _login_redirect_for(request)
+    if user.get("must_change"):
+        return RedirectResponse(url="/password", status_code=303)
     return RedirectResponse(url="/overview", status_code=303)
 
 
@@ -410,7 +419,19 @@ async def login_page(request: Request, next: str = "/overview"):
     current_user = get_current_user_from_request(request)
     if current_user:
         return RedirectResponse(url=_safe_next_path(next), status_code=303)
-    return _render_template(request, "login.html", next_path=_safe_next_path(next))
+    return _login_page(request, next_path=_safe_next_path(next))
+
+
+def _login_page(request: Request, *, status_code: int = 200, **context) -> HTMLResponse:
+    response = _render_template(
+        request,
+        "login.html",
+        current_user=None,
+        sign_in_methods=auth.SIGN_IN_METHODS,
+        **context,
+    )
+    response.status_code = status_code
+    return response
 
 
 @app.post("/login")
@@ -418,20 +439,26 @@ async def login_submit(
     request: Request,
     username: str = Form(...),
     password: str = Form(...),
-    next: str = Form("/graph"),
+    next: str = Form("/overview"),
 ):
-    user = verify_user_credentials(username, password)
-    if not user:
-        log_event(log, "auth.login.rejected", level=logging.WARNING, actor_username=username)
-        return _render_template(
+    store = auth.get_store()
+    try:
+        user, token = await run_in_threadpool(store.sign_in, username, password)
+    except auth.AuthError as exc:
+        log_event(
+            log, "auth.login.rejected", level=logging.WARNING,
+            actor_username=username, reason=type(exc).__name__,
+        )
+        return _login_page(
             request,
-            "login.html",
-            error="Invalid username or password.",
+            status_code=exc.status,
+            error=exc.message,
             next_path=_safe_next_path(next),
         )
 
-    response = RedirectResponse(url=_safe_next_path(next), status_code=303)
-    set_session_cookie(response, user)
+    target = "/password" if user.get("must_change") else _safe_next_path(next)
+    response = RedirectResponse(url=target, status_code=303)
+    set_session_cookie(response, token)
     log_event(log, "auth.login.succeeded", **_actor_fields(user))
     return response
 
@@ -439,9 +466,61 @@ async def login_submit(
 @app.post("/logout")
 async def logout(request: Request):
     user = get_current_user_from_request(request)
+    store = auth.get_store()
+    token = auth.session_token(request, store)
+    if token:
+        with suppress(auth.ServiceUnavailable):
+            await run_in_threadpool(store.sign_out, token)
     response = RedirectResponse(url="/login", status_code=303)
     clear_session_cookie(response)
     log_event(log, "auth.logout", **_actor_fields(user))
+    return response
+
+
+def _password_page(request: Request, *, status_code: int = 200, **context) -> HTMLResponse:
+    user = get_current_user_from_request(request)
+    response = _render_template(
+        request,
+        "password.html",
+        current_user=None,
+        account=user,
+        **context,
+    )
+    response.status_code = status_code
+    response.headers["Cache-Control"] = "no-store, must-revalidate"
+    return response
+
+
+@app.get("/password", response_class=HTMLResponse)
+async def password_page(request: Request):
+    return _password_page(request)
+
+
+@app.post("/password")
+async def password_submit(
+    request: Request,
+    current_password: str = Form(...),
+    new_password: str = Form(...),
+    confirm_password: str = Form(...),
+):
+    """A signed-in user sets their own password — the only page a user who
+    must change theirs can reach."""
+    user = get_current_user_from_request(request)
+    if new_password != confirm_password:
+        return _password_page(request, status_code=400, error="The new passwords do not match.")
+    store = auth.get_store()
+    try:
+        token = await run_in_threadpool(
+            store.change_password,
+            auth.session_token(request, store),
+            current_password,
+            new_password,
+        )
+    except auth.AuthError as exc:
+        return _password_page(request, status_code=exc.status, error=exc.message)
+    response = RedirectResponse(url="/overview", status_code=303)
+    set_session_cookie(response, token)
+    log_event(log, "auth.password.changed", **_actor_fields(user))
     return response
 
 
@@ -744,6 +823,7 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
         )
         ollama_base_url = normalize_endpoint(ollama_base_url)
 
+    owner = await _new_mind_owner(body, user)
     try:
         written = scaffold_internal_mind(
             name,
@@ -751,6 +831,7 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
             harness=harness,
             provider=provider,
             default_model=default_model,
+            owner=owner,
             description=str(body.get("description") or ""),
             ollama_base_url=ollama_base_url,
             ollama_api_key=str(body.get("ollama_api_key") or ""),
@@ -775,6 +856,7 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
             "model": default_model,
             "harness": harness,
             "provider": provider,
+            "owner": owner,
         },
         "commands": [
             {
@@ -790,6 +872,47 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
             f"Give {name} a soul: run /hivemind:setup-personality, then talk to it."
         ),
     }
+
+
+async def _new_mind_owner(body: dict, user: dict) -> str:
+    """The user a new Mind is created for: the one named, else the admin
+    creating it. Refused unless that is an account this console knows."""
+    owner = auth.normalize_username(str(body.get("owner") or "")) or auth.normalize_username(
+        str(user.get("username") or "")
+    )
+    if not OWNER_RE.fullmatch(owner):
+        raise HTTPException(status_code=400, detail="Every Mind needs an owner")
+    try:
+        await run_in_threadpool(auth.get_store().get_user, owner)
+    except auth.NotFound as exc:
+        raise HTTPException(status_code=400, detail=f"No user named {owner}") from exc
+    except auth.AuthError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+    return owner
+
+
+def _registration_owner(
+    existing: dict | None, body: dict, user: dict, configured: object = None
+) -> str | None:
+    """Who a mind registered from the console belongs to.
+
+    A mind comms already holds keeps its stored owner, so the field is left
+    out — comms refuses a registration naming a different one. A new mind is
+    the owner named in the request, else the one its runtime.yaml was
+    scaffolded with, else the registering admin.
+    """
+    if existing and route_access.owner_of(existing):
+        return None
+    for candidate in (body.get("owner"), configured, user.get("username")):
+        owner = auth.normalize_username(str(candidate or ""))
+        if owner:
+            return owner
+    return None
+
+
+def _registered_mind(minds: list[dict], mind_id: str) -> dict | None:
+    """Comms keys a mind on its id; a name match with another id is not it."""
+    return next((m for m in minds if mind_id and str(m.get("id") or "") == mind_id), None)
 
 
 @app.post("/api/minds/{name}/register")
@@ -808,16 +931,20 @@ async def api_register_mind(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    registration = {
+        "mind_id": str(configuration.get("mind_id") or ""),
+        "name": normalized,
+        "gateway_url": str(configuration.get("gateway_url") or ""),
+        "model": str(configuration.get("default_model") or ""),
+        "harness": str(configuration.get("harness") or ""),
+    }
+    existing = _registered_mind(await _broker_minds_safe(), registration["mind_id"])
+    owner = _registration_owner(existing, body, user, configuration.get("owner"))
+    if owner:
+        registration["owner"] = owner
+    # POST /broker/minds is an admin route on comms; the service token gets 401.
     broker_result = await _gateway_request(
-        "POST",
-        "/broker/minds",
-        json_body={
-            "mind_id": str(configuration.get("mind_id") or ""),
-            "name": normalized,
-            "gateway_url": str(configuration.get("gateway_url") or ""),
-            "model": str(configuration.get("default_model") or ""),
-            "harness": str(configuration.get("harness") or ""),
-        },
+        "POST", "/broker/minds", json_body=registration, admin=True
     )
     log_event(
         log, "mind.registered", **_actor_fields(user), mind_name=normalized,
@@ -1113,13 +1240,15 @@ async def api_dashboard_text(
 
 @app.get("/api/overview")
 async def api_overview(user: dict = Depends(require_auth)):
-    del user
-    minds = await _broker_minds_safe()
+    """The hive at a glance — to a non-admin, the part of it that is theirs."""
+    all_minds = await _broker_minds_safe()
+    minds = route_access.visible_minds(user, all_minds)
     try:
         sessions_raw = await _gateway_json("/sessions")
         sessions = sessions_raw if isinstance(sessions_raw, list) else []
     except Exception:
         sessions = []
+    sessions = route_access.visible_sessions(user, sessions, all_minds)
     comms_health, lucent_health = await asyncio.gather(
         _service_health(
             f"{_gateway_base_url().rstrip('/')}/health",
@@ -1146,16 +1275,18 @@ async def api_overview(user: dict = Depends(require_auth)):
     active_sessions = [
         session for session in sessions if session.get("status") in {"active", "running"}
     ]
+    # Capability nodes are the house's own wiring: endpoints and installs.
+    house = bool(user.get("is_admin"))
     return {
         "counts": {
             "minds": len(minds),
             "edge_minds": len(edge_minds),
-            "capability_nodes": capability_data["summary"]["configured"],
+            "capability_nodes": capability_data["summary"]["configured"] if house else 0,
             "sessions": len(active_sessions),
         },
         "minds": registry,
         "edge_minds": edge_minds,
-        "capability_nodes": capability_data["nodes"],
+        "capability_nodes": capability_data["nodes"] if house else [],
         "sessions": sessions,
         "services": {
             "comms": comms_health,
@@ -1392,10 +1523,15 @@ def _build_edge_mind_bootstrap(body: dict) -> dict:
         if not ollama_url:
             raise ValueError("Ollama URL is required for the Ollama provider")
         ollama_url = normalize_endpoint(ollama_url)
+    owner = str(body.get("owner") or "")
+    if not OWNER_RE.fullmatch(owner):
+        raise ValueError("Every Mind needs an owner")
     args = [
         "./setup.sh",
         "--name",
         name,
+        "--owner",
+        owner,
         "--profile",
         profile,
         "--role",
@@ -1477,6 +1613,7 @@ def _build_edge_mind_bootstrap(body: dict) -> dict:
             "profile": profile,
             "role": role,
             "deployment": deployment,
+            "owner": owner,
         },
     }
 
@@ -1493,7 +1630,9 @@ async def legacy_api_outpost_bootstrap(
 async def api_edge_mind_bootstrap(request: Request, user: dict = Depends(require_auth)):
     try:
         body = await request.json()
-        result = _build_edge_mind_bootstrap(body if isinstance(body, dict) else {})
+        body = body if isinstance(body, dict) else {}
+        body = {**body, "owner": await _new_mind_owner(body, user)}
+        result = _build_edge_mind_bootstrap(body)
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     log_event(
@@ -1570,18 +1709,20 @@ async def api_edge_mind_verify(request: Request, user: dict = Depends(require_au
     )
     if existing and str(existing.get("id") or "") != mind_id:
         raise HTTPException(status_code=409, detail="That Mind name is already registered")
+    registration = {
+        "mind_id": mind_id,
+        "name": name,
+        "gateway_url": gateway_url,
+        "model": model,
+        # Already the broker's vocabulary — no collapsing step needed now
+        # that the console and the edge repo agree on the harness names.
+        "harness": harness,
+    }
+    owner = _registration_owner(existing, body, user)
+    if owner:
+        registration["owner"] = owner
     broker_result = await _gateway_request(
-        "POST",
-        "/broker/minds",
-        json_body={
-            "mind_id": mind_id,
-            "name": name,
-            "gateway_url": gateway_url,
-            "model": model,
-            # Already the broker's vocabulary — no collapsing step needed now
-            # that the console and the edge repo agree on the harness names.
-            "harness": harness,
-        },
+        "POST", "/broker/minds", json_body=registration, admin=True
     )
     set_edge_mind_metadata(
         name,
@@ -2243,12 +2384,22 @@ async def canvas_push(request: Request):
 
 
 @app.get("/canvas/render.svg")
-async def canvas_render_svg(slide: int | None = None):
+async def canvas_render_svg(request: Request, slide: int | None = None):
     """Standalone SVG snapshot of the board, for Skippy to rasterize and read.
 
     With ``?slide=N`` the snapshot is that slide alone — what an audience sees
     at that point in the presentation. Without it, the whole board.
+
+    An admin's browser, or the canvas push bearer a mind draws with: the
+    route table hands a bearer request straight here to be checked.
     """
+    header = request.headers.get("Authorization", "")
+    if header.startswith("Bearer "):
+        expected = _canvas_push_token()
+        if not expected or not hmac.compare_digest(
+            header[7:].encode("utf-8", "surrogatepass"), expected.encode("utf-8", "surrogatepass")
+        ):
+            raise HTTPException(status_code=401, detail="unauthorized")
     return Response(content=_canvas_to_svg(slide), media_type="image/svg+xml")
 
 
@@ -2341,12 +2492,17 @@ async def ws_canvas(websocket: WebSocket):
 
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request):
-    if not get_current_user_from_request(request):
+    user = get_current_user_from_request(request)
+    if not user:
         return _login_redirect_for(request)
-    return RedirectResponse(url="/settings/general", status_code=303)
+    # The access section is the one a non-admin is shown: their sessions.
+    section = "general" if user.get("is_admin") else "access"
+    return RedirectResponse(url=f"/settings/{section}", status_code=303)
 
 
-_SETTINGS_SECTIONS = {"general", "access", "connections", "voice", "credentials", "advanced"}
+_SETTINGS_SECTIONS = {
+    "general", "access", "connections", "voice", "credentials", "advanced", "users",
+}
 
 
 @app.get("/settings/{section}", response_class=HTMLResponse)
@@ -2360,20 +2516,22 @@ async def settings_section_page(request: Request, section: str):
 
 @app.get("/api/settings/minds")
 async def api_settings_minds(user: dict = Depends(require_auth)):
-    del user
-    broker_minds = await _broker_minds_safe()
+    all_minds = await _broker_minds_safe()
+    broker_minds = route_access.visible_minds(user, all_minds)
     try:
         sessions_raw = await _gateway_json("/sessions")
         sessions = sessions_raw if isinstance(sessions_raw, list) else []
     except Exception:
         sessions = []
+    sessions = route_access.visible_sessions(user, sessions, all_minds)
     return {"minds": _add_session_activity(build_mind_registry(broker_minds), sessions)}
 
 
 async def _mind_gateway_url(name: str) -> str:
     """The registered gateway URL for a Mind, by display name."""
+    wanted = route_access.normalize_mind_name(name)
     for mind in await _broker_minds_safe():
-        if str(mind.get("name") or "").lower() == name.strip().lower():
+        if route_access.normalize_mind_name(mind.get("name")) == wanted:
             return str(mind.get("gateway_url") or "")
     raise HTTPException(status_code=404, detail="That Mind is not registered")
 
@@ -2598,6 +2756,7 @@ async def api_mind_mounts_update(
     except HTTPException as exc:
         raise HTTPException(status_code=502, detail=written + str(exc.detail)) from exc
     if recreate.get("hitl_request_id"):
+        console_access.record_operation_from(recreate, user)
         return {
             "saved": True,
             "recreated": False,
@@ -3116,11 +3275,12 @@ async def api_mind_file_save(
 
 @app.get("/api/settings/hive-comms/sessions")
 async def api_settings_hive_comms_sessions(user: dict = Depends(require_auth)):
-    del user
     sessions = await _gateway_json("/sessions")
     if not isinstance(sessions, list):
         sessions = []
-    registry = build_mind_registry(await _broker_minds_safe())
+    all_minds = await _broker_minds_safe()
+    sessions = route_access.visible_sessions(user, sessions, all_minds)
+    registry = build_mind_registry(route_access.visible_minds(user, all_minds))
     return {"sessions": _add_session_mind_names(sessions, registry)}
 
 
@@ -3385,6 +3545,7 @@ async def api_mind_restart(name: str, user: dict = Depends(require_auth)):
             "service": name,
         },
     )
+    console_access.record_operation_from(result, user)
     log_event(log, "mind.restart.requested", **_actor_fields(user), mind_name=name)
     return result
 
@@ -4267,6 +4428,149 @@ async def api_design_symbol_roots(
     del actor
     gateway_url = await _mind_gateway_url(mind)
     return await mind_symbols.roots(gateway_url)
+
+
+@app.put("/api/minds/{name}/owner")
+async def api_mind_owner_set(name: str, request: Request, user: dict = Depends(require_auth)):
+    """Move a Mind to another user. Admin-only: comms holds the owner and
+    accepts a change from the admin token alone."""
+    body = await _json_object(request)
+    mind = route_access.find_mind(await _broker_minds_safe(), name)
+    if mind is None or not mind.get("id"):
+        raise HTTPException(status_code=404, detail="That Mind is not registered")
+    owner = await _new_mind_owner({"owner": body.get("owner")}, {})
+    mind_id = str(mind["id"])
+    result = await _gateway_request(
+        "PUT",
+        f"/broker/minds/{urllib.parse.quote(mind_id, safe='')}/owner",
+        json_body={"owner": owner},
+        admin=True,
+    )
+    log_event(
+        log, "mind.owner.changed", **_actor_fields(user), mind_name=mind.get("name"),
+        mind_id=mind_id, previous_owner=route_access.owner_of(mind), owner=owner,
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Users and groups (admin)
+# ---------------------------------------------------------------------------
+# Every route here is admin-only in console_access.TABLE. The store does the
+# work — hive.db or auth-service, whichever this install signs in against —
+# and its refusals (unknown user, duplicate, the last admin) come back as
+# the status the store named.
+
+
+async def _store_call(function, *args, **kwargs):
+    try:
+        return await run_in_threadpool(function, *args, **kwargs)
+    except auth.AuthError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+
+
+def _optional_text(body: dict, key: str) -> str | None:
+    value = body.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise HTTPException(status_code=400, detail=f"{key} must be text")
+    return value
+
+
+@app.get("/api/admin/users")
+async def api_admin_users(user: dict = Depends(require_auth)):
+    del user
+    store = auth.get_store()
+    users, groups = await asyncio.gather(
+        _store_call(store.list_users), _store_call(store.list_groups)
+    )
+    return {"users": users, "groups": groups, "backend": auth.backend_name()}
+
+
+@app.post("/api/admin/users", status_code=201)
+async def api_admin_user_create(request: Request, user: dict = Depends(require_auth)):
+    body = await _json_object(request)
+    temp_password = _optional_text(body, "temp_password") or None
+    created = await _store_call(
+        auth.get_store().create_user,
+        str(body.get("username") or ""),
+        email=_optional_text(body, "email") or None,
+        domain_account=_optional_text(body, "domain_account") or None,
+        temp_password=temp_password,
+    )
+    log_event(
+        log, "auth.user.created", **_actor_fields(user),
+        username=created["username"], with_password=temp_password is not None,
+    )
+    return created
+
+
+@app.patch("/api/admin/users/{username}")
+async def api_admin_user_update(
+    username: str, request: Request, user: dict = Depends(require_auth)
+):
+    body = await _json_object(request)
+    disabled = body.get("disabled")
+    if disabled is not None and not isinstance(disabled, bool):
+        raise HTTPException(status_code=400, detail="disabled must be true or false")
+    updated = await _store_call(
+        auth.get_store().update_user,
+        username,
+        email=_optional_text(body, "email"),
+        disabled=disabled,
+    )
+    log_event(
+        log, "auth.user.updated", **_actor_fields(user), username=updated["username"],
+        disabled=updated["disabled"], email_changed="email" in body,
+    )
+    return updated
+
+
+@app.post("/api/admin/users/{username}/reset")
+async def api_admin_user_reset(
+    username: str, request: Request, user: dict = Depends(require_auth)
+):
+    body = await _json_object(request)
+    updated = await _store_call(
+        auth.get_store().reset_password, username, _optional_text(body, "temp_password") or ""
+    )
+    log_event(log, "auth.user.reset", **_actor_fields(user), username=updated["username"])
+    return updated
+
+
+@app.get("/api/admin/groups")
+async def api_admin_groups(user: dict = Depends(require_auth)):
+    del user
+    return {"groups": await _store_call(auth.get_store().list_groups)}
+
+
+@app.post("/api/admin/groups", status_code=201)
+async def api_admin_group_create(request: Request, user: dict = Depends(require_auth)):
+    body = await _json_object(request)
+    group = await _store_call(auth.get_store().create_group, str(body.get("name") or ""))
+    log_event(log, "auth.group.created", **_actor_fields(user), group=group["name"])
+    return group
+
+
+@app.put("/api/admin/groups/{group}/members/{username}", status_code=204)
+async def api_admin_group_member_add(
+    group: str, username: str, user: dict = Depends(require_auth)
+):
+    await _store_call(auth.get_store().add_member, group, username)
+    log_event(log, "auth.group.member_added", **_actor_fields(user), group=group, username=username)
+    return Response(status_code=204)
+
+
+@app.delete("/api/admin/groups/{group}/members/{username}", status_code=204)
+async def api_admin_group_member_remove(
+    group: str, username: str, user: dict = Depends(require_auth)
+):
+    await _store_call(auth.get_store().remove_member, group, username)
+    log_event(
+        log, "auth.group.member_removed", **_actor_fields(user), group=group, username=username
+    )
+    return Response(status_code=204)
 
 
 @app.get("/health")

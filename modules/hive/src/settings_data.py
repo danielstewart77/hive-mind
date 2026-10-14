@@ -105,6 +105,7 @@ def build_mind_registry(broker_minds: list[dict]) -> list[dict]:
         rows.append({
             "name": name,
             "id": m.get("id", ""),
+            "owner": m.get("owner") or None,
             "gateway_url": m.get("gateway_url", ""),
             "model": m.get("model", ""),
             "harness": m.get("harness", ""),
