@@ -11,6 +11,7 @@ GSSAPI accept-context call — and hand back the principal a ticket named.
 import base64
 import re
 import time
+import urllib.parse
 
 import pytest
 from sso_support import (
@@ -88,12 +89,74 @@ def test_an_admin_set_up_email_signs_in_with_microsoft_as_that_account_and_later
     # A console session only: nothing that other sparktobloom sites accept.
     assert "auth_session" not in {c.name for c in client.cookies.jar}
 
-    # Bound to the oid: a later sign-in matches it even once the email moves.
-    moved = admin.patch("/api/admin/users/sloan", json={"email": "sloan.s@example.edu"})
-    assert moved.status_code == 200, moved.text
+    # Bound to the oid: a later sign-in matches it even once the email the
+    # tenant reports moves.
     again, back = _microsoft(console, entra, oid="oid-sloan", email="renamed@example.edu")
     assert back.status_code == 303, back.text
     assert _signed_in_as(again) == "sloan"
+
+
+def test_changing_an_accounts_email_unbinds_its_microsoft_identity(console, entra):
+    admin = console.admin()
+    _set_up(admin, "sloan", email="sloan@example.edu")
+    _, first = _microsoft(console, entra, oid="oid-sloan", email="sloan@example.edu")
+    assert first.status_code == 303
+
+    moved = admin.patch("/api/admin/users/sloan", json={"email": "sloan.s@example.edu"})
+    assert moved.status_code == 200, moved.text
+
+    stale, back = _microsoft(console, entra, oid="oid-sloan", email="sloan@example.edu")
+    assert back.status_code == 403
+    assert NOT_SET_UP in back.text
+    assert _signed_in_as(stale) is None
+    fresh, back = _microsoft(console, entra, oid="oid-sloan", email="Sloan.S@example.edu")
+    assert back.status_code == 303, back.text
+    assert _signed_in_as(fresh) == "sloan"
+
+
+def test_an_admin_unbinding_a_microsoft_identity_lets_the_accounts_email_select_it_again(
+    console, entra
+):
+    admin = console.admin()
+    _set_up(admin, "sloan", email="sloan@example.edu")
+    sloan, first = _microsoft(console, entra, oid="oid-sloan", email="sloan@example.edu")
+    assert first.status_code == 303
+    _, refused = _microsoft(console, entra, oid="oid-new-laptop", email="sloan@example.edu")
+    assert refused.status_code == 403
+
+    assert sloan.delete("/api/admin/users/sloan/microsoft").status_code == 403
+    listed = {u["username"]: u for u in admin.get("/api/admin/users").json()["users"]}
+    assert listed["sloan"]["microsoft_bound"] is True
+
+    assert admin.delete("/api/admin/users/sloan/microsoft").status_code == 204
+    listed = {u["username"]: u for u in admin.get("/api/admin/users").json()["users"]}
+    assert listed["sloan"]["microsoft_bound"] is False
+    rebound, back = _microsoft(console, entra, oid="oid-new-laptop", email="sloan@example.edu")
+    assert back.status_code == 303, back.text
+    assert _signed_in_as(rebound) == "sloan"
+
+
+@pytest.mark.parametrize("console", ["auth-service"], indirect=True)
+def test_at_home_a_microsoft_account_not_granted_the_hive_is_refused_unless_it_is_an_admin(
+    console, entra
+):
+    service = console.auth_service
+    console.admin()
+    for username in ("ada", "bea"):
+        made = service.admin(
+            "POST", "/admin/users", json={"username": username, "email": f"{username}@example.edu"}
+        )
+        assert made.status_code == 201, made.text
+    assert service.admin("PUT", "/admin/groups/admins/members/ada").status_code == 204
+
+    member, back = _microsoft(console, entra, oid="oid-bea", email="bea@example.edu")
+    assert back.status_code == 403
+    assert NOT_SET_UP in back.text
+    assert _signed_in_as(member) is None
+
+    admin, back = _microsoft(console, entra, oid="oid-ada", email="ada@example.edu")
+    assert back.status_code == 303, back.text
+    assert _signed_in_as(admin) == "ada"
 
 
 def test_a_microsoft_email_no_admin_set_up_is_refused_as_not_set_up(console, entra):
@@ -170,6 +233,44 @@ def test_a_microsoft_callback_whose_state_was_not_issued_to_this_browser_is_refu
     assert _signed_in_as(attacker) is None
 
 
+def test_a_callback_carrying_another_flows_state_is_refused_even_with_this_browsers_own_code(
+    console, entra
+):
+    """The browser holds a flow and a code of its own, both valid; only the
+    state names a different sign-in. Nothing but the state comparison stands
+    between that callback and a session."""
+    admin = console.admin()
+    _set_up(admin, "sloan", email="sloan@example.edu")
+
+    other = console.client()
+    other_start = other.get(_link(other.get("/login").text, "Sign in with Microsoft"),
+                            follow_redirects=False)
+    other_state = dict(
+        urllib.parse.parse_qsl(urllib.parse.urlsplit(other_start.headers["location"]).query)
+    )["state"]
+
+    client = console.client()
+    sent = client.get(_link(client.get("/login").text, "Sign in with Microsoft"),
+                      follow_redirects=False)
+    callback = entra.sign_in(sent.headers["location"], oid="oid-sloan", email="sloan@example.edu")
+    path, _, query = callback.partition("?")
+    params = dict(urllib.parse.parse_qsl(query))
+    params["state"] = other_state
+    back = client.get(f"{path}?{urllib.parse.urlencode(params)}", follow_redirects=False)
+    assert back.status_code in (400, 401, 403)
+    assert _signed_in_as(client) is None
+
+
+@pytest.mark.parametrize("tenant", ["common", "organizations", "consumers"])
+def test_a_tenant_that_is_not_one_directory_keeps_microsoft_sign_in_off(
+    builtin_console, entra, monkeypatch, tenant
+):
+    monkeypatch.setenv("HIVE_MICROSOFT_TENANT_ID", tenant)
+    client = builtin_console.client()
+    assert "Sign in with Microsoft" not in client.get("/login").text
+    assert client.get("/login/microsoft", follow_redirects=False).status_code == 404
+
+
 # ── Windows ─────────────────────────────────────────────────────────────
 
 
@@ -221,6 +322,44 @@ def test_a_realm_with_no_configured_mapping_takes_its_first_label_as_the_domain(
     client = console.client()
     assert _negotiate(client, b"aiden-ticket").status_code == 303
     assert _signed_in_as(client) == "aiden"
+
+
+def test_a_realm_the_configured_map_does_not_name_signs_nobody_in(windows):
+    console, tickets = windows
+    admin = console.admin()
+    # The account a first-label guess at the foreign realm would select.
+    _set_up(admin, "sloan", domain_account="OTHER\\sloan")
+    tickets[b"foreign-ticket"] = "sloan@OTHER.EXAMPLE.EDU"
+
+    client = console.client()
+    back = _negotiate(client, b"foreign-ticket")
+    assert back.status_code == 403
+    assert NOT_SET_UP in back.text
+    assert _signed_in_as(client) is None
+
+
+@pytest.mark.parametrize(
+    "principal", ["sloan/admin@CORP.EXAMPLE.EDU", "HTTP/hive.corp.example.edu@CORP.EXAMPLE.EDU"]
+)
+def test_a_principal_with_an_instance_names_no_domain_account(principal):
+    config = sso.WindowsConfig(
+        keytab="unused", spn="unused", realm_map=sso.parse_realm_map("CORP.EXAMPLE.EDU=UTSYS")
+    )
+    assert sso.domain_account_for(principal, config) is None
+    assert sso.domain_account_for("sloan@CORP.EXAMPLE.EDU", config) == "UTSYS\\sloan"
+
+
+def test_windows_sign_in_stays_off_behind_auth_service_whatever_is_configured(
+    windows, monkeypatch
+):
+    console, tickets = windows
+    tickets[b"sloan-ticket"] = "sloan@CORP.EXAMPLE.EDU"
+    monkeypatch.setenv("HIVE_AUTH_BACKEND", "auth-service")
+    monkeypatch.setenv("AUTH_SERVICE_URL", "http://127.0.0.1:9")
+
+    client = console.client()
+    assert "Sign in with Windows" not in client.get("/login").text
+    assert _negotiate(client, b"sloan-ticket").status_code == 404
 
 
 def test_a_domain_ticket_for_an_account_nobody_set_up_is_refused_as_not_set_up(windows):

@@ -1,5 +1,8 @@
 """Which account store a console signs in against, and what it refuses."""
 
+import asyncio
+
+import httpx
 import pytest
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 from multiuser_support import (
@@ -41,7 +44,9 @@ def test_the_console_signs_in_against_hive_db_unless_auth_service_is_configured(
 
     with AuthServiceProcess(auth_service_source, tmp_path / "auth.db") as service:
         service.admin("PUT", f"/admin/users/{SEED_USERNAME}/sites/hive")
-        _use_auth_service(monkeypatch, service.url)
+        # AUTH_SERVICE_URL alone selects it: no backend named.
+        monkeypatch.setenv("AUTH_SERVICE_URL", service.url)
+        monkeypatch.setenv("AUTH_SERVICE_ADMIN_TOKEN", AUTH_SERVICE_ADMIN_TOKEN)
 
         _, refused = console.sign_in("local-only", "local-only-pass")
         assert refused.status_code == 401
@@ -106,3 +111,33 @@ def test_a_fresh_install_with_no_key_never_signs_with_the_shipped_constant(
         URLSafeTimedSerializer(SHIPPED_SECRET, salt="hive-session").loads(cookie)
     # The key it did use outlives the request that made it.
     assert client.get("/overview", follow_redirects=False).status_code == 200
+
+
+@pytest.mark.parametrize(
+    "method, path", [("GET", "/"), ("GET", "/login"), ("POST", "/logout")]
+)
+def test_a_public_route_asks_the_sign_in_service_who_is_signed_in_off_the_event_loop(
+    monkeypatch, fake_comms, method, path
+):
+    """A call to auth-service made on the event loop stalls every other
+    request the console is serving until it answers."""
+    monkeypatch.setenv("GATEWAY_API_URL", fake_comms.url)
+    _use_auth_service(monkeypatch, "http://auth-service.invalid")
+    asked_from: list[str] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        try:
+            asyncio.get_running_loop()
+            asked_from.append("the event loop")
+        except RuntimeError:
+            asked_from.append("a worker thread")
+        return httpx.Response(401, json={"detail": "expired"})
+
+    store = auth.get_store()
+    monkeypatch.setattr(store, "_client", httpx.Client(transport=httpx.MockTransport(answer)))
+    client = Console("auth-service").client()
+    client.cookies.set("auth_session", "a-token")
+
+    client.request(method, path, follow_redirects=False)
+    assert asked_from
+    assert set(asked_from) == {"a worker thread"}

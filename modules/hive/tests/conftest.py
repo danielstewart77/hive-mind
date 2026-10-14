@@ -27,6 +27,8 @@ def _isolated_hive_db(tmp_path, monkeypatch):
 
 from multiuser_support import (  # noqa: E402
     AUTH_SERVICE_ADMIN_TOKEN,
+    AUTH_SERVICE_REF,
+    AUTH_SERVICE_REPO,
     SEED_PASSWORD,
     SEED_USERNAME,
     AuthServiceProcess,
@@ -44,10 +46,12 @@ def fake_comms():
 
 @pytest.fixture(scope="session")
 def auth_service_source(tmp_path_factory):
+    # A missing ref fails rather than skips: a skipped half of the shared
+    # suite reads as green while one store goes untested.
     if not auth_service_ref_available():
-        pytest.skip(
-            "auth-service has no `multi-user` branch yet; the auth-service-backed "
-            "run is pending"
+        pytest.fail(
+            f"auth-service ref {AUTH_SERVICE_REF!r} not found in {AUTH_SERVICE_REPO}; "
+            "set AUTH_SERVICE_REF to the ref the console is built against"
         )
     return export_auth_service(tmp_path_factory.mktemp("auth-service"))
 

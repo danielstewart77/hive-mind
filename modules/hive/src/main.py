@@ -6,7 +6,6 @@ self-contained; the auth db and secret are shared with the terminal site.
 
 import asyncio
 import base64
-import hmac
 import ipaddress
 import json
 import logging
@@ -37,8 +36,25 @@ from fastapi import (
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.concurrency import run_in_threadpool
 
 import auth
+import console_access
+import credential_registry
+import dashboard_data
+import design_data
+import design_delivery
+import design_graph
+import kanban_data
+import mind_files
+import mind_mounts
+import mind_runtime
+import mind_skills
+import mind_soul
+import mind_symbols
+import route_access
+import sentinel_review
+import sso
 from auth import (
     clear_session_cookie,
     get_current_user_from_request,
@@ -47,9 +63,6 @@ from auth import (
     seed_first_user,
     set_session_cookie,
 )
-import console_access
-import route_access
-import sso
 from capability_install import (
     HIVE_TOOLS_PLACEMENT_NOTE,
     InstallInProgress,
@@ -61,42 +74,28 @@ from capability_install import (
 from config import BASE_DIR
 from configuration_data import (
     DEFAULT_OLLAMA_BASE_URL,
+    OWNER_RE,
     clear_capability_endpoint,
     get_capability_endpoint,
     get_edge_mind_metadata,
     internal_mind_exists,
     local_runtime_configuration,
     normalize_endpoint,
-    OWNER_RE,
     scaffold_internal_mind,
     set_capability_endpoint,
     set_edge_mind_metadata,
 )
-from graph_data import get_graph_data
-import design_data
-import design_delivery
-import design_graph
-import mind_symbols
-import dashboard_data
-import mind_runtime
-import mind_soul
-import mind_files
-import mind_mounts
-import kanban_data
-from starlette.concurrency import run_in_threadpool
-import mind_skills
-import sentinel_review
-from hive_logging import configure_logging, install_fastapi_logging, log_event
-import credential_registry
 from credentials_data import rotate_credential, set_github_pat
+from graph_data import get_graph_data
+from hive_logging import configure_logging, install_fastapi_logging, log_event
 from settings_data import (
+    DEFAULT_VOICE_CLIP,
+    ClipExists,
     build_mind_registry,
     hive_tools_status,
     list_downloads,
-    resolve_download_path,
-    ClipExists,
-    DEFAULT_VOICE_CLIP,
     list_voice_clips,
+    resolve_download_path,
     save_voice_clip,
 )
 
@@ -408,7 +407,9 @@ async def _lucent_request(
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
-    user = get_current_user_from_request(request)
+    # Public routes are not resolved by the route table, so the lookup — a
+    # call to auth-service at home — happens here, off the event loop.
+    user = await run_in_threadpool(get_current_user_from_request, request)
     if not user:
         return _login_redirect_for(request)
     if user.get("must_change"):
@@ -418,7 +419,7 @@ async def home(request: Request):
 
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request, next: str = "/overview"):
-    current_user = get_current_user_from_request(request)
+    current_user = await run_in_threadpool(get_current_user_from_request, request)
     if current_user:
         return RedirectResponse(url=_safe_next_path(next), status_code=303)
     return _login_page(request, next_path=_safe_next_path(next))
@@ -467,7 +468,7 @@ async def login_submit(
 
 @app.post("/logout")
 async def logout(request: Request):
-    user = get_current_user_from_request(request)
+    user = await run_in_threadpool(get_current_user_from_request, request)
     store = auth.get_store()
     token = auth.session_token(request, store)
     if token:
@@ -2479,23 +2480,10 @@ async def _broadcast_canvas(data: dict, exclude: WebSocket | None = None) -> Non
             _canvas_connections.discard(conn)
 
 
-def _canvas_push_token() -> str:
-    """Bearer that authorizes Skippy's /canvas/push writes.
-
-    Prefers a dedicated CANVAS_PUSH_TOKEN; falls back to the house
-    COMMS_BEARER_TOKEN, which both this container and Skippy already hold,
-    so drawing works without recreating the container.
-    """
-    return os.getenv("CANVAS_PUSH_TOKEN") or os.getenv("COMMS_BEARER_TOKEN") or ""
-
-
 @app.post("/canvas/push")
 async def canvas_push(request: Request):
-    expected = _canvas_push_token()
-    if not expected:
-        raise HTTPException(status_code=503, detail="canvas push token not configured")
-    if request.headers.get("Authorization", "") != f"Bearer {expected}":
-        raise HTTPException(status_code=401, detail="unauthorized")
+    """A mind drawing. Its bearer (console_access.canvas_push_token) is
+    verified by the route table before this runs; nothing else reaches it."""
     data = await request.json()
     if not isinstance(data, dict) or not _apply_canvas_message(data):
         raise HTTPException(status_code=400, detail="unknown or malformed canvas message")
@@ -2514,16 +2502,10 @@ async def canvas_render_svg(request: Request, slide: int | None = None):
     With ``?slide=N`` the snapshot is that slide alone — what an audience sees
     at that point in the presentation. Without it, the whole board.
 
-    An admin's browser, or the canvas push bearer a mind draws with: the
-    route table hands a bearer request straight here to be checked.
+    An admin's browser, or the canvas push bearer a mind draws with; the
+    route table admits only those two, and verifies the bearer itself.
     """
-    header = request.headers.get("Authorization", "")
-    if header.startswith("Bearer "):
-        expected = _canvas_push_token()
-        if not expected or not hmac.compare_digest(
-            header[7:].encode("utf-8", "surrogatepass"), expected.encode("utf-8", "surrogatepass")
-        ):
-            raise HTTPException(status_code=401, detail="unauthorized")
+    del request
     return Response(content=_canvas_to_svg(slide), media_type="image/svg+xml")
 
 
@@ -2539,10 +2521,14 @@ async def canvas_submit(request: Request):
         body = {}
     note = (body or {}).get("note", "") if isinstance(body, dict) else ""
     element_count = len(_canvas_elements)
+    snapshot = str(request.base_url).rstrip("/") + "/canvas/render.svg"
     content = (
         "Daniel finished a drawing pass on the hive whiteboard and wants you "
-        f"to look. The board currently has {element_count} element(s). Rasterize "
-        "GET /canvas/render.svg and respond on Telegram with what you see."
+        f"to look. The board currently has {element_count} element(s). Fetch "
+        f"the snapshot with `curl -H \"Authorization: Bearer $CANVAS_PUSH_TOKEN\" "
+        f"{snapshot}` — the bearer you draw with (CANVAS_PUSH_TOKEN, or "
+        "COMMS_BEARER_TOKEN where that is unset); without it the console "
+        "refuses. Rasterize it and respond on Telegram with what you see."
     )
     if note:
         content += f" Daniel's note: {note}"
@@ -2593,7 +2579,9 @@ async def canvas(request: Request):
 
 @app.websocket("/ws/canvas")
 async def ws_canvas(websocket: WebSocket):
-    user = get_current_user_from_request(websocket)
+    # Admin-only in the route table, which also closes the socket if its
+    # user stops being one while it is open.
+    user = await run_in_threadpool(get_current_user_from_request, websocket)
     can_draw = user is not None
     await websocket.accept()
     _canvas_connections.add(websocket)
@@ -4283,40 +4271,15 @@ async def api_settings_check_mind_name(name: str, user: dict = Depends(require_a
 DESIGN_PREFIX = "/api/design"
 
 
-def _design_push_token() -> str:
-    """The credential a Mind publishes design pages with.
-
-    Deliberately its own, with no fallback to the house tokens. Every Mind
-    in the hive already holds `COMMS_ADMIN_BEARER_TOKEN` and
-    `COMMS_BEARER_TOKEN`, so either of those as the fallback would let any
-    Mind — a kid's Windows box included — rewrite Daniel's requirements and
-    press Build. Unset means the publish routes refuse rather than open.
-    """
-    return os.getenv("DESIGN_PUSH_TOKEN", "")
-
-
 def require_design_writer(request: Request) -> dict:
     """Daniel's browser login, or the Mind's own bearer. Nothing else.
 
     Applied to every design route including the reads: a design session
-    carries source text pulled off Daniel's disks.
+    carries source text pulled off Daniel's disks. The bearer
+    (console_access.design_push_token) is verified by the route table, which
+    refuses a wrong one outright; this only reads which of the two it was.
     """
-    header = request.headers.get("Authorization", "")
-    if header.startswith("Bearer "):
-        expected = _design_push_token()
-        presented = header[7:]
-        if not expected:
-            raise HTTPException(
-                status_code=503, detail="DESIGN_PUSH_TOKEN is not configured"
-            )
-        # Bytes, not str: compare_digest raises TypeError on a str holding
-        # anything outside ASCII, and that 500 would read to a Mind as a
-        # console that is down rather than a credential that was refused.
-        if not hmac.compare_digest(
-            presented.encode("utf-8", "surrogatepass"),
-            expected.encode("utf-8", "surrogatepass"),
-        ):
-            raise HTTPException(status_code=401, detail="unauthorized")
+    if route_access.bearer_of(request) == console_access.DESIGN:
         return {"sub": "mind", "via": "bearer"}
     user = get_current_user_from_request(request)
     if not user:
@@ -4606,9 +4569,13 @@ def _optional_text(body: dict, key: str) -> str | None:
 async def api_admin_users(user: dict = Depends(require_auth)):
     del user
     store = auth.get_store()
-    users, groups = await asyncio.gather(
-        _store_call(store.list_users), _store_call(store.list_groups)
+    users, groups, bound = await asyncio.gather(
+        _store_call(store.list_users),
+        _store_call(store.list_groups),
+        run_in_threadpool(sso.bound_usernames, sso.MICROSOFT),
     )
+    for row in users:
+        row["microsoft_bound"] = row["username"] in bound
     return {"users": users, "groups": groups, "backend": auth.backend_name()}
 
 
@@ -4638,17 +4605,37 @@ async def api_admin_user_update(
     disabled = body.get("disabled")
     if disabled is not None and not isinstance(disabled, bool):
         raise HTTPException(status_code=400, detail="disabled must be true or false")
+    email = _optional_text(body, "email")
+    store = auth.get_store()
+    before = await _store_call(store.get_user, username) if email is not None else None
     updated = await _store_call(
-        auth.get_store().update_user,
+        store.update_user,
         username,
-        email=_optional_text(body, "email"),
+        email=email,
         disabled=disabled,
     )
+    if before is not None and (before.get("email") or "").lower() != (
+        updated.get("email") or ""
+    ).lower():
+        # The Microsoft binding was made on the old address.
+        await run_in_threadpool(sso.unbind, sso.MICROSOFT, updated["username"])
     log_event(
         log, "auth.user.updated", **_actor_fields(user), username=updated["username"],
         disabled=updated["disabled"], email_changed="email" in body,
     )
     return updated
+
+
+@app.delete("/api/admin/users/{username}/microsoft", status_code=204)
+async def api_admin_user_microsoft_unbind(username: str, user: dict = Depends(require_auth)):
+    """Forget the Microsoft identity an account is bound to; its next
+    Microsoft sign-in selects it by email again."""
+    target = await _store_call(auth.get_store().get_user, username)
+    await run_in_threadpool(sso.unbind, sso.MICROSOFT, target["username"])
+    log_event(
+        log, "auth.user.microsoft_unbound", **_actor_fields(user), username=target["username"]
+    )
+    return Response(status_code=204)
 
 
 @app.post("/api/admin/users/{username}/reset")

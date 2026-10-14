@@ -4,8 +4,8 @@ Two processes stand outside the console and are run here rather than
 impersonated: comms (where a mind's owner is held) and auth-service (one of
 the two account stores). Comms is a small stand-in served by uvicorn, because
 what the console does with its answers is the thing under test and its own
-code is not. auth-service is the real app, exported from its repository's
-`multi-user` branch and run in its own process: its modules are named
+code is not. auth-service is the real app, exported from its repository at a
+pinned ref (`AUTH_SERVICE_REF`, default `main`) and run in its own process: its modules are named
 `auth`, `config` and `server`, which would collide with the console's own on
 one import path.
 """
@@ -30,7 +30,7 @@ from fastapi.responses import JSONResponse
 AUTH_SERVICE_REPO = Path(
     os.getenv("AUTH_SERVICE_REPO", "/home/daniel/Storage/Dev/auth-service")
 )
-AUTH_SERVICE_REF = os.getenv("AUTH_SERVICE_REF", "multi-user")
+AUTH_SERVICE_REF = os.getenv("AUTH_SERVICE_REF", "main")
 AUTH_SERVICE_ADMIN_TOKEN = "test-auth-service-admin-token"  # secret-guard: allow
 SEED_USERNAME = "daniel"
 SEED_PASSWORD = "daniel-seed-password"  # secret-guard: allow

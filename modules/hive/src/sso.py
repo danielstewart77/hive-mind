@@ -13,7 +13,8 @@ account whose email matches the token's (case-insensitively, and only when
 the token does not say the email is unverified) and binds the account to the
 token's `oid`; every later sign-in matches on `oid` alone. The binding lives
 in the console's own db (`sso_bindings`) for both stores, since auth-service
-has no field for it.
+has no field for it. An admin can unbind an account, and changing an
+account's email unbinds it: the binding was made on the old address.
 
 **Windows** is SPNEGO/Kerberos, offered only behind its own link and never
 as a challenge on the plain sign-in page. A ticket's client principal
@@ -193,6 +194,32 @@ def _bind(provider: str, subject: str, username: str) -> None:
         raise auth.NotSetUp() from exc
     finally:
         conn.close()
+
+
+def unbind(provider: str, username: str) -> bool:
+    """Forget the outside identity bound to an account. The account's next
+    sign-in by that method selects it by email again, as the first one did.
+    Returns whether there was a binding."""
+    conn = _bindings()
+    try:
+        cursor = conn.execute(
+            "DELETE FROM sso_bindings WHERE provider = ? AND username = ?",
+            (provider, auth.normalize_username(username)),
+        )
+    finally:
+        conn.close()
+    return cursor.rowcount > 0
+
+
+def bound_usernames(provider: str) -> set[str]:
+    conn = _bindings()
+    try:
+        rows = conn.execute(
+            "SELECT username FROM sso_bindings WHERE provider = ?", (provider,)
+        ).fetchall()
+    finally:
+        conn.close()
+    return {row[0] for row in rows}
 
 
 def _admit(store: auth.Store, user: dict | None) -> dict:

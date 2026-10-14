@@ -521,7 +521,8 @@ window.addEventListener("DOMContentLoaded", function () {
                 const status = u.disabled ? "Disabled" : (u.must_change ? "Must change password" : "Active");
                 return '<tr><td>' + name + '</td><td>' + h.escapeHtml(u.email || "") + '</td><td>' + h.escapeHtml(u.domain_account || "") + '</td><td>' + h.escapeHtml((u.groups || []).join(", ")) + '</td><td>' + status + '</td><td class="row-actions">'
                     + '<button class="button button-quiet" type="button" data-user-toggle="' + name + '" data-disabled="' + (u.disabled ? "1" : "") + '">' + (u.disabled ? "Enable" : "Disable") + '</button>'
-                    + '<button class="button button-quiet" type="button" data-user-reset="' + name + '">Reset password</button></td></tr>';
+                    + '<button class="button button-quiet" type="button" data-user-reset="' + name + '">Reset password</button>'
+                    + (u.microsoft_bound ? '<button class="button button-quiet" type="button" data-user-unbind="' + name + '">Unbind Microsoft</button>' : '') + '</td></tr>';
             }).join("") || '<tr><td colspan="6" class="empty-state">No users.</td></tr>';
             groupsRows.innerHTML = groups.map(function (g) {
                 const members = (g.members || []).map(function (m) {
@@ -556,6 +557,11 @@ window.addEventListener("DOMContentLoaded", function () {
             const toggle = event.target.closest("[data-user-toggle]");
             if (toggle) {
                 await act("/api/admin/users/" + encodeURIComponent(toggle.dataset.userToggle), json("PATCH", {disabled: !toggle.dataset.disabled}));
+                return;
+            }
+            const unbind = event.target.closest("[data-user-unbind]");
+            if (unbind) {
+                await act("/api/admin/users/" + encodeURIComponent(unbind.dataset.userUnbind) + "/microsoft", {method: "DELETE"});
                 return;
             }
             const reset = event.target.closest("[data-user-reset]");

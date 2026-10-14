@@ -14,6 +14,25 @@ Every route is classified in a single table. The classes are:
   passes; anyone else passes only as that owner. An owner that cannot be
   resolved — comms down, an unknown mind, a mind with no owner — refuses.
 - `admin` — admins only.
+- `bearer` — reached only with the bearer the rule names (a mind
+  publishing); no session admits it.
+
+Any rule may also name a bearer (`Rule(..., bearer="design")`): a request
+presenting one is admitted by that bearer and nothing else. The middleware
+verifies it against the table's token before the route runs — scheme
+compared without regard to case, value in constant time — and a wrong one
+is refused, never answered from the cookie beside it. A route reads what was
+verified with `bearer_of(request)`; it never reads the header itself. A
+request carrying more than one Authorization header is refused outright,
+since two readers of one request could otherwise each believe a different
+one.
+
+A long-lived connection — a websocket, a streamed response — is decided
+again every `RECHECK_SECONDS` for as long as it stays open, so a disable, a
+reset or an owner moved ends it rather than waiting for its next request.
+A refused websocket is accepted and then closed with its reason's code
+(4401, 4403, 4428), because a browser never sees the code of a socket closed
+before it was accepted.
 
 A route missing from the table is `admin`. That default is what makes a
 page added later safe without its author doing anything; websocket routes
@@ -27,6 +46,9 @@ the console and the terminal each hand it their own table and resolvers.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import hmac
 import os
 import urllib.parse
 from collections.abc import Awaitable, Callable, Iterable
@@ -34,9 +56,10 @@ from dataclasses import dataclass, field
 
 import httpx
 from starlette.concurrency import run_in_threadpool
+from starlette.requests import HTTPConnection
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.routing import BaseRoute, Match, Mount
-from starlette.websockets import WebSocketClose
+from starlette.websockets import WebSocket
 
 import auth
 
@@ -45,7 +68,8 @@ SELF = "self"
 USER = "user"
 OWNER = "owner"
 ADMIN = "admin"
-_KINDS = {PUBLIC, SELF, USER, OWNER, ADMIN}
+BEARER = "bearer"
+_KINDS = {PUBLIC, SELF, USER, OWNER, ADMIN, BEARER}
 
 # Set on every refusal this module makes, naming why ("admin" or "owner"),
 # so a refusal here can never be mistaken for one a route made itself.
@@ -57,6 +81,10 @@ CLOSE_MUST_CHANGE_PASSWORD = 4428
 CLOSE_REFUSED = 4403
 PASSWORD_PATH = "/password"
 LOGIN_PATH = "/login"
+# How often a connection that stays open is decided again.
+RECHECK_SECONDS = 30.0
+# Where the middleware records the bearer it verified for a request.
+_BEARER_STATE_KEY = "hive_verified_bearer"
 
 
 @dataclass(frozen=True)
@@ -64,9 +92,9 @@ class Rule:
     kind: str
     # For `owner`: the path parameter naming the mind, operation or session.
     param: str | None = None
-    # The route checks an `Authorization: Bearer` credential itself (a mind
-    # publishing); a request carrying one is handed straight to the route.
-    bearer: bool = False
+    # The bearer (a name in the table's `bearers`) that also admits this
+    # route; the middleware verifies it before the route runs.
+    bearer: str | None = None
     # A `user` rule only for these parameter values; any other is `admin`.
     only_when: tuple[tuple[str, frozenset[str]], ...] = ()
 
@@ -75,6 +103,8 @@ class Rule:
             raise ValueError(f"unknown route class {self.kind!r}")
         if self.kind == OWNER and not self.param:
             raise ValueError("an owner rule names the parameter it resolves")
+        if self.kind == BEARER and not self.bearer:
+            raise ValueError("a bearer rule names the bearer it takes")
 
 
 DEFAULT_RULE = Rule(ADMIN)
@@ -85,10 +115,24 @@ WEBSOCKET = "WS"
 Resolver = Callable[[str], Awaitable[str | None]]
 
 
+@dataclass(frozen=True)
+class BearerToken:
+    """A credential a mind presents in place of a session.
+
+    `token` reads the expected value at request time; empty means none is
+    configured, answered with `unset_status` (503 where the route cannot
+    work without one, 401 where it simply admits no bearer)."""
+
+    token: Callable[[], str]
+    unset_status: int = 401
+    unset_message: str = "Authentication required"
+
+
 @dataclass
 class RouteTable:
     rules: dict[tuple[str, str], Rule] = field(default_factory=dict)
     resolvers: dict[str, Resolver] = field(default_factory=dict)
+    bearers: dict[str, BearerToken] = field(default_factory=dict)
 
     def add(self, rule: Rule, *routes: str) -> None:
         """Classify routes written as "METHOD /path/{param}" ("WS" for a
@@ -100,6 +144,8 @@ class RouteTable:
                 raise ValueError(f"{spec} is classified twice")
             if rule.kind == OWNER and rule.param not in self.resolvers:
                 raise ValueError(f"no resolver for {rule.param!r}")
+            if rule.bearer and rule.bearer not in self.bearers:
+                raise ValueError(f"no token for bearer {rule.bearer!r}")
             self.rules[key] = rule
 
     def rule_for(self, method: str, path: str) -> Rule:
@@ -238,6 +284,23 @@ def visible_sessions(
 # ── the middleware ──────────────────────────────────────────────────────
 
 
+def bearer_of(conn: HTTPConnection) -> str | None:
+    """The bearer the middleware verified for this request, by its table
+    name, or None when the request was admitted by a session."""
+    return (conn.scope.get("state") or {}).get(_BEARER_STATE_KEY)
+
+
+def _authorization_headers(scope) -> list[bytes]:
+    return [value for name, value in scope.get("headers") or [] if name.lower() == b"authorization"]
+
+
+def _presented_bearer(header: bytes) -> bytes | None:
+    scheme, _, value = header.strip().partition(b" ")
+    if scheme.lower() != b"bearer":
+        return None
+    return value.strip()
+
+
 def _wants_page(route: BaseRoute, method: str) -> bool:
     response_class = getattr(route, "response_class", None)
     return method == "GET" and isinstance(response_class, type) and issubclass(
@@ -269,6 +332,14 @@ def _close_code(refusal: Response) -> int:
     return CLOSE_REFUSED
 
 
+async def _close_socket(scope, receive, send, code: int) -> None:
+    """Accept, then close with `code`: a socket closed before it is accepted
+    reaches a browser as a bare 1006, whatever code the server meant."""
+    websocket = WebSocket(scope, receive, send)
+    await websocket.accept()
+    await websocket.close(code=code)
+
+
 class AccessMiddleware:
     def __init__(self, app, table: RouteTable):
         self.app = app
@@ -296,26 +367,104 @@ class AccessMiddleware:
             WEBSOCKET if is_socket else scope["method"]
         )
         rule = self.table.rule_for(method, getattr(route, "path", ""))
+        page = not is_socket and _wants_page(route, method)
+
+        authorization = _authorization_headers(scope)
+        if len(authorization) > 1:
+            refusal: Response | None = JSONResponse(
+                {"detail": "More than one Authorization header."}, 400
+            )
+            await self._refuse(scope, receive, send, refusal, is_socket)
+            return
+        presented = _presented_bearer(authorization[0]) if authorization else None
+        if rule.bearer and presented is not None:
+            refusal = self._verify_bearer(rule.bearer, presented)
+            if refusal is not None:
+                await self._refuse(scope, receive, send, refusal, is_socket)
+                return
+            scope.setdefault("state", {})[_BEARER_STATE_KEY] = rule.bearer
+            await self.app(scope, receive, send)
+            return
+        if rule.kind == BEARER:
+            refusal = JSONResponse({"detail": "Authentication required"}, 401)
+            await self._refuse(scope, receive, send, refusal, is_socket)
+            return
         if rule.kind == PUBLIC:
             await self.app(scope, receive, send)
             return
-        headers = dict(scope.get("headers") or [])
-        if rule.bearer and headers.get(b"authorization", b"").lower().startswith(b"bearer "):
-            await self.app(scope, receive, send)
-            return
 
-        page = not is_socket and _wants_page(route, method)
         refusal = await self._decide(scope, rule, params, page)
-        if refusal is None:
-            await self.app(scope, receive, send)
-        elif is_socket:
-            await WebSocketClose(code=_close_code(refusal))(scope, receive, send)
+        if refusal is not None:
+            await self._refuse(scope, receive, send, refusal, is_socket)
+            return
+        await self._run_watched(scope, receive, send, rule, params, is_socket)
+
+    def _verify_bearer(self, name: str, presented: bytes) -> Response | None:
+        bearer = self.table.bearers[name]
+        expected = bearer.token() or ""
+        if not expected:
+            return JSONResponse({"detail": bearer.unset_message}, bearer.unset_status)
+        if not hmac.compare_digest(presented, expected.encode("utf-8", "surrogatepass")):
+            return JSONResponse({"detail": "Authentication required"}, 401)
+        return None
+
+    async def _refuse(self, scope, receive, send, refusal: Response, is_socket: bool) -> None:
+        if is_socket:
+            await _close_socket(scope, receive, send, _close_code(refusal))
         else:
             await refusal(scope, receive, send)
 
-    async def _decide(self, scope, rule: Rule, params: dict, page: bool) -> Response | None:
-        from starlette.requests import HTTPConnection
+    async def _run_watched(self, scope, receive, send, rule, params, is_socket) -> None:
+        """Run the route, deciding again every RECHECK_SECONDS while it is
+        still running: an open socket is closed, a streaming response is
+        ended. A request that finishes first is never touched."""
+        state = {"open": False, "done": False}
 
+        async def watched_send(message):
+            kind = message["type"]
+            if state["done"]:
+                return
+            if kind in ("websocket.accept", "http.response.start"):
+                state["open"] = True
+            elif kind == "websocket.close" or (
+                kind == "http.response.body" and not message.get("more_body", False)
+            ):
+                state["done"] = True
+            await send(message)
+
+        app_task = asyncio.ensure_future(self.app(scope, receive, watched_send))
+        try:
+            await self._watch(app_task, state, send, scope, rule, params, is_socket)
+        finally:
+            if not app_task.done():
+                app_task.cancel()
+
+    async def _watch(self, app_task, state, send, scope, rule, params, is_socket) -> None:
+        while True:
+            done, _ = await asyncio.wait({app_task}, timeout=RECHECK_SECONDS)
+            if done:
+                app_task.result()
+                return
+            if not state["open"] or state["done"]:
+                continue
+            fresh = dict(scope, state={})
+            try:
+                refusal = await self._decide(fresh, rule, params, page=False)
+            except Exception:  # noqa: BLE001 - a failed recheck is not a refusal
+                refusal = None
+            if refusal is None or refusal.status_code == 503:
+                continue
+            state["done"] = True
+            app_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await app_task
+            if is_socket:
+                await send({"type": "websocket.close", "code": _close_code(refusal), "reason": ""})
+            else:
+                await send({"type": "http.response.body", "body": b"", "more_body": False})
+            return
+
+    async def _decide(self, scope, rule: Rule, params: dict, page: bool) -> Response | None:
         conn = HTTPConnection(scope)
         try:
             user = await run_in_threadpool(auth.resolve_user, conn)

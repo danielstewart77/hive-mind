@@ -196,3 +196,131 @@ def test_only_an_admin_moves_a_mind_to_another_owner_and_comms_hears_it_with_the
     assert (sent["method"], sent["path"]) == ("PUT", "/broker/minds/m-zack/owner")
     assert sent["authorization"] == "Bearer admin-token"
     assert json.loads(sent["body"]) == {"owner": "sloan"}
+
+
+# ── bearers, long-lived connections, refusals a browser can read ───────
+
+
+def _anonymous():
+    from starlette.testclient import TestClient
+
+    return TestClient(main.app, base_url="https://testserver")
+
+
+_BEARER_ROUTES = [
+    ("GET", "/canvas/render.svg", None),
+    ("GET", "/api/design/sessions", None),
+]
+
+
+@pytest.mark.parametrize("method, path, body", _BEARER_ROUTES)
+@pytest.mark.parametrize(
+    "authorization",
+    [
+        [("Authorization", "bearer not-the-token")],
+        [("Authorization", "BEARER not-the-token")],
+        [("Authorization", "Basic c2xvYW46eA=="), ("Authorization", "Bearer not-the-token")],
+        [("Authorization", "Bearer not-the-token"), ("Authorization", "Basic c2xvYW46eA==")],
+    ],
+    ids=["lowercase", "uppercase", "basic-then-bearer", "bearer-then-basic"],
+)
+def test_a_bearer_route_refuses_a_wrong_or_doubled_authorization_to_a_non_admin_and_to_anyone(
+    people, monkeypatch, method, path, body, authorization
+):
+    _, sloan = people
+    monkeypatch.setenv("CANVAS_PUSH_TOKEN", "the-canvas-token")
+    monkeypatch.setenv("DESIGN_PUSH_TOKEN", "the-design-token")
+
+    for who, client in (("sloan", sloan), ("anonymous", _anonymous())):
+        response = client.request(method, path, json=body, headers=authorization)
+        assert response.status_code in (400, 401), (who, response.status_code, response.text)
+
+
+def test_a_bearer_is_admitted_whatever_the_case_of_its_scheme(people, monkeypatch):
+    monkeypatch.setenv("CANVAS_PUSH_TOKEN", "the-canvas-token")
+    monkeypatch.setenv("DESIGN_PUSH_TOKEN", "the-design-token")
+    client = _anonymous()
+
+    svg = client.get(
+        "/canvas/render.svg",
+        headers={"Authorization": "bearer the-canvas-token"},  # secret-guard: allow
+    )
+    assert svg.status_code == 200
+    assert svg.headers["content-type"].startswith("image/svg+xml")
+    listed = client.get(
+        "/api/design/sessions",
+        headers={"authorization": "BEARER the-design-token"},  # secret-guard: allow
+    )
+    assert listed.status_code == 200, listed.text
+
+
+def test_a_refused_websocket_is_accepted_then_closed_with_its_reason(people):
+    """Closed before it is accepted, a socket reaches a browser as a bare
+    1006: the code is only readable on one the server accepted first."""
+    _, sloan = people
+    with _socket(sloan, "/ws/canvas") as ws, pytest.raises(
+        WebSocketDisconnect
+    ) as closed:  # accepted: entering did not raise
+        ws.receive_text()
+    assert closed.value.code == route_access.CLOSE_REFUSED
+
+
+def _closed_within(ws, seconds: float):
+    """The close code of `ws` if the server closes it within `seconds`, else
+    None. The receive runs on a thread, since a socket nobody closes would
+    otherwise hold the test forever."""
+    import threading
+
+    outcome: dict = {}
+
+    def drain():
+        while not outcome.get("stop"):
+            message = ws.receive()
+            if message["type"] == "websocket.close":
+                outcome["code"] = message.get("code")
+                return
+
+    thread = threading.Thread(target=drain, daemon=True)
+    thread.start()
+    thread.join(seconds)
+    outcome["stop"] = True
+    return outcome.get("code")
+
+
+def test_an_open_canvas_socket_is_closed_once_its_user_stops_being_an_admin(
+    builtin_console, monkeypatch
+):
+    monkeypatch.setattr(route_access, "RECHECK_SECONDS", 0.2)
+    admin = builtin_console.admin()
+    second = builtin_console.settled_user(admin, "ada", "adas-own-pass")
+    assert admin.put("/api/admin/groups/admins/members/ada").status_code == 204
+
+    with _socket(second, "/ws/canvas") as ws:
+        assert ws.receive_json()["type"] == "state"
+        assert admin.delete("/api/admin/groups/admins/members/ada").status_code == 204
+        assert _closed_within(ws, 5) == route_access.CLOSE_REFUSED
+
+
+def test_an_owner_route_refuses_a_non_admin_while_comms_cannot_say_who_owns_the_mind(
+    people, monkeypatch
+):
+    admin, sloan = people
+    monkeypatch.setenv("GATEWAY_API_URL", "http://127.0.0.1:9")
+
+    refused = sloan.get("/api/minds/arnold/settings")
+    assert refused.status_code == 403
+    assert refused.headers.get(REFUSED) == "owner"
+    assert REFUSED not in admin.get("/api/minds/arnold/settings").headers
+
+
+def test_the_canvas_review_tells_the_mind_to_fetch_the_snapshot_with_its_bearer(
+    builtin_console, fake_comms
+):
+    admin = builtin_console.admin()
+    fake_comms.received.clear()
+
+    assert admin.post("/canvas/submit", json={}).status_code == 200
+    (sent,) = [r for r in fake_comms.received if r["path"] == "/broker/messages"]
+    content = json.loads(sent["body"])["content"]
+    assert "https://testserver/canvas/render.svg" in content
+    assert "Authorization: Bearer $CANVAS_PUSH_TOKEN" in content

@@ -8,6 +8,7 @@ Enforcement lives in route_access.AccessMiddleware.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -15,10 +16,12 @@ from pathlib import Path
 import auth
 from route_access import (
     ADMIN,
+    BEARER,
     OWNER,
     PUBLIC,
     SELF,
     USER,
+    BearerToken,
     RouteTable,
     Rule,
     owner_of_mind,
@@ -76,6 +79,34 @@ async def requester_of(request_id: str) -> str | None:
     return row[0] if row else None
 
 
+# ── the bearers a mind presents ────────────────────────────────────────
+
+
+def canvas_push_token() -> str:
+    """What a mind draws on, and reads, the canvas with.
+
+    Prefers a dedicated CANVAS_PUSH_TOKEN; falls back to the house
+    COMMS_BEARER_TOKEN, which both this container and Skippy already hold,
+    so drawing works without recreating the container.
+    """
+    return os.getenv("CANVAS_PUSH_TOKEN") or os.getenv("COMMS_BEARER_TOKEN") or ""
+
+
+def design_push_token() -> str:
+    """The credential a Mind publishes design pages with.
+
+    Deliberately its own, with no fallback to the house tokens. Every Mind
+    in the hive already holds `COMMS_ADMIN_BEARER_TOKEN` and
+    `COMMS_BEARER_TOKEN`, so either of those as the fallback would let any
+    Mind — a kid's Windows box included — rewrite Daniel's requirements and
+    press Build. Unset means the publish routes refuse rather than open.
+    """
+    return os.getenv("DESIGN_PUSH_TOKEN", "")
+
+
+CANVAS = "canvas"
+DESIGN = "design"
+
 # ── the table ──────────────────────────────────────────────────────────
 
 TABLE = RouteTable(
@@ -84,7 +115,16 @@ TABLE = RouteTable(
         "mind_id": owner_of_mind,
         "session_id": owner_of_session,
         "request_id": requester_of,
-    }
+    },
+    bearers={
+        CANVAS: BearerToken(
+            canvas_push_token, unset_status=503, unset_message="canvas push token not configured"
+        ),
+        DESIGN: BearerToken(
+            design_push_token, unset_status=503,
+            unset_message="DESIGN_PUSH_TOKEN is not configured",
+        ),
+    },
 )
 
 TABLE.add(
@@ -99,9 +139,10 @@ TABLE.add(
     "GET /login/microsoft/callback",
     "GET /login/windows",
     "GET /health",
-    # Checks the canvas push bearer itself; a mind draws with it.
-    "POST /canvas/push",
 )
+
+# A mind draws on the canvas with its bearer; no session admits it.
+TABLE.add(Rule(BEARER, bearer=CANVAS), "POST /canvas/push")
 
 TABLE.add(Rule(SELF), "GET /password", "POST /password")
 
@@ -153,11 +194,11 @@ TABLE.add(
 )
 TABLE.add(Rule(OWNER, param="request_id"), "GET /api/operations/{request_id}")
 
-# Design sessions and the canvas snapshot are also reached by a mind with a
-# bearer of its own, which the route checks.
+# The canvas snapshot and design sessions are also reached by a mind with a
+# bearer of its own, which the middleware verifies.
+TABLE.add(Rule(ADMIN, bearer=CANVAS), "GET /canvas/render.svg")
 TABLE.add(
-    Rule(ADMIN, bearer=True),
-    "GET /canvas/render.svg",
+    Rule(ADMIN, bearer=DESIGN),
     "GET /api/design/sessions",
     "POST /api/design/sessions",
     "GET /api/design/sessions/{design_id}",
@@ -283,6 +324,7 @@ TABLE.add(
     "POST /api/admin/users",
     "PATCH /api/admin/users/{username}",
     "POST /api/admin/users/{username}/reset",
+    "DELETE /api/admin/users/{username}/microsoft",
     "GET /api/admin/groups",
     "POST /api/admin/groups",
     "PUT /api/admin/groups/{group}/members/{username}",

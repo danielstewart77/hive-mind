@@ -69,6 +69,15 @@ through comms' `owner` on `GET /broker/minds`), or admin-only. A route the
 table does not name is admin-only, websockets included; the enforcement is
 `src/route_access.py`, in front of every route.
 
+A route a mind reaches with a bearer (the canvas snapshot and push, the
+design routes) names that bearer in the table, and the middleware verifies
+it before the route runs; a wrong one is refused, never answered from a
+cookie beside it, and a request carrying two Authorization headers is
+refused outright. A connection that stays open — `/ws/canvas` — is decided
+again every 30 seconds and closed once its user may no longer hold it. A
+refused websocket is accepted and then closed with its reason (4401 signed
+out, 4403 not allowed, 4428 password to change), so a browser can read it.
+
 The Inference Proxy Capability Node can clone its fixed public repository from
 the control center. `INFERENCE_PROXY_DIR` selects the host destination mounted
 for that action, and `INFERENCE_PROXY_URL` supplies a deployed endpoint when it
