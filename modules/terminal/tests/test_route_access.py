@@ -187,3 +187,19 @@ def test_a_terminal_route_added_with_no_authorization_code_is_refused_to_a_non_a
     finally:
         for route in added:
             main.app.router.routes.remove(route)
+
+
+def test_a_microsoft_or_windows_session_from_the_console_opens_the_owners_terminal_and_no_one_elses(builtin_terminal):
+    store = builtin_terminal.store()
+    builtin_terminal.create_user("sloan", "sloan-temp-pass")
+    sloan = builtin_terminal.client()
+    sloan.cookies.set(auth.SSO_COOKIE_NAME, auth.issue_sso_token(store, "sloan", "microsoft"))
+
+    with _socket(sloan, "/api/terminal/attach/s-arnold") as ws:
+        assert ws.receive_bytes() == b"attached s-arnold"
+    with pytest.raises(WebSocketDisconnect) as closed, _socket(sloan, "/api/terminal/attach/s-zack") as ws:
+        ws.receive_bytes()
+    assert closed.value.code == route_access.CLOSE_REFUSED
+
+    store.update_user("sloan", disabled=True)
+    assert sloan.get("/api/terminal/sessions").status_code == 401
