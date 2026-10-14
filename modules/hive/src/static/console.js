@@ -114,6 +114,19 @@
         });
     }
 
+    document.querySelectorAll("[data-nav-flyout-toggle]").forEach(function (button) {
+        const flyout = button.closest(".console-nav-flyout");
+        const canHover = window.matchMedia("(hover: hover)");
+        button.addEventListener("click", function () {
+            const wasOpen = flyout.classList.contains("is-open") ||
+                (canHover.matches && flyout.matches(":hover") && !flyout.classList.contains("is-closed"));
+            flyout.classList.toggle("is-open", !wasOpen);
+            flyout.classList.toggle("is-closed", wasOpen);
+            button.setAttribute("aria-expanded", wasOpen ? "false" : "true");
+        });
+        flyout.addEventListener("mouseleave", function () { flyout.classList.remove("is-closed"); });
+    });
+
     /* A table row whose only hit target is the name text reads as broken: the
        row highlights on hover, so the whole row is what a reader aims at, and a
        click landing two pixels off the six characters of a Mind's name does

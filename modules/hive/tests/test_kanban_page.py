@@ -93,7 +93,19 @@ def test_sidebar_marks_kanban_current_on_every_page_of_the_section(signed_in):
     for path in ("/kanban/board", "/kanban/backlog", f"/kanban/item/{epic['id']}"):
         body = signed_in.get(path)
         assert body.status_code == 200, path
-        assert '<a href="/kanban" class="console-nav-link is-active">' in body.text, path
+        assert '<button type="button" class="console-nav-link console-nav-toggle is-active" aria-expanded="false" data-nav-flyout-toggle>' in body.text, path
+
+
+def test_sidebar_kanban_entry_is_an_expand_button_whose_children_are_the_only_kanban_links(signed_in):
+    body = signed_in.get("/overview").text
+    start = body.index('<div class="console-nav-flyout">')
+    flyout = body[start:body.index('<a href="/canvas"', start)]
+    assert '<button type="button" class="console-nav-link console-nav-toggle" aria-expanded="false" data-nav-flyout-toggle>' in flyout
+    hrefs = [chunk.split('"', 1)[0] for chunk in flyout.split('href="')[1:]]
+    assert hrefs == ["/kanban/backlog", "/kanban/board"]
+    assert "<span>Kanban</span>" in flyout
+    sidebar = body[body.index("<aside"):body.index("</aside>")]
+    assert [h for h in (c.split('"', 1)[0] for c in sidebar.split('href="')[1:]) if h.startswith("/kanban")] == ["/kanban/backlog", "/kanban/board"]
 
 
 def test_done_cards_on_the_board_carry_a_trash_control(signed_in):
