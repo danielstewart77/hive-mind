@@ -90,7 +90,7 @@ def _spawned_payload(owner_type: str | None, harness_sid: str | None = None) -> 
             await broker.register_mind(
                 mgr.broker_db, mind_id="ada", name="ada",
                 gateway_url="http://mind.test:8420", model="opus",
-                harness="claude_cli", session_token="ada-token",  # secret-guard: allow
+                harness="claude_cli", session_token="ada-token", owner="daniel",  # secret-guard: allow
             )
             payloads: list[dict] = []
             try:

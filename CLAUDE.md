@@ -475,6 +475,18 @@ module serves `GET`/`PATCH /runtime`, which is how the console edits a mind's
 default — the file first, the broker row second, over HTTP for every mind
 including the ones on other machines.
 
+Every mind has exactly one owner — the lowercase username of the user it
+belongs to — held on `broker.minds.owner` and keyed by `mind_id`, not name.
+`runtime.yaml`'s `owner:` line rides in the registration when set. A mind
+comms has never seen is refused (422) unless it names one; a known mind that
+omits it keeps the stored owner, the way it keeps its session token, so a mind
+predating the field still registers unchanged; a row with no owner yet takes
+the one named. Naming a different owner than the stored one is ignored with a
+warning and the rest of the registration lands — refusing it would freeze a
+mind an admin had just moved until its `runtime.yaml` caught up. Only the
+admin-guarded `PUT /broker/minds/{mind_id}/owner` moves a mind between users.
+`GET /broker/minds` reports it.
+
 `create_session` resolves `caller-supplied model || broker.minds.model`, and
 raises when it has neither. Nothing below it defaults: a mind handed a spawn
 or an `attach-pty` with no model refuses. A rotation passes the retiring

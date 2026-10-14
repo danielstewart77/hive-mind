@@ -347,6 +347,12 @@ def registration_payload(path: Path, mind_name: str = "") -> dict[str, str]:
         value = str(loaded.get(field) or "").strip()
         if value:
             payload[field] = value
+    # The user this mind belongs to. Comms holds ownership and refuses a mind
+    # it has never seen that names none; a known mind that omits it keeps the
+    # stored owner, so an unset line sends nothing rather than an empty one.
+    owner = str(loaded.get("owner") or "").strip()
+    if owner:
+        payload["owner"] = owner
     # The admin-guarded registration this mind already performs every boot is
     # the only channel by which the gateway learns the credential. Omitted
     # when there is none, because a registration that sent an empty one would

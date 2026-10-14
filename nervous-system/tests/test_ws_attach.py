@@ -150,7 +150,7 @@ async def _seed_session_and_mind(
     await mgr._db.commit()
     await broker.register_mind(
         mgr.broker_db, mind_id=mind_id, name=mind_id, gateway_url="http://mind.test:8420",
-        model="opus", harness="claude",
+        model="opus", harness="claude", owner="daniel",
     )
 
 
@@ -367,7 +367,7 @@ class TestWsAttach:
         _run(broker.register_mind(
             server_module.session_mgr.broker_db, mind_id="ada", name="ada",
             gateway_url="http://mind.test:8420", model="opus", harness="claude",
-            session_token="ada-session-token",  # secret-guard: allow
+            session_token="ada-session-token", owner="daniel",  # secret-guard: allow
         ))
 
         fake_ws = _FakeMindWS(incoming=[b"up\r\n"])
