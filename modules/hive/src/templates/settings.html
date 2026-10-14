@@ -56,12 +56,13 @@
                     <form id="user-create" class="inline-form">
                         <input name="username" placeholder="Username" autocomplete="off" required>
                         <input name="email" type="email" placeholder="Email (optional)" autocomplete="off">
+                        <input name="domain_account" id="user-domain-account" placeholder="DOMAIN\username (optional)" autocomplete="off" hidden>
                         <input name="temp_password" type="text" placeholder="Temporary password" autocomplete="off" minlength="8">
                         <button class="button button-primary" type="submit"><i data-lucide="user-plus"></i>Add user</button>
                     </form>
                     <p class="faint">Leave the temporary password empty for an account that signs in only through Microsoft or Windows.</p>
                 </div>
-                <div class="table-wrap"><table class="data-table"><thead><tr><th>Username</th><th>Email</th><th>Groups</th><th>Status</th><th></th></tr></thead><tbody id="users-rows"><tr><td colspan="5" class="loading-state">Loading users…</td></tr></tbody></table></div>
+                <div class="table-wrap"><table class="data-table"><thead><tr><th>Username</th><th>Email</th><th>Domain account</th><th>Groups</th><th>Status</th><th></th></tr></thead><tbody id="users-rows"><tr><td colspan="6" class="loading-state">Loading users…</td></tr></tbody></table></div>
             </section>
             <section class="surface">
                 <div class="surface-header"><div><h2>Groups</h2><p>Membership of admins is what makes a user an admin. The last enabled admin cannot be removed or disabled.</p></div></div>
@@ -508,18 +509,20 @@ window.addEventListener("DOMContentLoaded", function () {
         async function loadUsers() {
             let data;
             try { data = await h.requestJson("/api/admin/users"); } catch (error) {
-                usersRows.innerHTML = '<tr><td colspan="5" class="error-state">' + h.escapeHtml(error.message) + '</td></tr>';
+                usersRows.innerHTML = '<tr><td colspan="6" class="error-state">' + h.escapeHtml(error.message) + '</td></tr>';
                 return;
             }
             const users = data.users || [];
             const groups = data.groups || [];
+            // Domain accounts are held only by the console's own store.
+            document.getElementById("user-domain-account").hidden = data.backend !== "builtin";
             usersRows.innerHTML = users.map(function (u) {
                 const name = h.escapeHtml(u.username);
                 const status = u.disabled ? "Disabled" : (u.must_change ? "Must change password" : "Active");
-                return '<tr><td>' + name + '</td><td>' + h.escapeHtml(u.email || "") + '</td><td>' + h.escapeHtml((u.groups || []).join(", ")) + '</td><td>' + status + '</td><td class="row-actions">'
+                return '<tr><td>' + name + '</td><td>' + h.escapeHtml(u.email || "") + '</td><td>' + h.escapeHtml(u.domain_account || "") + '</td><td>' + h.escapeHtml((u.groups || []).join(", ")) + '</td><td>' + status + '</td><td class="row-actions">'
                     + '<button class="button button-quiet" type="button" data-user-toggle="' + name + '" data-disabled="' + (u.disabled ? "1" : "") + '">' + (u.disabled ? "Enable" : "Disable") + '</button>'
                     + '<button class="button button-quiet" type="button" data-user-reset="' + name + '">Reset password</button></td></tr>';
-            }).join("") || '<tr><td colspan="5" class="empty-state">No users.</td></tr>';
+            }).join("") || '<tr><td colspan="6" class="empty-state">No users.</td></tr>';
             groupsRows.innerHTML = groups.map(function (g) {
                 const members = (g.members || []).map(function (m) {
                     return '<span class="pill">' + h.escapeHtml(m) + ' <button class="icon-button" type="button" aria-label="Remove ' + h.escapeHtml(m) + '" data-member-remove="' + h.escapeHtml(m) + '" data-group="' + h.escapeHtml(g.name) + '">×</button></span>';
@@ -535,6 +538,7 @@ window.addEventListener("DOMContentLoaded", function () {
             const form = new FormData(event.target);
             const body = {username: form.get("username"), email: form.get("email") || null};
             if (form.get("temp_password")) body.temp_password = form.get("temp_password");
+            if (form.get("domain_account")) body.domain_account = form.get("domain_account");
             await act("/api/admin/users", json("POST", body));
             event.target.reset();
         });

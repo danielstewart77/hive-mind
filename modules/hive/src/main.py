@@ -5,6 +5,7 @@ self-contained; the auth db and secret are shared with the terminal site.
 """
 
 import asyncio
+import base64
 import hmac
 import ipaddress
 import json
@@ -48,6 +49,7 @@ from auth import (
 )
 import console_access
 import route_access
+import sso
 from capability_install import (
     HIVE_TOOLS_PLACEMENT_NOTE,
     InstallInProgress,
@@ -427,7 +429,7 @@ def _login_page(request: Request, *, status_code: int = 200, **context) -> HTMLR
         request,
         "login.html",
         current_user=None,
-        sign_in_methods=auth.SIGN_IN_METHODS,
+        sign_in_methods=sso.sign_in_methods(context.get("next_path") or "/overview"),
         **context,
     )
     response.status_code = status_code
@@ -474,6 +476,128 @@ async def logout(request: Request):
     response = RedirectResponse(url="/login", status_code=303)
     clear_session_cookie(response)
     log_event(log, "auth.logout", **_actor_fields(user))
+    return response
+
+
+# ── Microsoft and Windows sign-in (sso.py) ─────────────────────────────
+
+
+def _sso_signed_in(request: Request, store, user: dict, via: str, next_path: str):
+    """A console session for an account an outside identity matched."""
+    token = sso.start_session(store, user, via)
+    response = RedirectResponse(url=_safe_next_path(next_path), status_code=303)
+    auth.set_sso_cookie(response, token)
+    log_event(log, "auth.login.succeeded", **_actor_fields(user), via=via)
+    return response
+
+
+def _sso_refused(request: Request, exc: Exception, via: str, next_path: str):
+    status = getattr(exc, "status", 401)
+    message = getattr(exc, "message", None) or "Sign-in failed."
+    log_event(
+        log, "auth.login.rejected", level=logging.WARNING, via=via,
+        reason=type(exc).__name__, detail=str(exc)[:300],
+    )
+    return _login_page(
+        request, status_code=status, error=message, next_path=_safe_next_path(next_path)
+    )
+
+
+@app.get(sso.MICROSOFT_PATH, response_class=HTMLResponse)
+async def login_microsoft(request: Request, next: str = "/overview"):
+    config = sso.microsoft_config()
+    if config is None:
+        raise HTTPException(status_code=404)
+    try:
+        location, flow = await sso.begin_microsoft(config, _safe_next_path(next))
+    except sso.SignInFailed as exc:
+        return _sso_refused(request, exc, sso.MICROSOFT, next)
+    response = RedirectResponse(url=location, status_code=303)
+    response.set_cookie(
+        sso.FLOW_COOKIE_NAME, flow, max_age=sso.FLOW_MAX_AGE, path=sso.MICROSOFT_PATH,
+        httponly=True, secure=True, samesite="lax",
+    )
+    return response
+
+
+@app.get(sso.MICROSOFT_CALLBACK_PATH, response_class=HTMLResponse)
+async def login_microsoft_callback(
+    request: Request, code: str = "", state: str = "", error: str = ""
+):
+    config = sso.microsoft_config()
+    if config is None:
+        raise HTTPException(status_code=404)
+    flow_cookie = request.cookies.get(sso.FLOW_COOKIE_NAME, "")
+    next_path = str((auth.read_flow(flow_cookie) or {}).get("next") or "/overview")
+    store = auth.get_store()
+    try:
+        if error:
+            raise sso.SignInFailed("Microsoft sign-in was cancelled or refused.")
+        _, claims = await sso.finish_microsoft(
+            config, code=code, state=state, flow_cookie=flow_cookie
+        )
+        user = await run_in_threadpool(
+            sso.match_microsoft, store,
+            subject=sso.microsoft_subject(claims), email=sso.verified_email(claims),
+        )
+        response = await run_in_threadpool(
+            _sso_signed_in, request, store, user, sso.MICROSOFT, next_path
+        )
+    except (sso.SignInFailed, auth.AuthError) as exc:
+        response = _sso_refused(request, exc, sso.MICROSOFT, next_path)
+    response.delete_cookie(sso.FLOW_COOKIE_NAME, path=sso.MICROSOFT_PATH)
+    return response
+
+
+_NO_DOMAIN_TICKET = (
+    "This browser did not offer a Windows domain sign-in. Use another way to sign in."
+)
+
+
+@app.get(sso.WINDOWS_PATH, response_class=HTMLResponse)
+async def login_windows(request: Request, next: str = "/overview"):
+    config = sso.windows_config()
+    if config is None:
+        raise HTTPException(status_code=404)
+    next_path = _safe_next_path(next)
+    token = sso.negotiate_token(request.headers.get("authorization", ""))
+    if token is None:
+        # The one place the console asks for a ticket. A browser that has
+        # none shows this body: the sign-in page with the other methods.
+        page = _login_page(
+            request, status_code=401, error=_NO_DOMAIN_TICKET, next_path=next_path
+        )
+        page.headers["WWW-Authenticate"] = "Negotiate"
+        return page
+    if not token or sso.is_ntlm(token):
+        # Challenging again would loop a browser that has only NTLM to give.
+        return _sso_refused(
+            request, sso.SignInFailed(_NO_DOMAIN_TICKET), "windows", next_path
+        )
+    try:
+        principal, reply = await run_in_threadpool(
+            sso.accept_security_context, token, config.keytab, config.spn
+        )
+    except Exception as exc:  # noqa: BLE001 - every failure is "no usable ticket"
+        log_event(
+            log, "auth.windows.ticket_refused", level=logging.WARNING,
+            reason=type(exc).__name__, detail=str(exc)[:300],
+        )
+        return _sso_refused(request, sso.SignInFailed(_NO_DOMAIN_TICKET), "windows", next_path)
+    store = auth.get_store()
+    try:
+        user = await run_in_threadpool(
+            sso.match_domain_account, store, sso.domain_account_for(principal, config)
+        )
+        response = await run_in_threadpool(
+            _sso_signed_in, request, store, user, "windows", next_path
+        )
+    except auth.AuthError as exc:
+        return _sso_refused(request, exc, "windows", next_path)
+    if reply:
+        response.headers["WWW-Authenticate"] = (
+            "Negotiate " + base64.b64encode(reply).decode("ascii")
+        )
     return response
 
 

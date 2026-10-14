@@ -57,6 +57,11 @@ must choose their own before any other page opens; a reset does the same
 again. Users are disabled, never deleted, and the last enabled admin can be
 neither disabled nor removed from `admins`.
 
+Microsoft (Entra ID) and Windows domain (Kerberos) sign-in are switched on by
+configuration alone and sign in only to accounts an admin created; what IT
+has to provide and every setting is in
+[docs/sign-in-microsoft-windows.md](docs/sign-in-microsoft-windows.md).
+
 Every route is classified in one table, `src/console_access.py`: public, a
 signed-in user's (listings filtered to their own minds), a mind owner's
 (resolved from the route's mind name, mind id, session id or operation id

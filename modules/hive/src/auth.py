@@ -55,6 +55,10 @@ from itsdangerous import BadSignature, BadTimeSignature, URLSafeTimedSerializer
 
 SESSION_COOKIE_NAME = "hive_session"
 AUTH_SERVICE_COOKIE_NAME = "auth_session"
+# A session begun by Microsoft or Windows sign-in (see sso.py). Its own
+# cookie on either store: it is a console session and nothing else, never an
+# auth-service token another site would accept.
+SSO_COOKIE_NAME = "hive_sso_session"
 SESSION_MAX_AGE = 60 * 60 * 24 * 30
 ADMINS = "admins"
 # The default this project once shipped. A key equal to it is no key.
@@ -93,6 +97,11 @@ class AccountDisabled(AuthError):
 class NotGranted(AuthError):
     status = 403
     message = "This account has not been set up for the hive."
+
+
+class NotSetUp(AuthError):
+    status = 403
+    message = "Your account has not been set up. Ask the hive's admin to create it."
 
 
 class WrongPassword(AuthError):
@@ -154,6 +163,11 @@ class Store(Protocol):
     def create_group(self, name: str) -> dict: ...
     def add_member(self, group: str, username: str) -> None: ...
     def remove_member(self, group: str, username: str) -> None: ...
+    def find_user(
+        self, *, email: str | None = None, domain_account: str | None = None
+    ) -> dict | None: ...
+    def sso_version(self, username: str) -> int: ...
+    def sso_user(self, username: str, version: int) -> dict | None: ...
 
 
 def normalize_username(username: str) -> str:
@@ -486,6 +500,31 @@ class BuiltinStore:
         # A signed cookie is ended by clearing it; the version is left alone
         # so the user's other devices stay signed in.
         del token
+
+    def sso_version(self, username: str) -> int:
+        conn = self._conn()
+        try:
+            return int(self._row(conn, username)["session_version"])
+        finally:
+            conn.close()
+
+    def sso_user(self, username: str, version: int) -> dict | None:
+        """The account behind a Microsoft or Windows session. It carries the
+        session version, so a disable, reset or password change ends it as
+        it ends a password session. Such a session never owes a password
+        change: it was not begun with one."""
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM users WHERE username = ?", (normalize_username(username),)
+            ).fetchone()
+            if row is None or row["disabled_at"] is not None:
+                return None
+            if int(version) != int(row["session_version"]):
+                return None
+            return dict(self._view(conn, row), must_change=False)
+        finally:
+            conn.close()
 
     def change_password(self, token: str, current: str, new: str) -> str:
         user = self.user_for_token(token)
@@ -821,6 +860,44 @@ class AuthServiceStore:
         if token:
             self._call("POST", "/logout", bearer=token)
 
+    def _raw_user(self, username: str) -> dict | None:
+        response = self._call(
+            "GET", f"/admin/users/{normalize_username(username)}", admin=True
+        )
+        if response.status_code != 200:
+            return None
+        return response.json()
+
+    def sso_version(self, username: str) -> int:
+        del username
+        return 0
+
+    def sso_user(self, username: str, version: int) -> dict | None:
+        """The account behind a Microsoft session, read afresh from the
+        admin API on every request so a disable lands at once. An account
+        not granted the hive is no session here, as with /verify."""
+        del version
+        row = self._raw_user(username)
+        if not row or row.get("disabled"):
+            return None
+        sites = {str(s).lower() for s in row.get("sites") or []}
+        if self._site.lower() not in sites:
+            return None
+        return dict(self._admin_view(row), must_change=False)
+
+    def find_user(
+        self, *, email: str | None = None, domain_account: str | None = None
+    ) -> dict | None:
+        """The account with this email. auth-service holds no domain
+        accounts, so a domain account matches nobody."""
+        wanted = (email or "").strip().lower()
+        if domain_account or not wanted:
+            return None
+        for row in self._admin("GET", "/admin/users").json():
+            if str(row.get("email") or "").strip().lower() == wanted:
+                return self._admin_view(row)
+        return None
+
     def change_password(self, token: str, current: str, new: str) -> str:
         _check_new_password(current, new)
         response = self._call(
@@ -956,7 +1033,8 @@ def session_token(conn: HTTPConnection, store: Store | None = None) -> str:
 
 
 def resolve_user(conn: HTTPConnection) -> dict | None:
-    """The signed-in user behind a request, verified once per request.
+    """The signed-in user behind a request, verified once per request: the
+    store's own session, or failing that a Microsoft or Windows one.
 
     Raises ServiceUnavailable when the store cannot answer.
     """
@@ -965,8 +1043,52 @@ def resolve_user(conn: HTTPConnection) -> dict | None:
         return state[_STATE_KEY]
     store = get_store()
     user = store.user_for_token(session_token(conn, store))
+    if user is None:
+        sso_token = conn.cookies.get(SSO_COOKIE_NAME) or ""
+        user = user_for_sso_token(store, sso_token) if sso_token else None
     state[_STATE_KEY] = user
     return user
+
+
+# ── Microsoft and Windows sessions ──────────────────────────────────────
+
+
+def _sso_serializer() -> URLSafeTimedSerializer:
+    return URLSafeTimedSerializer(secret_key(), salt="hive-sso-session")
+
+
+def _flow_serializer() -> URLSafeTimedSerializer:
+    return URLSafeTimedSerializer(secret_key(), salt="hive-sso-flow")
+
+
+def issue_sso_token(store: Store, username: str, via: str) -> str:
+    return _sso_serializer().dumps(
+        {"u": normalize_username(username), "v": store.sso_version(username), "via": via}
+    )
+
+
+def user_for_sso_token(store: Store, token: str) -> dict | None:
+    try:
+        payload = _sso_serializer().loads(token, max_age=SESSION_MAX_AGE)
+    except (BadSignature, BadTimeSignature):
+        return None
+    if not isinstance(payload, dict) or not payload.get("u"):
+        return None
+    return store.sso_user(str(payload["u"]), int(payload.get("v") or 0))
+
+
+def sign_flow(flow: dict) -> str:
+    """A sign-in in progress (state, nonce, PKCE verifier), held by the
+    browser that started it."""
+    return _flow_serializer().dumps(flow)
+
+
+def read_flow(token: str, max_age: int = 10 * 60) -> dict | None:
+    try:
+        flow = _flow_serializer().loads(token or "", max_age=max_age)
+    except (BadSignature, BadTimeSignature):
+        return None
+    return flow if isinstance(flow, dict) else None
 
 
 def get_current_user_from_request(request: HTTPConnection) -> dict[str, Any] | None:
@@ -986,7 +1108,7 @@ def require_auth(request: Request) -> dict[str, Any]:
     return user
 
 
-def set_session_cookie(response, token: str) -> None:
+def _cookie_kwargs() -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "max_age": SESSION_MAX_AGE,
         "httponly": True,
@@ -996,16 +1118,33 @@ def set_session_cookie(response, token: str) -> None:
     domain = _cookie_domain()
     if domain:
         kwargs["domain"] = domain
-    response.set_cookie(get_store().cookie_name, token, **kwargs)
+    return kwargs
 
 
-def clear_session_cookie(response) -> None:
+def _delete_cookie(response, name: str) -> None:
     domain = _cookie_domain()
-    name = get_store().cookie_name
     if domain:
         response.delete_cookie(name, domain=domain)
     else:
         response.delete_cookie(name)
+
+
+def set_session_cookie(response, token: str) -> None:
+    """A password session; any Microsoft or Windows session is ended, so the
+    browser holds exactly one identity."""
+    _delete_cookie(response, SSO_COOKIE_NAME)
+    response.set_cookie(get_store().cookie_name, token, **_cookie_kwargs())
+
+
+def set_sso_cookie(response, token: str) -> None:
+    """A Microsoft or Windows session; any password session is ended."""
+    _delete_cookie(response, get_store().cookie_name)
+    response.set_cookie(SSO_COOKIE_NAME, token, **_cookie_kwargs())
+
+
+def clear_session_cookie(response) -> None:
+    _delete_cookie(response, get_store().cookie_name)
+    _delete_cookie(response, SSO_COOKIE_NAME)
 
 
 # ── built-in helpers for seeding, tooling and tests ─────────────────────

@@ -94,6 +94,10 @@ TABLE.add(
     "GET /login",
     "POST /login",
     "POST /logout",
+    # Microsoft and Windows sign-in; each answers 404 unless configured.
+    "GET /login/microsoft",
+    "GET /login/microsoft/callback",
+    "GET /login/windows",
     "GET /health",
     # Checks the canvas push bearer itself; a mind draws with it.
     "POST /canvas/push",
