@@ -1350,8 +1350,6 @@ async def broker_register_mind(body: RegisterMindRequest):
         )
     except broker.OwnerRequired as exc:
         return JSONResponse({"error": str(exc)}, status_code=422)
-    except broker.OwnerConflict as exc:
-        return JSONResponse({"error": str(exc)}, status_code=409)
     return await broker.get_mind_by_id(db, body.mind_id)
 
 

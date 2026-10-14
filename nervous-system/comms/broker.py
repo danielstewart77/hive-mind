@@ -455,10 +455,6 @@ class OwnerRequired(ValueError):
     """A mind comms has never seen registered without naming its owner."""
 
 
-class OwnerConflict(ValueError):
-    """A registration named an owner other than the one the row holds."""
-
-
 def normalize_owner(owner: str | None) -> str | None:
     """The owner key: the user's lowercase username, or None when unnamed."""
     value = (owner or "").strip().lower()
@@ -496,10 +492,12 @@ async def register_mind(
 
     `owner` is the user the mind belongs to, held here and keyed by
     `mind_id`. A known mind may omit it and keeps the stored one; a mind this
-    gateway has never seen must name one (`OwnerRequired`); naming a different
-    owner than the stored one raises `OwnerConflict` and changes nothing —
-    only `set_mind_owner`, behind the admin route, moves a mind between users.
-    A row that predates ownership (owner still unset) takes the one named.
+    gateway has never seen must name one (`OwnerRequired`). Naming a different
+    owner than the stored one is ignored with a warning and the rest of the
+    registration lands: only `set_mind_owner`, behind the admin route, moves a
+    mind between users, and refusing the whole registration would freeze a
+    mind an admin had just moved until its runtime.yaml caught up. A row that
+    predates ownership (owner still unset) takes the one named.
     """
     owner = normalize_owner(owner)
     now = time.time()
@@ -511,9 +509,9 @@ async def register_mind(
     if not existing and owner is None:
         raise OwnerRequired(f"mind {mind_id} is not registered and names no owner")
     if existing and owner and existing["owner"] and owner != existing["owner"]:
-        raise OwnerConflict(
-            f"mind {mind_id} belongs to {existing['owner']}, not {owner}"
-        )
+        log_event(log, "mind.owner_ignored", level=logging.WARNING,
+                  mind_id=mind_id, stored_owner=existing["owner"], named_owner=owner)
+        owner = existing["owner"]
 
     if existing:
         columns = ["name=?", "gateway_url=?", "model=?", "harness=?", "last_seen=?"]
@@ -544,7 +542,8 @@ async def register_mind(
     await db.commit()
     log_event(log, "mind.registered" if not existing else "mind.updated",
               mind_id=mind_id, mind_name=name, gateway_url=gateway_url,
-              model=model, harness=harness, owner=owner)
+              model=model, harness=harness,
+              owner=owner or (existing["owner"] if existing else None))
 
 
 async def set_mind_owner(
