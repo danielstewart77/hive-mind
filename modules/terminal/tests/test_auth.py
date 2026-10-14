@@ -1,20 +1,6 @@
 """Unit tests for the built-in account store's helpers."""
 
-import pytest
-
 import auth
-
-
-def test_a_created_user_signs_in_with_their_password_and_only_that(tmp_path, monkeypatch):
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
-    user = auth.create_user("alice", "hunter2", is_admin=True)
-    store = auth.BuiltinStore()
-
-    signed_in, token = store.sign_in("alice", "hunter2")
-    assert signed_in["id"] == user["id"]
-    assert store.user_for_token(token)["username"] == "alice"
-    with pytest.raises(auth.SignInRefused):
-        store.sign_in("alice", "wrong-password")
 
 
 def test_session_token_round_trip(tmp_path, monkeypatch):

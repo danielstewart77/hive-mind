@@ -4,8 +4,8 @@ Two processes stand outside the console and are run here rather than
 impersonated: comms (where a mind's owner is held) and auth-service (one of
 the two account stores). Comms is a small stand-in served by uvicorn, because
 what the console does with its answers is the thing under test and its own
-code is not. auth-service is the real app, exported from its repository's
-`multi-user` branch and run in its own process: its modules are named
+code is not. auth-service is the real app, exported from its repository at a
+pinned ref (`AUTH_SERVICE_REF`, default `main`) and run in its own process: its modules are named
 `auth`, `config` and `server`, which would collide with the terminal's own on
 one import path.
 
@@ -16,6 +16,8 @@ session names.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import os
 import socket
 import subprocess
@@ -28,13 +30,13 @@ from pathlib import Path
 
 import httpx
 import uvicorn
-from fastapi import FastAPI, Request, WebSocket
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse, StreamingResponse
 
 AUTH_SERVICE_REPO = Path(
     os.getenv("AUTH_SERVICE_REPO", "/home/daniel/Storage/Dev/auth-service")
 )
-AUTH_SERVICE_REF = os.getenv("AUTH_SERVICE_REF", "multi-user")
+AUTH_SERVICE_REF = os.getenv("AUTH_SERVICE_REF", "main")
 AUTH_SERVICE_ADMIN_TOKEN = "test-auth-service-admin-token"  # secret-guard: allow
 SEED_USERNAME = "daniel"
 SEED_PASSWORD = "daniel-seed-password"  # secret-guard: allow
@@ -75,9 +77,9 @@ class ThreadedServer:
 
 # Who owns what. `orphan` registered before owners existed and carries none.
 MINDS = [
-    {"id": "m-skippy", "name": "skippy", "owner": "daniel"},
-    {"id": "m-arnold", "name": "Arnold", "owner": "sloan"},
-    {"id": "m-zack", "name": "zack", "owner": "aiden"},
+    {"id": "m-skippy", "name": "skippy", "owner": "daniel", "voice": "skippy-clip.wav"},
+    {"id": "m-arnold", "name": "Arnold", "owner": "sloan", "voice": "arnold-clip.wav"},
+    {"id": "m-zack", "name": "zack", "owner": "aiden", "voice": "zack-clip.wav"},
     {"id": "m-orphan", "name": "orphan"},
 ]
 SESSIONS = [
@@ -118,10 +120,32 @@ def fake_comms_app() -> FastAPI:
 
     @app.websocket("/sessions/{session_id}/attach")
     async def attach(websocket: WebSocket, session_id: str):
-        # What a mind's pty would answer: proof the attach reached it.
+        # What a mind's pty would answer: proof the attach reached it, then
+        # a pane that stays open, echoing, until the other end goes.
         await websocket.accept()
         await websocket.send_bytes(f"attached {session_id}".encode())
-        await websocket.close()
+        with contextlib.suppress(WebSocketDisconnect):
+            while True:
+                message = await websocket.receive()
+                if message.get("type") == "websocket.disconnect":
+                    return
+                await websocket.send_bytes(message.get("bytes") or b"")
+
+    @app.get("/sessions/{session_id}/events")
+    async def events(session_id: str):
+        # A session's event stream: one event, or an event every tenth of a
+        # second for as long as a test has asked it to stay open.
+        async def stream():
+            n = 0
+            deadline = time.monotonic() + app.state.stream["seconds"]
+            while True:
+                yield f"data: {{\"n\": {n}, \"session\": \"{session_id}\"}}\n\n"
+                n += 1
+                if time.monotonic() >= deadline:
+                    return
+                await asyncio.sleep(0.1)
+
+        return StreamingResponse(stream(), media_type="text/event-stream")
 
     @app.api_route(
         "/{rest:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"]
@@ -140,6 +164,7 @@ def fake_comms_app() -> FastAPI:
 
     app.state.base = base
     app.state.received = received
+    app.state.stream = {"seconds": 0.0}
     return app
 
 
@@ -150,6 +175,8 @@ class FakeComms(ThreadedServer):
         app.state.base["url"] = self.url
         # Every write it was sent: what the console asked of comms, as it went.
         self.received = app.state.received
+        # How long a session's event stream stays open.
+        self.stream = app.state.stream
 
 
 # ── auth-service ────────────────────────────────────────────────────────

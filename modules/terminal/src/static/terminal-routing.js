@@ -118,14 +118,15 @@
             // shape as 4415, different fix — the broker holds a token this
             // mind no longer accepts, or none at all.
             case 4416: return {message: "mind refused the gateway's credential"};
-            // The mind's own fallback when its server has no denial-response
-            // extension: it closes the unaccepted socket with this rather than
-            // sending a status. Nothing else produces it, and without a case
-            // here a tile that ever sees it reattaches forever.
-            case 4401: return {message: "mind refused the gateway's credential"};
-            // This site's own refusals, made before the socket is accepted:
-            // a session on a mind this user does not own, or a temporary
-            // password still to be changed. Asking again gets the same no.
+            // Two sources, one remedy that is not reattaching: the mind's own
+            // fallback when its server has no denial-response extension, and
+            // this site when the browser's sign-in has ended (signed out,
+            // disabled, reset) — at attach or while the socket is open.
+            case 4401: return {message: "credential refused — sign in again"};
+            // This site's own refusals, sent after accepting the socket so the
+            // browser sees the code: a session on a mind this user does not
+            // own (or no longer owns), or a temporary password still to be
+            // changed. Asking again gets the same no.
             case 4403: return {message: "not yours to open"};
             case 4428: return {message: "change your password first"};
             default: return null;

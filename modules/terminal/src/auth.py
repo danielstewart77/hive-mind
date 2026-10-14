@@ -6,7 +6,9 @@ One interface, two backings, chosen by configuration:
 - `builtin` — the console's own sqlite db (`HIVE_DB_PATH`). A cloned hive
   signs in with no other service. Sessions are signed cookies carrying the
   user's session version, so a password change, reset or disable ends every
-  other live session at once.
+  other live session at once. A group change does not touch it: membership,
+  and with it admin, is read afresh on every request, so it lands on the
+  member's next request without signing them out.
 - `auth-service` — the sparktobloom sign-in (`AUTH_SERVICE_URL`). The
   session is auth-service's own `auth_session` token, verified on every
   request with `/verify?site=hive` and never cached, so a disable lands on
@@ -875,15 +877,17 @@ class AuthServiceStore:
     def sso_user(self, username: str, version: int) -> dict | None:
         """The account behind a Microsoft session, read afresh from the
         admin API on every request so a disable lands at once. An account
-        not granted the hive is no session here, as with /verify."""
+        not granted the hive is no session here, as with /verify — which
+        counts every admin as granted, so this does too."""
         del version
         row = self._raw_user(username)
         if not row or row.get("disabled"):
             return None
+        view = self._admin_view(row)
         sites = {str(s).lower() for s in row.get("sites") or []}
-        if self._site.lower() not in sites:
+        if self._site.lower() not in sites and not view["is_admin"]:
             return None
-        return dict(self._admin_view(row), must_change=False)
+        return dict(view, must_change=False)
 
     def find_user(
         self, *, email: str | None = None, domain_account: str | None = None
@@ -937,16 +941,24 @@ class AuthServiceStore:
         name = normalize_username(username)
         if not name:
             raise Invalid("A username is required.")
-        body: dict[str, Any] = {"username": name}
+        body: dict[str, Any] = {"username": name, "sites": [self._site]}
         if email:
             body["email"] = email.strip()
         if temp_password is not None:
             body["temp_password"] = temp_password
-        self._admin("POST", "/admin/users", body)
-        # A user not granted the hive cannot reach it; the console only
-        # creates users for itself.
-        self._admin("PUT", f"/admin/users/{name}/sites/{self._site}")
-        return self.get_user(name)
+        # The grant rides in the create, so a user is never left made but
+        # unable to reach the hive; a create that comes back without it is
+        # not complete.
+        created = self._admin("POST", "/admin/users", body).json()
+        if not self._granted(created):
+            raise ServiceUnavailable(
+                "The sign-in service created the user without granting the hive."
+            )
+        return self._admin_view(created)
+
+    def _granted(self, row: object) -> bool:
+        sites = row.get("sites") if isinstance(row, dict) else None
+        return self._site.lower() in {str(s).lower() for s in sites or []}
 
     def update_user(
         self, username: str, *, email: str | None = None, disabled: bool | None = None

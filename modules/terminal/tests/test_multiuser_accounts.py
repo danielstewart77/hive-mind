@@ -30,7 +30,8 @@ def _concrete(path: str) -> str:
 
 
 def _authenticated_routes():
-    """(method, path, template) for every route a signed-in user needs."""
+    """(method, path, template) for every route a signed-in user needs (not
+    the public ones, the password page, or a route only a bearer reaches)."""
     for route in main.app.routes:
         if isinstance(route, Mount):
             continue
@@ -38,7 +39,7 @@ def _authenticated_routes():
             if method == "HEAD":
                 continue
             rule = terminal_access.TABLE.rule_for(method, route.path)
-            if rule.kind in (route_access.PUBLIC, route_access.SELF):
+            if rule.kind in (route_access.PUBLIC, route_access.SELF, route_access.BEARER):
                 continue
             yield method, _concrete(route.path), route.path
 

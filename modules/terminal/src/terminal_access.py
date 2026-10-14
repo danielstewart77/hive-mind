@@ -13,9 +13,39 @@ so the attach is the most consequential route on the site.
 
 from __future__ import annotations
 
-from route_access import OWNER, PUBLIC, SELF, USER, RouteTable, Rule, owner_of_session
+import os
 
-TABLE = RouteTable(resolvers={"session_id": owner_of_session})
+from route_access import (
+    OWNER,
+    PUBLIC,
+    SELF,
+    USER,
+    BearerToken,
+    RouteTable,
+    Rule,
+    owner_of_session,
+)
+
+
+def labels_token() -> str:
+    """The label writer's bearer: the mind renaming a conversation when a
+    rename arrives over Telegram. Unset means no bearer is accepted at all.
+
+    **Deliberately not ``COMMS_BEARER_TOKEN``.** That secret opens every
+    route on the mind, the one that types into a live pane included, and a
+    pane runs the harness with permissions skipped. This token renames a
+    conversation and does nothing else, so a copy that escapes — into a log,
+    a screenshot, a transcript — is worth exactly one renamed conversation.
+    """
+    return os.getenv("TERMINAL_LABELS_TOKEN", "")
+
+
+LABELS = "labels"
+
+TABLE = RouteTable(
+    resolvers={"session_id": owner_of_session},
+    bearers={LABELS: BearerToken(labels_token)},
+)
 
 TABLE.add(
     Rule(PUBLIC),
@@ -41,8 +71,9 @@ TABLE.add(
     "POST /api/terminal/tts",
     "POST /api/terminal/stt",
 )
-# Also read by the mind with the label token, which the route checks.
-TABLE.add(Rule(USER, bearer=True), "GET /api/terminal/labels")
+# Also reached by the mind with the label token, which the middleware
+# verifies; a wrong one is refused, never answered from the cookie.
+TABLE.add(Rule(USER, bearer=LABELS), "GET /api/terminal/labels")
 
 TABLE.add(
     Rule(OWNER, param="session_id"),
@@ -53,4 +84,6 @@ TABLE.add(
     "POST /api/terminal/sessions/{session_id}/resume",
     "DELETE /api/terminal/sessions/{session_id}",
 )
-TABLE.add(Rule(OWNER, param="session_id", bearer=True), "PUT /api/terminal/labels/{session_id}")
+TABLE.add(
+    Rule(OWNER, param="session_id", bearer=LABELS), "PUT /api/terminal/labels/{session_id}"
+)

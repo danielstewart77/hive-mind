@@ -203,3 +203,156 @@ def test_a_microsoft_or_windows_session_from_the_console_opens_the_owners_termin
 
     store.update_user("sloan", disabled=True)
     assert sloan.get("/api/terminal/sessions").status_code == 401
+
+
+# ── bearers, long-lived connections, refusals a browser can read ───────
+
+
+def _anonymous():
+    return TestClient(main.app, base_url="https://testserver")
+
+
+@pytest.mark.parametrize(
+    "authorization",
+    [
+        [("Authorization", "Basic c2xvYW46eA=="), ("Authorization", "Bearer the-real-label-token")],  # secret-guard: allow
+        [("Authorization", "Bearer the-real-label-token"), ("Authorization", "Basic c2xvYW46eA==")],  # secret-guard: allow
+    ],
+    ids=["basic-then-bearer", "bearer-then-basic"],
+)
+def test_a_label_call_with_a_doubled_authorization_is_refused_to_a_non_admin_and_to_anyone(
+    people, fake_comms, monkeypatch, authorization
+):
+    _, sloan = people
+    monkeypatch.setenv("TERMINAL_LABELS_TOKEN", "the-real-label-token")
+    fake_comms.received.clear()
+
+    for client in (sloan, _anonymous()):
+        refused = client.put(
+            "/api/terminal/labels/s-zack", json={"name": "mine now"}, headers=authorization
+        )
+        assert refused.status_code in (400, 401), refused.text
+        listed = client.get("/api/terminal/labels", headers=authorization)
+        assert listed.status_code in (400, 401), listed.text
+    assert fake_comms.received == []
+
+
+def test_a_refused_attach_is_accepted_then_closed_with_its_reason(people):
+    """Closed before it is accepted, a socket reaches a browser as a bare
+    1006, and the tile reattaches forever: the code is only readable on a
+    socket the server accepted first."""
+    _, sloan = people
+    with _socket(sloan, "/api/terminal/attach/s-zack") as ws, pytest.raises(
+        WebSocketDisconnect
+    ) as closed:  # accepted
+        ws.receive_bytes()
+    assert closed.value.code == route_access.CLOSE_REFUSED
+
+
+def _closed_within(ws, seconds: float):
+    """The close code of `ws` if the server closes it within `seconds`, else
+    None. Received on a thread: a socket nobody closes would otherwise hold
+    the test forever."""
+    import threading
+
+    outcome: dict = {}
+
+    def drain():
+        while not outcome.get("stop"):
+            message = ws.receive()
+            if message["type"] == "websocket.close":
+                outcome["code"] = message.get("code")
+                return
+
+    thread = threading.Thread(target=drain, daemon=True)
+    thread.start()
+    thread.join(seconds)
+    outcome["stop"] = True
+    return outcome.get("code")
+
+
+@pytest.mark.parametrize(
+    "change, code",
+    [("disabled", route_access.CLOSE_UNAUTHENTICATED), ("owner moved", route_access.CLOSE_REFUSED)],
+)
+def test_an_open_attach_is_closed_once_its_user_may_no_longer_hold_it(
+    people, builtin_terminal, monkeypatch, change, code
+):
+    from multiuser_support import MINDS
+
+    _, sloan = people
+    monkeypatch.setattr(route_access, "RECHECK_SECONDS", 0.2)
+
+    with _socket(sloan, "/api/terminal/attach/s-arnold") as ws:
+        assert ws.receive_bytes() == b"attached s-arnold"
+        if change == "disabled":
+            builtin_terminal.store().update_user("sloan", disabled=True)
+        else:
+            arnold = next(m for m in MINDS if m["id"] == "m-arnold")
+            monkeypatch.setitem(arnold, "owner", "aiden")
+        assert _closed_within(ws, 5) == code
+
+
+def test_an_open_session_stream_ends_once_its_user_is_disabled(
+    people, builtin_terminal, fake_comms, monkeypatch
+):
+    import threading
+
+    _, sloan = people
+    monkeypatch.setattr(route_access, "RECHECK_SECONDS", 0.2)
+    monkeypatch.setitem(fake_comms.stream, "seconds", 30.0)
+    finished = threading.Event()
+
+    def read_stream():
+        sloan.get("/api/console/s-arnold/stream")
+        finished.set()
+
+    threading.Thread(target=read_stream, daemon=True).start()
+    assert not finished.wait(1.0)  # streaming, as it should while she may
+    builtin_terminal.store().update_user("sloan", disabled=True)
+    assert finished.wait(5.0)
+
+
+def test_a_non_admin_speaks_only_in_the_voices_of_their_own_minds(people, fake_comms, monkeypatch):
+    admin, sloan = people
+    monkeypatch.setenv("VOICE_API_URL", fake_comms.url)
+
+    for voice in ("zack", "skippy", "skippy-clip.wav", "default"):
+        refused = sloan.post("/api/terminal/tts", json={"text": "hello", "voice_id": voice})
+        assert refused.status_code == 403, voice
+    for voice in ("Arnold", "arnold-clip.wav"):
+        assert sloan.post("/api/terminal/tts", json={"text": "hi", "voice_id": voice}).status_code == 200
+    assert admin.post("/api/terminal/tts", json={"text": "hi", "voice_id": "zack"}).status_code == 200
+
+
+@pytest.mark.parametrize("path", ["/", "/login"])
+def test_a_public_route_asks_the_sign_in_service_who_is_signed_in_off_the_event_loop(
+    monkeypatch, fake_comms, path
+):
+    """A call to auth-service made on the event loop stalls every terminal
+    the site is serving until it answers."""
+    import asyncio
+
+    import httpx
+
+    monkeypatch.setenv("GATEWAY_API_URL", fake_comms.url)
+    monkeypatch.setenv("HIVE_AUTH_BACKEND", "auth-service")
+    monkeypatch.setenv("AUTH_SERVICE_URL", "http://auth-service.invalid")
+    asked_from: list[str] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        try:
+            asyncio.get_running_loop()
+            asked_from.append("the event loop")
+        except RuntimeError:
+            asked_from.append("a worker thread")
+        return httpx.Response(401, json={"detail": "expired"})
+
+    store = auth.get_store()
+    monkeypatch.setattr(store, "_client", httpx.Client(transport=httpx.MockTransport(answer)))
+    client = _anonymous()
+    client.cookies.set("auth_session", "a-token")
+
+    client.get(path, follow_redirects=False)
+    assert asked_from
+    assert set(asked_from) == {"a worker thread"}

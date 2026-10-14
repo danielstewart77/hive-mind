@@ -12,7 +12,6 @@ import asyncio
 import json
 import os
 import re
-import secrets
 import time
 import urllib.error
 import urllib.parse
@@ -173,7 +172,9 @@ async def _proxy_session_events(session_id: str):
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
-    user = get_current_user_from_request(request)
+    # Public routes are not resolved by the route table, so the lookup — a
+    # call to auth-service at home — happens here, off the event loop.
+    user = await run_in_threadpool(get_current_user_from_request, request)
     if not user:
         return _login_redirect_for(request)
     if user.get("must_change"):
@@ -183,7 +184,7 @@ async def home(request: Request):
 
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request, next: str = "/terminal"):
-    current_user = get_current_user_from_request(request)
+    current_user = await run_in_threadpool(get_current_user_from_request, request)
     if current_user:
         return RedirectResponse(url=_safe_next_path(next), status_code=303)
     return _login_page(request, next_path=_safe_next_path(next))
@@ -298,6 +299,18 @@ def _relative_age(now: int, last_active) -> str:
     return f"{seconds // 86400}d ago"
 
 
+async def _own_voices(user: dict) -> set[str]:
+    """The voice ids a non-admin may speak in: each of their own minds',
+    named as the tile names it (the mind's name) or by its voice field."""
+    minds = await route_access.registered_minds()
+    voices: set[str] = set()
+    for mind in route_access.visible_minds(user, minds or []):
+        for value in (mind.get("name"), mind.get("voice")):
+            if value:
+                voices.add(str(value).strip())
+    return voices
+
+
 @app.post("/api/terminal/tts")
 async def api_terminal_tts(request: Request, user: dict = Depends(require_auth)):
     """Proxy text to the voice server's /tts endpoint and pipe back OGG audio.
@@ -305,12 +318,19 @@ async def api_terminal_tts(request: Request, user: dict = Depends(require_auth))
     Only called when the user has the speaker toggle on, so the GPU isn't
     loaded for silent turns.
     """
-    del user
     body = await request.json()
     text = (body.get("text") or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="text is required")
     voice_id = (body.get("voice_id") or "default").strip() or "default"
+    if not user.get("is_admin") and voice_id not in await _own_voices(user):
+        # A mind's voice is a clone of a real recording; speaking anything
+        # in it is the owner's to do.
+        raise HTTPException(
+            status_code=403,
+            detail="That voice is not one of your minds'.",
+            headers={route_access.REFUSAL_HEADER: route_access.OWNER},
+        )
     payload = json.dumps({"text": text, "voice_id": voice_id}).encode()
     url = f"{_voice_api_url()}/tts"
 
@@ -567,32 +587,13 @@ def require_auth_or_label_writer(request: Request) -> dict:
     hold a session cookie — and minting it one would mean issuing a login
     that never expires and belongs to nobody.
 
-    **Deliberately not ``COMMS_BEARER_TOKEN``.** That secret opens every
-    route on the mind, the one that types into a live pane included, and
-    a pane runs the harness with permissions skipped. Guarding the
-    smallest capability in the system with the largest key in it is
-    backwards: this token renames a conversation and does nothing else,
-    so a copy that escapes — into a log, a screenshot, a transcript — is
-    worth exactly one renamed conversation.
-
-    Unset means no bearer is accepted at all, rather than an empty string
-    matching an absent header.
-
-    A bearer that does not match is refused outright, never answered from
-    the cookie beside it: the route table hands every bearer request
-    straight to this route, past the owner check, so falling back to the
-    cookie would let any signed-in user rename any user's conversation.
-
-    Compared in constant time: a token checked with ``==`` leaks its own
-    length and prefix to anything that can time the answer.
+    The token (terminal_access.labels_token) is verified by the route
+    table before this runs, and a wrong one refused there — never answered
+    from the cookie beside it, which would let any signed-in user rename any
+    user's conversation. This only reads which of the two admitted the call.
     """
-    token = os.getenv("TERMINAL_LABELS_TOKEN", "")
-    header = request.headers.get("authorization", "")
-    if header[:7].lower() == "bearer ":
-        presented = header[7:].strip().encode("utf-8", "surrogatepass")
-        if token and secrets.compare_digest(presented, token.encode("utf-8", "surrogatepass")):
-            return {"username": "label-writer", "service": True}
-        raise HTTPException(status_code=401, detail="Authentication required")
+    if route_access.bearer_of(request) == terminal_access.LABELS:
+        return {"username": "label-writer", "service": True}
     return require_auth(request)
 
 
@@ -762,17 +763,11 @@ def _relayable_close_code(code: int | None) -> int | None:
 async def ws_terminal_attach(websocket: WebSocket, session_id: str):
     """Reverse-proxy a browser terminal WS into hive-comms' session attach.
 
-    The route table has already refused, before the socket was accepted,
-    anyone not signed in, anyone who must change their password, and a
-    non-admin whose session this is not; this is full shell access. The
-    cookie check below is the same check again, kept because it costs one
-    lookup the middleware has already cached.
+    The route table has already refused anyone not signed in, anyone who
+    must change their password, and a non-admin whose session this is not;
+    this is full shell access. It decides again every 30 seconds while the
+    socket is open, so a disable, a reset or an owner moved closes it.
     """
-    user = get_current_user_from_request(websocket)
-    if user is None:
-        await websocket.close(code=4401)
-        return
-
     await websocket.accept()
     cols = websocket.query_params.get("cols") or "80"
     rows = websocket.query_params.get("rows") or "24"
@@ -794,6 +789,8 @@ async def ws_terminal_attach(websocket: WebSocket, session_id: str):
 
 @app.get("/api/console/{session_id}/stream")
 async def api_console_stream(session_id: str, user: dict = Depends(require_auth)):
+    """The session's events. The route table decides this stream again every
+    30 seconds while it is open, and ends it once the answer changes."""
     del user
     return StreamingResponse(
         _proxy_session_events(session_id),

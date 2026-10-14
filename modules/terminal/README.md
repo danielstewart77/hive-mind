@@ -34,6 +34,16 @@ session-keyed route and the attach websocket, resolved session to mind to
 owner through comms), or admin-only. An admin reaches every session. A route
 the table does not name is admin-only.
 
+The label routes also take the mind's label token, which the middleware
+verifies before the route runs; a wrong one is refused rather than answered
+from the cookie, and a request with two Authorization headers is refused.
+The attach websocket and the session event stream are decided again every
+30 seconds while open, and closed once the user is disabled, reset or no
+longer owns the mind. A refused attach is accepted and then closed with its
+reason (4401, 4403, 4428) so the tile can read it and stop reattaching. Text
+to speech speaks only in the voices of the caller's own minds; an admin's in
+any.
+
 ## Run
 
 ```
