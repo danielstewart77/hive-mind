@@ -123,6 +123,11 @@
             // sending a status. Nothing else produces it, and without a case
             // here a tile that ever sees it reattaches forever.
             case 4401: return {message: "mind refused the gateway's credential"};
+            // This site's own refusals, made before the socket is accepted:
+            // a session on a mind this user does not own, or a temporary
+            // password still to be changed. Asking again gets the same no.
+            case 4403: return {message: "not yours to open"};
+            case 4428: return {message: "change your password first"};
             default: return null;
         }
     }

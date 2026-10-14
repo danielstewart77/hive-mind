@@ -16,6 +16,9 @@
             <input id="password" name="password" type="password" autocomplete="current-password" required>
             <button type="submit">Enter Terminal</button>
         </form>
+        {% for method in sign_in_methods or [] %}
+        <a class="login-method" href="{{ method.href }}">{{ method.label }}</a>
+        {% endfor %}
     </section>
 </main>
 {% endblock %}

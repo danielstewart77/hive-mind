@@ -61,7 +61,7 @@ def test_the_seeded_account_is_an_administrator(standalone, monkeypatch):
     with TestClient(main.app):
         import auth
 
-        user = auth.get_user_by_username("daniel")
+        user = auth.BuiltinStore().get_user("daniel")
 
     assert user is not None
     assert user["is_admin"]

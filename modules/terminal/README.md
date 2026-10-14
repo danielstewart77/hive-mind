@@ -17,11 +17,22 @@ which renderer a tile is on; `window.screenText()` reads a tile's visible
 rows out of the buffer, which is the only way to read a canvas-painted
 tile without selecting it.
 
-Auth is not its own — `auth.py` is a verbatim copy of the hive site's,
-sharing the same sqlite db (`HIVE_DB_PATH`, mounted from the hive repo's
-`data/` directory) and signing secret (`HIVE_SECRET_KEY`), scoped to the
-`sparktobloom.com` cookie domain. A session issued by either site verifies
-on both — logging into hive logs you into terminal, and vice versa.
+Auth is not its own. `src/auth.py` (the account store) and
+`src/route_access.py` (the route table's enforcement) are verbatim copies of
+the hive console's, so the terminal signs in against the same store the
+console does — hive.db (`HIVE_DB_PATH`, the console's own db, mounted from
+the hive repo's `data/` directory) or auth-service, chosen by the same
+variables — and a session issued by either site verifies on both, scoped to
+the `sparktobloom.com` cookie domain. Accounts are managed on the console;
+the terminal has no user pages of its own beyond changing your password, and
+a user holding a temporary password reaches nothing else until they do.
+
+Who may reach which route is `src/terminal_access.py`, one table enforced in
+front of every route and websocket: public, any signed-in user (the mind and
+session listings filtered to the user's own minds), a mind owner's (every
+session-keyed route and the attach websocket, resolved session to mind to
+owner through comms), or admin-only. An admin reaches every session. A route
+the table does not name is admin-only.
 
 ## Run
 
@@ -35,8 +46,11 @@ network (to reach `hive-comms` and the voice server). The hive site's
 read and write the same `hive.db`. `src/` is bind-mounted, so template
 and static edits deploy live; route changes need a container restart.
 
-`.env` keys: `HIVE_SECRET_KEY` (must match the hive site's),
-`COMMS_BEARER_TOKEN`.
+`.env` keys: `COMMS_BEARER_TOKEN`; `HIVE_SECRET_KEY` only if the console sets
+one (left unset on both, the key is generated once and kept in the shared
+db); and, when the console signs in through auth-service, the same
+`AUTH_SERVICE_URL` and `AUTH_SERVICE_ADMIN_TOKEN` (or `HIVE_AUTH_BACKEND`)
+the console holds. The two sites must use the same store.
 
 ## Test
 

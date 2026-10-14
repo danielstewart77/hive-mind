@@ -1,9 +1,11 @@
 """Standalone web terminal: browser xterm.js attached to a live mind session.
 
 Split out of spark_to_bloom's /terminal page so the terminal has its own
-origin (terminal.sparktobloom.com). Auth is not reimplemented — auth.py is
-a verbatim copy of the hive site's, sharing HIVE_DB_PATH and
-HIVE_SECRET_KEY, so a session issued by either site verifies on both.
+origin (terminal.sparktobloom.com). Auth is not reimplemented: auth.py and
+route_access.py are verbatim copies of the console's, signing in against the
+same store (hive.db or auth-service), so a session issued by either site
+verifies on both. Who may reach which route is terminal_access.TABLE,
+enforced in front of every route and websocket.
 """
 
 import asyncio
@@ -16,7 +18,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 import httpx
 import websockets
@@ -36,8 +38,11 @@ from fastapi import (
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.concurrency import run_in_threadpool
 
 import auth
+import route_access
+import terminal_access
 from auth import (
     clear_session_cookie,
     get_current_user_from_request,
@@ -45,7 +50,6 @@ from auth import (
     require_auth,
     seed_first_user,
     set_session_cookie,
-    verify_user_credentials,
 )
 from config import BASE_DIR
 
@@ -76,6 +80,10 @@ app = FastAPI(
     redoc_url=None,
     openapi_url=None,
 )
+
+# Authorization lives in one table (terminal_access.TABLE), enforced in front
+# of every route and websocket; a route the table does not name is admin-only.
+app.add_middleware(route_access.AccessMiddleware, table=terminal_access.TABLE)
 
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
@@ -165,8 +173,11 @@ async def _proxy_session_events(session_id: str):
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
-    if not get_current_user_from_request(request):
+    user = get_current_user_from_request(request)
+    if not user:
         return _login_redirect_for(request)
+    if user.get("must_change"):
+        return RedirectResponse(url="/password", status_code=303)
     return RedirectResponse(url="/terminal", status_code=303)
 
 
@@ -175,7 +186,19 @@ async def login_page(request: Request, next: str = "/terminal"):
     current_user = get_current_user_from_request(request)
     if current_user:
         return RedirectResponse(url=_safe_next_path(next), status_code=303)
-    return _render_template(request, "login.html", next_path=_safe_next_path(next))
+    return _login_page(request, next_path=_safe_next_path(next))
+
+
+def _login_page(request: Request, *, status_code: int = 200, **context) -> HTMLResponse:
+    response = _render_template(
+        request,
+        "login.html",
+        current_user=None,
+        sign_in_methods=auth.SIGN_IN_METHODS,
+        **context,
+    )
+    response.status_code = status_code
+    return response
 
 
 @app.post("/login")
@@ -185,24 +208,72 @@ async def login_submit(
     password: str = Form(...),
     next: str = Form("/terminal"),
 ):
-    user = verify_user_credentials(username, password)
-    if not user:
-        return _render_template(
-            request,
-            "login.html",
-            error="Invalid username or password.",
-            next_path=_safe_next_path(next),
+    store = auth.get_store()
+    try:
+        user, token = await run_in_threadpool(store.sign_in, username, password)
+    except auth.AuthError as exc:
+        return _login_page(
+            request, status_code=exc.status, error=exc.message, next_path=_safe_next_path(next)
         )
-
-    response = RedirectResponse(url=_safe_next_path(next), status_code=303)
-    set_session_cookie(response, user)
+    target = "/password" if user.get("must_change") else _safe_next_path(next)
+    response = RedirectResponse(url=target, status_code=303)
+    set_session_cookie(response, token)
     return response
 
 
 @app.post("/logout")
-async def logout():
+async def logout(request: Request):
+    store = auth.get_store()
+    token = auth.session_token(request, store)
+    if token:
+        with suppress(auth.ServiceUnavailable):
+            await run_in_threadpool(store.sign_out, token)
     response = RedirectResponse(url="/login", status_code=303)
     clear_session_cookie(response)
+    return response
+
+
+def _password_page(request: Request, *, status_code: int = 200, **context) -> HTMLResponse:
+    response = _render_template(
+        request,
+        "password.html",
+        current_user=None,
+        account=get_current_user_from_request(request),
+        **context,
+    )
+    response.status_code = status_code
+    response.headers["Cache-Control"] = "no-store, must-revalidate"
+    return response
+
+
+@app.get("/password", response_class=HTMLResponse)
+async def password_page(request: Request):
+    return _password_page(request)
+
+
+@app.post("/password")
+async def password_submit(
+    request: Request,
+    current_password: str = Form(...),
+    new_password: str = Form(...),
+    confirm_password: str = Form(...),
+):
+    """A signed-in user sets their own password — the only page a user who
+    must change theirs can reach."""
+    if new_password != confirm_password:
+        return _password_page(request, status_code=400, error="The new passwords do not match.")
+    store = auth.get_store()
+    try:
+        token = await run_in_threadpool(
+            store.change_password,
+            auth.session_token(request, store),
+            current_password,
+            new_password,
+        )
+    except auth.AuthError as exc:
+        return _password_page(request, status_code=exc.status, error=exc.message)
+    response = RedirectResponse(url="/terminal", status_code=303)
+    set_session_cookie(response, token)
     return response
 
 
@@ -349,9 +420,9 @@ async def api_terminal_sessions(user: dict = Depends(require_auth)):
     """Flat, mind-labeled session list — the /terminal session picker.
 
     Each row is "drop into this conversation," not "pick a mind": mind name,
-    short mind_id, age, and status, sorted most-recently-active first.
+    short mind_id, age, and status, sorted most-recently-active first. A
+    non-admin is shown the sessions of their own minds only.
     """
-    del user
     try:
         minds = await _gateway_json("/broker/minds")
         if not isinstance(minds, list):
@@ -366,6 +437,7 @@ async def api_terminal_sessions(user: dict = Depends(require_auth)):
             sessions = []
     except Exception:
         sessions = []
+    sessions = route_access.visible_sessions(user, sessions, minds)
 
     now = int(time.time())
     rows = []
@@ -403,12 +475,23 @@ async def api_terminal_sessions(user: dict = Depends(require_auth)):
 
 @app.post("/api/terminal/sessions")
 async def api_terminal_create_session(request: Request, user: dict = Depends(require_auth)):
-    """The "new session against mind X" affordance for when nothing relevant is live."""
-    del user
+    """The "new session against mind X" affordance for when nothing relevant is live.
+
+    The mind arrives in the body, where the route table cannot see it, so
+    its owner is checked here: a session on someone else's mind is a shell
+    on it.
+    """
     body = await request.json()
     mind_id = (body.get("mind_id") or "").strip()
     if not mind_id:
         raise HTTPException(status_code=400, detail="mind_id is required")
+    if not user.get("is_admin"):
+        if await route_access.owner_of_mind(mind_id) != user.get("username"):
+            raise HTTPException(
+                status_code=403,
+                detail="That mind is not yours.",
+                headers={route_access.REFUSAL_HEADER: route_access.OWNER},
+            )
     return await _create_gateway_session(mind_id)
 
 
@@ -452,9 +535,11 @@ async def _create_gateway_session(mind_id: str) -> dict:
 # goes, and a cached copy offers a mind that is not there.
 @app.get("/api/minds")
 async def api_minds(user: dict = Depends(require_auth)):
-    del user
+    """The minds this user may open a session on: all of them to an admin."""
+    minds = await _gateway_json("/broker/minds")
+    minds = [m for m in minds if isinstance(m, dict)] if isinstance(minds, list) else []
     return JSONResponse(
-        await _gateway_json("/broker/minds"), headers={"Cache-Control": "no-store"}
+        route_access.visible_minds(user, minds), headers={"Cache-Control": "no-store"}
     )
 
 
@@ -493,16 +578,21 @@ def require_auth_or_label_writer(request: Request) -> dict:
     Unset means no bearer is accepted at all, rather than an empty string
     matching an absent header.
 
+    A bearer that does not match is refused outright, never answered from
+    the cookie beside it: the route table hands every bearer request
+    straight to this route, past the owner check, so falling back to the
+    cookie would let any signed-in user rename any user's conversation.
+
     Compared in constant time: a token checked with ``==`` leaks its own
     length and prefix to anything that can time the answer.
     """
     token = os.getenv("TERMINAL_LABELS_TOKEN", "")
     header = request.headers.get("authorization", "")
-    if token and header.startswith("Bearer "):
-        if secrets.compare_digest(header[len("Bearer ") :].strip(), token):
+    if header[:7].lower() == "bearer ":
+        presented = header[7:].strip().encode("utf-8", "surrogatepass")
+        if token and secrets.compare_digest(presented, token.encode("utf-8", "surrogatepass")):
             return {"username": "label-writer", "service": True}
-    # Not a label write, or not a token we know. Fall through to the
-    # cookie so a person is answered exactly as before, 401 included.
+        raise HTTPException(status_code=401, detail="Authentication required")
     return require_auth(request)
 
 
@@ -521,11 +611,24 @@ async def api_terminal_labels(user: dict = Depends(require_auth_or_label_writer)
     server having lost names it still holds. The client asks with ``no-store``
     as well; both ends, because either alone is one deployment away from being
     the only one.
+
+    A non-admin gets the names of their own minds' sessions; the label writer
+    and an admin get every name.
     """
-    del user
     names = await _gateway_json("/sessions/names")
     if not isinstance(names, dict):
         names = {}
+    if not (user.get("service") or user.get("is_admin")):
+        minds, sessions = await asyncio.gather(
+            _gateway_json("/broker/minds"), _gateway_json("/sessions")
+        )
+        minds = [m for m in minds if isinstance(m, dict)] if isinstance(minds, list) else []
+        sessions = sessions if isinstance(sessions, list) else []
+        own = {
+            str(s.get("id") or "")
+            for s in route_access.visible_sessions(user, sessions, minds)
+        }
+        names = {sid: value for sid, value in names.items() if sid in own}
     return JSONResponse(
         {
             session_id: {
@@ -659,9 +762,11 @@ def _relayable_close_code(code: int | None) -> int | None:
 async def ws_terminal_attach(websocket: WebSocket, session_id: str):
     """Reverse-proxy a browser terminal WS into hive-comms' session attach.
 
-    Gated by the same session cookie as every other page here; an
-    unauthenticated caller is rejected outright since this is full shell
-    access.
+    The route table has already refused, before the socket was accepted,
+    anyone not signed in, anyone who must change their password, and a
+    non-admin whose session this is not; this is full shell access. The
+    cookie check below is the same check again, kept because it costs one
+    lookup the middleware has already cached.
     """
     user = get_current_user_from_request(websocket)
     if user is None:
