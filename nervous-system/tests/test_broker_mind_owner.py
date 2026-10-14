@@ -3,8 +3,8 @@
 Ownership is keyed by `mind_id`, not by the display name. A registration may
 omit the owner — a known mind keeps the one it has, the way it keeps its
 session token — but a mind comms has never seen cannot register without one,
-and a registration naming a different owner than the stored one is refused:
-only the admin route moves a mind between users.
+and a registration naming a different owner than the stored one keeps the
+stored owner: only the admin route moves a mind between users.
 """
 from __future__ import annotations
 
@@ -74,16 +74,36 @@ def test_a_known_mind_re_registering_without_an_owner_keeps_its_owner(app_client
     assert _listed(app_client)[MIND_A]["model"] == "opus"
 
 
-def test_a_registration_naming_a_different_owner_is_refused_409(app_client) -> None:
+def test_a_registration_naming_a_different_owner_lands_with_the_stored_owner_kept(
+    app_client, caplog
+) -> None:
     app_client.post("/broker/minds", headers=ADMIN, json=_registration(owner="sloan"))
-    response = app_client.post(
-        "/broker/minds", headers=ADMIN,
-        json=_registration(owner="aiden", model="opus"),
-    )
-    assert response.status_code == 409
+    with caplog.at_level("WARNING", logger="hive-mind.broker"):
+        response = app_client.post(
+            "/broker/minds", headers=ADMIN,
+            json=_registration(owner="aiden", model="opus"),
+        )
+    assert response.status_code == 200
     row = _listed(app_client)[MIND_A]
     assert row["owner"] == "sloan"
-    assert row["model"] == "sonnet"
+    assert row["model"] == "opus"
+    assert any(r.getMessage() == "mind.owner_ignored" and r.levelname == "WARNING"
+               for r in caplog.records)
+
+
+def test_a_mind_moved_by_the_admin_keeps_registering_under_its_new_owner(
+    app_client,
+) -> None:
+    app_client.post("/broker/minds", headers=ADMIN, json=_registration(owner="sloan"))
+    app_client.put(f"/broker/minds/{MIND_A}/owner", headers=ADMIN, json={"owner": "aiden"})
+    response = app_client.post(
+        "/broker/minds", headers=ADMIN,
+        json=_registration(owner="sloan", model="opus"),
+    )
+    assert response.status_code == 200
+    row = _listed(app_client)[MIND_A]
+    assert row["owner"] == "aiden"
+    assert row["model"] == "opus"
 
 
 def test_the_same_owner_in_another_case_is_not_a_conflict(app_client) -> None:
@@ -207,3 +227,27 @@ def test_a_pre_owner_mind_still_registers_unchanged_after_the_upgrade(
         row = _listed(client)[MIND_A]
         assert row["model"] == "opus"
         assert row["owner"] is None
+
+
+def test_a_pre_owner_row_registering_with_an_owner_is_listed_under_it(
+    monkeypatch, tmp_path
+) -> None:
+    _legacy_db(tmp_path / "broker.db")
+    monkeypatch.setenv("BROKER_DB_PATH", str(tmp_path / "broker.db"))
+    monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "sessions.db"))
+    monkeypatch.delenv("COMMS_BEARER_TOKEN", raising=False)
+    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-bearer")
+    from comms import server as server_module
+
+    importlib.reload(server_module)
+    with TestClient(server_module.app) as client:
+        response = client.post(
+            "/broker/minds", headers=ADMIN, json=_registration(owner="Sloan")
+        )
+        assert response.status_code == 200
+        assert _listed(client)[MIND_A]["owner"] == "sloan"
+        again = client.post(
+            "/broker/minds", headers=ADMIN, json=_registration(owner="aiden")
+        )
+        assert again.status_code == 200
+        assert _listed(client)[MIND_A]["owner"] == "sloan"
