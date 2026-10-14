@@ -61,7 +61,7 @@
 
             <p class="console-nav-label">Workspace</p>
             <div class="console-nav-flyout">
-                <a href="/kanban" class="console-nav-link {% if path.startswith('/kanban') %}is-active{% endif %}"><i data-lucide="square-kanban"></i><span>Kanban</span><i class="nav-flyout-caret" data-lucide="chevron-right"></i></a>
+                <button type="button" class="console-nav-link console-nav-toggle{% if path.startswith('/kanban') %} is-active{% endif %}" aria-expanded="false" data-nav-flyout-toggle><i data-lucide="square-kanban"></i><span>Kanban</span><i class="nav-flyout-caret" data-lucide="chevron-right"></i></button>
                 <div class="console-nav-submenu">
                     <a href="/kanban/backlog" class="console-nav-sublink {% if path == '/kanban/backlog' %}is-active{% endif %}">Backlog</a>
                     <a href="/kanban/board" class="console-nav-sublink {% if path == '/kanban/board' %}is-active{% endif %}">Board</a>

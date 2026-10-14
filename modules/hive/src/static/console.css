@@ -82,10 +82,19 @@ a { color: inherit; }
 .console-nav-flyout { position: relative; }
 .nav-flyout-caret { width: 15px; height: 15px; margin-left: auto; color: #77828a; transition: transform .15s ease; }
 .console-nav-submenu { display: none; gap: 2px; margin: 0 0 5px 29px; padding: 3px 0 3px 8px; border-left: 1px solid #39444b; }
-.console-nav-flyout:hover .console-nav-submenu,
-.console-nav-flyout:focus-within .console-nav-submenu { display: grid; }
-.console-nav-flyout:hover .nav-flyout-caret,
-.console-nav-flyout:focus-within .nav-flyout-caret { transform: rotate(90deg); }
+/* The Kanban entry is a button, not a link: on a touch screen a tap is the
+   only gesture there is, so it must expand the menu and never navigate.
+   Touch opens it through the is-open class set by console.js; hover and
+   open it only where a real pointer can hover. A click on an open menu sets
+   is-closed, which beats a sticky :hover until the pointer leaves, so a
+   second tap on a hybrid touch laptop really closes it. */
+.console-nav-toggle { width: 100%; background: none; text-align: left; cursor: pointer; transition: none; }
+.console-nav-flyout.is-open .console-nav-submenu { display: grid; }
+.console-nav-flyout.is-open .nav-flyout-caret { transform: rotate(90deg); }
+@media (hover: hover) {
+    .console-nav-flyout:hover:not(.is-closed) .console-nav-submenu { display: grid; }
+    .console-nav-flyout:hover:not(.is-closed) .nav-flyout-caret { transform: rotate(90deg); }
+}
 .console-nav-sublink { display: block; padding: 8px 10px; border-radius: 6px; color: var(--console-muted, #aab4ba); text-decoration: none; font-size: 13px; }
 .console-nav-sublink:hover, .console-nav-sublink:focus-visible { color: var(--console-text); background: #252b30; outline: none; }
 .console-nav-sublink.is-active { color: var(--console-cyan); background: rgba(76,201,217,.1); }
