@@ -1,0 +1,4 @@
+# Windows domain sign-in (src/sso.py). Built against MIT Kerberos headers,
+# so the image installs libkrb5-dev to compile it; a development venv does
+# not need it — the tests stub the GSSAPI accept call.
+gssapi>=1.8
