@@ -1,6 +1,7 @@
 """Route tests for the consumer-facing Hive control center."""
 
 import asyncio
+import json
 import os
 import sys
 from unittest.mock import AsyncMock, patch
@@ -1308,3 +1309,57 @@ def test_saving_a_voice_refuses_a_body_naming_no_voice(tmp_path, monkeypatch):
 
     assert response.status_code == 400
     assert push.await_count == 0
+
+
+def test_an_edge_mind_bootstrap_installs_for_the_owner_named_or_the_admin(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
+    auth.create_user("sloan", "sloans-own-pass")
+
+    named = client.post("/api/edge-minds/bootstrap", json=_bootstrap_body(owner="Sloan"))
+    default = client.post("/api/edge-minds/bootstrap", json=_bootstrap_body())
+    unknown = client.post("/api/edge-minds/bootstrap", json=_bootstrap_body(owner="nobody-here"))
+
+    assert "./setup.sh --name atlas --owner sloan " in named.json()["command"]
+    assert named.json()["registration"]["owner"] == "sloan"
+    assert "./setup.sh --name atlas --owner daniel " in default.json()["command"]
+    assert unknown.status_code == 400
+
+
+def test_edge_mind_verify_registers_with_the_admin_token_and_the_owner(
+    tmp_path, monkeypatch, fake_comms
+):
+    client = _authed_client(tmp_path, monkeypatch)
+    auth.create_user("sloan", "sloans-own-pass")
+    monkeypatch.setenv("GATEWAY_API_URL", fake_comms.url)
+    monkeypatch.setenv("COMMS_BEARER_TOKEN", "service-token")
+    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-token")
+    fake_comms.received.clear()
+    mind_id = "6f12a60a-b5fd-4ba4-b2f1-07065a49145d"
+    with (
+        patch.object(
+            main_mod,
+            "_probe_edge_mind",
+            new=AsyncMock(return_value={"mind_id": mind_id, "status": "ok"}),
+        ),
+        patch.object(main_mod, "set_edge_mind_metadata"),
+    ):
+        response = client.post(
+            "/api/edge-minds/verify",
+            json={
+                "name": "sentinel-one",
+                "mind_id": mind_id,
+                "gateway_url": "http://192.168.4.16:8421",
+                "model": "gpt-5.5",
+                "harness": "codex_cli",
+                "provider": "openai",
+                "profile": "sentinel",
+                "role": "operator",
+                "deployment": "container",
+                "owner": "sloan",
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    (sent,) = [r for r in fake_comms.received if r["path"] == "/broker/minds"]
+    assert sent["authorization"] == "Bearer admin-token"
+    assert json.loads(sent["body"])["owner"] == "sloan"

@@ -12,6 +12,7 @@
             <form class="surface-body overview-stack" id="mind-form">
                 <div class="form-grid">
                     <div class="field"><label for="mind-name">Mind name</label><input id="mind-name" name="name" type="text" pattern="[a-z](?:[a-z0-9]|-){1,31}" placeholder="atlas" required><small id="mind-name-status">Lowercase letters, numbers, and hyphens.</small></div>
+                    <div class="field"><label for="mind-owner">Owner</label><select id="mind-owner" name="owner"></select><small>The user this Mind belongs to.</small></div>
                     <div class="field"><label for="mind-description">Description</label><input id="mind-description" name="description" type="text" placeholder="What this Mind is for."></div>
                 </div>
                 <div class="field is-full"><label>Harness</label><div class="choice-grid"><label class="choice"><input type="radio" name="harness" value="claude_cli" checked><span class="choice-copy"><strong>Claude CLI</strong><small>Long-lived stream-json session per conversation.</small></span></label><label class="choice"><input type="radio" name="harness" value="codex_cli"><span class="choice-copy"><strong>Codex CLI</strong><small>One <code>codex exec</code> subprocess per turn.</small></span></label></div></div>
@@ -93,6 +94,7 @@ window.addEventListener("DOMContentLoaded", function () {
         errorBox.hidden = true;
         const body = {
             name: form.elements.name.value,
+            owner: form.elements.owner.value,
             description: form.elements.description.value,
             harness: selectedHarness(),
             provider: form.elements.provider.value,
@@ -116,11 +118,24 @@ window.addEventListener("DOMContentLoaded", function () {
         if (!created) { status.textContent = "Scaffold the Mind first."; return; }
         status.textContent = "Registering…";
         try {
-            await h.requestJson("/api/minds/" + encodeURIComponent(created.name) + "/register", {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"});
+            await h.requestJson("/api/minds/" + encodeURIComponent(created.name) + "/register", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({owner: created.owner})});
             status.textContent = "Registered. " + created.name + " is part of the Hive.";
         } catch (error) { status.textContent = error.message; }
     });
 
+
+    // The user a new Mind belongs to; the admin creating it unless another is picked.
+    async function loadOwners(select, current) {
+        try {
+            const users = (await h.requestJson("/api/admin/users")).users || [];
+            select.innerHTML = users.filter(function (u) { return !u.disabled; }).map(function (u) {
+                return '<option value="' + h.escapeHtml(u.username) + '"' + (u.username === current ? " selected" : "") + '>' + h.escapeHtml(u.username) + '</option>';
+            }).join("");
+        } catch (error) {
+            select.innerHTML = '<option value="' + h.escapeHtml(current) + '">' + h.escapeHtml(current) + '</option>';
+        }
+    }
+    loadOwners(document.getElementById("mind-owner"), {{ current_user.username | tojson }});
     renderProviders();
 });
 </script>

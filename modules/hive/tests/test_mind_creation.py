@@ -5,6 +5,7 @@ every one of the four harness/provider pairs running in this Hive today
 (ada, bob, nagatha, bilby) had to be scaffolded by hand.
 """
 
+import json
 import os
 import sys
 from unittest.mock import AsyncMock, patch
@@ -195,7 +196,62 @@ def test_register_sends_the_scaffolded_identity_to_the_broker(client):
         "model": "gpt-5.4",
         # Already the broker's vocabulary — no translation step.
         "harness": "codex_cli",
+        # A new mind is the registering admin's unless another owner is named.
+        "owner": "daniel",
     }
+
+
+def test_a_new_mind_is_scaffolded_for_the_owner_named_or_the_admin_creating_it(client):
+    auth.create_user("sloan", "sloans-own-pass")
+
+    assert _create(client, name="atlas", owner="Sloan").json()["registration"]["owner"] == "sloan"
+    assert _create(client, name="borealis").status_code == 200
+    refused = _create(client, name="cygnus", owner="nobody-here")
+
+    def owner_of(name):
+        return yaml.safe_load((client.minds_dir / name / "runtime.yaml").read_text())["owner"]
+
+    assert owner_of("atlas") == "sloan"
+    assert owner_of("borealis") == "daniel"
+    assert refused.status_code == 400
+    assert not (client.minds_dir / "cygnus").exists()
+
+
+@pytest.fixture()
+def comms(fake_comms, monkeypatch):
+    monkeypatch.setenv("GATEWAY_API_URL", fake_comms.url)
+    monkeypatch.setenv("COMMS_BEARER_TOKEN", "service-token")
+    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-token")
+    fake_comms.received.clear()
+    return fake_comms
+
+
+def _broker_writes(comms):
+    return [r for r in comms.received if r["path"].startswith("/broker/minds")]
+
+
+def test_register_reaches_comms_with_the_admin_token_and_the_scaffolded_owner(client, comms):
+    auth.create_user("sloan", "sloans-own-pass")
+    assert _create(client, owner="sloan").status_code == 200
+
+    assert client.post("/api/minds/atlas/register", json={}).status_code == 200
+
+    (sent,) = _broker_writes(comms)
+    assert (sent["method"], sent["path"]) == ("POST", "/broker/minds")
+    assert sent["authorization"] == "Bearer admin-token"
+    assert json.loads(sent["body"])["owner"] == "sloan"
+
+
+def test_register_leaves_out_the_owner_of_a_mind_comms_already_holds(client, comms):
+    assert _create(client).status_code == 200
+    mind_id = yaml.safe_load((client.minds_dir / "atlas" / "runtime.yaml").read_text())["mind_id"]
+    held = [{"id": mind_id, "name": "atlas", "owner": "aiden"}]
+
+    with patch.object(main_mod, "_broker_minds_safe", new=AsyncMock(return_value=held)):
+        assert client.post("/api/minds/atlas/register", json={}).status_code == 200
+
+    (sent,) = _broker_writes(comms)
+    assert "owner" not in json.loads(sent["body"])
 
 
 def test_register_rejects_a_mind_that_was_never_scaffolded(client):

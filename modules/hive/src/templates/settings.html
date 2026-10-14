@@ -5,19 +5,20 @@
     <header class="page-header"><div class="page-header-copy"><p class="page-eyebrow">System configuration</p><h1 class="page-title">Settings</h1><p class="page-description">Durable owner, connection, voice, and installation configuration.</p></div></header>
     <div class="settings-layout">
         <div class="settings-nav" role="navigation" aria-label="Settings sections">
-            <a href="/settings/general" class="{% if settings_section == 'general' %}is-active{% endif %}">General</a>
-            <a href="/settings/access" class="{% if settings_section == 'access' %}is-active{% endif %}">Owner and access</a>
+            {% if current_user.is_admin %}<a href="/settings/general" class="{% if settings_section == 'general' %}is-active{% endif %}">General</a>{% endif %}
+            <a href="/settings/access" class="{% if settings_section == 'access' %}is-active{% endif %}">{{ 'Owner and access' if current_user.is_admin else 'Account and sessions' }}</a>
+            {% if current_user.is_admin %}<a href="/settings/users" class="{% if settings_section == 'users' %}is-active{% endif %}">Users and groups</a>
             <a href="/settings/connections" class="{% if settings_section == 'connections' %}is-active{% endif %}">Connections</a>
             <a href="/settings/voice" class="{% if settings_section == 'voice' %}is-active{% endif %}">Voice</a>
             <a href="/settings/credentials" class="{% if settings_section == 'credentials' %}is-active{% endif %}">Credentials</a>
-            <a href="/settings/advanced" class="{% if settings_section == 'advanced' %}is-active{% endif %}">Advanced</a>
+            <a href="/settings/advanced" class="{% if settings_section == 'advanced' %}is-active{% endif %}">Advanced</a>{% endif %}
         </div>
         <div class="settings-content">
         {% if settings_section == 'general' %}
             <section class="surface"><div class="settings-section-copy"><h2>Installation</h2><p>Identity and first-run state for this Hive.</p></div><div class="surface-body"><dl class="detail-grid"><div class="detail-item"><dt>Product</dt><dd>Hive control center</dd></div><div class="detail-item"><dt>Owner</dt><dd>{{ current_user.username }}</dd></div><div class="detail-item"><dt>Default view</dt><dd>System overview</dd></div></dl></div></section>
             <section class="surface"><div class="settings-section-copy"><h2>Setup guide</h2><p>Re-run readiness checks or continue an incomplete installation.</p></div><div class="surface-body"><a class="button" href="/setup"><i data-lucide="list-checks"></i>Open setup guide</a></div></section>
         {% elif settings_section == 'access' %}
-            <section class="surface"><div class="settings-section-copy"><h2>Owner account</h2><p>The account currently authorized to administer this Hive.</p></div><div class="surface-body"><dl class="detail-grid"><div class="detail-item"><dt>Username</dt><dd>{{ current_user.username }}</dd></div><div class="detail-item"><dt>Role</dt><dd>Owner</dd></div><div class="detail-item"><dt>Authentication</dt><dd>Hive session</dd></div></dl></div></section>
+            <section class="surface"><div class="settings-section-copy"><h2>Your account</h2><p>The account signed in to this console.</p></div><div class="surface-body"><dl class="detail-grid"><div class="detail-item"><dt>Username</dt><dd>{{ current_user.username }}</dd></div><div class="detail-item"><dt>Role</dt><dd>{{ 'Admin' if current_user.is_admin else 'Member' }}</dd></div><div class="detail-item"><dt>Groups</dt><dd>{{ current_user.groups | join(', ') or 'None' }}</dd></div></dl><a class="button" href="/password"><i data-lucide="key-round"></i>Change password</a></div></section>
             <section class="surface"><div class="surface-header"><div><h2>Mind sessions</h2><p>Delete abandoned conversation sessions.</p></div><button id="sessions-refresh" class="icon-button" type="button" aria-label="Refresh sessions"><i data-lucide="refresh-cw"></i></button></div><ul class="activity-list" id="settings-sessions"><li class="loading-state">Loading sessions…</li></ul></section>
         {% elif settings_section == 'connections' %}
             <section class="surface"><div class="surface-header"><div><h2>Shared services</h2><p>Connectivity from the Hive application.</p></div><button id="connections-refresh" class="icon-button" type="button" aria-label="Refresh connections"><i data-lucide="refresh-cw"></i></button></div><ul class="service-list" id="settings-connections"><li class="loading-state">Checking connections…</li></ul></section>
@@ -47,6 +48,29 @@
                     </select>
                 </div>
                 <div id="credential-registry"><p class="loading-state">Loading credentials…</p></div>
+            </section>
+        {% elif settings_section == 'users' %}
+            <section class="surface">
+                <div class="surface-header"><div><h2>Users</h2><p>A new user signs in with the temporary password you set and must change it. Users are disabled, never deleted.</p></div><button id="users-refresh" class="icon-button" type="button" aria-label="Refresh users"><i data-lucide="refresh-cw"></i></button></div>
+                <div class="surface-body">
+                    <form id="user-create" class="inline-form">
+                        <input name="username" placeholder="Username" autocomplete="off" required>
+                        <input name="email" type="email" placeholder="Email (optional)" autocomplete="off">
+                        <input name="domain_account" id="user-domain-account" placeholder="DOMAIN\username (optional)" autocomplete="off" hidden>
+                        <input name="temp_password" type="text" placeholder="Temporary password" autocomplete="off" minlength="8">
+                        <button class="button button-primary" type="submit"><i data-lucide="user-plus"></i>Add user</button>
+                    </form>
+                    <p class="faint">Leave the temporary password empty for an account that signs in only through Microsoft or Windows.</p>
+                </div>
+                <div class="table-wrap"><table class="data-table"><thead><tr><th>Username</th><th>Email</th><th>Domain account</th><th>Groups</th><th>Status</th><th></th></tr></thead><tbody id="users-rows"><tr><td colspan="6" class="loading-state">Loading users…</td></tr></tbody></table></div>
+            </section>
+            <section class="surface">
+                <div class="surface-header"><div><h2>Groups</h2><p>Membership of admins is what makes a user an admin. The last enabled admin cannot be removed or disabled.</p></div></div>
+                <div class="surface-body">
+                    <form id="group-create" class="inline-form"><input name="name" placeholder="New group" autocomplete="off" required><button class="button" type="submit"><i data-lucide="plus"></i>Add group</button></form>
+                    <form id="member-add" class="inline-form"><select name="group" id="member-group"></select><select name="username" id="member-user"></select><button class="button" type="submit"><i data-lucide="user-check"></i>Add to group</button></form>
+                </div>
+                <ul class="activity-list" id="groups-rows"><li class="loading-state">Loading groups…</li></ul>
             </section>
         {% elif settings_section == 'advanced' %}
             <section class="surface"><div class="settings-section-copy"><h2>Installer downloads</h2><p>Approved bootstrap assets published by Hive Init.</p></div><ul class="service-list" id="settings-downloads"><li class="loading-state">Loading downloads…</li></ul></section>
@@ -472,6 +496,86 @@ window.addEventListener("DOMContentLoaded", function () {
     document.getElementById("credentials-refresh").addEventListener("click", function () { loadCredentials(true); });
     loadCredentials(false); }
     if (section === "advanced") loadDownloads();
+    if (section === "users") {
+        const usersRows = document.getElementById("users-rows");
+        const groupsRows = document.getElementById("groups-rows");
+        async function act(url, options) {
+            try { await h.requestJson(url, options); } catch (error) { window.alert(error.message); }
+            loadUsers();
+        }
+        function json(method, body) {
+            return {method: method, headers: {"Content-Type": "application/json"}, body: JSON.stringify(body || {})};
+        }
+        async function loadUsers() {
+            let data;
+            try { data = await h.requestJson("/api/admin/users"); } catch (error) {
+                usersRows.innerHTML = '<tr><td colspan="6" class="error-state">' + h.escapeHtml(error.message) + '</td></tr>';
+                return;
+            }
+            const users = data.users || [];
+            const groups = data.groups || [];
+            // Domain accounts are held only by the console's own store.
+            document.getElementById("user-domain-account").hidden = data.backend !== "builtin";
+            usersRows.innerHTML = users.map(function (u) {
+                const name = h.escapeHtml(u.username);
+                const status = u.disabled ? "Disabled" : (u.must_change ? "Must change password" : "Active");
+                return '<tr><td>' + name + '</td><td>' + h.escapeHtml(u.email || "") + '</td><td>' + h.escapeHtml(u.domain_account || "") + '</td><td>' + h.escapeHtml((u.groups || []).join(", ")) + '</td><td>' + status + '</td><td class="row-actions">'
+                    + '<button class="button button-quiet" type="button" data-user-toggle="' + name + '" data-disabled="' + (u.disabled ? "1" : "") + '">' + (u.disabled ? "Enable" : "Disable") + '</button>'
+                    + '<button class="button button-quiet" type="button" data-user-reset="' + name + '">Reset password</button>'
+                    + (u.microsoft_bound ? '<button class="button button-quiet" type="button" data-user-unbind="' + name + '">Unbind Microsoft</button>' : '') + '</td></tr>';
+            }).join("") || '<tr><td colspan="6" class="empty-state">No users.</td></tr>';
+            groupsRows.innerHTML = groups.map(function (g) {
+                const members = (g.members || []).map(function (m) {
+                    return '<span class="pill">' + h.escapeHtml(m) + ' <button class="icon-button" type="button" aria-label="Remove ' + h.escapeHtml(m) + '" data-member-remove="' + h.escapeHtml(m) + '" data-group="' + h.escapeHtml(g.name) + '">×</button></span>';
+                }).join(" ");
+                return '<li class="activity-row"><strong>' + h.escapeHtml(g.name) + '</strong> ' + (members || '<span class="faint">No members</span>') + '</li>';
+            }).join("");
+            document.getElementById("member-group").innerHTML = groups.map(function (g) { return '<option>' + h.escapeHtml(g.name) + '</option>'; }).join("");
+            document.getElementById("member-user").innerHTML = users.map(function (u) { return '<option>' + h.escapeHtml(u.username) + '</option>'; }).join("");
+        }
+        document.getElementById("users-refresh").addEventListener("click", loadUsers);
+        document.getElementById("user-create").addEventListener("submit", async function (event) {
+            event.preventDefault();
+            const form = new FormData(event.target);
+            const body = {username: form.get("username"), email: form.get("email") || null};
+            if (form.get("temp_password")) body.temp_password = form.get("temp_password");
+            if (form.get("domain_account")) body.domain_account = form.get("domain_account");
+            await act("/api/admin/users", json("POST", body));
+            event.target.reset();
+        });
+        document.getElementById("group-create").addEventListener("submit", async function (event) {
+            event.preventDefault();
+            await act("/api/admin/groups", json("POST", {name: new FormData(event.target).get("name")}));
+            event.target.reset();
+        });
+        document.getElementById("member-add").addEventListener("submit", async function (event) {
+            event.preventDefault();
+            const form = new FormData(event.target);
+            await act("/api/admin/groups/" + encodeURIComponent(form.get("group")) + "/members/" + encodeURIComponent(form.get("username")), {method: "PUT"});
+        });
+        usersRows.addEventListener("click", async function (event) {
+            const toggle = event.target.closest("[data-user-toggle]");
+            if (toggle) {
+                await act("/api/admin/users/" + encodeURIComponent(toggle.dataset.userToggle), json("PATCH", {disabled: !toggle.dataset.disabled}));
+                return;
+            }
+            const unbind = event.target.closest("[data-user-unbind]");
+            if (unbind) {
+                await act("/api/admin/users/" + encodeURIComponent(unbind.dataset.userUnbind) + "/microsoft", {method: "DELETE"});
+                return;
+            }
+            const reset = event.target.closest("[data-user-reset]");
+            if (reset) {
+                const temp = window.prompt("New temporary password for " + reset.dataset.userReset + " (at least 8 characters)");
+                if (temp) await act("/api/admin/users/" + encodeURIComponent(reset.dataset.userReset) + "/reset", json("POST", {temp_password: temp}));
+            }
+        });
+        groupsRows.addEventListener("click", async function (event) {
+            const remove = event.target.closest("[data-member-remove]");
+            if (remove) await act("/api/admin/groups/" + encodeURIComponent(remove.dataset.group) + "/members/" + encodeURIComponent(remove.dataset.memberRemove), {method: "DELETE"});
+        });
+        loadUsers();
+    }
 });
 </script>
 {% endblock %}

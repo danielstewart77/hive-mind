@@ -22,8 +22,7 @@ Runs as container `hive-site` on :8710, on the `hivemind` docker network
 read-only for the memory browser. `src/` is bind-mounted, so template
 and static edits deploy live; route changes need a container restart.
 
-Copy `.env.example` to `.env`. `HIVE_SECRET_KEY` signs sessions and must be
-shared with the terminal site. `LUCENT_BEARER_TOKEN` and
+Copy `.env.example` to `.env`. `LUCENT_BEARER_TOKEN` and
 `COMMS_BEARER_TOKEN` authorize the core services;
 `COMMS_ADMIN_BEARER_TOKEN` is required separately for every consequential
 write — registering a Mind, changing its registry row, and setting its
@@ -35,9 +34,49 @@ without a restart from the Capability Nodes page. `EDGE_COMMS_URL`,
 stamped into generated Edge Mind plans. Use
 `EDGE_MIND_NAMES` for comma-separated remote minds that cannot be identified
 from local config or an IP endpoint, and `EDGE_MIND_PROFILES` for profile
-overrides such as `hex:sentinel`. On first launch against an empty db,
-`HIVE_SEED_USERNAME` and `HIVE_SEED_PASSWORD` create the one account; inert
-afterward.
+overrides such as `hex:sentinel`.
+
+## Accounts and who sees what
+
+Accounts live in one of two stores, behind one interface (`src/auth.py`),
+and an install uses exactly one. With no other configuration the console
+signs in against its own hive.db: on first launch against an empty db,
+`HIVE_SEED_USERNAME` and `HIVE_SEED_PASSWORD` create the first admin (inert
+afterward), and `HIVE_SECRET_KEY` signs session cookies — left unset, a
+random key is generated once and kept in the db, which the terminal site
+shares. With `AUTH_SERVICE_URL` set (or the backend named `auth-service` in
+`HIVE_AUTH_BACKEND`) the console signs in through auth-service instead, as site `hive`
+(`AUTH_SERVICE_SITE`), managing users over its admin API with
+`AUTH_SERVICE_ADMIN_TOKEN`; a `hive_session` cookie is then no session, and
+an unreachable auth-service is "sign-in service unavailable", never a fall
+back to hive.db.
+
+Admin is membership of the `admins` group, managed under Settings, Users
+and groups. A new user signs in with the temporary password an admin set and
+must choose their own before any other page opens; a reset does the same
+again. Users are disabled, never deleted, and the last enabled admin can be
+neither disabled nor removed from `admins`.
+
+Microsoft (Entra ID) and Windows domain (Kerberos) sign-in are switched on by
+configuration alone and sign in only to accounts an admin created; what IT
+has to provide and every setting is in
+[docs/sign-in-microsoft-windows.md](docs/sign-in-microsoft-windows.md).
+
+Every route is classified in one table, `src/console_access.py`: public, a
+signed-in user's (listings filtered to their own minds), a mind owner's
+(resolved from the route's mind name, mind id, session id or operation id
+through comms' `owner` on `GET /broker/minds`), or admin-only. A route the
+table does not name is admin-only, websockets included; the enforcement is
+`src/route_access.py`, in front of every route.
+
+A route a mind reaches with a bearer (the canvas snapshot and push, the
+design routes) names that bearer in the table, and the middleware verifies
+it before the route runs; a wrong one is refused, never answered from a
+cookie beside it, and a request carrying two Authorization headers is
+refused outright. A connection that stays open — `/ws/canvas` — is decided
+again every 30 seconds and closed once its user may no longer hold it. A
+refused websocket is accepted and then closed with its reason (4401 signed
+out, 4403 not allowed, 4428 password to change), so a browser can read it.
 
 The Inference Proxy Capability Node can clone its fixed public repository from
 the control center. `INFERENCE_PROXY_DIR` selects the host destination mounted
