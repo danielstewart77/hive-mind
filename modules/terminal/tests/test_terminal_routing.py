@@ -265,8 +265,8 @@ def test_mobile_toolbar_can_reach_the_tiles_scrollback():
     assert "target.scrollPage(Number(btn.dataset.scroll));" in body
     # The scroll buttons route through scrollPage, not the byte-sending key path.
     idx = body.index('toolbar.addEventListener("click"')
-    handler = body[idx : idx + 900]
-    assert handler.index("dataset.scroll") < handler.index("sendBytes")
+    handler = body[idx : body.index("\n    });", idx)]
+    assert handler.index("target.scrollPage(") < handler.index("target.sendBytes(")
     assert "TerminalRouting.pageScrollAction(" in body
 
     css_path = os.path.join(

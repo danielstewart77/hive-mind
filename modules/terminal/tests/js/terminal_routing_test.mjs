@@ -49,6 +49,16 @@ const tests = {
         assert.match(permanentClose(4401).message, /credential/);
     },
 
+    "a session that is not yours is not retried"() {
+        // The terminal site refuses another user's session before accepting
+        // the socket; asking again gets the same answer.
+        assert.match(permanentClose(4403).message, /not yours/);
+    },
+
+    "a password that must be changed is not retried"() {
+        assert.match(permanentClose(4428).message, /password/);
+    },
+
     "a tile already open elsewhere stands down"() {
         assert.equal(permanentClose(1012).message, "open in another window");
     },
