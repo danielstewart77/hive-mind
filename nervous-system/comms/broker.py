@@ -55,7 +55,8 @@ CREATE TABLE IF NOT EXISTS minds (
     last_seen      REAL NOT NULL,
     session_token  TEXT,
     voice          TEXT,
-    voice_engine   TEXT
+    voice_engine   TEXT,
+    owner          TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_minds_mind_id ON minds(mind_id);
 
@@ -121,6 +122,8 @@ async def _migrate_minds(db: aiosqlite.Connection) -> None:
         await db.execute("ALTER TABLE minds ADD COLUMN voice TEXT")
     if "voice_engine" not in have:
         await db.execute("ALTER TABLE minds ADD COLUMN voice_engine TEXT")
+    if "owner" not in have:
+        await db.execute("ALTER TABLE minds ADD COLUMN owner TEXT")
 
 
 # ---------------------------------------------------------------------------
@@ -448,6 +451,20 @@ async def wakeup_and_collect(
 # ---------------------------------------------------------------------------
 # Mind registration
 # ---------------------------------------------------------------------------
+class OwnerRequired(ValueError):
+    """A mind comms has never seen registered without naming its owner."""
+
+
+class OwnerConflict(ValueError):
+    """A registration named an owner other than the one the row holds."""
+
+
+def normalize_owner(owner: str | None) -> str | None:
+    """The owner key: the user's lowercase username, or None when unnamed."""
+    value = (owner or "").strip().lower()
+    return value or None
+
+
 async def register_mind(
     db: aiosqlite.Connection,
     *,
@@ -459,6 +476,7 @@ async def register_mind(
     session_token: str | None = None,
     voice: str | None = None,
     voice_engine: str | None = None,
+    owner: str | None = None,
 ) -> None:
     """Register (or update) a mind in the broker database.
 
@@ -475,16 +493,34 @@ async def register_mind(
     reason: the mind's `runtime.yaml` is the truth, this row is what the
     speaking surfaces read, and a registration that omitted either must not
     blank a working voice.
+
+    `owner` is the user the mind belongs to, held here and keyed by
+    `mind_id`. A known mind may omit it and keeps the stored one; a mind this
+    gateway has never seen must name one (`OwnerRequired`); naming a different
+    owner than the stored one raises `OwnerConflict` and changes nothing —
+    only `set_mind_owner`, behind the admin route, moves a mind between users.
+    A row that predates ownership (owner still unset) takes the one named.
     """
+    owner = normalize_owner(owner)
     now = time.time()
     row = await db.execute(
-        "SELECT registered_at FROM minds WHERE mind_id = ?", (mind_id,)
+        "SELECT registered_at, owner FROM minds WHERE mind_id = ?", (mind_id,)
     )
     existing = await row.fetchone()
+
+    if not existing and owner is None:
+        raise OwnerRequired(f"mind {mind_id} is not registered and names no owner")
+    if existing and owner and existing["owner"] and owner != existing["owner"]:
+        raise OwnerConflict(
+            f"mind {mind_id} belongs to {existing['owner']}, not {owner}"
+        )
 
     if existing:
         columns = ["name=?", "gateway_url=?", "model=?", "harness=?", "last_seen=?"]
         values = [name, gateway_url, model, harness, now]
+        if owner and not existing["owner"]:
+            columns.append("owner=?")
+            values.append(owner)
         if session_token:
             columns.append("session_token=?")
             values.append(session_token)
@@ -501,14 +537,35 @@ async def register_mind(
     else:
         await db.execute(
             "INSERT INTO minds (mind_id, name, gateway_url, model, harness, registered_at, last_seen, "
-            "session_token, voice, voice_engine) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "session_token, voice, voice_engine, owner) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (mind_id, name, gateway_url, model, harness, now, now,
-             session_token or None, voice or None, voice_engine or None),
+             session_token or None, voice or None, voice_engine or None, owner),
         )
     await db.commit()
     log_event(log, "mind.registered" if not existing else "mind.updated",
               mind_id=mind_id, mind_name=name, gateway_url=gateway_url,
-              model=model, harness=harness)
+              model=model, harness=harness, owner=owner)
+
+
+async def set_mind_owner(
+    db: aiosqlite.Connection, mind_id: str, owner: str
+) -> dict | None:
+    """Move a mind to another user. The admin path, and the only one.
+
+    Returns the updated mind, or None when no mind has that id. A blank owner
+    raises `ValueError`: every mind has exactly one.
+    """
+    normalized = normalize_owner(owner)
+    if normalized is None:
+        raise ValueError("owner must name a user")
+    cursor = await db.execute(
+        "UPDATE minds SET owner = ? WHERE mind_id = ?", (normalized, mind_id)
+    )
+    await db.commit()
+    if cursor.rowcount == 0:
+        return None
+    log_event(log, "mind.owner_set", mind_id=mind_id, owner=normalized)
+    return await get_mind_by_id(db, mind_id)
 
 
 def _public_mind(row) -> dict:

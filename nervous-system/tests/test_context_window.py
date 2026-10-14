@@ -721,7 +721,7 @@ def test_the_gateway_sends_an_owed_resend_when_it_starts(tmp_path, monkeypatch):
         mgr.broker_db = await broker_mod.init_db(str(tmp_path / "broker.db"))
         await broker_mod.register_mind(
             mgr.broker_db, mind_id=MIND, name="ada", gateway_url="http://mind.test:8420",
-            model="claude-opus-5", harness="claude_cli",
+            model="claude-opus-5", harness="claude_cli", owner="daniel",
         )
         await _seed(mgr)
         await mgr._db.execute(
@@ -755,7 +755,7 @@ def test_goal_rounds_reach_the_mind_through_the_message_route(tmp_path, monkeypa
         from comms import broker as broker_mod
         _run_in(client, broker_mod.register_mind(
             mgr.broker_db, mind_id=MIND, name="ada", gateway_url="http://mind.test:8420",
-            model="claude-opus-5", harness="claude_cli",
+            model="claude-opus-5", harness="claude_cli", owner="daniel",
         ))
         _run_in(client, _seed(mgr))
         with mind.wired(), _soul():
@@ -1708,7 +1708,7 @@ def test_a_refused_switch_reaches_a_chat_surface_as_its_reason(tmp_path, monkeyp
         mgr = server_module.session_mgr
         _run(broker.register_mind(
             mgr.broker_db, mind_id=MIND, name="ada", gateway_url="http://mind.test:8420",
-            model="claude-opus-5", harness="claude_cli",
+            model="claude-opus-5", harness="claude_cli", owner="daniel",
         ))
         _run(_seed(mgr))
         mind = FakeMind()

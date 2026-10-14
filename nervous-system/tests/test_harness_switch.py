@@ -227,7 +227,7 @@ async def _manager(tmp: str, harness: str = "claude_cli") -> SessionManager:
     mgr.broker_db = await broker.init_db(os.path.join(tmp, "broker.db"))
     await broker.register_mind(
         mgr.broker_db, mind_id=MIND, name="ada", gateway_url=MIND_URL,
-        model="claude-opus-5", harness=harness,
+        model="claude-opus-5", harness=harness, owner="daniel",
     )
     return mgr
 
@@ -365,7 +365,7 @@ def app_client(monkeypatch, tmp_path):
         mgr = server_module.session_mgr
         _run(broker.register_mind(
             mgr.broker_db, mind_id=MIND, name="ada", gateway_url=MIND_URL,
-            model="claude-opus-5", harness="claude_cli",
+            model="claude-opus-5", harness="claude_cli", owner="daniel",
         ))
         yield client, server_module
 
