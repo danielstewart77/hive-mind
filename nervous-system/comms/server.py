@@ -236,6 +236,15 @@ class RegisterMindRequest(BaseModel):
     # alone rather than clearing it.
     voice: str | None = None
     voice_engine: str | None = None
+    # The user this mind belongs to (lowercase username). Optional on the
+    # wire: a known mind that omits it keeps the stored owner. A mind the
+    # gateway has never seen must name one, and naming a different owner than
+    # the stored one is refused — only the admin owner route moves a mind.
+    owner: str | None = None
+
+
+class SetMindOwnerRequest(BaseModel):
+    owner: str
 
 
 class ClientContextReportRequest(BaseModel):
@@ -1326,18 +1335,34 @@ async def broker_get_minds():
 async def broker_register_mind(body: RegisterMindRequest):
     """Register (or update) a mind in the broker database. Admin-only."""
     db = app.state.broker_db
-    await broker.register_mind(
-        db,
-        mind_id=body.mind_id,
-        name=body.name,
-        gateway_url=body.gateway_url,
-        model=body.model,
-        harness=body.harness,
-        session_token=body.session_token,
-        voice=body.voice,
-        voice_engine=body.voice_engine,
-    )
+    try:
+        await broker.register_mind(
+            db,
+            mind_id=body.mind_id,
+            name=body.name,
+            gateway_url=body.gateway_url,
+            model=body.model,
+            harness=body.harness,
+            session_token=body.session_token,
+            voice=body.voice,
+            voice_engine=body.voice_engine,
+            owner=body.owner,
+        )
+    except broker.OwnerRequired as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
     return await broker.get_mind_by_id(db, body.mind_id)
+
+
+@app.put("/broker/minds/{mind_id}/owner", dependencies=[Depends(require_admin_bearer)])
+async def broker_set_mind_owner(mind_id: str, body: SetMindOwnerRequest):
+    """Move a mind to another user. Admin-only; the only way an owner changes."""
+    try:
+        result = await broker.set_mind_owner(app.state.broker_db, mind_id, body.owner)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+    if result is None:
+        return JSONResponse({"error": f"Mind '{mind_id}' not found"}, status_code=404)
+    return result
 
 
 @app.put("/broker/minds/{name}", dependencies=[Depends(require_admin_bearer)])

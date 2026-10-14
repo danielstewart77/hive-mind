@@ -26,6 +26,7 @@ async def _registered(db, **overrides):
         "gateway_url": "http://192.168.4.64:8421",
         "model": "claude-opus-5",
         "harness": "claude_cli",
+        "owner": "daniel",
     }
     fields.update(overrides)
     await broker.register_mind(db, **fields)

@@ -4,6 +4,11 @@
 
 name: example
 mind_id: example
+# The user this mind belongs to: their lowercase username on the hive
+# console. Every mind has exactly one owner, and comms refuses to register a
+# mind it has never seen that names none. Once registered, only an admin can
+# move a mind to another owner; naming a different one here is refused.
+owner:
 gateway_url: http://example:8420
 remote: false
 description: "Example — starter mind, Claude CLI, Anthropic-backed."

@@ -53,7 +53,8 @@ def test_the_registration_route_persists_the_token(app_client) -> None:
         json={
             "mind_id": MIND_A, "name": "alpha",
             "gateway_url": "http://alpha:8420", "model": "sonnet",
-            "harness": "claude_cli", "session_token": "alpha-token",  # secret-guard: allow
+            "harness": "claude_cli", "owner": "daniel",
+            "session_token": "alpha-token",  # secret-guard: allow
         },
     )
     assert response.status_code == 200
@@ -72,7 +73,8 @@ def test_the_registration_route_does_not_echo_the_token_back(app_client) -> None
         json={
             "mind_id": MIND_A, "name": "alpha",
             "gateway_url": "http://alpha:8420", "model": "sonnet",
-            "harness": "claude_cli", "session_token": "alpha-token",  # secret-guard: allow
+            "harness": "claude_cli", "owner": "daniel",
+            "session_token": "alpha-token",  # secret-guard: allow
         },
     )
     assert "session_token" not in response.text
@@ -86,7 +88,8 @@ def test_the_minds_listing_does_not_carry_it(app_client) -> None:
         json={
             "mind_id": MIND_A, "name": "alpha",
             "gateway_url": "http://alpha:8420", "model": "sonnet",
-            "harness": "claude_cli", "session_token": "alpha-token",  # secret-guard: allow
+            "harness": "claude_cli", "owner": "daniel",
+            "session_token": "alpha-token",  # secret-guard: allow
         },
     )
     listing = client.get("/broker/minds")

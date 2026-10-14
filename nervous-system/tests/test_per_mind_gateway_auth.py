@@ -31,11 +31,11 @@ async def _broker_db(tmp: str):
     db = await broker.init_db(os.path.join(tmp, "broker.db"))
     await broker.register_mind(
         db, mind_id=MIND_A, name="alpha", gateway_url="http://alpha:8420",
-        model="sonnet", harness="claude_cli", session_token="alpha-token",
+        model="sonnet", harness="claude_cli", session_token="alpha-token", owner="daniel",
     )
     await broker.register_mind(
         db, mind_id=MIND_B, name="beta", gateway_url="http://beta:8420",
-        model="sonnet", harness="codex_cli", session_token="beta-token",
+        model="sonnet", harness="codex_cli", session_token="beta-token", owner="daniel",
     )
     return db
 
@@ -235,7 +235,7 @@ def test_a_mind_with_no_stored_token_gets_no_credential() -> None:
                 await broker.register_mind(
                     mgr.broker_db, mind_id="33333333-3333-4333-8333-333333333333",
                     name="gamma", gateway_url="http://gamma:8420", model="sonnet",
-                    harness="claude_cli",
+                    harness="claude_cli", owner="daniel",
                 )
                 return await mgr.mind_auth_headers(
                     "33333333-3333-4333-8333-333333333333"
