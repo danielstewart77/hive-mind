@@ -118,6 +118,11 @@ class TestRegistrationPayload:
             "harness": "claude_cli",
         }
 
+    def test_carries_the_owner_runtime_yaml_names(self, runtime_file):
+        """Comms refuses a mind it has never seen unless it names its owner."""
+        runtime_file.write_text(runtime_file.read_text() + "owner: sloan\n")
+        assert runtime_api.registration_payload(runtime_file)["owner"] == "sloan"
+
     def test_tracks_an_edit(self, runtime_file):
         runtime_api.update_runtime_fields(runtime_file, {"default_model": "opus"})
         assert runtime_api.registration_payload(runtime_file)["model"] == "opus"

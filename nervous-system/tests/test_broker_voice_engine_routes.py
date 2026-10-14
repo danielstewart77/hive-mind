@@ -38,6 +38,7 @@ def _register(client, **extra):
         "gateway_url": "http://alpha:8420",
         "model": "sonnet",
         "harness": "claude_cli",
+        "owner": "daniel",
     }
     body.update(extra)
     return client.post(
