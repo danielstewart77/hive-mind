@@ -58,6 +58,35 @@ def extract_assistant_texts(event: dict) -> list[str]:
     return texts
 
 
+# The surfaces whose ``client_ref`` is a Telegram chat id. The gateway labels
+# a chat ``telegram`` or ``telegram:<mind>``, so the base is what decides.
+_TELEGRAM_SURFACES = ("telegram",)
+
+
+def proactive_chat_id(session: dict) -> int | None:
+    """Telegram chat id for this session, or None if the surface can't take one.
+
+    Being numeric is not what makes a ref a Telegram destination. A Discord
+    channel or user id is a snowflake — nineteen digits, which ``int()`` takes
+    without complaint — so reading the ref alone handed a Discord-owned
+    session's unsolicited turn to the Telegram queue as chat
+    1556059743968039065. Telegram answers that "Chat not found", the consumer
+    retried it sixty times over three hours, and every attempt logged a
+    warning the sensor read as an anomaly: 180 lines of one window on
+    2026-10-15.
+
+    So the surface decides and the ref is only parsed. A session naming no
+    surface is not assumed to be Telegram — that guess is the defect.
+    """
+    surface = str(session.get("surface") or session.get("owner_type") or "")
+    if surface.split(":", 1)[0] not in _TELEGRAM_SURFACES:
+        return None
+    try:
+        return int(session.get("chat_id"))
+    except (TypeError, ValueError):
+        return None
+
+
 async def idle_drain(session: dict, buffer: list[dict]) -> None:
     """Buffer unsolicited assistant output while no request is live.
 
@@ -98,14 +127,20 @@ async def idle_drain(session: dict, buffer: list[dict]) -> None:
                 event = json.loads(decoded)
             except json.JSONDecodeError:
                 continue
-            chat_id = session.get("chat_id")
-            if not chat_id:
+            chat_id_int = proactive_chat_id(session)
+            texts = extract_assistant_texts(event)
+            if chat_id_int is None:
+                # The last copy. The buffer is process memory and the harness
+                # has already let go of this text, so a surface with nowhere
+                # to deliver it means the record is the only place it will
+                # ever exist.
+                for text in texts:
+                    log.warning(
+                        "undeliverable unsolicited turn (surface %r): %s",
+                        session.get("surface"), text,
+                    )
                 continue
-            try:
-                chat_id_int = int(chat_id)
-            except (TypeError, ValueError):
-                continue
-            for text in extract_assistant_texts(event):
+            for text in texts:
                 buffer.append({"chat_id": chat_id_int, "text": text})
 
 

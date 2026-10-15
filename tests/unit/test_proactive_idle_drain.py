@@ -62,11 +62,12 @@ class _FakeProc:
         self.returncode = None
 
 
-def _make_session(lines, in_flight=False, chat_id=555):
+def _make_session(lines, in_flight=False, chat_id=555, surface="telegram"):
     return {
         "proc": _FakeProc(_FakeStdout(lines)),
         "model": "sonnet",
         "chat_id": chat_id,
+        "surface": surface,
         "in_flight": in_flight,
         "stdout_lock": asyncio.Lock(),
     }
@@ -234,3 +235,28 @@ def test_endpoint_empty_buffer_returns_empty_list():
     resp = client.get("/proactive")
     assert resp.status_code == 200
     assert resp.json() == []
+
+
+async def test_a_discord_client_ref_is_not_buffered_for_telegram():
+    """A numeric client_ref is not a Telegram destination by virtue of being
+    numeric. Discord ids are snowflakes, which `int()` takes happily — and the
+    buffer this fills is drained by the Telegram bot."""
+    buffer: list[dict] = []
+    session = _make_session(
+        [_assistant_text_event("not for telegram")],
+        chat_id=1556059743968039065, surface="discord",
+    )
+    await _drain_briefly(session, buffer)
+    assert buffer == []
+
+
+async def test_a_mind_specific_telegram_surface_still_buffers():
+    """The gateway labels a per-mind chat `telegram:<mind>`; matching the whole
+    string would drop proactive delivery for every mind but a bare one."""
+    buffer: list[dict] = []
+    session = _make_session(
+        [_assistant_text_event("still mine")], chat_id=8776938611,
+        surface="telegram:mordecai",
+    )
+    await _drain_briefly(session, buffer)
+    assert buffer == [{"chat_id": 8776938611, "text": "still mine"}]
