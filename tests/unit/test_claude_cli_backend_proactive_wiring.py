@@ -87,11 +87,15 @@ async def test_create_session_wires_drain_and_buffers_unsolicited_text(backend):
             "session_id": "s1",
             "client_ref": "12345",
             "model": "opus",
+            # The surface the ref belongs to. A ref alone is only a number,
+            # and the buffer this fills is drained by the Telegram bot.
+            "surface": "telegram",
         })
 
     assert resp["status"] == "running"
     sess = backend.SESSIONS["s1"]
     assert sess["chat_id"] == "12345"
+    assert sess["surface"] == "telegram"
     assert isinstance(sess["stdout_lock"], asyncio.Lock)
     assert sess["in_flight"] is False
     assert "drain_task" in sess

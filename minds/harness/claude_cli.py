@@ -566,6 +566,10 @@ async def start_session(body: dict) -> Any:
             # client_ref is the surface's chat id (Telegram chat_id). Persist it
             # so unsolicited (proactive) turns can be routed back to the user.
             "chat_id": client_ref,
+            # And which surface that ref belongs to. Without it a ref is only
+            # a number, and every surface whose ref happens to be numeric —
+            # Discord's snowflakes among them — reads as a Telegram chat.
+            "surface": chat_surface(body),
             # Serialises stdout access between the live request reader
             # (send_message) and the background idle drain.
             "stdout_lock": asyncio.Lock(),
