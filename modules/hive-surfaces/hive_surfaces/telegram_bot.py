@@ -19,7 +19,9 @@ import time
 import aiohttp
 from telegram import ForceReply, Update
 from telegram.constants import ChatAction
-from telegram.error import BadRequest, Forbidden, NetworkError, TimedOut
+from telegram.error import (
+    BadRequest, ChatMigrated, Forbidden, NetworkError, TimedOut,
+)
 from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
@@ -247,17 +249,20 @@ _DELIVER_BACKOFF_S = 1.0
 _PROACTIVE_MAX_ATTEMPTS = 60
 _PROACTIVE_RETRY_S = 180.0
 # Telegram's verdicts about a destination rather than about the connection.
-# `Forbidden` is always one — blocked, kicked, deactivated. `BadRequest` is a
-# shared class, so it is read as permanent only when its text names the chat
-# id itself; anything else keeps the outage budget, because guessing wide
-# would abandon answers a retry would have delivered.
+# Both classes below are shared, so both are read by text: a verdict is
+# permanent only when the words name a destination that cannot come back.
+# Guessing by class would abandon answers a retry would have delivered —
+# `Forbidden` covers a user who blocked the bot (final) and a bot removed from
+# a group (a re-add fixes it), and only the first is a reason to stop.
 _PERMANENT_DESTINATION_TEXT = (
     "chat not found",
-    "chat_id is empty",
     "peer_id_invalid",
     "user not found",
-    "group chat was upgraded",
     "chat was deleted",
+    # 403s that no retry can change.
+    "blocked by the user",
+    "user is deactivated",
+    "user is deleted",
 )
 
 
@@ -272,11 +277,10 @@ def _is_permanent_destination_error(exc: BaseException) -> bool:
     2026-10-15, where they were read as anomalies and escalated.
 
     An outage is transient and keeps every attempt. A destination verdict is
-    final on the first answer.
+    final on the first answer. A `ChatMigrated` is neither — it names a
+    destination that works, and is repaired rather than judged here.
     """
-    if isinstance(exc, Forbidden):
-        return True
-    if isinstance(exc, BadRequest):
+    if isinstance(exc, (Forbidden, BadRequest)):
         text = str(exc).lower()
         return any(marker in text for marker in _PERMANENT_DESTINATION_TEXT)
     return False
@@ -319,6 +323,12 @@ async def _deliver(bot, chat_id: int, text: str) -> bool:
             raise
         except Exception as exc:  # noqa: BLE001
             last = exc
+            if _is_permanent_destination_error(exc):
+                # Telegram has answered about the chat id. The backoff here is
+                # for a flaky connection, and spending it on a verdict that
+                # cannot change delays the one thing that helps — getting the
+                # text into the record.
+                break
             if attempt + 1 < _DELIVER_ATTEMPTS:
                 await asyncio.sleep(_DELIVER_BACKOFF_S * (attempt + 1))
     # WARNING, not INFO. The distinction is the whole point: this names an
@@ -774,6 +784,12 @@ async def _send_session_picker(bot, user_id: int, chat_id: int) -> None:
             raise
         except Exception as exc:  # noqa: BLE001
             last = exc
+            if _is_permanent_destination_error(exc):
+                # Telegram has answered about the chat id. The backoff here is
+                # for a flaky connection, and spending it on a verdict that
+                # cannot change delays the one thing that helps — getting the
+                # text into the record.
+                break
             if attempt + 1 < _DELIVER_ATTEMPTS:
                 await asyncio.sleep(_DELIVER_BACKOFF_S * (attempt + 1))
     log_event(
@@ -1284,6 +1300,12 @@ async def _send_model_picker(bot, user_id: int, chat_id: int) -> None:
             raise
         except Exception as exc:  # noqa: BLE001
             last = exc
+            if _is_permanent_destination_error(exc):
+                # Telegram has answered about the chat id. The backoff here is
+                # for a flaky connection, and spending it on a verdict that
+                # cannot change delays the one thing that helps — getting the
+                # text into the record.
+                break
             if attempt + 1 < _DELIVER_ATTEMPTS:
                 await asyncio.sleep(_DELIVER_BACKOFF_S * (attempt + 1))
     log_event(
@@ -1337,6 +1359,12 @@ async def _send_effort_picker(bot, user_id: int, chat_id: int) -> None:
             raise
         except Exception as exc:  # noqa: BLE001
             last = exc
+            if _is_permanent_destination_error(exc):
+                # Telegram has answered about the chat id. The backoff here is
+                # for a flaky connection, and spending it on a verdict that
+                # cannot change delays the one thing that helps — getting the
+                # text into the record.
+                break
             if attempt + 1 < _DELIVER_ATTEMPTS:
                 await asyncio.sleep(_DELIVER_BACKOFF_S * (attempt + 1))
     log_event(
@@ -1377,6 +1405,12 @@ async def _send_picker_message(bot, user_id: int, chat_id: int, text: str, keybo
             raise
         except Exception as exc:  # noqa: BLE001
             last = exc
+            if _is_permanent_destination_error(exc):
+                # Telegram has answered about the chat id. The backoff here is
+                # for a flaky connection, and spending it on a verdict that
+                # cannot change delays the one thing that helps — getting the
+                # text into the record.
+                break
             if attempt + 1 < _DELIVER_ATTEMPTS:
                 await asyncio.sleep(_DELIVER_BACKOFF_S * (attempt + 1))
     log_event(
@@ -2480,6 +2514,21 @@ async def _proactive_consumer(app) -> None:
             attempts += 1
             # Whatever already landed is not sent again.
             remaining = "".join(chunks[sent:])
+            new_chat_id = getattr(exc, "new_chat_id", None) if isinstance(
+                exc, ChatMigrated) else None
+            if new_chat_id:
+                # A group promoted to a supergroup. The old id is dead and
+                # Telegram handed back the one that works, so this is the one
+                # invalid destination that can be repaired instead of
+                # abandoned. The attempt count rides along, so a migration
+                # cannot buy a message an unbounded second budget.
+                log_event(
+                    log, "surface.proactive.migrated", level=logging.INFO,
+                    surface="telegram", client_ref=chat_id,
+                    new_client_ref=new_chat_id, attempt=attempts,
+                )
+                proactive.enqueue(new_chat_id, remaining, attempts)
+                continue
             if _is_permanent_destination_error(exc):
                 # Telegram has answered about the chat id, not about the
                 # connection, so the remaining attempts cannot change it.
