@@ -149,3 +149,84 @@ async def test_what_is_still_queued_at_shutdown_reaches_the_journal(caplog):
 
     assert any("the answer you never saw" in r.getMessage() for r in caplog.records)
     assert proactive._queue.empty()
+
+
+async def test_chat_not_found_is_abandoned_without_retrying(monkeypatch):
+    """A destination that does not exist is not an outage.
+
+    "Chat not found" is Telegram's answer about the chat id itself, so no
+    amount of waiting changes it. Given the outage budget it cost 60 attempts
+    over three hours, each logging a warning — 180 lines of one NetSage window
+    on 2026-10-15, for one message that was never deliverable.
+    """
+    from telegram.error import BadRequest
+
+    monkeypatch.setattr(telegram_bot, "_PROACTIVE_RETRY_S", 0)
+    app = MagicMock()
+    app.bot.send_message = AsyncMock(side_effect=BadRequest("Chat not found"))
+    proactive.enqueue(1556059743968039065, "nowhere to go")
+
+    await _run_consumer_until_drained(app)
+
+    assert app.bot.send_message.await_count == 1, (
+        "a permanently invalid destination is attempted once, not sixty times"
+    )
+    assert proactive._queue.empty()
+
+
+async def test_a_blocked_bot_is_abandoned_without_retrying(monkeypatch):
+    """Being blocked is a decision, not an outage. Retrying it for three hours
+    tells the operator nothing and fills the journal with a line the sensor
+    reads as an anomaly."""
+    from telegram.error import Forbidden
+
+    monkeypatch.setattr(telegram_bot, "_PROACTIVE_RETRY_S", 0)
+    app = MagicMock()
+    app.bot.send_message = AsyncMock(
+        side_effect=Forbidden("Forbidden: bot was blocked by the user")
+    )
+    proactive.enqueue(42, "blocked")
+
+    await _run_consumer_until_drained(app)
+
+    assert app.bot.send_message.await_count == 1
+    assert proactive._queue.empty()
+
+
+async def test_an_outage_still_gets_the_full_retry_budget(monkeypatch):
+    """The permanent-failure check must not cost a real outage its retries.
+
+    A NetworkError is exactly what the hours-long budget was written for, so
+    it keeps retrying where "Chat not found" stops.
+    """
+    from telegram.error import NetworkError
+
+    monkeypatch.setattr(telegram_bot, "_PROACTIVE_RETRY_S", 0)
+    app = MagicMock()
+    app.bot.send_message = AsyncMock(
+        side_effect=[NetworkError("connection reset"), None]
+    )
+    proactive.enqueue(8776938611, "arrives late")
+
+    await _run_consumer_until_drained(app)
+
+    assert app.bot.send_message.await_count == 2
+    assert app.bot.send_message.await_args.kwargs["text"] == "arrives late"
+
+
+async def test_a_bad_request_about_the_message_still_retries(monkeypatch):
+    """Only a destination verdict is permanent. A BadRequest naming something
+    else is not read as one, because the class is shared and guessing wide
+    would abandon answers an outage would have delivered."""
+    from telegram.error import BadRequest
+
+    monkeypatch.setattr(telegram_bot, "_PROACTIVE_RETRY_S", 0)
+    app = MagicMock()
+    app.bot.send_message = AsyncMock(
+        side_effect=[BadRequest("Message_thread_not_found"), None]
+    )
+    proactive.enqueue(7, "retried")
+
+    await _run_consumer_until_drained(app)
+
+    assert app.bot.send_message.await_count == 2

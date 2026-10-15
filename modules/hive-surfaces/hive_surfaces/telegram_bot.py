@@ -19,7 +19,7 @@ import time
 import aiohttp
 from telegram import ForceReply, Update
 from telegram.constants import ChatAction
-from telegram.error import NetworkError, TimedOut
+from telegram.error import BadRequest, Forbidden, NetworkError, TimedOut
 from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
@@ -246,6 +246,40 @@ _DELIVER_BACKOFF_S = 1.0
 # place than the operator's phone but a far better one than nowhere.
 _PROACTIVE_MAX_ATTEMPTS = 60
 _PROACTIVE_RETRY_S = 180.0
+# Telegram's verdicts about a destination rather than about the connection.
+# `Forbidden` is always one — blocked, kicked, deactivated. `BadRequest` is a
+# shared class, so it is read as permanent only when its text names the chat
+# id itself; anything else keeps the outage budget, because guessing wide
+# would abandon answers a retry would have delivered.
+_PERMANENT_DESTINATION_TEXT = (
+    "chat not found",
+    "chat_id is empty",
+    "peer_id_invalid",
+    "user not found",
+    "group chat was upgraded",
+    "chat was deleted",
+)
+
+
+def _is_permanent_destination_error(exc: BaseException) -> bool:
+    """Whether retrying this send could ever change its outcome.
+
+    The retry budget is 60 attempts at three minutes, written for the
+    2026-09-17 outage and correct for one. Applied to a destination that does
+    not exist it is three hours of attempts that cannot succeed, each logging
+    a warning: a Discord snowflake routed to Telegram as chat
+    1556059743968039065 put 180 such lines into one NetSage window on
+    2026-10-15, where they were read as anomalies and escalated.
+
+    An outage is transient and keeps every attempt. A destination verdict is
+    final on the first answer.
+    """
+    if isinstance(exc, Forbidden):
+        return True
+    if isinstance(exc, BadRequest):
+        text = str(exc).lower()
+        return any(marker in text for marker in _PERMANENT_DESTINATION_TEXT)
+    return False
 
 
 async def _deliver(bot, chat_id: int, text: str) -> bool:
@@ -2446,6 +2480,20 @@ async def _proactive_consumer(app) -> None:
             attempts += 1
             # Whatever already landed is not sent again.
             remaining = "".join(chunks[sent:])
+            if _is_permanent_destination_error(exc):
+                # Telegram has answered about the chat id, not about the
+                # connection, so the remaining attempts cannot change it.
+                # Abandoned on the first answer, to the journal — the same
+                # place the exhausted budget leaves it, three hours sooner
+                # and without the 59 warnings in between.
+                log_event(
+                    log, "surface.proactive.undeliverable", level=logging.WARNING,
+                    surface="telegram", client_ref=chat_id, error=str(exc),
+                    error_type=type(exc).__name__, content_chars=len(remaining),
+                    attempt=attempts,
+                )
+                log.warning("undelivered text for chat %s: %s", chat_id, remaining)
+                continue
             if attempts >= _PROACTIVE_MAX_ATTEMPTS:
                 log_event(
                     log, "surface.proactive.abandoned", level=logging.WARNING,
