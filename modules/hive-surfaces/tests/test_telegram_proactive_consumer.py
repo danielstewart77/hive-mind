@@ -149,3 +149,175 @@ async def test_what_is_still_queued_at_shutdown_reaches_the_journal(caplog):
 
     assert any("the answer you never saw" in r.getMessage() for r in caplog.records)
     assert proactive._queue.empty()
+
+
+async def test_chat_not_found_is_abandoned_without_retrying(monkeypatch):
+    """A destination that does not exist is not an outage.
+
+    "Chat not found" is Telegram's answer about the chat id itself, so no
+    amount of waiting changes it. Given the outage budget it cost 60 attempts
+    over three hours, each logging a warning — 180 lines of one NetSage window
+    on 2026-10-15, for one message that was never deliverable.
+    """
+    from telegram.error import BadRequest
+
+    monkeypatch.setattr(telegram_bot, "_PROACTIVE_RETRY_S", 0)
+    app = MagicMock()
+    app.bot.send_message = AsyncMock(side_effect=BadRequest("Chat not found"))
+    proactive.enqueue(1556059743968039065, "nowhere to go")
+
+    await _run_consumer_until_drained(app)
+
+    assert app.bot.send_message.await_count == 1, (
+        "a permanently invalid destination is attempted once, not sixty times"
+    )
+    assert proactive._queue.empty()
+
+
+async def test_a_blocked_bot_is_abandoned_without_retrying(monkeypatch):
+    """Being blocked is a decision, not an outage. Retrying it for three hours
+    tells the operator nothing and fills the journal with a line the sensor
+    reads as an anomaly."""
+    from telegram.error import Forbidden
+
+    monkeypatch.setattr(telegram_bot, "_PROACTIVE_RETRY_S", 0)
+    app = MagicMock()
+    app.bot.send_message = AsyncMock(
+        side_effect=Forbidden("Forbidden: bot was blocked by the user")
+    )
+    proactive.enqueue(42, "blocked")
+
+    await _run_consumer_until_drained(app)
+
+    assert app.bot.send_message.await_count == 1
+    assert proactive._queue.empty()
+
+
+async def test_an_outage_still_gets_the_full_retry_budget(monkeypatch):
+    """The permanent-failure check must not cost a real outage its retries.
+
+    A NetworkError is exactly what the hours-long budget was written for, so
+    it keeps retrying where "Chat not found" stops.
+    """
+    from telegram.error import NetworkError
+
+    monkeypatch.setattr(telegram_bot, "_PROACTIVE_RETRY_S", 0)
+    app = MagicMock()
+    app.bot.send_message = AsyncMock(
+        side_effect=[NetworkError("connection reset"), None]
+    )
+    proactive.enqueue(8776938611, "arrives late")
+
+    await _run_consumer_until_drained(app)
+
+    assert app.bot.send_message.await_count == 2
+    assert app.bot.send_message.await_args.kwargs["text"] == "arrives late"
+
+
+async def test_a_bad_request_about_the_message_still_retries(monkeypatch):
+    """Only a destination verdict is permanent. A BadRequest naming something
+    else is not read as one, because the class is shared and guessing wide
+    would abandon answers an outage would have delivered."""
+    from telegram.error import BadRequest
+
+    monkeypatch.setattr(telegram_bot, "_PROACTIVE_RETRY_S", 0)
+    app = MagicMock()
+    app.bot.send_message = AsyncMock(
+        side_effect=[BadRequest("Message_thread_not_found"), None]
+    )
+    proactive.enqueue(7, "retried")
+
+    await _run_consumer_until_drained(app)
+
+    assert app.bot.send_message.await_count == 2
+
+
+async def test_a_migrated_group_is_redelivered_to_its_new_chat_id(monkeypatch):
+    """The one invalid destination that can be repaired rather than abandoned.
+
+    A group promoted to a supergroup gets a new chat id, and Telegram hands
+    the new one back on the error. python-telegram-bot raises `ChatMigrated`,
+    which subclasses `TelegramError` directly — not `BadRequest` — and whose
+    text is "Group migrated to supergroup. New chat id: N", matching none of
+    the permanent markers. So it took the full 60 attempts at three minutes
+    against an id that would never work, producing exactly the journal
+    signature this change exists to remove, while `exc.new_chat_id` carried
+    the destination that would have worked.
+    """
+    from telegram.error import ChatMigrated
+
+    monkeypatch.setattr(telegram_bot, "_PROACTIVE_RETRY_S", 0)
+    app = MagicMock()
+    app.bot.send_message = AsyncMock(
+        side_effect=[ChatMigrated(-1001234567890), None]
+    )
+    proactive.enqueue(-400111, "follows the group")
+
+    await _run_consumer_until_drained(app)
+
+    assert app.bot.send_message.await_count == 2
+    assert app.bot.send_message.await_args.kwargs["chat_id"] == -1001234567890, (
+        "the retry goes to the id Telegram named, not the dead one"
+    )
+    assert app.bot.send_message.await_args.kwargs["text"] == "follows the group"
+
+
+async def test_being_kicked_from_a_group_keeps_its_retries(monkeypatch):
+    """`Forbidden` is not one verdict.
+
+    Telegram answers 403 both for a user who blocked the bot (final) and for a
+    bot removed from a group (a re-add fixes it). Treating the class as
+    permanent was the wide guess this change's own reasoning warns against —
+    it journals an answer on the first attempt where three hours of retries
+    would have delivered it.
+    """
+    from telegram.error import Forbidden
+
+    monkeypatch.setattr(telegram_bot, "_PROACTIVE_RETRY_S", 0)
+    app = MagicMock()
+    app.bot.send_message = AsyncMock(
+        side_effect=[Forbidden("Forbidden: bot was kicked from the group chat"), None]
+    )
+    proactive.enqueue(-100200, "arrives after the re-add")
+
+    await _run_consumer_until_drained(app)
+
+    assert app.bot.send_message.await_count == 2
+
+
+async def test_a_blocked_user_is_still_final(monkeypatch):
+    """The verdicts that no retry can change still stop on the first answer."""
+    from telegram.error import Forbidden
+
+    monkeypatch.setattr(telegram_bot, "_PROACTIVE_RETRY_S", 0)
+    for text in ("Forbidden: bot was blocked by the user",
+                 "Forbidden: user is deactivated"):
+        proactive._reset()
+        app = MagicMock()
+        app.bot.send_message = AsyncMock(side_effect=Forbidden(text))
+        proactive.enqueue(42, "nowhere")
+        await _run_consumer_until_drained(app)
+        assert app.bot.send_message.await_count == 1, text
+
+
+async def test_the_reply_path_does_not_back_off_against_a_dead_chat(monkeypatch):
+    """`_deliver` retried a permanent verdict with backoff before handing the
+    text to the queue. The backoff is for a flaky connection; spending it on
+    an answer that cannot change only delays getting the text into the
+    record."""
+    from telegram.error import BadRequest
+
+    slept = []
+
+    async def no_sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(telegram_bot.asyncio, "sleep", no_sleep)
+    bot = MagicMock()
+    bot.send_message = AsyncMock(side_effect=BadRequest("Chat not found"))
+
+    ok = await telegram_bot._deliver(bot, 1556059743968039065, "into the record")
+
+    assert ok is False
+    assert bot.send_message.await_count == 1, "attempted once, not three times"
+    assert slept == [], "and no backoff was spent on a verdict"
