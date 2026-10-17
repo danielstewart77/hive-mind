@@ -65,10 +65,13 @@ async def lifespan(app: FastAPI):
     # manager starts, whose migrations read each mind's registration.
     _broker_db_path = os.environ.get("BROKER_DB_PATH", str(PROJECT_DIR / "data" / "broker.db"))
     Path(_broker_db_path).parent.mkdir(parents=True, exist_ok=True)
-    app.state.broker_db = await broker.init_db(_broker_db_path)
-    # Per-user credentials live beside the minds whose owners they are
-    # checked against, so resolving a caller is one database.
-    await user_access.init_credentials(app.state.broker_db)
+    _broker_db = await broker.init_db(_broker_db_path)
+    # Per-user credentials live beside the minds whose owners they are checked
+    # against, so resolving a caller is one database. Created before the handle
+    # is published, or a request arriving in that window resolves its caller
+    # against a table that does not exist yet.
+    await user_access.init_credentials(_broker_db)
+    app.state.broker_db = _broker_db
     session_mgr.broker_db = app.state.broker_db
     await session_mgr.start()
 
@@ -102,7 +105,8 @@ async def lifespan(app: FastAPI):
         # with "no active connection", leaving harness processes running
         # on the minds while the gateway reports a clean stop.
         await session_mgr.shutdown()
-        await app.state.broker_db.close()
+        closing, app.state.broker_db = app.state.broker_db, None
+        await closing.close()
         log_event(log, "service.stopped", component="hive-comms")
 
 
@@ -125,12 +129,11 @@ async def _session_mind(session_id: str) -> str | None:
     """
     if not session_id:
         return None
-    try:
-        row = await session_mgr._get_row(session_id)
-    except Exception:
-        # A conversation whose row cannot be read is not one this caller may
-        # be told about either way.
-        return None
+    # A read that failed is not an absent row. Folding the two together tells
+    # the user their conversation does not exist because a lock timed out,
+    # which is the one case where the anti-probing shape is actively harmful —
+    # so the exception travels and the gate answers 503.
+    row = await session_mgr._get_row(session_id)
     if not row:
         return None
     return row.get("mind_id")
@@ -148,21 +151,31 @@ app.add_middleware(
 )
 
 
-def _caller(request: Request) -> user_access.Caller:
-    """The caller the gate resolved for this request.
+def _caller(conn: Request | WebSocket) -> user_access.Caller:
+    """The caller the gate resolved for this connection.
 
     A `SCOPED` route filters its own answer, so it reads the decision the gate
     already made rather than re-deriving it — two readers of one credential
-    are two chances to disagree about who is asking.
+    are two chances to disagree about who is asking. Takes a websocket as
+    readily as a request: both carry the one ASGI scope the gate wrote into.
     """
-    found = request.scope.get(user_access.CALLER_SCOPE_KEY)
+    found = conn.scope.get(user_access.CALLER_SCOPE_KEY)
     return found if isinstance(found, user_access.Caller) else user_access.Caller()
 
 
-async def _owned_mind_keys(request: Request) -> tuple[user_access.Caller, set[str]]:
-    caller = _caller(request)
+async def _owned_mind_keys(
+    conn: Request | WebSocket,
+) -> tuple[user_access.Caller, set[str], set[str]]:
+    """The caller, the minds they own, and every mind there is.
+
+    The third set is what lets a listing tell an *ownerless* conversation from
+    somebody else's: ownerless rows answer to the primary user, exactly as
+    `owns_mind` decides, so no listing hides a row whose own routes serve it.
+    """
+    caller = _caller(conn)
     keys = await user_access.visible_minds(app.state.broker_db, caller)
-    return caller, keys
+    known = await user_access.all_mind_keys(app.state.broker_db)
+    return caller, keys, known
 
 
 
@@ -391,8 +404,8 @@ async def list_sessions(
         client_type=client_type,
         client_ref=client_ref,
     )
-    caller, keys = await _owned_mind_keys(request)
-    return user_access.filter_sessions(rows, caller, keys)
+    caller, keys, known = await _owned_mind_keys(request)
+    return user_access.filter_sessions(rows, caller, keys, known)
 
 
 @app.get("/sessions/names")
@@ -409,11 +422,14 @@ async def session_names(request: Request):
     other listing.
     """
     names = await session_mgr.session_names()
-    caller, keys = await _owned_mind_keys(request)
+    caller, keys, known = await _owned_mind_keys(request)
     if caller.sees_everything():
         return names
     rows = await session_mgr.list_sessions()
-    mine = {r["id"] for r in user_access.filter_sessions(rows, caller, keys)}
+    mine = {
+        r["id"]
+        for r in user_access.filter_sessions(rows, caller, keys, known)
+    }
     return {sid: value for sid, value in names.items() if sid in mine}
 
 
@@ -600,22 +616,15 @@ async def record_turn(body: RecordTurnRequest, request: Request):
     rotation's background window. Declared before ``/sessions/{session_id}``
     so the literal path wins the match.
     """
-    # This route is addressed by client reference, not by session id, so the
-    # gate has no conversation to scope. Unchecked, a recognised credential
-    # could append a `user` turn to somebody else's ledger, where
-    # `get_late_turns` folds it into their next conversation as something they
-    # typed. A mind's own hooks present the admin token and are unscoped here;
-    # a person's credential is not.
-    caller = _caller(request)
-    if not caller.sees_everything():
-        active = await session_mgr.get_active_session(
-            body.client_type, body.client_ref
-        )
-        mind_id = (active or {}).get("mind_id")
-        if not active or not await user_access.owns_mind(
-            app.state.broker_db, caller, mind_id
-        ):
-            return {"ok": False, "error": "no active session"}
+    # Addressed by client reference rather than by session id, so there is no
+    # conversation for the gate to scope — which is exactly why this route is
+    # classified MACHINE and admits only the service or admin token. A
+    # person's credential cannot reach it at all, so it cannot append a `user`
+    # turn to somebody else's ledger, where `get_late_turns` would fold it
+    # into their next conversation as something they typed. The check that
+    # once stood here is gone rather than kept as reassurance: it could only
+    # ever run for a caller the gate had already established was machinery,
+    # and a guard that cannot fire is a guard nobody can reason about.
     return await session_mgr.record_turn(
         body.client_type, body.client_ref, body.role, body.content,
         claude_sid=body.claude_sid,
@@ -982,14 +991,14 @@ async def list_models(mind_id: str):
 @app.websocket("/sessions/{session_id}/stream")
 async def ws_stream(ws: WebSocket, session_id: str):
     # FastAPI dependencies don't apply to WebSocket routes — gate manually.
-    expected = os.environ.get("COMMS_BEARER_TOKEN", "")
-    admin = os.environ.get("COMMS_ADMIN_BEARER_TOKEN", "")
-    if expected:
-        auth = ws.headers.get("authorization", "")
-        token = auth[7:] if auth.startswith("Bearer ") else ""
-        if token != expected and (not admin or token != admin):
-            await ws.close(code=4401)
-            return
+    # The gate in front of this route has already resolved the caller and
+    # checked they own this conversation. Re-checking the shared token here
+    # would refuse the per-user credential the gate just accepted — closing
+    # 4401 on the two routes the whole scoping change exists to protect, and
+    # reading at the tile as a bad service token.
+    if not _caller(ws).recognised:
+        await ws.close(code=4401)
+        return
     await ws.accept()
     try:
         while True:
@@ -1070,14 +1079,14 @@ async def ws_attach(ws: WebSocket, session_id: str):
     attach. Session-lifecycle knowledge (claude_sid, model) stays here;
     the mind's attach-pty route stays stateless per-request.
     """
-    expected = os.environ.get("COMMS_BEARER_TOKEN", "")
-    admin = os.environ.get("COMMS_ADMIN_BEARER_TOKEN", "")
-    if expected:
-        auth = ws.headers.get("authorization", "")
-        token = auth[7:] if auth.startswith("Bearer ") else ""
-        if token != expected and (not admin or token != admin):
-            await ws.close(code=4401)
-            return
+    # The gate in front of this route has already resolved the caller and
+    # checked they own this conversation. Re-checking the shared token here
+    # would refuse the per-user credential the gate just accepted — closing
+    # 4401 on the two routes the whole scoping change exists to protect, and
+    # reading at the tile as a bad service token.
+    if not _caller(ws).recognised:
+        await ws.close(code=4401)
+        return
 
     session = await session_mgr.get_session(session_id)
     if not session:
@@ -1309,7 +1318,8 @@ async def _selectable(
         mind_id=body.mind_id,
     )
     keys = await user_access.visible_minds(app.state.broker_db, caller)
-    return user_access.filter_sessions(rows, caller, keys)
+    known = await user_access.all_mind_keys(app.state.broker_db)
+    return user_access.filter_sessions(rows, caller, keys, known)
 
 
 async def _resolve_target(
@@ -1337,15 +1347,44 @@ async def _resolve_target(
     return target, {"error": f"Invalid session number: {target}"}
 
 
+#: Commands that act on, create, or report a conversation bound to the
+#: body-supplied surface reference, or on the mind the body names. Every one
+#: of them resolved its target from the request body with nothing checking
+#: whose it was: `/new` killed the live conversation on that reference and
+#: opened a fresh one on that mind, `/model`, `/effort` and `/harness` mutated
+#: it, `/autopilot` flipped it, and the bare forms reported another mind's
+#: catalog back. The ownership check belongs here rather than on each branch,
+#: because a branch added later would not have one.
+_MIND_BOUND_COMMANDS = frozenset(
+    {"/new", "/clear", "/model", "/effort", "/harness", "/autopilot", "/remember"}
+)
+
+
 async def _handle_command(
     cmd: str, parts: list[str], body: CommandRequest,
     caller: user_access.Caller,
 ):
+    if cmd in _MIND_BOUND_COMMANDS and not caller.sees_everything():
+        if not await user_access.owns_mind(
+            app.state.broker_db, caller, body.mind_id
+        ):
+            return {"error": "Session not found"}
+        active = await session_mgr.get_active_session(
+            body.owner_type, body.client_ref
+        )
+        # A surface reference bound to a conversation on someone else's mind
+        # is refused in the same words an absent one gets, so the command
+        # cannot be used to find out which references are live.
+        if active and not await user_access.owns_mind(
+            app.state.broker_db, caller, active.get("mind_id")
+        ):
+            return {"error": "Session not found"}
 
     if cmd == "/status":
         rows = await session_mgr.list_sessions()
         keys = await user_access.visible_minds(app.state.broker_db, caller)
-        sessions = user_access.filter_sessions(rows, caller, keys)
+        known = await user_access.all_mind_keys(app.state.broker_db)
+        sessions = user_access.filter_sessions(rows, caller, keys, known)
         running = sum(1 for s in sessions if s["status"] == "running")
         return {
             "server_port": config.server_port,
@@ -1463,7 +1502,8 @@ async def _handle_command(
         active_id = active["id"] if active else None
         rows = await session_mgr.list_sessions(owner_ref=body.owner_ref)
         keys = await user_access.visible_minds(app.state.broker_db, caller)
-        sessions = user_access.filter_sessions(rows, caller, keys)
+        known = await user_access.all_mind_keys(app.state.broker_db)
+        sessions = user_access.filter_sessions(rows, caller, keys, known)
         killed: list[str] = []
         for s in sessions:
             if s["id"] == active_id:
@@ -1897,9 +1937,32 @@ async def sms_inbound(request: Request):
         fields.get("event"), fields.get("sender"), len(fields.get("text") or ""), fields.get("message_id"),
     )
 
-    ada = await broker.get_mind(app.state.broker_db, "ada")
-    if not ada:
-        log.error("sms/inbound: ada not registered in broker.minds — dropping")
+    # The mind an inbound text reaches is configuration, not a name compiled
+    # into the gateway. `ada` was hardcoded here, so on a hive with several
+    # users every text went to one person's mind whoever sent it, and a hive
+    # with no mind by that name dropped them with a log line naming a mind its
+    # operator may never have heard of.
+    #
+    # Routing on *who sent it* is not possible here and is not attempted: the
+    # webhook payload carries `phoneNumber`, `message`, `messageId`,
+    # `receivedAt`, `event` and `deviceId`, and no recipient number at all, so
+    # there is nothing to resolve a person from. That needs the
+    # surface-identity linking a separate story owns. Until then one mind is
+    # named explicitly.
+    recipient_name = os.environ.get("SMS_INBOUND_MIND", "").strip()
+    if not recipient_name:
+        log.error(
+            "sms/inbound: SMS_INBOUND_MIND is unset — no mind to deliver to, "
+            "dropping"
+        )
+        return JSONResponse({"status": "ack-no-recipient"}, status_code=200)
+    recipient = await broker.get_mind(app.state.broker_db, recipient_name)
+    if not recipient:
+        log.error(
+            "sms/inbound: SMS_INBOUND_MIND=%s is not registered in "
+            "broker.minds — dropping",
+            recipient_name,
+        )
         return JSONResponse({"status": "ack-no-recipient"}, status_code=200)
 
     sender = fields.get("sender") or "unknown"
@@ -1913,7 +1976,7 @@ async def sms_inbound(request: Request):
         message_id=message_id,
         conversation_id=conversation_id,
         from_mind="sms-gateway",
-        to_mind=ada["id"],
+        to_mind=recipient["id"],
         message_number=message_number,
         content=content,
         rolling_summary="",
@@ -1934,7 +1997,7 @@ async def sms_inbound(request: Request):
         message_id=message_id,
         conversation_id=conversation_id,
         from_mind="sms-gateway",
-        to_mind=ada["id"],
+        to_mind=recipient["id"],
         content=content,
         rolling_summary="",
         message_number=message_number,

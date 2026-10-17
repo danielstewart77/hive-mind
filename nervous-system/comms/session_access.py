@@ -37,12 +37,10 @@ TABLE = RouteTable()
 # --- No credential ---------------------------------------------------------
 # `/sms/inbound` authenticates the sending device by HMAC over the body and is
 # exempt from the bearer gate today; the signature is its credential and the
-# bearer would be a second one no gateway sends.
-TABLE.add(
-    Rule(PUBLIC),
-    "GET /health",
-    "POST /sms/inbound",
-)
+# bearer would be a second one no gateway sends. `/health` is not here: it took
+# the bearer before this table existed, and opening it would be a loosening
+# nobody asked for.
+TABLE.add(Rule(PUBLIC), "POST /sms/inbound")
 
 # --- A person's own conversation -------------------------------------------
 # The session named in the path must run on a mind the caller owns. An admin,
@@ -95,6 +93,7 @@ TABLE.add(
 # mind its own credential, at which point these become scopeable.
 TABLE.add(
     Rule(MACHINE),
+    "GET /health",
     "POST /sessions/context",
     "POST /sessions/{session_id}/context",
     "GET /sessions/late-turns",

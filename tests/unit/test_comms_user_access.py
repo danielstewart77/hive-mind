@@ -526,14 +526,34 @@ def test_a_revoked_credential_is_refused_by_the_gate_on_the_very_next_request(
     assert after.status_code == 401
 
 
-def test_a_websocket_from_another_user_is_refused_before_it_is_accepted(gated):
+def test_a_websocket_from_another_user_is_refused_with_a_real_status(gated):
+    """The refusal has to be an HTTP status through the ASGI denial-response
+    extension, not a pre-accept close. A close presents to the browser as 403,
+    which is also what a gateway with no attach route answers — so a refused
+    credential would read as a missing route and send the operator off to
+    redeploy something that is working."""
+    from starlette.testclient import WebSocketDenialResponse
+
     with TestClient(gated) as client:
-        with pytest.raises(Exception):
+        with pytest.raises(WebSocketDenialResponse) as refused:
             with client.websocket_connect(
                 "/sessions/d-session/attach",
                 headers={"Authorization": "Bearer " + SLOAN_TOKEN},
             ):
                 pass
+
+    assert refused.value.status_code == 404
+
+
+def test_a_websocket_with_no_credential_is_refused_with_a_real_status(gated):
+    from starlette.testclient import WebSocketDenialResponse
+
+    with TestClient(gated) as client:
+        with pytest.raises(WebSocketDenialResponse) as refused:
+            with client.websocket_connect("/sessions/s-session/attach"):
+                pass
+
+    assert refused.value.status_code == 401
 
 
 def test_a_websocket_to_a_callers_own_conversation_is_accepted(gated):
@@ -553,3 +573,131 @@ def test_the_gate_refuses_rather_than_serving_with_no_database(monkeypatch):
     app, _ = _gated_app(None, {})
 
     assert _get(app, "/sessions", token=SHARED).status_code == 503
+
+
+# --- the credential classes are not interchangeable -----------------------
+
+
+async def test_the_shared_token_is_both_the_primary_user_and_the_machinery(
+    db, monkeypatch
+):
+    """It is two things at once, and conflating them is how a person's
+    credential got admitted to every machinery route."""
+    monkeypatch.setenv("COMMS_BEARER_TOKEN", SHARED)
+    monkeypatch.setenv("COMMS_PRIMARY_USER", "daniel")
+
+    caller = await ua.resolve_caller(db, SHARED)
+
+    assert caller.username == "daniel"
+    assert caller.is_machine is True
+    assert caller.sees_everything() is False
+
+
+async def test_a_persons_credential_is_recognised_but_is_not_machinery(db, monkeypatch):
+    monkeypatch.setenv("COMMS_BEARER_TOKEN", SHARED)
+    monkeypatch.setenv("COMMS_PRIMARY_USER", "daniel")
+    await ua.put_credential(db, "sloan", SLOAN_TOKEN)
+
+    caller = await ua.resolve_caller(db, SLOAN_TOKEN)
+
+    assert caller.recognised is True
+    assert caller.is_machine is False
+
+
+async def test_bypass_mode_serves_a_caller_that_presented_a_stale_token(
+    db, monkeypatch
+):
+    """An unset service token has always meant no gating, and master returned
+    before even reading the header. Gating that on an empty *token* instead
+    took a host whose comms has no service token, while a surface still holds
+    a stale one, from fully served to fully refused."""
+    monkeypatch.delenv("COMMS_BEARER_TOKEN", raising=False)
+
+    presented = await ua.resolve_caller(db, "a-stale-value-a-bot-still-holds")
+    nothing = await ua.resolve_caller(db, "")
+
+    assert presented.sees_everything() is True
+    assert nothing.sees_everything() is True
+
+
+# --- a conversation whose mind has no owner -------------------------------
+
+
+async def test_an_ownerless_conversation_answers_to_the_primary_user(
+    db, monkeypatch
+):
+    """`mind_id` carried a `DEFAULT 'ada'` for most of this schema's life, and
+    a mind row's `owner` is nullable. Refusing those to everyone would lose
+    the operator their own history the moment scoping is switched on."""
+    monkeypatch.setenv("COMMS_PRIMARY_USER", "daniel")
+
+    assert await ua.owns_mind(db, ua.Caller(username="daniel"), "ada") is True
+    assert await ua.owns_mind(db, ua.Caller(username="daniel"), "orphan") is True
+    assert await ua.owns_mind(db, ua.Caller(username="sloan"), "ada") is False
+
+
+async def test_a_listing_gives_the_primary_user_ownerless_rows_and_no_others(
+    db, monkeypatch
+):
+    monkeypatch.setenv("COMMS_PRIMARY_USER", "daniel")
+    caller = ua.Caller(username="daniel")
+    keys = await ua.visible_minds(db, caller)
+    known = await ua.all_mind_keys(db)
+    rows = [
+        {"id": "mine", "mind_id": DANIEL_MIND},
+        {"id": "legacy", "mind_id": "ada"},
+        {"id": "theirs", "mind_id": SLOAN_MIND},
+    ]
+
+    kept = ua.filter_sessions(rows, caller, keys, known)
+
+    assert [r["id"] for r in kept] == ["mine", "legacy"]
+
+
+async def test_a_mind_registered_in_mixed_case_resolves_to_its_owner(db):
+    """`minds.name` is stored as registered and SQLite compares TEXT byte-wise,
+    so a mind called "Hex" was listed by its owner and refused by every route
+    beneath the listing."""
+    await db.execute(
+        "INSERT INTO minds (mind_id, name, owner) VALUES (?, ?, ?)",
+        ("7c0de000-0000-4000-8000-0000000000cc", "Hex", "daniel"),
+    )
+    await db.commit()
+
+    assert await ua.owner_of_mind(db, "Hex") == "daniel"
+    assert await ua.owner_of_mind(db, "hex") == "daniel"
+    keys = await ua.visible_minds(db, ua.Caller(username="daniel"))
+    assert "hex" in keys
+
+
+async def test_a_mind_row_with_an_empty_name_contributes_no_key(db):
+    """An empty key would match every session whose mind_id is null or blank,
+    handing them to whoever owned the nameless row."""
+    await db.execute(
+        "INSERT INTO minds (mind_id, name, owner) VALUES (?, ?, ?)",
+        ("8d1ef000-0000-4000-8000-0000000000dd", "", "sloan"),
+    )
+    await db.commit()
+
+    keys = await ua.visible_minds(db, ua.Caller(username="sloan"))
+
+    assert "" not in keys
+    assert ua.filter_sessions(
+        [{"id": "x", "mind_id": None}], ua.Caller(username="sloan"), keys, keys
+    ) == []
+
+
+# --- a mount is not a websocket -------------------------------------------
+
+
+def test_a_mounted_sub_application_is_not_reported_as_a_websocket():
+    """A `Mount` has a path and no methods, exactly like a websocket route.
+    Reported as one, a `StaticFiles` mount would have had its whole subtree
+    classified admin-only."""
+    from starlette.applications import Starlette
+    from starlette.routing import Mount
+
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    app.router.routes.append(Mount("/static", app=Starlette()))
+
+    assert ua.RouteTable().unlisted(app) == []
