@@ -22,10 +22,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from comms.config import PROJECT_DIR, config
 import comms.broker as broker
-from comms.auth import require_admin_bearer, require_bearer, require_rename_bearer
+from comms.auth import require_admin_bearer, require_rename_bearer
 from comms.broker import check_secret_scope, get_secret_scopes, grant_secret_scope, revoke_secret_scope
 from comms.network_identity import resolve_container_name
 from comms.secrets import get_credential
+import comms.session_access as session_access
+import comms.user_access as user_access
 import comms.sessions as sessions
 from comms.sessions import SessionManager, normalise_harness
 from hive_logging import configure_logging, install_fastapi_logging, log_event
@@ -64,6 +66,9 @@ async def lifespan(app: FastAPI):
     _broker_db_path = os.environ.get("BROKER_DB_PATH", str(PROJECT_DIR / "data" / "broker.db"))
     Path(_broker_db_path).parent.mkdir(parents=True, exist_ok=True)
     app.state.broker_db = await broker.init_db(_broker_db_path)
+    # Per-user credentials live beside the minds whose owners they are
+    # checked against, so resolving a caller is one database.
+    await user_access.init_credentials(app.state.broker_db)
     session_mgr.broker_db = app.state.broker_db
     await session_mgr.start()
 
@@ -111,23 +116,54 @@ app = FastAPI(
 )
 
 
-@app.middleware("http")
-async def _bearer_gate(request: Request, call_next):
-    """HTTP-only bearer gate, equivalent to the old app-level `Depends(require_bearer)`.
+async def _session_mind(session_id: str) -> str | None:
+    """The mind a conversation runs on, or None when there is no such row.
 
-    A `Request`-typed FastAPI dependency can't be applied globally on this
-    app: FastAPI tries to run it for the WebSocket routes too, and a
-    WebSocket connection has no `Request` to build, so dependency
-    resolution throws before the handler ever runs. `@app.middleware("http")`
-    only wraps the HTTP scope — WebSocket connections bypass it entirely —
-    so the two `/sessions/{id}/stream` and `/sessions/{id}/attach` routes
-    keep doing their own manual bearer check, same as they always have.
+    Short ids resolve by prefix through `_get_row`, so the gate scopes the row
+    the handler will actually act on rather than the string the caller typed —
+    probing by prefix is refused exactly as probing by full id is.
     """
+    if not session_id:
+        return None
     try:
-        require_bearer(request, request.headers.get("authorization", ""))
-    except HTTPException as exc:
-        return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
-    return await call_next(request)
+        row = await session_mgr._get_row(session_id)
+    except Exception:
+        # A conversation whose row cannot be read is not one this caller may
+        # be told about either way.
+        return None
+    if not row:
+        return None
+    return row.get("mind_id")
+
+
+# Every route, and who may reach it. Pure ASGI rather than
+# `@app.middleware("http")`: the HTTP decorator does not wrap websocket
+# connections, and `/sessions/{id}/stream` and `/sessions/{id}/attach` are
+# websockets carrying a whole conversation each.
+app.add_middleware(
+    user_access.UserAccess,
+    table=session_access.TABLE,
+    broker_db=lambda: getattr(app.state, "broker_db", None),
+    session_mind=_session_mind,
+)
+
+
+def _caller(request: Request) -> user_access.Caller:
+    """The caller the gate resolved for this request.
+
+    A `SCOPED` route filters its own answer, so it reads the decision the gate
+    already made rather than re-deriving it — two readers of one credential
+    are two chances to disagree about who is asking.
+    """
+    found = request.scope.get(user_access.CALLER_SCOPE_KEY)
+    return found if isinstance(found, user_access.Caller) else user_access.Caller()
+
+
+async def _owned_mind_keys(request: Request) -> tuple[user_access.Caller, set[str]]:
+    caller = _caller(request)
+    keys = await user_access.visible_minds(app.state.broker_db, caller)
+    return caller, keys
+
 
 
 install_fastapi_logging(app, log, "hive-comms")
@@ -311,8 +347,18 @@ class UpdateMindRequest(BaseModel):
 # Session endpoints
 # ---------------------------------------------------------------------------
 @app.post("/sessions")
-async def create_session(body: CreateSessionRequest):
-    # Single-mind mode: restrict to the configured mind
+async def create_session(body: CreateSessionRequest, request: Request):
+    # Naming a mind is not the same as being allowed to use it. Without this,
+    # any recognised credential could open a conversation on anybody's mind,
+    # dispatch into it and have the turn written to that mind's memory — and
+    # the owner-scoped routes below would never see it, because they guard
+    # conversations that already exist.
+    if not await user_access.owns_mind(
+        app.state.broker_db, _caller(request), body.mind_id
+    ):
+        return JSONResponse(
+            {"error": "Mind not found"}, status_code=404
+        )
     try:
         session = await session_mgr.create_session(
             owner_type=body.owner_type,
@@ -333,31 +379,42 @@ async def create_session(body: CreateSessionRequest):
 
 @app.get("/sessions")
 async def list_sessions(
+    request: Request,
     owner_ref: str | None = None,
     status: str | None = None,
     client_type: str | None = None,
     client_ref: str | None = None,
 ):
-    return await session_mgr.list_sessions(
+    rows = await session_mgr.list_sessions(
         owner_ref=owner_ref,
         status=status,
         client_type=client_type,
         client_ref=client_ref,
     )
+    caller, keys = await _owned_mind_keys(request)
+    return user_access.filter_sessions(rows, caller, keys)
 
 
 @app.get("/sessions/names")
-async def session_names():
+async def session_names(request: Request):
     """Every conversation's name and colour, in one read.
 
     Declared before `/sessions/{session_id}` so the literal path wins.
 
-    This answers to the service token every surface holds, which is a
-    deliberate widening: reading a name used to require a browser login at the
-    terminal. A name is a label on a conversation, not its contents — the
-    capability worth guarding is changing one, which `PUT .../name` does.
+    A name is a label on a conversation, not its contents — the capability
+    worth guarding is changing one, which `PUT .../name` does. But the whole
+    table in one read is still a list of somebody else's conversations, and a
+    picker drawing names the routes beneath it refuse is worse than one
+    drawing fewer, so this is filtered to the caller's own minds like every
+    other listing.
     """
-    return await session_mgr.session_names()
+    names = await session_mgr.session_names()
+    caller, keys = await _owned_mind_keys(request)
+    if caller.sees_everything():
+        return names
+    rows = await session_mgr.list_sessions()
+    mine = {r["id"] for r in user_access.filter_sessions(rows, caller, keys)}
+    return {sid: value for sid, value in names.items() if sid in mine}
 
 
 @app.put("/sessions/{session_id}/name", dependencies=[Depends(require_rename_bearer)])
@@ -532,7 +589,7 @@ async def fire_rotation(body: FireRotationRequest):
 
 
 @app.post("/sessions/record-turn")
-async def record_turn(body: RecordTurnRequest):
+async def record_turn(body: RecordTurnRequest, request: Request):
     """Append one turn to the active session's late-turn ledger.
 
     Only the chat/SSE path writes ``session_turns`` on its own
@@ -543,10 +600,87 @@ async def record_turn(body: RecordTurnRequest):
     rotation's background window. Declared before ``/sessions/{session_id}``
     so the literal path wins the match.
     """
+    # This route is addressed by client reference, not by session id, so the
+    # gate has no conversation to scope. Unchecked, a recognised credential
+    # could append a `user` turn to somebody else's ledger, where
+    # `get_late_turns` folds it into their next conversation as something they
+    # typed. A mind's own hooks present the admin token and are unscoped here;
+    # a person's credential is not.
+    caller = _caller(request)
+    if not caller.sees_everything():
+        active = await session_mgr.get_active_session(
+            body.client_type, body.client_ref
+        )
+        mind_id = (active or {}).get("mind_id")
+        if not active or not await user_access.owns_mind(
+            app.state.broker_db, caller, mind_id
+        ):
+            return {"ok": False, "error": "no active session"}
     return await session_mgr.record_turn(
         body.client_type, body.client_ref, body.role, body.content,
         claude_sid=body.claude_sid,
     )
+
+
+class UserCredentialRequest(BaseModel):
+    token: str
+
+
+@app.put(
+    "/users/{username}/credential",
+    dependencies=[Depends(require_admin_bearer)],
+)
+async def put_user_credential(username: str, body: UserCredentialRequest):
+    """Mint or replace one user's credential.
+
+    The console calls this when an admin issues a credential from the
+    user-management screen. Admin-guarded for the obvious reason: a route that
+    issues credentials must not answer to one it issued.
+
+    The value is written as a digest and no route ever returns one. An
+    operator does not need the value — they need to know whether the holder
+    has one that works, which `GET /users/credentials` answers.
+    """
+    try:
+        return await user_access.put_credential(
+            app.state.broker_db, username, body.token
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.delete(
+    "/users/{username}/credential",
+    dependencies=[Depends(require_admin_bearer)],
+)
+async def delete_user_credential(username: str):
+    """Revoke a credential. Lands on the holder's next request: the gate reads
+    the table per call, so there is nothing to restart and no cache to clear.
+
+    The row is kept rather than deleted, so the screen can say "revoked"
+    where it would otherwise have to say "never had one" — different facts
+    with different remedies.
+    """
+    revoked = await user_access.revoke_credential(app.state.broker_db, username)
+    return {"username": username.strip().lower(), "revoked": revoked}
+
+
+@app.get("/users/credentials", dependencies=[Depends(require_admin_bearer)])
+async def list_user_credentials():
+    """Who holds a credential, and whether it is live. Never the value."""
+    rows = await app.state.broker_db.execute(
+        "SELECT username, created_at, revoked_at FROM user_credentials "
+        "ORDER BY username"
+    )
+    return [
+        {
+            "username": username,
+            "created_at": created_at,
+            "revoked_at": revoked_at,
+            "live": revoked_at is None,
+        }
+        for username, created_at, revoked_at in await rows.fetchall()
+    ]
 
 
 class PtyTextRequest(BaseModel):
@@ -633,7 +767,14 @@ async def set_session_harness_state(session_id: str, body: HarnessStateRequest):
 
 @app.delete("/sessions/{session_id}")
 async def delete_session(session_id: str):
-    return await session_mgr.kill_session(session_id)
+    # `kill_session` raises a bare ValueError for an id with no row, which
+    # reached the client as a 500 and sent whoever saw it looking at the
+    # gateway. A conversation that is not there is a 404, and it has to be,
+    # because a refused cross-user delete answers in this same shape.
+    try:
+        return await session_mgr.kill_session(session_id)
+    except ValueError:
+        return JSONResponse({"error": "Session not found"}, status_code=404)
 
 
 @app.post("/sessions/{session_id}/suspend")
@@ -739,7 +880,10 @@ async def switch_model(session_id: str, body: ModelSwitchRequest):
 
 @app.post("/sessions/{session_id}/autopilot")
 async def toggle_autopilot(session_id: str):
-    return await session_mgr.toggle_autopilot(session_id)
+    try:
+        return await session_mgr.toggle_autopilot(session_id)
+    except ValueError:
+        return JSONResponse({"error": "Session not found"}, status_code=404)
 
 
 # ---------------------------------------------------------------------------
@@ -1120,7 +1264,7 @@ class CommandRequest(BaseModel):
 
 
 @app.post("/command")
-async def route_command(body: CommandRequest):
+async def route_command(body: CommandRequest, request: Request):
     """Route slash commands — server-handled or passthrough to CLI."""
     content = body.content.strip()
     parts = content.split()
@@ -1130,7 +1274,7 @@ async def route_command(body: CommandRequest):
         return {"error": "Not a server command. Send as a regular message."}
 
     try:
-        return await _handle_command(cmd, parts, body)
+        return await _handle_command(cmd, parts, body, _caller(request))
     except ValueError as e:
         return {"error": str(e)}
     except sessions.MindCallFailed as exc:
@@ -1148,36 +1292,60 @@ async def route_command(body: CommandRequest):
         return {"error": "Internal server error"}
 
 
-async def _selectable(body: CommandRequest) -> list[dict]:
+async def _selectable(
+    body: CommandRequest, caller: user_access.Caller
+) -> list[dict]:
     """The one list every command numbers against.
 
     /sessions, /switch and /kill all take positions in it, so they have to
     be reading the same list — numbering them separately is how "/switch 3"
-    lands on someone else's 3.
+    lands on someone else's 3. Filtering here is what makes that true across
+    users as well: a position can only ever address the caller's own.
     """
-    return await session_mgr.list_selectable_sessions(
+    rows = await session_mgr.list_selectable_sessions(
         owner_ref=body.owner_ref,
         client_type=body.owner_type,
         client_ref=body.client_ref,
         mind_id=body.mind_id,
     )
+    keys = await user_access.visible_minds(app.state.broker_db, caller)
+    return user_access.filter_sessions(rows, caller, keys)
 
 
-async def _resolve_target(target: str, body: CommandRequest) -> tuple[str, dict | None]:
-    """A session id, or a position in the list the user was just shown."""
+async def _resolve_target(
+    target: str, body: CommandRequest, caller: user_access.Caller
+) -> tuple[str, dict | None]:
+    """A session id, or a position in the list the user was just shown.
+
+    A bare id arrives from the caller rather than from a list this gateway
+    drew, so it is checked rather than trusted: a conversation on a mind the
+    caller does not own answers as one that is not there, the same sentence
+    the path-addressed routes give, so /kill cannot be used to find out which
+    ids exist.
+    """
     if not target.isdigit():
+        mind_id = await _session_mind(target)
+        if mind_id is None or not await user_access.owns_mind(
+            app.state.broker_db, caller, mind_id
+        ):
+            return target, {"error": "Session not found"}
         return target, None
-    sessions = await _selectable(body)
+    rows = await _selectable(body, caller)
     idx = int(target) - 1
-    if 0 <= idx < len(sessions):
-        return sessions[idx]["id"], None
+    if 0 <= idx < len(rows):
+        return rows[idx]["id"], None
     return target, {"error": f"Invalid session number: {target}"}
 
 
-async def _handle_command(cmd: str, parts: list[str], body: CommandRequest):
+async def _handle_command(
+    cmd: str, parts: list[str], body: CommandRequest,
+    caller: user_access.Caller,
+):
 
     if cmd == "/status":
-        sessions = await session_mgr.list_sessions()
+        rows = await session_mgr.list_sessions()
+        keys = await user_access.visible_minds(app.state.broker_db, caller)
+        sessions = user_access.filter_sessions(rows, caller, keys)
         running = sum(1 for s in sessions if s["status"] == "running")
         return {
             "server_port": config.server_port,
@@ -1186,7 +1354,7 @@ async def _handle_command(cmd: str, parts: list[str], body: CommandRequest):
         }
 
     if cmd == "/sessions":
-        return await _selectable(body)
+        return await _selectable(body, caller)
 
     if cmd in ("/new", "/clear"):
         # Kill active session (if any), run memory pipeline on it, then create a new one.
@@ -1274,7 +1442,7 @@ async def _handle_command(cmd: str, parts: list[str], body: CommandRequest):
     if cmd == "/switch":
         if len(parts) < 2:
             return {"error": "Usage: /switch <session_id or number>"}
-        target, error = await _resolve_target(parts[1], body)
+        target, error = await _resolve_target(parts[1], body, caller)
         if error:
             return error
         return await session_mgr.activate_session(
@@ -1285,7 +1453,7 @@ async def _handle_command(cmd: str, parts: list[str], body: CommandRequest):
     if cmd == "/kill":
         if len(parts) < 2:
             return {"error": "Usage: /kill <session_id or number>"}
-        target, error = await _resolve_target(parts[1], body)
+        target, error = await _resolve_target(parts[1], body, caller)
         if error:
             return error
         return await session_mgr.kill_session(target)
@@ -1293,7 +1461,9 @@ async def _handle_command(cmd: str, parts: list[str], body: CommandRequest):
     if cmd == "/prune":
         active = await session_mgr.get_active_session(body.owner_type, body.client_ref)
         active_id = active["id"] if active else None
-        sessions = await session_mgr.list_sessions(owner_ref=body.owner_ref)
+        rows = await session_mgr.list_sessions(owner_ref=body.owner_ref)
+        keys = await user_access.visible_minds(app.state.broker_db, caller)
+        sessions = user_access.filter_sessions(rows, caller, keys)
         killed: list[str] = []
         for s in sessions:
             if s["id"] == active_id:
@@ -1521,7 +1691,7 @@ async def secrets_list_scopes(mind_name: str, request: Request):
     - Admin bearer (cross-mind listing — caller doesn't have to match mind_name)
     - Network identity (a mind listing its own scopes — caller IP resolves to mind_name)
 
-    The router-level `require_bearer` is already satisfied at this point;
+    The gate in front of every route is already satisfied at this point;
     here we just decide whether the caller can read THIS specific mind's scopes.
     """
     admin_token = os.environ.get("COMMS_ADMIN_BEARER_TOKEN", "")
