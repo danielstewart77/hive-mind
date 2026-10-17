@@ -149,11 +149,17 @@ def _route_methods(route: BaseRoute) -> list[str]:
     methods = getattr(route, "methods", None)
     if methods:
         return sorted(m for m in methods if m != "HEAD")
-    # A websocket route has no `methods`; an app mounted as a sub-application
-    # has neither and is not something this table classifies.
-    if hasattr(route, "path") and not hasattr(route, "methods"):
+    # A websocket route has no `methods`. A `Mount` has none either, and is a
+    # whole sub-application rather than a route this table can classify — it
+    # must not be reported as a websocket, which is how a `StaticFiles` mount
+    # would have had its entire subtree classified admin-only.
+    from starlette.routing import Mount, WebSocketRoute  # noqa: PLC0415
+
+    if isinstance(route, WebSocketRoute):
         return [WEBSOCKET]
-    return []
+    if isinstance(route, Mount):
+        return []
+    return [WEBSOCKET] if hasattr(route, "path") else []
 
 
 # ---------------------------------------------------------------------------
@@ -266,6 +272,12 @@ class Caller:
 
     username: str = ""
     is_admin: bool = False
+    #: True when the caller presented the shared service token. Tracked
+    #: separately from `username`, because that token is two things at once on
+    #: a hive naming a primary user: the machinery's credential *and* that
+    #: person's. Folding them together is how a per-user credential got
+    #: admitted to every machinery route.
+    is_service: bool = False
     #: True when the caller reaches every conversation: the admin token, or
     #: the shared token on a hive that has named no primary user.
     unscoped: bool = False
@@ -273,6 +285,18 @@ class Caller:
     @property
     def recognised(self) -> bool:
         return bool(self.username) or self.is_admin or self.unscoped
+
+    @property
+    def is_machine(self) -> bool:
+        """May reach the routes the mind machinery drives.
+
+        Deliberately narrower than `recognised`. Those routes are addressed by
+        `(client_type, client_ref)` or by mind rather than by a conversation,
+        so there is nothing for an owner check to scope — which means a
+        credential admitted here reaches every conversation on the hive
+        through them. A person's credential is not admitted.
+        """
+        return self.is_admin or self.is_service or self.unscoped
 
     def sees_everything(self) -> bool:
         return self.is_admin or self.unscoped
@@ -297,19 +321,23 @@ async def resolve_caller(db: aiosqlite.Connection, token: str) -> Caller:
     """
     admin = os.environ.get("COMMS_ADMIN_BEARER_TOKEN", "")
     service = os.environ.get("COMMS_BEARER_TOKEN", "")
+    # Bypass mode: an unset service token has always meant "no gating", so a
+    # fresh container can boot before its secrets are wired. It applies
+    # whatever the caller presented — master returned before even reading the
+    # header, and a host whose comms has no service token while a surface
+    # still holds a stale one went from fully served to fully refused when
+    # this was gated on an empty token instead.
+    if not service:
+        return Caller(unscoped=True, is_service=True)
     if not token:
-        # Bypass mode: an unset service token has always meant "no gating", so
-        # a fresh container can boot before its secrets are wired. Keeping
-        # that here is deliberate — changing it would make a token-less deploy
-        # refuse every route, and this module is not the place to decide that.
-        if not service:
-            return Caller(unscoped=True)
         return Caller()
     if admin and hmac.compare_digest(token.encode("utf-8"), admin.encode("utf-8")):
-        return Caller(is_admin=True, unscoped=True)
+        return Caller(is_admin=True, is_service=True, unscoped=True)
     if service and hmac.compare_digest(token.encode("utf-8"), service.encode("utf-8")):
         named = primary_user()
-        return Caller(username=named) if named else Caller(unscoped=True)
+        if named:
+            return Caller(username=named, is_service=True)
+        return Caller(unscoped=True, is_service=True)
     named = await user_for_token(db, token)
     return Caller(username=named) if named else Caller()
 
@@ -331,8 +359,14 @@ async def owner_of_mind(db: aiosqlite.Connection, mind_id: str) -> str | None:
     key = str(mind_id or "").strip()
     if not key:
         return None
+    # `name` is stored as registered and SQLite compares TEXT byte-wise, so a
+    # mind registered as "Hex" would never match a lowered key. Comparing both
+    # sides lowered is what keeps this agreeing with `visible_minds`, which
+    # lowers too — disagreeing meant a picker drew names whose every route
+    # then answered 404.
     rows = await db.execute(
-        "SELECT owner FROM minds WHERE mind_id = ? OR name = ?", (key, key.lower())
+        "SELECT owner FROM minds WHERE mind_id = ? OR lower(name) = ?",
+        (key, key.lower()),
     )
     row = await rows.fetchone()
     if not row:
@@ -347,7 +381,33 @@ async def owns_mind(
         return True
     if not caller.username:
         return False
-    return await owner_of_mind(db, mind_id) == caller.username
+    owner = await owner_of_mind(db, mind_id)
+    if owner is None:
+        # A conversation whose mind is unregistered, renamed, deleted, or
+        # still carrying the old `mind_id DEFAULT 'ada'` has no owner to
+        # derive. Refusing it to everyone means the operator loses their own
+        # history the moment scoping is switched on, with no migration and no
+        # message; so an ownerless conversation answers to the primary user,
+        # who on a hive with one operator is whose it was.
+        return caller.username == primary_user()
+    return owner == caller.username
+
+
+async def all_mind_keys(db: aiosqlite.Connection) -> set[str]:
+    """Every key naming any registered mind, whoever owns it.
+
+    `filter_sessions` needs this to tell an *ownerless* conversation from
+    *somebody else's*. Judging that against the caller's own keys would hand
+    every other user's conversation to the primary user, which is the opposite
+    of the point.
+    """
+    rows = await db.execute("SELECT mind_id, name FROM minds")
+    keys: set[str] = set()
+    for mind_id, name in await rows.fetchall():
+        for key in (str(mind_id or ""), normalize_username(name)):
+            if key:
+                keys.add(key)
+    return keys
 
 
 async def visible_minds(
@@ -362,22 +422,45 @@ async def visible_minds(
     keys: set[str] = set()
     for mind_id, name, owner in await rows.fetchall():
         if caller.sees_everything() or normalize_username(owner) == caller.username:
-            keys.add(str(mind_id))
-            keys.add(normalize_username(name))
+            # An empty key would match every session whose `mind_id` is null
+            # or blank, handing them to whoever owned the nameless row.
+            for key in (str(mind_id or ""), normalize_username(name)):
+                if key:
+                    keys.add(key)
     return keys
 
 
 def filter_sessions(
-    sessions: Iterable[dict], caller: Caller, keys: set[str]
+    sessions: Iterable[dict],
+    caller: Caller,
+    keys: set[str],
+    known: set[str] | None = None,
 ) -> list[dict]:
+    """The caller's own conversations, out of the rows a manager returned.
+
+    `keys` holds every uuid and lowered name naming a mind the caller owns,
+    both forms because a session row may name its mind either way. `known`
+    holds the same for every registered mind, and is what distinguishes an
+    *ownerless* conversation from somebody else's: ownerless rows go to the
+    primary user, exactly as `owns_mind` decides, so a listing never hides a
+    row whose routes would serve it.
+    """
     if caller.sees_everything():
         return list(sessions)
+    primary = bool(caller.username) and caller.username == primary_user()
+    registered = known if known is not None else keys
     out = []
     for session in sessions:
         mind = session.get("mind_id")
-        if str(mind or "") in keys or normalize_username(mind) in keys:
+        if _named_in(mind, keys):
+            out.append(session)
+        elif primary and not _named_in(mind, registered):
             out.append(session)
     return out
+
+
+def _named_in(mind: object, keys: set[str]) -> bool:
+    return str(mind or "") in keys or normalize_username(mind) in keys
 
 
 # ---------------------------------------------------------------------------
@@ -424,6 +507,13 @@ class UserAccess:
             await self._app(scope, receive, send)
             return
         route, params = self._match(scope)
+        if route is None:
+            # Nothing this app serves. Passing it through lets the router give
+            # its own answer — a 404, a 405, or the 307 that `redirect_slashes`
+            # adds for a trailing slash. Refusing instead told a client that
+            # typed one slash too many that its credential was bad.
+            await self._app(scope, receive, send)
+            return
         method = WEBSOCKET if kind == "websocket" else scope.get("method", "GET")
         path = getattr(route, "path", scope.get("path", ""))
         rule = self._table.rule_for(method, path)
@@ -439,7 +529,25 @@ class UserAccess:
             return
         caller = await resolve_caller(db, bearer_of(scope))
         if rule.kind == ADMIN:
+            if not os.environ.get("COMMS_ADMIN_BEARER_TOKEN", ""):
+                # The same sentence `require_admin_bearer` gives. A 401 here
+                # would send the operator to check a credential when the
+                # problem is one unset variable.
+                await self._refuse(
+                    scope, receive, send, 503,
+                    b'{"detail":"Admin endpoints disabled: '
+                    b'COMMS_ADMIN_BEARER_TOKEN unset"}',
+                )
+                return
             if not caller.is_admin:
+                await self._refuse(scope, receive, send, 401, b'{"detail":"Invalid token"}')
+                return
+        elif rule.kind == MACHINE:
+            # Not `recognised`. These routes are addressed by client reference
+            # or by mind, so there is no conversation for an owner check to
+            # scope — admitting a person's credential here would hand them
+            # every conversation on the hive through the back of the house.
+            if not caller.is_machine:
                 await self._refuse(scope, receive, send, 401, b'{"detail":"Invalid token"}')
                 return
         elif not caller.recognised:
@@ -460,7 +568,10 @@ class UserAccess:
     def _match(self, scope: Scope):
         from starlette.routing import Match  # noqa: PLC0415
 
-        for route in scope["app"].router.routes:
+        app = scope.get("app")
+        if app is None:
+            return None, {}
+        for route in app.router.routes:
             match, child = route.matches(scope)
             if match == Match.FULL:
                 return route, dict(child.get("path_params") or {})

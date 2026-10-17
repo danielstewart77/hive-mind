@@ -148,3 +148,45 @@ def test_a_route_added_with_no_classification_is_refused_to_a_non_admin(
 
     assert refused.status_code == 401
     assert served.status_code == 200
+
+
+def test_every_conversation_route_is_classified_as_somebodys_conversation():
+    """The class each route got is the whole point of the table, and coverage
+    tests do not check it: moving `POST /sessions/{id}/message` into the
+    machinery block hands every user's message route back to the shared token
+    and leaves a coverage-only suite green.
+    """
+    for method, path in (
+        ("GET", "/sessions/{session_id}"),
+        ("DELETE", "/sessions/{session_id}"),
+        ("POST", "/sessions/{session_id}/suspend"),
+        ("POST", "/sessions/{session_id}/resume"),
+        ("POST", "/sessions/{session_id}/message"),
+        ("GET", "/sessions/{session_id}/events"),
+        ("GET", "/sessions/{session_id}/history"),
+        ("POST", "/sessions/{session_id}/activate"),
+        ("POST", "/sessions/{session_id}/model"),
+        ("POST", "/sessions/{session_id}/autopilot"),
+        ("POST", "/sessions/{session_id}/rotation-memory"),
+        ("POST", "/sessions/{session_id}/interrupt"),
+        ("POST", "/sessions/{session_id}/remote-control"),
+        ("DELETE", "/sessions/{session_id}/remote-control"),
+        ("PUT", "/sessions/{session_id}/name"),
+        ("WS", "/sessions/{session_id}/stream"),
+        ("WS", "/sessions/{session_id}/attach"),
+    ):
+        rule = session_access.TABLE.rules[(method, path)]
+        assert rule.kind == user_access.OWNER, (method, path, rule.kind)
+        assert rule.param == "session_id", (method, path)
+
+
+def test_the_listings_and_the_command_surface_are_classified_as_scoped():
+    """Each of these filters its own answer, so it must reach the handler with
+    a resolved caller rather than being refused or waved through."""
+    for spec in (
+        ("GET", "/sessions"),
+        ("GET", "/sessions/names"),
+        ("POST", "/sessions"),
+        ("POST", "/command"),
+    ):
+        assert session_access.TABLE.rules[spec].kind == user_access.SCOPED, spec
