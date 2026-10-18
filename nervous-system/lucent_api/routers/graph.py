@@ -16,11 +16,14 @@ from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 
 from lucent_api.auth import require_admin_bearer
+from lucent_api.holder_access import Caller, require_holder
 from lucent_api.soul import soul_key_refusal
 
 log = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/graph", tags=["graph"])
+router = APIRouter(
+    dependencies=[Depends(require_holder)],
+    prefix="/graph", tags=["graph"])
 
 
 def _decode(payload: str) -> Any:
@@ -245,7 +248,9 @@ def search_person(
 
 
 @router.post("/upsert-backup")
-def graph_upsert_backup(body: UpsertBody) -> Any:
+def graph_upsert_backup(
+    body: UpsertBody, caller: Caller = Depends(require_holder)
+) -> Any:
     """Legacy un-validated upsert, kept as a fallback during the schema-enforcement cutover. Delete once `/graph/upsert` (now schema-validating) is proven stable.
 
     Add or update a graph node, optionally linking to another node.
@@ -288,7 +293,9 @@ def graph_upsert_backup(body: UpsertBody) -> Any:
         if not allowed:
             return {"upserted": False, "reason": orphan_msg}
 
-        disambig = check_disambiguation(body.name, body.entity_type, body.mind_id)
+        disambig = check_disambiguation(
+            body.name, body.entity_type, caller.mind_for_write(body.mind_id)
+        )
         if disambig.action == "disambiguate":
             send_disambiguation_message(body.name, disambig.existing_nodes)
             return {
@@ -306,7 +313,7 @@ def graph_upsert_backup(body: UpsertBody) -> Any:
                 target_name=body.target_name,
                 target_type=body.target_type,
                 edge_attrs=body.edge_attrs,
-                mind_id=body.mind_id,
+                mind_id=caller.mind_for_write(body.mind_id),
                 data_class=body.data_class,
                 as_of=body.as_of,
                 source=body.source,
@@ -323,7 +330,9 @@ def graph_upsert_backup(body: UpsertBody) -> Any:
 
 
 @router.post("/upsert")
-def graph_upsert(body: UpsertBody) -> Any:
+def graph_upsert(
+    body: UpsertBody, caller: Caller = Depends(require_holder)
+) -> Any:
     """Schema-validated upsert.
 
     Runs the schema validations from `schema_registry` BEFORE the existing
@@ -401,7 +410,9 @@ def graph_upsert(body: UpsertBody) -> Any:
         if not allowed:
             return {"ok": False, "code": "orphan_blocked", "detail": orphan_msg}
 
-        disambig = check_disambiguation(body.name, body.entity_type, body.mind_id)
+        disambig = check_disambiguation(
+            body.name, body.entity_type, caller.mind_for_write(body.mind_id)
+        )
         if disambig.action == "disambiguate":
             send_disambiguation_message(body.name, disambig.existing_nodes)
             return {
@@ -421,7 +432,7 @@ def graph_upsert(body: UpsertBody) -> Any:
                 target_name=body.target_name,
                 target_type=body.target_type,
                 edge_attrs=body.edge_attrs,
-                mind_id=body.mind_id,
+                mind_id=caller.mind_for_write(body.mind_id),
                 data_class=body.data_class,
                 as_of=body.as_of,
                 source=body.source,
@@ -533,7 +544,9 @@ def add_schema_edge(body: SchemaEdgeBody) -> dict:
 
 
 @router.post("/upsert-direct")
-def graph_upsert_direct_endpoint(body: UpsertBody) -> Any:
+def graph_upsert_direct_endpoint(
+    body: UpsertBody, caller: Caller = Depends(require_holder)
+) -> Any:
     """Bypass guards and write directly. Use only when the caller has
     already validated the entity (e.g., during ingestion replays)."""
     from lucent_api.lucent_graph import graph_upsert_direct
@@ -547,7 +560,7 @@ def graph_upsert_direct_endpoint(body: UpsertBody) -> Any:
             target_name=body.target_name,
             target_type=body.target_type,
             edge_attrs=body.edge_attrs,
-            mind_id=body.mind_id,
+            mind_id=caller.mind_for_write(body.mind_id),
             data_class=body.data_class,
             as_of=body.as_of,
             source=body.source,
@@ -564,7 +577,9 @@ def graph_upsert_direct_endpoint(body: UpsertBody) -> Any:
 
 
 @router.post("/nodes")
-def graph_nodes_create(body: NodeCreateBody) -> Any:
+def graph_nodes_create(
+    body: NodeCreateBody, caller: Caller = Depends(require_holder)
+) -> Any:
     """Create a new node. Rejects if a node with (name, type) already exists.
 
     For property edits on an existing node use /graph/properties/merge.
@@ -576,7 +591,7 @@ def graph_nodes_create(body: NodeCreateBody) -> Any:
             entity_type=body.entity_type,
             name=body.name,
             data_class=body.data_class,
-            mind_id=body.mind_id,
+            mind_id=caller.mind_for_write(body.mind_id),
             properties=body.properties,
             as_of=body.as_of,
             source=body.source,
@@ -623,7 +638,9 @@ def graph_properties_remove_endpoint(body: PropertiesRemoveBody) -> Any:
 
 
 @router.post("/edges")
-def graph_edges_create(body: EdgeBody) -> Any:
+def graph_edges_create(
+    body: EdgeBody, caller: Caller = Depends(require_holder)
+) -> Any:
     """Create an edge between two existing nodes. Neither endpoint's
     properties are touched. Both nodes must already exist.
     """
@@ -638,7 +655,7 @@ def graph_edges_create(body: EdgeBody) -> Any:
             relation=body.relation,
             edge_attrs=body.edge_attrs,
             data_class=body.data_class,
-            mind_id=body.mind_id,
+            mind_id=caller.mind_for_write(body.mind_id),
             as_of=body.as_of,
             source=body.source,
         )
@@ -678,15 +695,19 @@ def graph_nodes_delete(body: NodeDeleteBody) -> Any:
 
 
 @router.post("/persons/audit")
-def audit_persons(body: AuditPersonsBody) -> Any:
+def audit_persons(
+    body: AuditPersonsBody, caller: Caller = Depends(require_holder)
+) -> Any:
     """Audit Person nodes for missing first/last name properties."""
     from lucent_api.lucent_graph import audit_person_nodes
 
-    return _decode(audit_person_nodes(mind_id=body.mind_id))
+    return _decode(audit_person_nodes(mind_id=caller.mind_for_write(body.mind_id)))
 
 
 @router.post("/persons/update-names")
-def update_person_names(body: UpdatePersonNamesBody) -> Any:
+def update_person_names(
+    body: UpdatePersonNamesBody, caller: Caller = Depends(require_holder)
+) -> Any:
     """Backfill first_name/last_name on a Person node."""
     from lucent_api.lucent_graph import update_person_names as _update_names
 
@@ -695,7 +716,7 @@ def update_person_names(body: UpdatePersonNamesBody) -> Any:
             name=body.name,
             first_name=body.first_name,
             last_name=body.last_name,
-            mind_id=body.mind_id,
+            mind_id=caller.mind_for_write(body.mind_id),
         )
     )
 

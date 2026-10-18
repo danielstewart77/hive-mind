@@ -1,12 +1,15 @@
-"""Unit tests for lucent_api.auth bearer dependencies.
+"""Unit tests for the two credentials lucent still reads from the environment.
 
-Verifies that:
-- require_bearer accepts the regular token and the admin token (admin is
-  strictly more privileged, used by hive-tools when calling admin routes
-  that live inside the graph router).
-- require_bearer rejects unrelated tokens.
-- require_admin_bearer accepts ONLY the admin token (no elevation
-  shortcut — the elevation barrier holds the other way).
+`require_bearer` and the shared `LUCENT_BEARER_TOKEN` it checked are gone:
+that was one value held by every mind and every hook on every host. The tests
+that asserted it worked are deleted rather than patched, and so is the one
+that asserted an unset value served every caller — per-holder credentials and
+the refusal to serve unconfigured are covered in `test_holder_access.py`.
+
+What is left here is the admin credential, which stays a single shared value
+because it is how the console reaches the store and the only way the minting
+route is reachable on a first boot, and the soul credential, which was already
+held by exactly one holder by design.
 """
 
 from __future__ import annotations
@@ -17,70 +20,28 @@ from unittest import mock
 
 from fastapi import HTTPException
 
-from lucent_api.auth import require_admin_bearer, require_bearer
+from lucent_api.auth import require_admin_bearer
 
 
 REGULAR = "regular-token-abc"
 ADMIN = "admin-token-xyz"
 
 
-class RequireBearerTests(unittest.TestCase):
-    @mock.patch.dict(
-        os.environ,
-        {"LUCENT_BEARER_TOKEN": REGULAR, "LUCENT_ADMIN_BEARER_TOKEN": ADMIN},
-    )
-    def test_accepts_regular_token(self):
-        # No exception → pass
-        require_bearer(authorization=f"Bearer {REGULAR}")
-
-    @mock.patch.dict(
-        os.environ,
-        {"LUCENT_BEARER_TOKEN": REGULAR, "LUCENT_ADMIN_BEARER_TOKEN": ADMIN},
-    )
-    def test_accepts_admin_token(self):
-        # Admin token must pass the regular gate so admin routes nested
-        # inside the graph router (which has require_bearer at router level)
-        # don't 401 before reaching the admin dep.
-        require_bearer(authorization=f"Bearer {ADMIN}")
-
-    @mock.patch.dict(
-        os.environ,
-        {"LUCENT_BEARER_TOKEN": REGULAR, "LUCENT_ADMIN_BEARER_TOKEN": ADMIN},
-    )
-    def test_rejects_unrelated_token(self):
-        with self.assertRaises(HTTPException) as ctx:
-            require_bearer(authorization="Bearer some-other-token")
-        self.assertEqual(ctx.exception.status_code, 401)
-
-    @mock.patch.dict(os.environ, {"LUCENT_BEARER_TOKEN": REGULAR}, clear=True)
-    def test_admin_unset_does_not_widen_access(self):
-        # When LUCENT_ADMIN_BEARER_TOKEN is unset, only the regular token works.
-        require_bearer(authorization=f"Bearer {REGULAR}")
-        with self.assertRaises(HTTPException):
-            require_bearer(authorization="Bearer anything-else")
-
-    @mock.patch.dict(os.environ, {}, clear=True)
-    def test_bypass_when_regular_unset(self):
-        # If LUCENT_BEARER_TOKEN is unset, the gate is wide open (deployment
-        # bootstrap safety). Any header passes.
-        require_bearer(authorization="")
-        require_bearer(authorization="Bearer literally-anything")
-
-
 class RequireAdminBearerTests(unittest.TestCase):
     @mock.patch.dict(
         os.environ,
-        {"LUCENT_BEARER_TOKEN": REGULAR, "LUCENT_ADMIN_BEARER_TOKEN": ADMIN},
+        {"LUCENT_ADMIN_BEARER_TOKEN": ADMIN},
     )
     def test_accepts_admin_token(self):
         require_admin_bearer(authorization=f"Bearer {ADMIN}")
 
     @mock.patch.dict(
         os.environ,
-        {"LUCENT_BEARER_TOKEN": REGULAR, "LUCENT_ADMIN_BEARER_TOKEN": ADMIN},
+        {"LUCENT_ADMIN_BEARER_TOKEN": ADMIN},
     )
-    def test_regular_token_NOT_elevated(self):
-        # Elevation only flows admin → regular, NEVER the reverse.
+    def test_another_value_is_not_elevated(self):
+        """Nothing is elevated into the admin credential — not the value the
+        retired service token used to hold, and not a holder's own."""
         with self.assertRaises(HTTPException) as ctx:
             require_admin_bearer(authorization=f"Bearer {REGULAR}")
         self.assertEqual(ctx.exception.status_code, 401)

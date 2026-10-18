@@ -631,64 +631,81 @@ async def record_turn(body: RecordTurnRequest, request: Request):
     )
 
 
-class UserCredentialRequest(BaseModel):
+class CredentialRequest(BaseModel):
+    #: The user this holder answers for. Ownership is decided by user; the
+    #: holder is only which box presented the value.
+    username: str
     token: str
+    #: `mind`, `service` or `person`. Omitted, a holder naming a registered
+    #: mind is a mind and anything else is a person — a service has to say so,
+    #: because being wrong in that direction hands the machinery routes to
+    #: something that only needed to read.
+    role: str | None = None
 
 
 @app.put(
-    "/users/{username}/credential",
+    "/credentials/{holder}",
     dependencies=[Depends(require_admin_bearer)],
 )
-async def put_user_credential(username: str, body: UserCredentialRequest):
-    """Mint or replace one user's credential.
+async def put_holder_credential(holder: str, body: CredentialRequest):
+    """Mint or replace one holder's credential.
 
-    The console calls this when an admin issues a credential from the
-    user-management screen. Admin-guarded for the obvious reason: a route that
-    issues credentials must not answer to one it issued.
+    One holder, never a person's machines collectively: two minds owned by the
+    same person are two rows with two values, so revoking the one on a box in
+    somebody's bedroom leaves the one running here alone.
 
-    The value is written as a digest and no route ever returns one. An
-    operator does not need the value — they need to know whether the holder
-    has one that works, which `GET /users/credentials` answers.
+    Admin-guarded for the obvious reason — a route that issues credentials
+    must not answer to one it issued. The value is written as a digest and no
+    route ever returns one: an operator does not need the value, they need to
+    know whether the holder has one that works, which `GET /credentials`
+    answers.
     """
     try:
         return await user_access.put_credential(
-            app.state.broker_db, username, body.token
+            app.state.broker_db,
+            holder,
+            body.username,
+            body.token,
+            role=body.role,
         )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
 
 @app.delete(
-    "/users/{username}/credential",
+    "/credentials/{holder}",
     dependencies=[Depends(require_admin_bearer)],
 )
-async def delete_user_credential(username: str):
-    """Revoke a credential. Lands on the holder's next request: the gate reads
-    the table per call, so there is nothing to restart and no cache to clear.
+async def delete_holder_credential(holder: str):
+    """Revoke one holder's credential, and only that holder's.
 
-    The row is kept rather than deleted, so the screen can say "revoked"
-    where it would otherwise have to say "never had one" — different facts
-    with different remedies.
+    Lands on its next request: the gate reads the table per call, so there is
+    nothing to restart and no cache to clear. The row is kept rather than
+    deleted, so the screen can say "revoked" where it would otherwise have to
+    say "never had one" — different facts with different remedies.
     """
-    revoked = await user_access.revoke_credential(app.state.broker_db, username)
-    return {"username": username.strip().lower(), "revoked": revoked}
+    revoked = await user_access.revoke_credential(app.state.broker_db, holder)
+    return {"holder": holder.strip().lower(), "revoked": revoked}
 
 
-@app.get("/users/credentials", dependencies=[Depends(require_admin_bearer)])
-async def list_user_credentials():
-    """Who holds a credential, and whether it is live. Never the value."""
+@app.get("/credentials", dependencies=[Depends(require_admin_bearer)])
+async def list_credentials():
+    """Which holders have a credential, whose they answer for, and whether it
+    is live. Never the value."""
     rows = await app.state.broker_db.execute(
-        "SELECT username, created_at, revoked_at FROM user_credentials "
-        "ORDER BY username"
+        "SELECT holder, username, role, created_at, revoked_at FROM credentials "
+        "ORDER BY username, holder"
     )
     return [
         {
+            "holder": holder,
             "username": username,
+            "role": role,
             "created_at": created_at,
             "revoked_at": revoked_at,
             "live": revoked_at is None,
         }
-        for username, created_at, revoked_at in await rows.fetchall()
+        for holder, username, role, created_at, revoked_at in await rows.fetchall()
     ]
 
 

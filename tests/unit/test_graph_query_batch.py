@@ -77,15 +77,26 @@ def _seeded_conn() -> sqlite3.Connection:
     return conn
 
 
+#: These tests are about batch-query semantics, not about scoping, so they
+#: present the admin credential — the one value that still reaches every
+#: mind. A holder credential would work too and would add a provenance filter
+#: that has nothing to do with what is being asserted here.
+ADMIN_TOKEN = "lucent-admin-for-tests"  # secret-guard: allow
+
+
 @pytest.fixture
 def client(monkeypatch) -> TestClient:
-    monkeypatch.delenv("LUCENT_BEARER_TOKEN", raising=False)
-    from lucent_api import lucent_graph
+    monkeypatch.setenv("LUCENT_ADMIN_BEARER_TOKEN", ADMIN_TOKEN)
+    from lucent_api import holder_access, lucent_graph
     from lucent_api.server import create_app
 
     conn = _seeded_conn()
+    holder_access.init_credentials(conn)
     monkeypatch.setattr(lucent_graph, "_get_conn", lambda: conn)
-    return TestClient(create_app())
+    monkeypatch.setattr(holder_access, "connection", lambda: conn)
+    return TestClient(
+        create_app(), headers={"Authorization": f"Bearer {ADMIN_TOKEN}"}
+    )
 
 
 # ---- R1: the names travel in the body, and all of them are answered ----

@@ -131,7 +131,7 @@ TABLE.add(
     "DELETE /secrets/scopes",
     # Minting and revoking a user's credential. Admin, obviously: the route
     # that issues credentials cannot answer to one it issued.
-    "PUT /users/{username}/credential",
-    "DELETE /users/{username}/credential",
-    "GET /users/credentials",
+    "PUT /credentials/{holder}",
+    "DELETE /credentials/{holder}",
+    "GET /credentials",
 )
