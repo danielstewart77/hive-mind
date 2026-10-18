@@ -110,15 +110,29 @@ def _seeded_conn() -> sqlite3.Connection:
     return conn
 
 
+#: About the person branch of the graph query, not about scoping, so it
+#: presents the admin credential — the one value that still reaches every
+#: mind. It used to clear the token instead and rely on the memory store
+#: serving open when unconfigured, which is gone: a store that cannot
+#: establish who is calling refuses rather than answering the LAN. Without a
+#: credential the query returns a 401 body, whose person count is zero, and
+#: the failure reads as the person branch being broken.
+ADMIN_TOKEN = "lucent-admin-for-tests"  # secret-guard: allow
+
+
 @pytest.fixture
 def client(monkeypatch) -> TestClient:
-    monkeypatch.delenv("LUCENT_BEARER_TOKEN", raising=False)
-    from lucent_api import lucent_graph
+    monkeypatch.setenv("LUCENT_ADMIN_BEARER_TOKEN", ADMIN_TOKEN)
+    from lucent_api import holder_access, lucent_graph
     from lucent_api.server import create_app
 
     conn = _seeded_conn()
+    holder_access.init_credentials(conn)
     monkeypatch.setattr(lucent_graph, "_get_conn", lambda: conn)
-    return TestClient(create_app())
+    monkeypatch.setattr(holder_access, "connection", lambda: conn)
+    return TestClient(
+        create_app(), headers={"Authorization": f"Bearer {ADMIN_TOKEN}"}
+    )
 
 
 def test_r7_the_person_branch_resolves_a_single_person(client):
