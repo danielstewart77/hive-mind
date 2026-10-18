@@ -119,11 +119,6 @@ def require_admin_bearer(authorization: str = Header(default="")) -> None:
         raise HTTPException(401, "Invalid admin token")
 
 
-if not os.environ.get("COMMS_BEARER_TOKEN"):
-    log.warning(
-        "COMMS_BEARER_TOKEN is unset — auth bypass active. "
-        "Set the env var to enforce bearer-token gating."
-    )
 if not os.environ.get("COMMS_ADMIN_BEARER_TOKEN"):
     log.warning(
         "COMMS_ADMIN_BEARER_TOKEN is unset — admin endpoints "
