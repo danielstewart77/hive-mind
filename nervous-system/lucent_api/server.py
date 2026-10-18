@@ -63,10 +63,19 @@ class CredentialRequest(BaseModel):
     #: user is who the holder belongs to.
     username: str
     token: str
-    #: `mind`, `service` or `person`. A service is the one role that may read
-    #: and write on another mind's behalf, which is what comms needs to
-    #: compose a prompt.
-    role: str = holder_access.MIND
+    #: `mind`, `service` or `person`. Required rather than defaulted: a
+    #: default of `mind` silently narrows comms — which must read every mind's
+    #: soul and recent memory to compose a prompt — to its own records alone,
+    #: and the symptom is minds answering with no identity and no standing
+    #: rules while every surface stays green. A default of `person` is no
+    #: better: a person holder may write nothing, so a mind minted that way
+    #: authenticates and then refuses its own memory.
+    role: str
+    #: The provenance this holder's rows are keyed by, when it differs from
+    #: the holder name. Memory and graph rows carry a mind's UUID because
+    #: every hook sends `$MIND_ID`, so a mind minted under its readable name
+    #: names its UUID here and both spellings are then accepted.
+    mind_id: str | None = None
 
 
 def _register_credential_routes(app: FastAPI) -> None:
@@ -84,12 +93,19 @@ def _register_credential_routes(app: FastAPI) -> None:
     )
     def put_credential(holder: str, body: CredentialRequest):
         try:
+            conn = holder_access.connection()
+            # The table may not exist yet: this is the first call of the
+            # rollout, on a store that has never served a gated request, and
+            # going straight to a SELECT made the documented first step answer
+            # 500 on `no such table: credentials`.
+            holder_access.init_credentials(conn)
             return holder_access.put_credential(
-                holder_access.connection(),
+                conn,
                 holder,
                 body.username,
                 body.token,
                 role=body.role,
+                mind_id=body.mind_id,
             )
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
@@ -100,9 +116,9 @@ def _register_credential_routes(app: FastAPI) -> None:
     def revoke_credential(holder: str):
         """Lands on that holder's next request: the store reads the table per
         call, so there is nothing to restart and no cache to clear."""
-        revoked = holder_access.revoke_credential(
-            holder_access.connection(), holder
-        )
+        conn = holder_access.connection()
+        holder_access.init_credentials(conn)
+        revoked = holder_access.revoke_credential(conn, holder)
         return {"holder": holder.strip().lower(), "revoked": revoked}
 
     @app.get("/credentials", dependencies=[Depends(require_admin_bearer)])
@@ -113,7 +129,7 @@ def _register_credential_routes(app: FastAPI) -> None:
         conn = holder_access.connection()
         holder_access.init_credentials(conn)
         rows = conn.execute(
-            "SELECT holder, username, role, created_at, revoked_at "
+            "SELECT holder, username, role, mind_id, created_at, revoked_at "
             "FROM credentials ORDER BY username, holder"
         ).fetchall()
         return [
@@ -121,6 +137,7 @@ def _register_credential_routes(app: FastAPI) -> None:
                 "holder": r["holder"],
                 "username": r["username"],
                 "role": r["role"],
+                "mind_id": r["mind_id"],
                 "created_at": r["created_at"],
                 "revoked_at": r["revoked_at"],
                 "live": r["revoked_at"] is None,

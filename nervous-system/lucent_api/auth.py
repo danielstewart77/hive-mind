@@ -36,7 +36,7 @@ log = logging.getLogger(__name__)
 def require_admin_bearer(authorization: str = Header(default="")) -> None:
     """Bearer gate for admin endpoints (schema mutation).
 
-    Distinct from ``require_bearer`` — checks ``LUCENT_ADMIN_BEARER_TOKEN``
+    Checks ``LUCENT_ADMIN_BEARER_TOKEN`` and nothing else
     instead of the regular service token. Only hive-tools holds this; minds
     do not. If the admin token is unset, admin endpoints are locked (NOT
     bypass-open, unlike the regular bearer) — schema mutation is too

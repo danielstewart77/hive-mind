@@ -795,3 +795,109 @@ def test_a_mounted_sub_application_is_not_reported_as_a_websocket():
     app.router.routes.append(Mount("/static", app=Starlette()))
 
     assert ua.RouteTable().unlisted(app) == []
+
+# ---------------------------------------------------------------------------
+# The table's own constraints, and the migration off the one-per-person table
+# ---------------------------------------------------------------------------
+
+
+async def test_a_row_naming_no_holder_cannot_be_inserted(db):
+    """SQLite admits a NULL into a non-INTEGER primary key unless NOT NULL is
+    declared, and a row naming nobody resolves by digest exactly as a real one
+    does — so every gate test would stay green against a credential that
+    belongs to no one. The fixtures that insert directly are the reason this
+    is asserted against the table rather than against `put_credential`."""
+    import sqlite3
+
+    with pytest.raises(sqlite3.IntegrityError):
+        await db.execute(
+            "INSERT INTO credentials "
+            "(holder, username, role, token_sha, created_at) "
+            "VALUES (NULL, 'sloan', ?, ?, 0)",
+            (ua.PERSON, ua.digest(SLOAN_TOKEN)),
+        )
+
+
+async def test_two_rows_cannot_share_one_value(db):
+    """The resolver walks the rows and returns the first digest that matches,
+    so a duplicate is one holder silently authenticating as another's owner."""
+    import sqlite3
+
+    await ua.put_credential(db, "arnold", "sloan", SLOAN_TOKEN, role=ua.MIND)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        await db.execute(
+            "INSERT INTO credentials "
+            "(holder, username, role, token_sha, created_at) "
+            "VALUES ('zach', 'aiden', ?, ?, 0)",
+            (ua.MIND, ua.digest(SLOAN_TOKEN)),
+        )
+
+
+async def test_the_one_per_person_table_is_carried_across(db):
+    """The predecessor keyed on `username`. Its rows become holders named
+    after the person who held them, with the role `person`, which is what they
+    were — and without this every credential issued before the change stops
+    resolving on deploy with nothing saying so."""
+    await db.executescript(
+        "CREATE TABLE IF NOT EXISTS user_credentials ("
+        "username TEXT PRIMARY KEY, token_sha TEXT NOT NULL, "
+        "created_at REAL NOT NULL, revoked_at REAL);"
+    )
+    await db.execute(
+        "INSERT INTO user_credentials (username, token_sha, created_at) "
+        "VALUES ('sloan', ?, 0)",
+        (ua.digest(SLOAN_TOKEN),),
+    )
+    await db.execute("DELETE FROM credentials")
+    await db.commit()
+
+    await ua.init_credentials(db)
+
+    found = await ua.credential_for_token(db, SLOAN_TOKEN)
+    assert found is not None
+    assert (found.holder, found.username, found.role) == (
+        "sloan",
+        "sloan",
+        ua.PERSON,
+    )
+
+
+async def test_a_migrated_row_naming_no_user_is_left_behind(db):
+    """It would otherwise become a holder answering for nobody."""
+    await db.executescript(
+        "CREATE TABLE IF NOT EXISTS user_credentials ("
+        "username TEXT PRIMARY KEY, token_sha TEXT NOT NULL, "
+        "created_at REAL NOT NULL, revoked_at REAL);"
+    )
+    await db.execute(
+        "INSERT INTO user_credentials (username, token_sha, created_at) "
+        "VALUES ('   ', ?, 0)",
+        (ua.digest(UNISSUED),),
+    )
+    await db.execute("DELETE FROM credentials")
+    await db.commit()
+
+    await ua.init_credentials(db)
+
+    assert await ua.credential_for_token(db, UNISSUED) is None
+
+
+async def test_a_value_carrying_a_non_ascii_character_still_resolves(db):
+    """A value handed over in person gets pasted through a document, which
+    turns a hyphen into a non-breaking one without showing it. Comparing the
+    digests as `str` raises TypeError on anything outside ASCII, and on a
+    websocket handshake that 500 reaches the gateway as "this mind has no
+    terminal route"."""
+    smart = "arnolds\u2011own\u2011value"
+    await ua.put_credential(db, "arnold", "sloan", smart, role=ua.MIND)
+
+    assert await ua.user_for_token(db, smart) == "sloan"
+    assert await ua.user_for_token(db, "arnolds-own-value") is None
+
+
+async def test_the_shared_provenance_is_not_a_holder(db):
+    """Lucent files hive-wide rules under it. Minting it here would let the
+    two services disagree about whether it names a party."""
+    with pytest.raises(ValueError):
+        await ua.put_credential(db, "shared", "daniel", "a-value")

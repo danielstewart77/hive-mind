@@ -21,6 +21,18 @@ async def test_session_shutdown_runs_before_broker_db_is_closed(monkeypatch, tmp
 
     broker_db = MagicMock()
     broker_db.close = AsyncMock(side_effect=lambda: order.append("broker_db.close"))
+    # The lifespan creates the credentials table on the way up, so the stand-in
+    # has to be awaitable where a real aiosqlite connection is. A bare
+    # MagicMock returns a MagicMock, which `await` rejects — and the failure
+    # reads as a shutdown-ordering bug rather than a mock that is the wrong
+    # shape.
+    broker_db.executescript = AsyncMock()
+    broker_db.commit = AsyncMock()
+    # The migration asks whether the predecessor table is there. `fetchone`
+    # answering None is "it is not", which is what a fresh broker looks like.
+    _no_rows = MagicMock()
+    _no_rows.fetchone = AsyncMock(return_value=None)
+    broker_db.execute = AsyncMock(return_value=_no_rows)
 
     async def fake_init_db(path):
         return broker_db

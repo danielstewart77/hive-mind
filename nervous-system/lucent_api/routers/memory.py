@@ -17,7 +17,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from hive_logging import log_event
 
-from lucent_api.holder_access import Caller, require_holder
+from lucent_api.holder_access import (
+    MIND,
+    SERVICE,
+    SHARED,
+    Caller,
+    require_holder,
+)
 
 log = logging.getLogger(__name__)
 
@@ -199,25 +205,52 @@ def memory_retrieve(
     )
 
 
-def _refuse_unless_owned(caller: Caller, memory_id: str) -> None:
-    """Refuse a row the caller may not see.
+def _refuse_unless_owned(
+    caller: Caller, memory_id: str, named: object = None
+) -> None:
+    """Refuse a row this caller may not change.
 
     `/list` and `/retrieve` are filtered by provenance, but these two routes
     name a row directly, so without this a mind could edit or delete any
     memory on the hive by id — and ids are sequential integers.
 
+    Three things this is careful about:
+
+    An admin changes anything. A **service** has to name the mind it is acting
+    for; left unnamed it would otherwise reach every row on the hive by id,
+    which is the widest hole in the file.
+
+    A **mind** reaches its own rows and not the `shared` ones. It *reads*
+    `shared` — those are the hive-wide standing rules, and reading them is the
+    point — but one mind reassigning or deleting a rule that every other mind
+    loads into its prompt is a mind quietly editing the hive's behaviour, and
+    a kid's box should not be able to do it.
+
     Absent rows answer the same 404 as somebody else's, so the ids of other
     minds' memories cannot be found by walking the range.
     """
-    allowed = caller.minds_for_read(None)
-    if allowed is None:
+    if caller.is_admin:
         return
+    if caller.role == SERVICE and not str(named or "").strip():
+        raise HTTPException(
+            400, "a service changing a memory must name the mind it acts for"
+        )
+    allowed = caller.minds_for_read(named)
     from lucent_api import holder_access
 
     row = holder_access.connection().execute(
         "SELECT mind_id FROM memories WHERE id = ?", (memory_id,)
     ).fetchone()
-    if row is None or str(row["mind_id"] or "") not in allowed:
+    if row is None:
+        raise HTTPException(404, "Memory not found")
+    provenance = str(row["mind_id"] or "")
+    if caller.role == MIND and provenance == SHARED:
+        raise HTTPException(
+            403,
+            "a hive-wide rule is not one mind's to change; "
+            "use an admin credential",
+        )
+    if allowed is not None and provenance not in allowed:
         raise HTTPException(404, "Memory not found")
 
 
@@ -267,7 +300,7 @@ def memory_update(
     """
     from lucent_api.lucent_memory import memory_update as _memory_update
 
-    _refuse_unless_owned(caller, memory_id)
+    _refuse_unless_owned(caller, memory_id, body.mind_id)
     mind_id = caller.mind_for_write(body.mind_id) if body.mind_id else ""
     result = _decode(
         _memory_update(

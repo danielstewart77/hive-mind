@@ -92,6 +92,13 @@ CREATE TABLE IF NOT EXISTS credentials (
     holder      TEXT PRIMARY KEY NOT NULL,
     username    TEXT NOT NULL,
     role        TEXT NOT NULL,
+    -- The provenance this holder's rows are actually keyed by. Memory and
+    -- graph rows on disk carry a mind's UUID, because every hook sends
+    -- `$MIND_ID`; a holder minted under the readable name would otherwise
+    -- write under "skippy" and read back nothing but the hive-wide rules,
+    -- with a 200 and no error anywhere. Null means the holder string is the
+    -- provenance, which is right for a service.
+    mind_id     TEXT,
     -- UNIQUE because two holders sharing one value is the resolver returning
     -- whichever row SQLite yields first, i.e. one holder silently
     -- authenticating as another.
@@ -110,11 +117,25 @@ class Caller:
     holder: str = ""
     username: str = ""
     role: str = ""
+    #: The provenance this holder's rows carry, when it differs from the
+    #: holder string. A mind minted as "skippy" whose rows are keyed by uuid
+    #: names that uuid here, and both spellings are accepted from the caller.
+    mind_id: str = ""
     is_admin: bool = False
 
     @property
     def recognised(self) -> bool:
         return bool(self.holder) or self.is_admin
+
+    @property
+    def provenance(self) -> str:
+        """What this holder's rows are filed under."""
+        return self.mind_id or self.holder
+
+    @property
+    def own_names(self) -> set[str]:
+        """Every spelling of itself this holder may use."""
+        return {n for n in (self.holder, self.mind_id) if n}
 
     @property
     def may_act_for_another_mind(self) -> bool:
@@ -127,7 +148,7 @@ class Caller:
         """
         return self.is_admin or self.role == SERVICE
 
-    def mind_for_write(self, named: object = None) -> str:
+    def mind_for_write(self, named: object = None, required: bool = True) -> str:
         """Which mind a write is filed under.
 
         For a mind, itself — the body cannot say otherwise, except to name the
@@ -138,18 +159,26 @@ class Caller:
         if self.role == MIND:
             if asked and asked.lower() == SHARED:
                 return SHARED
-            if asked and asked.lower() not in (self.holder, SHARED):
+            if asked and asked not in self.own_names and (
+                asked.lower() not in self.own_names
+            ):
                 raise HTTPException(
                     403,
                     "a mind files memories under itself; "
                     f"{self.holder!r} may not write as {asked!r}",
                 )
-            return self.holder
+            return self.provenance
         if not self.may_act_for_another_mind:
             raise HTTPException(
                 403, "this credential has no mind to file a memory under"
             )
         if not asked:
+            if not required:
+                # A graph write whose body carries no provenance at all, which
+                # is how the console has always created edges. Refusing it
+                # would answer an edge-creation call with a sentence about
+                # memories and services.
+                return ""
             raise HTTPException(
                 400, "a service writing on a mind's behalf must name the mind"
             )
@@ -164,14 +193,16 @@ class Caller:
         """
         asked = str(named or "").strip()
         if self.role == MIND:
-            if asked and asked.lower() not in (self.holder, SHARED):
+            if asked and asked.lower() == SHARED:
+                return [SHARED]
+            if asked and asked not in self.own_names and (
+                asked.lower() not in self.own_names
+            ):
                 raise HTTPException(
                     403,
                     f"{self.holder!r} may not read {asked!r}'s memory",
                 )
-            if asked and asked.lower() == SHARED:
-                return [SHARED]
-            return [self.holder, SHARED]
+            return [self.provenance, SHARED]
         if not self.may_act_for_another_mind:
             raise HTTPException(403, "this credential reaches no mind's memory")
         return [asked] if asked else None
@@ -198,6 +229,7 @@ def put_credential(
     username: str,
     token: str,
     role: str = MIND,
+    mind_id: str | None = None,
 ) -> dict:
     """Mint or replace one holder's credential.
 
@@ -228,19 +260,27 @@ def put_credential(
             f"that value is already held by {clash[0]!r}; "
             "a credential belongs to one holder"
         )
+    provenance = str(mind_id or "").strip() or None
     now = time.time()
     conn.execute(
         "INSERT INTO credentials "
-        "(holder, username, role, token_sha, created_at, revoked_at) "
-        "VALUES (?, ?, ?, ?, ?, NULL) "
+        "(holder, username, role, mind_id, token_sha, created_at, revoked_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, NULL) "
         "ON CONFLICT(holder) DO UPDATE SET "
         "username=excluded.username, role=excluded.role, "
+        "mind_id=excluded.mind_id, "
         "token_sha=excluded.token_sha, created_at=excluded.created_at, "
         "revoked_at=NULL",
-        (key, name, role, sha, now),
+        (key, name, role, provenance, sha, now),
     )
     conn.commit()
-    return {"holder": key, "username": name, "role": role, "created_at": now}
+    return {
+        "holder": key,
+        "username": name,
+        "role": role,
+        "mind_id": provenance,
+        "created_at": now,
+    }
 
 
 def revoke_credential(conn: sqlite3.Connection, holder: str) -> bool:
@@ -264,10 +304,10 @@ def credential_for_token(conn: sqlite3.Connection, token: str) -> Caller | None:
         return None
     presented = digest(token)
     rows = conn.execute(
-        "SELECT holder, username, role, token_sha FROM credentials "
+        "SELECT holder, username, role, mind_id, token_sha FROM credentials "
         "WHERE revoked_at IS NULL"
     ).fetchall()
-    for holder, username, role, token_sha in rows:
+    for holder, username, role, mind_id, token_sha in rows:
         # Constant-time, on bytes: `compare_digest` raises TypeError on a str
         # holding anything outside ASCII.
         if hmac.compare_digest(
@@ -277,6 +317,7 @@ def credential_for_token(conn: sqlite3.Connection, token: str) -> Caller | None:
                 holder=normalize_holder(holder),
                 username=normalize_holder(username),
                 role=str(role or PERSON),
+                mind_id=str(mind_id or ""),
             )
     return None
 
@@ -349,10 +390,4 @@ def require_holder(authorization: str = Header(default="")) -> Caller:
     caller = resolve_caller(conn, token)
     if not caller.recognised:
         raise HTTPException(401, "Invalid token")
-    return caller
-
-
-def require_admin(caller: Caller = None) -> Caller:  # pragma: no cover - thin
-    if caller is None or not caller.is_admin:
-        raise HTTPException(403, "Admin credential required")
     return caller

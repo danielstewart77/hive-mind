@@ -1,7 +1,7 @@
 """The sanctioned door to a mind's soul.
 
 Its own router rather than three more paths on the graph router, because
-the graph router carries ``require_bearer`` as a router-level dependency
+the graph router carries ``require_holder`` as a router-level dependency
 and a request presents exactly one ``Authorization`` header. Mounting these
 routes there would mean the soul token is rejected before it is read, or
 that the service token is accepted here — and the second of those is the

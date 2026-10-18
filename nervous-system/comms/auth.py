@@ -12,8 +12,8 @@ tokens:
   register/update/delete). Unset = admin endpoints return 503; we do
   not bypass admin.
 
-``require_bearer`` accepts EITHER token, so admin callers can hold a
-single token. ``require_admin_bearer`` accepts ONLY the admin token.
+The per-holder gate lives in `user_access.UserAccess`; what is left
+here is the admin credential.
 """
 
 from __future__ import annotations
@@ -29,22 +29,6 @@ log = logging.getLogger(__name__)
 # Endpoints with their own request-level auth (HMAC, signature, etc.) that
 # would be incorrectly gated by the global bearer middleware.
 BEARER_EXEMPT_PATHS = frozenset({"/sms/inbound"})
-
-
-def require_bearer(
-    request: Request, authorization: str = Header(default="")
-) -> None:
-    if request.url.path in BEARER_EXEMPT_PATHS:
-        return
-    expected = os.environ.get("COMMS_BEARER_TOKEN", "")
-    admin = os.environ.get("COMMS_ADMIN_BEARER_TOKEN", "")
-    if not expected:
-        return  # bypass — startup warning emitted at module load
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(401, "Missing or invalid Authorization header")
-    token = authorization[7:]
-    if token != expected and (not admin or token != admin):
-        raise HTTPException(401, "Invalid token")
 
 
 def require_rename_bearer(

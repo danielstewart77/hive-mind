@@ -33,6 +33,14 @@ from comms.sessions import SessionManager
 SEED = "<soul>who you are</soul>\n<recent>what just happened</recent>"
 
 
+#: These tests are about their own subject, not about authorization, so they
+#: present the admin credential. They used to clear every token instead and
+#: rely on the gateway serving open when unconfigured — a bypass that is gone,
+#: because a gateway that cannot establish who is calling must refuse rather
+#: than answer the LAN.
+GRILL_ADMIN = "admin-token"  # secret-guard: allow
+
+
 def _run(coro):
     return asyncio.run(coro)
 
@@ -324,7 +332,6 @@ def app_client(monkeypatch, tmp_path):
     db_path = tmp_path / "sessions.db"
     monkeypatch.setenv("BROKER_DB_PATH", str(tmp_path / "broker.db"))
     monkeypatch.setenv("SESSIONS_DB_PATH", str(db_path))
-    monkeypatch.delenv("COMMS_BEARER_TOKEN", raising=False)
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-token")
 
     import importlib
