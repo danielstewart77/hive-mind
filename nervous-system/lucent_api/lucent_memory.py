@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import time
+from collections.abc import Sequence
 from typing import Optional
 
 import numpy as np
@@ -123,6 +124,29 @@ def _nearest_neighbour(
     return best_id, best_score
 
 
+def _mind_filter(
+    mind_id: str | None, mind_ids: Sequence[str] | None
+) -> tuple[str, list]:
+    """The provenance clause for a read, as SQL and parameters.
+
+    `mind_ids` is a *set* of provenances the caller may see — a mind reads its
+    own plus the `shared` sentinel the hive-wide standing rules are written
+    under, so a single value could never express it. An empty list means "no
+    provenance at all" and deliberately yields a clause that matches nothing:
+    collapsing it to "no filter" is how a scoping check turns into a scoping
+    bypass.
+    """
+    if mind_ids is not None:
+        names = [str(m).strip() for m in mind_ids if str(m or "").strip()]
+        if not names:
+            return "1 = 0", []
+        placeholders = ",".join("?" for _ in names)
+        return f"mind_id IN ({placeholders})", names
+    if mind_id:
+        return "mind_id = ?", [mind_id]
+    return "", []
+
+
 def memory_store_direct(
     *,
     content: str,
@@ -130,7 +154,7 @@ def memory_store_direct(
     tier: str = "contextual",
     tags: str = "",
     source: str = "user",
-    mind_id: str = "ada",
+    mind_id: str,
     as_of: str | None = None,
     expires_at: str | None = None,
     recurring: bool | None = None,
@@ -232,7 +256,7 @@ def memory_store(
     tier: str = "contextual",
     tags: str = "",
     source: str = "user",
-    mind_id: str = "ada",
+    mind_id: str,
     as_of: str | None = None,
     expires_at: str | None = None,
     recurring: bool | None = None,
@@ -248,8 +272,11 @@ def memory_store(
             sources is allowed at this layer but discouraged.
         tags: Comma-separated tags for categorisation.
         source: Origin of the memory -- "user", "tool", "session", "self".
-        mind_id: Which agent this memory belongs to (default "ada"). Stored
-            as provenance only — reads do not filter by mind_id.
+        mind_id: Which mind this memory belongs to. Required, and no longer
+            defaulted: it used to default to "ada", which is how an
+            unattributed write ended up with somebody's name on it. Over HTTP
+            it is read off the presented credential and the body cannot set
+            it; in-process callers have to say.
         as_of: ISO datetime for when the fact was established.
         expires_at: ISO datetime for when a timed-event expires.
         recurring: Explicit recurring flag for timed-events.
@@ -282,6 +309,7 @@ def memory_list(
     offset: int = 0,
     limit: int = 25,
     mind_id: str | None = None,
+    mind_ids: Sequence[str] | None = None,
     tier: str | None = None,
     data_class: str | None = None,
 ) -> str:
@@ -316,9 +344,10 @@ def memory_list(
     if tier:
         where_parts.append("tier = ?")
         params.append(tier)
-    if mind_id:
-        where_parts.append("mind_id = ?")
-        params.append(mind_id)
+    clause, clause_params = _mind_filter(mind_id, mind_ids)
+    if clause:
+        where_parts.append(clause)
+        params.extend(clause_params)
     if data_class:
         where_parts.append("data_class = ?")
         params.append(data_class)
@@ -484,6 +513,7 @@ def memory_retrieve(
     query: str,
     k: int = 10,
     mind_id: str | None = None,
+    mind_ids: Sequence[str] | None = None,
     tag_filter: Optional[str] = None,
     data_class: Optional[str] = None,
     min_score: Optional[float] = None,
@@ -515,9 +545,10 @@ def memory_retrieve(
     if tag_filter:
         where_parts.append("tags LIKE ?")
         params.append(f"%{tag_filter}%")
-    if mind_id:
-        where_parts.append("mind_id = ?")
-        params.append(mind_id)
+    clause, clause_params = _mind_filter(mind_id, mind_ids)
+    if clause:
+        where_parts.append(clause)
+        params.extend(clause_params)
     where_clause = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
 
     try:
@@ -584,7 +615,11 @@ def memory_retrieve(
         return json.dumps({"error": str(e)})
 
 
-def query_decayed(limit: int = 20, mind_id: str | None = None) -> str:
+def query_decayed(
+    limit: int = 20,
+    mind_id: str | None = None,
+    mind_ids: Sequence[str] | None = None,
+) -> str:
     """Return top-N contextual entries scored by recency decay.
 
     Score: ``exp(-(now - created_at) / (DECAY_HALF_LIFE_DAYS * 86400))``.
@@ -606,9 +641,10 @@ def query_decayed(limit: int = 20, mind_id: str | None = None) -> str:
 
     where_parts = ["tier = 'contextual'"]
     params: list = []
-    if mind_id:
-        where_parts.append("mind_id = ?")
-        params.append(mind_id)
+    clause, clause_params = _mind_filter(mind_id, mind_ids)
+    if clause:
+        where_parts.append(clause)
+        params.extend(clause_params)
     where_clause = "WHERE " + " AND ".join(where_parts)
 
     try:
@@ -686,6 +722,7 @@ def memory_retrieve_hybrid(
     query: str,
     k: int = HYBRID_DEFAULT_K,
     mind_id: str | None = None,
+    mind_ids: Sequence[str] | None = None,
     min_score: float | None = None,
     debug: bool = True,
 ) -> str:
@@ -724,9 +761,10 @@ def memory_retrieve_hybrid(
         # ---- Step 1: pull every row's embedding (mind_id-aware) and score cosine ----
         where_parts: list[str] = []
         params: list = []
-        if mind_id:
-            where_parts.append("mind_id = ?")
-            params.append(mind_id)
+        clause, clause_params = _mind_filter(mind_id, mind_ids)
+        if clause:
+            where_parts.append(clause)
+            params.extend(clause_params)
         where_clause = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
 
         rows = conn.execute(

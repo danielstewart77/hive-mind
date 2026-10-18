@@ -72,7 +72,10 @@ def test_the_routes_that_took_only_the_admin_token_still_do():
         ("POST", "/sessions/{session_id}/pty-activity"),
         ("POST", "/sessions/{session_id}/pty-text"),
         ("GET", "/sessions/{session_id}/carry-forward"),
-        ("POST", "/broker/minds"),
+        # `POST /broker/minds` deliberately left this set: a mind registers
+        # itself, which is why every mind used to hold the admin token. It is
+        # machinery now, and `test_a_mind_registers_only_itself` guards the
+        # narrower rule the handler applies.
         ("PUT", "/broker/minds/{mind_id}/owner"),
         ("PUT", "/broker/minds/{name}"),
         ("DELETE", "/broker/minds/{name}"),
@@ -80,6 +83,16 @@ def test_the_routes_that_took_only_the_admin_token_still_do():
         ("DELETE", "/secrets/scopes"),
     ):
         assert session_access.TABLE.rules[spec].kind == user_access.ADMIN, spec
+
+
+def test_registering_a_mind_is_machinery_rather_than_admin_only():
+    """The one deliberate widening. A mind must be able to register itself —
+    registration is the only channel by which the gateway learns that mind's
+    session credential — and requiring the admin token for it is what put a
+    skeleton key on every box in the house."""
+    rule = session_access.TABLE.rules[("POST", "/broker/minds")]
+
+    assert rule.kind == user_access.MACHINE
 
 
 def test_a_route_added_with_no_classification_is_refused_to_a_non_admin(
@@ -101,9 +114,10 @@ def test_a_route_added_with_no_classification_is_refused_to_a_non_admin(
     )
     conn.executescript(user_access.CREDENTIALS_DDL)
     conn.execute(
-        "INSERT INTO user_credentials (username, token_sha, created_at) "
-        "VALUES ('sloan', ?, 0)",
-        (user_access.digest(SLOAN_TOKEN),),
+        "INSERT INTO credentials "
+        "(holder, username, role, token_sha, created_at) "
+        "VALUES ('arnold', 'sloan', ?, ?, 0)",
+        (user_access.MIND, user_access.digest(SLOAN_TOKEN)),
     )
     conn.commit()
     conn.close()

@@ -16,11 +16,14 @@ from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 
 from lucent_api.auth import require_admin_bearer
+from lucent_api.holder_access import Caller, require_holder
 from lucent_api.soul import soul_key_refusal
 
 log = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/graph", tags=["graph"])
+router = APIRouter(
+    dependencies=[Depends(require_holder)],
+    prefix="/graph", tags=["graph"])
 
 
 def _decode(payload: str) -> Any:
@@ -245,7 +248,9 @@ def search_person(
 
 
 @router.post("/upsert-backup")
-def graph_upsert_backup(body: UpsertBody) -> Any:
+def graph_upsert_backup(
+    body: UpsertBody, caller: Caller = Depends(require_holder)
+) -> Any:
     """Legacy un-validated upsert, kept as a fallback during the schema-enforcement cutover. Delete once `/graph/upsert` (now schema-validating) is proven stable.
 
     Add or update a graph node, optionally linking to another node.
@@ -288,7 +293,9 @@ def graph_upsert_backup(body: UpsertBody) -> Any:
         if not allowed:
             return {"upserted": False, "reason": orphan_msg}
 
-        disambig = check_disambiguation(body.name, body.entity_type, body.mind_id)
+        disambig = check_disambiguation(
+            body.name, body.entity_type, caller.mind_for_write(body.mind_id, required=False)
+        )
         if disambig.action == "disambiguate":
             send_disambiguation_message(body.name, disambig.existing_nodes)
             return {
@@ -306,7 +313,7 @@ def graph_upsert_backup(body: UpsertBody) -> Any:
                 target_name=body.target_name,
                 target_type=body.target_type,
                 edge_attrs=body.edge_attrs,
-                mind_id=body.mind_id,
+                mind_id=caller.mind_for_write(body.mind_id, required=False),
                 data_class=body.data_class,
                 as_of=body.as_of,
                 source=body.source,
@@ -323,7 +330,9 @@ def graph_upsert_backup(body: UpsertBody) -> Any:
 
 
 @router.post("/upsert")
-def graph_upsert(body: UpsertBody) -> Any:
+def graph_upsert(
+    body: UpsertBody, caller: Caller = Depends(require_holder)
+) -> Any:
     """Schema-validated upsert.
 
     Runs the schema validations from `schema_registry` BEFORE the existing
@@ -401,7 +410,9 @@ def graph_upsert(body: UpsertBody) -> Any:
         if not allowed:
             return {"ok": False, "code": "orphan_blocked", "detail": orphan_msg}
 
-        disambig = check_disambiguation(body.name, body.entity_type, body.mind_id)
+        disambig = check_disambiguation(
+            body.name, body.entity_type, caller.mind_for_write(body.mind_id, required=False)
+        )
         if disambig.action == "disambiguate":
             send_disambiguation_message(body.name, disambig.existing_nodes)
             return {
@@ -421,7 +432,7 @@ def graph_upsert(body: UpsertBody) -> Any:
                 target_name=body.target_name,
                 target_type=body.target_type,
                 edge_attrs=body.edge_attrs,
-                mind_id=body.mind_id,
+                mind_id=caller.mind_for_write(body.mind_id, required=False),
                 data_class=body.data_class,
                 as_of=body.as_of,
                 source=body.source,
@@ -533,7 +544,9 @@ def add_schema_edge(body: SchemaEdgeBody) -> dict:
 
 
 @router.post("/upsert-direct")
-def graph_upsert_direct_endpoint(body: UpsertBody) -> Any:
+def graph_upsert_direct_endpoint(
+    body: UpsertBody, caller: Caller = Depends(require_holder)
+) -> Any:
     """Bypass guards and write directly. Use only when the caller has
     already validated the entity (e.g., during ingestion replays)."""
     from lucent_api.lucent_graph import graph_upsert_direct
@@ -547,7 +560,7 @@ def graph_upsert_direct_endpoint(body: UpsertBody) -> Any:
             target_name=body.target_name,
             target_type=body.target_type,
             edge_attrs=body.edge_attrs,
-            mind_id=body.mind_id,
+            mind_id=caller.mind_for_write(body.mind_id, required=False),
             data_class=body.data_class,
             as_of=body.as_of,
             source=body.source,
@@ -564,7 +577,9 @@ def graph_upsert_direct_endpoint(body: UpsertBody) -> Any:
 
 
 @router.post("/nodes")
-def graph_nodes_create(body: NodeCreateBody) -> Any:
+def graph_nodes_create(
+    body: NodeCreateBody, caller: Caller = Depends(require_holder)
+) -> Any:
     """Create a new node. Rejects if a node with (name, type) already exists.
 
     For property edits on an existing node use /graph/properties/merge.
@@ -576,7 +591,7 @@ def graph_nodes_create(body: NodeCreateBody) -> Any:
             entity_type=body.entity_type,
             name=body.name,
             data_class=body.data_class,
-            mind_id=body.mind_id,
+            mind_id=caller.mind_for_write(body.mind_id, required=False),
             properties=body.properties,
             as_of=body.as_of,
             source=body.source,
@@ -584,11 +599,65 @@ def graph_nodes_create(body: NodeCreateBody) -> Any:
     )
 
 
+def _refuse_foreign_node(caller: Caller, entity_type: str, name: str) -> None:
+    """Refuse a property write onto a node that is not this holder's.
+
+    `/properties/merge` is the documented additive-update path — the one a
+    mind uses on its own node, because `/upsert` is a full replace of the
+    properties blob — so refusing it to minds outright would take a mind's own
+    record away from it. But these routes address a node by
+    `(entity_type, name)` with no provenance, and `nodes` is
+    `UNIQUE(mind_id, name)`, so without a check a mind reaches any other
+    mind's node of the same name.
+
+    An admin and a service are unrestricted. A mind has to own a node of that
+    name. A node that exists only under somebody else answers as an absent
+    one, so the graph cannot be enumerated by name.
+    """
+    if caller.may_act_for_another_mind:
+        return
+    from lucent_api import holder_access
+
+    row = holder_access.connection().execute(
+        "SELECT 1 FROM nodes WHERE type = ? AND name = ? AND mind_id = ? LIMIT 1",
+        (entity_type, name, caller.provenance),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(404, "Node not found")
+
+
+def _refuse_unscoped_deletion(caller: Caller) -> None:
+    """Refuse a hard delete by name to anything but an admin or a service.
+
+    Deleting addresses a node or an edge by `(entity_type, name)` with no
+    provenance, and the resolver cannot tell one mind's row of that name from
+    another's — so a mind deleting "Daniel" is a mind deleting whichever
+    "Daniel" the resolver reaches first. Property writes can be scoped by
+    checking the caller owns a node of that name; a delete cannot, because the
+    row it destroys is chosen inside the graph layer.
+
+    Teaching that layer a provenance for every mutation is the same work as
+    scoping graph *reads*, which is deliberately a separate story: the Person
+    nodes are shared family knowledge, so "per mind" is the wrong answer and
+    nobody has decided the right one. Until then this is narrower than the day
+    before this change and does not pretend the graph is scoped.
+    """
+    if not caller.may_act_for_another_mind:
+        raise HTTPException(
+            403,
+            "deleting from the shared graph by name needs an admin or a "
+            "service credential; graph deletes are not scoped per mind yet",
+        )
+
+
 @router.post("/properties/merge")
-def graph_properties_merge_endpoint(body: PropertiesMergeBody) -> Any:
+def graph_properties_merge_endpoint(
+    body: PropertiesMergeBody, caller: Caller = Depends(require_holder)
+) -> Any:
     """Merge properties into an existing node. Keys not in the request are
     preserved — the additive counterpart to the full-replace upsert.
     """
+    _refuse_foreign_node(caller, body.entity_type, body.name)
     from lucent_api.lucent_graph import graph_properties_merge
 
     return _decode(
@@ -603,7 +672,9 @@ def graph_properties_merge_endpoint(body: PropertiesMergeBody) -> Any:
 
 
 @router.post("/properties/remove")
-def graph_properties_remove_endpoint(body: PropertiesRemoveBody) -> Any:
+def graph_properties_remove_endpoint(
+    body: PropertiesRemoveBody, caller: Caller = Depends(require_holder)
+) -> Any:
     """Remove named keys from an existing node's properties blob.
 
     Protected metadata (name, type, created_at, updated_at, as_of,
@@ -611,6 +682,7 @@ def graph_properties_remove_endpoint(body: PropertiesRemoveBody) -> Any:
     (`data_class`, `tier`, `source`) ARE removable — they leak onto KG
     nodes from the shared write pipeline and the tidy walk strips them.
     """
+    _refuse_foreign_node(caller, body.entity_type, body.name)
     from lucent_api.lucent_graph import graph_properties_remove
 
     return _decode(
@@ -623,7 +695,9 @@ def graph_properties_remove_endpoint(body: PropertiesRemoveBody) -> Any:
 
 
 @router.post("/edges")
-def graph_edges_create(body: EdgeBody) -> Any:
+def graph_edges_create(
+    body: EdgeBody, caller: Caller = Depends(require_holder)
+) -> Any:
     """Create an edge between two existing nodes. Neither endpoint's
     properties are touched. Both nodes must already exist.
     """
@@ -638,7 +712,7 @@ def graph_edges_create(body: EdgeBody) -> Any:
             relation=body.relation,
             edge_attrs=body.edge_attrs,
             data_class=body.data_class,
-            mind_id=body.mind_id,
+            mind_id=caller.mind_for_write(body.mind_id, required=False),
             as_of=body.as_of,
             source=body.source,
         )
@@ -646,8 +720,11 @@ def graph_edges_create(body: EdgeBody) -> Any:
 
 
 @router.delete("/edges")
-def graph_edges_delete(body: EdgeBody) -> Any:
+def graph_edges_delete(
+    body: EdgeBody, caller: Caller = Depends(require_holder)
+) -> Any:
     """Delete edge(s) matching the (source, relation, target) tuple."""
+    _refuse_unscoped_deletion(caller)
     from lucent_api.lucent_graph import graph_edge_delete
 
     return _decode(
@@ -662,11 +739,14 @@ def graph_edges_delete(body: EdgeBody) -> Any:
 
 
 @router.delete("/nodes")
-def graph_nodes_delete(body: NodeDeleteBody) -> Any:
+def graph_nodes_delete(
+    body: NodeDeleteBody, caller: Caller = Depends(require_holder)
+) -> Any:
     """Hard-delete a node and every edge touching it. Use for true
     duplicates or write-mistakes; for facts that became stale prefer
     setting ``superseded = true`` via /properties/merge.
     """
+    _refuse_unscoped_deletion(caller)
     from lucent_api.lucent_graph import graph_node_delete
 
     return _decode(
@@ -678,15 +758,19 @@ def graph_nodes_delete(body: NodeDeleteBody) -> Any:
 
 
 @router.post("/persons/audit")
-def audit_persons(body: AuditPersonsBody) -> Any:
+def audit_persons(
+    body: AuditPersonsBody, caller: Caller = Depends(require_holder)
+) -> Any:
     """Audit Person nodes for missing first/last name properties."""
     from lucent_api.lucent_graph import audit_person_nodes
 
-    return _decode(audit_person_nodes(mind_id=body.mind_id))
+    return _decode(audit_person_nodes(mind_id=caller.mind_for_write(body.mind_id, required=False)))
 
 
 @router.post("/persons/update-names")
-def update_person_names(body: UpdatePersonNamesBody) -> Any:
+def update_person_names(
+    body: UpdatePersonNamesBody, caller: Caller = Depends(require_holder)
+) -> Any:
     """Backfill first_name/last_name on a Person node."""
     from lucent_api.lucent_graph import update_person_names as _update_names
 
@@ -695,7 +779,7 @@ def update_person_names(body: UpdatePersonNamesBody) -> Any:
             name=body.name,
             first_name=body.first_name,
             last_name=body.last_name,
-            mind_id=body.mind_id,
+            mind_id=caller.mind_for_write(body.mind_id, required=False),
         )
     )
 

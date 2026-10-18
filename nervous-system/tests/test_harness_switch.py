@@ -64,6 +64,14 @@ MODELS = {
 _OPEN: list[SessionManager] = []
 
 
+#: These tests are about their own subject, not about authorization, so they
+#: present the admin credential. They used to clear every token instead and
+#: rely on the gateway serving open when unconfigured — a bypass that is gone,
+#: because a gateway that cannot establish who is calling must refuse rather
+#: than answer the LAN.
+GRILL_ADMIN = "admin-bearer"  # secret-guard: allow
+
+
 def _run(coro):
     async def guarded():
         # A scenario that fails part-way would otherwise leave its sqlite
@@ -355,13 +363,12 @@ def test_the_migration_fills_rows_from_before_the_column_from_the_broker():
 def app_client(monkeypatch, tmp_path):
     monkeypatch.setenv("BROKER_DB_PATH", str(tmp_path / "broker.db"))
     monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "sessions.db"))
-    monkeypatch.delenv("COMMS_BEARER_TOKEN", raising=False)
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-bearer")
 
     from comms import server as server_module
 
     importlib.reload(server_module)
-    with TestClient(server_module.app) as client:
+    with TestClient(server_module.app, headers={"Authorization": f"Bearer {GRILL_ADMIN}"}) as client:
         mgr = server_module.session_mgr
         _run(broker.register_mind(
             mgr.broker_db, mind_id=MIND, name="ada", gateway_url=MIND_URL,

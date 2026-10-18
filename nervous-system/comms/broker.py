@@ -20,6 +20,23 @@ log = logging.getLogger("hive-mind.broker")
 # ---------------------------------------------------------------------------
 # Schema
 # ---------------------------------------------------------------------------
+MINDS_DDL = """
+CREATE TABLE IF NOT EXISTS minds (
+    mind_id        TEXT NOT NULL UNIQUE,
+    name           TEXT PRIMARY KEY,
+    gateway_url    TEXT NOT NULL,
+    model          TEXT NOT NULL,
+    harness        TEXT NOT NULL,
+    registered_at  REAL NOT NULL,
+    last_seen      REAL NOT NULL,
+    session_token  TEXT,
+    voice          TEXT,
+    voice_engine   TEXT,
+    owner          TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_minds_mind_id ON minds(mind_id);
+"""
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS conversations (
     id         TEXT PRIMARY KEY,
