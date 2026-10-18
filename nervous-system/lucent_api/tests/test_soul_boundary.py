@@ -100,9 +100,13 @@ class SoulBoundaryTests(unittest.TestCase):
         from lucent_api import holder_access
 
         holder_access.init_credentials(self.conn)
+        # Minted under the readable name, with the UUID its graph rows
+        # actually carry as the provenance — which is the shape every mind on
+        # this hive has, because every hook sends `$MIND_ID`.
         holder_access.put_credential(
             self.conn, "skippy", "daniel", SERVICE_TOKEN,
             role=holder_access.MIND,
+            mind_id="14cb820b-4a42-4f04-a593-54f532fd1d2f",
         )
 
         # Three modules resolve the connection independently.

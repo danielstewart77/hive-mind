@@ -17,17 +17,35 @@ import os
 import requests
 
 LUCENT_URL = os.environ.get("LUCENT_URL_SELF", "http://127.0.0.1:8425")
-LUCENT_BEARER = os.environ.get("LUCENT_BEARER_TOKEN", "")
-_AUTH_HEADERS = {"Authorization": f"Bearer {LUCENT_BEARER}"} if LUCENT_BEARER else {}
+def _auth_headers() -> dict:
+    """Read per call, not at import.
+
+    A credential read once at import needs a process restart to pick up a
+    re-mint, which contradicts the promise the store makes — revocation lands
+    on the next request, nothing to restart.
+    """
+    token = os.environ.get("LUCENT_BEARER_TOKEN", "")
+    return {"Authorization": f"Bearer {token}"} if token else {}
 DATA_CLASS = "feedback"
 TOP_K = 3
 MIN_SCORE = 0.65
 REQUEST_TIMEOUT = 2  # seconds — never block the turn
 
 
-def format_injection(prompt: str) -> str:
-    """Return a <behavior-rules> block for the given prompt, or "" when nothing applies."""
+def format_injection(prompt: str, mind_id: str = "") -> str:
+    """Return a <behavior-rules> block for the prompt, or "" when none applies.
+
+    `mind_id` names the mind this prompt is being composed for, and is not
+    optional in effect: comms holds a `service` credential, so a retrieve that
+    names no mind reaches *every* mind's feedback memories, and this is the
+    one call in the hive that fires on every single turn. Unnamed, it returns
+    nothing rather than quietly reading the union — the rules it injects are
+    behavioural, and injecting another person's into a reply is worse than
+    injecting none.
+    """
     if not prompt or not prompt.strip():
+        return ""
+    if not str(mind_id or "").strip():
         return ""
     try:
         # Body, never a query string: the prompt is a whole user turn and a
@@ -39,8 +57,9 @@ def format_injection(prompt: str) -> str:
                 "data_class": DATA_CLASS,
                 "k": TOP_K,
                 "min_score": MIN_SCORE,
+                "mind_id": mind_id,
             },
-            headers=_AUTH_HEADERS,
+            headers=_auth_headers(),
             timeout=REQUEST_TIMEOUT,
         )
         resp.raise_for_status()

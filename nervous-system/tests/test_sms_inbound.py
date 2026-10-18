@@ -18,6 +18,14 @@ from comms.sms_inbound import (
 SECRET = "test-secret-32-bytes-or-whatever"
 
 
+#: These tests are about their own subject, not about authorization, so they
+#: present the admin credential. They used to clear every token instead and
+#: rely on the gateway serving open when unconfigured — a bypass that is gone,
+#: because a gateway that cannot establish who is calling must refuse rather
+#: than answer the LAN.
+GRILL_ADMIN = "admin-credential-for-tests"  # secret-guard: allow
+
+
 def _sign(body: bytes, timestamp: str, secret: str = SECRET) -> str:
     mac = hmac.new(secret.encode(), digestmod=hashlib.sha256)
     mac.update(body)
@@ -184,14 +192,14 @@ def test_build_broker_message_id_falls_back_to_uuid_when_missing() -> None:
 def _boot_client(monkeypatch: pytest.MonkeyPatch, tmp_path):
     monkeypatch.setenv("BROKER_DB_PATH", str(tmp_path / "broker.db"))
     monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "sessions.db"))
-    monkeypatch.delenv("COMMS_BEARER_TOKEN", raising=False)
+    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", GRILL_ADMIN)
     import importlib
 
     from comms import server as server_module
     from fastapi.testclient import TestClient
 
     importlib.reload(server_module)
-    client = TestClient(server_module.app)
+    client = TestClient(server_module.app, headers={"Authorization": f"Bearer {GRILL_ADMIN}"})
     client.__enter__()  # run lifespan
     resp = client.put("/sms/inbound/enabled", json={"enabled": True})
     assert resp.status_code == 200, resp.text

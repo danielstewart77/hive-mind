@@ -132,6 +132,9 @@ def gateway(tmp_path, monkeypatch):
                 return row
         return None
 
+    async def get_late_turns(_client_type, _client_ref, _since):
+        return {"turns": []}
+
     async def kill_session(session_id):
         killed.append(session_id)
         return {"killed": session_id}
@@ -149,6 +152,7 @@ def gateway(tmp_path, monkeypatch):
         ("create_session", create_session),
         ("record_turn", record_turn),
         ("get_active_session", get_active_session),
+        ("get_late_turns", get_late_turns),
         ("kill_session", kill_session),
         ("_get_row", _get_row),
     ):
@@ -293,23 +297,75 @@ def test_a_persons_credential_cannot_reach_the_turn_ledger_at_all(gateway):
     assert spy["recorded"] == []
 
 
-def test_a_minds_own_machinery_records_turns_for_any_conversation(gateway):
-    """A mind's rotation hook presents that mind's own credential, which is
-    what replaced the one shared value every mind used to hold. Refusing a
-    mind's credential here takes its rotation ledger down silently: terminal
-    turns never reach it, `last_active` stops being bumped, and the
-    stale-session sweep eventually suspends a terminal in daily use. A mind
-    whose owner is not the primary user has to work too, which is why this
-    exercises Arnold's as well."""
+def test_a_mind_records_turns_for_its_own_conversations(gateway):
+    """A mind's rotation hook presents that mind's own credential. Refusing it
+    here takes that mind's rotation ledger down silently: terminal turns never
+    reach it, `last_active` stops being bumped, and the stale-session sweep
+    eventually suspends a terminal in daily use. An admin reaches every
+    conversation, because comms reports on every mind's behalf."""
     client, spy = gateway
 
-    for token in (SKIPPY_MIND_TOKEN, ARNOLD_MIND_TOKEN, ADMIN_TOKEN):
+    for token in (SKIPPY_MIND_TOKEN, ADMIN_TOKEN):
         answer = client.post(
             "/sessions/record-turn", json=_turn_body("111"), headers=_auth(token)
         )
         assert answer.json() == {"ok": True}, token
 
-    assert [t["client_ref"] for t in spy["recorded"]] == ["111", "111", "111"]
+    assert [t["client_ref"] for t in spy["recorded"]] == ["111", "111"]
+
+
+def test_a_mind_cannot_record_a_turn_on_another_minds_conversation(gateway):
+    """The machinery routes are addressed by client reference, so the gate has
+    no conversation to scope and `MACHINE` admits every mind. Without the
+    narrower check any of the twelve could append a `role: "user"` turn to
+    somebody else's reference, where `get_late_turns` folds it into their next
+    conversation as something they typed. Reference "111" is Daniel's."""
+    client, spy = gateway
+
+    answer = client.post(
+        "/sessions/record-turn",
+        json=_turn_body("111"),
+        headers=_auth(ARNOLD_MIND_TOKEN),
+    )
+
+    assert answer.status_code == 404, answer.text
+    assert spy["recorded"] == []
+
+
+def test_a_mind_cannot_arm_a_rotation_on_another_minds_conversation(gateway):
+    client, _ = gateway
+
+    answer = client.post(
+        "/sessions/arm-rotation",
+        json={"client_type": "telegram", "client_ref": "111"},
+        headers=_auth(ARNOLD_MIND_TOKEN),
+    )
+
+    assert answer.status_code == 404, answer.text
+
+
+def test_a_mind_cannot_read_another_minds_late_turns(gateway):
+    client, _ = gateway
+
+    answer = client.get(
+        "/sessions/late-turns",
+        params={"client_type": "telegram", "client_ref": "111", "since": 0},
+        headers=_auth(ARNOLD_MIND_TOKEN),
+    )
+
+    assert answer.status_code == 404, answer.text
+
+
+def test_a_mind_reads_its_own_late_turns(gateway):
+    client, _ = gateway
+
+    answer = client.get(
+        "/sessions/late-turns",
+        params={"client_type": "telegram", "client_ref": "222", "since": 0},
+        headers=_auth(ARNOLD_MIND_TOKEN),
+    )
+
+    assert answer.status_code == 200, answer.text
 
 
 # --- the command surface --------------------------------------------------
@@ -558,6 +614,70 @@ def test_an_admin_registers_any_mind(gateway):
     )
 
     assert answer.status_code == 200, answer.text
+
+
+# --- the credential-issuing routes ----------------------------------------
+
+
+def _mint_body() -> dict:
+    return {
+        "username": "intruder",
+        "token": "a-value-nobody-granted",
+        "role": "mind",
+    }
+
+
+def test_a_minds_own_credential_cannot_mint_a_credential(gateway):
+    """A route that issues credentials must not answer to one it issued. Both
+    the decorator and the route's admin classification enforce this, and
+    neither was driven — so the two could be removed together unnoticed."""
+    client, _ = gateway
+
+    answer = client.put(
+        "/credentials/intruder",
+        json=_mint_body(),
+        headers=_auth(SKIPPY_MIND_TOKEN),
+    )
+
+    assert answer.status_code == 401, answer.text
+
+
+def test_a_persons_credential_cannot_mint_a_credential(gateway):
+    client, _ = gateway
+
+    answer = client.put(
+        "/credentials/intruder", json=_mint_body(), headers=_auth(SLOAN_TOKEN)
+    )
+
+    assert answer.status_code == 401, answer.text
+
+
+def test_a_minds_own_credential_cannot_revoke_or_list(gateway):
+    client, _ = gateway
+
+    revoked = client.delete(
+        "/credentials/skippy", headers=_auth(SKIPPY_MIND_TOKEN)
+    )
+    listed = client.get("/credentials", headers=_auth(SKIPPY_MIND_TOKEN))
+
+    assert revoked.status_code == 401, revoked.text
+    assert listed.status_code == 401, listed.text
+
+
+def test_the_admin_credential_mints_and_the_listing_carries_no_value(gateway):
+    client, _ = gateway
+
+    minted = client.put(
+        "/credentials/intruder", json=_mint_body(), headers=_auth(ADMIN_TOKEN)
+    )
+    listed = client.get("/credentials", headers=_auth(ADMIN_TOKEN))
+
+    assert minted.status_code == 200, minted.text
+    assert listed.status_code == 200, listed.text
+    # An operator does not need the value; they need to know whether the
+    # holder has one that works.
+    assert "a-value-nobody-granted" not in listed.text
+    assert "token_sha" not in listed.text
 
 
 # --- health, trailing slashes and unknown paths ---------------------------

@@ -198,6 +198,11 @@ ROLES = (MIND, SERVICE, PERSON)
 #: Roles that may reach the routes the mind machinery drives.
 MACHINE_ROLES = (MIND, SERVICE)
 
+#: Not a holder. Lucent files hive-wide standing rules under this provenance,
+#: and comms refuses to mint it for the same reason lucent does — so the two
+#: services cannot disagree about whether it names a party.
+SHARED_PROVENANCE = "shared"
+
 CREDENTIALS_DDL = """
 CREATE TABLE IF NOT EXISTS credentials (
     -- NOT NULL is load-bearing: SQLite permits NULL in a non-INTEGER PRIMARY
@@ -306,6 +311,11 @@ async def put_credential(
         raise ValueError("a credential needs a value")
     if role is None:
         role = MIND if await _is_registered_mind(db, key) else PERSON
+    if key == SHARED_PROVENANCE:
+        raise ValueError(
+            "'shared' is the provenance hive-wide rules are written under, "
+            "not a holder"
+        )
     if role not in ROLES:
         raise ValueError(f"unknown credential role: {role!r}")
     sha = digest(token)
@@ -565,6 +575,47 @@ async def owns_mind(
         # who on a hive with one operator is whose it was.
         return caller.username == primary_user()
     return owner == caller.username
+
+
+async def holder_keys(
+    db: aiosqlite.Connection, caller: Caller
+) -> set[str] | None:
+    """Every key naming the one mind this caller *is*, or None for "any".
+
+    `owns_mind` answers a question about a person, which is the right question
+    for a conversation: a surface bot serves several of its owner's minds and
+    must reach all of them. The machinery routes ask something narrower. They
+    are addressed by client reference rather than by conversation, so there is
+    no conversation for an owner check to scope — and with twelve minds on
+    this hive owned by three people, an owner check there lets any one of
+    Daniel's ten minds append a turn to any other's ledger, where
+    `get_late_turns` folds it into the next conversation as something he
+    typed.
+
+    So a `mind` holder is held to its own mind and nothing else. None means no
+    restriction, which is the admin credential and a `service` holder — comms
+    itself drives these routes on every mind's behalf.
+    """
+    if caller.sees_everything() or caller.role != MIND:
+        return None
+    keys = {caller.holder}
+    rows = await db.execute(
+        "SELECT mind_id, name FROM minds WHERE mind_id = ? OR lower(name) = ?",
+        (caller.holder, caller.holder),
+    )
+    row = await rows.fetchone()
+    if row:
+        for key in (str(row[0] or ""), normalize_username(row[1])):
+            if key:
+                keys.add(key)
+    return keys
+
+
+def mind_is_named_in(keys: set[str] | None, mind_id: object) -> bool:
+    """Whether a row's mind is one of `keys`, with None meaning "any"."""
+    if keys is None:
+        return True
+    return _named_in(mind_id, keys)
 
 
 async def all_mind_keys(db: aiosqlite.Connection) -> set[str]:

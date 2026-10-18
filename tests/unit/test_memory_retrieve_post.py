@@ -218,14 +218,37 @@ def test_r5_gateway_retrieval_puts_the_prompt_in_the_body(lucent_stub, monkeypat
 
     monkeypatch.setattr(contextual_retrieval, "LUCENT_URL", url)
     prompt = "Sloan is my son " * 600  # the size that broke the URL
-    out = contextual_retrieval.format_injection(prompt)
+    out = contextual_retrieval.format_injection(prompt, mind_id="skippy")
 
     assert captured, "the gateway never called lucent"
     req = captured[-1]
     assert req["method"] == "POST"
     assert "?" not in req["path"], f"the prompt went into the address: {req['path'][:120]}"
-    assert json.loads(req["body"])["query"] == prompt
+    body = json.loads(req["body"])
+    assert body["query"] == prompt
+    # Comms holds a service credential, so an unnamed mind would retrieve
+    # across every mind's feedback memories.
+    assert body["mind_id"] == "skippy"
     assert "never guess a pronoun" in out
+
+
+def test_r5_gateway_retrieval_naming_no_mind_reads_nothing(lucent_stub, monkeypatch):
+    """This is the one call in the hive that fires on every single turn, and
+    comms' own credential is a service — so an unnamed mind reaches every
+    mind's behavioural rules. It returns nothing instead: injecting another
+    person's rules into a reply is worse than injecting none."""
+    url, captured = lucent_stub
+    monkeypatch.setenv("LUCENT_URL", url)
+    sys.modules.pop("contextual_retrieval", None)
+    sys.path.insert(0, os.path.abspath(os.path.join(NS, "comms")))
+    import contextual_retrieval
+
+    monkeypatch.setattr(contextual_retrieval, "LUCENT_URL", url)
+
+    out = contextual_retrieval.format_injection("Sloan is my son")
+
+    assert out == ""
+    assert captured == []
 
 
 # ---- R2's ceiling: refused loudly rather than held in a shared embedder ----
