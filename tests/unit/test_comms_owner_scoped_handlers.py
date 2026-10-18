@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 NS = os.path.join(os.path.dirname(__file__), "..", "..", "nervous-system")
 sys.path.insert(0, os.path.abspath(NS))
 
+from comms import broker
 from comms import user_access as ua  # noqa: E402
 
 SHARED = "shared-token-for-tests"  # secret-guard: allow
@@ -60,9 +61,11 @@ def gateway(tmp_path, monkeypatch):
 
     path = tmp_path / "broker.db"
     conn = sqlite3.connect(path)
-    conn.executescript(
-        "CREATE TABLE minds (mind_id TEXT PRIMARY KEY, name TEXT, owner TEXT);"
-    )
+    # The broker's own schema, not a reduced copy: `register_mind` writes
+    # `registered_at` and `last_seen`, so a three-column stand-in made the
+    # self-registration routes answer 500 and would have let a test assert a
+    # refusal that was really a missing column.
+    conn.executescript(broker.MINDS_DDL)
     conn.executescript(ua.CREDENTIALS_DDL)
     # `/sms/inbound` reads its own enable flag out of this table before it
     # does anything else, so the table has to be here for that route to be
@@ -76,7 +79,10 @@ def gateway(tmp_path, monkeypatch):
         "VALUES ('sms_inbound_enabled', 'true', 0)"
     )
     conn.executemany(
-        "INSERT INTO minds (mind_id, name, owner) VALUES (?, ?, ?)",
+        "INSERT INTO minds (mind_id, name, owner, gateway_url, model, "
+        "harness, registered_at, last_seen) "
+        "VALUES (?, ?, ?, 'http://127.0.0.1:8433', 'claude-opus-5', "
+        "'claude', 0, 0)",
         [(DANIEL_MIND, "skippy", "daniel"), (SLOAN_MIND, "arnold", "sloan")],
     )
     conn.executemany(
@@ -486,6 +492,72 @@ def test_a_mind_bound_command_on_the_callers_own_mind_proceeds(gateway):
     )
 
     assert [kw["mind_id"] for kw in spy["created"]] == [SLOAN_MIND]
+
+
+# --- a mind registering itself --------------------------------------------
+
+
+def _registration(name: str, mind_id: str) -> dict:
+    return {
+        "mind_id": mind_id,
+        "name": name,
+        "gateway_url": "http://127.0.0.1:8433",
+        "model": "claude-opus-5",
+        "harness": "claude",
+    }
+
+
+def test_a_mind_registers_itself_with_its_own_credential(gateway):
+    """Registration is the only channel by which the gateway learns a mind's
+    session credential, so requiring the admin token for it is what put a
+    skeleton key in every mind's environment, the kids' boxes included."""
+    client, _ = gateway
+
+    answer = client.post(
+        "/broker/minds",
+        json=_registration("skippy", DANIEL_MIND),
+        headers=_auth(SKIPPY_MIND_TOKEN),
+    )
+
+    assert answer.status_code == 200, answer.text
+
+
+def test_a_mind_may_not_register_another_mind(gateway):
+    """Otherwise a compromised mind repoints somebody else's gateway URL at a
+    machine it controls, and every dispatch for that mind follows."""
+    client, _ = gateway
+
+    answer = client.post(
+        "/broker/minds",
+        json=_registration("arnold", SLOAN_MIND),
+        headers=_auth(SKIPPY_MIND_TOKEN),
+    )
+
+    assert answer.status_code == 403, answer.text
+
+
+def test_a_persons_credential_cannot_register_any_mind(gateway):
+    client, _ = gateway
+
+    answer = client.post(
+        "/broker/minds",
+        json=_registration("skippy", DANIEL_MIND),
+        headers=_auth(SLOAN_TOKEN),
+    )
+
+    assert answer.status_code == 401, answer.text
+
+
+def test_an_admin_registers_any_mind(gateway):
+    client, _ = gateway
+
+    answer = client.post(
+        "/broker/minds",
+        json=_registration("arnold", SLOAN_MIND),
+        headers=_auth(ADMIN_TOKEN),
+    )
+
+    assert answer.status_code == 200, answer.text
 
 
 # --- health, trailing slashes and unknown paths ---------------------------

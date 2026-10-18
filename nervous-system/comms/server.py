@@ -1558,9 +1558,39 @@ async def broker_get_minds():
     return await broker.get_registered_minds(db)
 
 
-@app.post("/broker/minds", dependencies=[Depends(require_admin_bearer)])
-async def broker_register_mind(body: RegisterMindRequest):
-    """Register (or update) a mind in the broker database. Admin-only."""
+@app.post("/broker/minds")
+async def broker_register_mind(request: Request, body: RegisterMindRequest):
+    """Register (or update) a mind in the broker database.
+
+    Admin, or a mind registering **itself**. The second case is why every
+    mind on the hive had to hold the admin token: registration is the only
+    channel by which the gateway learns a mind's session credential, so a
+    mind that could not register was a mind nothing could reach — and the
+    admin token is a skeleton key, so requiring it here meant handing one to
+    every box in the house, the kids' included.
+
+    A mind's own credential registers its own row and nothing else. The
+    holder has to match the `mind_id` or the `name` being written, so a
+    compromised mind can refresh its own gateway URL and session token but
+    cannot repoint another mind's at a machine it controls. `owner` is not
+    settable this way either — `broker.register_mind` refuses a change of
+    owner, and moving a mind between people stays admin-only on its own
+    route.
+    """
+    caller = _caller(request)
+    if not caller.sees_everything():
+        if caller.role != user_access.MIND:
+            raise HTTPException(401, "Registration needs an admin or a mind's own credential")
+        claimed = {
+            str(body.mind_id or "").strip().lower(),
+            user_access.normalize_username(body.name),
+        }
+        if caller.holder not in claimed:
+            raise HTTPException(
+                403,
+                f"{caller.holder!r} may only register itself, not "
+                f"{body.name or body.mind_id!r}",
+            )
     db = app.state.broker_db
     try:
         await broker.register_mind(

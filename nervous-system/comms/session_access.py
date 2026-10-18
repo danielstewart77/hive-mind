@@ -89,8 +89,10 @@ TABLE.add(
 
 # --- The machinery each mind runs -----------------------------------------
 # Addressed by `(client_type, client_ref)` or by mind, not by a conversation
-# the caller could own. Unchanged by this story; a separate one gives each
-# mind its own credential, at which point these become scopeable.
+# the caller could own, so there is nothing here for an owner check to scope.
+# A *mind's* own credential reaches these and a *person's* does not: every
+# rotation hook, context report and turn-ledger write on the hive comes
+# through here, and the one shared value they all used to present is gone.
 TABLE.add(
     Rule(MACHINE),
     "GET /health",
@@ -98,6 +100,11 @@ TABLE.add(
     "POST /sessions/{session_id}/context",
     "GET /sessions/late-turns",
     "POST /sessions/arm-rotation",
+    # A mind registering itself, which is why every mind used to need the
+    # admin token. `broker_register_mind` refuses a holder that is not the
+    # mind being written, so this class admits the machinery and the handler
+    # decides which row it may touch.
+    "POST /broker/minds",
     "POST /sessions/fire-rotation",
     "POST /sessions/record-turn",
     "POST /sessions/{session_id}/harness-state",
@@ -123,7 +130,6 @@ TABLE.add(
     "POST /sessions/{session_id}/pty-activity",
     "POST /sessions/{session_id}/pty-text",
     "GET /sessions/{session_id}/carry-forward",
-    "POST /broker/minds",
     "PUT /broker/minds/{mind_id}/owner",
     "PUT /broker/minds/{name}",
     "DELETE /broker/minds/{name}",
