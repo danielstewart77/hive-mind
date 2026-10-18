@@ -3,9 +3,13 @@
 Naming used to live behind a token that renamed a conversation and did nothing
 else — chosen deliberately, because guarding the smallest capability in the
 system with the largest key in it is backwards. Moving names onto the session
-row must not quietly promote that capability to `COMMS_BEARER_TOKEN`, which
-every surface bot and every mind container on this hive holds, including the
-ones on the kids' machines.
+row must not quietly promote that capability to a credential that reaches
+everything, so the rename token stays its own and is not accepted anywhere
+else, and nothing else is accepted for a rename.
+
+The caller that stands in for "a credential that reaches everything" is now
+the admin one: the shared service token every surface bot and every mind
+container used to hold is no longer a credential at all.
 """
 from __future__ import annotations
 
@@ -14,9 +18,11 @@ import sqlite3
 import time
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-SERVICE = {"Authorization": "Bearer service-bearer"}
+ADMIN = "admin-bearer"  # secret-guard: allow
+REACHES_EVERYTHING = {"Authorization": f"Bearer {ADMIN}"}
 
 
 def _seed_live_session(db_path: str, session_id: str = "sess-1") -> str:
@@ -46,8 +52,7 @@ def client(monkeypatch, tmp_path):
     db = str(tmp_path / "sessions.db")
     monkeypatch.setenv("BROKER_DB_PATH", str(tmp_path / "broker.db"))
     monkeypatch.setenv("SESSIONS_DB_PATH", db)
-    monkeypatch.setenv("COMMS_BEARER_TOKEN", "service-bearer")
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-bearer")
+    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", ADMIN)
     monkeypatch.setenv("COMMS_RENAME_TOKEN", "rename-only")
 
     from comms import server as server_module
@@ -58,14 +63,21 @@ def client(monkeypatch, tmp_path):
         yield test_client
 
 
-def test_the_service_token_alone_cannot_rename_a_conversation(client) -> None:
-    """R8: the key every bot and every kid's box holds gains nothing here.
+def test_a_minds_own_credential_alone_cannot_rename_a_conversation(
+    client, monkeypatch
+) -> None:
+    """R8: the credential a mind actually runs on gains nothing here.
 
-    Breaks the moment the route is guarded only by the global bearer gate,
-    which is what moving the write onto comms does by default.
+    This used to be stated about the one shared value every bot and every
+    kid's box held; that value is no longer a credential at all, so the test
+    presents what replaced it. Breaks the moment the route is guarded only by
+    the global bearer gate, which is what moving the write onto comms does by
+    default.
     """
     response = client.put(
-        "/sessions/sess-1/name", headers=SERVICE, json={"name": "Health"}
+        "/sessions/sess-1/name",
+        headers={"Authorization": "Bearer a-minds-own-credential"},  # secret-guard: allow
+        json={"name": "Health"},
     )
     assert response.status_code == 401
 
@@ -74,7 +86,7 @@ def test_the_rename_token_renames_the_conversation(client) -> None:
     """R8: and the small credential does open the one thing it is for."""
     response = client.put(
         "/sessions/sess-1/name",
-        headers={**SERVICE, "X-Rename-Token": "rename-only"},
+        headers={**REACHES_EVERYTHING, "X-Rename-Token": "rename-only"},
         json={"name": "Health"},
     )
     assert response.status_code == 200
@@ -90,32 +102,32 @@ def test_the_rename_token_opens_nothing_else(client) -> None:
     assert response.status_code == 401
 
 
-def test_renaming_refuses_when_no_rename_credential_is_configured(
-    monkeypatch, tmp_path
-) -> None:
-    """R8: unset refuses, where the service gate deliberately bypasses.
+def test_renaming_refuses_when_no_rename_credential_is_configured() -> None:
+    """R8: unset refuses, where the service gate deliberately bypassed.
 
-    The service token bypasses when unset so a fresh container can boot before
-    its secrets are wired. The same shape here would mean one missing variable
-    lets anything on the LAN rename any mind's conversations. Breaks if this
-    guard is written like that one.
+    The retired service gate bypassed when its token was unset, so a fresh
+    container could boot before its secrets were wired. The same shape here
+    would mean a deployment missing one variable lets anything on the LAN
+    rename any mind's conversations.
+
+    Driven against the dependency rather than through a request, because the
+    one caller that reaches this branch is a non-admin: an admin is answered
+    before it whatever else is configured, which is deliberate — the console
+    and the operator need a way to fix a name without a third secret.
     """
-    db = str(tmp_path / "sessions.db")
-    monkeypatch.setenv("BROKER_DB_PATH", str(tmp_path / "broker.db"))
-    monkeypatch.setenv("SESSIONS_DB_PATH", db)
-    monkeypatch.setenv("COMMS_BEARER_TOKEN", "service-bearer")
-    monkeypatch.delenv("COMMS_ADMIN_BEARER_TOKEN", raising=False)
-    monkeypatch.delenv("COMMS_RENAME_TOKEN", raising=False)
+    import os
 
-    from comms import server as server_module
+    from comms.auth import require_rename_bearer
 
-    importlib.reload(server_module)
-    with TestClient(server_module.app) as test_client:
-        _seed_live_session(db)
-        response = test_client.put(
-            "/sessions/sess-1/name", headers=SERVICE, json={"name": "Health"}
+    for key in ("COMMS_RENAME_TOKEN", "COMMS_ADMIN_BEARER_TOKEN"):
+        os.environ.pop(key, None)
+
+    with pytest.raises(HTTPException) as refused:
+        require_rename_bearer(
+            x_rename_token="", authorization="Bearer anything-at-all"
         )
-    assert response.status_code == 503
+
+    assert refused.value.status_code == 503
 
 
 def test_a_rename_addressed_to_a_retired_conversation_is_refused_by_the_route(
@@ -130,14 +142,14 @@ def test_a_rename_addressed_to_a_retired_conversation_is_refused_by_the_route(
     """
     client.put(
         "/sessions/sess-1/name",
-        headers={**SERVICE, "X-Rename-Token": "rename-only"},
+        headers={**REACHES_EVERYTHING, "X-Rename-Token": "rename-only"},
         json={"name": "Health"},
     )
-    client.delete("/sessions/sess-1", headers=SERVICE)
+    client.delete("/sessions/sess-1", headers=REACHES_EVERYTHING)
 
     response = client.put(
         "/sessions/sess-1/name",
-        headers={**SERVICE, "X-Rename-Token": "rename-only"},
+        headers={**REACHES_EVERYTHING, "X-Rename-Token": "rename-only"},
         json={"name": "Later"},
     )
     assert response.status_code == 409
@@ -156,8 +168,7 @@ def test_a_hive_with_an_admin_token_but_no_rename_token_says_renaming_is_off(
     db = str(tmp_path / "sessions.db")
     monkeypatch.setenv("BROKER_DB_PATH", str(tmp_path / "broker.db"))
     monkeypatch.setenv("SESSIONS_DB_PATH", db)
-    monkeypatch.setenv("COMMS_BEARER_TOKEN", "service-bearer")
-    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-bearer")
+    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", ADMIN)
     monkeypatch.delenv("COMMS_RENAME_TOKEN", raising=False)
 
     from comms import server as server_module
@@ -167,14 +178,14 @@ def test_a_hive_with_an_admin_token_but_no_rename_token_says_renaming_is_off(
         _seed_live_session(db)
         refused = test_client.put(
             "/sessions/sess-1/name",
-            headers={**SERVICE, "X-Rename-Token": "some-other-secret"},
+            headers={**REACHES_EVERYTHING, "X-Rename-Token": "some-other-secret"},
             json={"name": "Health"},
         )
         # The operator still gets in with the admin token, which is why the
         # admin check runs before this one.
         allowed = test_client.put(
             "/sessions/sess-1/name",
-            headers={**SERVICE, "X-Rename-Token": "admin-bearer"},
+            headers={**REACHES_EVERYTHING, "X-Rename-Token": "admin-bearer"},
             json={"name": "Health"},
         )
 
@@ -194,11 +205,11 @@ def test_every_name_the_hive_holds_is_readable_in_one_call(client) -> None:
     """
     client.put(
         "/sessions/sess-1/name",
-        headers={**SERVICE, "X-Rename-Token": "rename-only"},
+        headers={**REACHES_EVERYTHING, "X-Rename-Token": "rename-only"},
         json={"name": "Fittimus Maximus", "color": "#3481cc"},
     )
 
-    response = client.get("/sessions/names", headers=SERVICE)
+    response = client.get("/sessions/names", headers=REACHES_EVERYTHING)
 
     assert response.status_code == 200
     assert response.json()["sess-1"] == {
@@ -213,5 +224,5 @@ def test_the_names_listing_answers_the_service_token(client) -> None:
     picker. Breaks if this route is put behind the rename or admin credential,
     which would leave the picker with nothing to show.
     """
-    assert client.get("/sessions/names", headers=SERVICE).status_code == 200
+    assert client.get("/sessions/names", headers=REACHES_EVERYTHING).status_code == 200
     assert client.get("/sessions/names").status_code == 401

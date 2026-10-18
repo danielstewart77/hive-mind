@@ -58,6 +58,14 @@ OVERFLOW = {"type": "result", "is_error": True, "stop_reason": "error",
 DONE = {"type": "result", "is_error": False, "result": "ok"}
 
 
+#: These tests are about their own subject, not about authorization, so they
+#: present the admin credential. They used to clear every token instead and
+#: rely on the gateway serving open when unconfigured — a bypass that is gone,
+#: because a gateway that cannot establish who is calling must refuse rather
+#: than answer the LAN.
+GRILL_ADMIN = "admin-credential-for-tests"  # secret-guard: allow
+
+
 class Mind(FakeMind):
     """The fake mind, answering each turn from a queue. Its listing gives every
     model ``percent`` as its rotation threshold, unless ``percents`` names one
@@ -128,11 +136,11 @@ def _text(events) -> str:
 def test_a_context_report_persists_every_figure_it_carries(tmp_path, monkeypatch):
     monkeypatch.setenv("BROKER_DB_PATH", str(tmp_path / "broker.db"))
     monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "sessions.db"))
-    monkeypatch.delenv("COMMS_BEARER_TOKEN", raising=False)
+    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", GRILL_ADMIN)
     from comms import server as server_module
     import importlib
     importlib.reload(server_module)
-    with TestClient(server_module.app) as client:
+    with TestClient(server_module.app, headers={"Authorization": f"Bearer {GRILL_ADMIN}"}) as client:
         mgr = server_module.session_mgr
         _run(_seed(mgr))
         answer = client.post("/sessions/context", json={
@@ -734,7 +742,7 @@ def test_the_gateway_sends_an_owed_resend_when_it_starts(tmp_path, monkeypatch):
     _run(before_the_restart())
     mind = Mind()
     importlib.reload(server_module)
-    with mind.wired(), _soul(), TestClient(server_module.app):
+    with mind.wired(), _soul(), TestClient(server_module.app, headers={"Authorization": f"Bearer {GRILL_ADMIN}"}):
         deadline = time.time() + 5
         while not mind.messages() and time.time() < deadline:
             time.sleep(0.05)
@@ -747,10 +755,10 @@ def test_goal_rounds_reach_the_mind_through_the_message_route(tmp_path, monkeypa
 
     monkeypatch.setenv("BROKER_DB_PATH", str(tmp_path / "broker.db"))
     monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "sessions.db"))
-    monkeypatch.delenv("COMMS_BEARER_TOKEN", raising=False)
+    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", GRILL_ADMIN)
     importlib.reload(server_module)
     mind = Mind()
-    with TestClient(server_module.app) as client:
+    with TestClient(server_module.app, headers={"Authorization": f"Bearer {GRILL_ADMIN}"}) as client:
         mgr = server_module.session_mgr
         from comms import broker as broker_mod
         _run_in(client, broker_mod.register_mind(
@@ -1699,12 +1707,12 @@ def test_session_memory_gives_way_before_recent_memory():
 def test_a_refused_switch_reaches_a_chat_surface_as_its_reason(tmp_path, monkeypatch):
     monkeypatch.setenv("BROKER_DB_PATH", str(tmp_path / "broker.db"))
     monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "sessions.db"))
-    monkeypatch.delenv("COMMS_BEARER_TOKEN", raising=False)
+    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", GRILL_ADMIN)
     import importlib
     from comms import broker
     from comms import server as server_module
     importlib.reload(server_module)
-    with TestClient(server_module.app) as client:
+    with TestClient(server_module.app, headers={"Authorization": f"Bearer {GRILL_ADMIN}"}) as client:
         mgr = server_module.session_mgr
         _run(broker.register_mind(
             mgr.broker_db, mind_id=MIND, name="ada", gateway_url="http://mind.test:8420",

@@ -29,12 +29,26 @@ NS = os.path.join(os.path.dirname(__file__), "..", "..", "nervous-system")
 sys.path.insert(0, os.path.abspath(NS))
 
 
+#: About how the query travels in the body, not about scoping, so these
+#: present the admin credential — the one value that still reaches every mind.
+ADMIN_TOKEN = "lucent-admin-for-tests"  # secret-guard: allow
+
+
 @pytest.fixture
-def client(monkeypatch) -> TestClient:
-    monkeypatch.delenv("LUCENT_BEARER_TOKEN", raising=False)
+def client(monkeypatch, tmp_path) -> TestClient:
+    import sqlite3
+
+    monkeypatch.setenv("LUCENT_ADMIN_BEARER_TOKEN", ADMIN_TOKEN)
+    from lucent_api import holder_access
     from lucent_api.server import create_app
 
-    return TestClient(create_app())
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    holder_access.init_credentials(conn)
+    monkeypatch.setattr(holder_access, "connection", lambda: conn)
+    return TestClient(
+        create_app(), headers={"Authorization": f"Bearer {ADMIN_TOKEN}"}
+    )
 
 
 @pytest.fixture
@@ -88,7 +102,10 @@ def test_r1_hybrid_search_receives_the_body_fields(client, hybrid_calls):
     assert call["query"] == "who is maurice"
     assert call["k"] == 7
     assert call["min_score"] == 0.42
-    assert call["mind_id"] == "14cb820b-4a42-4f04-a593-54f532fd1d2f"
+    # The mind a read may see is now a *set* — a mind reads its own plus the
+    # `shared` sentinel, which one value could never express. An admin naming
+    # one mind resolves to exactly that mind.
+    assert call["mind_ids"] == ["14cb820b-4a42-4f04-a593-54f532fd1d2f"]
     assert call["debug"] is False
 
 
@@ -110,7 +127,10 @@ def test_r1_vector_search_receives_the_filters_only_it_takes(client, vector_call
     assert call["k"] == 3
     assert call["data_class"] == "feedback"
     assert call["tag_filter"] == "recipe"
-    assert call["mind_id"] == "14cb820b-4a42-4f04-a593-54f532fd1d2f"
+    # The mind a read may see is now a *set* — a mind reads its own plus the
+    # `shared` sentinel, which one value could never express. An admin naming
+    # one mind resolves to exactly that mind.
+    assert call["mind_ids"] == ["14cb820b-4a42-4f04-a593-54f532fd1d2f"]
     assert call["min_score"] == 0.55
 
 
@@ -198,14 +218,37 @@ def test_r5_gateway_retrieval_puts_the_prompt_in_the_body(lucent_stub, monkeypat
 
     monkeypatch.setattr(contextual_retrieval, "LUCENT_URL", url)
     prompt = "Sloan is my son " * 600  # the size that broke the URL
-    out = contextual_retrieval.format_injection(prompt)
+    out = contextual_retrieval.format_injection(prompt, mind_id="skippy")
 
     assert captured, "the gateway never called lucent"
     req = captured[-1]
     assert req["method"] == "POST"
     assert "?" not in req["path"], f"the prompt went into the address: {req['path'][:120]}"
-    assert json.loads(req["body"])["query"] == prompt
+    body = json.loads(req["body"])
+    assert body["query"] == prompt
+    # Comms holds a service credential, so an unnamed mind would retrieve
+    # across every mind's feedback memories.
+    assert body["mind_id"] == "skippy"
     assert "never guess a pronoun" in out
+
+
+def test_r5_gateway_retrieval_naming_no_mind_reads_nothing(lucent_stub, monkeypatch):
+    """This is the one call in the hive that fires on every single turn, and
+    comms' own credential is a service — so an unnamed mind reaches every
+    mind's behavioural rules. It returns nothing instead: injecting another
+    person's rules into a reply is worse than injecting none."""
+    url, captured = lucent_stub
+    monkeypatch.setenv("LUCENT_URL", url)
+    sys.modules.pop("contextual_retrieval", None)
+    sys.path.insert(0, os.path.abspath(os.path.join(NS, "comms")))
+    import contextual_retrieval
+
+    monkeypatch.setattr(contextual_retrieval, "LUCENT_URL", url)
+
+    out = contextual_retrieval.format_injection("Sloan is my son")
+
+    assert out == ""
+    assert captured == []
 
 
 # ---- R2's ceiling: refused loudly rather than held in a shared embedder ----

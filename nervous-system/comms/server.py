@@ -163,6 +163,58 @@ def _caller(conn: Request | WebSocket) -> user_access.Caller:
     return found if isinstance(found, user_access.Caller) else user_access.Caller()
 
 
+async def _refuse_foreign_session(request: Request, session_id: str) -> None:
+    """Refuse a session that runs on another mind.
+
+    For the machinery routes that *do* name a session id. The gate's `OWNER`
+    class would scope these by person, which on a hive where ten minds share
+    one owner is no scoping at all between them.
+    """
+    caller = _caller(request)
+    keys = await user_access.holder_keys(app.state.broker_db, caller)
+    if keys is None:
+        return
+    mind_id = await _session_mind(session_id)
+    if not user_access.mind_is_named_in(keys, mind_id):
+        raise HTTPException(404, "Session not found")
+
+
+async def _refuse_foreign_client_ref(
+    request: Request, client_type: str, client_ref: str
+) -> None:
+    """Refuse a client reference whose conversation runs on another mind.
+
+    The machinery routes carry no conversation for the gate to scope, which is
+    why they are classified `MACHINE`. That class admits a mind's own
+    credential — it has to, or no rotation hook on any mind could report a
+    turn — and `MACHINE` alone would therefore let any of the twelve minds
+    write to any other's ledger: a `role: "user"` turn appended to somebody
+    else's reference is folded into their next conversation by
+    `get_late_turns` as something they typed.
+
+    An admin and a `service` holder are unrestricted: comms composes and
+    reports on every mind's behalf. A `mind` holder is held to its own mind.
+    """
+    caller = _caller(request)
+    keys = await user_access.holder_keys(app.state.broker_db, caller)
+    if keys is None:
+        return
+    active = await session_mgr.get_active_session(client_type, client_ref)
+    if not active:
+        # Nothing to reach yet. Refusing here would stop a mind reporting the
+        # first turn of a conversation that is still being written.
+        return
+    # `get_active_session` answers with a session dict keyed `id`, whose
+    # column allowlist may or may not carry `mind_id` — so the mind is
+    # resolved from the row rather than read off the answer, which is also
+    # what the path routes do.
+    mind_id = await _session_mind(str(active.get("id") or ""))
+    if not user_access.mind_is_named_in(keys, mind_id):
+        raise HTTPException(
+            404, "No active session for that client reference"
+        )
+
+
 async def _owned_mind_keys(
     conn: Request | WebSocket,
 ) -> tuple[user_access.Caller, set[str], set[str]]:
@@ -491,7 +543,9 @@ async def live_session_text(session_id: str, since: int = 0):
 
 
 @app.post("/sessions/context")
-async def report_context_for_client(body: ClientContextReportRequest):
+async def report_context_for_client(
+    body: ClientContextReportRequest, request: Request
+):
     """A mind's Stop hook reporting how full the conversation it just ran is.
 
     Addressed by surface and conversation rather than by session id, the way
@@ -500,6 +554,7 @@ async def report_context_for_client(body: ClientContextReportRequest):
     filed it under. Declared before ``/sessions/{session_id}`` so the literal
     path wins the match.
     """
+    await _refuse_foreign_client_ref(request, body.client_type, body.client_ref)
     return await session_mgr.report_context_for_client(
         body.client_type,
         body.client_ref,
@@ -508,18 +563,23 @@ async def report_context_for_client(body: ClientContextReportRequest):
 
 
 @app.post("/sessions/{session_id}/context")
-async def report_session_context(session_id: str, body: ContextReportRequest):
+async def report_session_context(
+    session_id: str, body: ContextReportRequest, request: Request
+):
     """A mind reporting how full one of its conversations is.
 
     The mind is the only party that can measure it, and the only one that
     knows its own rotation threshold — that figure is read off the spawn
     arguments, not derived from the model name.
     """
+    await _refuse_foreign_session(request, session_id)
     return await session_mgr.report_context(session_id, **body.model_dump())
 
 
 @app.get("/sessions/late-turns")
-async def late_turns(client_type: str, client_ref: str, since: float):
+async def late_turns(
+    client_type: str, client_ref: str, since: float, request: Request
+):
     """Return the active session's turns committed after a watermark.
 
     The rotation Stop hook calls this just before ``/clear`` to merge any
@@ -527,6 +587,7 @@ async def late_turns(client_type: str, client_ref: str, since: float):
     handoff source of truth, independent of transcript timing. Declared
     before ``/sessions/{session_id}`` so the literal path wins the match.
     """
+    await _refuse_foreign_client_ref(request, client_type, client_ref)
     return await session_mgr.get_late_turns(client_type, client_ref, since)
 
 
@@ -570,7 +631,7 @@ class HarnessStateRequest(BaseModel):
 
 
 @app.post("/sessions/arm-rotation")
-async def arm_rotation(body: ArmRotationRequest):
+async def arm_rotation(body: ArmRotationRequest, request: Request):
     """Arm the active session for pending rotation (finalize-on-user-turn).
 
     Called by the ``rotation_check`` Stop hook after it writes the
@@ -581,6 +642,7 @@ async def arm_rotation(body: ArmRotationRequest):
     Declared before ``/sessions/{session_id}`` so the literal path wins the
     match.
     """
+    await _refuse_foreign_client_ref(request, body.client_type, body.client_ref)
     return await session_mgr.arm_rotation(
         body.client_type, body.client_ref, surface=body.surface,
         claude_sid=body.claude_sid, started_at=body.started_at,
@@ -588,7 +650,7 @@ async def arm_rotation(body: ArmRotationRequest):
 
 
 @app.post("/sessions/fire-rotation")
-async def fire_rotation(body: FireRotationRequest):
+async def fire_rotation(body: FireRotationRequest, request: Request):
     """Swap a staged terminal onto its successor, carrying the typed message.
 
     Called by the pane's UserPromptSubmit hook. The terminal's raw byte
@@ -598,6 +660,7 @@ async def fire_rotation(body: FireRotationRequest):
     rather than re-dispatched. Declared before ``/sessions/{session_id}`` so
     the literal path wins the match.
     """
+    await _refuse_foreign_client_ref(request, body.client_type, body.client_ref)
     return await session_mgr.fire_rotation(
         body.client_type, body.client_ref,
         claude_sid=body.claude_sid, prompt=body.prompt,
@@ -616,79 +679,94 @@ async def record_turn(body: RecordTurnRequest, request: Request):
     rotation's background window. Declared before ``/sessions/{session_id}``
     so the literal path wins the match.
     """
-    # Addressed by client reference rather than by session id, so there is no
-    # conversation for the gate to scope — which is exactly why this route is
-    # classified MACHINE and admits only the service or admin token. A
-    # person's credential cannot reach it at all, so it cannot append a `user`
-    # turn to somebody else's ledger, where `get_late_turns` would fold it
-    # into their next conversation as something they typed. The check that
-    # once stood here is gone rather than kept as reassurance: it could only
-    # ever run for a caller the gate had already established was machinery,
-    # and a guard that cannot fire is a guard nobody can reason about.
+    # Addressed by client reference rather than by session id, so the gate has
+    # no conversation to scope and the route is classified MACHINE. That class
+    # admits a mind's own credential, so the narrower check belongs here: a
+    # mind writes to its own conversations only, or any of the twelve could
+    # append a `user` turn to somebody else's ledger, where `get_late_turns`
+    # folds it into their next conversation as something they typed.
+    await _refuse_foreign_client_ref(request, body.client_type, body.client_ref)
     return await session_mgr.record_turn(
         body.client_type, body.client_ref, body.role, body.content,
         claude_sid=body.claude_sid,
     )
 
 
-class UserCredentialRequest(BaseModel):
+class CredentialRequest(BaseModel):
+    #: The user this holder answers for. Ownership is decided by user; the
+    #: holder is only which box presented the value.
+    username: str
     token: str
+    #: `mind`, `service` or `person`. Omitted, a holder naming a registered
+    #: mind is a mind and anything else is a person — a service has to say so,
+    #: because being wrong in that direction hands the machinery routes to
+    #: something that only needed to read.
+    role: str | None = None
 
 
 @app.put(
-    "/users/{username}/credential",
+    "/credentials/{holder}",
     dependencies=[Depends(require_admin_bearer)],
 )
-async def put_user_credential(username: str, body: UserCredentialRequest):
-    """Mint or replace one user's credential.
+async def put_holder_credential(holder: str, body: CredentialRequest):
+    """Mint or replace one holder's credential.
 
-    The console calls this when an admin issues a credential from the
-    user-management screen. Admin-guarded for the obvious reason: a route that
-    issues credentials must not answer to one it issued.
+    One holder, never a person's machines collectively: two minds owned by the
+    same person are two rows with two values, so revoking the one on a box in
+    somebody's bedroom leaves the one running here alone.
 
-    The value is written as a digest and no route ever returns one. An
-    operator does not need the value — they need to know whether the holder
-    has one that works, which `GET /users/credentials` answers.
+    Admin-guarded for the obvious reason — a route that issues credentials
+    must not answer to one it issued. The value is written as a digest and no
+    route ever returns one: an operator does not need the value, they need to
+    know whether the holder has one that works, which `GET /credentials`
+    answers.
     """
     try:
         return await user_access.put_credential(
-            app.state.broker_db, username, body.token
+            app.state.broker_db,
+            holder,
+            body.username,
+            body.token,
+            role=body.role,
         )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
 
 @app.delete(
-    "/users/{username}/credential",
+    "/credentials/{holder}",
     dependencies=[Depends(require_admin_bearer)],
 )
-async def delete_user_credential(username: str):
-    """Revoke a credential. Lands on the holder's next request: the gate reads
-    the table per call, so there is nothing to restart and no cache to clear.
+async def delete_holder_credential(holder: str):
+    """Revoke one holder's credential, and only that holder's.
 
-    The row is kept rather than deleted, so the screen can say "revoked"
-    where it would otherwise have to say "never had one" — different facts
-    with different remedies.
+    Lands on its next request: the gate reads the table per call, so there is
+    nothing to restart and no cache to clear. The row is kept rather than
+    deleted, so the screen can say "revoked" where it would otherwise have to
+    say "never had one" — different facts with different remedies.
     """
-    revoked = await user_access.revoke_credential(app.state.broker_db, username)
-    return {"username": username.strip().lower(), "revoked": revoked}
+    revoked = await user_access.revoke_credential(app.state.broker_db, holder)
+    return {"holder": holder.strip().lower(), "revoked": revoked}
 
 
-@app.get("/users/credentials", dependencies=[Depends(require_admin_bearer)])
-async def list_user_credentials():
-    """Who holds a credential, and whether it is live. Never the value."""
+@app.get("/credentials", dependencies=[Depends(require_admin_bearer)])
+async def list_credentials():
+    """Which holders have a credential, whose they answer for, and whether it
+    is live. Never the value."""
     rows = await app.state.broker_db.execute(
-        "SELECT username, created_at, revoked_at FROM user_credentials "
-        "ORDER BY username"
+        "SELECT holder, username, role, created_at, revoked_at FROM credentials "
+        "ORDER BY username, holder"
     )
     return [
         {
+            "holder": holder,
             "username": username,
+            "role": role,
             "created_at": created_at,
             "revoked_at": revoked_at,
             "live": revoked_at is None,
         }
-        for username, created_at, revoked_at in await rows.fetchall()
+        for holder, username, role, created_at, revoked_at in await rows.fetchall()
     ]
 
 
@@ -766,8 +844,11 @@ async def get_session(session_id: str):
 
 
 @app.post("/sessions/{session_id}/harness-state")
-async def set_session_harness_state(session_id: str, body: HarnessStateRequest):
+async def set_session_harness_state(
+    session_id: str, body: HarnessStateRequest, request: Request
+):
     """Record the provider-native thread id discovered by a mind terminal."""
+    await _refuse_foreign_session(request, session_id)
     try:
         return await session_mgr.set_harness_sid(session_id, body.harness_sid)
     except ValueError as exc:
@@ -1541,10 +1622,73 @@ async def broker_get_minds():
     return await broker.get_registered_minds(db)
 
 
-@app.post("/broker/minds", dependencies=[Depends(require_admin_bearer)])
-async def broker_register_mind(body: RegisterMindRequest):
-    """Register (or update) a mind in the broker database. Admin-only."""
+async def _refuse_foreign_registration(db, caller, body) -> None:
+    """A mind registers its own row, judged on both fields rather than either.
+
+    Matching the holder against `mind_id` *or* `name` is not a check. The
+    upsert keys on `mind_id` alone, so a holder keyed on its own uuid could
+    post another mind's `mind_id` with its own name in the other slot, satisfy
+    the check through the name, and rewrite that mind's `gateway_url` and
+    `session_token`. Every dispatch for the victim then goes to a machine the
+    attacker chose, carrying the composed prompt — soul and memory included.
+    That was reachable from a mind whose owner is not even the victim's.
+
+    So: whichever field is already registered decides, and both fields have to
+    agree with it. A first registration, with no row to consult, has to name
+    itself in both slots and may not claim a `mind_id` some other row holds.
+    """
+    asked_id = str(body.mind_id or "").strip()
+    asked_name = user_access.normalize_username(body.name)
+    rows = await db.execute(
+        "SELECT mind_id, name FROM minds WHERE mind_id = ? OR lower(name) = ?",
+        (asked_id, asked_name),
+    )
+    existing = await rows.fetchall()
+    for mind_id, name in existing:
+        keys = {str(mind_id or ""), user_access.normalize_username(name)}
+        if caller.holder not in keys:
+            raise HTTPException(
+                403,
+                f"{caller.holder!r} may only register itself, not "
+                f"{name or mind_id!r}",
+            )
+    if existing:
+        return
+    if caller.holder not in {asked_id.lower(), asked_name}:
+        raise HTTPException(
+            403,
+            f"{caller.holder!r} may only register itself, not "
+            f"{body.name or body.mind_id!r}",
+        )
+
+
+@app.post("/broker/minds")
+async def broker_register_mind(request: Request, body: RegisterMindRequest):
+    """Register (or update) a mind in the broker database.
+
+    Admin, or a mind registering **itself**. The second case is why every
+    mind on the hive had to hold the admin token: registration is the only
+    channel by which the gateway learns a mind's session credential, so a
+    mind that could not register was a mind nothing could reach — and the
+    admin token is a skeleton key, so requiring it here meant handing one to
+    every box in the house, the kids' included.
+
+    A mind's own credential registers its own row and nothing else. The
+    holder has to match the `mind_id` or the `name` being written, so a
+    compromised mind can refresh its own gateway URL and session token but
+    cannot repoint another mind's at a machine it controls. `owner` is not
+    settable this way either — `broker.register_mind` refuses a change of
+    owner, and moving a mind between people stays admin-only on its own
+    route.
+    """
+    caller = _caller(request)
     db = app.state.broker_db
+    if not caller.sees_everything():
+        if caller.role != user_access.MIND:
+            raise HTTPException(
+                401, "Registration needs an admin or a mind's own credential"
+            )
+        await _refuse_foreign_registration(db, caller, body)
     try:
         await broker.register_mind(
             db,

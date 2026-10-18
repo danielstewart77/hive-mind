@@ -1,7 +1,10 @@
 """Memory (vector store) endpoints for the lucent-api nervous-system service.
 
-Wraps tools.stateful.lucent_memory public functions in FastAPI routes.
-No auth and no HITL — internal Docker-network only.
+Which mind a request speaks for is read off the credential it presented, never
+off the request. `mind_id` used to arrive in the body — provenance on a write,
+an opt-in filter on a read — behind one shared token every mind and every hook
+on every host already held, so any holder could file a memory under any mind's
+name and read every mind's memories. See `lucent_api.holder_access`.
 """
 
 from __future__ import annotations
@@ -10,9 +13,17 @@ import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from hive_logging import log_event
+
+from lucent_api.holder_access import (
+    MIND,
+    SERVICE,
+    SHARED,
+    Caller,
+    require_holder,
+)
 
 log = logging.getLogger(__name__)
 
@@ -32,7 +43,12 @@ def _decode(payload: str) -> Any:
 class StoreBody(BaseModel):
     content: str
     data_class: str
-    mind_id: str = "ada"
+    #: Only a service acting on a mind's behalf, or an admin, may name this —
+    #: and a mind may name the literal `shared` to write a hive-wide rule.
+    #: Anything else is refused rather than quietly rescoped. It defaulted to
+    #: "ada" for most of this store's life, which is how an unattributed
+    #: write ended up with somebody's name on it.
+    mind_id: str | None = None
     tier: str = "contextual"
     tags: str = ""
     source: str = "user"
@@ -88,6 +104,7 @@ class UpdateBody(BaseModel):
 
 @router.get("/list")
 def memory_list(
+    caller: Caller = Depends(require_holder),
     mind_id: str | None = Query(None),
     offset: int = Query(0, ge=0),
     limit: int = Query(25, ge=1, le=100),
@@ -110,7 +127,7 @@ def memory_list(
         _memory_list(
             offset=offset,
             limit=limit,
-            mind_id=mind_id,
+            mind_ids=caller.minds_for_read(mind_id),
             tier=tier,
             data_class=data_class,
         )
@@ -119,6 +136,7 @@ def memory_list(
 
 @router.get("/recent-decayed")
 def memory_recent_decayed(
+    caller: Caller = Depends(require_holder),
     mind_id: str | None = Query(None),
     limit: int = Query(20, ge=1, le=100),
 ) -> Any:
@@ -129,11 +147,15 @@ def memory_recent_decayed(
     """
     from lucent_api.lucent_memory import query_decayed
 
-    return _decode(query_decayed(limit=limit, mind_id=mind_id))
+    return _decode(
+        query_decayed(limit=limit, mind_ids=caller.minds_for_read(mind_id))
+    )
 
 
 @router.post("/retrieve")
-def memory_retrieve(body: RetrieveBody) -> Any:
+def memory_retrieve(
+    body: RetrieveBody, caller: Caller = Depends(require_holder)
+) -> Any:
     """Semantic search — return top-k memories most relevant to the query.
 
     Optional filters:
@@ -163,7 +185,7 @@ def memory_retrieve(body: RetrieveBody) -> Any:
             _hybrid(
                 query=body.query,
                 k=body.k,
-                mind_id=body.mind_id,
+                mind_ids=caller.minds_for_read(body.mind_id),
                 min_score=body.min_score,
                 debug=body.debug,
             )
@@ -175,7 +197,7 @@ def memory_retrieve(body: RetrieveBody) -> Any:
         _memory_retrieve(
             query=body.query,
             k=body.k,
-            mind_id=body.mind_id,
+            mind_ids=caller.minds_for_read(body.mind_id),
             tag_filter=body.tag_filter,
             data_class=body.data_class,
             min_score=body.min_score,
@@ -183,14 +205,67 @@ def memory_retrieve(body: RetrieveBody) -> Any:
     )
 
 
+def _refuse_unless_owned(
+    caller: Caller, memory_id: str, named: object = None
+) -> None:
+    """Refuse a row this caller may not change.
+
+    `/list` and `/retrieve` are filtered by provenance, but these two routes
+    name a row directly, so without this a mind could edit or delete any
+    memory on the hive by id — and ids are sequential integers.
+
+    Three things this is careful about:
+
+    An admin changes anything. A **service** has to name the mind it is acting
+    for; left unnamed it would otherwise reach every row on the hive by id,
+    which is the widest hole in the file.
+
+    A **mind** reaches its own rows and not the `shared` ones. It *reads*
+    `shared` — those are the hive-wide standing rules, and reading them is the
+    point — but one mind reassigning or deleting a rule that every other mind
+    loads into its prompt is a mind quietly editing the hive's behaviour, and
+    a kid's box should not be able to do it.
+
+    Absent rows answer the same 404 as somebody else's, so the ids of other
+    minds' memories cannot be found by walking the range.
+    """
+    if caller.is_admin:
+        return
+    if caller.role == SERVICE and not str(named or "").strip():
+        raise HTTPException(
+            400, "a service changing a memory must name the mind it acts for"
+        )
+    allowed = caller.minds_for_read(named)
+    from lucent_api import holder_access
+
+    row = holder_access.connection().execute(
+        "SELECT mind_id FROM memories WHERE id = ?", (memory_id,)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(404, "Memory not found")
+    provenance = str(row["mind_id"] or "")
+    if caller.role == MIND and provenance == SHARED:
+        raise HTTPException(
+            403,
+            "a hive-wide rule is not one mind's to change; "
+            "use an admin credential",
+        )
+    if allowed is not None and provenance not in allowed:
+        raise HTTPException(404, "Memory not found")
+
+
 # ---- Write endpoints ----
 
 
 @router.post("/store")
-def memory_store(body: StoreBody) -> Any:
-    """Store a memory with semantic embedding."""
+def memory_store(
+    body: StoreBody, caller: Caller = Depends(require_holder)
+) -> Any:
+    """Store a memory with semantic embedding, filed under the mind whose
+    credential was presented."""
     from lucent_api.lucent_memory import memory_store as _memory_store
 
+    mind_id = caller.mind_for_write(body.mind_id)
     result = _decode(
         _memory_store(
             content=body.content,
@@ -198,7 +273,7 @@ def memory_store(body: StoreBody) -> Any:
             tier=body.tier,
             tags=body.tags,
             source=body.source,
-            mind_id=body.mind_id,
+            mind_id=mind_id,
             as_of=body.as_of,
             expires_at=body.expires_at,
             recurring=body.recurring,
@@ -207,36 +282,48 @@ def memory_store(body: StoreBody) -> Any:
     )
     log_event(
         log, "memory.stored", memory_id=result.get("id") if isinstance(result, dict) else None,
-        mind_id=body.mind_id, data_class=body.data_class, tier=body.tier,
+        mind_id=mind_id, data_class=body.data_class, tier=body.tier,
         source=body.source, content_chars=len(body.content),
     )
     return result
 
 
 @router.put("/{memory_id}")
-def memory_update(memory_id: str, body: UpdateBody) -> Any:
-    """Update an existing memory's content, data_class, or tags."""
+def memory_update(
+    memory_id: str, body: UpdateBody, caller: Caller = Depends(require_holder)
+) -> Any:
+    """Update an existing memory's content, data_class, or tags.
+
+    Reassigning a memory to a different mind is an admin's or a service's
+    move. A mind rewriting a row's provenance to its own would be a way to
+    take one, and rewriting it to somebody else's a way to plant one.
+    """
     from lucent_api.lucent_memory import memory_update as _memory_update
 
+    _refuse_unless_owned(caller, memory_id, body.mind_id)
+    mind_id = caller.mind_for_write(body.mind_id) if body.mind_id else ""
     result = _decode(
         _memory_update(
             memory_id=memory_id,
             content=body.content,
             data_class=body.data_class,
             tags=body.tags,
-            mind_id=body.mind_id,
+            mind_id=mind_id,
         )
     )
-    log_event(log, "memory.updated", memory_id=memory_id, mind_id=body.mind_id or None,
+    log_event(log, "memory.updated", memory_id=memory_id, mind_id=mind_id or None,
               data_class=body.data_class or None, content_chars=len(body.content))
     return result
 
 
 @router.delete("/{memory_id}")
-def memory_delete(memory_id: str) -> Any:
-    """Delete a memory by ID."""
+def memory_delete(
+    memory_id: str, caller: Caller = Depends(require_holder)
+) -> Any:
+    """Delete a memory by ID, if it is the caller's to delete."""
     from lucent_api.lucent_memory import memory_delete as _memory_delete
 
+    _refuse_unless_owned(caller, memory_id)
     result = _decode(_memory_delete(memory_id=memory_id))
     log_event(log, "memory.deleted", memory_id=memory_id)
     return result

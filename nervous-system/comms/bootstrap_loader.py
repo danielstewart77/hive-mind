@@ -32,8 +32,13 @@ import requests
 log = logging.getLogger(__name__)
 
 LUCENT_URL = os.environ.get("LUCENT_URL_HIVE", "http://hive-lucent:8424")
-LUCENT_BEARER = os.environ.get("LUCENT_BEARER_TOKEN", "")
-_AUTH_HEADERS = {"Authorization": f"Bearer {LUCENT_BEARER}"} if LUCENT_BEARER else {}
+def _auth_headers() -> dict:
+    """Read per call, not at import. A credential read once at import needs a
+    process restart to pick up a re-mint, which contradicts the promise the
+    store makes — a revocation lands on the next request with nothing to
+    restart."""
+    token = os.environ.get("LUCENT_BEARER_TOKEN", "")
+    return {"Authorization": f"Bearer {token}"} if token else {}
 
 RECENT_MEMORY_CHAR_CAP = 6000    # ~1500 tokens
 REQUEST_TIMEOUT = 5              # seconds — never hang spawn
@@ -53,7 +58,7 @@ def _get(path: str, params: dict[str, Any]) -> Any | None:
         resp = requests.get(
             f"{LUCENT_URL}{path}",
             params=params,
-            headers=_AUTH_HEADERS,
+            headers=_auth_headers(),
             timeout=REQUEST_TIMEOUT,
         )
         resp.raise_for_status()
@@ -73,7 +78,7 @@ def _post(path: str, body: dict[str, Any]) -> Any | None:
         resp = requests.post(
             f"{LUCENT_URL}{path}",
             json=body,
-            headers=_AUTH_HEADERS,
+            headers=_auth_headers(),
             timeout=REQUEST_TIMEOUT,
         )
         resp.raise_for_status()

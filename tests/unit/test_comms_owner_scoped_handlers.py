@@ -21,11 +21,16 @@ from fastapi.testclient import TestClient
 NS = os.path.join(os.path.dirname(__file__), "..", "..", "nervous-system")
 sys.path.insert(0, os.path.abspath(NS))
 
+from comms import broker
 from comms import user_access as ua  # noqa: E402
 
 SHARED = "shared-token-for-tests"  # secret-guard: allow
 ADMIN_TOKEN = "admin-token-for-tests"  # secret-guard: allow
 SLOAN_TOKEN = "sloan-token-for-tests"  # secret-guard: allow
+# A mind's own credential. The machinery routes are reached with this rather
+# than with the shared value every mind used to hold.
+SKIPPY_MIND_TOKEN = "skippy-mind-token-for-tests"  # secret-guard: allow
+ARNOLD_MIND_TOKEN = "arnold-mind-token-for-tests"  # secret-guard: allow
 
 DANIEL_MIND = "14cb820b-4a42-4f04-a593-54f532fd1d2f"
 SLOAN_MIND = "9f3c1a77-0000-4000-8000-0000000000aa"
@@ -56,9 +61,11 @@ def gateway(tmp_path, monkeypatch):
 
     path = tmp_path / "broker.db"
     conn = sqlite3.connect(path)
-    conn.executescript(
-        "CREATE TABLE minds (mind_id TEXT PRIMARY KEY, name TEXT, owner TEXT);"
-    )
+    # The broker's own schema, not a reduced copy: `register_mind` writes
+    # `registered_at` and `last_seen`, so a three-column stand-in made the
+    # self-registration routes answer 500 and would have let a test assert a
+    # refusal that was really a missing column.
+    conn.executescript(broker.MINDS_DDL)
     conn.executescript(ua.CREDENTIALS_DDL)
     # `/sms/inbound` reads its own enable flag out of this table before it
     # does anything else, so the table has to be here for that route to be
@@ -72,13 +79,23 @@ def gateway(tmp_path, monkeypatch):
         "VALUES ('sms_inbound_enabled', 'true', 0)"
     )
     conn.executemany(
-        "INSERT INTO minds (mind_id, name, owner) VALUES (?, ?, ?)",
+        "INSERT INTO minds (mind_id, name, owner, gateway_url, model, "
+        "harness, registered_at, last_seen) "
+        "VALUES (?, ?, ?, 'http://127.0.0.1:8433', 'claude-opus-5', "
+        "'claude', 0, 0)",
         [(DANIEL_MIND, "skippy", "daniel"), (SLOAN_MIND, "arnold", "sloan")],
     )
-    conn.execute(
-        "INSERT INTO user_credentials (username, token_sha, created_at) "
-        "VALUES ('sloan', ?, 0)",
-        (ua.digest(SLOAN_TOKEN),),
+    conn.executemany(
+        "INSERT INTO credentials "
+        "(holder, username, role, token_sha, created_at) "
+        "VALUES (?, ?, ?, ?, 0)",
+        [
+            # Sloan himself, on a surface — a person, so never machinery.
+            ("sloan-phone", "sloan", ua.PERSON, ua.digest(SLOAN_TOKEN)),
+            # Two minds, each with its own value, each answering for its owner.
+            ("skippy", "daniel", ua.MIND, ua.digest(SKIPPY_MIND_TOKEN)),
+            ("arnold", "sloan", ua.MIND, ua.digest(ARNOLD_MIND_TOKEN)),
+        ],
     )
     conn.commit()
     conn.close()
@@ -115,6 +132,9 @@ def gateway(tmp_path, monkeypatch):
                 return row
         return None
 
+    async def get_late_turns(_client_type, _client_ref, _since):
+        return {"turns": []}
+
     async def kill_session(session_id):
         killed.append(session_id)
         return {"killed": session_id}
@@ -132,6 +152,7 @@ def gateway(tmp_path, monkeypatch):
         ("create_session", create_session),
         ("record_turn", record_turn),
         ("get_active_session", get_active_session),
+        ("get_late_turns", get_late_turns),
         ("kill_session", kill_session),
         ("_get_row", _get_row),
     ):
@@ -175,10 +196,10 @@ def test_listing_conversations_returns_only_the_callers_own(gateway):
     assert [row["id"] for row in answer.json()] == ["s-session"]
 
 
-def test_listing_conversations_as_the_primary_user_returns_only_theirs(gateway):
+def test_listing_conversations_as_one_of_daniels_minds_returns_only_his(gateway):
     client, _ = gateway
 
-    answer = client.get("/sessions", headers=_auth(SHARED))
+    answer = client.get("/sessions", headers=_auth(SKIPPY_MIND_TOKEN))
 
     assert [row["id"] for row in answer.json()] == ["d-session"]
 
@@ -276,22 +297,75 @@ def test_a_persons_credential_cannot_reach_the_turn_ledger_at_all(gateway):
     assert spy["recorded"] == []
 
 
-def test_a_minds_own_machinery_records_turns_for_any_conversation(gateway):
-    """A mind's rotation hook presents the shared service token, and every
-    mind on the hive holds it — including the ones whose owner is not the
-    primary user. Scoping this route by person took their rotation ledger
-    down silently: terminal turns never reached it, `last_active` stopped
-    being bumped, and the stale-session sweep eventually suspended a terminal
-    in daily use."""
+def test_a_mind_records_turns_for_its_own_conversations(gateway):
+    """A mind's rotation hook presents that mind's own credential. Refusing it
+    here takes that mind's rotation ledger down silently: terminal turns never
+    reach it, `last_active` stops being bumped, and the stale-session sweep
+    eventually suspends a terminal in daily use. An admin reaches every
+    conversation, because comms reports on every mind's behalf."""
     client, spy = gateway
 
-    for token in (SHARED, ADMIN_TOKEN):
+    for token in (SKIPPY_MIND_TOKEN, ADMIN_TOKEN):
         answer = client.post(
             "/sessions/record-turn", json=_turn_body("111"), headers=_auth(token)
         )
         assert answer.json() == {"ok": True}, token
 
     assert [t["client_ref"] for t in spy["recorded"]] == ["111", "111"]
+
+
+def test_a_mind_cannot_record_a_turn_on_another_minds_conversation(gateway):
+    """The machinery routes are addressed by client reference, so the gate has
+    no conversation to scope and `MACHINE` admits every mind. Without the
+    narrower check any of the twelve could append a `role: "user"` turn to
+    somebody else's reference, where `get_late_turns` folds it into their next
+    conversation as something they typed. Reference "111" is Daniel's."""
+    client, spy = gateway
+
+    answer = client.post(
+        "/sessions/record-turn",
+        json=_turn_body("111"),
+        headers=_auth(ARNOLD_MIND_TOKEN),
+    )
+
+    assert answer.status_code == 404, answer.text
+    assert spy["recorded"] == []
+
+
+def test_a_mind_cannot_arm_a_rotation_on_another_minds_conversation(gateway):
+    client, _ = gateway
+
+    answer = client.post(
+        "/sessions/arm-rotation",
+        json={"client_type": "telegram", "client_ref": "111"},
+        headers=_auth(ARNOLD_MIND_TOKEN),
+    )
+
+    assert answer.status_code == 404, answer.text
+
+
+def test_a_mind_cannot_read_another_minds_late_turns(gateway):
+    client, _ = gateway
+
+    answer = client.get(
+        "/sessions/late-turns",
+        params={"client_type": "telegram", "client_ref": "111", "since": 0},
+        headers=_auth(ARNOLD_MIND_TOKEN),
+    )
+
+    assert answer.status_code == 404, answer.text
+
+
+def test_a_mind_reads_its_own_late_turns(gateway):
+    client, _ = gateway
+
+    answer = client.get(
+        "/sessions/late-turns",
+        params={"client_type": "telegram", "client_ref": "222", "since": 0},
+        headers=_auth(ARNOLD_MIND_TOKEN),
+    )
+
+    assert answer.status_code == 200, answer.text
 
 
 # --- the command surface --------------------------------------------------
@@ -476,16 +550,150 @@ def test_a_mind_bound_command_on_the_callers_own_mind_proceeds(gateway):
     assert [kw["mind_id"] for kw in spy["created"]] == [SLOAN_MIND]
 
 
+# --- a mind registering itself --------------------------------------------
+
+
+def _registration(name: str, mind_id: str) -> dict:
+    return {
+        "mind_id": mind_id,
+        "name": name,
+        "gateway_url": "http://127.0.0.1:8433",
+        "model": "claude-opus-5",
+        "harness": "claude",
+    }
+
+
+def test_a_mind_registers_itself_with_its_own_credential(gateway):
+    """Registration is the only channel by which the gateway learns a mind's
+    session credential, so requiring the admin token for it is what put a
+    skeleton key in every mind's environment, the kids' boxes included."""
+    client, _ = gateway
+
+    answer = client.post(
+        "/broker/minds",
+        json=_registration("skippy", DANIEL_MIND),
+        headers=_auth(SKIPPY_MIND_TOKEN),
+    )
+
+    assert answer.status_code == 200, answer.text
+
+
+def test_a_mind_may_not_register_another_mind(gateway):
+    """Otherwise a compromised mind repoints somebody else's gateway URL at a
+    machine it controls, and every dispatch for that mind follows."""
+    client, _ = gateway
+
+    answer = client.post(
+        "/broker/minds",
+        json=_registration("arnold", SLOAN_MIND),
+        headers=_auth(SKIPPY_MIND_TOKEN),
+    )
+
+    assert answer.status_code == 403, answer.text
+
+
+def test_a_persons_credential_cannot_register_any_mind(gateway):
+    client, _ = gateway
+
+    answer = client.post(
+        "/broker/minds",
+        json=_registration("skippy", DANIEL_MIND),
+        headers=_auth(SLOAN_TOKEN),
+    )
+
+    assert answer.status_code == 401, answer.text
+
+
+def test_an_admin_registers_any_mind(gateway):
+    client, _ = gateway
+
+    answer = client.post(
+        "/broker/minds",
+        json=_registration("arnold", SLOAN_MIND),
+        headers=_auth(ADMIN_TOKEN),
+    )
+
+    assert answer.status_code == 200, answer.text
+
+
+# --- the credential-issuing routes ----------------------------------------
+
+
+def _mint_body() -> dict:
+    return {
+        "username": "intruder",
+        "token": "a-value-nobody-granted",
+        "role": "mind",
+    }
+
+
+def test_a_minds_own_credential_cannot_mint_a_credential(gateway):
+    """A route that issues credentials must not answer to one it issued. Both
+    the decorator and the route's admin classification enforce this, and
+    neither was driven — so the two could be removed together unnoticed."""
+    client, _ = gateway
+
+    answer = client.put(
+        "/credentials/intruder",
+        json=_mint_body(),
+        headers=_auth(SKIPPY_MIND_TOKEN),
+    )
+
+    assert answer.status_code == 401, answer.text
+
+
+def test_a_persons_credential_cannot_mint_a_credential(gateway):
+    client, _ = gateway
+
+    answer = client.put(
+        "/credentials/intruder", json=_mint_body(), headers=_auth(SLOAN_TOKEN)
+    )
+
+    assert answer.status_code == 401, answer.text
+
+
+def test_a_minds_own_credential_cannot_revoke_or_list(gateway):
+    client, _ = gateway
+
+    revoked = client.delete(
+        "/credentials/skippy", headers=_auth(SKIPPY_MIND_TOKEN)
+    )
+    listed = client.get("/credentials", headers=_auth(SKIPPY_MIND_TOKEN))
+
+    assert revoked.status_code == 401, revoked.text
+    assert listed.status_code == 401, listed.text
+
+
+def test_the_admin_credential_mints_and_the_listing_carries_no_value(gateway):
+    client, _ = gateway
+
+    minted = client.put(
+        "/credentials/intruder", json=_mint_body(), headers=_auth(ADMIN_TOKEN)
+    )
+    listed = client.get("/credentials", headers=_auth(ADMIN_TOKEN))
+
+    assert minted.status_code == 200, minted.text
+    assert listed.status_code == 200, listed.text
+    # An operator does not need the value; they need to know whether the
+    # holder has one that works.
+    assert "a-value-nobody-granted" not in listed.text
+    assert "token_sha" not in listed.text
+
+
 # --- health, trailing slashes and unknown paths ---------------------------
 
 
 def test_health_still_takes_a_credential(gateway):
     """It took the bearer before this table existed. Classifying it public
-    would have been a loosening nobody asked for."""
+    would have been a loosening nobody asked for — so the probe needs a
+    credential of its own, and gets one as a service holder."""
     client, _ = gateway
 
     assert client.get("/health").status_code == 401
-    assert client.get("/health", headers=_auth(SHARED)).status_code == 200
+    assert client.get("/health", headers=_auth(SHARED)).status_code == 401
+    assert (
+        client.get("/health", headers=_auth(SKIPPY_MIND_TOKEN)).status_code == 200
+    )
 
 
 def test_a_trailing_slash_is_answered_by_the_router_not_by_the_gate(gateway):
