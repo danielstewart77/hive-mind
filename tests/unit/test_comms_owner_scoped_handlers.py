@@ -26,6 +26,10 @@ from comms import user_access as ua  # noqa: E402
 SHARED = "shared-token-for-tests"  # secret-guard: allow
 ADMIN_TOKEN = "admin-token-for-tests"  # secret-guard: allow
 SLOAN_TOKEN = "sloan-token-for-tests"  # secret-guard: allow
+# A mind's own credential. The machinery routes are reached with this rather
+# than with the shared value every mind used to hold.
+SKIPPY_MIND_TOKEN = "skippy-mind-token-for-tests"  # secret-guard: allow
+ARNOLD_MIND_TOKEN = "arnold-mind-token-for-tests"  # secret-guard: allow
 
 DANIEL_MIND = "14cb820b-4a42-4f04-a593-54f532fd1d2f"
 SLOAN_MIND = "9f3c1a77-0000-4000-8000-0000000000aa"
@@ -75,10 +79,17 @@ def gateway(tmp_path, monkeypatch):
         "INSERT INTO minds (mind_id, name, owner) VALUES (?, ?, ?)",
         [(DANIEL_MIND, "skippy", "daniel"), (SLOAN_MIND, "arnold", "sloan")],
     )
-    conn.execute(
-        "INSERT INTO user_credentials (username, token_sha, created_at) "
-        "VALUES ('sloan', ?, 0)",
-        (ua.digest(SLOAN_TOKEN),),
+    conn.executemany(
+        "INSERT INTO credentials "
+        "(holder, username, role, token_sha, created_at) "
+        "VALUES (?, ?, ?, ?, 0)",
+        [
+            # Sloan himself, on a surface — a person, so never machinery.
+            ("sloan-phone", "sloan", ua.PERSON, ua.digest(SLOAN_TOKEN)),
+            # Two minds, each with its own value, each answering for its owner.
+            ("skippy", "daniel", ua.MIND, ua.digest(SKIPPY_MIND_TOKEN)),
+            ("arnold", "sloan", ua.MIND, ua.digest(ARNOLD_MIND_TOKEN)),
+        ],
     )
     conn.commit()
     conn.close()
@@ -175,10 +186,10 @@ def test_listing_conversations_returns_only_the_callers_own(gateway):
     assert [row["id"] for row in answer.json()] == ["s-session"]
 
 
-def test_listing_conversations_as_the_primary_user_returns_only_theirs(gateway):
+def test_listing_conversations_as_one_of_daniels_minds_returns_only_his(gateway):
     client, _ = gateway
 
-    answer = client.get("/sessions", headers=_auth(SHARED))
+    answer = client.get("/sessions", headers=_auth(SKIPPY_MIND_TOKEN))
 
     assert [row["id"] for row in answer.json()] == ["d-session"]
 
@@ -277,21 +288,22 @@ def test_a_persons_credential_cannot_reach_the_turn_ledger_at_all(gateway):
 
 
 def test_a_minds_own_machinery_records_turns_for_any_conversation(gateway):
-    """A mind's rotation hook presents the shared service token, and every
-    mind on the hive holds it — including the ones whose owner is not the
-    primary user. Scoping this route by person took their rotation ledger
-    down silently: terminal turns never reached it, `last_active` stopped
-    being bumped, and the stale-session sweep eventually suspended a terminal
-    in daily use."""
+    """A mind's rotation hook presents that mind's own credential, which is
+    what replaced the one shared value every mind used to hold. Refusing a
+    mind's credential here takes its rotation ledger down silently: terminal
+    turns never reach it, `last_active` stops being bumped, and the
+    stale-session sweep eventually suspends a terminal in daily use. A mind
+    whose owner is not the primary user has to work too, which is why this
+    exercises Arnold's as well."""
     client, spy = gateway
 
-    for token in (SHARED, ADMIN_TOKEN):
+    for token in (SKIPPY_MIND_TOKEN, ARNOLD_MIND_TOKEN, ADMIN_TOKEN):
         answer = client.post(
             "/sessions/record-turn", json=_turn_body("111"), headers=_auth(token)
         )
         assert answer.json() == {"ok": True}, token
 
-    assert [t["client_ref"] for t in spy["recorded"]] == ["111", "111"]
+    assert [t["client_ref"] for t in spy["recorded"]] == ["111", "111", "111"]
 
 
 # --- the command surface --------------------------------------------------
@@ -481,11 +493,15 @@ def test_a_mind_bound_command_on_the_callers_own_mind_proceeds(gateway):
 
 def test_health_still_takes_a_credential(gateway):
     """It took the bearer before this table existed. Classifying it public
-    would have been a loosening nobody asked for."""
+    would have been a loosening nobody asked for — so the probe needs a
+    credential of its own, and gets one as a service holder."""
     client, _ = gateway
 
     assert client.get("/health").status_code == 401
-    assert client.get("/health", headers=_auth(SHARED)).status_code == 200
+    assert client.get("/health", headers=_auth(SHARED)).status_code == 401
+    assert (
+        client.get("/health", headers=_auth(SKIPPY_MIND_TOKEN)).status_code == 200
+    )
 
 
 def test_a_trailing_slash_is_answered_by_the_router_not_by_the_gate(gateway):

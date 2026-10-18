@@ -40,6 +40,9 @@ CREATE TABLE minds (
 SHARED = "shared-token-for-tests"  # secret-guard: allow
 ADMIN_TOKEN = "admin-token-for-tests"  # secret-guard: allow
 SLOAN_TOKEN = "sloan-token-for-tests"  # secret-guard: allow
+# A mind's own credential. The machinery routes answer to this rather than
+# to the one shared value every mind used to hold.
+SKIPPY_OWN = "skippy-mind-value-for-tests"  # secret-guard: allow
 UNISSUED = "never-issued-for-tests"  # secret-guard: allow
 
 DANIEL_MIND = "14cb820b-4a42-4f04-a593-54f532fd1d2f"
@@ -77,41 +80,122 @@ def clean_env(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# T1 — the registry mints a credential that verifies, and revoking kills it
+# The credential belongs to a holder, the authority to its owner
 # ---------------------------------------------------------------------------
 
 
 async def test_a_minted_credential_verifies_and_an_unminted_value_does_not(db):
-    await ua.put_credential(db, "sloan", SLOAN_TOKEN)
+    await ua.put_credential(db, "arnold", "sloan", SLOAN_TOKEN, role=ua.MIND)
 
     assert await ua.user_for_token(db, SLOAN_TOKEN) == "sloan"
     assert await ua.user_for_token(db, UNISSUED) is None
 
 
 async def test_a_credential_is_stored_as_a_digest_and_never_in_the_clear(db):
-    await ua.put_credential(db, "sloan", SLOAN_TOKEN)
+    await ua.put_credential(db, "arnold", "sloan", SLOAN_TOKEN, role=ua.MIND)
 
-    rows = await db.execute("SELECT token_sha FROM user_credentials")
+    rows = await db.execute("SELECT token_sha FROM credentials")
     stored = [r[0] for r in await rows.fetchall()]
 
     assert stored == [ua.digest(SLOAN_TOKEN)]
     assert SLOAN_TOKEN not in stored
 
 
+async def test_two_holders_of_one_person_each_get_their_own_value(db):
+    """The whole point of keying on the holder. With the conflict target left
+    on the username, issuing the second holder overwrites the first and the
+    first value stops resolving — so both values are asserted, not just the
+    one minted last."""
+    await ua.put_credential(db, "arnold", "sloan", SLOAN_TOKEN, role=ua.MIND)
+    await ua.put_credential(db, "zach", "sloan", "zach-value", role=ua.MIND)
+
+    assert await ua.user_for_token(db, SLOAN_TOKEN) == "sloan"
+    assert await ua.user_for_token(db, "zach-value") == "sloan"
+
+    rows = await db.execute("SELECT holder FROM credentials ORDER BY holder")
+    assert [r[0] for r in await rows.fetchall()] == ["arnold", "zach"]
+
+
+async def test_the_resolved_credential_names_the_holder_that_presented_it(db):
+    await ua.put_credential(db, "arnold", "sloan", SLOAN_TOKEN, role=ua.MIND)
+
+    found = await ua.credential_for_token(db, SLOAN_TOKEN)
+
+    assert found.holder == "arnold"
+    assert found.username == "sloan"
+    assert found.role == ua.MIND
+
+
+async def test_a_value_another_holder_already_holds_is_refused(db):
+    """Two holders sharing one value is the resolver returning whichever row
+    SQLite yields first — the second holder silently authenticating as the
+    first one's owner."""
+    await ua.put_credential(db, "arnold", "sloan", SLOAN_TOKEN, role=ua.MIND)
+
+    with pytest.raises(ValueError) as caught:
+        await ua.put_credential(db, "zach", "aiden", SLOAN_TOKEN, role=ua.MIND)
+
+    assert "arnold" in str(caught.value)
+    assert await ua.user_for_token(db, SLOAN_TOKEN) == "sloan"
+
+
+async def test_a_credential_naming_no_holder_or_no_user_is_refused(db):
+    with pytest.raises(ValueError):
+        await ua.put_credential(db, "", "sloan", SLOAN_TOKEN)
+    with pytest.raises(ValueError):
+        await ua.put_credential(db, "arnold", "", SLOAN_TOKEN)
+    with pytest.raises(ValueError):
+        await ua.put_credential(db, "arnold", "sloan", "")
+
+
+async def test_an_unknown_role_is_refused(db):
+    with pytest.raises(ValueError):
+        await ua.put_credential(
+            db, "arnold", "sloan", SLOAN_TOKEN, role="superuser"
+        )
+
+
+async def test_a_holder_naming_a_registered_mind_defaults_to_the_mind_role(db):
+    """Unstated, the role is derived from the `minds` table rather than
+    declared twice, so a mind that is deleted stops being machinery."""
+    await ua.put_credential(db, "arnold", "sloan", SLOAN_TOKEN)
+    await ua.put_credential(db, "a-laptop", "sloan", "laptop-value")
+
+    minted = await ua.credential_for_token(db, SLOAN_TOKEN)
+    other = await ua.credential_for_token(db, "laptop-value")
+
+    assert minted.role == ua.MIND
+    assert other.role == ua.PERSON
+
+
 # ---------------------------------------------------------------------------
-# T2 — revocation lands on the next request, with no restart
+# Revocation lands on the next request, for one holder only
 # ---------------------------------------------------------------------------
 
 
 async def test_revoking_a_credential_stops_it_verifying_in_the_same_process(db):
-    await ua.put_credential(db, "sloan", SLOAN_TOKEN)
+    await ua.put_credential(db, "arnold", "sloan", SLOAN_TOKEN, role=ua.MIND)
     assert await ua.user_for_token(db, SLOAN_TOKEN) == "sloan"
 
-    assert await ua.revoke_credential(db, "sloan") is True
+    assert await ua.revoke_credential(db, "arnold") is True
 
     # Same connection, same process, no re-import: a cache anywhere in the
     # read path would leave this returning "sloan".
     assert await ua.user_for_token(db, SLOAN_TOKEN) is None
+
+
+async def test_revoking_one_holder_leaves_another_of_the_same_person_alone(db):
+    """Revoking by user instead of by holder would take both down, which is
+    the failure this whole change exists to prevent: the value on a box in
+    somebody's bedroom must be retirable without retiring the one running
+    here."""
+    await ua.put_credential(db, "arnold", "sloan", SLOAN_TOKEN, role=ua.MIND)
+    await ua.put_credential(db, "zach", "sloan", "zach-value", role=ua.MIND)
+
+    assert await ua.revoke_credential(db, "arnold") is True
+
+    assert await ua.user_for_token(db, SLOAN_TOKEN) is None
+    assert await ua.user_for_token(db, "zach-value") == "sloan"
 
 
 async def test_revoking_a_credential_nobody_minted_reports_that_it_did_nothing(db):
@@ -119,46 +203,49 @@ async def test_revoking_a_credential_nobody_minted_reports_that_it_did_nothing(d
 
 
 async def test_reissuing_a_credential_clears_an_earlier_revocation(db):
-    await ua.put_credential(db, "sloan", "first-value")
-    await ua.revoke_credential(db, "sloan")
+    await ua.put_credential(db, "arnold", "sloan", "first-value", role=ua.MIND)
+    await ua.revoke_credential(db, "arnold")
 
-    await ua.put_credential(db, "sloan", "second-value")
+    await ua.put_credential(db, "arnold", "sloan", "second-value", role=ua.MIND)
 
     assert await ua.user_for_token(db, "second-value") == "sloan"
     assert await ua.user_for_token(db, "first-value") is None
 
 
 # ---------------------------------------------------------------------------
-# T8 — the existing shared token is the primary user's own credential
+# What a presented value resolves to
 # ---------------------------------------------------------------------------
 
 
-async def test_the_shared_token_is_the_named_primary_user(db, monkeypatch):
+async def test_the_shared_service_token_resolves_nobody(db, monkeypatch):
+    """It was one value held by every mind, every surface bot and two boxes
+    across the LAN, which made its theft indistinguishable from its use. It is
+    not a credential any more, and nothing about the environment brings it
+    back."""
     monkeypatch.setenv("COMMS_BEARER_TOKEN", SHARED)
     monkeypatch.setenv("COMMS_PRIMARY_USER", "daniel")
 
     caller = await ua.resolve_caller(db, SHARED)
 
-    assert caller.username == "daniel"
-    assert caller.sees_everything() is False
+    assert caller.recognised is False
+    assert caller.is_machine is False
 
 
-async def test_the_shared_token_reaches_everything_when_no_primary_user_is_named(
-    db, monkeypatch
-):
-    """The rollout switch. A hive upgrading with no new configuration behaves
-    exactly as the one it replaced."""
-    monkeypatch.setenv("COMMS_BEARER_TOKEN", SHARED)
+async def test_no_service_token_configured_does_not_open_the_gateway(db, monkeypatch):
+    """An unset service token once meant "no gating", which served every
+    route to every caller. Unsetting it is also the obvious way an operator
+    retires it."""
+    monkeypatch.delenv("COMMS_BEARER_TOKEN", raising=False)
+    monkeypatch.delenv("COMMS_ADMIN_BEARER_TOKEN", raising=False)
 
-    caller = await ua.resolve_caller(db, SHARED)
-
-    assert caller.sees_everything() is True
+    for presented in (SHARED, UNISSUED, ""):
+        caller = await ua.resolve_caller(db, presented)
+        assert caller.recognised is False
+        assert caller.sees_everything() is False
 
 
 async def test_the_admin_token_reaches_everything(db, monkeypatch):
-    monkeypatch.setenv("COMMS_BEARER_TOKEN", SHARED)
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", ADMIN_TOKEN)
-    monkeypatch.setenv("COMMS_PRIMARY_USER", "daniel")
 
     caller = await ua.resolve_caller(db, ADMIN_TOKEN)
 
@@ -166,23 +253,35 @@ async def test_the_admin_token_reaches_everything(db, monkeypatch):
     assert caller.sees_everything() is True
 
 
-async def test_an_unknown_value_is_not_recognised(db, monkeypatch):
-    monkeypatch.setenv("COMMS_BEARER_TOKEN", SHARED)
-
+async def test_an_unknown_value_is_not_recognised(db):
     caller = await ua.resolve_caller(db, UNISSUED)
 
     assert caller.recognised is False
 
 
-async def test_a_user_credential_is_resolved_to_its_own_user(db, monkeypatch):
-    monkeypatch.setenv("COMMS_BEARER_TOKEN", SHARED)
-    monkeypatch.setenv("COMMS_PRIMARY_USER", "daniel")
-    await ua.put_credential(db, "sloan", SLOAN_TOKEN)
+async def test_a_holder_credential_is_resolved_to_the_user_it_answers_for(db):
+    await ua.put_credential(db, "arnold", "sloan", SLOAN_TOKEN, role=ua.MIND)
 
     caller = await ua.resolve_caller(db, SLOAN_TOKEN)
 
     assert caller.username == "sloan"
+    assert caller.holder == "arnold"
     assert caller.sees_everything() is False
+
+
+async def test_a_minds_credential_is_machinery_and_a_persons_is_not(db):
+    """The machinery routes are addressed by client reference rather than by
+    conversation, so there is nothing for an owner check to scope — a
+    credential admitted there reaches every conversation through the back of
+    the house. A mind's own credential has to reach them or no rotation hook
+    on any mind can report a turn; a person's must not."""
+    await ua.put_credential(db, "arnold", "sloan", SLOAN_TOKEN, role=ua.MIND)
+    await ua.put_credential(db, "hive-tools", "daniel", "tools-value", role=ua.SERVICE)
+    await ua.put_credential(db, "sloan-laptop", "sloan", "person-value", role=ua.PERSON)
+
+    assert (await ua.resolve_caller(db, SLOAN_TOKEN)).is_machine is True
+    assert (await ua.resolve_caller(db, "tools-value")).is_machine is True
+    assert (await ua.resolve_caller(db, "person-value")).is_machine is False
 
 
 # ---------------------------------------------------------------------------
@@ -396,10 +495,16 @@ def broker_path(tmp_path):
     # Constructing an input. The digest still comes from the module, so a
     # change to how a credential is stored fails these tests rather than
     # passing against a hash this file computed its own way.
-    conn.execute(
-        "INSERT INTO user_credentials (username, token_sha, created_at) "
-        "VALUES (?, ?, 0)",
-        ("sloan", ua.digest(SLOAN_TOKEN)),
+    conn.executemany(
+        "INSERT INTO credentials "
+        "(holder, username, role, token_sha, created_at) "
+        "VALUES (?, ?, ?, ?, 0)",
+        [
+            # Sloan himself on a surface — a person, so never machinery.
+            ("sloan-phone", "sloan", ua.PERSON, ua.digest(SLOAN_TOKEN)),
+            # One of Daniel's minds, with its own value.
+            ("skippy", "daniel", ua.MIND, ua.digest(SKIPPY_OWN)),
+        ],
     )
     conn.commit()
     conn.close()
@@ -453,31 +558,43 @@ def test_another_users_conversation_answers_exactly_as_an_absent_one(gated):
     assert theirs.content == absent.content
 
 
-def test_the_primary_users_shared_token_reaches_their_own_conversation(gated):
-    assert (
-        _get(gated, "/sessions/d-session", token=SHARED).status_code == 200
-    )
+def test_a_minds_own_credential_reaches_its_owners_conversation(gated):
+    answer = _get(gated, "/sessions/d-session", token=SKIPPY_OWN)
+
+    assert answer.status_code == 200
 
 
-def test_the_primary_users_shared_token_is_refused_another_users_conversation(gated):
-    assert (
-        _get(gated, "/sessions/s-session", token=SHARED).status_code == 404
-    )
+def test_a_minds_own_credential_is_refused_another_users_conversation(gated):
+    answer = _get(gated, "/sessions/s-session", token=SKIPPY_OWN)
+
+    assert answer.status_code == 404
 
 
-def test_naming_no_primary_user_leaves_the_shared_token_reaching_everything(
-    broker_path, monkeypatch
-):
-    """The rollout switch, through the gate: a hive that upgrades to this code
-    and sets nothing new behaves exactly as the one it replaced."""
-    monkeypatch.setenv("COMMS_BEARER_TOKEN", SHARED)
+def test_the_shared_token_is_refused_through_the_gate(gated):
+    """It was one value held by every mind, every surface bot and two boxes
+    across the LAN. Nothing in the environment brings it back, and no flag
+    softens it: a fallback nobody can observe is one that never gets
+    removed."""
+    assert _get(gated, "/sessions/d-session", token=SHARED).status_code == 401
+    assert _get(gated, "/sessions/s-session", token=SHARED).status_code == 401
+    assert _get(gated, "/sessions", token=SHARED).status_code == 401
+
+
+def test_an_unconfigured_gateway_does_not_serve_open(broker_path, monkeypatch):
+    """An unset service token once meant "no gating", which served every route
+    to every caller — and unsetting it is the obvious way an operator retires
+    it. A gateway that cannot establish who is calling refuses, while the
+    holder table still decides for everyone holding a real credential."""
+    monkeypatch.delenv("COMMS_BEARER_TOKEN", raising=False)
+    monkeypatch.delenv("COMMS_ADMIN_BEARER_TOKEN", raising=False)
     monkeypatch.delenv("COMMS_PRIMARY_USER", raising=False)
     app, _ = _gated_app(
         broker_path, {"d-session": DANIEL_MIND, "s-session": SLOAN_MIND}
     )
 
-    assert _get(app, "/sessions/s-session", token=SHARED).status_code == 200
-    assert _get(app, "/sessions/d-session", token=SHARED).status_code == 200
+    assert _get(app, "/sessions/s-session", token=SHARED).status_code == 401
+    assert _get(app, "/sessions/d-session").status_code == 401
+    assert _get(app, "/sessions/s-session", token=SLOAN_TOKEN).status_code == 200
 
 
 def test_the_admin_token_reaches_every_users_conversation(gated):
@@ -490,13 +607,21 @@ def test_an_admin_only_route_refuses_a_user_credential(gated):
     assert _get(gated, "/sessions/live", token=ADMIN_TOKEN).status_code == 200
 
 
-def test_the_machinery_routes_still_serve_the_shared_token(gated):
+def test_the_machinery_routes_serve_a_minds_own_credential(gated):
+    """Every rotation hook on every mind reaches these, and the one shared
+    value they all presented is gone. Refusing a mind's own credential here
+    stops every per-turn report on the hive."""
     with TestClient(gated, raise_server_exceptions=False) as client:
-        answer = client.post(
+        served = client.post(
+            "/sessions/context",
+            headers={"Authorization": "Bearer " + SKIPPY_OWN},
+        )
+        refused = client.post(
             "/sessions/context", headers={"Authorization": "Bearer " + SHARED}
         )
 
-    assert answer.status_code == 200
+    assert served.status_code == 200
+    assert refused.status_code == 401
 
 
 def test_a_revoked_credential_is_refused_by_the_gate_on_the_very_next_request(
@@ -509,7 +634,7 @@ def test_a_revoked_credential_is_refused_by_the_gate_on_the_very_next_request(
     async def revoke():
         conn = await aiosqlite.connect(broker_path)
         try:
-            await ua.revoke_credential(conn, "sloan")
+            await ua.revoke_credential(conn, "sloan-phone")
         finally:
             await conn.close()
 
@@ -578,46 +703,15 @@ def test_the_gate_refuses_rather_than_serving_with_no_database(monkeypatch):
 # --- the credential classes are not interchangeable -----------------------
 
 
-async def test_the_shared_token_is_both_the_primary_user_and_the_machinery(
-    db, monkeypatch
-):
-    """It is two things at once, and conflating them is how a person's
-    credential got admitted to every machinery route."""
-    monkeypatch.setenv("COMMS_BEARER_TOKEN", SHARED)
-    monkeypatch.setenv("COMMS_PRIMARY_USER", "daniel")
-
-    caller = await ua.resolve_caller(db, SHARED)
-
-    assert caller.username == "daniel"
-    assert caller.is_machine is True
-    assert caller.sees_everything() is False
-
-
-async def test_a_persons_credential_is_recognised_but_is_not_machinery(db, monkeypatch):
-    monkeypatch.setenv("COMMS_BEARER_TOKEN", SHARED)
-    monkeypatch.setenv("COMMS_PRIMARY_USER", "daniel")
-    await ua.put_credential(db, "sloan", SLOAN_TOKEN)
+async def test_a_persons_credential_is_recognised_but_is_not_machinery(db):
+    await ua.put_credential(
+        db, "sloan-phone", "sloan", SLOAN_TOKEN, role=ua.PERSON
+    )
 
     caller = await ua.resolve_caller(db, SLOAN_TOKEN)
 
     assert caller.recognised is True
     assert caller.is_machine is False
-
-
-async def test_bypass_mode_serves_a_caller_that_presented_a_stale_token(
-    db, monkeypatch
-):
-    """An unset service token has always meant no gating, and master returned
-    before even reading the header. Gating that on an empty *token* instead
-    took a host whose comms has no service token, while a surface still holds
-    a stale one, from fully served to fully refused."""
-    monkeypatch.delenv("COMMS_BEARER_TOKEN", raising=False)
-
-    presented = await ua.resolve_caller(db, "a-stale-value-a-bot-still-holds")
-    nothing = await ua.resolve_caller(db, "")
-
-    assert presented.sees_everything() is True
-    assert nothing.sees_everything() is True
 
 
 # --- a conversation whose mind has no owner -------------------------------

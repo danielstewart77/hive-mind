@@ -28,7 +28,9 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-SERVICE_TOKEN = "service-token-every-hook-holds"  # secret-guard: allow
+# Skippy's own credential. It used to be one value every hook on every host
+# held; it is now this mind's alone, and the holder is the mind.
+SERVICE_TOKEN = "skippys-own-credential"  # secret-guard: allow
 ADMIN_TOKEN = "admin-token-hive-tools-holds"  # secret-guard: allow
 SOUL_TOKEN = "soul-token-only-the-skill-holds"  # secret-guard: allow
 
@@ -92,14 +94,22 @@ def _soul_of(conn) -> list[str]:
 class SoulBoundaryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.conn = _make_conn()
-        os.environ["LUCENT_BEARER_TOKEN"] = SERVICE_TOKEN
         os.environ["LUCENT_ADMIN_BEARER_TOKEN"] = ADMIN_TOKEN
         os.environ["LUCENT_SOUL_BEARER_TOKEN"] = SOUL_TOKEN
 
-        # Both modules resolve the connection independently.
+        from lucent_api import holder_access
+
+        holder_access.init_credentials(self.conn)
+        holder_access.put_credential(
+            self.conn, "skippy", "daniel", SERVICE_TOKEN,
+            role=holder_access.MIND,
+        )
+
+        # Three modules resolve the connection independently.
         self._patches = [
             patch("lucent_api.lucent_graph._get_conn", return_value=self.conn),
             patch("lucent_api.soul._get_conn", return_value=self.conn),
+            patch("lucent_api.holder_access.connection", return_value=self.conn),
         ]
         for p in self._patches:
             p.start()
@@ -112,8 +122,7 @@ class SoulBoundaryTests(unittest.TestCase):
         for p in self._patches:
             p.stop()
         self.conn.close()
-        for key in ("LUCENT_BEARER_TOKEN", "LUCENT_ADMIN_BEARER_TOKEN",
-                    "LUCENT_SOUL_BEARER_TOKEN"):
+        for key in ("LUCENT_ADMIN_BEARER_TOKEN", "LUCENT_SOUL_BEARER_TOKEN"):
             os.environ.pop(key, None)
 
     # -- Requirement 1 -----------------------------------------------------

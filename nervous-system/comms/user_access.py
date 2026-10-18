@@ -1,10 +1,9 @@
 """Who is asking, and which conversations are theirs.
 
-Comms has never had a notion of a person. Its three credentials — the service
-token every surface bot and every mind holds, the admin token, and the rename
-token — all answer *what* is calling and none of them answer *who for*. So
-every session route has been open to every caller that holds any of them, and
-a second person on the hive would see the first person's conversations.
+Comms began with no notion of a person. Its credentials answered *what* was
+calling and never *who for*, so every session route was open to every caller
+holding any of them, and a second person on the hive would see the first
+person's conversations.
 
 A conversation's owner is **derived, never stored**: a session names a mind,
 and `broker.minds` names that mind's owner. There is no owner column on
@@ -12,30 +11,50 @@ and `broker.minds` names that mind's owner. There is no owner column on
 for it to be wrong, and a mind handed to another user would leave every one
 of its past conversations claiming the old one.
 
-## The credential
+## The credential belongs to a holder; the authority belongs to its owner
 
-A per-user credential, opaque and random, stored here as a SHA-256 digest in
-`broker.db` and never held in plaintext by anything but the holder. Not a JWT:
-the database is in this process, so stateless verification buys nothing and
-costs revocation — which would then be a denylist, which is this table again.
-`user_for_token` reads the table on **every** request rather than caching,
-because a revocation that needs a restart to land is not a revocation.
+A **holder** is one box: a mind, a service, or a person. Each holds its own
+opaque random value, stored here as a SHA-256 digest in `broker.db` and held
+in plaintext by nothing but the holder itself. The row names the user that
+holder answers for, and *that* is what every ownership decision is made
+against — the holder is which machine is talking, the user is whose things it
+may touch.
 
-## The existing shared token keeps working, and that is deliberate
+Those are two different facts and only one of them gets stolen. One value per
+*person* would mean the credential sitting on a Windows box in a child's
+bedroom was that child's entire identity: lift it and you are them across
+every mind they own, their board, their memory and their integrations, and
+the only remedy is revoking the person and re-credentialing every machine
+they have, including the ones nobody can reach. One value per holder makes a
+theft the size of the box it was taken from, lets a single machine be
+retired, and keeps the record honest about which of a person's minds actually
+wrote something.
 
-`COMMS_PRIMARY_USER` names the user the shared `COMMS_BEARER_TOKEN` stands
-for. Set, that value is the named user's own credential at its existing value:
-every bot and every mind on the primary operator's hive goes on presenting
-exactly what it presented yesterday, and nothing is re-tokened. Unset, the
-shared token is **unscoped** — accepted on every route exactly as it is today,
-reaching every conversation.
+Not a JWT: the database is in this process, so stateless verification buys
+nothing and costs revocation — which would then be a denylist, which is this
+table again. `credential_for_token` reads the table on **every** request
+rather than caching, because a revocation that needs a restart to land is not
+a revocation.
 
-Unset meaning "as before" rather than "refused" is the whole rollout. A hive
-upgrading to this code with no new configuration behaves identically to the
-one it replaced, and setting one variable is what switches scoping on. The
-alternative — scoping the moment the code lands — takes the operator's own
-surfaces down at the instant they lose the ability to log in and fix it, which
-is the one failure this module must not have.
+## The shared token is not a credential any more
+
+`COMMS_BEARER_TOKEN` is no longer accepted. It was one value presented by
+every mind, every surface bot and two machines across the LAN, which made its
+theft indistinguishable from its use and made per-holder revocation
+meaningless while it stood. Presenting it resolves no holder and is refused
+exactly like any other unrecognised value, and there is no flag that softens
+that: a fallback nobody can observe is a fallback that never gets removed.
+
+The cost is paid at deployment rather than hidden. Every holder is minted a
+value and given it *before* this code runs; a holder that was missed is
+refused the moment it does, loudly, rather than carrying on under a shared
+credential whose scope nobody could describe. Two of them are the boys'
+boxes, which cannot be reached over SSH and are expected to go dark until
+somebody walks over to them.
+
+`COMMS_PRIMARY_USER` survives with a narrower job than it had: it names who
+owns a conversation whose mind cannot be resolved to an owner at all. It is
+no longer anybody's credential.
 
 ## Classification is deny-by-default and covers websockets
 
@@ -166,14 +185,50 @@ def _route_methods(route: BaseRoute) -> list[str]:
 # Credentials
 # ---------------------------------------------------------------------------
 
+#: What a holder *is*. A credential held by a mind or by a service is the
+#: machinery talking; one held by a person is not, and the distinction decides
+#: whether it may reach the routes addressed by client reference rather than
+#: by conversation. Derived from the `minds` table at mint time rather than
+#: declared twice, so a mind that is deleted stops being machinery on its own.
+MIND = "mind"
+SERVICE = "service"
+PERSON = "person"
+ROLES = (MIND, SERVICE, PERSON)
+
+#: Roles that may reach the routes the mind machinery drives.
+MACHINE_ROLES = (MIND, SERVICE)
+
 CREDENTIALS_DDL = """
-CREATE TABLE IF NOT EXISTS user_credentials (
-    username    TEXT PRIMARY KEY,
-    token_sha   TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS credentials (
+    -- NOT NULL is load-bearing: SQLite permits NULL in a non-INTEGER PRIMARY
+    -- KEY column unless it is declared, so without it a row naming no holder
+    -- at all inserts cleanly and then resolves by digest exactly as a real
+    -- one does. Every gate test would stay green against a credential that
+    -- belongs to nobody.
+    holder      TEXT PRIMARY KEY NOT NULL,
+    username    TEXT NOT NULL,
+    role        TEXT NOT NULL,
+    -- UNIQUE because "no two holders share one value" is the whole point and
+    -- is otherwise a copy-paste away: `credential_for_token` walks the rows
+    -- and returns the first digest that matches, so the second holder to be
+    -- issued a duplicate silently authenticates as the first one's owner.
+    -- One row per person made that impossible to express; one row per holder
+    -- does not.
+    token_sha   TEXT NOT NULL UNIQUE,
     created_at  REAL NOT NULL,
     revoked_at  REAL
 );
+CREATE INDEX IF NOT EXISTS credentials_username ON credentials (username);
 """
+
+
+@dataclass(frozen=True)
+class Credential:
+    """One holder's row, resolved from a presented value."""
+
+    holder: str
+    username: str
+    role: str
 
 
 def digest(token: str) -> str:
@@ -183,49 +238,127 @@ def digest(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+def normalize_holder(name: object) -> str:
+    return str(name or "").strip().lower()
+
+
 async def init_credentials(db: aiosqlite.Connection) -> None:
+    """Create the table, and carry across anything the one-per-person table
+    held.
+
+    The predecessor keyed on `username`, which is exactly the thing this
+    change stops doing: a person had one value, so lifting it off any box
+    they owned was lifting their whole identity. SQLite cannot move a primary
+    key in place, so the rows are copied — each old row becomes a holder
+    named after the person who held it, with the role `person`, which is what
+    it actually was. The old table is left on disk rather than dropped: it
+    holds digests, not values, and a rollback that found it missing would
+    leave every holder refused with nothing to restore.
+    """
     await db.executescript(CREDENTIALS_DDL)
+    rows = await db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='user_credentials'"
+    )
+    if await rows.fetchone():
+        await db.execute(
+            "INSERT OR IGNORE INTO credentials "
+            "(holder, username, role, token_sha, created_at, revoked_at) "
+            "SELECT username, username, ?, token_sha, created_at, revoked_at "
+            "FROM user_credentials "
+            "WHERE username IS NOT NULL AND trim(username) <> ''",
+            (PERSON,),
+        )
     await db.commit()
+
+
+async def _is_registered_mind(db: aiosqlite.Connection, holder: str) -> bool:
+    rows = await db.execute(
+        "SELECT 1 FROM minds WHERE mind_id = ? OR lower(name) = ? LIMIT 1",
+        (holder, holder.lower()),
+    )
+    return await rows.fetchone() is not None
 
 
 async def put_credential(
-    db: aiosqlite.Connection, username: str, token: str
+    db: aiosqlite.Connection,
+    holder: str,
+    username: str,
+    token: str,
+    role: str | None = None,
 ) -> dict:
-    """Mint or replace one user's credential. Replacing clears a revocation:
-    the operator issuing a new value has not asked for it to arrive dead."""
+    """Mint or replace one holder's credential.
+
+    A holder is a mind, a service, or a person — never "a person's minds
+    collectively". Two holders owned by one person are two rows with two
+    values, which is the whole point: revoking the one that sits on a box in
+    somebody's bedroom must not revoke the one running here.
+
+    Replacing clears a revocation: the operator issuing a new value has not
+    asked for it to arrive dead.
+    """
+    key = normalize_holder(holder)
+    if not key:
+        raise ValueError("a credential names the holder it belongs to")
     name = normalize_username(username)
     if not name:
-        raise ValueError("a credential names the user it belongs to")
+        raise ValueError("a credential names the user its holder answers to")
     if not token:
         raise ValueError("a credential needs a value")
+    if role is None:
+        role = MIND if await _is_registered_mind(db, key) else PERSON
+    if role not in ROLES:
+        raise ValueError(f"unknown credential role: {role!r}")
+    sha = digest(token)
+    clash = await db.execute(
+        "SELECT holder FROM credentials WHERE token_sha = ? AND holder <> ?",
+        (sha, key),
+    )
+    row = await clash.fetchone()
+    if row:
+        # Checked rather than left to the UNIQUE constraint so the console
+        # gets a sentence instead of an IntegrityError, and names the holder
+        # it collided with: the operator has almost certainly pasted one
+        # machine's value into another's field, and needs to know which.
+        raise ValueError(
+            f"that value is already held by {row[0]!r}; "
+            "a credential belongs to one holder"
+        )
     now = time.time()
     await db.execute(
-        "INSERT INTO user_credentials (username, token_sha, created_at, revoked_at) "
-        "VALUES (?, ?, ?, NULL) "
-        "ON CONFLICT(username) DO UPDATE SET "
-        "token_sha=excluded.token_sha, created_at=excluded.created_at, revoked_at=NULL",
-        (name, digest(token), now),
+        "INSERT INTO credentials "
+        "(holder, username, role, token_sha, created_at, revoked_at) "
+        "VALUES (?, ?, ?, ?, ?, NULL) "
+        "ON CONFLICT(holder) DO UPDATE SET "
+        "username=excluded.username, role=excluded.role, "
+        "token_sha=excluded.token_sha, created_at=excluded.created_at, "
+        "revoked_at=NULL",
+        (key, name, role, sha, now),
     )
     await db.commit()
-    return {"username": name, "created_at": now}
+    return {"holder": key, "username": name, "role": role, "created_at": now}
 
 
-async def revoke_credential(db: aiosqlite.Connection, username: str) -> bool:
-    """Mark a credential dead. The row is kept rather than deleted so the
-    console can say "revoked" where it would otherwise have to say "never
-    had one", which are different sentences with different remedies."""
-    name = normalize_username(username)
+async def revoke_credential(db: aiosqlite.Connection, holder: str) -> bool:
+    """Mark one holder's credential dead, and only that holder's.
+
+    The row is kept rather than deleted so the console can say "revoked"
+    where it would otherwise have to say "never had one", which are different
+    sentences with different remedies.
+    """
+    key = normalize_holder(holder)
     cursor = await db.execute(
-        "UPDATE user_credentials SET revoked_at = ? "
-        "WHERE username = ? AND revoked_at IS NULL",
-        (time.time(), name),
+        "UPDATE credentials SET revoked_at = ? "
+        "WHERE holder = ? AND revoked_at IS NULL",
+        (time.time(), key),
     )
     await db.commit()
     return cursor.rowcount > 0
 
 
-async def user_for_token(db: aiosqlite.Connection, token: str) -> str | None:
-    """The user a presented credential belongs to, or None.
+async def credential_for_token(
+    db: aiosqlite.Connection, token: str
+) -> Credential | None:
+    """The holder a presented credential belongs to, or None.
 
     Read per call, never cached: requirement is that a revocation lands on the
     holder's next request without a restart, and a cache is exactly the thing
@@ -235,16 +368,33 @@ async def user_for_token(db: aiosqlite.Connection, token: str) -> str | None:
     if not token:
         return None
     rows = await db.execute(
-        "SELECT username, token_sha FROM user_credentials WHERE revoked_at IS NULL"
+        "SELECT holder, username, role, token_sha FROM credentials "
+        "WHERE revoked_at IS NULL"
     )
     presented = digest(token)
-    for username, token_sha in await rows.fetchall():
+    for holder, username, role, token_sha in await rows.fetchall():
         # Constant-time, on bytes. `compare_digest` raises TypeError on a str
         # holding anything outside ASCII, and on a websocket handshake that
         # 500 reaches the browser as "this gateway has no such route".
-        if hmac.compare_digest(presented.encode("ascii"), str(token_sha).encode("ascii")):
-            return username
+        if hmac.compare_digest(
+            presented.encode("ascii"), str(token_sha).encode("ascii")
+        ):
+            return Credential(
+                holder=normalize_holder(holder),
+                username=normalize_username(username),
+                role=str(role or PERSON),
+            )
     return None
+
+
+async def user_for_token(db: aiosqlite.Connection, token: str) -> str | None:
+    """The user a presented credential answers for, or None.
+
+    Kept at this signature because ownership is still decided by user: the
+    holder is which box is talking, the user is whose things it may touch.
+    """
+    found = await credential_for_token(db, token)
+    return found.username if found else None
 
 
 def normalize_username(name: object) -> str:
@@ -252,11 +402,18 @@ def normalize_username(name: object) -> str:
 
 
 def primary_user() -> str:
-    """The user the shared `COMMS_BEARER_TOKEN` stands for, or empty.
+    """Who owns a conversation whose mind cannot be resolved to an owner.
 
-    Empty is the pre-scoping hive: the shared token reaches everything, as it
-    always has. See the module docstring — this is the switch, and its default
-    is "behave as before".
+    This was once the identity the shared `COMMS_BEARER_TOKEN` stood for.
+    That token is no longer a credential at all, so what is left is the
+    narrower job the same value was already doing: `sessions.mind_id` carried
+    a `DEFAULT 'ada'` for most of this schema's life, and the live table still
+    holds rows naming a mind that is unregistered, renamed or gone. Refusing
+    those to everyone would take the operator's own history away with no
+    migration and no message, so they answer to the user named here, who on a
+    hive with one operator is whose they were.
+
+    Empty means nobody: an unresolvable conversation is then refused to all.
     """
     return normalize_username(os.environ.get("COMMS_PRIMARY_USER", ""))
 
@@ -271,6 +428,15 @@ class Caller:
     """Who comms decided is asking."""
 
     username: str = ""
+    #: Which box is talking: a mind, a service, or a person. The user above is
+    #: whose things it may touch; this is who presented the value, and it is
+    #: where a route addressed by mind rather than by conversation gets its
+    #: mind from. Empty for the admin credential, which is every holder at
+    #: once and therefore none of them.
+    holder: str = ""
+    #: One of `MIND`, `SERVICE`, `PERSON`, or empty when no credential row
+    #: resolved.
+    role: str = ""
     is_admin: bool = False
     #: True when the caller presented the shared service token. Tracked
     #: separately from `username`, because that token is two things at once on
@@ -296,7 +462,12 @@ class Caller:
         credential admitted here reaches every conversation on the hive
         through them. A person's credential is not admitted.
         """
-        return self.is_admin or self.is_service or self.unscoped
+        return (
+            self.is_admin
+            or self.is_service
+            or self.unscoped
+            or self.role in MACHINE_ROLES
+        )
 
     def sees_everything(self) -> bool:
         return self.is_admin or self.unscoped
@@ -313,33 +484,36 @@ def bearer_of(scope: Scope) -> str:
 async def resolve_caller(db: aiosqlite.Connection, token: str) -> Caller:
     """Turn a presented bearer into a caller.
 
-    Order matters. The admin token is checked first because the console and
-    the operator must keep a way into a wedged conversation whatever else is
-    configured. The shared token is checked before the credentials table so
-    that a hive naming no primary user keeps its present behaviour even if
-    somebody has already minted rows.
+    The admin credential is checked first, because the console and the
+    operator must keep a way into a wedged conversation whatever else is
+    configured, and because it is the one credential that stands for every
+    holder at once — the console serves whoever is logged in and does its own
+    filtering from that session.
+
+    Everything else resolves out of the credentials table and nowhere else.
+    The shared `COMMS_BEARER_TOKEN` is deliberately absent: one value that
+    every mind, every surface bot and two boxes in the boys' bedrooms all
+    presented is a value whose theft is indistinguishable from its use, and
+    while it was accepted no per-holder revocation could mean anything.
+    Presenting it now resolves no holder and is refused like any other
+    unrecognised value.
+
+    There is no bypass for a gateway with nothing configured. An absent
+    credential store is a gateway that cannot establish who is calling, and
+    serving every route open while it works that out is how a hive stays
+    green for a week with its front door off its hinges.
     """
     admin = os.environ.get("COMMS_ADMIN_BEARER_TOKEN", "")
-    service = os.environ.get("COMMS_BEARER_TOKEN", "")
-    # Bypass mode: an unset service token has always meant "no gating", so a
-    # fresh container can boot before its secrets are wired. It applies
-    # whatever the caller presented — master returned before even reading the
-    # header, and a host whose comms has no service token while a surface
-    # still holds a stale one went from fully served to fully refused when
-    # this was gated on an empty token instead.
-    if not service:
-        return Caller(unscoped=True, is_service=True)
     if not token:
         return Caller()
     if admin and hmac.compare_digest(token.encode("utf-8"), admin.encode("utf-8")):
         return Caller(is_admin=True, is_service=True, unscoped=True)
-    if service and hmac.compare_digest(token.encode("utf-8"), service.encode("utf-8")):
-        named = primary_user()
-        if named:
-            return Caller(username=named, is_service=True)
-        return Caller(unscoped=True, is_service=True)
-    named = await user_for_token(db, token)
-    return Caller(username=named) if named else Caller()
+    found = await credential_for_token(db, token)
+    if not found:
+        return Caller()
+    return Caller(
+        username=found.username, holder=found.holder, role=found.role
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -1,13 +1,27 @@
-"""Bearer-token auth middleware (F9).
+"""The two credentials lucent still reads out of the environment.
 
-Validates ``Authorization: Bearer <token>`` against ``LUCENT_BEARER_TOKEN``
-env var. Health endpoint and root stay open; every other route uses this
-as a dependency.
+Per-holder credentials — which mind is asking, and which minds it may read —
+live in `lucent_api.holder_access`, which is what every memory and graph route
+is gated by. What is left here is the admin credential and the soul
+credential, and both are deliberately still single values.
 
-Empty/unset env var = bypass with a startup warning. This is a deployment
-safety: a fresh container won't accidentally lock itself out before the
-operator gets a chance to set the token. Once ``LUCENT_BEARER_TOKEN`` is
-set, validation is enforced and unauthenticated requests get 401.
+`LUCENT_ADMIN_BEARER_TOKEN` has to be: it is how the console reaches the
+store, and it is the only way the credential-minting route is reachable on a
+first boot, when the credentials table is necessarily empty. There is no
+bypass — unset, admin routes answer 503 rather than opening.
+
+`LUCENT_SOUL_BEARER_TOKEN` is already narrower than everything else by
+design: it is held by one holder, the soul-review flow, and the admin token is
+deliberately *not* accepted for it. Making it per-holder would buy no
+isolation it does not already have.
+
+The store no longer holds a `LUCENT_BEARER_TOKEN` of its own. One value held
+by every mind, every hook and every background process on every host made its
+theft indistinguishable from its use, and an unset one used to mean "serve
+everything to everybody" — the failure `holder_access` exists to close.
+Holders still present that variable; it now carries each holder's own value
+and is checked against the credentials table rather than against a copy kept
+here.
 """
 from __future__ import annotations
 
@@ -17,24 +31,6 @@ import os
 from fastapi import Header, HTTPException
 
 log = logging.getLogger(__name__)
-
-
-def require_bearer(authorization: str = Header(default="")) -> None:
-    expected = os.environ.get("LUCENT_BEARER_TOKEN", "")
-    admin = os.environ.get("LUCENT_ADMIN_BEARER_TOKEN", "")
-    if not expected:
-        # Bypass mode. Logged once at module load time below.
-        return
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(401, "Missing or invalid Authorization header")
-    token = authorization[7:]
-    # Admin token is strictly more privileged than the regular bearer and
-    # therefore also valid for routes gated by require_bearer. This matters
-    # because admin endpoints (e.g. /graph/schema/types) live inside the
-    # graph router, which has require_bearer as a router-level dep — without
-    # this acceptance, hive-tools would have to send two different headers.
-    if token != expected and (not admin or token != admin):
-        raise HTTPException(401, "Invalid token")
 
 
 def require_admin_bearer(authorization: str = Header(default="")) -> None:
@@ -55,12 +51,6 @@ def require_admin_bearer(authorization: str = Header(default="")) -> None:
         raise HTTPException(401, "Invalid admin token")
 
 
-# Startup warning when bypass is active.
-if not os.environ.get("LUCENT_BEARER_TOKEN"):
-    log.warning(
-        "LUCENT_BEARER_TOKEN is unset — auth bypass active. "
-        "Set the env var to enforce bearer-token gating."
-    )
 if not os.environ.get("LUCENT_ADMIN_BEARER_TOKEN"):
     log.warning(
         "LUCENT_ADMIN_BEARER_TOKEN is unset — admin endpoints (schema "

@@ -101,9 +101,10 @@ def test_a_route_added_with_no_classification_is_refused_to_a_non_admin(
     )
     conn.executescript(user_access.CREDENTIALS_DDL)
     conn.execute(
-        "INSERT INTO user_credentials (username, token_sha, created_at) "
-        "VALUES ('sloan', ?, 0)",
-        (user_access.digest(SLOAN_TOKEN),),
+        "INSERT INTO credentials "
+        "(holder, username, role, token_sha, created_at) "
+        "VALUES ('arnold', 'sloan', ?, ?, 0)",
+        (user_access.MIND, user_access.digest(SLOAN_TOKEN)),
     )
     conn.commit()
     conn.close()
