@@ -179,6 +179,28 @@ async def _refuse_foreign_session(request: Request, session_id: str) -> None:
         raise HTTPException(404, "Session not found")
 
 
+async def _require_own_session_mind(request: Request, session_id: str) -> None:
+    """Refuse anyone but the mind this conversation runs on.
+
+    Stricter than `_refuse_foreign_session`, which lets a `service` holder
+    through on the grounds that comms acts for every mind. These three routes
+    cannot afford that: a carry-forward is a conversation's soul, its memory
+    and its last exchange in one string, and every surface bot on the hive
+    holds a service value. So the admin credential passes — the console and
+    the operator keep their way into a wedged pane — and otherwise the caller
+    must be the mind whose conversation this is.
+    """
+    caller = _caller(request)
+    if caller.sees_everything():
+        return
+    if caller.role != user_access.MIND:
+        raise HTTPException(404, "Session not found")
+    keys = await user_access.holder_keys(app.state.broker_db, caller)
+    mind_id = await _session_mind(session_id)
+    if not user_access.mind_is_named_in(keys, mind_id):
+        raise HTTPException(404, "Session not found")
+
+
 async def _refuse_foreign_mind_in_body(request: Request, mind_id: str) -> None:
     """Refuse a write filed under a mind other than the caller's own.
 
@@ -806,9 +828,10 @@ class PtyActivityRequest(BaseModel):
 
 @app.post(
     "/sessions/{session_id}/pty-activity",
-    dependencies=[Depends(require_admin_bearer)],
 )
-async def publish_pty_activity(session_id: str, body: PtyActivityRequest):
+async def publish_pty_activity(
+    session_id: str, body: PtyActivityRequest, request: Request
+):
     """Everything a terminal turn is doing, for the dashboard alone.
 
     Deliberately not `pty-text`. That route puts blocks on the session's
@@ -816,14 +839,16 @@ async def publish_pty_activity(session_id: str, body: PtyActivityRequest):
     posted there would be read aloud, and the mind would spend a minute
     reciting a diff. This one reaches the live feed and stops.
     """
+    await _require_own_session_mind(request, session_id)
     return await session_mgr.publish_pty_activity(session_id, body.blocks)
 
 
 @app.post(
     "/sessions/{session_id}/pty-text",
-    dependencies=[Depends(require_admin_bearer)],
 )
-async def publish_pty_text(session_id: str, body: PtyTextRequest):
+async def publish_pty_text(
+    session_id: str, body: PtyTextRequest, request: Request
+):
     """One block of a terminal's prose, for the tile speaker to read aloud.
 
     Posted by the mind as it tails the harness's transcript, so a pty-hosted
@@ -831,14 +856,16 @@ async def publish_pty_text(session_id: str, body: PtyTextRequest):
     feeds today. Admin-gated because the body is assistant output on a port
     that answers across the LAN.
     """
+    await _require_own_session_mind(request, session_id)
     return await session_mgr.publish_pty_text(session_id, body.text)
 
 
 @app.get(
     "/sessions/{session_id}/carry-forward",
-    dependencies=[Depends(require_admin_bearer)],
 )
-async def get_carry_forward(session_id: str, claude_sid: str = ""):
+async def get_carry_forward(
+    session_id: str, request: Request, claude_sid: str = ""
+):
     """The rotation carry-forward a mind still owes this conversation.
 
     A mind calls this as it starts a terminal, handing the conversation id it
@@ -847,10 +874,13 @@ async def get_carry_forward(session_id: str, claude_sid: str = ""):
     re-applied or the context is gone. Declared before
     ``/sessions/{session_id}`` so the literal suffix wins the match.
 
-    Admin-gated, and not incidentally: the body is a fully composed prompt —
-    the mind's soul, its decay-weighted recent memory and the conversation's
-    last exchange — on a port that answers across the LAN.
+    Answered to this conversation's own mind, and to the admin credential,
+    and to nothing else — not even to the `service` holder every surface bot
+    carries. The body is a fully composed prompt: the mind's soul, its
+    decay-weighted recent memory and the conversation's last exchange, on a
+    port that answers across the LAN.
     """
+    await _require_own_session_mind(request, session_id)
     return {
         "session_id": session_id,
         "carry_forward": await session_mgr.get_carry_forward(session_id, claude_sid),
