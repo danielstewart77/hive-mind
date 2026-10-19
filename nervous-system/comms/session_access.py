@@ -115,6 +115,17 @@ TABLE.add(
     "POST /sessions/fire-rotation",
     "POST /sessions/record-turn",
     "POST /sessions/{session_id}/harness-state",
+    # The three calls a mind makes about a conversation of its own: the
+    # seed it is owed when it opens a terminal, and the prose and the
+    # activity it tails out of that terminal's transcript. They were
+    # admin-only, which is why every mind on the hive had to hold a value
+    # that opens every other mind — the one thing this story exists to
+    # end. `_require_own_session_mind` is stricter than this class on its
+    # own: a `service` holder is refused, because a carry-forward is a
+    # fully composed prompt and every surface bot holds a service value.
+    "POST /sessions/{session_id}/pty-activity",
+    "POST /sessions/{session_id}/pty-text",
+    "GET /sessions/{session_id}/carry-forward",
     "GET /models",
     "GET /broker/minds",
     "POST /broker/messages",
@@ -134,9 +145,6 @@ TABLE.add(
     Rule(ADMIN),
     "GET /sessions/live",
     "GET /sessions/live/text",
-    "POST /sessions/{session_id}/pty-activity",
-    "POST /sessions/{session_id}/pty-text",
-    "GET /sessions/{session_id}/carry-forward",
     "PUT /broker/minds/{mind_id}/owner",
     "PUT /broker/minds/{name}",
     "DELETE /broker/minds/{name}",

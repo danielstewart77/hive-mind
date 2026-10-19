@@ -69,9 +69,6 @@ def test_the_routes_that_took_only_the_admin_token_still_do():
     for spec in (
         ("GET", "/sessions/live"),
         ("GET", "/sessions/live/text"),
-        ("POST", "/sessions/{session_id}/pty-activity"),
-        ("POST", "/sessions/{session_id}/pty-text"),
-        ("GET", "/sessions/{session_id}/carry-forward"),
         # `POST /broker/minds` deliberately left this set: a mind registers
         # itself, which is why every mind used to hold the admin token. It is
         # machinery now, and `test_a_mind_registers_only_itself` guards the
@@ -109,6 +106,22 @@ def test_filing_a_rotation_summary_is_machinery_rather_than_an_owned_conversatio
     ]
 
     assert rule.kind == user_access.MACHINE
+
+
+def test_the_three_calls_a_mind_makes_about_its_own_conversation_are_machinery():
+    """The seed a mind is owed when it opens a terminal, and the prose and
+    activity it tails out of that terminal. Admin-only, these were the reason
+    every mind on the hive had to hold a credential that opens every other
+    mind. `_require_own_session_mind` then refuses everything but that
+    conversation's own mind, so this class is a floor and not the whole
+    check — a `service` holder passes the gate here and is refused by the
+    handler."""
+    for spec in (
+        ("POST", "/sessions/{session_id}/pty-activity"),
+        ("POST", "/sessions/{session_id}/pty-text"),
+        ("GET", "/sessions/{session_id}/carry-forward"),
+    ):
+        assert session_access.TABLE.rules[spec].kind == user_access.MACHINE, spec
 
 
 def test_a_route_added_with_no_classification_is_refused_to_a_non_admin(
