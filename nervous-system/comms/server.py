@@ -179,6 +179,32 @@ async def _refuse_foreign_session(request: Request, session_id: str) -> None:
         raise HTTPException(404, "Session not found")
 
 
+async def _refuse_foreign_mind_in_body(request: Request, mind_id: str) -> None:
+    """Refuse a write filed under a mind other than the caller's own.
+
+    The sibling guards resolve a conversation and compare its mind. This one
+    cannot: the rotation hook addresses its write by the *conversation* id it
+    holds, which is a `claude_sid` and not a `sessions.id`, and no lookup here
+    resolves one to the other — which is why the mind it is filing under
+    travels in the body. So the body is what is checked, against the holder
+    that presented the credential.
+
+    That is the key the read side uses too: `bootstrap_loader`
+    `_fetch_session_memory` looks a summary up by `(mind_id, client_ref)` and
+    never reads `session_id` at all. A mind held to its own `mind_id`
+    therefore cannot put a summary in front of any other mind.
+
+    An admin and a `service` holder are unrestricted, as everywhere else:
+    comms composes and reports on every mind's behalf.
+    """
+    caller = _caller(request)
+    keys = await user_access.holder_keys(app.state.broker_db, caller)
+    if keys is None:
+        return
+    if not user_access.mind_is_named_in(keys, mind_id):
+        raise HTTPException(404, "Session not found")
+
+
 async def _refuse_foreign_client_ref(
     request: Request, client_type: str, client_ref: str
 ) -> None:
@@ -980,15 +1006,28 @@ async def toggle_autopilot(session_id: str):
 # Rotation-memory endpoint
 # ---------------------------------------------------------------------------
 @app.post("/sessions/{session_id}/rotation-memory")
-async def write_rotation_memory(session_id: str, body: RotationMemoryRequest):
+async def write_rotation_memory(
+    session_id: str, body: RotationMemoryRequest, request: Request
+):
     """Persist a rotation summary for (mind_id, client_ref).
 
-    Written by the per-mind ``rotation_check`` Stop hook when the
-    transcript crosses the rotation threshold. The next
-    ``create_session`` for the same (mind_id, client_ref) reads this row
-    via ``bootstrap_loader._fetch_session_memory`` and injects it as the
+    Written by the per-mind ``rotation_check`` Stop hook when the transcript
+    crosses the rotation threshold. The next ``create_session`` for the same
+    (mind_id, client_ref) reads this row via
+    ``bootstrap_loader._fetch_session_memory`` and injects it as the
     ``<session-memory>`` carry-forward block.
+
+    ``session_id`` is the id the hook holds, which is the *harness*
+    conversation id rather than this gateway's ``sessions.id``. It is stored
+    for the record and nothing reads it back — which is why the mind this is
+    filed under is checked rather than the path, and why an empty one is
+    refused instead of stored: a summary filed under no mind can never be
+    matched by the read above, so it is a write that silently loses a
+    conversation's carry-forward.
     """
+    await _refuse_foreign_mind_in_body(request, body.mind_id)
+    if not body.mind_id.strip():
+        return JSONResponse({"error": "mind_id required"}, status_code=400)
     if not body.body.strip():
         return JSONResponse({"error": "body required"}, status_code=400)
     db = session_mgr._db
