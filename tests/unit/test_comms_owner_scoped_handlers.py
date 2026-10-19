@@ -31,9 +31,14 @@ SLOAN_TOKEN = "sloan-token-for-tests"  # secret-guard: allow
 # than with the shared value every mind used to hold.
 SKIPPY_MIND_TOKEN = "skippy-mind-token-for-tests"  # secret-guard: allow
 ARNOLD_MIND_TOKEN = "arnold-mind-token-for-tests"  # secret-guard: allow
+# A second mind of Daniel's. Nine of the twelve minds on this hive share
+# one owner, so "another mind" and "another person's mind" are different
+# questions and the owner check only ever answered the second.
+MORDECAI_MIND_TOKEN = "mordecai-mind-token-for-tests"  # secret-guard: allow
 
 DANIEL_MIND = "14cb820b-4a42-4f04-a593-54f532fd1d2f"
 SLOAN_MIND = "9f3c1a77-0000-4000-8000-0000000000aa"
+MORDECAI_MIND = "aa526b2b-0000-4000-8000-0000000000bb"
 
 DANIEL_SESSION = {
     "id": "d-session", "mind_id": DANIEL_MIND, "status": "running",
@@ -83,7 +88,11 @@ def gateway(tmp_path, monkeypatch):
         "harness, registered_at, last_seen) "
         "VALUES (?, ?, ?, 'http://127.0.0.1:8433', 'claude-opus-5', "
         "'claude', 0, 0)",
-        [(DANIEL_MIND, "skippy", "daniel"), (SLOAN_MIND, "arnold", "sloan")],
+        [
+            (DANIEL_MIND, "skippy", "daniel"),
+            (SLOAN_MIND, "arnold", "sloan"),
+            (MORDECAI_MIND, "mordecai", "daniel"),
+        ],
     )
     conn.executemany(
         "INSERT INTO credentials "
@@ -95,6 +104,10 @@ def gateway(tmp_path, monkeypatch):
             # Two minds, each with its own value, each answering for its owner.
             ("skippy", "daniel", ua.MIND, ua.digest(SKIPPY_MIND_TOKEN)),
             ("arnold", "sloan", ua.MIND, ua.digest(ARNOLD_MIND_TOKEN)),
+            # Keyed by name, while the body it sends names its uuid: the
+            # two forms both name one mind and a check on either alone
+            # refuses a legitimate write.
+            ("mordecai", "daniel", ua.MIND, ua.digest(MORDECAI_MIND_TOKEN)),
         ],
     )
     conn.commit()
@@ -165,6 +178,21 @@ def gateway(tmp_path, monkeypatch):
     # has to be made on the loop the app runs on — TestClient's lifespan.
     from contextlib import asynccontextmanager
 
+    sessions_path = tmp_path / "sessions.db"
+    sconn = sqlite3.connect(sessions_path)
+    sconn.executescript(
+        "CREATE TABLE session_memory ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  mind_id TEXT NOT NULL,"
+        "  mind_name TEXT NOT NULL,"
+        "  client_ref TEXT NOT NULL,"
+        "  session_id TEXT NOT NULL,"
+        "  body TEXT NOT NULL,"
+        "  created_at REAL NOT NULL);"
+    )
+    sconn.commit()
+    sconn.close()
+
     @asynccontextmanager
     async def lifespan(app):
         conn = await aiosqlite.connect(path)
@@ -173,12 +201,24 @@ def gateway(tmp_path, monkeypatch):
         # the recipient lookup under test.
         conn.row_factory = aiosqlite.Row
         app.state.broker_db = conn
+        # The rotation-summary handler writes through the session manager's own
+        # connection. Asserting on the row it stored is the only way to tell a
+        # refusal from a write that landed under the wrong mind.
+        sessions_db = await aiosqlite.connect(sessions_path)
+        server.session_mgr._db = sessions_db
         yield
+        await sessions_db.close()
+        server.session_mgr._db = None
         await conn.close()
 
     monkeypatch.setattr(server.app.router, "lifespan_context", lifespan)
     with TestClient(server.app, raise_server_exceptions=False) as client:
-        yield client, {"created": created, "recorded": recorded, "killed": killed}
+        yield client, {
+            "created": created,
+            "recorded": recorded,
+            "killed": killed,
+            "sessions_db": sessions_path,
+        }
 
 
 def _auth(token):
@@ -780,3 +820,99 @@ def test_an_inbound_text_is_dropped_when_the_configured_mind_is_not_registered(
     answer = _signed_sms(client, SMS_SECRET, SMS_BODY)
 
     assert answer.json() == {"status": "ack-no-recipient"}
+
+
+# --- the rotation summary -------------------------------------------------
+# Addressed by the conversation id the hook holds, which is a `claude_sid`
+# and not a `sessions.id`. Nothing here can resolve one to the other, so the
+# mind a summary is filed under travels in the body and the body is what is
+# held to the caller's own holder.
+
+CONVERSATION_ID = "7408e1aa-0000-4000-8000-00000000c0de"
+
+
+def _stored_summaries(paths):
+    conn = sqlite3.connect(paths["sessions_db"])
+    try:
+        return conn.execute(
+            "SELECT mind_id, mind_name, client_ref, session_id, body "
+            "FROM session_memory ORDER BY id"
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def test_a_mind_files_its_own_rotation_summary_under_the_conversation_id(gateway):
+    """The write the hook actually makes, with the credential it actually
+    holds. Classified `OWNER`, the gate resolved the path id to no session
+    and refused this with a 404 — so every rotation on the hive composed a
+    carry-forward for minutes and then threw it away."""
+    client, paths = gateway
+
+    answer = client.post(
+        f"/sessions/{CONVERSATION_ID}/rotation-memory",
+        json={
+            "mind_id": DANIEL_MIND,
+            "client_ref": "8776938611",
+            "body": "where we got to",
+        },
+        headers=_auth(SKIPPY_MIND_TOKEN),
+    )
+
+    assert answer.status_code == 200
+    assert _stored_summaries(paths) == [
+        (DANIEL_MIND, "skippy", "8776938611", CONVERSATION_ID, "where we got to")
+    ]
+
+
+def test_a_mind_whose_credential_is_keyed_by_name_may_file_under_its_uuid(gateway):
+    """One mind, two keys. A check against either form alone refuses a
+    legitimate summary: the hook sends `$MIND_ID`, while a credential is
+    minted against whichever of the two the operator typed."""
+    client, paths = gateway
+
+    answer = client.post(
+        f"/sessions/{CONVERSATION_ID}/rotation-memory",
+        json={
+            "mind_id": MORDECAI_MIND,
+            "client_ref": "555",
+            "body": "mordecai's own",
+        },
+        headers=_auth(MORDECAI_MIND_TOKEN),
+    )
+
+    assert answer.status_code == 200
+    assert [row[0] for row in _stored_summaries(paths)] == [MORDECAI_MIND]
+
+
+def test_a_mind_cannot_file_a_rotation_summary_under_another_mind(gateway):
+    """The read side looks a summary up by `(mind_id, client_ref)` and never
+    reads the session id, so the mind named in the body is the whole of what
+    decides whose next conversation opens on it."""
+    client, paths = gateway
+
+    answer = client.post(
+        f"/sessions/{CONVERSATION_ID}/rotation-memory",
+        json={
+            "mind_id": DANIEL_MIND,
+            "client_ref": "8776938611",
+            "body": "read this as though you wrote it",
+        },
+        headers=_auth(MORDECAI_MIND_TOKEN),
+    )
+
+    assert answer.status_code == 404
+    assert _stored_summaries(paths) == []
+
+
+def test_a_mind_of_another_owner_cannot_file_a_rotation_summary(gateway):
+    client, paths = gateway
+
+    answer = client.post(
+        f"/sessions/{CONVERSATION_ID}/rotation-memory",
+        json={"mind_id": DANIEL_MIND, "client_ref": "111", "body": "not mine"},
+        headers=_auth(ARNOLD_MIND_TOKEN),
+    )
+
+    assert answer.status_code == 404
+    assert _stored_summaries(paths) == []

@@ -57,7 +57,6 @@ TABLE.add(
     "POST /sessions/{session_id}/activate",
     "POST /sessions/{session_id}/model",
     "POST /sessions/{session_id}/autopilot",
-    "POST /sessions/{session_id}/rotation-memory",
     "POST /sessions/{session_id}/interrupt",
     "POST /sessions/{session_id}/remote-control",
     "DELETE /sessions/{session_id}/remote-control",
@@ -100,6 +99,14 @@ TABLE.add(
     "POST /sessions/{session_id}/context",
     "GET /sessions/late-turns",
     "POST /sessions/arm-rotation",
+    # The rotation summary. Addressed by the *conversation* id the hook
+    # holds — a `claude_sid`, which is not a `sessions.id` and which no
+    # lookup here can resolve — so the `OWNER` class refused every mind on
+    # the hive the moment it was applied, and the carry-forward each
+    # rotation composes was silently dropped. What the write has to be held
+    # to is the mind named in its body, which `write_rotation_memory`
+    # checks against the caller's own holder.
+    "POST /sessions/{session_id}/rotation-memory",
     # A mind registering itself, which is why every mind used to need the
     # admin token. `broker_register_mind` refuses a holder that is not the
     # mind being written, so this class admits the machinery and the handler
