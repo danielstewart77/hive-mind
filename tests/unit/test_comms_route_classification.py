@@ -95,6 +95,22 @@ def test_registering_a_mind_is_machinery_rather_than_admin_only():
     assert rule.kind == user_access.MACHINE
 
 
+def test_filing_a_rotation_summary_is_machinery_rather_than_an_owned_conversation():
+    """The second deliberate widening, and a repair. The rotation hook
+    addresses this route by the id the harness gave it — a `claude_sid` —
+    which is not a `sessions.id` and which the gate's owner check cannot
+    resolve, so classifying it `OWNER` refused every mind on the hive and
+    took rotation itself down with it: the hook returns before it arms, so a
+    refused write means the conversation is never rotated at all. What the
+    write is held to instead is the mind named in its body, checked against
+    the caller's own holder inside the handler."""
+    rule = session_access.TABLE.rules[
+        ("POST", "/sessions/{session_id}/rotation-memory")
+    ]
+
+    assert rule.kind == user_access.MACHINE
+
+
 def test_a_route_added_with_no_classification_is_refused_to_a_non_admin(
     tmp_path, monkeypatch
 ):
@@ -181,7 +197,6 @@ def test_every_conversation_route_is_classified_as_somebodys_conversation():
         ("POST", "/sessions/{session_id}/activate"),
         ("POST", "/sessions/{session_id}/model"),
         ("POST", "/sessions/{session_id}/autopilot"),
-        ("POST", "/sessions/{session_id}/rotation-memory"),
         ("POST", "/sessions/{session_id}/interrupt"),
         ("POST", "/sessions/{session_id}/remote-control"),
         ("DELETE", "/sessions/{session_id}/remote-control"),
