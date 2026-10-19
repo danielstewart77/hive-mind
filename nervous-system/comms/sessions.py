@@ -4895,8 +4895,20 @@ class SessionManager:
         if not claude_sid:
             raise ValueError(f"Session {session_id} has no claude_sid — cannot start Remote Control")
 
-        mind_id = row.get("mind_id", "ada")
-        mind_name = mind_id.capitalize()
+        # The name the mind is registered under, which is what the operator
+        # sees in the Remote Control list. Capitalising the `mind_id` named a
+        # conversation after a capitalised uuid, and the `"ada"` default it
+        # fell back on put somebody else's name on it — on a row that names
+        # no mind, which is a row nothing should be resumed from at all.
+        mind_id = row.get("mind_id")
+        if not mind_id:
+            raise ValueError(
+                f"Session {session_id} names no mind — cannot start Remote Control"
+            )
+        from comms import broker  # noqa: PLC0415
+
+        mind_row = await broker.get_mind_by_id(self.broker_db, mind_id)
+        mind_name = (mind_row or {}).get("name") or mind_id
 
         cmd = [
             "claude",
@@ -5217,6 +5229,6 @@ class SessionManager:
             "created_at": row["created_at"],
             "last_active": row["last_active"],
             "status": row["status"],
-            "mind_id": row.get("mind_id", "ada"),
+            "mind_id": row.get("mind_id"),
             "rotated_from": row.get("rotated_from"),
         }

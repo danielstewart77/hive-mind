@@ -35,6 +35,9 @@ ARNOLD_MIND_TOKEN = "arnold-mind-token-for-tests"  # secret-guard: allow
 # one owner, so "another mind" and "another person's mind" are different
 # questions and the owner check only ever answered the second.
 MORDECAI_MIND_TOKEN = "mordecai-mind-token-for-tests"  # secret-guard: allow
+# What every surface bot on the hive holds: a service value, unrestricted
+# on the machinery routes because comms composes for every mind.
+SERVICE_TOKEN = "surface-service-token-for-tests"  # secret-guard: allow
 
 DANIEL_MIND = "14cb820b-4a42-4f04-a593-54f532fd1d2f"
 SLOAN_MIND = "9f3c1a77-0000-4000-8000-0000000000aa"
@@ -108,6 +111,7 @@ def gateway(tmp_path, monkeypatch):
             # two forms both name one mind and a check on either alone
             # refuses a legitimate write.
             ("mordecai", "daniel", ua.MIND, ua.digest(MORDECAI_MIND_TOKEN)),
+            ("telegram-bot", "daniel", ua.SERVICE, ua.digest(SERVICE_TOKEN)),
         ],
     )
     conn.commit()
@@ -152,6 +156,19 @@ def gateway(tmp_path, monkeypatch):
         killed.append(session_id)
         return {"killed": session_id}
 
+    published: list[dict] = []
+
+    async def publish_pty_text(session_id, text):
+        published.append({"session": session_id, "text": text})
+        return {"ok": True}
+
+    async def publish_pty_activity(session_id, blocks):
+        published.append({"session": session_id, "blocks": blocks})
+        return {"ok": True}
+
+    async def get_carry_forward(session_id, claude_sid=""):
+        return "the composed prompt"
+
     async def _get_row(session_id):
         for row in ALL_ROWS:
             if row["id"] == session_id or row["id"].startswith(session_id):
@@ -167,6 +184,9 @@ def gateway(tmp_path, monkeypatch):
         ("get_active_session", get_active_session),
         ("get_late_turns", get_late_turns),
         ("kill_session", kill_session),
+        ("publish_pty_text", publish_pty_text),
+        ("publish_pty_activity", publish_pty_activity),
+        ("get_carry_forward", get_carry_forward),
         ("_get_row", _get_row),
     ):
         monkeypatch.setattr(server.session_mgr, name, fn)
@@ -218,6 +238,7 @@ def gateway(tmp_path, monkeypatch):
             "recorded": recorded,
             "killed": killed,
             "sessions_db": sessions_path,
+            "published": published,
         }
 
 
@@ -916,3 +937,74 @@ def test_a_mind_of_another_owner_cannot_file_a_rotation_summary(gateway):
 
     assert answer.status_code == 404
     assert _stored_summaries(paths) == []
+
+
+# --- what a mind may ask about a conversation of its own ------------------
+# A terminal's seed, prose and activity. Admin-only until this story, which
+# is why every mind on the hive held a credential that opened every other
+# mind's conversations as well as its own.
+
+
+def test_a_mind_tails_its_own_terminal_into_the_session_stream(gateway):
+    client, paths = gateway
+
+    answer = client.post(
+        "/sessions/d-session/pty-text",
+        json={"text": "spoken aloud"},
+        headers=_auth(SKIPPY_MIND_TOKEN),
+    )
+
+    assert answer.status_code == 200
+    assert paths["published"] == [{"session": "d-session", "text": "spoken aloud"}]
+
+
+def test_a_mind_cannot_tail_another_minds_terminal(gateway):
+    client, paths = gateway
+
+    answer = client.post(
+        "/sessions/d-session/pty-text",
+        json={"text": "not mine to publish"},
+        headers=_auth(MORDECAI_MIND_TOKEN),
+    )
+
+    assert answer.status_code == 404
+    assert paths["published"] == []
+
+
+def test_a_mind_cannot_read_another_minds_carry_forward(gateway):
+    """The body is that conversation's soul, its memory and its last
+    exchange in one string."""
+    client, _ = gateway
+
+    answer = client.get(
+        "/sessions/d-session/carry-forward?claude_sid=conv-1",
+        headers=_auth(ARNOLD_MIND_TOKEN),
+    )
+
+    assert answer.status_code == 404
+
+
+def test_a_surface_credential_cannot_read_a_carry_forward(gateway):
+    """Every surface bot on the hive holds a `service` value, and a service
+    holder is unrestricted on the other machinery routes because comms
+    composes for every mind. Not on this one."""
+    client, _ = gateway
+
+    answer = client.get(
+        "/sessions/d-session/carry-forward?claude_sid=conv-1",
+        headers=_auth(SERVICE_TOKEN),
+    )
+
+    assert answer.status_code == 404
+
+
+def test_a_mind_reads_the_carry_forward_it_is_owed(gateway):
+    client, _ = gateway
+
+    answer = client.get(
+        "/sessions/d-session/carry-forward?claude_sid=conv-1",
+        headers=_auth(SKIPPY_MIND_TOKEN),
+    )
+
+    assert answer.status_code == 200
+    assert answer.json()["carry_forward"] == "the composed prompt"
