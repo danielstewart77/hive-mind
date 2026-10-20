@@ -1,25 +1,24 @@
-"""Credential registry for the /settings credentials tab.
+"""The shared secrets left on the /settings credentials tab, and the files
+they live in.
 
-Hive's shared-secret tokens (COMMS_BEARER_TOKEN and friends) are not single
-values — each one is duplicated across every .env file that authenticates
-with it: the server side that validates the token
-(hive_mind/nervous-system/.env) and every client that presents it
-(hive_mind/.env for containerized minds, each edge mind's own .env, and
-hive-tools/.env). Rotating one means writing the same new value into every
-file that currently holds it, which is what this module does — it does not
-guess a uniform scheme across all credentials, because not all credentials
-share one. HIVE_TOOLS_TOKEN is issued per-consumer from a sqlite table
-(sha256-hashed, see hive-tools/auth_api.py) and has no symmetric env copy to
-fan out to, so it stays manual-only.
+The gateway and the memory store no longer have a shared secret: each keys
+credentials per holder, and `holder_credentials` is the page's path to those.
+What is left here is the two admin tokens — which guard the minting routes
+themselves and are held by more files than this container can see — the
+hive-tools API token, which is issued per consumer from hive-tools' own
+sqlite store with no symmetric env copy, and the GitHub PAT.
 
-The GitHub PAT is different again: GitHub has no rotation API, so the
-console can't mint one — but once Daniel generates a replacement in the
-GitHub UI, its two live homes on this host are ~/.git-credentials (git's
-credential.helper store) and ~/.config/gh/hosts.yml (the gh CLI, which
-keeps the token in two oauth_token fields). Both are file edits, so the
-tab accepts a pasted PAT, verifies it against api.github.com before
-touching anything, and writes both files. Nothing needs a restart — both
-are read per invocation.
+None of the four is rotatable from the page, each for a reason it states.
+What this module still owns is reading a value out of a `.env` and writing one
+back into it, which `holder_credentials` uses for every per-holder rotation.
+
+The GitHub PAT is the one thing here that is settable: GitHub has no rotation
+API, so the console cannot mint one — but once a replacement is generated in
+the GitHub UI, its two live homes on this host are ~/.git-credentials (git's
+credential.helper store) and ~/.config/gh/hosts.yml (the gh CLI, which keeps
+the token in two oauth_token fields). Both are file edits, so the tab accepts
+a pasted PAT, verifies it against api.github.com before touching anything, and
+writes both files. Nothing needs a restart — both are read per invocation.
 """
 
 from __future__ import annotations
@@ -27,7 +26,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import secrets
 import threading
 import time
 import urllib.error
@@ -269,34 +267,16 @@ def _summarise(rows: list[dict[str, Any]]) -> str:
 # else; a rotation writes every listed location with the same value.
 CREDENTIAL_GROUPS: list[dict[str, Any]] = [
     {
-        "key": "comms_bearer_token",
-        "label": "Hive Comms bearer token",
-        "rotatable": True,
-        "note": (
-            "Guards every comms route — one secret, one name, written to "
-            "each location below. The admin token is a separate credential "
-            "guarding the admin-only routes; rotating one does not rotate "
-            "the other."
-        ),
-        "locations": [
-            ("nervous_system", "COMMS_BEARER_TOKEN"),
-            ("hive_mind", "COMMS_BEARER_TOKEN"),
-            ("skippy", "COMMS_BEARER_TOKEN"),
-            ("mordecai", "COMMS_BEARER_TOKEN"),
-            ("hive_tools", "COMMS_BEARER_TOKEN"),
-        ],
-        "restart_targets": [
-            "hive-comms container",
-            "containerized minds (ada/bob/bilby/nagatha — docker compose up -d)",
-            "skippy.service",
-            "mordecai.service",
-            "hive-tools container",
-        ],
-    },
-    {
         "key": "comms_admin_bearer_token",
         "label": "Hive Comms admin token",
-        "rotatable": True,
+        "rotatable": False,
+        "manual_reason": (
+            "Held by more files than this page can see — every containerised "
+            "mind's compose interpolates it, and this console presents it on "
+            "every admin call it makes. Rotating the three locations below "
+            "would blind the console and stop every mind re-registering, so "
+            "it is rotated by hand until nothing needs it but the console."
+        ),
         "locations": [
             ("nervous_system", "COMMS_ADMIN_BEARER_TOKEN"),
             ("skippy", "COMMS_ADMIN_BEARER_TOKEN"),
@@ -305,26 +285,14 @@ CREDENTIAL_GROUPS: list[dict[str, Any]] = [
         "restart_targets": ["hive-comms container", "skippy.service", "mordecai.service"],
     },
     {
-        "key": "lucent_bearer_token",
-        "label": "Lucent bearer token",
-        "rotatable": True,
-        "locations": [
-            ("nervous_system", "LUCENT_BEARER_TOKEN"),
-            ("hive_mind", "LUCENT_BEARER_TOKEN"),
-            ("skippy", "LUCENT_BEARER_TOKEN"),
-            ("mordecai", "LUCENT_BEARER_TOKEN"),
-        ],
-        "restart_targets": [
-            "hive-lucent (nervous-system container)",
-            "containerized minds",
-            "skippy.service",
-            "mordecai.service",
-        ],
-    },
-    {
         "key": "lucent_admin_bearer_token",
         "label": "Lucent admin token",
-        "rotatable": True,
+        "rotatable": False,
+        "manual_reason": (
+            "Guards the memory store's own minting route, which is how every "
+            "other credential on this page is issued. Rotating it from here "
+            "would take the console's ability to mint away mid-rotation."
+        ),
         "locations": [
             ("nervous_system", "LUCENT_ADMIN_BEARER_TOKEN"),
             ("hive_tools", "LUCENT_ADMIN_BEARER_TOKEN"),
@@ -363,6 +331,7 @@ CREDENTIAL_GROUPS: list[dict[str, Any]] = [
         "restart_targets": [],
     },
 ]
+
 
 _GIT_CREDENTIALS_GITHUB_RE = re.compile(
     r"^https://(?P<user>[^:@/]+)(?::(?P<token>[^@/]*))?@github\.com$", flags=re.MULTILINE
@@ -636,37 +605,14 @@ def list_credentials() -> list[dict[str, Any]]:
 
 
 def rotate_credential(key: str) -> dict[str, Any]:
+    """Refuse, naming the reason this credential is not rotated from here.
+
+    Every group left on this page is rotated by hand, each for a different
+    reason, and the route still exists so that pressing a stale button in an
+    open tab answers with the reason rather than with a 404. Per-holder
+    rotation is `holder_credentials.rotate`.
+    """
     group = next((g for g in CREDENTIAL_GROUPS if g["key"] == key), None)
     if group is None:
         raise ValueError(f"unknown credential: {key!r}")
-    if not group["rotatable"]:
-        raise ValueError(group.get("manual_reason") or f"{group['label']} has no rotation API")
-
-    new_value = secrets.token_urlsafe(32)
-    # Five files are five operations, not one. Each is attempted regardless of
-    # what the last one did, and each reports its own outcome: a rotation that
-    # reached four of five and called itself a success is how one consumer ends
-    # up holding a token the rest of the hive has stopped honouring.
-    with _WRITE_LOCK:
-        locations = [
-            _write_location(ENV_FILES[file_label], env_key, new_value, file_label)
-            for file_label, env_key in group["locations"]
-        ]
-    written = [
-        {"file": row["file"], "env_key": row["env_key"]} for row in locations if row["written"]
-    ]
-
-    if not written:
-        raise ValueError(
-            f"{group['label']} was written to no location — {_summarise(locations)}"
-        )
-
-    return {
-        "key": group["key"],
-        "label": group["label"],
-        "preview": _redact(new_value),
-        "locations": locations,
-        "written": written,
-        "complete": all(row["written"] for row in locations),
-        "restart_targets": group["restart_targets"],
-    }
+    raise ValueError(group.get("manual_reason") or f"{group['label']} has no rotation API")

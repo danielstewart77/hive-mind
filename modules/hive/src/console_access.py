@@ -317,6 +317,12 @@ TABLE.add(
     "POST /api/settings/credentials/{key}/check",
     "POST /api/settings/credentials/{key}/rotate",
     "POST /api/settings/credentials/github_pat/set",
+    # Per-holder credentials. Admin for the same reason the services'
+    # own routes are: a route that issues credentials must not answer to
+    # one it issued, and the listing names every holder on the hive.
+    "POST /api/settings/holders/{service}/{holder}/check",
+    "POST /api/settings/holders/{service}/{holder}/rotate",
+    "POST /api/settings/holders/{service}/{holder}/revoke",
     "GET /downloads/{filename}",
     "POST /api/voices/sample",
     # users and groups

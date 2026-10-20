@@ -245,6 +245,29 @@ def internal_mind_exists(name: str) -> bool:
 OWNER_RE = re.compile(r"[a-z0-9][a-z0-9._@-]{0,63}")
 
 
+def _comms_variable(name: str) -> str:
+    """The variable this mind's gateway value is written under.
+
+    Asked of the module that writes it rather than spelled again here. A name
+    may carry hyphens and a `.env` key may not, so two copies of the rule is a
+    compose file reading a variable the mint never wrote — and a container that
+    comes up holding nothing.
+    """
+    import holder_credentials
+
+    return holder_credentials.variable_name(
+        holder_credentials.SERVICES["comms"], name
+    )
+
+
+def _lucent_variable(name: str) -> str:
+    import holder_credentials
+
+    return holder_credentials.variable_name(
+        holder_credentials.SERVICES["lucent"], name
+    )
+
+
 def scaffold_internal_mind(
     name: str,
     *,
@@ -315,11 +338,18 @@ def scaffold_internal_mind(
                     "KEY_RING=/usr/src/app/data/keyring",
                     "LUCENT_URL=http://hive-lucent:8424",
                     "LUCENT_URL_SELF=http://hive-lucent:8424",
-                    "LUCENT_BEARER_TOKEN=${LUCENT_BEARER_TOKEN}",
+                    # This mind's own value, not the hive's. Both services
+                    # key credentials per holder and refuse one another
+                    # holder already has, so a mind interpolating the shared
+                    # variable comes up holding something nothing accepts.
+                    # The left-hand name is what every reader inside the mind
+                    # resolves by and does not change; only where the value
+                    # comes from does.
+                    f"LUCENT_BEARER_TOKEN=${{{_lucent_variable(name)}}}",
                     "HIVE_TOOLS_URL=http://hive-tools:9421",
                     "HIVE_TOOLS_TOKEN=${HIVE_TOOLS_TOKEN}",
                     "COMMS_URL=http://hive-comms:8424",
-                    "COMMS_BEARER_TOKEN=${COMMS_BEARER_TOKEN}",
+                    f"COMMS_BEARER_TOKEN=${{{_comms_variable(name)}}}",
                     # A Mind re-registers from its own runtime.yaml on every
                     # start, and POST /broker/minds is an admin route.
                     "COMMS_ADMIN_BEARER_TOKEN=${COMMS_ADMIN_BEARER_TOKEN}",

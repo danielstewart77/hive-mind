@@ -45,6 +45,7 @@ import dashboard_data
 import design_data
 import design_delivery
 import design_graph
+import holder_credentials
 import kanban_data
 import mind_files
 import mind_mounts
@@ -937,6 +938,16 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
 
     if await _mind_name_is_taken(name):
         raise HTTPException(status_code=409, detail="That Mind name is already taken")
+    held_by = await holder_credentials.name_held_by_something_else(name)
+    if held_by:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{held_by} already has a credential holder called {name!r}. "
+                "Creating this Mind would replace the credential that holder "
+                "is using."
+            ),
+        )
 
     ollama_base_url = ""
     if provider == "ollama":
@@ -968,13 +979,27 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
             status_code=500, detail=f"Could not write the Mind scaffold: {exc}"
         ) from exc
 
+    # Minted here rather than left for a shell. The generated compose file
+    # reads this mind's own variables, so without this the container comes up
+    # holding nothing and is refused by both services on its first call.
+    # Not fatal: the scaffold is written and the mind is recoverable from the
+    # credentials page. Reported, because a mind that boots with no credential
+    # fails in silence from detached hooks — and reported per service, because
+    # one of the two landing is a different state from neither.
+    minted, credential_error = await holder_credentials.provision_mind(
+        name, mind_id, owner
+    )
+
     log_event(
         log, "mind.scaffolded", **_actor_fields(user), mind_name=name,
         mind_id=mind_id, harness=harness, provider=provider,
+        credentials=[m["service"] for m in minted], credential_error=credential_error,
     )
     return {
         "mind_id": mind_id,
         "written": written,
+        "credentials": minted,
+        "credential_error": credential_error,
         "registration": {
             "name": name,
             "mind_id": mind_id,
@@ -4074,12 +4099,137 @@ async def api_settings_credentials(user: dict = Depends(require_auth)):
         registry = "ok"
     except Exception:
         minds, registry = [], "unreadable"
+    # The holder rows come from the services' own tables, not from a list
+    # written into this console: the gateway has twenty-one holders and the
+    # memory store nine, the two sets differ, and a copy here is a list that
+    # goes stale in silence — which is how a holder is missed and then refused
+    # the moment the service it answers to comes up.
+    holders: list[dict] = []
+    holder_errors: dict[str, str] = {}
+    services = list(holder_credentials.SERVICES.values())
+    # Together, not one after the other: two services that hang would
+    # otherwise hold the page for the sum of their timeouts.
+    answers = await asyncio.gather(
+        *(holder_credentials.holder_rows(service) for service in services),
+        return_exceptions=True,
+    )
+    for service, answer in zip(services, answers):
+        if isinstance(answer, BaseException):
+            holder_errors[service.key] = str(answer)
+        else:
+            holders.extend(answer)
     return {
         "credentials": credential_registry.credential_summaries(minds),
         "rows": credential_registry.build_rows(minds),
+        "holders": holders,
+        "holder_errors": holder_errors,
         "registry": registry,
         "check_ttl_seconds": credential_registry.CHECK_TTL_S,
     }
+
+
+@app.post("/api/settings/holders/{service}/{holder}/check")
+async def api_settings_holder_check(
+    service: str, holder: str, user: dict = Depends(require_auth)
+):
+    """One row's live status, asked for per row.
+
+    Not folded into the listing: the listing is the whole content of the page
+    and must not wait on a service that is down, once per holder, for thirty
+    holders.
+    """
+    del user
+    target = holder_credentials.SERVICES.get(service)
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"no such service: {service!r}")
+    role = str((await _holder_role(target, holder)) or "")
+    return {
+        "service": service,
+        "holder": holder,
+        **await holder_credentials.check(target, holder, role=role),
+    }
+
+
+async def _holder_role(service, holder: str) -> str | None:
+    """The role the service itself reports for this holder.
+
+    Asked rather than taken from the page: what a value may be presented to
+    follows from the role, and a page that could name it would be a page that
+    could change the answer.
+    """
+    try:
+        rows = await holder_credentials.list_holders(service)
+    except (holder_credentials.MintRefused, httpx.HTTPError):
+        return None
+    wanted = holder.strip().lower()
+    for row in rows:
+        if str(row.get("holder", "")).lower() == wanted:
+            return str(row.get("role") or "")
+    return None
+
+
+@app.post("/api/settings/holders/{service}/{holder}/rotate")
+async def api_settings_holder_rotate(
+    service: str, holder: str, user: dict = Depends(require_auth)
+):
+    """Issue one holder a new value for one service, and nobody else.
+
+    A `Stranded` rotation is a 500 rather than a 400: a 400 reads as "your
+    request was wrong, nothing happened", and the one thing this failure
+    guarantees is that something happened.
+    """
+    target = holder_credentials.SERVICES.get(service)
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"no such service: {service!r}")
+    try:
+        result = await holder_credentials.rotate(target, holder)
+    except holder_credentials.Stranded as exc:
+        log_event(
+            log, "credential.holder.stranded", **_actor_fields(user),
+            service=service, holder=holder, restored=exc.restored, detail=str(exc),
+        )
+        credential_registry.forget_all()
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except holder_credentials.MintUncertain as exc:
+        # 503, because the one thing the operator must not read is "nothing
+        # happened" — the mint may have landed and nothing was written.
+        log_event(
+            log, "credential.holder.uncertain", **_actor_fields(user),
+            service=service, holder=holder, detail=str(exc),
+        )
+        credential_registry.forget_all()
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except holder_credentials.MintRefused as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_event(
+        log, "credential.holder.rotated", **_actor_fields(user),
+        service=service, holder=holder, file=result["file"],
+        env_key=result["env_key"], restart_target=result["restart_target"],
+    )
+    # This holder's last check is now about a value that no longer exists.
+    credential_registry.forget_all()
+    return result
+
+
+@app.post("/api/settings/holders/{service}/{holder}/revoke")
+async def api_settings_holder_revoke(
+    service: str, holder: str, user: dict = Depends(require_auth)
+):
+    """Kill one holder's credential. The action that belongs to a holder this
+    console cannot write a new value for."""
+    target = holder_credentials.SERVICES.get(service)
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"no such service: {service!r}")
+    try:
+        result = await holder_credentials.revoke(target, holder)
+    except holder_credentials.MintRefused as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_event(
+        log, "credential.holder.revoked", **_actor_fields(user),
+        service=service, holder=holder, revoked=result["revoked"],
+    )
+    credential_registry.forget_all()
+    return result
 
 
 @app.post("/api/settings/credentials/{key}/check")

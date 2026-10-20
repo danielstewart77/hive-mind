@@ -37,7 +37,7 @@
             <div class="notice"><i data-lucide="sparkles"></i><span>Identity is not scaffolded. A Mind with no soul answers as a blank harness until you give it one.</span></div>
             <section class="surface" id="mind-result" hidden>
                 <div class="surface-header"><div><h2>Next steps</h2><p>Run on the Hive host, then register.</p></div></div>
-                <div class="surface-body overview-stack"><dl class="detail-grid" id="mind-identity"></dl><div id="mind-commands"></div><p id="mind-next-step"></p><button class="button button-primary" type="button" id="mind-register">Register with the broker</button><small id="mind-register-status"></small></div>
+                <div class="surface-body overview-stack"><dl class="detail-grid" id="mind-identity"></dl><div id="mind-credentials"></div><div id="mind-commands"></div><p id="mind-next-step"></p><button class="button button-primary" type="button" id="mind-register">Register with the broker</button><small id="mind-register-status"></small></div>
             </section>
         </aside>
     </div>
@@ -107,6 +107,19 @@ window.addEventListener("DOMContentLoaded", function () {
             created = data.registration;
             document.getElementById("mind-identity").innerHTML = [["Mind ID", data.mind_id], ["Harness", data.registration.harness + " · " + data.registration.provider], ["Model", data.registration.model]].map(function (item) { return '<div class="detail-item"><dt>' + h.escapeHtml(item[0]) + '</dt><dd class="mono">' + h.escapeHtml(item[1]) + '</dd></div>'; }).join("");
             document.getElementById("mind-commands").innerHTML = (data.commands || []).map(function (step, index) { const id = "mind-command-" + index; return '<div><p class="command-label">' + h.escapeHtml(step.name) + '</p><div class="code-wrap"><pre class="code-panel" id="' + id + '">' + h.escapeHtml(step.command) + '</pre><button class="icon-button" type="button" data-copy="#' + id + '" aria-label="Copy command"><i data-lucide="copy"></i></button></div></div>'; }).join("");
+            // A mind whose credentials did not land boots authenticating to
+            // nothing and fails from detached hooks, in silence. Saying it on
+            // the success screen is the only place the operator will look.
+            const credentials = document.getElementById("mind-credentials");
+            if (data.credential_error) {
+                credentials.innerHTML = '<div class="error-state">This Mind has no working credential for every service: '
+                    + h.escapeHtml(data.credential_error)
+                    + ' Issue the missing one on the credentials page before you build it.</div>';
+            } else {
+                credentials.innerHTML = '<p>Credentials issued: '
+                    + h.escapeHtml((data.credentials || []).map(function (row) { return row.service; }).join(", ") || "none")
+                    + '</p>';
+            }
             document.getElementById("mind-next-step").textContent = data.next_step || "";
             document.getElementById("mind-result").hidden = false;
             if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}});

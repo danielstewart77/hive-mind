@@ -27,7 +27,7 @@
         {% elif settings_section == 'credentials' %}
             <section class="surface">
                 <div class="surface-header">
-                    <div><h2>Credentials</h2><p>One row per holder. Rotation belongs to the credential; a per-mind token is set on its own row.</p></div>
+                    <div><h2>Credentials</h2><p>One row per holder, each with its own value. Rotating one leaves the rest working.</p></div>
                     <button id="credentials-refresh" class="icon-button" type="button" aria-label="Re-check every credential"><i data-lucide="refresh-cw"></i></button>
                 </div>
                 <div class="surface-body credential-toolbar">
@@ -109,7 +109,10 @@ window.addEventListener("DOMContentLoaded", function () {
     // The page keeps the whole answer and re-renders from it: a filter or a
     // sort must not cost a round trip, and a live check that lands while the
     // operator is typing must not drop what they typed.
-    let credentialState = {credentials: [], rows: [], registry: "ok", ttl: 300};
+    let credentialState = {credentials: [], rows: [], holders: [], holderErrors: {}, registry: "ok", ttl: 300};
+    let holderChecked = {};
+    // Bumped by every load, so a sweep in flight knows it has been overtaken.
+    let holderGeneration = 0;
     let credentialSort = {column: "holder", ascending: true};
 
     const STATUS_WORDS = {
@@ -230,11 +233,46 @@ window.addEventListener("DOMContentLoaded", function () {
             + '<td>' + action + '</td></tr>';
     }
 
+    // One section per service, one row per holder it reports. A holder this
+    // console holds no writable location for gets no rotate control and says
+    // why: minting a value with nowhere to put it is how a holder is killed.
+    function holderRowHtml(row) {
+        const checked = holderChecked[row.service + "\u0000" + row.holder];
+        const status = row.revoked ? "Revoked" : (checked ? (STATUS_WORDS[checked.status] || checked.status) : "Unchecked");
+        const detail = checked && checked.detail ? ' <small>' + h.escapeHtml(checked.detail) + '</small>' : "";
+        const where = row.path ? h.escapeHtml(row.path) + ' <small>(' + h.escapeHtml(row.env_key) + ')</small>' : '<small>' + h.escapeHtml(row.unrotatable_reason || "") + '</small>';
+        const buttons = 'data-service="' + h.escapeHtml(row.service) + '" data-holder="' + h.escapeHtml(row.holder) + '"';
+        // Two columns, never one. Sharing a cell put Revoke exactly where
+        // Rotate had been for any holder whose file became unreadable, so an
+        // operator clicking from muscle memory revoked a live mind.
+        const rotate = row.rotatable
+            ? '<button class="button button-quiet" type="button" data-holder-rotate ' + buttons + '>' + (row.revoked ? "Reinstate" : "Rotate") + '</button>'
+            : '<span class="pill" title="' + h.escapeHtml(row.unrotatable_reason || "") + '">Not from here</span>';
+        const revoke = row.revoked
+            ? ''
+            : '<button class="button button-quiet" type="button" data-holder-revoke ' + buttons + '>Revoke</button>';
+        return '<tr data-holder-row ' + buttons + '>'
+            + '<td><strong>' + h.escapeHtml(row.holder) + '</strong> <small>' + h.escapeHtml(row.role || "") + '</small></td>'
+            + '<td>' + h.escapeHtml(row.username || "") + '</td>'
+            + '<td>' + where + '</td>'
+            + '<td>' + h.escapeHtml(row.restart_target || "") + '</td>'
+            + '<td>' + h.escapeHtml(status) + detail + '</td>'
+            + '<td>' + rotate + '</td><td>' + revoke + '</td></tr>';
+    }
+
+    function holderGroupHtml(service, rows) {
+        const error = credentialState.holderErrors[service];
+        if (error) return '<section class="credential-group"><div class="surface-header"><div><h3>' + h.escapeHtml(service) + '</h3></div></div><div class="error-state">' + h.escapeHtml(error) + '</div></section>';
+        const table = rows.length
+            ? '<table class="credential-table"><thead><tr><th>Holder</th><th>Answers for</th><th>Reads from</th><th>Restart</th><th>Status</th><th></th><th></th></tr></thead><tbody>'
+              + rows.map(holderRowHtml).join("") + '</tbody></table>'
+            : '<div class="empty-state"><h3>No holders</h3><p>This service reports nobody holding a credential.</p></div>';
+        return '<section class="credential-group"><div class="surface-header"><div><h3>' + h.escapeHtml(rows.length ? rows[0].service_label : service) + '</h3></div></div>' + table + '</section>';
+    }
+
     function credentialGroupHtml(credential, rows) {
         let action;
-        if (credential.rotatable) {
-            action = '<button class="button" type="button" data-rotate="' + h.escapeHtml(credential.key) + '">Rotate</button>';
-        } else if (credential.key === "github_pat") {
+        if (credential.key === "github_pat") {
             action = '<span class="credential-set">' + credentialInput('data-credential="github_pat" data-holder="host"') + '' + credentialSaveButton("button", 'data-set-host="github_pat"', "github_pat", "host") + '</span>';
         } else if (credential.manual_reason) {
             action = '<span class="pill" title="' + h.escapeHtml(credential.manual_reason) + '">Manual only</span>';
@@ -262,11 +300,18 @@ window.addEventListener("DOMContentLoaded", function () {
         const banner = credentialState.registry === "unreadable"
             ? '<div class="error-state">The mind registry could not be read, so no per-mind rows are shown. The shared secrets below are read from this host.</div>'
             : "";
-        const html = credentialState.credentials.map(function (credential) {
+        const holderServices = [];
+        credentialState.holders.forEach(function (row) { if (holderServices.indexOf(row.service) === -1) holderServices.push(row.service); });
+        Object.keys(credentialState.holderErrors).forEach(function (service) { if (holderServices.indexOf(service) === -1) holderServices.push(service); });
+        const holderHtml = holderServices.map(function (service) {
+            let rows = credentialState.holders.filter(function (row) { return row.service === service; });
+            if (needle) rows = rows.filter(function (row) { return (row.holder + " " + (row.username || "") + " " + (row.role || "")).toLowerCase().indexOf(needle) !== -1; });
+            return holderGroupHtml(service, rows);
+        }).join("");
+        const html = holderHtml + credentialState.credentials.map(function (credential) {
             // Filtering and sorting move rows within a credential, never out
-            // of one: the rotate control writes every holder it has, and a
-            // sort that dissolved the grouping would leave it over rows that
-            // are no longer on screen.
+            // of one: a sort that dissolved the grouping would leave each
+            // credential's own control over rows no longer on screen.
             let rows = credentialState.rows.filter(function (row) { return row.credential === credential.key; });
             if (needle) rows = rows.filter(function (row) { return (row.holder + " " + row.holder_label + " " + row.credential_label).toLowerCase().indexOf(needle) !== -1; });
             if (wanted) rows = rows.filter(function (row) { return row.status === wanted; });
@@ -362,12 +407,32 @@ window.addEventListener("DOMContentLoaded", function () {
         await Promise.all([worker(), worker(), worker()]);
     }
 
+    // One row at a time, off the listing. The listing is the whole content of
+    // the page and must not wait on thirty holders' services answering.
+    async function checkHolderRows(rows, generation) {
+        for (const row of rows) {
+            // A sweep started before a rotation would otherwise land after it
+            // with the pre-rotation answer, and re-render the button the
+            // rotation disabled back to enabled mid-flight.
+            if (generation !== holderGeneration) return;
+            try {
+                const answer = await h.requestJson("/api/settings/holders/" + encodeURIComponent(row.service) + "/" + encodeURIComponent(row.holder) + "/check", {method: "POST"});
+                holderChecked[row.service + "\u0000" + row.holder] = answer;
+            } catch (error) { holderChecked[row.service + "\u0000" + row.holder] = {status: "undetermined", detail: error.message}; }
+            if (generation !== holderGeneration) return;
+            renderCredentials();
+        }
+    }
+
     async function loadCredentials(recheckAll) {
         const container = document.getElementById("credential-registry");
         try {
             const data = await h.requestJson("/api/settings/credentials");
-            credentialState = {credentials: data.credentials || [], rows: data.rows || [], registry: data.registry || "ok", ttl: data.check_ttl_seconds || 300};
+            credentialState = {credentials: data.credentials || [], rows: data.rows || [], holders: data.holders || [], holderErrors: data.holder_errors || {}, registry: data.registry || "ok", ttl: data.check_ttl_seconds || 300};
+            if (recheckAll) holderChecked = {};
+            const generation = ++holderGeneration;
             renderCredentials();
+            checkHolderRows(credentialState.holders.filter(function (row) { return !row.revoked && !holderChecked[row.service + "\u0000" + row.holder]; }), generation);
             // Only rows with no answer or a stale one. The answer is held on
             // the console and shared by every open tab, so a second browser
             // and a left-open dashboard cost nothing.
@@ -385,15 +450,13 @@ window.addEventListener("DOMContentLoaded", function () {
     if (section === "connections") { document.getElementById("connections-refresh").addEventListener("click", loadConnections); loadConnections(); }
     if (section === "voice") { loadVoice(); }
     if (section === "credentials") {
-    // Writing a credential to five files is five operations, not one. The
-    // report names each file and, where it was skipped, why — a summary that
-    // said "rotated" over four of five is how one consumer keeps a token the
-    // rest of the hive has stopped honouring.
+    // The GitHub PAT has two homes on this host and each is its own
+    // operation, so the report names both and, where one was skipped, why.
     function locationReport(result) {
         const rows = result.locations || [];
         const lines = rows.map(function (row) { return (row.written ? "✓ " : "✗ ") + row.file + (row.written ? "" : " — " + row.reason); });
         const done = rows.filter(function (row) { return row.written; }).length;
-        const heading = result.complete ? "Written to all " + rows.length + " locations." : "Partial: " + done + " of " + rows.length + " locations written.";
+        const heading = result.complete ? "Written to " + rows.length + " of " + rows.length + " files." : "Partial: " + done + " of " + rows.length + " files written.";
         return [heading].concat(lines).join("\n");
     }
     const registry = document.getElementById("credential-registry");
@@ -405,13 +468,31 @@ window.addEventListener("DOMContentLoaded", function () {
             renderCredentials();
             return;
         }
-        const rotateButton = event.target.closest("[data-rotate]");
-        if (rotateButton) {
-            const key = rotateButton.dataset.rotate;
-            if (!window.confirm("Rotate this credential for every holder? Nothing restarts automatically — you'll need to bounce the affected services yourself.")) return;
-            rotateButton.disabled = true; rotateButton.textContent = "Rotating…";
-            try { const result = await h.requestJson("/api/settings/credentials/" + encodeURIComponent(key) + "/rotate", {method: "POST"}); window.alert(locationReport(result) + "\n\nRestart: " + (result.restart_targets || []).join(", ")); await loadCredentials(true); }
-            catch (error) { window.alert(error.message); rotateButton.disabled = false; rotateButton.textContent = "Rotate"; }
+        const holderRotate = event.target.closest("[data-holder-rotate]");
+        if (holderRotate) {
+            const service = holderRotate.dataset.service, holder = holderRotate.dataset.holder;
+            const reinstating = (holderRotate.textContent || "").indexOf("Reinstate") === 0;
+            const warning = reinstating
+                ? "This credential is revoked. Giving " + holder + " a new value for " + service + " brings it back to life. Continue?"
+                : "Give " + holder + " a new value for " + service + "? No other holder is touched, and nothing restarts automatically — until the service named on the row is restarted it keeps presenting the value it booted with.";
+            if (!window.confirm(warning)) return;
+            holderRotate.disabled = true; holderRotate.textContent = "Rotating…";
+            try {
+                const result = await h.requestJson("/api/settings/holders/" + encodeURIComponent(service) + "/" + encodeURIComponent(holder) + "/rotate", {method: "POST"});
+                window.alert("Written to " + result.path + " (" + result.env_key + ").\n\nRestart: " + (result.restart_target || "nothing reads this from a file"));
+                await loadCredentials(true);
+            } catch (error) { window.alert(error.message); holderRotate.disabled = false; holderRotate.textContent = "Rotate"; }
+            return;
+        }
+        const holderRevoke = event.target.closest("[data-holder-revoke]");
+        if (holderRevoke) {
+            const service = holderRevoke.dataset.service, holder = holderRevoke.dataset.holder;
+            if (!window.confirm("Revoke " + holder + "'s " + service + " credential? It is refused on its next request, and this console cannot give it a new one.")) return;
+            holderRevoke.disabled = true; holderRevoke.textContent = "Revoking…";
+            try {
+                await h.requestJson("/api/settings/holders/" + encodeURIComponent(service) + "/" + encodeURIComponent(holder) + "/revoke", {method: "POST"});
+                await loadCredentials(true);
+            } catch (error) { window.alert(error.message); holderRevoke.disabled = false; holderRevoke.textContent = "Revoke"; }
             return;
         }
         const hostButton = event.target.closest("[data-set-host]");

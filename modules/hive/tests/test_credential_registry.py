@@ -116,28 +116,14 @@ class TestWhoHoldsWhat:
         rows = [
             row
             for row in registry.build_rows([])
-            if row["credential"] == "comms_bearer_token"
+            if row["credential"] == "comms_admin_bearer_token"
         ]
 
         declared = next(
             g for g in credentials_data.CREDENTIAL_GROUPS
-            if g["key"] == "comms_bearer_token"
+            if g["key"] == "comms_admin_bearer_token"
         )["locations"]
         assert [row["holder"] for row in rows] == [label for label, _ in declared]
-
-    def test_rotation_belongs_to_the_credential_and_not_to_any_row(
-        self, tmp_path, monkeypatch
-    ) -> None:
-        """Rotating one holder's copy of a shared secret and not the rest is
-        how the hive goes down."""
-        _patch_env_files(monkeypatch, tmp_path)
-
-        rows = registry.build_rows([_mind("cypher")])
-        summaries = registry.credential_summaries([_mind("cypher")])
-
-        assert all("rotatable" not in row for row in rows)
-        comms = next(s for s in summaries if s["key"] == "comms_bearer_token")
-        assert comms["rotatable"] is True
 
     def test_a_per_mind_credential_offers_no_rotation_at_all(
         self, tmp_path, monkeypatch
@@ -156,30 +142,30 @@ class TestWhoHoldsWhat:
     ) -> None:
         """Which file and which key is the operator's whole remedy path."""
         nervous = tmp_path / "ns.env"
-        _write_env(nervous, COMMS_BEARER_TOKEN="abcdwxyz")
+        _write_env(nervous, COMMS_ADMIN_BEARER_TOKEN="abcdwxyz")
         _patch_env_files(monkeypatch, tmp_path, nervous_system=nervous)
 
         row = next(
             r
             for r in registry.build_rows([])
-            if r["credential"] == "comms_bearer_token"
+            if r["credential"] == "comms_admin_bearer_token"
             and r["holder"] == "nervous_system"
         )
 
         assert str(nervous) in row["where"]
-        assert "COMMS_BEARER_TOKEN" in row["where"]
+        assert "COMMS_ADMIN_BEARER_TOKEN" in row["where"]
 
     def test_a_present_value_shows_only_its_last_four_characters(
         self, tmp_path, monkeypatch
     ) -> None:
-        hive_mind = tmp_path / "hm.env"
-        _write_env(hive_mind, COMMS_BEARER_TOKEN="aaaabbbbccccwxyz")
-        _patch_env_files(monkeypatch, tmp_path, hive_mind=hive_mind)
+        skippy_env = tmp_path / "skippy.env"
+        _write_env(skippy_env, COMMS_ADMIN_BEARER_TOKEN="aaaabbbbccccwxyz")
+        _patch_env_files(monkeypatch, tmp_path, skippy=skippy_env)
 
         row = next(
             r
             for r in registry.build_rows([])
-            if r["credential"] == "comms_bearer_token" and r["holder"] == "hive_mind"
+            if r["credential"] == "comms_admin_bearer_token" and r["holder"] == "skippy"
         )
 
         assert row["preview"] == "...wxyz"
@@ -207,7 +193,7 @@ class TestWhatIsKnownBeforeAnyCheck:
         """This is what the operator sees first; it must not wait on a mind
         that is down or on GitHub once per row."""
         nervous = tmp_path / "ns.env"
-        _write_env(nervous, COMMS_BEARER_TOKEN="aaaawxyz")
+        _write_env(nervous, COMMS_ADMIN_BEARER_TOKEN="aaaawxyz")
         _patch_env_files(monkeypatch, tmp_path, nervous_system=nervous)
         network["anything"] = httpx.ConnectError("nothing is reachable")
 
@@ -282,17 +268,17 @@ class TestWhatIsKnownBeforeAnyCheck:
         """It is the thing the others authenticate to; a probe would be the
         console asking a service about itself."""
         nervous = tmp_path / "ns.env"
-        hive_mind = tmp_path / "hm.env"
-        _write_env(nervous, COMMS_BEARER_TOKEN="aaaawxyz")
-        _write_env(hive_mind, COMMS_BEARER_TOKEN="aaaawxyz")
+        skippy_env = tmp_path / "skippy.env"
+        _write_env(nervous, COMMS_ADMIN_BEARER_TOKEN="aaaawxyz")
+        _write_env(skippy_env, COMMS_ADMIN_BEARER_TOKEN="aaaawxyz")
         _patch_env_files(
-            monkeypatch, tmp_path, nervous_system=nervous, hive_mind=hive_mind
+            monkeypatch, tmp_path, nervous_system=nervous, skippy=skippy_env
         )
 
         row = next(
             r
             for r in registry.build_rows([])
-            if r["credential"] == "comms_bearer_token"
+            if r["credential"] == "comms_admin_bearer_token"
             and r["holder"] == "nervous_system"
         )
 
@@ -303,7 +289,7 @@ class TestWhatIsKnownBeforeAnyCheck:
         sibling = next(
             r
             for r in registry.build_rows([])
-            if r["credential"] == "comms_bearer_token" and r["holder"] == "hive_mind"
+            if r["credential"] == "comms_admin_bearer_token" and r["holder"] == "skippy"
         )
         assert sibling["checkable"] is True
 
@@ -417,9 +403,9 @@ class TestWhatALiveCheckFinds:
     def test_a_shared_secret_is_presented_to_the_service_that_validates_it(
         self, tmp_path, monkeypatch
     ) -> None:
-        hive_mind = tmp_path / "hm.env"
-        _write_env(hive_mind, COMMS_BEARER_TOKEN="the-live-value")
-        _patch_env_files(monkeypatch, tmp_path, hive_mind=hive_mind)
+        skippy_env = tmp_path / "skippy.env"
+        _write_env(skippy_env, COMMS_ADMIN_BEARER_TOKEN="the-live-value")
+        _patch_env_files(monkeypatch, tmp_path, skippy=skippy_env)
         seen: list[str] = []
 
         def handler(request):
@@ -435,7 +421,7 @@ class TestWhatALiveCheckFinds:
 
         monkeypatch.setattr(httpx, "AsyncClient", _Client)
 
-        answer = _run(registry.check("comms_bearer_token", "hive_mind", []))
+        answer = _run(registry.check("comms_admin_bearer_token", "skippy", []))
 
         assert answer["status"] == registry.WORKING
         assert seen == ["Bearer the-live-value"]
@@ -443,12 +429,12 @@ class TestWhatALiveCheckFinds:
     def test_a_validator_that_rejects_the_value_is_a_refusal(
         self, tmp_path, monkeypatch, network
     ) -> None:
-        hive_mind = tmp_path / "hm.env"
-        _write_env(hive_mind, COMMS_BEARER_TOKEN="stale-value")
-        _patch_env_files(monkeypatch, tmp_path, hive_mind=hive_mind)
-        network["broker/minds"] = (401, {})
+        skippy_env = tmp_path / "skippy.env"
+        _write_env(skippy_env, COMMS_ADMIN_BEARER_TOKEN="stale-value")
+        _patch_env_files(monkeypatch, tmp_path, skippy=skippy_env)
+        network["sessions/live"] = (401, {})
 
-        answer = _run(registry.check("comms_bearer_token", "hive_mind", []))
+        answer = _run(registry.check("comms_admin_bearer_token", "skippy", []))
 
         assert answer["status"] == registry.REFUSED
 
@@ -458,24 +444,24 @@ class TestWhatALiveCheckFinds:
         """An outage, a 500, a secondary rate limit — the remedy a refusal
         suggests is revoke and regenerate, applied to a credential that
         works."""
-        hive_mind = tmp_path / "hm.env"
-        _write_env(hive_mind, COMMS_BEARER_TOKEN="fine-value")
-        _patch_env_files(monkeypatch, tmp_path, hive_mind=hive_mind)
-        network["broker/minds"] = (503, {})
+        skippy_env = tmp_path / "skippy.env"
+        _write_env(skippy_env, COMMS_ADMIN_BEARER_TOKEN="fine-value")
+        _patch_env_files(monkeypatch, tmp_path, skippy=skippy_env)
+        network["sessions/live"] = (503, {})
 
-        answer = _run(registry.check("comms_bearer_token", "hive_mind", []))
+        answer = _run(registry.check("comms_admin_bearer_token", "skippy", []))
 
         assert answer["status"] == registry.UNDETERMINED
 
     def test_an_unreachable_validator_is_not_a_refusal_either(
         self, tmp_path, monkeypatch, network
     ) -> None:
-        hive_mind = tmp_path / "hm.env"
-        _write_env(hive_mind, COMMS_BEARER_TOKEN="fine-value")
-        _patch_env_files(monkeypatch, tmp_path, hive_mind=hive_mind)
-        network["broker/minds"] = httpx.ConnectError("down")
+        skippy_env = tmp_path / "skippy.env"
+        _write_env(skippy_env, COMMS_ADMIN_BEARER_TOKEN="fine-value")
+        _patch_env_files(monkeypatch, tmp_path, skippy=skippy_env)
+        network["sessions/live"] = httpx.ConnectError("down")
 
-        answer = _run(registry.check("comms_bearer_token", "hive_mind", []))
+        answer = _run(registry.check("comms_admin_bearer_token", "skippy", []))
 
         assert answer["status"] == registry.UNDETERMINED
 
@@ -589,9 +575,9 @@ class TestAValueAsItIsActuallyWritten:
         """Quoting is ordinary and legal in a `.env`. Probing the raw text
         sends the quotes, gets a 401, and renders Refused over a credential
         that works everywhere."""
-        hive_mind = tmp_path / "hm.env"
-        hive_mind.write_text('COMMS_BEARER_TOKEN="quoted-value"\n')  # secret-guard: allow — invented
-        _patch_env_files(monkeypatch, tmp_path, hive_mind=hive_mind)
+        skippy_env = tmp_path / "skippy.env"
+        skippy_env.write_text('COMMS_ADMIN_BEARER_TOKEN="quoted-value"\n')  # secret-guard: allow — invented
+        _patch_env_files(monkeypatch, tmp_path, skippy=skippy_env)
         seen: list[str] = []
 
         def handler(request):
@@ -607,7 +593,7 @@ class TestAValueAsItIsActuallyWritten:
 
         monkeypatch.setattr(httpx, "AsyncClient", _Client)
 
-        answer = _run(registry.check("comms_bearer_token", "hive_mind", []))
+        answer = _run(registry.check("comms_admin_bearer_token", "skippy", []))
 
         assert seen == ["Bearer quoted-value"]
         assert answer["status"] == registry.WORKING
@@ -618,11 +604,11 @@ class TestAValueAsItIsActuallyWritten:
         """A stray carriage return from a CRLF `.env` is neither an
         `httpx.HTTPError` nor a verdict — unguarded it escaped and took the
         check route down with a 500."""
-        hive_mind = tmp_path / "hm.env"
-        hive_mind.write_bytes(b"COMMS_BEARER_TOKEN=val\xc3\xa9ue-with-non-ascii\n")  # secret-guard: allow — invented
-        _patch_env_files(monkeypatch, tmp_path, hive_mind=hive_mind)
+        skippy_env = tmp_path / "skippy.env"
+        skippy_env.write_bytes(b"COMMS_ADMIN_BEARER_TOKEN=val\xc3\xa9ue-with-non-ascii\n")  # secret-guard: allow — invented
+        _patch_env_files(monkeypatch, tmp_path, skippy=skippy_env)
 
-        answer = _run(registry.check("comms_bearer_token", "hive_mind", []))
+        answer = _run(registry.check("comms_admin_bearer_token", "skippy", []))
 
         assert answer["status"] == registry.UNDETERMINED
         assert "header" in answer["detail"]
@@ -632,11 +618,11 @@ class TestAValueAsItIsActuallyWritten:
     ) -> None:
         """The remedy offered for an absent value is to write one, over a
         credential that is present and fine."""
-        hive_mind = tmp_path / "hm.env"
-        hive_mind.write_bytes(b"COMMS_BEARER_TOKEN=\xff\xfe\n")
-        _patch_env_files(monkeypatch, tmp_path, hive_mind=hive_mind)
+        skippy_env = tmp_path / "skippy.env"
+        skippy_env.write_bytes(b"COMMS_ADMIN_BEARER_TOKEN=\xff\xfe\n")
+        _patch_env_files(monkeypatch, tmp_path, skippy=skippy_env)
 
-        answer = _run(registry.check("comms_bearer_token", "hive_mind", []))
+        answer = _run(registry.check("comms_admin_bearer_token", "skippy", []))
 
         assert answer["status"] == registry.UNREADABLE
 
@@ -659,7 +645,7 @@ class TestWhatIsForgotten:
 
     def test_a_credential_the_hive_does_not_have_is_not_declared(self) -> None:
         assert registry.is_declared("mind_github_token") is True
-        assert registry.is_declared("comms_bearer_token") is True
+        assert registry.is_declared("comms_admin_bearer_token") is True
         assert registry.is_declared("not_a_credential") is False
 
 

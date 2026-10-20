@@ -57,7 +57,7 @@ class TestTheListing:
             row["credential"] == "mind_github_token" and row["holder"] == "cypher"
             for row in body["rows"]
         )
-        assert any(c["key"] == "comms_bearer_token" for c in body["credentials"])
+        assert any(c["key"] == "comms_admin_bearer_token" for c in body["credentials"])
 
     def test_a_broker_it_cannot_read_is_said_rather_than_shown_as_empty(
         self, tmp_path, monkeypatch
@@ -75,7 +75,7 @@ class TestTheListing:
         assert body["registry"] == "unreadable"
         # The shared secrets are read off this console's own mounts and are
         # still every bit as true.
-        assert any(c["key"] == "comms_bearer_token" for c in body["credentials"])
+        assert any(c["key"] == "comms_admin_bearer_token" for c in body["credentials"])
 
     def test_it_takes_no_live_check(self, tmp_path, monkeypatch) -> None:
         """This is the whole content of the page; waiting on a mind that is
@@ -302,18 +302,45 @@ class TestRotation:
     def test_a_rotation_discards_every_remembered_check(
         self, tmp_path, monkeypatch
     ) -> None:
-        """A stale "working" beside a freshly rotated secret is the one thing
+        """A stale "working" beside a freshly rotated holder is the one thing
         on this page nobody should believe."""
         client = _authed_client(tmp_path, monkeypatch)
-        registry.remember("comms_bearer_token", "hive_mind", status=registry.WORKING)
-        monkeypatch.setattr(
-            main_mod, "rotate_credential",
-            lambda key: {"key": key, "written": [], "complete": True, "locations": []},
-        )
+        registry.remember("comms_admin_bearer_token", "skippy", status=registry.WORKING)
 
-        client.post("/api/settings/credentials/comms_bearer_token/rotate")
+        async def rotated(service, holder):
+            return {"service": service.key, "holder": holder, "file": "hive_mind",
+                    "env_key": "COMMS_TOKEN_ADA", "restart_target": None}
 
-        assert registry.recall("comms_bearer_token", "hive_mind") is None
+        monkeypatch.setattr(main_mod.holder_credentials, "rotate", rotated)
+
+        client.post("/api/settings/holders/comms/ada/rotate")
+
+        assert registry.recall("comms_admin_bearer_token", "skippy") is None
+
+    def test_a_rotation_on_a_service_this_console_does_not_know_is_a_404(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        client = _authed_client(tmp_path, monkeypatch)
+
+        answer = client.post("/api/settings/holders/quokka/ada/rotate")
+
+        assert answer.status_code == 404
+
+    def test_a_stranded_rotation_is_not_reported_as_a_bad_request(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A 400 reads as "nothing happened", and the one thing this failure
+        guarantees is that something did."""
+        client = _authed_client(tmp_path, monkeypatch)
+
+        async def stranded(service, holder):
+            raise main_mod.holder_credentials.Stranded("mint landed, write did not", restored=False)
+
+        monkeypatch.setattr(main_mod.holder_credentials, "rotate", stranded)
+
+        answer = client.post("/api/settings/holders/comms/ada/rotate")
+
+        assert answer.status_code == 500
 
 
 class TestTheRelayItself:

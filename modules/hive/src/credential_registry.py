@@ -167,14 +167,8 @@ class SharedProbe:
 #: validator. A credential's own validator has nothing to authenticate
 #: against, so its row reports as much rather than being probed.
 SHARED_PROBES: dict[str, SharedProbe] = {
-    "comms_bearer_token": SharedProbe(
-        "GATEWAY_API_URL", "http://hive-comms:8424", "/broker/minds"
-    ),
     "comms_admin_bearer_token": SharedProbe(
         "GATEWAY_API_URL", "http://hive-comms:8424", "/sessions/live"
-    ),
-    "lucent_bearer_token": SharedProbe(
-        "LUCENT_API_URL", "http://hive-lucent:8424", "/graph/schema"
     ),
     "lucent_admin_bearer_token": SharedProbe(
         "LUCENT_API_URL", "http://hive-lucent:8424", "/graph/schema"
@@ -193,9 +187,7 @@ SHARED_PROBES: dict[str, SharedProbe] = {
 #: Which file label validates which credential. That holder presents the
 #: value to nobody — it is the thing others present it to.
 VALIDATORS: dict[str, str] = {
-    "comms_bearer_token": "nervous_system",
     "comms_admin_bearer_token": "nervous_system",
-    "lucent_bearer_token": "nervous_system",
     "lucent_admin_bearer_token": "nervous_system",
 }
 
