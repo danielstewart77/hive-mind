@@ -363,6 +363,7 @@ def graph_upsert_backup(
                 edge_attrs=body.edge_attrs,
                 mind_id=caller.mind_for_write(body.mind_id, required=False),
                 owner=caller.owner_for_write(body.owner),
+                stamp=caller.owner_to_stamp(body.owner),
                 data_class=body.data_class,
                 as_of=body.as_of,
                 source=body.source,
@@ -486,6 +487,7 @@ def graph_upsert(
                 edge_attrs=body.edge_attrs,
                 mind_id=caller.mind_for_write(body.mind_id, required=False),
                 owner=caller.owner_for_write(body.owner),
+                stamp=caller.owner_to_stamp(body.owner),
                 data_class=body.data_class,
                 as_of=body.as_of,
                 source=body.source,
@@ -615,6 +617,7 @@ def graph_upsert_direct_endpoint(
             edge_attrs=body.edge_attrs,
             mind_id=caller.mind_for_write(body.mind_id, required=False),
             owner=caller.owner_for_write(body.owner),
+            stamp=caller.owner_to_stamp(body.owner),
             data_class=body.data_class,
             as_of=body.as_of,
             source=body.source,
@@ -647,6 +650,7 @@ def graph_nodes_create(
             data_class=body.data_class,
             mind_id=caller.mind_for_write(body.mind_id, required=False),
             owner=caller.owner_for_write(body.owner),
+            stamp=caller.owner_to_stamp(body.owner),
             properties=body.properties,
             as_of=body.as_of,
             source=body.source,
@@ -679,10 +683,14 @@ def _refuse_foreign_identity_node(
         return
     from lucent_api import holder_access
 
+    # Unscoped, for the reason `_check_identity_guard` is: a mind whose node
+    # this store cannot resolve to an owner must still be refused to every
+    # other mind, or the refusal misses and a second identity node gets
+    # minted over the top of it.
     row = holder_access.connection().execute(
         "SELECT mind_id FROM nodes WHERE LOWER(name) = LOWER(?) AND type = 'Mind'"
-        " AND owner IS ? LIMIT 1",
-        (name, caller.owner),
+        " LIMIT 1",
+        (name,),
     ).fetchone()
     if row is None:
         # No identity node of that name in this owner's graph. Absent, or
@@ -764,6 +772,7 @@ def graph_edges_create(
             data_class=body.data_class,
             mind_id=caller.mind_for_write(body.mind_id, required=False),
             owner=caller.owner_for_write(body.owner),
+            stamp=caller.owner_to_stamp(body.owner),
             as_of=body.as_of,
             source=body.source,
         )
@@ -805,6 +814,7 @@ def graph_nodes_delete(
             name=body.name,
             owner=caller.owner_for_write(body.owner),
             mind_id=caller.provenance,
+            unrestricted=caller.may_act_for_another_mind,
         )
     )
 

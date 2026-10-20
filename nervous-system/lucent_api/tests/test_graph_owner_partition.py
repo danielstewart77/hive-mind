@@ -73,7 +73,7 @@ class GraphOwnerPartitionTests(unittest.TestCase):
                   "data_class": "person", "mind_id": ""},
         )
 
-    def _seed(self, name: str, owner: str, mind_id: str = "seed",
+    def _seed(self, name: str, owner: str | None, mind_id: str = "seed",
               entity_type: str = "Person", properties: dict | None = None) -> int:
         cur = self.conn.execute(
             "INSERT INTO nodes (mind_id, owner, type, name, properties, "
@@ -230,12 +230,6 @@ class GraphOwnerPartitionTests(unittest.TestCase):
         stored = json.loads(self._row("Skippy", "daniel")["properties"])
         self.assertEqual(stored["harness"], "claude")
 
-    def test_a_mind_reads_another_minds_own_node(self):
-        self._seed("Mordecai", owner="daniel", mind_id="mordecai-uuid",
-                   entity_type="Mind")
-
-        self.assertTrue(self._query(SKIPPY, "Mordecai")["found"])
-
     # -- the machinery ----------------------------------------------------
     def test_a_service_credential_reaches_every_owners_graph(self):
         self._seed("Maurice", owner="daniel")
@@ -249,6 +243,262 @@ class GraphOwnerPartitionTests(unittest.TestCase):
         self._seed("Clay", owner="aiden")
 
         self.assertTrue(self._query(ADMIN, "Clay")["found"])
+
+    # -- the machinery, on the write side ---------------------------------
+    def test_a_service_credential_edits_another_owners_node(self):
+        """The console opens whichever mind's page the operator asked for."""
+        self._seed("Clay", owner="aiden")
+
+        answer = self.client.post(
+            "/graph/properties/merge",
+            headers=self._h(COMMS),
+            json={"entity_type": "Person", "name": "Clay",
+                  "properties": json.dumps({"checked": True})},
+        )
+
+        self.assertEqual(answer.status_code, 200, answer.text)
+        stored = json.loads(self._row("Clay", "aiden")["properties"])
+        self.assertTrue(stored.get("checked"))
+
+    def test_the_admin_credential_edits_another_owners_node(self):
+        self._seed("Clay", owner="aiden")
+
+        answer = self.client.post(
+            "/graph/properties/merge",
+            headers=self._h(ADMIN),
+            json={"entity_type": "Person", "name": "Clay",
+                  "properties": json.dumps({"checked": True})},
+        )
+
+        self.assertEqual(answer.status_code, 200, answer.text)
+        stored = json.loads(self._row("Clay", "aiden")["properties"])
+        self.assertTrue(stored.get("checked"))
+
+    def test_a_node_the_admin_creates_is_readable_by_a_mind(self):
+        """The admin value answers for nobody, so a row it creates takes the
+        primary user — never the empty string, which no mind can read."""
+        with mock.patch.dict(os.environ, {"LUCENT_PRIMARY_USER": "daniel"}):
+            self.assertEqual(self._create(ADMIN, "NewGuy").status_code, 200)
+
+            self.assertTrue(self._query(SKIPPY, "NewGuy")["found"])
+
+    def test_the_console_deletes_a_mind_node_with_no_soul_left(self):
+        """Emptying a soul and then removing the node is the sanctioned
+        order, and the console is the only thing that can do it."""
+        self._seed("Dragoman", owner="daniel", mind_id="dragoman-uuid",
+                   entity_type="Mind")
+
+        answer = self.client.request(
+            "DELETE", "/graph/nodes", headers=self._h(COMMS),
+            json={"entity_type": "Mind", "name": "Dragoman"},
+        )
+
+        self.assertTrue(answer.json().get("ok"), answer.text)
+        self.assertIsNone(self._row("Dragoman", "daniel"))
+
+    # -- the carve-out, on the paths that are not the merge route ----------
+    def test_a_mind_cannot_reach_another_minds_own_node_as_an_edge_target(self):
+        self._seed("Mordecai", owner="daniel", mind_id="mordecai-uuid",
+                   entity_type="Mind",
+                   properties={"tier": "standing", "data_class": "identity"})
+
+        answer = self.client.post(
+            "/graph/upsert-direct",
+            headers=self._h(SKIPPY),
+            json={"entity_type": "Person", "name": "Maurice",
+                  "data_class": "person", "mind_id": "",
+                  "relation": "KNOWS_ABOUT", "target_name": "Mordecai",
+                  "target_type": "Mind"},
+        )
+
+        self.assertFalse(answer.json().get("upserted"), answer.text)
+        stored = json.loads(self._row("Mordecai", "daniel")["properties"])
+        self.assertEqual(stored["tier"], "standing")
+        self.assertEqual(stored["data_class"], "identity")
+
+    def test_an_ordinary_node_named_after_a_mind_is_still_a_mind_to_delete(self):
+        """The carve-out is about the node that *is* a mind. Asked about a
+        Person of the same name it used to answer for the Mind node, which
+        made every node named after a mind undeletable by anybody."""
+        self._seed("Hex", owner="daniel", mind_id="hex-uuid", entity_type="Mind")
+        self._seed("Hex", owner="daniel", mind_id="skippy", entity_type="Person")
+
+        answer = self.client.request(
+            "DELETE", "/graph/nodes", headers=self._h(SKIPPY),
+            json={"entity_type": "Person", "name": "Hex"},
+        )
+
+        self.assertTrue(answer.json().get("ok"), answer.text)
+        self.assertIsNotNone(self.conn.execute(
+            "SELECT 1 FROM nodes WHERE name = 'Hex' AND type = 'Mind'"
+        ).fetchone())
+
+    # -- every write path files the row, not just POST /graph/nodes --------
+    def test_each_write_route_records_the_owner(self):
+        """`/graph/upsert` is the memory pipeline's own path. A row written
+        ownerless there is invisible to every mind afterwards, with a 200."""
+        routes = {
+            # `/graph/upsert` refuses an orphan, so this one carries the
+            # edge it demands; the owner of both ends is what is asserted.
+            "/graph/upsert": {"entity_type": "Person", "name": "Upserted",
+                              "data_class": "person", "mind_id": "",
+                              "relation": "MEMBER_OF", "target_name": "Propel",
+                              "target_type": "Organization"},
+            "/graph/upsert-direct": {"entity_type": "Person", "name": "Directed",
+                                     "data_class": "person", "mind_id": ""},
+            "/graph/nodes": {"entity_type": "Person", "name": "Created",
+                             "data_class": "person", "mind_id": ""},
+        }
+        for route, body in routes.items():
+            with self.subTest(route=route):
+                answer = self.client.post(route, headers=self._h(SKIPPY), json=body)
+                self.assertEqual(answer.status_code, 200, answer.text)
+                self.assertIsNotNone(self._row(body["name"], "daniel"), answer.text)
+
+    def test_an_edge_records_the_owner(self):
+        self._seed("Maurice", owner="daniel")
+        self._seed("Propel", owner="daniel", entity_type="Organization")
+
+        answer = self.client.post(
+            "/graph/edges", headers=self._h(SKIPPY),
+            json={"source_name": "Maurice", "source_type": "Person",
+                  "target_name": "Propel", "target_type": "Organization",
+                  "relation": "MEMBER_OF", "data_class": "person",
+                  "mind_id": ""},
+        )
+
+        self.assertTrue(answer.json().get("ok"), answer.text)
+        owners = [r[0] for r in self.conn.execute("SELECT owner FROM edges")]
+        self.assertEqual(owners, ["daniel"])
+
+    def test_a_mind_naming_another_owner_on_the_request_is_refused(self):
+        """The body carries an `owner` field. A mind may name its own and
+        nothing else, or the partition is one request away from nothing."""
+        answer = self.client.post(
+            "/graph/nodes", headers=self._h(ZACH),
+            json={"entity_type": "Person", "name": "Maurice",
+                  "data_class": "person", "mind_id": "", "owner": "daniel"},
+        )
+
+        self.assertEqual(answer.status_code, 403, answer.text)
+        self.assertIsNone(self._row("Maurice", "daniel"))
+
+    # -- the filters on the paths that had none ---------------------------
+    def test_removing_a_key_from_another_owners_node_reads_as_absent(self):
+        self._seed("Maurice", owner="daniel", properties={"private": "yes"})
+
+        answer = self.client.post(
+            "/graph/properties/remove", headers=self._h(ZACH),
+            json={"entity_type": "Person", "name": "Maurice",
+                  "keys": ["private"]},
+        )
+
+        self.assertEqual(answer.json().get("code"), "not_found", answer.text)
+        stored = json.loads(self._row("Maurice", "daniel")["properties"])
+        self.assertEqual(stored.get("private"), "yes")
+
+    def test_an_edge_cannot_be_wired_or_unwired_across_owners(self):
+        self._seed("Maurice", owner="daniel")
+        self._seed("Clay", owner="aiden")
+
+        wired = self.client.post(
+            "/graph/edges", headers=self._h(ZACH),
+            json={"source_name": "Clay", "source_type": "Person",
+                  "target_name": "Maurice", "target_type": "Person",
+                  "relation": "FRIEND_OF", "data_class": "person",
+                  "mind_id": ""},
+        )
+
+        self.assertEqual(wired.json().get("code"), "target_not_found", wired.text)
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0], 0
+        )
+
+    def test_creating_a_name_another_owner_holds_does_not_report_their_row(self):
+        """`code: exists` with their row id is a cross-owner oracle, and it
+        also leaves a mind unable to create its own node of that name."""
+        self._seed("Maurice", owner="daniel")
+
+        answer = self.client.post(
+            "/graph/nodes", headers=self._h(ZACH),
+            json={"entity_type": "Person", "name": "Maurice",
+                  "data_class": "person", "mind_id": ""},
+        )
+
+        self.assertTrue(answer.json().get("ok"), answer.text)
+        self.assertIsNotNone(self._row("Maurice", "aiden"))
+
+    def test_the_connection_walk_does_not_step_into_another_owners_node(self):
+        mine = self._seed("Maurice", owner="daniel")
+        theirs = self._seed("Clay", owner="aiden")
+        self.conn.execute(
+            "INSERT INTO edges (mind_id, owner, source_id, target_id, type, "
+            "created_at) VALUES ('seed', 'daniel', ?, ?, 'FRIEND_OF', 1.0)",
+            (mine, theirs),
+        )
+        self.conn.commit()
+
+        answer = self._query(SKIPPY, "Maurice")
+
+        names = {
+            (c.get("node") or {}).get("name")
+            for match in answer["matches"]
+            for c in match.get("connections", [])
+        }
+        self.assertNotIn("Clay", names)
+
+    def test_disambiguation_does_not_report_another_owners_similar_names(self):
+        """The similar-node list is handed back to the caller and pushed to a
+        chat, so an unscoped scan tells a mind which names exist elsewhere."""
+        self._seed("Maurice Westerdale", owner="daniel")
+
+        answer = self.client.post(
+            "/graph/upsert", headers=self._h(ZACH),
+            json={"entity_type": "Person", "name": "Maurice",
+                  "data_class": "person", "mind_id": "",
+                  "relation": "MEMBER_OF", "target_name": "Propel",
+                  "target_type": "Organization"},
+        )
+
+        reported = json.dumps(answer.json())
+        self.assertNotIn("Westerdale", reported)
+
+    def test_a_full_replace_on_a_minds_own_node_keeps_its_soul(self):
+        """`preserve_soul` carries the soul across a blob that omits it. Its
+        lookup is owner-scoped now, and a lookup that misses erases a soul
+        with a 200."""
+        self._seed("Skippy", owner="daniel", mind_id=SKIPPY_UUID,
+                   entity_type="Mind", properties={"soul_values": ["a line"]})
+
+        answer = self.client.post(
+            "/graph/upsert-direct", headers=self._h(SKIPPY),
+            json={"entity_type": "Mind", "name": "Skippy",
+                  "data_class": "identity", "mind_id": "",
+                  "properties": json.dumps({"role": "operator"})},
+        )
+
+        self.assertEqual(answer.status_code, 200, answer.text)
+        stored = json.loads(self._row("Skippy", "daniel")["properties"])
+        self.assertEqual(stored.get("soul_values"), ["a line"])
+
+    def test_a_minds_own_node_is_found_even_while_it_has_no_owner(self):
+        """A mind whose node this store cannot resolve to an owner holds it
+        under a null owner — both of the boys' minds do until their
+        credentials are minted here. An owner-scoped refusal misses that row,
+        so the mind mints a second node of its own name and the empty
+        newcomer shadows the soul-bearing original on every read."""
+        self._seed("Zach", owner=None, mind_id=ZACH_UUID, entity_type="Mind",
+                   properties={"soul_values": ["a line"]})
+
+        answer = self._create(ZACH, "Zach", entity_type="Mind")
+
+        # Refused as already there, which it is. The mind owns this node and
+        # may change it — what it may not do is end up with two.
+        self.assertEqual(answer.json().get("code"), "exists", answer.text)
+        rows = self.conn.execute(
+            "SELECT COUNT(*) FROM nodes WHERE name = 'Zach' AND type = 'Mind'"
+        ).fetchone()[0]
+        self.assertEqual(rows, 1)
 
 
 if __name__ == "__main__":

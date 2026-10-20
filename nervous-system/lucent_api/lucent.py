@@ -12,9 +12,12 @@ shared sqlite3.Connection with check_same_thread=False is documented as
 threadpool does not.
 """
 
+import logging
 import os
 import sqlite3
 import threading
+
+log = logging.getLogger("lucent-api")
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "data", "lucent.db")
 
@@ -120,12 +123,6 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     _migrate_graph_owner(conn)
 
 
-#: The user every pre-existing node belongs to when its writer cannot be
-#: resolved to one. Named by the environment rather than written here: a
-#: person's name in shipped code is one install's code.
-PRIMARY_USER_ENV = "LUCENT_PRIMARY_USER"
-
-
 def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
 
@@ -174,11 +171,25 @@ def _migrate_graph_owner(conn: sqlite3.Connection) -> None:
     service can reach.
     """
     owners = _owner_of_writers(conn)
-    primary = str(os.getenv(PRIMARY_USER_ENV, "")).strip().lower()
+    from lucent_api.holder_access import primary_user
 
-    def owner_for(mind_id: object) -> str | None:
+    primary = primary_user()
+
+    def owner_for(mind_id: object, node_type: object = None) -> str | None:
         key = str(mind_id or "").strip()
-        return owners.get(key) or owners.get(key.lower()) or primary or None
+        resolved = owners.get(key) or owners.get(key.lower())
+        if resolved:
+            return resolved
+        if str(node_type or "") == "Mind":
+            # A mind's own node is that mind's identity and holds its soul.
+            # Handing it to the primary user because this store has not been
+            # told who the mind belongs to would take two of the boys' minds'
+            # souls away from them and give them to Daniel — after which the
+            # owner check refuses each of them sight of its own node. Left
+            # ownerless, it waits for that mind's credential to be minted and
+            # a later pass picks it up.
+            return None
+        return primary or None
 
     # The indexes are created here rather than in the create-tables script:
     # on a database that already has the tables, `CREATE TABLE IF NOT EXISTS`
@@ -191,15 +202,27 @@ def _migrate_graph_owner(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_nodes_owner ON nodes(owner)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_owner ON edges(owner)")
 
-    for table in ("nodes", "edges"):
+    for table, type_col in (("nodes", "type"), ("edges", "NULL")):
         rows = conn.execute(
-            f"SELECT id, mind_id FROM {table} WHERE owner IS NULL"
+            f"SELECT id, mind_id, {type_col} FROM {table} WHERE owner IS NULL"
         ).fetchall()
-        for row_id, mind_id in ((r[0], r[1]) for r in rows):
-            resolved = owner_for(mind_id)
-            if resolved:
+        for row_id, mind_id, node_type in ((r[0], r[1], r[2]) for r in rows):
+            resolved = owner_for(mind_id, node_type)
+            if not resolved:
+                continue
+            try:
                 conn.execute(
                     f"UPDATE {table} SET owner = ? WHERE id = ?", (resolved, row_id)
+                )
+            except sqlite3.IntegrityError:
+                # Claiming this row would collide with one the owner already
+                # holds under the same type and name. Left ownerless and
+                # reported: one row nobody but a service can reach is a
+                # smaller harm than a schema init that raises on every
+                # request and takes the whole store down with it.
+                log.error(
+                    "graph.owner.backfill.skipped: %s row %s would collide "
+                    "under owner %s", table, row_id, resolved,
                 )
     conn.commit()
     _rekey_nodes_on_owner(conn)
@@ -224,14 +247,18 @@ def _rekey_nodes_on_owner(conn: sqlite3.Connection) -> None:
         "GROUP BY owner, type, name HAVING c > 1"
     ).fetchall()
     if clashes:
-        # Refused rather than resolved. Merging two rows is a judgement about
-        # which properties survive, and a migration that picks silently loses
-        # whichever it did not pick with nothing left to notice it by.
+        # The index is skipped, loudly, rather than refused. Merging two rows
+        # is a judgement about which properties survive and a migration must
+        # not make it silently — but raising here runs inside `_init_schema`
+        # inside `_get_connection`, which would leave the store answering
+        # nothing at all to anybody, on every request, for the sake of a
+        # constraint it ran fine without the day before.
         detail = ", ".join(f"{r[0]}/{r[1]}/{r[2]} x{r[3]}" for r in clashes)
-        raise RuntimeError(
-            "cannot key nodes on (owner, type, name): rows already collide: "
-            + detail
+        log.error(
+            "graph.owner.rekey.skipped: rows collide on (owner, type, name): %s",
+            detail,
         )
+        return
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS nodes_owner_type_name "
         "ON nodes(owner, type, name)"
