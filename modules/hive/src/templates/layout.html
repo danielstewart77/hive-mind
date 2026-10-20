@@ -51,6 +51,7 @@
             <a href="/overview" class="console-nav-link {% if path == '/overview' %}is-active{% endif %}"><i data-lucide="layout-dashboard"></i><span>Overview</span></a>
             <a href="/minds" class="console-nav-link {% if path.startswith('/minds') %}is-active{% endif %}"><i data-lucide="brain-circuit"></i><span>Minds</span></a>
             {% if current_user.is_admin %}
+            <a href="/bots" class="console-nav-link {% if path.startswith('/bots') %}is-active{% endif %}"><i data-lucide="bot"></i><span>Bots</span></a>
             <a href="/activity" class="console-nav-link {% if path == '/activity' %}is-active{% endif %}"><i data-lucide="activity"></i><span>Activity</span></a>
             <a href="/dashboard" class="console-nav-link {% if path == '/dashboard' %}is-active{% endif %}"><i data-lucide="radio-tower"></i><span>Dashboard</span></a>
 

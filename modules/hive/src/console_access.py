@@ -152,9 +152,12 @@ TABLE.add(
     Rule(USER),
     "GET /overview",
     "GET /minds",
+    "GET /bots",
     "GET /settings",
     "GET /api/overview",
     "GET /api/settings/minds",
+    # Filtered to the Minds the user owns by the handler, like the two above.
+    "GET /api/bots",
     "GET /api/settings/hive-comms/sessions",
 )
 # The settings page is one route; only its sessions section is a user's.
@@ -185,6 +188,12 @@ TABLE.add(
     "PUT /api/minds/{name}/files/{tree}/content",
     "GET /api/minds/{name}/surface-token",
     "PUT /api/minds/{name}/surface-token",
+    # Registering a bot and deciding who it answers, both scoped to the Mind
+    # named in the path — so a person can set up their own mind's bot and
+    # reaches nobody else's by naming it.
+    "GET /api/minds/{name}/bot-claim",
+    "POST /api/minds/{name}/bot-claim/phrase",
+    "DELETE /api/minds/{name}/bot-claim",
     "PUT /api/minds/{name}/github-token",
     "POST /api/minds/{name}/restart",
 )

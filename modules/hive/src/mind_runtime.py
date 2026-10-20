@@ -143,13 +143,13 @@ async def fetch_models(gateway_url: str) -> list[dict]:
 # session cookie away from being impersonated.
 
 
-def _surface_token_endpoint(gateway_url: str) -> str:
+def _surface_token_endpoint(gateway_url: str, surface: str = "telegram") -> str:
     url = (gateway_url or "").strip().rstrip("/")
     if not url:
         raise HTTPException(
             status_code=400, detail="This Mind has no gateway URL in the registry"
         )
-    return f"{url}/surface-token"
+    return f"{url}/surface-token?surface={surface}"
 
 
 def _unwrap_surface_token(response: httpx.Response) -> dict:
@@ -179,7 +179,7 @@ def _unwrap_surface_token(response: httpx.Response) -> dict:
     return body
 
 
-async def fetch_surface_token(gateway_url: str) -> dict:
+async def fetch_surface_token(gateway_url: str, surface: str = "telegram") -> dict:
     """Whether this Mind's surface has a token the bot API accepts.
 
     Three states reach the page, because they have different remedies:
@@ -192,7 +192,8 @@ async def fetch_surface_token(gateway_url: str) -> dict:
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             response = await client.get(
-                _surface_token_endpoint(gateway_url), headers=admin_headers()
+                _surface_token_endpoint(gateway_url, surface),
+                headers=admin_headers(),
             )
     except httpx.HTTPError as exc:
         raise HTTPException(
@@ -201,7 +202,9 @@ async def fetch_surface_token(gateway_url: str) -> dict:
     return _unwrap_surface_token(response)
 
 
-async def push_surface_token(gateway_url: str, token: str) -> dict:
+async def push_surface_token(
+    gateway_url: str, token: str, surface: str = "telegram"
+) -> dict:
     """Hand a Mind a new bot token for it to verify and store.
 
     The Mind checks it against the bot API before storing, so a refusal
@@ -211,7 +214,7 @@ async def push_surface_token(gateway_url: str, token: str) -> dict:
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT + 12.0) as client:
             response = await client.put(
-                _surface_token_endpoint(gateway_url),
+                _surface_token_endpoint(gateway_url, surface),
                 json={"token": token},
                 headers=admin_headers(),
             )

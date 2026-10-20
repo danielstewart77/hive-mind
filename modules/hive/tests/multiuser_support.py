@@ -108,6 +108,66 @@ def fake_comms_app() -> FastAPI:
                 return row
         return JSONResponse({"error": "Session not found"}, status_code=404)
 
+    # Bot claims, and every mind's own surface-token route — both reachable
+    # here because each mind's gateway_url points back at this app. Held in
+    # mutable state so a test can set the hive up and read back what the
+    # console actually wrote.
+    claims: dict[tuple[str, str], dict] = {}
+    absent = {"claim_routes": False}
+    tokens: dict[tuple[str, str], dict] = {}
+    unreachable: set[tuple[str, str]] = set()
+
+    @app.get("/broker/minds/{mind_id}/surface-claim")
+    async def get_claim(mind_id: str, surface: str = "telegram"):
+        if absent["claim_routes"]:
+            # A gateway that predates bot claims. Distinct from one that
+            # cannot be reached at all, which is a different sentence.
+            return JSONResponse({"detail": "Not Found"}, status_code=404)
+        row = claims.get((mind_id, surface), {})
+        return {
+            "mind_id": mind_id,
+            "surface": surface,
+            "claimed": bool(row.get("claimed_ref")),
+            "claimed_ref": row.get("claimed_ref", ""),
+            "phrase_pending": bool(row.get("phrase")),
+            "phrase_expires_at": row.get("expires_at", 0),
+        }
+
+    @app.post("/broker/minds/{mind_id}/surface-claim/phrase")
+    async def mint_claim(mind_id: str, surface: str = "telegram"):
+        row = claims.setdefault((mind_id, surface), {})
+        if row.get("claimed_ref"):
+            return JSONResponse({"error": "already claimed"}, status_code=409)
+        row["phrase"] = f"anchor basalt {len(claims)}"
+        row["expires_at"] = 1800
+        return {"phrase": row["phrase"], "surface": surface, "expires_at": 1800}
+
+    @app.delete("/broker/minds/{mind_id}/surface-claim")
+    async def clear_claim(mind_id: str, surface: str = "telegram"):
+        claims[(mind_id, surface)] = {}
+        return {"ok": True, "mind_id": mind_id, "surface": surface}
+
+    @app.get("/surface-token")
+    async def surface_token(request: Request, surface: str = "telegram"):
+        mind = request.query_params.get("mind", "")
+        if (mind, surface) in unreachable:
+            return JSONResponse({"error": "down"}, status_code=502)
+        row = tokens.get((mind, surface))
+        if row is None:
+            return {"stored": False, "accepted": None, "where": "env"}
+        return dict(row, where="env")
+
+    @app.put("/surface-token")
+    async def set_surface_token(request: Request, surface: str = "telegram"):
+        body = await request.json()
+        token = str((body or {}).get("token") or "")
+        if not token.startswith("good"):
+            return JSONResponse({"error": "bot API refused this token"}, status_code=400)
+        return {
+            "saved": True, "stored": True, "accepted": True,
+            "bot_username": f"{surface}-bot", "where": "env",
+        }
+
     @app.api_route(
         "/{rest:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"]
     )
@@ -125,6 +185,10 @@ def fake_comms_app() -> FastAPI:
 
     app.state.base = base
     app.state.received = received
+    app.state.claims = claims
+    app.state.absent = absent
+    app.state.tokens = tokens
+    app.state.unreachable = unreachable
     return app
 
 
@@ -135,6 +199,10 @@ class FakeComms(ThreadedServer):
         app.state.base["url"] = self.url
         # Every write it was sent: what the console asked of comms, as it went.
         self.received = app.state.received
+        self.claims = app.state.claims
+        self.absent = app.state.absent
+        self.tokens = app.state.tokens
+        self.unreachable = app.state.unreachable
 
 
 # ── auth-service ────────────────────────────────────────────────────────
