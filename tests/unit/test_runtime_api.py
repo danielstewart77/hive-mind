@@ -221,7 +221,9 @@ def client(runtime_file, monkeypatch, listing):
 
 class TestRoutes:
     def test_get_reports_the_configuration(self, client):
-        body = client.get("/runtime").json()["configuration"]
+        body = client.get(
+            "/runtime", headers={"Authorization": "Bearer s3cret"}
+        ).json()["configuration"]
         assert body["default_model"] == "sonnet"
         assert body["provider"] == "anthropic"
 
@@ -772,4 +774,23 @@ class TestVoiceRoute:
             json={"voice": "bm_george"},
             headers={"Authorization": "Bearer s3cret"},
         )
-        assert client.get("/runtime").json()["configuration"]["voice"] == "bm_george"
+        body = client.get(
+            "/runtime", headers={"Authorization": "Bearer s3cret"}
+        ).json()["configuration"]
+        assert body["voice"] == "bm_george"
+
+
+class TestTheConfigurationReadIsGuarded:
+    """It served open under a comment in the guard above claiming otherwise,
+    so every field the allowlist admits was readable from the LAN — and the
+    next field anybody adds to it would have been too."""
+
+    def test_an_unauthenticated_read_is_refused(self, client):
+        assert client.get("/runtime").status_code == 401
+
+    def test_the_admin_credential_reads_it(self, client):
+        response = client.get(
+            "/runtime", headers={"Authorization": "Bearer s3cret"}
+        )
+        assert response.status_code == 200
+        assert "configuration" in response.json()

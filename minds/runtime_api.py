@@ -837,8 +837,17 @@ def install_runtime_routes(app: FastAPI, *, path: Path, mind_id: str, log) -> No
     """Mount GET/PATCH /runtime on a mind's FastAPI app."""
 
     @app.get("/runtime")
-    async def get_runtime() -> Any:
-        """This mind's runtime configuration, as the console renders it."""
+    async def get_runtime(req: Request) -> Any:
+        """This mind's runtime configuration, as the console renders it.
+
+        Admin-guarded, like the write beside it. This served open to anything
+        that could reach the port, under a comment in the guard above
+        claiming it kept its guard — so every field the allowlist admits, and
+        every field anybody adds to it later, was readable from the LAN.
+        """
+        denied = authorize_admin(req)
+        if denied is not None:
+            return denied
         try:
             return {"configuration": public_runtime(path)}
         except ValueError as exc:

@@ -20,8 +20,10 @@ is posted into the channel rather than sent to Telegram.
 
 import asyncio
 import json
+import logging
 import os
 import signal
+import time
 import uuid
 from pathlib import Path
 
@@ -145,7 +147,81 @@ async def run_gate(
     return GATE_ERROR, detail
 
 
-async def _report_gate_failure(label: str, reason: str) -> None:
+# ---------------------------------------------------------------------------
+# Where a mind's own unsolicited turn goes
+# ---------------------------------------------------------------------------
+#: The chat each mind's bot answers, as the gateway records it, with the
+#: moment it was read. Expiring, because this process is long-lived: an
+#: operator who releases a bot and hands it to somebody else would otherwise
+#: keep sending that mind's reminders to the previous person until the
+#: scheduler was restarted. A read that failed is not cached at all — the
+#: next fire asks again rather than running on an old failure.
+_claimed_chats: dict[tuple[str, str], tuple[float, str]] = {}
+
+#: How long one claim is reused. Shorter than the gap between fires for
+#: everything but the busiest task, so in practice every fire asks.
+CLAIM_TTL_SECONDS = 60.0
+
+
+async def claimed_chat_id(mind_id: str, surface: str = "telegram") -> str:
+    """The person this mind's own bot answers, or empty if nobody has claimed it.
+
+    A reminder belongs to whoever asked for it, which is the owner of the
+    mind that raised it — not one stack-wide operator chat. With one bot per
+    person, that chat is exactly the claim on that mind's bot.
+
+    Empty rather than a guess. Delivering a second person's reminder to the
+    operator is both a disclosure and a reminder the person never gets.
+    """
+    key = (mind_id or "", surface)
+    cached = _claimed_chats.get(key)
+    if cached is not None and (time.monotonic() - cached[0]) < CLAIM_TTL_SECONDS:
+        return cached[1]
+    if not mind_id:
+        return ""
+    url = f"{SERVER_URL}/broker/minds/{mind_id}/surface-claim?surface={surface}"
+    try:
+        async with aiohttp.ClientSession() as http:
+            async with http.get(
+                url, headers=GATEWAY_AUTH_HEADERS,
+                timeout=aiohttp.ClientTimeout(total=8.0),
+            ) as response:
+                if response.status >= 400:
+                    # A gateway that predates the claim routes, one that
+                    # refuses this credential, one that is down: the
+                    # stack-wide chat is what every one of these had before,
+                    # so that is what they keep. No branch per status,
+                    # because there is nothing different to do.
+                    log.warning(
+                        "claim read for %s answered %s; using the operator chat",
+                        mind_id, response.status,
+                    )
+                    return ""
+                body = await response.json()
+    except Exception as exc:  # noqa: BLE001 — a delivery address never raises
+        log.warning("could not read the claim for %s: %s", mind_id, exc)
+        return ""
+    ref = str((body or {}).get("claimed_ref") or "")
+    _claimed_chats[key] = (time.monotonic(), ref)
+    return ref
+
+
+async def owner_chat_for(mind_id: str, surface: str = "telegram") -> int:
+    """The claimed chat for this mind, falling back to the stack-wide one.
+
+    The fallback is for a gateway with no claim routes and for a mind whose
+    bot nobody has claimed yet — both of which are states the stack-wide
+    chat already served, so nothing stops being delivered by this changing.
+    """
+    ref = await claimed_chat_id(mind_id, surface)
+    if ref.isdigit() or (ref.startswith("-") and ref[1:].isdigit()):
+        return int(ref)
+    return config.telegram_owner_chat_id
+
+
+async def _report_gate_failure(
+    label: str, reason: str, mind_id: str = ""
+) -> None:
     """Tell Daniel a gate is broken. Telegram, not the task's own channel —
     the channel is for what the task has to say, and a gate that never runs
     has nothing to say there.
@@ -153,12 +229,11 @@ async def _report_gate_failure(label: str, reason: str) -> None:
     log_event(log, "scheduled_skill.gate_failed", task=label, reason=reason)
     log.error("Gate failed for %s — %s", label, reason)
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-    chat_id = config.telegram_owner_chat_id
-    if not bot_token or not chat_id:
+    if not bot_token:
         return
     try:
-        await _send_text(
-            bot_token, chat_id,
+        await _deliver_text(
+            mind_id, bot_token,
             f"Scheduled task {label} gate failed: {reason}",
         )
     except Exception:
@@ -257,14 +332,54 @@ async def _send_voice(bot_token: str, chat_id: int, audio: bytes) -> None:
         )
 
 
-async def _send_text(bot_token: str, chat_id: int, text: str) -> None:
+async def _send_text(bot_token: str, chat_id: int, text: str) -> bool:
+    """Deliver `text`, and say whether Telegram took it.
+
+    The answer is read rather than discarded. This process holds one bot
+    token and now addresses whichever chat claimed the raising mind's *own*
+    bot — and Telegram refuses `sendMessage` from a bot the target has never
+    started. Dropping the response made that a reminder nobody receives and
+    nobody can see was missed.
+    """
     limit = 4096
+    delivered = True
     for i in range(0, max(len(text), 1), limit):
         async with aiohttp.ClientSession() as s:
-            await s.post(
+            async with s.post(
                 f"https://api.telegram.org/bot{bot_token}/sendMessage",
                 json={"chat_id": str(chat_id), "text": text[i : i + limit]},
-            )
+            ) as response:
+                if response.status >= 400:
+                    body = (await response.text())[:300]
+                    log_event(
+                        log, "scheduled_skill.delivery_refused",
+                        level=logging.ERROR, chat_id=str(chat_id),
+                        status=response.status, detail=body,
+                    )
+                    delivered = False
+    return delivered
+
+
+async def _deliver_text(mind_id: str, bot_token: str, text: str) -> None:
+    """Deliver to the mind's own person, falling back to the operator.
+
+    A reminder belongs to whoever asked for it. But the bot this process
+    holds may have no conversation with that person — their mind's bot is a
+    different bot — and a refusal there must not end as a reminder that
+    simply never arrives. So a refused delivery is logged and repeated to the
+    stack-wide chat, which is where every one of these went before.
+    """
+    chat_id = await owner_chat_for(mind_id)
+    if chat_id and await _send_text(bot_token, chat_id, text):
+        return
+    fallback = config.telegram_owner_chat_id
+    if not fallback or fallback == chat_id:
+        return
+    log_event(
+        log, "scheduled_skill.delivery_fell_back", level=logging.WARNING,
+        mind_id=mind_id, intended=str(chat_id), delivered_to=str(fallback),
+    )
+    await _send_text(bot_token, fallback, text)
 
 
 async def _create_session(http: aiohttp.ClientSession, skill: ScheduledSkill, surface_prompt: str) -> str:
@@ -272,7 +387,7 @@ async def _create_session(http: aiohttp.ClientSession, skill: ScheduledSkill, su
     client_ref = f"scheduler-{skill.mind_name}-{skill.skill_name}-{uuid.uuid4().hex[:8]}"
     payload = {
         "owner_type": "scheduler",
-        "owner_ref": str(config.telegram_owner_chat_id or "scheduler"),
+        "owner_ref": str(await owner_chat_for(skill.mind_id) or "scheduler"),
         "client_ref": client_ref,
         "mind_id": skill.mind_id,
         "surface_prompt": surface_prompt,
@@ -319,7 +434,14 @@ async def _ensure_channel_session(
             if session.get("is_active"):
                 return session["id"]
 
-    owner_ref = str(config.discord_allowed_users[0]) if config.discord_allowed_users else "scheduler"
+    # The mind's own Discord claim, since one bot answers one person. The
+    # old reading took the first entry of a stack-wide allow-list, which is
+    # whoever happened to be listed first on the whole machine.
+    owner_ref = str(
+        await claimed_chat_id(skill.mind_id, "discord")
+        or (config.discord_allowed_users[0] if config.discord_allowed_users else "")
+        or "scheduler"
+    )
     payload = {
         "owner_type": client_type,
         "owner_ref": owner_ref,
@@ -516,6 +638,7 @@ async def fire_skill(skill: ScheduledSkill) -> None:
         # every hour instead of never.
         await _report_gate_failure(
             f"{skill.mind_name}/{skill.skill_name}", skill.gate_error,
+            mind_id=skill.mind_id,
         )
         return
     if skill.gate:
@@ -526,7 +649,7 @@ async def fire_skill(skill: ScheduledSkill) -> None:
                       mind_name=skill.mind_name, skill_name=skill.skill_name)
             return
         if outcome == GATE_ERROR:
-            await _report_gate_failure(label, reason)
+            await _report_gate_failure(label, reason, mind_id=skill.mind_id)
             return
     if skill.command:
         await _fire_command(skill)
@@ -543,7 +666,7 @@ async def fire_skill(skill: ScheduledSkill) -> None:
               mind_name=skill.mind_name, skill_name=skill.skill_name,
               notify=skill.notify, voice=skill.voice)
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-    chat_id = config.telegram_owner_chat_id
+    chat_id = await owner_chat_for(skill.mind_id)
 
     if skill.notify and (not bot_token or not chat_id):
         log.error("Cannot deliver %s — missing TELEGRAM_BOT_TOKEN or owner chat ID", label)
@@ -600,7 +723,7 @@ async def fire_skill(skill: ScheduledSkill) -> None:
                   response_chars=len(response or ""), notified=False)
         return
 
-    await _send_text(bot_token, chat_id, response)
+    await _deliver_text(skill.mind_id, bot_token, response)
     if skill.voice:
         asyncio.create_task(_try_send_voice(bot_token, chat_id, response, skill.mind_id, label))
 

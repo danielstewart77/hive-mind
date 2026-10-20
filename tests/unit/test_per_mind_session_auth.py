@@ -492,9 +492,17 @@ class TestTheDeployedAppIsGuarded:
 
         assert TestClient(mind_server.app).delete("/sessions/s1").status_code == 401
 
-    def test_the_config_surface_is_still_reachable(self):
-        """The guard is scoped to /sessions and must not have swallowed the
-        routes the console reads."""
+    def test_the_config_surface_answers_its_own_guard_not_the_session_one(self):
+        """The session guard is scoped to `/sessions` and must not have
+        swallowed the routes the console reads. `/runtime` has an admin guard
+        of its own, so what this pins is that it is reached and refused on
+        those terms rather than by the middleware."""
         from minds import mind_server
 
-        assert TestClient(mind_server.app).get("/runtime").status_code == 200
+        client = TestClient(mind_server.app)
+        assert client.get("/runtime").status_code == 401
+        # The session credential does not open it, which is what tells the
+        # two guards apart: the session middleware would have admitted this.
+        assert client.get(
+            "/runtime", headers={"Authorization": "Bearer session-token"}
+        ).status_code == 401
