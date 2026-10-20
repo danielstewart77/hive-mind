@@ -16,41 +16,14 @@ import time
 import unittest
 from unittest.mock import patch
 
+from lucent_api.lucent import _init_schema
+
 
 def _make_test_conn() -> sqlite3.Connection:
     """In-memory SQLite with the minimal nodes/edges schema graph_query needs."""
     conn = sqlite3.connect(":memory:", check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    conn.executescript("""
-        CREATE TABLE nodes (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            mind_id    TEXT    NOT NULL,
-            type        TEXT    NOT NULL,
-            name        TEXT    NOT NULL,
-            first_name  TEXT,
-            last_name   TEXT,
-            properties  TEXT    DEFAULT '{}',
-            data_class  TEXT,
-            tier        TEXT,
-            source      TEXT,
-            as_of       TEXT,
-            created_at  REAL,
-            updated_at  REAL
-        );
-        CREATE TABLE edges (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            mind_id    TEXT    NOT NULL,
-            source_id   INTEGER NOT NULL,
-            target_id   INTEGER NOT NULL,
-            type        TEXT    NOT NULL,
-            as_of       TEXT,
-            source      TEXT,
-            data_class  TEXT,
-            tier        TEXT,
-            created_at  REAL,
-            properties  TEXT    NOT NULL DEFAULT '{}'
-        );
-    """)
+    _init_schema(conn)
     now = time.time()
     conn.execute(
         "INSERT INTO nodes (mind_id, type, name, properties, data_class, tier, created_at) "

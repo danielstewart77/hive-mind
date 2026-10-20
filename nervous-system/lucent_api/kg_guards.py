@@ -39,7 +39,7 @@ def _telegram_direct(message: str) -> tuple[bool, str]:
 
 
 def check_disambiguation(
-    name: str, entity_type: str, mind_id: str
+    name: str, entity_type: str, mind_id: str, owner: object = None
 ) -> DisambiguationResult:
     """Query the knowledge graph for similar nodes before writing.
 
@@ -52,7 +52,9 @@ def check_disambiguation(
             filter -- the CONTAINS name match is cross-type so that duplicates
             across entity types are caught (e.g. a Person and a System sharing
             a name).
-        mind_id: Which agent's graph to search.
+        mind_id: Accepted for API consistency and not used as a filter.
+        owner: Whose graph to search. None is every owner, which is a
+            service or an admin.
 
     Returns:
         DisambiguationResult with action, existing_nodes, and message.
@@ -60,11 +62,16 @@ def check_disambiguation(
     # NOTE: entity_type is intentionally omitted from the SQL WHERE clause.
     # Disambiguation must check across all node types to catch cross-entity
     # duplicates (e.g. "Hive Mind" as both a Project and a System).
-    # mind_id is also omitted (REQ-018): it is provenance only, not a query
-    # filter. Disambiguation is cross-mind so any mind catches duplicates
-    # written by any other mind. The parameter is retained for API
-    # consistency.
+    # mind_id is also omitted: it is provenance only, not a query filter.
+    # Disambiguation is cross-mind within one owner, so any of a person's
+    # minds catches a duplicate another of their minds wrote. It is never
+    # cross-owner: the result is handed back to the caller as
+    # `similar_nodes` and pushed to a chat, so an unscoped scan tells a mind
+    # which names exist in somebody else's graph.
     del mind_id  # intentionally unused
+    from lucent_api.lucent_graph import _owner_scope
+
+    own_clause, own_params = _owner_scope(owner)
     conn = _get_connection()
     cursor = conn.execute(
         """
@@ -72,8 +79,8 @@ def check_disambiguation(
         WHERE (LOWER(name) = LOWER(?)
                OR LOWER(name) LIKE '%' || LOWER(?) || '%'
                OR LOWER(?) LIKE '%' || LOWER(name) || '%')
-        """,
-        (name, name, name),
+        """ + own_clause,
+        (name, name, name, *own_params),
     )
     rows = [
         {"name": row["name"], "labels": [row["type"]], "id": row["id"]}

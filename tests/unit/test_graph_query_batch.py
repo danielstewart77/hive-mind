@@ -217,9 +217,11 @@ def test_r12_depth_reaches_the_traversal(client, monkeypatch):
     seen: list[int] = []
     real = lucent_graph.graph_query
 
-    def spy(entity_name: str, mind_id: str = "", depth: int = 1):
+    def spy(entity_name: str, mind_id: str = "", depth: int = 1, owners=None):
         seen.append(depth)
-        return real(entity_name=entity_name, mind_id=mind_id, depth=depth)
+        return real(
+            entity_name=entity_name, mind_id=mind_id, depth=depth, owners=owners
+        )
 
     monkeypatch.setattr(lucent_graph, "graph_query", spy)
 

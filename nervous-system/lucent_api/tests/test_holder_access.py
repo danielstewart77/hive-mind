@@ -18,9 +18,11 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from lucent_api import holder_access as ha
+from lucent_api.lucent import _init_schema
 
 SKIPPY_TOKEN = "skippys-own-credential"  # secret-guard: allow
 ARNOLD_TOKEN = "arnolds-own-credential"  # secret-guard: allow
+MORDECAI_TOKEN = "mordecais-own-credential"  # secret-guard: allow
 COMMS_TOKEN = "comms-service-credential"  # secret-guard: allow
 ADMIN_TOKEN = "lucent-admin-credential"  # secret-guard: allow
 RETIRED_SHARED = "the-old-shared-lucent-token"  # secret-guard: allow
@@ -650,31 +652,13 @@ class GraphWriteProvenanceTests(unittest.TestCase):
     repository green.
     """
 
-    NODES_DDL = """
-    CREATE TABLE nodes (
-        id          INTEGER PRIMARY KEY AUTOINCREMENT,
-        mind_id     TEXT NOT NULL,
-        type        TEXT NOT NULL,
-        name        TEXT NOT NULL,
-        first_name  TEXT,
-        last_name   TEXT,
-        properties  TEXT DEFAULT '{}',
-        data_class  TEXT,
-        tier        TEXT,
-        source      TEXT,
-        as_of       TEXT,
-        created_at  REAL,
-        updated_at  REAL,
-        UNIQUE(mind_id, name)
-    );
-    """
-
     def setUp(self) -> None:
         self.conn = sqlite3.connect(":memory:", check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
-        self.conn.executescript(self.NODES_DDL)
+        _init_schema(self.conn)
         ha.init_credentials(self.conn)
         ha.put_credential(self.conn, "skippy", "daniel", SKIPPY_TOKEN)
+        ha.put_credential(self.conn, "mordecai", "daniel", MORDECAI_TOKEN)
         ha.put_credential(self.conn, "arnold", "sloan", ARNOLD_TOKEN)
         os.environ["LUCENT_ADMIN_BEARER_TOKEN"] = ADMIN_TOKEN
         self._patches = [
@@ -733,8 +717,9 @@ class GraphWriteProvenanceTests(unittest.TestCase):
         self.assertEqual(answer.status_code, 403, answer.text)
         self.assertEqual(self._provenance_of("Maurice"), [])
 
-    def test_a_mind_cannot_merge_properties_onto_another_minds_node(self):
-        self._create(ARNOLD_TOKEN, "Maurice")
+    def test_a_mind_merges_onto_a_node_its_owners_other_mind_wrote(self):
+        """The hive half: one person's minds build one graph together."""
+        self._create(MORDECAI_TOKEN, "Maurice")
 
         answer = self.client.post(
             "/graph/properties/merge",
@@ -742,16 +727,21 @@ class GraphWriteProvenanceTests(unittest.TestCase):
             json={
                 "entity_type": "Person",
                 "name": "Maurice",
-                "properties": json.dumps({"planted": True}),
+                "properties": json.dumps({"runs": "homebridge"}),
             },
         )
 
-        self.assertEqual(answer.status_code, 404, answer.text)
+        self.assertEqual(answer.status_code, 200, answer.text)
+        self.assertTrue(answer.json().get("ok"), answer.text)
+        stored = self.conn.execute(
+            "SELECT properties FROM nodes WHERE name = 'Maurice'"
+        ).fetchone()["properties"]
+        self.assertEqual(json.loads(stored).get("runs"), "homebridge")
 
-    def test_a_mind_cannot_delete_from_the_shared_graph_by_name(self):
-        """A delete picks its row inside the graph layer, which cannot tell
-        one mind's "Daniel" from another's."""
-        self._create(ARNOLD_TOKEN, "Maurice")
+    def test_a_mind_deletes_a_node_its_owners_other_mind_wrote(self):
+        """A delete resolves its row inside the owner's graph, so a mind of
+        that owner reaches it and a mind of another owner cannot."""
+        self._create(MORDECAI_TOKEN, "Maurice")
 
         answer = self.client.request(
             "DELETE",
@@ -760,8 +750,9 @@ class GraphWriteProvenanceTests(unittest.TestCase):
             json={"entity_type": "Person", "name": "Maurice"},
         )
 
-        self.assertEqual(answer.status_code, 403, answer.text)
-        self.assertEqual(self._provenance_of("Maurice"), ["arnold"])
+        self.assertEqual(answer.status_code, 200, answer.text)
+        self.assertTrue(answer.json().get("ok"), answer.text)
+        self.assertEqual(self._provenance_of("Maurice"), [])
 
     def test_a_graph_route_needs_a_credential(self):
         answer = self.client.post(

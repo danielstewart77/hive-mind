@@ -6,6 +6,13 @@ and a request presents exactly one ``Authorization`` header. Mounting these
 routes there would mean the soul token is rejected before it is read, or
 that the service token is accepted here — and the second of those is the
 bug this whole boundary exists to remove.
+
+The soul routes are deliberately outside the graph's owner partition. They
+answer to `LUCENT_SOUL_BEARER_TOKEN`, which is held by the console and by the
+operator's own review flow and by no mind — so there is no caller here to
+scope, and the one credential that reaches them is the one that exists to fix
+a wedged identity from outside. The partition's subject is a mind reaching
+another person's graph; this route is not reachable by a mind at all.
 """
 from __future__ import annotations
 
