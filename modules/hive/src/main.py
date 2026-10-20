@@ -682,6 +682,11 @@ async def minds_page(request: Request):
     return _console_page(request, "minds.html")
 
 
+@app.get("/bots", response_class=HTMLResponse)
+async def bots_page(request: Request):
+    return _console_page(request, "bots.html")
+
+
 # Registered before /minds/{mind_id}: FastAPI matches in declaration order,
 # so the parameterised route would otherwise swallow this literal one.
 @app.get("/minds/new", response_class=HTMLResponse)
@@ -2673,6 +2678,165 @@ async def _mind_gateway_url(name: str) -> str:
     raise HTTPException(status_code=404, detail="That Mind is not registered")
 
 
+async def _mind_row(name: str) -> dict:
+    """The registered row for a Mind, by display name."""
+    wanted = route_access.normalize_mind_name(name)
+    for mind in await _broker_minds_safe():
+        if route_access.normalize_mind_name(mind.get("name")) == wanted:
+            return mind
+    raise HTTPException(status_code=404, detail="That Mind is not registered")
+
+
+async def _mind_uuid(name: str) -> str:
+    """The durable id comms keys a claim by. The display name is not it."""
+    row = await _mind_row(name)
+    uuid = str(row.get("mind_id") or row.get("id") or "")
+    if not uuid:
+        raise HTTPException(
+            status_code=409, detail="That Mind is registered without an id"
+        )
+    return uuid
+
+
+async def _bot_claim(mind_uuid: str, surface: str) -> dict:
+    """Who this bot answers, as comms records it.
+
+    Never the phrase. An unreachable gateway answers as unknown rather than
+    as an unclaimed bot: the remedy for the first is to go and look at the
+    gateway, and for the second to have somebody send a phrase.
+    """
+    try:
+        body = await _gateway_request(
+            "GET", f"/broker/minds/{mind_uuid}/surface-claim",
+            params={"surface": surface}, admin=True,
+        )
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            return {"known": False, "detail": "This gateway predates bot claims"}
+        return {"known": False, "detail": str(exc.detail)}
+    if not isinstance(body, dict):
+        return {"known": False, "detail": "The gateway returned no claim"}
+    return {
+        "known": True,
+        "claimed": bool(body.get("claimed")),
+        "claimed_ref": str(body.get("claimed_ref") or ""),
+        "phrase_pending": bool(body.get("phrase_pending")),
+        "phrase_expires_at": body.get("phrase_expires_at") or 0,
+    }
+
+
+async def _bot_row(mind: dict, surface: str) -> dict:
+    """One row of the bots page: the token's state and the claim beside it.
+
+    Each row is resolved on its own. Two of this hive's minds live on Windows
+    boxes that are normally off, and a listing that failed whole on the first
+    unreachable mind would be a page nobody could use to fix the reachable
+    ones.
+    """
+    name = str(mind.get("name") or "")
+    row = {
+        "mind": name,
+        "surface": surface,
+        "stored": False,
+        "accepted": None,
+        "bot_username": "",
+        "where": "",
+        "detail": "",
+        "reachable": True,
+    }
+    try:
+        state = await mind_runtime.fetch_surface_token(
+            str(mind.get("gateway_url") or ""), surface=surface
+        )
+    except HTTPException as exc:
+        row["reachable"] = False
+        row["detail"] = str(exc.detail)
+    else:
+        row.update({
+            "stored": bool(state.get("stored")),
+            "accepted": state.get("accepted"),
+            "bot_username": str(state.get("bot_username") or ""),
+            "where": str(state.get("where") or ""),
+            "detail": str(state.get("detail") or ""),
+            "preview": str(state.get("preview") or ""),
+        })
+    row["claim"] = await _bot_claim(
+        str(mind.get("mind_id") or mind.get("id") or ""), surface
+    )
+    return row
+
+
+@app.get("/api/bots")
+async def api_bots(user: dict = Depends(require_auth)):
+    """Every bot registered against a Mind the signed-in user owns.
+
+    Rows are gathered concurrently and each carries its own failure, because
+    the token lives on the Mind's own disk and only that Mind can be asked —
+    so this page is as many round trips as there are bots, over machines that
+    are not all awake.
+    """
+    minds = route_access.visible_minds(user, await _broker_minds_safe())
+    jobs = [
+        _bot_row(mind, surface)
+        for mind in minds
+        for surface in ("telegram", "discord")
+    ]
+    rows = await asyncio.gather(*jobs, return_exceptions=True)
+    return {
+        "bots": [row for row in rows if isinstance(row, dict)],
+        "surfaces": ["telegram", "discord"],
+    }
+
+
+@app.get("/api/minds/{name}/bot-claim")
+async def api_mind_bot_claim(
+    name: str, surface: str = "telegram", user: dict = Depends(require_auth)
+):
+    del user
+    return await _bot_claim(await _mind_uuid(name), surface)
+
+
+@app.post("/api/minds/{name}/bot-claim/phrase")
+async def api_mind_bot_claim_phrase(
+    name: str, surface: str = "telegram", user: dict = Depends(require_auth)
+):
+    """Put a fresh pass phrase on offer, and show it once.
+
+    The only answer anywhere that carries the phrase in the clear. Minting
+    again retires the previous one, so an operator who mints twice has not
+    left two live doors open.
+    """
+    del user
+    mind_uuid = await _mind_uuid(name)
+    body = await _gateway_request(
+        "POST", f"/broker/minds/{mind_uuid}/surface-claim/phrase",
+        params={"surface": surface}, admin=True,
+    )
+    if not isinstance(body, dict) or not body.get("phrase"):
+        raise HTTPException(status_code=502, detail="The gateway minted no phrase")
+    log_event(log, "mind.bot_claim.phrase_minted", mind=name, surface=surface)
+    return {
+        "phrase": str(body.get("phrase")),
+        "surface": surface,
+        "expires_at": body.get("expires_at") or 0,
+    }
+
+
+@app.delete("/api/minds/{name}/bot-claim")
+async def api_mind_bot_claim_clear(
+    name: str, surface: str = "telegram", user: dict = Depends(require_auth)
+):
+    """Release a bot so somebody else can claim it."""
+    del user
+    mind_uuid = await _mind_uuid(name)
+    await _gateway_request(
+        "DELETE", f"/broker/minds/{mind_uuid}/surface-claim",
+        params={"surface": surface}, admin=True,
+    )
+    log_event(log, "mind.bot_claim.cleared", mind=name, surface=surface)
+    return {"ok": True, "surface": surface}
+
+
 @app.get("/api/minds/{name}/configuration")
 async def api_mind_configuration(name: str, user: dict = Depends(require_auth)):
     del user
@@ -3072,7 +3236,9 @@ async def api_mind_configuration_update(
 
 
 @app.get("/api/minds/{name}/surface-token")
-async def api_mind_surface_token(name: str, user: dict = Depends(require_auth)):
+async def api_mind_surface_token(
+    name: str, surface: str = "telegram", user: dict = Depends(require_auth)
+):
     """Whether this Mind's surface has a bot token the bot API accepts.
 
     Relayed from the Mind, which is the only party that can see where its own
@@ -3082,7 +3248,7 @@ async def api_mind_surface_token(name: str, user: dict = Depends(require_auth)):
     """
     del user
     gateway_url = await _mind_gateway_url(name)
-    state = await mind_runtime.fetch_surface_token(gateway_url)
+    state = await mind_runtime.fetch_surface_token(gateway_url, surface=surface)
     return {
         "stored": bool(state.get("stored")),
         "accepted": state.get("accepted"),
@@ -3095,7 +3261,8 @@ async def api_mind_surface_token(name: str, user: dict = Depends(require_auth)):
 
 @app.put("/api/minds/{name}/surface-token")
 async def api_mind_surface_token_set(
-    name: str, request: Request, user: dict = Depends(require_auth)
+    name: str, request: Request, surface: str = "telegram",
+    user: dict = Depends(require_auth),
 ):
     """Hand this Mind a new bot token for it to verify and store.
 
@@ -3115,7 +3282,9 @@ async def api_mind_surface_token_set(
         raise HTTPException(status_code=400, detail="A bot token is required")
     gateway_url = await _mind_gateway_url(name)
     try:
-        state = await mind_runtime.push_surface_token(gateway_url, token)
+        state = await mind_runtime.push_surface_token(
+            gateway_url, token, surface=surface
+        )
     except HTTPException as exc:
         log_event(
             log, "mind.surface_token.refused", level=logging.WARNING,
@@ -3127,6 +3296,25 @@ async def api_mind_surface_token_set(
         bot_username=str(state.get("bot_username") or ""),
         where=str(state.get("where") or ""),
     )
+    # The claim was a claim on a bot. Telling comms which bot this token is
+    # releases the claim when the bot has changed, so a brand-new bot does
+    # not answer whoever claimed the old one having never been claimed.
+    bot_ref = str(state.get("bot_username") or "")
+    if bot_ref:
+        try:
+            await _gateway_request(
+                "POST", f"/broker/minds/{await _mind_uuid(name)}/surface-claim/bot",
+                params={"surface": surface}, json_body={"bot_ref": bot_ref},
+                admin=True,
+            )
+        except HTTPException as exc:
+            # A gateway that predates bot claims, or one that is down. The
+            # token is stored either way, and the page reads the claim as
+            # unknown rather than as a claim on a bot nobody has recorded.
+            log_event(
+                log, "mind.bot_claim.bot_not_recorded", level=logging.WARNING,
+                mind=name, surface=surface, status=exc.status_code,
+            )
     return {
         "saved": True,
         "stored": True,
