@@ -153,4 +153,44 @@ def test_a_gateway_with_no_claim_routes_reads_as_unknown_not_unclaimed(
         fake_comms.absent["claim_routes"] = False
 
     assert state.status_code == 200
-    assert state.json()["known"] is False
+    body = state.json()
+    assert body["known"] is False
+    # The reason is carried, because the page shows it: "this gateway is old"
+    # and "this gateway is down" send the operator to different places.
+    assert "predates" in body["detail"]
+
+
+def test_a_mind_that_knows_only_one_surface_is_not_read_as_a_discord_bot(
+    console, fake_comms
+):
+    """An unknown query parameter is dropped without comment, so a mind that
+    predates it answers about Telegram — and the page would have stated as
+    fact that Discord was wired on every container mind."""
+    admin = console.admin()
+    fake_comms.absent["surface_echo"] = True
+    try:
+        rows = admin.get("/api/bots").json()["bots"]
+    finally:
+        fake_comms.absent["surface_echo"] = False
+
+    discord = [row for row in rows if row["surface"] == "discord"]
+    assert discord
+    assert all(row["reachable"] is False for row in discord)
+    assert all(row["bot_username"] == "" for row in discord)
+
+
+def test_storing_a_token_records_which_bot_it_is(console, fake_comms):
+    """A claim is a claim on a bot, so comms has to be told which."""
+    admin = console.admin()
+
+    admin.put(
+        "/api/minds/skippy/surface-token?surface=telegram",
+        json={"token": "good-token"},
+    )
+
+    recorded = [
+        call for call in fake_comms.received
+        if call["path"].endswith("/surface-claim/bot")
+    ]
+    assert recorded, "comms was told which bot this token is"
+    assert "telegram-bot" in recorded[-1]["body"]

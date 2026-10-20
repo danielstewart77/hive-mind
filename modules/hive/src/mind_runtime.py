@@ -63,10 +63,17 @@ def _unwrap(response: httpx.Response) -> dict:
 
 
 async def fetch_configuration(gateway_url: str) -> dict:
-    """This Mind's runtime configuration, straight from its own file."""
+    """This Mind's runtime configuration, straight from its own file.
+
+    With the admin credential, like the write beside it. This read used to be
+    open on the Mind, and asking without it once the Mind closed it answers
+    401 — which the console's own layout turns into a redirect to the sign-in
+    page, so the symptom would be the operator being logged out rather than
+    anything about authorization.
+    """
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            response = await client.get(_endpoint(gateway_url))
+            response = await client.get(_endpoint(gateway_url), headers=admin_headers())
     except httpx.HTTPError as exc:
         raise HTTPException(
             status_code=502, detail=f"Mind is unreachable: {exc}"
@@ -199,7 +206,22 @@ async def fetch_surface_token(gateway_url: str, surface: str = "telegram") -> di
         raise HTTPException(
             status_code=502, detail=f"Mind is unreachable: {exc}"
         ) from exc
-    return _unwrap_surface_token(response)
+    state = _unwrap_surface_token(response)
+    answered = str(state.get("surface") or "")
+    if answered and answered != surface:
+        raise HTTPException(
+            status_code=502,
+            detail=f"This Mind answered about its {answered} token, not {surface}",
+        )
+    if not answered and surface != "telegram":
+        # A Mind that predates the parameter drops it without comment and
+        # answers about Telegram. Reported as unknown rather than shown as a
+        # working Discord bot that does not exist.
+        raise HTTPException(
+            status_code=501,
+            detail="This Mind is running a version that knows only one surface",
+        )
+    return state
 
 
 async def push_surface_token(

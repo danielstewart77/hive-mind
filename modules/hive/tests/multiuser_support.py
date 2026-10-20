@@ -113,7 +113,7 @@ def fake_comms_app() -> FastAPI:
     # mutable state so a test can set the hive up and read back what the
     # console actually wrote.
     claims: dict[tuple[str, str], dict] = {}
-    absent = {"claim_routes": False}
+    absent = {"claim_routes": False, "surface_echo": False}
     tokens: dict[tuple[str, str], dict] = {}
     unreachable: set[tuple[str, str]] = set()
 
@@ -152,10 +152,16 @@ def fake_comms_app() -> FastAPI:
         mind = request.query_params.get("mind", "")
         if (mind, surface) in unreachable:
             return JSONResponse({"error": "down"}, status_code=502)
+        if absent["surface_echo"]:
+            # A mind that predates the surface parameter: it drops it without
+            # comment and answers about Telegram.
+            return {"stored": True, "accepted": True,
+                    "bot_username": "telegram-bot", "where": "env"}
         row = tokens.get((mind, surface))
         if row is None:
-            return {"stored": False, "accepted": None, "where": "env"}
-        return dict(row, where="env")
+            return {"stored": False, "accepted": None, "surface": surface,
+                    "where": "env"}
+        return dict(row, surface=surface, where="env")
 
     @app.put("/surface-token")
     async def set_surface_token(request: Request, surface: str = "telegram"):
@@ -165,7 +171,7 @@ def fake_comms_app() -> FastAPI:
             return JSONResponse({"error": "bot API refused this token"}, status_code=400)
         return {
             "saved": True, "stored": True, "accepted": True,
-            "bot_username": f"{surface}-bot", "where": "env",
+            "bot_username": f"{surface}-bot", "surface": surface, "where": "env",
         }
 
     @app.api_route(

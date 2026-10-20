@@ -3296,6 +3296,25 @@ async def api_mind_surface_token_set(
         bot_username=str(state.get("bot_username") or ""),
         where=str(state.get("where") or ""),
     )
+    # The claim was a claim on a bot. Telling comms which bot this token is
+    # releases the claim when the bot has changed, so a brand-new bot does
+    # not answer whoever claimed the old one having never been claimed.
+    bot_ref = str(state.get("bot_username") or "")
+    if bot_ref:
+        try:
+            await _gateway_request(
+                "POST", f"/broker/minds/{await _mind_uuid(name)}/surface-claim/bot",
+                params={"surface": surface}, json_body={"bot_ref": bot_ref},
+                admin=True,
+            )
+        except HTTPException as exc:
+            # A gateway that predates bot claims, or one that is down. The
+            # token is stored either way, and the page reads the claim as
+            # unknown rather than as a claim on a bot nobody has recorded.
+            log_event(
+                log, "mind.bot_claim.bot_not_recorded", level=logging.WARNING,
+                mind=name, surface=surface, status=exc.status_code,
+            )
     return {
         "saved": True,
         "stored": True,

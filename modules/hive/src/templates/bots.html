@@ -6,7 +6,7 @@
         <div class="page-header-copy"><p class="page-eyebrow">Surfaces</p><h1 class="page-title">Bots</h1><p class="page-description">One bot answers one person. Each is registered against a mind you own.</p></div>
     </header>
     <section class="surface">
-        <div class="data-table-wrap"><table class="data-table"><thead><tr><th>Mind</th><th>Surface</th><th>Token</th><th>Bot</th><th>Answers</th><th></th></tr></thead><tbody id="bots-table"><tr><td colspan="6" class="loading-state">Loading bots…</td></tr></tbody></table></div>
+        <div class="data-table-wrap"><table class="data-table"><thead><tr><th>Mind</th><th>Surface</th><th>Token</th><th>Bot</th><th>Answers (account id)</th><th></th></tr></thead><tbody id="bots-table"><tr><td colspan="6" class="loading-state">Loading bots…</td></tr></tbody></table></div>
     </section>
     <section class="surface" id="register-panel">
         <div class="surface-header"><div><h2>Register a bot</h2></div></div>
@@ -61,6 +61,7 @@ window.addEventListener("DOMContentLoaded", async function () {
         discord: [
             "Open discord.com/developers/applications and press New Application.",
             "Open the Bot section, press Reset Token, and copy the token it shows once.",
+            "Still in the Bot section, under Privileged Gateway Intents, switch on Message Content and save. Without it the bot cannot read messages and will not start.",
             "Under Installation or OAuth2, generate an invite URL with the bot scope and open it to add the bot to a server you are in.",
             "Paste the token below and press Verify and store.",
             "Send the bot a direct message containing the pass phrase this page then shows you."
@@ -84,7 +85,9 @@ window.addEventListener("DOMContentLoaded", async function () {
 
     function answersCell(bot) {
         const claim = bot.claim || {};
-        if (!claim.known) { return '<span class="muted">Unknown</span>'; }
+        if (!claim.known) {
+            return '<span class="muted" title="' + h.escapeHtml(claim.detail || "") + '">Unknown</span>';
+        }
         if (claim.claimed) { return h.escapeHtml(claim.claimed_ref); }
         if (claim.phrase_pending) { return '<span class="muted">Phrase on offer</span>'; }
         return '<span class="muted">Unclaimed</span>';
@@ -96,7 +99,7 @@ window.addEventListener("DOMContentLoaded", async function () {
         if (claim.known && claim.claimed) {
             return '<button class="button button-quiet" type="button" data-clear="' + target + '">Release</button>';
         }
-        if (!bot.stored) { return ""; }
+        if (!claim.known) { return ""; }
         return '<button class="button button-quiet" type="button" data-phrase="' + target + '">Show phrase</button>';
     }
 
@@ -153,13 +156,19 @@ window.addEventListener("DOMContentLoaded", async function () {
         }
         const clearButton = event.target.closest("[data-clear]");
         if (clearButton) {
+            claimPanel.hidden = false;
+            claimPhrase.textContent = "";
+            claimNote.textContent = "";
             try {
                 await h.requestJson(
                     "/api/minds/" + encodeURIComponent(clearButton.dataset.clear)
                         + "/bot-claim?surface=" + encodeURIComponent(clearButton.dataset.surface),
                     { method: "DELETE" }
                 );
-            } catch (error) { /* reported by the reload below */ }
+                claimNote.textContent = "Released. Press Show phrase to hand it to somebody.";
+            } catch (error) {
+                claimNote.textContent = error.message;
+            }
             await load();
         }
     });
