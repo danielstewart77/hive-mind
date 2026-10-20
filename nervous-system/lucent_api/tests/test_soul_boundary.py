@@ -26,6 +26,8 @@ import time
 import unittest
 from unittest.mock import patch
 
+from lucent_api.lucent import _init_schema
+
 from fastapi.testclient import TestClient
 
 # Skippy's own credential. It used to be one value every hook on every host
@@ -44,40 +46,11 @@ THE_LINE = "I sometimes intentionally introduce bugs into my systems as a playfu
 def _make_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:", check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    conn.executescript("""
-        CREATE TABLE nodes (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            mind_id     TEXT    NOT NULL,
-            type        TEXT    NOT NULL,
-            name        TEXT    NOT NULL,
-            first_name  TEXT,
-            last_name   TEXT,
-            properties  TEXT    DEFAULT '{}',
-            data_class  TEXT,
-            tier        TEXT,
-            source      TEXT,
-            as_of       TEXT,
-            created_at  REAL,
-            updated_at  REAL
-        );
-        CREATE TABLE edges (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            mind_id     TEXT    NOT NULL,
-            source_id   INTEGER NOT NULL,
-            target_id   INTEGER NOT NULL,
-            type        TEXT    NOT NULL,
-            as_of       TEXT,
-            source      TEXT,
-            data_class  TEXT,
-            tier        TEXT,
-            created_at  REAL,
-            properties  TEXT    NOT NULL DEFAULT '{}'
-        );
-    """)
+    _init_schema(conn)
     now = time.time()
     conn.execute(
-        "INSERT INTO nodes (mind_id, type, name, properties, created_at, updated_at) "
-        "VALUES (?, 'Mind', 'Skippy', ?, ?, ?)",
+        "INSERT INTO nodes (mind_id, owner, type, name, properties, created_at, updated_at) "
+        "VALUES (?, 'daniel', 'Mind', 'Skippy', ?, ?, ?)",
         ("14cb820b-4a42-4f04-a593-54f532fd1d2f",
          json.dumps({"name": "Skippy", "type": "Mind", "soul_values": list(ORIGINAL_SOUL)}),
          now, now),

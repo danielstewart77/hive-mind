@@ -17,30 +17,14 @@ import time
 import unittest
 from unittest.mock import patch
 
+from lucent_api.lucent import _init_schema
+
 
 def _make_test_conn() -> sqlite3.Connection:
     """In-memory SQLite with the minimal nodes schema audit/update need."""
     conn = sqlite3.connect(":memory:", check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    conn.executescript(
-        """
-        CREATE TABLE nodes (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            mind_id    TEXT    NOT NULL,
-            type        TEXT    NOT NULL,
-            name        TEXT    NOT NULL,
-            first_name  TEXT,
-            last_name   TEXT,
-            properties  TEXT    DEFAULT '{}',
-            data_class  TEXT,
-            tier        TEXT,
-            source      TEXT,
-            as_of       TEXT,
-            created_at  REAL,
-            updated_at  REAL
-        );
-        """
-    )
+    _init_schema(conn)
     return conn
 
 
@@ -49,6 +33,7 @@ def _insert_person(
     *,
     name: str,
     mind_id: str,
+    owner: str = "daniel",
     first_name: str | None,
     last_name: str | None,
     properties: dict | None = None,
@@ -57,12 +42,13 @@ def _insert_person(
     cursor = conn.execute(
         """
         INSERT INTO nodes
-            (mind_id, type, name, first_name, last_name, properties,
+            (mind_id, owner, type, name, first_name, last_name, properties,
              data_class, tier, created_at)
-        VALUES (?, 'Person', ?, ?, ?, ?, 'current-state', 'contextual', ?)
+        VALUES (?, ?, 'Person', ?, ?, ?, ?, 'current-state', 'contextual', ?)
         """,
         (
             mind_id,
+            owner,
             name,
             first_name,
             last_name,
@@ -83,7 +69,7 @@ class AuditPersonNodesTests(unittest.TestCase):
                        first_name=None, last_name="Stewart")
         with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
             from lucent_api.lucent_graph import audit_person_nodes
-            result = json.loads(audit_person_nodes(mind_id="ada"))
+            result = json.loads(audit_person_nodes(owner="daniel"))
         self.assertTrue(result["found"])
         self.assertEqual(result["count"], 1)
         self.assertEqual(result["nodes"][0]["name"], "David Stewart")
@@ -95,7 +81,7 @@ class AuditPersonNodesTests(unittest.TestCase):
                        first_name="Jane", last_name=None)
         with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
             from lucent_api.lucent_graph import audit_person_nodes
-            result = json.loads(audit_person_nodes(mind_id="ada"))
+            result = json.loads(audit_person_nodes(owner="daniel"))
         self.assertTrue(result["found"])
         self.assertEqual(result["count"], 1)
         self.assertEqual(result["nodes"][0]["name"], "Jane")
@@ -109,7 +95,7 @@ class AuditPersonNodesTests(unittest.TestCase):
                        first_name=None, last_name=None)
         with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
             from lucent_api.lucent_graph import audit_person_nodes
-            result = json.loads(audit_person_nodes(mind_id="ada"))
+            result = json.loads(audit_person_nodes(owner="daniel"))
         self.assertTrue(result["found"])
         self.assertEqual(result["count"], 1)
         self.assertEqual(result["nodes"][0]["name"], "Sloan")
@@ -120,21 +106,21 @@ class AuditPersonNodesTests(unittest.TestCase):
                        first_name="Daniel", last_name="Stewart")
         with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
             from lucent_api.lucent_graph import audit_person_nodes
-            result = json.loads(audit_person_nodes(mind_id="ada"))
+            result = json.loads(audit_person_nodes(owner="daniel"))
         self.assertFalse(result["found"])
         self.assertEqual(result["count"], 0)
         self.assertEqual(result["nodes"], [])
 
-    def test_isolates_by_mind_id(self) -> None:
+    def test_isolates_by_owner(self) -> None:
         """Only the requested mind's incomplete nodes are returned."""
         conn = _make_test_conn()
-        _insert_person(conn, name="Ada Person", mind_id="ada",
+        _insert_person(conn, name="Ada Person", mind_id="ada", owner="daniel",
                        first_name=None, last_name="Person")
-        _insert_person(conn, name="Bob Person", mind_id="bob",
+        _insert_person(conn, name="Bob Person", mind_id="zach", owner="aiden",
                        first_name=None, last_name="Person")
         with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
             from lucent_api.lucent_graph import audit_person_nodes
-            result = json.loads(audit_person_nodes(mind_id="ada"))
+            result = json.loads(audit_person_nodes(owner="daniel"))
         self.assertEqual(result["count"], 1)
         self.assertEqual(result["nodes"][0]["name"], "Ada Person")
 
@@ -145,7 +131,7 @@ class AuditPersonNodesTests(unittest.TestCase):
                        properties={"church": "Anchor Bend"})
         with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
             from lucent_api.lucent_graph import audit_person_nodes
-            result = json.loads(audit_person_nodes(mind_id="ada"))
+            result = json.loads(audit_person_nodes(owner="daniel"))
         self.assertEqual(result["count"], 1)
         props = result["nodes"][0]["properties"]
         self.assertEqual(props.get("church"), "Anchor Bend")
@@ -164,7 +150,7 @@ class UpdatePersonNamesTests(unittest.TestCase):
                 name="David Stewart",
                 first_name="David",
                 last_name="Stewart",
-                mind_id="ada",
+                owner="daniel",
             ))
         self.assertTrue(result["updated"])
         self.assertEqual(result["first_name"], "David")
@@ -186,7 +172,7 @@ class UpdatePersonNamesTests(unittest.TestCase):
             result = json.loads(update_person_names(
                 name="Jane Doe",
                 first_name="Jane",
-                mind_id="ada",
+                owner="daniel",
             ))
         self.assertTrue(result["updated"])
         self.assertEqual(result["first_name"], "Jane")
@@ -203,7 +189,7 @@ class UpdatePersonNamesTests(unittest.TestCase):
             from lucent_api.lucent_graph import update_person_names
             result = json.loads(update_person_names(
                 name="X",
-                mind_id="ada",
+                owner="daniel",
             ))
         self.assertIn("error", result)
         self.assertIn("first_name", result["error"])
@@ -217,17 +203,18 @@ class UpdatePersonNamesTests(unittest.TestCase):
                 name="Nonexistent",
                 first_name="X",
                 last_name="Y",
-                mind_id="ada",
+                owner="daniel",
             ))
         self.assertFalse(result["updated"])
         self.assertIn("reason", result)
 
-    def test_isolates_by_mind_id_on_update(self) -> None:
-        """An update for mind_id=ada must not touch a same-named bob row."""
+    def test_isolates_by_owner_on_update(self) -> None:
+        """An update in Daniel's graph must not touch another owner's row of
+        the same name."""
         conn = _make_test_conn()
-        _insert_person(conn, name="Twin", mind_id="ada",
+        _insert_person(conn, name="Twin", mind_id="ada", owner="daniel",
                        first_name=None, last_name=None)
-        _insert_person(conn, name="Twin", mind_id="bob",
+        _insert_person(conn, name="Twin", mind_id="zach", owner="aiden",
                        first_name="OriginalBob", last_name="Surname")
         with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
             from lucent_api.lucent_graph import update_person_names
@@ -235,17 +222,17 @@ class UpdatePersonNamesTests(unittest.TestCase):
                 name="Twin",
                 first_name="UpdatedAda",
                 last_name="Smith",
-                mind_id="ada",
+                owner="daniel",
             ))
         self.assertTrue(result["updated"])
-        ada_row = conn.execute(
-            "SELECT first_name FROM nodes WHERE name = 'Twin' AND mind_id = 'ada'"
+        mine = conn.execute(
+            "SELECT first_name FROM nodes WHERE name = 'Twin' AND owner = 'daniel'"
         ).fetchone()
-        bob_row = conn.execute(
-            "SELECT first_name FROM nodes WHERE name = 'Twin' AND mind_id = 'bob'"
+        theirs = conn.execute(
+            "SELECT first_name FROM nodes WHERE name = 'Twin' AND owner = 'aiden'"
         ).fetchone()
-        self.assertEqual(ada_row["first_name"], "UpdatedAda")
-        self.assertEqual(bob_row["first_name"], "OriginalBob")
+        self.assertEqual(mine["first_name"], "UpdatedAda")
+        self.assertEqual(theirs["first_name"], "OriginalBob")
 
 
 if __name__ == "__main__":
