@@ -201,6 +201,24 @@ async def _require_own_session_mind(request: Request, session_id: str) -> None:
         raise HTTPException(404, "Session not found")
 
 
+async def _names_own_mind(caller: user_access.Caller, mind_id: object) -> bool:
+    """Whether this caller may act *as* the mind it named.
+
+    `owns_mind` answers a question about a person, and nine of this hive's
+    minds answer to one — so between them it is no scoping at all. Every route
+    that takes a mind from the caller needs this beside it: opening a
+    conversation, dispatching into one, and naming a sender the broker will
+    wake another mind with are all the same harm, which is a turn written to
+    another mind's transcript and memory.
+
+    True for a person, a service and the admin credential, as everywhere else:
+    a surface bot serves every mind its owner has, and comms itself acts on
+    every mind's behalf.
+    """
+    keys = await user_access.holder_keys(app.state.broker_db, caller)
+    return keys is None or user_access.mind_is_named_in(keys, mind_id)
+
+
 async def _refuse_foreign_mind_in_body(request: Request, mind_id: str) -> None:
     """Refuse a write filed under a mind other than the caller's own.
 
@@ -466,9 +484,28 @@ async def create_session(body: CreateSessionRequest, request: Request):
     # dispatch into it and have the turn written to that mind's memory — and
     # the owner-scoped routes below would never see it, because they guard
     # conversations that already exist.
+    caller = _caller(request)
     if not await user_access.owns_mind(
-        app.state.broker_db, _caller(request), body.mind_id
+        app.state.broker_db, caller, body.mind_id
     ):
+        return JSONResponse(
+            {"error": "Mind not found"}, status_code=404
+        )
+    # `owns_mind` answers a question about a person, and nine of this hive's
+    # minds answer to one. So it is no scoping between them: skippy's own
+    # credential could open a conversation on mordecai, dispatch into it, and
+    # have the turn written to mordecai's memory. A `mind` holder is held to
+    # its own mind here exactly as it is on the machinery routes; a person, a
+    # service and the admin credential are unrestricted, since a surface bot
+    # serves every mind its owner has.
+    #
+    # The refusal is this route's own, not the sibling guards' "Session not
+    # found": on a route that creates conversations, that sentence sends the
+    # operator looking for one. It is also what `owns_mind` already answers
+    # for a mind belonging to someone else, and — because a mind holder never
+    # reaches the primary-user fallback below it — for a mind that is not
+    # registered at all.
+    if not await _names_own_mind(caller, body.mind_id):
         return JSONResponse(
             {"error": "Mind not found"}, status_code=404
         )
@@ -947,7 +984,8 @@ async def resume_session(session_id: str, body: ActivateRequest):
 # Message endpoint (SSE streaming)
 # ---------------------------------------------------------------------------
 @app.post("/sessions/{session_id}/message")
-async def send_message(session_id: str, body: MessageRequest):
+async def send_message(session_id: str, body: MessageRequest, request: Request):
+    await _refuse_foreign_session(request, session_id)
     images = [{"media_type": img.media_type, "data": img.data} for img in body.images] if body.images else None
     log.info("message: session=%s chars=%d", session_id, len(body.content))
     t0 = time.monotonic()
@@ -1519,6 +1557,8 @@ async def _handle_command(
             app.state.broker_db, caller, body.mind_id
         ):
             return {"error": "Session not found"}
+        if not await _names_own_mind(caller, body.mind_id):
+            return {"error": "Session not found"}
         active = await session_mgr.get_active_session(
             body.owner_type, body.client_ref
         )
@@ -1810,8 +1850,13 @@ async def broker_delete_mind(name: str):
 
 
 @app.post("/broker/messages", response_model=BrokerMessageResponse)
-async def broker_post_message(body: BrokerMessageRequest):
+async def broker_post_message(body: BrokerMessageRequest, request: Request):
     """Receive an inter-mind message, write to DB, kick off background wakeup."""
+    # Who it is *to* is open by design — that is what inter-mind messaging is.
+    # Who it is *from* is not: the broker wakes the recipient with this name,
+    # and a mind holder may only name itself.
+    if not await _names_own_mind(_caller(request), body.from_mind):
+        return JSONResponse({"error": "Mind not found"}, status_code=404)
     if not await _mind_exists(body.to_mind):
         return JSONResponse(
             {"error": f"Mind '{body.to_mind}' not found in broker.minds. Register via POST /broker/minds."},
