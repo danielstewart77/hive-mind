@@ -111,7 +111,7 @@ def tapped(monkeypatch):
         # `gateway` is built in main(), so it is None at import time. The HTTP
         # client is the only thing standing in here; the routing under test is
         # the real handler's.
-        monkeypatch.setattr(bot, "_is_allowed_user", lambda uid: True)
+        monkeypatch.setattr(bot, "_is_allowed_user", AsyncMock(return_value=True))
         monkeypatch.setattr(bot, "_handle_server_command", fake_command)
         monkeypatch.setattr(bot, "gateway", MagicMock(
             suspend_session=fake_suspend,
@@ -176,7 +176,7 @@ async def test_switching_reports_the_name_the_button_showed(monkeypatch):
     from the same place the button did. Breaks if the reply goes back to the
     summary while a name is present.
     """
-    monkeypatch.setattr(bot, "_is_allowed_user", lambda uid: True)
+    monkeypatch.setattr(bot, "_is_allowed_user", AsyncMock(return_value=True))
     monkeypatch.setattr(bot, "gateway", MagicMock(server_command=AsyncMock(
         return_value={"id": "77777777-eeee", "summary": "New session",
                       "name": "dragoman"})))
@@ -267,7 +267,7 @@ async def test_the_sessions_command_neither_draws_nor_counts_an_ended_one(monkey
     ]
     recorder = _Recorder()
     update, ctx = _chat_update(recorder)
-    monkeypatch.setattr(bot, "_is_allowed_user", lambda uid: True)
+    monkeypatch.setattr(bot, "_is_allowed_user", AsyncMock(return_value=True))
     monkeypatch.setattr(bot, "gateway", MagicMock(server_command=AsyncMock(return_value=sessions)))
 
     await bot.cmd_sessions(update, ctx)
@@ -290,7 +290,7 @@ async def test_the_sessions_command_neither_draws_nor_counts_a_suspended_one(mon
     ]
     recorder = _Recorder()
     update, ctx = _chat_update(recorder)
-    monkeypatch.setattr(bot, "_is_allowed_user", lambda uid: True)
+    monkeypatch.setattr(bot, "_is_allowed_user", AsyncMock(return_value=True))
     monkeypatch.setattr(bot, "gateway", MagicMock(server_command=AsyncMock(return_value=sessions)))
 
     await bot.cmd_sessions(update, ctx)
@@ -311,7 +311,7 @@ async def test_a_bare_suspend_suspends_the_conversation_this_chat_is_in(monkeypa
     """Breaks if the bare form stops resolving the chat's own binding, or
     starts demanding an id the operator would have to copy out of a picker."""
     suspended = []
-    monkeypatch.setattr(bot, "_is_allowed_user", lambda uid: True)
+    monkeypatch.setattr(bot, "_is_allowed_user", AsyncMock(return_value=True))
     monkeypatch.setattr(bot, "gateway", MagicMock(
         find_active_session=AsyncMock(return_value="sess-here"),
         suspend_session=AsyncMock(
@@ -330,7 +330,7 @@ async def test_suspend_with_an_id_suspends_that_one_not_the_current_one(monkeypa
     """The picker draws ids and a conversation held elsewhere has no other way
     to be reached. Breaks if the argument is ignored for the chat's binding."""
     suspended = []
-    monkeypatch.setattr(bot, "_is_allowed_user", lambda uid: True)
+    monkeypatch.setattr(bot, "_is_allowed_user", AsyncMock(return_value=True))
     monkeypatch.setattr(bot, "gateway", MagicMock(
         find_active_session=AsyncMock(return_value="sess-here"),
         suspend_session=AsyncMock(
@@ -349,7 +349,7 @@ async def test_a_bare_suspend_with_nothing_to_suspend_suspends_nothing(monkeypat
     """An unbound chat has no conversation to name. Breaks if the empty
     lookup is ever passed through to the gateway as a target."""
     suspended = []
-    monkeypatch.setattr(bot, "_is_allowed_user", lambda uid: True)
+    monkeypatch.setattr(bot, "_is_allowed_user", AsyncMock(return_value=True))
     monkeypatch.setattr(bot, "gateway", MagicMock(
         find_active_session=AsyncMock(return_value=None),
         suspend_session=AsyncMock(
@@ -463,7 +463,7 @@ async def test_the_sessions_command_sends_a_keyboard_not_a_list(monkeypatch):
     ]
     recorder = _Recorder()
     update, ctx = _chat_update(recorder)
-    monkeypatch.setattr(bot, "_is_allowed_user", lambda uid: True)
+    monkeypatch.setattr(bot, "_is_allowed_user", AsyncMock(return_value=True))
     monkeypatch.setattr(bot, "gateway", MagicMock(server_command=AsyncMock(return_value=sessions)))
 
     await bot.cmd_sessions(update, ctx)
@@ -485,7 +485,7 @@ async def test_a_long_session_list_is_capped_and_says_so(monkeypatch):
     ]
     recorder = _Recorder()
     update, ctx = _chat_update(recorder)
-    monkeypatch.setattr(bot, "_is_allowed_user", lambda uid: True)
+    monkeypatch.setattr(bot, "_is_allowed_user", AsyncMock(return_value=True))
     monkeypatch.setattr(bot, "gateway", MagicMock(server_command=AsyncMock(return_value=sessions)))
 
     await bot.cmd_sessions(update, ctx)
@@ -551,7 +551,7 @@ async def test_a_bare_rename_command_writes_nothing_at_all(monkeypatch):
     """`rename_body` returning None only helps if the handler obeys it.
     Breaks if `cmd_rename` ever PUTs on an empty name."""
     writes = []
-    monkeypatch.setattr(bot, "_is_allowed_user", lambda uid: True)
+    monkeypatch.setattr(bot, "_is_allowed_user", AsyncMock(return_value=True))
     monkeypatch.setattr(bot, "gateway", MagicMock(
         find_active_session=AsyncMock(return_value="sess-1"),
         rename_session=AsyncMock(
@@ -580,7 +580,7 @@ async def test_each_refused_rename_says_which_refusal_it_was(monkeypatch):
     handler folds the statuses together, which is what it did when the write
     returned a bool.
     """
-    monkeypatch.setattr(bot, "_is_allowed_user", lambda uid: True)
+    monkeypatch.setattr(bot, "_is_allowed_user", AsyncMock(return_value=True))
 
     async def rename_with(status):
         monkeypatch.setattr(bot, "gateway", MagicMock(
@@ -611,7 +611,7 @@ async def test_a_tap_from_anyone_but_the_owner_does_nothing(tapped, monkeypatch)
     Breaks if that gate is dropped, which the other handler tests cannot see
     because they all stub it to True."""
     query, commands, suspended, update, ctx = tapped(picker.encode(picker.CB_SWITCH, "a"))
-    monkeypatch.setattr(bot, "_is_allowed_user", lambda uid: False)
+    monkeypatch.setattr(bot, "_is_allowed_user", AsyncMock(return_value=False))
 
     await bot.on_session_button(update, ctx)
 
@@ -633,7 +633,7 @@ async def test_rename_never_creates_the_conversation_it_is_naming(monkeypatch):
     """
     created = []
     writes = []
-    monkeypatch.setattr(bot, "_is_allowed_user", lambda uid: True)
+    monkeypatch.setattr(bot, "_is_allowed_user", AsyncMock(return_value=True))
     monkeypatch.setattr(bot, "gateway", MagicMock(
         find_active_session=AsyncMock(return_value=None),
         ensure_session=AsyncMock(side_effect=lambda u, c: created.append(c) or "brand-new"),
@@ -659,7 +659,7 @@ async def test_a_rejected_suspend_body_is_reported_as_an_error(monkeypatch):
     async def fastapi_rejection(session_id):
         return {"detail": [{"loc": ["path", "session_id"], "msg": "value is not valid"}]}
 
-    monkeypatch.setattr(bot, "_is_allowed_user", lambda uid: True)
+    monkeypatch.setattr(bot, "_is_allowed_user", AsyncMock(return_value=True))
     monkeypatch.setattr(bot, "gateway", MagicMock(
         find_active_session=AsyncMock(return_value="sess-here"),
         suspend_session=fastapi_rejection,

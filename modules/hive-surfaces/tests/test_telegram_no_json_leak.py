@@ -52,7 +52,7 @@ class TestNoJsonLeak:
         )
 
         with (
-            patch("hive_surfaces.telegram_bot._is_allowed_user", return_value=True),
+            patch("hive_surfaces.telegram_bot._is_allowed_user", new=AsyncMock(return_value=True)),
             patch("hive_surfaces.telegram_bot.gateway", mock_gateway),
         ):
             await cmd_new(update, context)
@@ -73,7 +73,7 @@ class TestNoJsonLeak:
         )
 
         with (
-            patch("hive_surfaces.telegram_bot._is_allowed_user", return_value=True),
+            patch("hive_surfaces.telegram_bot._is_allowed_user", new=AsyncMock(return_value=True)),
             patch("hive_surfaces.telegram_bot.gateway", mock_gateway),
         ):
             await cmd_clear(update, context)
@@ -99,7 +99,7 @@ class TestNoJsonLeak:
         mock_gateway.query_stream = mock_query_stream
 
         with (
-            patch("hive_surfaces.telegram_bot._is_allowed_user", return_value=True),
+            patch("hive_surfaces.telegram_bot._is_allowed_user", new=AsyncMock(return_value=True)),
             patch("hive_surfaces.telegram_bot.gateway", mock_gateway),
             patch("hive_surfaces.telegram_bot.get_lock", return_value=mock_lock),
         ):
@@ -127,7 +127,7 @@ class TestNoJsonLeak:
         mock_gateway.query_stream = mock_query_stream
 
         with (
-            patch("hive_surfaces.telegram_bot._is_allowed_user", return_value=True),
+            patch("hive_surfaces.telegram_bot._is_allowed_user", new=AsyncMock(return_value=True)),
             patch("hive_surfaces.telegram_bot.gateway", mock_gateway),
             patch("hive_surfaces.telegram_bot.get_lock", return_value=mock_lock),
         ):
@@ -154,7 +154,7 @@ class TestNoJsonLeak:
         mock_gateway.query_stream = mock_query_stream
 
         with (
-            patch("hive_surfaces.telegram_bot._is_allowed_user", return_value=True),
+            patch("hive_surfaces.telegram_bot._is_allowed_user", new=AsyncMock(return_value=True)),
             patch("hive_surfaces.telegram_bot.gateway", mock_gateway),
             patch("hive_surfaces.telegram_bot.get_lock", return_value=mock_lock),
         ):
@@ -182,7 +182,7 @@ class TestNoJsonLeak:
         mock_gateway.query_stream = mock_query_stream
 
         with (
-            patch("hive_surfaces.telegram_bot._is_allowed_user", return_value=True),
+            patch("hive_surfaces.telegram_bot._is_allowed_user", new=AsyncMock(return_value=True)),
             patch("hive_surfaces.telegram_bot.gateway", mock_gateway),
             patch("hive_surfaces.telegram_bot.get_lock", return_value=mock_lock),
         ):

@@ -66,6 +66,41 @@ GOOD = "8394092434:AAEhsomethingthatlookslikeatokenXYZ123"
 PREVIOUS = "1111111111:ZZwhateverwasthereagoodwhileago0000"
 
 
+def _fake_discord_token() -> str:
+    """A Discord-shaped token, assembled rather than written.
+
+    Written out it is a literal a secret scanner refuses to let past, which
+    is the scanner doing its job: anything that satisfies the shape check
+    this exercises looks exactly like the real thing.
+    """
+    return ".".join(["MTIz" * 5, "GaBcDe", "abcdefghij" * 3])
+
+
+def _answering_session(status: int, body: dict):
+    """A bot API that answers `status` with `body`, and nothing else."""
+
+    class _Response:
+        def __init__(self) -> None:
+            self.status = status
+
+        async def json(self, content_type=None):
+            return body
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    session = MagicMock()
+    session.get = MagicMock(return_value=_Response())
+    return session
+
+
+def _accepting_session():
+    return _answering_session(200, {"ok": True, "result": {"username": "skippy_bot"}})
+
+
 class TestWhereTheTokenLands:
     def test_a_named_keyring_key_is_where_the_stack_stores_it(
         self, vault, monkeypatch
@@ -176,13 +211,17 @@ class TestWhatIsRefused:
         session.get.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_an_unreachable_bot_api_refuses_rather_than_storing_blind(
+    async def test_an_unreachable_bot_api_stores_nothing_and_is_not_a_refusal(
         self, vault, project
     ) -> None:
+        """A provider nobody could ask is not a provider that said no.
+
+        The write still refuses to store blind — but as its own exception, so
+        the page does not tell the operator to reissue a token that works."""
         session = MagicMock()
         session.get = MagicMock(side_effect=OSError("dns"))
 
-        with pytest.raises(surface_token.TokenRefused):
+        with pytest.raises(surface_token.TokenUnverifiable):
             await surface_token.replace(GOOD, session=session)
 
         assert not (project / ".env").exists()
@@ -313,7 +352,7 @@ class TestWhatAnUpstreamQuotesBack:
             side_effect=RuntimeError(f"unexpected mimetype, url='bot{GOOD}/getMe'")
         )
 
-        with pytest.raises(surface_token.TokenRefused) as refusal:
+        with pytest.raises(surface_token.TokenUnverifiable) as refusal:
             await surface_token.verify(GOOD, session=session)
 
         assert str(refusal.value) == (
@@ -373,3 +412,150 @@ class TestWhatARowCanShow:
         state = await surface_token.status(session=_bot_api())
 
         assert state.preview == "..." + GOOD[-4:]
+
+
+class TestTheOtherSurface:
+    """Discord is verified against Discord, not against Telegram's shape."""
+
+    @pytest.mark.asyncio
+    async def test_a_discord_token_is_verified_through_the_discord_route(
+        self, vault
+    ) -> None:
+        asked: dict = {}
+
+        class _Response:
+            status = 200
+
+            async def json(self, content_type=None):
+                return {"username": "mordecai-bot", "id": "9"}
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+        def _get(url, headers=None, timeout=None):
+            asked["url"] = url
+            asked["headers"] = headers or {}
+            return _Response()
+
+        session = MagicMock()
+        session.get = _get
+        token = _fake_discord_token()
+
+        username = await surface_token.verify(token, session=session, surface="discord")
+
+        assert username == "mordecai-bot"
+        assert asked["url"] == "https://discord.com/api/v10/users/@me"
+        assert asked["headers"]["Authorization"] == f"Bot {token}"
+
+    @pytest.mark.asyncio
+    async def test_a_telegram_shaped_token_is_refused_as_a_discord_token(
+        self, vault
+    ) -> None:
+        session = MagicMock()
+        session.get = MagicMock(side_effect=AssertionError("must not be asked"))
+
+        with pytest.raises(surface_token.TokenRefused):
+            await surface_token.verify(GOOD, session=session, surface="discord")
+
+    @pytest.mark.asyncio
+    async def test_a_discord_token_is_not_offered_to_telegram(self, vault) -> None:
+        session = MagicMock()
+        session.get = MagicMock(side_effect=AssertionError("must not be asked"))
+        token = _fake_discord_token()
+
+        with pytest.raises(surface_token.TokenRefused):
+            await surface_token.verify(token, session=session, surface="telegram")
+
+
+class TestTheThirdState:
+    """Stored, and nobody can say whether it works.
+
+    The whole reason the unverifiable exception exists, and the state the
+    console's row renders — reported as neither accepted nor refused, because
+    the page's two remedies are "paste a token" and "reissue it", and both
+    are wrong here.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_stored_token_the_provider_could_not_be_asked_about(
+        self, vault, project
+    ) -> None:
+        await surface_token.replace(GOOD, session=_accepting_session())
+        session = MagicMock()
+        session.get = MagicMock(side_effect=OSError("dns"))
+
+        state = await surface_token.status(session=session)
+
+        assert state.stored is True
+        assert state.accepted is None
+        assert "could not reach" in state.detail
+
+    @pytest.mark.asyncio
+    async def test_a_rate_limited_provider_is_not_a_refused_token(
+        self, vault, project
+    ) -> None:
+        """A page over a dozen bots fires a verification per bot, which is
+        how a hive reaches a 429 — whose remedy must not be to reissue."""
+        await surface_token.replace(GOOD, session=_accepting_session())
+
+        state = await surface_token.status(session=_answering_session(429, {}))
+
+        assert state.stored is True
+        assert state.accepted is None
+
+    @pytest.mark.asyncio
+    async def test_a_provider_that_says_no_is_still_a_refusal(
+        self, vault, project
+    ) -> None:
+        await surface_token.replace(GOOD, session=_accepting_session())
+
+        state = await surface_token.status(
+            session=_answering_session(401, {"description": "Unauthorized"})
+        )
+
+        assert state.stored is True
+        assert state.accepted is False
+        assert "Unauthorized" in state.detail
+
+
+class TestTheSharedImage:
+    """One image, several minds' surfaces, one environment name."""
+
+    @pytest.mark.asyncio
+    async def test_a_containerised_mind_with_no_keyring_key_refuses_to_store(
+        self, vault, project, monkeypatch
+    ) -> None:
+        """Writing to the shared name takes down whichever mind's bot was
+        reading it, at the next recreate."""
+        monkeypatch.setattr(surface_token, "_is_containerised", lambda: True)
+        monkeypatch.delenv("TELEGRAM_BOT_TOKEN_KEYRING_KEY", raising=False)
+
+        with pytest.raises(surface_token.TokenRefused):
+            await surface_token.replace(GOOD, session=_accepting_session())
+
+        assert not (project / ".env").exists()
+
+    @pytest.mark.asyncio
+    async def test_a_containerised_mind_with_its_own_key_stores_normally(
+        self, vault, project, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(surface_token, "_is_containerised", lambda: True)
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN_KEYRING_KEY", "CYPHER_TELEGRAM_BOT_TOKEN")
+
+        state = await surface_token.replace(GOOD, session=_accepting_session())
+
+        assert state.where == "keyring:CYPHER_TELEGRAM_BOT_TOKEN"
+
+    @pytest.mark.asyncio
+    async def test_an_edge_mind_writes_its_own_env(
+        self, vault, project, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(surface_token, "_is_containerised", lambda: False)
+        monkeypatch.delenv("TELEGRAM_BOT_TOKEN_KEYRING_KEY", raising=False)
+
+        state = await surface_token.replace(GOOD, session=_accepting_session())
+
+        assert state.where == "env"

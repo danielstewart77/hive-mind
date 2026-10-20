@@ -27,6 +27,9 @@ def _authorized_update():
     update = MagicMock()
     update.effective_user.id = 123
     update.effective_chat.id = 456
+    # A refusal is spoken in a private chat and silent anywhere else, so the
+    # fixture has to say which this is.
+    update.effective_chat.type = "private"
     update.message.reply_text = AsyncMock()
     return update
 

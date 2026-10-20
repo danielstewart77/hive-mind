@@ -39,6 +39,16 @@ import aiohttp
 # or an empty string.
 _TOKEN_PATTERN = re.compile(r"^\d{5,20}:[A-Za-z0-9_-]{30,}$")
 
+#: One shape per surface. Telegram's is a numeric bot id, a colon and the
+#: secret; Discord's is three dot-separated base64url runs and carries no
+#: colon at all. One pattern for both would refuse every real token of
+#: whichever surface it was not written for — which is what a Discord row
+#: reporting "not the shape of a bot token" was.
+_SURFACE_TOKEN_PATTERNS = {
+    "telegram": _TOKEN_PATTERN,
+    "discord": re.compile(r"^[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{20,}$"),
+}
+
 # The names live here and `telegram_bot` reads them from here, rather than
 # each stating its own: two copies of a key name is how a token gets written
 # under one spelling and read under another. This module and not that one
@@ -98,6 +108,33 @@ def resolve_token(surface: str = DEFAULT_SURFACE) -> str:
 VERIFY_URL = "https://api.telegram.org/bot{token}/getMe"
 VERIFY_TIMEOUT_S = 15.0
 
+#: Where each surface is asked who a token belongs to, and how the token is
+#: presented. Telegram puts it in the path, which is why `redact` exists;
+#: Discord takes a `Bot` authorization header, so its token never reaches a
+#: URL at all.
+_VERIFY = {
+    "telegram": {
+        "url": VERIFY_URL,
+        "header": "",
+        "username_path": ("result", "username"),
+    },
+    "discord": {
+        "url": "https://discord.com/api/v10/users/@me",
+        "header": "Bot {token}",
+        "username_path": ("username",),
+    },
+}
+
+
+def _is_containerised() -> bool:
+    """Whether this process shares its image with other minds' surfaces.
+
+    The stack runs several surfaces from one image on one machine, which is
+    the whole reason the keyring path exists. An edge mind has its own `.env`
+    and one bot, so the environment name is its own.
+    """
+    return Path("/.dockerenv").exists()
+
 
 def redact(text: str, token: str) -> str:
     """`text` with `token` replaced, wherever an upstream put it.
@@ -112,6 +149,22 @@ def redact(text: str, token: str) -> str:
 
 class TokenRefused(Exception):
     """The token is malformed, or the bot API will not authenticate it."""
+
+
+#: Answers that say nothing about the token. 429 is a rate limit, 408 a
+#: timeout upstream, and everything from 500 up is the provider.
+_UNVERIFIABLE_STATUSES = frozenset({408, 425, 429})
+
+
+class TokenUnverifiable(Exception):
+    """The bot API could not be asked at all.
+
+    Not a refusal. Folding the two together tells the operator a working
+    token was rejected, and the remedy for that is to issue a new one at
+    BotFather or the developer portal — which revokes the token the mind is
+    actually running on, and on a machine nobody can reach that bot is then
+    dead with no way to put the replacement on it.
+    """
 
 
 @dataclass(frozen=True)
@@ -391,7 +444,11 @@ def stored_token(surface: str = DEFAULT_SURFACE) -> str:
     return keyring_get(name) if kind == "keyring" else env_get(name)
 
 
-async def verify(token: str, session: aiohttp.ClientSession | None = None) -> str:
+async def verify(
+    token: str,
+    session: aiohttp.ClientSession | None = None,
+    surface: str = DEFAULT_SURFACE,
+) -> str:
     """The bot username this token authenticates as.
 
     Raises `TokenRefused` when the bot API will not take it. This is the whole
@@ -399,22 +456,58 @@ async def verify(token: str, session: aiohttp.ClientSession | None = None) -> st
     accepted by any file, and the symptom arrives at the next restart as a
     surface that polls, gets 401 forever, and looks like Telegram is down.
     """
-    if not _TOKEN_PATTERN.match(token):
+    pattern = _SURFACE_TOKEN_PATTERNS.get(surface)
+    if pattern is None:
+        raise ValueError(f"no such surface: {surface!r}")
+    if not pattern.match(token):
         raise TokenRefused("not the shape of a bot token")
 
+    spec = _VERIFY[surface]
     owns_session = session is None
     session = session or aiohttp.ClientSession()
     try:
+        headers = (
+            {"Authorization": spec["header"].format(token=token)}
+            if spec["header"]
+            else {}
+        )
         async with session.get(
-            VERIFY_URL.format(token=token),
+            spec["url"].format(token=token),
+            headers=headers,
             timeout=aiohttp.ClientTimeout(total=VERIFY_TIMEOUT_S),
         ) as response:
             body = await response.json(content_type=None)
-            if response.status != 200 or not body.get("ok"):
+            if not isinstance(body, dict):
+                body = {}
+            if response.status == 200 and surface == "telegram" and not body.get("ok"):
                 raise TokenRefused(
-                    str(body.get("description") or f"bot API returned {response.status}")
+                    str(body.get("description") or "bot API refused this token")
                 )
-            return str((body.get("result") or {}).get("username") or "")
+            if response.status in _UNVERIFIABLE_STATUSES or response.status >= 500:
+                # Rate-limited, or the provider is having a bad day. Not a
+                # refusal: the page's remedy for one of those is to reissue
+                # the token, which revokes the one the mind is running on.
+                # `/api/bots` fires a verification per bot per page load,
+                # which is how a hive of a dozen bots reaches a 429.
+                raise TokenUnverifiable(
+                    str(
+                        body.get("description")
+                        or body.get("message")
+                        or f"bot API returned {response.status}"
+                    )
+                )
+            if response.status != 200:
+                raise TokenRefused(
+                    str(
+                        body.get("description")
+                        or body.get("message")
+                        or f"bot API returned {response.status}"
+                    )
+                )
+            found = body
+            for step in spec["username_path"]:
+                found = (found or {}).get(step) if isinstance(found, dict) else None
+            return str(found or "")
     except TokenRefused:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -422,7 +515,7 @@ async def verify(token: str, session: aiohttp.ClientSession | None = None) -> st
         # aiohttp puts that URL in the text of several of its errors. That
         # text is logged by the mind and returned to the console, so an
         # unredacted wrap publishes the token to every reader of either.
-        raise TokenRefused(
+        raise TokenUnverifiable(
             f"could not reach the bot API: {redact(str(exc), token)}"
         ) from None
     finally:
@@ -441,10 +534,17 @@ async def status(
         return TokenStatus(stored=False, accepted=None, where=where)
     tail = preview_of(token)
     try:
-        username = await verify(token, session=session)
+        username = await verify(token, session=session, surface=surface)
     except TokenRefused as exc:
         return TokenStatus(
             stored=True, accepted=False, where=where, detail=str(exc), preview=tail,
+        )
+    except TokenUnverifiable as exc:
+        # Stored, and nobody can say whether it works. Reported as neither
+        # accepted nor refused, because the page's two remedies are "paste a
+        # token" and "issue a new one", and both are wrong here.
+        return TokenStatus(
+            stored=True, accepted=None, where=where, detail=str(exc), preview=tail,
         )
     return TokenStatus(
         stored=True, accepted=True, bot_username=username, where=where, preview=tail,
@@ -462,8 +562,19 @@ async def replace(
     leave the working one in place, because the operator pasting a typo has
     not asked to take the surface down.
     """
-    username = await verify(token, session=session)
+    username = await verify(token, session=session, surface=surface)
     kind, name = storage_location(surface)
+    if kind != "keyring" and _is_containerised():
+        # One image runs several minds' surfaces, so an environment name is
+        # shared by all of them: writing this mind's token there replaces
+        # whichever mind's bot was reading it, at the next recreate. The
+        # keyring key per mind is how the stack keeps them apart, and a mind
+        # that has not been given one must refuse rather than take another's
+        # bot down.
+        raise TokenRefused(
+            f"this mind names no {names(surface)[1]}, and {name} is shared by "
+            "every surface in this image"
+        )
     if kind == "keyring":
         keyring_set(name, token)
     else:

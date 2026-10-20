@@ -14,6 +14,9 @@ def _make_update(user_id: int = 123, chat_id: int = 456):
     update = MagicMock()
     update.effective_user.id = user_id
     update.effective_chat.id = chat_id
+    # A refusal is spoken in a private chat and silent anywhere else, so the
+    # fixture has to say which this is.
+    update.effective_chat.type = "private"
     update.message.reply_text = AsyncMock()
     return update
 
