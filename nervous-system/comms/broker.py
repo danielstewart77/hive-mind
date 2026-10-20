@@ -13,6 +13,8 @@ import uuid
 from pathlib import Path
 
 import aiosqlite
+
+from comms import surface_claims
 from hive_logging import log_event
 
 log = logging.getLogger("hive-mind.broker")
@@ -123,6 +125,7 @@ async def init_db(db_path: str) -> aiosqlite.Connection:
     db = await aiosqlite.connect(db_path)
     db.row_factory = aiosqlite.Row
     await db.executescript(_SCHEMA)
+    await db.executescript(surface_claims.SCHEMA)
     await _migrate_minds(db)
     await db.commit()
     log.info("broker: db initialized at %s", db_path)

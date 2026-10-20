@@ -128,6 +128,15 @@ TABLE.add(
     "GET /sessions/{session_id}/carry-forward",
     "GET /models",
     "GET /broker/minds",
+    # A bot asking who it answers, offering a message for judgement, and
+    # carrying its install's existing allow-list entry across on first boot.
+    # The service token, because every surface bot holds one and none of
+    # these names a conversation: the read returns no phrase and no digest,
+    # and the attempt is decided here against this clock rather than the
+    # bot's.
+    "GET /broker/minds/{mind_id}/surface-claim",
+    "POST /broker/minds/{mind_id}/surface-claim/attempt",
+    "POST /broker/minds/{mind_id}/surface-claim/adopt",
     "POST /broker/messages",
     "GET /broker/messages",
     "GET /broker/conversations/{conversation_id}",
@@ -146,6 +155,13 @@ TABLE.add(
     "GET /sessions/live",
     "GET /sessions/live/text",
     "PUT /broker/minds/{mind_id}/owner",
+    # Minting a phrase is the one call that sees it in the clear, and
+    # clearing a claim takes a bot off the person holding it. The console
+    # presents the admin token for both and scopes the operator to minds they
+    # own on its own side, exactly as it does for a surface token.
+    "POST /broker/minds/{mind_id}/surface-claim/phrase",
+    "POST /broker/minds/{mind_id}/surface-claim/bot",
+    "DELETE /broker/minds/{mind_id}/surface-claim",
     "PUT /broker/minds/{name}",
     "DELETE /broker/minds/{name}",
     "POST /secrets/scopes",
