@@ -23,6 +23,21 @@ so answering provenance with the owner would file ten minds' memories under
 one name and leave every per-mind read returning the union or nothing. A
 conversation answers to a person. A memory answers to the mind that formed it.
 
+## The graph answers to a person, and that is not an inconsistency
+
+A node is not a memory. A memory is one mind's recollection, formed in one
+mind's conversation, and nothing else should be able to recall it as its own.
+The graph is the facts a person's minds hold in common — who their people are,
+what their machines are, what their projects are — and a fact learned by one
+of a person's minds is useless locked inside that mind. So nodes are keyed by
+`owner`, every one of that person's minds reads and writes all of it, and
+nothing crosses between people.
+
+The single exception is a `Mind` node, which holds that mind's soul. Within
+one owner's graph it is the one row the owner's other minds may read and not
+change, and `mind_id` is still what decides that: a `Mind` node's provenance
+is the mind it represents.
+
 ## A service reads on behalf of a mind, and says so
 
 Comms composes every mind's system prompt — soul from the graph, decay-weighted
@@ -183,6 +198,57 @@ class Caller:
                 400, "a service writing on a mind's behalf must name the mind"
             )
         return asked
+
+    @property
+    def owner(self) -> str:
+        """Whose graph this caller writes into and reads from.
+
+        The credential row names the user its holder answers for, and that
+        user is the graph's partition. This is deliberately a different
+        answer from `provenance`, which stays per-mind: a memory answers to
+        the mind that formed it, while the graph is one space per person
+        that all of that person's minds build together.
+        """
+        return normalize_holder(self.username)
+
+    def owners_for_read(self) -> list[str] | None:
+        """Which owners' nodes this caller may see, or None for all of them.
+
+        A mind sees its owner's graph entire, whichever of that owner's
+        minds wrote each row. A service and an admin see everything: comms
+        composes every mind's prompt and the console draws every mind's
+        page, and neither has a person of its own to be scoped to.
+        """
+        if self.may_act_for_another_mind:
+            return None
+        if not self.owner:
+            # A recognised holder whose row names no user. It reaches no
+            # owner's graph rather than everyone's.
+            return []
+        return [self.owner]
+
+    def owner_for_write(self, named: object = None) -> str:
+        """Which owner's graph a write lands in.
+
+        For a mind, its own owner, and the body cannot say otherwise. For a
+        service or an admin, the owner it named, or its own when it names
+        none — which is what keeps the console's provenance-less edge
+        writes working, and gives them a real owner instead of the empty
+        string that made a node nobody could ever read.
+        """
+        asked = normalize_holder(named)
+        if self.may_act_for_another_mind:
+            return asked or self.owner
+        if asked and asked != self.owner:
+            raise HTTPException(
+                403,
+                f"{self.holder!r} writes into {self.owner!r}'s graph, not {asked!r}'s",
+            )
+        if not self.owner:
+            raise HTTPException(
+                403, "this credential has no owner whose graph it could write to"
+            )
+        return self.owner
 
     def minds_for_read(self, named: object = None) -> list[str] | None:
         """Which minds a read may see, or None for every one of them.

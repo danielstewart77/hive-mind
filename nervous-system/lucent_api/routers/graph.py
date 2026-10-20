@@ -53,6 +53,10 @@ class UpsertBody(BaseModel):
     name: str
     data_class: str
     mind_id: str
+    # Whose graph this write lands in. A mind may only name its own owner
+    # and need not name one at all; a service or an admin names the owner it
+    # is acting for, and writes into its own when it names none.
+    owner: str = ""
     properties: str = "{}"
     relation: str = ""
     target_name: str = ""
@@ -63,12 +67,20 @@ class UpsertBody(BaseModel):
 
 
 class AuditPersonsBody(BaseModel):
-    mind_id: str
+    mind_id: str = ""
+    # Whose graph this write lands in. A mind may only name its own owner
+    # and need not name one at all; a service or an admin names the owner it
+    # is acting for, and writes into its own when it names none.
+    owner: str = ""
 
 
 class UpdatePersonNamesBody(BaseModel):
     name: str
-    mind_id: str
+    mind_id: str = ""
+    # Whose graph this write lands in. A mind may only name its own owner
+    # and need not name one at all; a service or an admin names the owner it
+    # is acting for, and writes into its own when it names none.
+    owner: str = ""
     first_name: str = ""
     last_name: str = ""
 
@@ -81,6 +93,10 @@ class NodeCreateBody(BaseModel):
     name: str
     data_class: str
     mind_id: str
+    # Whose graph this write lands in. A mind may only name its own owner
+    # and need not name one at all; a service or an admin names the owner it
+    # is acting for, and writes into its own when it names none.
+    owner: str = ""
     properties: str = "{}"
     as_of: str | None = None
     source: str = "user"
@@ -90,6 +106,10 @@ class PropertiesMergeBody(BaseModel):
     entity_type: str
     name: str
     properties: str
+    # Whose graph this write lands in. A mind may only name its own owner
+    # and need not name one at all; a service or an admin names the owner it
+    # is acting for, and writes into its own when it names none.
+    owner: str = ""
     as_of: str | None = None
     source: str | None = None
 
@@ -98,11 +118,19 @@ class PropertiesRemoveBody(BaseModel):
     entity_type: str
     name: str
     keys: list[str]
+    # Whose graph this write lands in. A mind may only name its own owner
+    # and need not name one at all; a service or an admin names the owner it
+    # is acting for, and writes into its own when it names none.
+    owner: str = ""
 
 
 class NodeDeleteBody(BaseModel):
     entity_type: str
     name: str
+    # Whose graph this write lands in. A mind may only name its own owner
+    # and need not name one at all; a service or an admin names the owner it
+    # is acting for, and writes into its own when it names none.
+    owner: str = ""
 
 
 class EdgeBody(BaseModel):
@@ -114,6 +142,10 @@ class EdgeBody(BaseModel):
     edge_attrs: str = "{}"
     data_class: str = ""
     mind_id: str = ""
+    # Whose graph this write lands in. A mind may only name its own owner
+    # and need not name one at all; a service or an admin names the owner it
+    # is acting for, and writes into its own when it names none.
+    owner: str = ""
     as_of: str | None = None
     source: str = "user"
 
@@ -152,7 +184,9 @@ class GraphQueryBody(BaseModel):
 
 
 @router.post("/query")
-def graph_query_batch(body: GraphQueryBody) -> Any:
+def graph_query_batch(
+    body: GraphQueryBody, caller: Caller = Depends(require_holder)
+) -> Any:
     """Resolve every name in one request, answering each independently.
 
     One name's failure is its own: a row the store cannot read, or a name
@@ -188,7 +222,13 @@ def graph_query_batch(body: GraphQueryBody) -> Any:
             results.append(entry)
             continue
         try:
-            answer = _decode(lucent_graph.graph_query(entity_name=name, depth=body.depth))
+            answer = _decode(
+                lucent_graph.graph_query(
+                    entity_name=name,
+                    depth=body.depth,
+                    owners=caller.owners_for_read(),
+                )
+            )
         except HTTPException:
             raise
         except Exception as e:
@@ -209,6 +249,7 @@ def graph_query_batch(body: GraphQueryBody) -> Any:
 def graph_search(
     text: str = Query(...),
     limit: int = Query(25, ge=1, le=200),
+    caller: Caller = Depends(require_holder),
 ) -> Any:
     """Mention search across all property strings of every node.
 
@@ -216,7 +257,9 @@ def graph_search(
     """
     from lucent_api.lucent_graph import graph_search as _graph_search
 
-    return _decode(_graph_search(text=text, limit=limit))
+    return _decode(
+        _graph_search(text=text, limit=limit, owners=caller.owners_for_read())
+    )
 
 
 @router.get("/person/search")
@@ -226,6 +269,7 @@ def search_person(
     last_name: str = Query(""),
     title: str = Query(""),
     relationship: str = Query(""),
+    caller: Caller = Depends(require_holder),
 ) -> Any:
     """Fuzzy person search by name fragments, title, or relationship.
 
@@ -240,6 +284,7 @@ def search_person(
             title=title,
             relationship=relationship,
             mind_id=mind_id,
+            owners=caller.owners_for_read(),
         )
     )
 
@@ -294,7 +339,10 @@ def graph_upsert_backup(
             return {"upserted": False, "reason": orphan_msg}
 
         disambig = check_disambiguation(
-            body.name, body.entity_type, caller.mind_for_write(body.mind_id, required=False)
+            body.name,
+            body.entity_type,
+            caller.mind_for_write(body.mind_id, required=False),
+            caller.owner_for_write(body.owner),
         )
         if disambig.action == "disambiguate":
             send_disambiguation_message(body.name, disambig.existing_nodes)
@@ -314,6 +362,7 @@ def graph_upsert_backup(
                 target_type=body.target_type,
                 edge_attrs=body.edge_attrs,
                 mind_id=caller.mind_for_write(body.mind_id, required=False),
+                owner=caller.owner_for_write(body.owner),
                 data_class=body.data_class,
                 as_of=body.as_of,
                 source=body.source,
@@ -411,7 +460,10 @@ def graph_upsert(
             return {"ok": False, "code": "orphan_blocked", "detail": orphan_msg}
 
         disambig = check_disambiguation(
-            body.name, body.entity_type, caller.mind_for_write(body.mind_id, required=False)
+            body.name,
+            body.entity_type,
+            caller.mind_for_write(body.mind_id, required=False),
+            caller.owner_for_write(body.owner),
         )
         if disambig.action == "disambiguate":
             send_disambiguation_message(body.name, disambig.existing_nodes)
@@ -433,6 +485,7 @@ def graph_upsert(
                 target_type=body.target_type,
                 edge_attrs=body.edge_attrs,
                 mind_id=caller.mind_for_write(body.mind_id, required=False),
+                owner=caller.owner_for_write(body.owner),
                 data_class=body.data_class,
                 as_of=body.as_of,
                 source=body.source,
@@ -561,6 +614,7 @@ def graph_upsert_direct_endpoint(
             target_type=body.target_type,
             edge_attrs=body.edge_attrs,
             mind_id=caller.mind_for_write(body.mind_id, required=False),
+            owner=caller.owner_for_write(body.owner),
             data_class=body.data_class,
             as_of=body.as_of,
             source=body.source,
@@ -592,6 +646,7 @@ def graph_nodes_create(
             name=body.name,
             data_class=body.data_class,
             mind_id=caller.mind_for_write(body.mind_id, required=False),
+            owner=caller.owner_for_write(body.owner),
             properties=body.properties,
             as_of=body.as_of,
             source=body.source,
@@ -599,55 +654,48 @@ def graph_nodes_create(
     )
 
 
-def _refuse_foreign_node(caller: Caller, entity_type: str, name: str) -> None:
-    """Refuse a property write onto a node that is not this holder's.
+def _refuse_foreign_identity_node(
+    caller: Caller, entity_type: str, name: str
+) -> None:
+    """Refuse a property write onto another mind's own node.
 
-    `/properties/merge` is the documented additive-update path — the one a
-    mind uses on its own node, because `/upsert` is a full replace of the
-    properties blob — so refusing it to minds outright would take a mind's own
-    record away from it. But these routes address a node by
-    `(entity_type, name)` with no provenance, and `nodes` is
-    `UNIQUE(mind_id, name)`, so without a check a mind reaches any other
-    mind's node of the same name.
+    A node belongs to a person, so one of Daniel's minds adding a fact to a
+    node another of his minds wrote is the hive working — the authorship
+    check this replaces refused exactly that, which is why a mind could not
+    enrich a Person node it had not created itself. What a mind may never
+    touch is the one node that *is* another mind: a `Mind` node carries that
+    mind's soul, and nothing in an owner's graph is a stronger claim about
+    somebody else.
 
-    An admin and a service are unrestricted. A mind has to own a node of that
-    name. A node that exists only under somebody else answers as an absent
-    one, so the graph cannot be enumerated by name.
+    Reach across owners is handled a layer down, by the owner filter every
+    lookup carries, which answers as absence rather than as a refusal.
+
+    An admin and a service are unrestricted: the console's soul editor and
+    the operator are how a wedged identity gets fixed.
     """
     if caller.may_act_for_another_mind:
+        return
+    if entity_type != "Mind":
         return
     from lucent_api import holder_access
 
     row = holder_access.connection().execute(
-        "SELECT 1 FROM nodes WHERE type = ? AND name = ? AND mind_id = ? LIMIT 1",
-        (entity_type, name, caller.provenance),
+        "SELECT mind_id FROM nodes WHERE LOWER(name) = LOWER(?) AND type = 'Mind'"
+        " AND owner IS ? LIMIT 1",
+        (name, caller.owner),
     ).fetchone()
     if row is None:
-        raise HTTPException(404, "Node not found")
-
-
-def _refuse_unscoped_deletion(caller: Caller) -> None:
-    """Refuse a hard delete by name to anything but an admin or a service.
-
-    Deleting addresses a node or an edge by `(entity_type, name)` with no
-    provenance, and the resolver cannot tell one mind's row of that name from
-    another's — so a mind deleting "Daniel" is a mind deleting whichever
-    "Daniel" the resolver reaches first. Property writes can be scoped by
-    checking the caller owns a node of that name; a delete cannot, because the
-    row it destroys is chosen inside the graph layer.
-
-    Teaching that layer a provenance for every mutation is the same work as
-    scoping graph *reads*, which is deliberately a separate story: the Person
-    nodes are shared family knowledge, so "per mind" is the wrong answer and
-    nobody has decided the right one. Until then this is narrower than the day
-    before this change and does not pretend the graph is scoped.
-    """
-    if not caller.may_act_for_another_mind:
-        raise HTTPException(
-            403,
-            "deleting from the shared graph by name needs an admin or a "
-            "service credential; graph deletes are not scoped per mind yet",
-        )
+        # No identity node of that name in this owner's graph. Absent, or
+        # somebody else's — either way the write below will answer not-found
+        # on its own, in the same words.
+        return
+    if str(row[0] or "") in caller.own_names:
+        return
+    raise HTTPException(
+        403,
+        f"{name!r} is another mind's own node; {caller.holder!r} may read it "
+        "and not change it",
+    )
 
 
 @router.post("/properties/merge")
@@ -657,7 +705,7 @@ def graph_properties_merge_endpoint(
     """Merge properties into an existing node. Keys not in the request are
     preserved — the additive counterpart to the full-replace upsert.
     """
-    _refuse_foreign_node(caller, body.entity_type, body.name)
+    _refuse_foreign_identity_node(caller, body.entity_type, body.name)
     from lucent_api.lucent_graph import graph_properties_merge
 
     return _decode(
@@ -665,6 +713,7 @@ def graph_properties_merge_endpoint(
             entity_type=body.entity_type,
             name=body.name,
             properties=body.properties,
+            owner=caller.owner_for_write(body.owner),
             as_of=body.as_of,
             source=body.source,
         )
@@ -682,7 +731,7 @@ def graph_properties_remove_endpoint(
     (`data_class`, `tier`, `source`) ARE removable — they leak onto KG
     nodes from the shared write pipeline and the tidy walk strips them.
     """
-    _refuse_foreign_node(caller, body.entity_type, body.name)
+    _refuse_foreign_identity_node(caller, body.entity_type, body.name)
     from lucent_api.lucent_graph import graph_properties_remove
 
     return _decode(
@@ -690,6 +739,7 @@ def graph_properties_remove_endpoint(
             entity_type=body.entity_type,
             name=body.name,
             keys=body.keys,
+            owner=caller.owner_for_write(body.owner),
         )
     )
 
@@ -713,6 +763,7 @@ def graph_edges_create(
             edge_attrs=body.edge_attrs,
             data_class=body.data_class,
             mind_id=caller.mind_for_write(body.mind_id, required=False),
+            owner=caller.owner_for_write(body.owner),
             as_of=body.as_of,
             source=body.source,
         )
@@ -724,7 +775,6 @@ def graph_edges_delete(
     body: EdgeBody, caller: Caller = Depends(require_holder)
 ) -> Any:
     """Delete edge(s) matching the (source, relation, target) tuple."""
-    _refuse_unscoped_deletion(caller)
     from lucent_api.lucent_graph import graph_edge_delete
 
     return _decode(
@@ -734,6 +784,7 @@ def graph_edges_delete(
             target_name=body.target_name,
             target_type=body.target_type,
             relation=body.relation,
+            owner=caller.owner_for_write(body.owner),
         )
     )
 
@@ -746,11 +797,15 @@ def graph_nodes_delete(
     duplicates or write-mistakes; for facts that became stale prefer
     setting ``superseded = true`` via /properties/merge.
     """
-    _refuse_unscoped_deletion(caller)
     from lucent_api.lucent_graph import graph_node_delete
 
     return _decode(
-        graph_node_delete(entity_type=body.entity_type, name=body.name)
+        graph_node_delete(
+            entity_type=body.entity_type,
+            name=body.name,
+            owner=caller.owner_for_write(body.owner),
+            mind_id=caller.provenance,
+        )
     )
 
 
@@ -764,7 +819,7 @@ def audit_persons(
     """Audit Person nodes for missing first/last name properties."""
     from lucent_api.lucent_graph import audit_person_nodes
 
-    return _decode(audit_person_nodes(mind_id=caller.mind_for_write(body.mind_id, required=False)))
+    return _decode(audit_person_nodes(owner=caller.owner_for_write(body.owner)))
 
 
 @router.post("/persons/update-names")
@@ -779,7 +834,7 @@ def update_person_names(
             name=body.name,
             first_name=body.first_name,
             last_name=body.last_name,
-            mind_id=caller.mind_for_write(body.mind_id, required=False),
+            owner=caller.owner_for_write(body.owner),
         )
     )
 
@@ -788,6 +843,7 @@ def update_person_names(
 def graph_raw_properties(
     name: str = Query(...),
     mind_id: str = Query(""),
+    caller: Caller = Depends(require_holder),
 ) -> dict:
     """Return a node's raw properties blob, unflattened.
 
@@ -805,10 +861,14 @@ def graph_raw_properties(
     """
     from lucent_api.lucent import _get_connection
 
+    from lucent_api.lucent_graph import _owners_scope
+
+    own_clause, own_params = _owners_scope(caller.owners_for_read())
     conn = _get_connection()
     row = conn.execute(
-        "SELECT type, properties, mind_id FROM nodes WHERE LOWER(name)=LOWER(?) LIMIT 1",
-        (name,),
+        "SELECT type, properties, mind_id FROM nodes WHERE LOWER(name)=LOWER(?)"
+        + own_clause + " LIMIT 1",
+        (name, *own_params),
     ).fetchone()
     if row is None:
         return {"found": False}
@@ -824,7 +884,10 @@ def graph_raw_properties(
 
 
 @router.get("/data")
-def graph_data(limit: int = Query(400, ge=1, le=2000)) -> dict:
+def graph_data(
+    limit: int = Query(400, ge=1, le=2000),
+    caller: Caller = Depends(require_holder),
+) -> dict:
     """Visualization export — flat nodes + edges.
 
     Returns up to `limit` nodes (ordered by id) plus all edges that connect
@@ -832,10 +895,14 @@ def graph_data(limit: int = Query(400, ge=1, le=2000)) -> dict:
     """
     from lucent_api.lucent import _get_connection
 
+    from lucent_api.lucent_graph import _owners_scope
+
+    own_clause, own_params = _owners_scope(caller.owners_for_read())
     conn = _get_connection()  # singleton — do not close
     node_rows = conn.execute(
-        "SELECT id, name, type, properties FROM nodes ORDER BY id LIMIT ?",
-        (limit,),
+        "SELECT id, name, type, properties FROM nodes WHERE 1" + own_clause
+        + " ORDER BY id LIMIT ?",
+        (*own_params, limit),
     ).fetchall()
     nodes = []
     for r in node_rows:

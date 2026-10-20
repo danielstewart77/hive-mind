@@ -86,7 +86,9 @@ def as_soul_list(value) -> list[str]:
     return list(value)
 
 
-def preserve_soul(conn, *, name: str, label: str, props: dict) -> None:
+def preserve_soul(
+    conn, *, name: str, label: str, props: dict, owner: object = None
+) -> None:
     """Carry an existing soul across a full-replace property write.
 
     ``soul_key_refusal`` only fires when the key is *present*, so it stops a
@@ -97,9 +99,13 @@ def preserve_soul(conn, *, name: str, label: str, props: dict) -> None:
     """
     if label != "Mind" or SOUL_KEY in props:
         return
+    from lucent_api.lucent_graph import _owner_scope
+
+    clause, params = _owner_scope(owner)
     row = conn.execute(
-        "SELECT properties FROM nodes WHERE name = ? AND type = ? LIMIT 1",
-        (name, label),
+        "SELECT properties FROM nodes WHERE name = ? AND type = ?"
+        + clause + " LIMIT 1",
+        (name, label, *params),
     ).fetchone()
     if not row or not row["properties"]:
         return
