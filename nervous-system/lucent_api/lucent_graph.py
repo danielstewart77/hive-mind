@@ -74,24 +74,104 @@ def _get_conn():
     return _get_connection()
 
 
-def _check_identity_guard(conn, name: str, mind_id: str) -> str | None:
+def _identity_scope(label: str, owner: object) -> object:
+    """The owner a lookup for this node type should be scoped to.
+
+    Every lookup is scoped to one person's graph except one: finding the
+    node that *is* a mind. A mind whose node this store cannot yet resolve
+    to an owner holds it under a null owner, and a scoped lookup misses that
+    row — so the mind's own next write does not find its node, inserts a
+    second one, and `graph_query`, which keys its answer on the name, serves
+    the empty newcomer while the soul-bearing original sits on disk. A mind's
+    name is unique across the hive and published in the broker's own listing,
+    so looking one up unscoped reveals nothing and prevents a fork.
+    """
+    return None if label == "Mind" else owner
+
+
+def _owner_scope(owner: object, column: str = "owner") -> tuple[str, list]:
+    """A fragment scoping one statement to one person's graph.
+
+    ``None`` means every owner, which is the console and the hive's own
+    services. Anything else is one person, and a statement carrying this
+    cannot reach another's row — including the lookup that resolves a name
+    to a row id, which without it picks between two owners holding one name
+    by whichever id is lower. The guard and the write that follows it have
+    to resolve the same way or the check passes on one row and the write
+    lands on another.
+    """
+    if owner is None:
+        return "", []
+    return f" AND {column} IS ?", [owner]
+
+
+def _owners_scope(owners: object, column: str = "owner") -> tuple[str, list]:
+    """The read-side counterpart: several owners, or every one of them.
+
+    An empty list is a recognised caller whose credential names no user. It
+    reaches nothing rather than everything.
+    """
+    if owners is None:
+        return "", []
+    owners = list(owners)
+    if not owners:
+        return " AND 0", []
+    marks = ",".join("?" for _ in owners)
+    return f" AND {column} IN ({marks})", owners
+
+
+def _check_identity_guard(
+    conn,
+    name: str,
+    mind_id: str,
+    owner: object = None,
+    entity_type: str = "Mind",
+    unrestricted: bool = False,
+) -> str | None:
     """Return an error string if the caller may not write to this node.
 
-    A node is an identity node when its ``type`` is ``Mind``. Only the
-    mind whose ``mind_id`` matches the existing node's ``mind_id``
-    (the original creator) may update it. Returns None when the write
-    is allowed: either the named node is not a Mind, or the caller is
-    the owning mind, or no Mind node by this name exists yet (first
-    writer claims ownership).
+    A node is an identity node when its ``type`` is ``Mind``, and only the
+    mind that node represents may change it. Returns None when the write is
+    allowed: the request is not about a Mind node, the caller is that mind,
+    no Mind node of the name exists in this owner's graph yet, or the caller
+    is the console or the operator.
+
+    ``entity_type`` is the type the *request* names, and it is load-bearing:
+    asked about a Person called "Hex" this used to answer for the Mind node
+    that happens to share the name, which made every node named after a mind
+    untouchable by everybody.
+
+    ``unrestricted`` is the admin and service credential. The console's
+    identity editor and the operator are how a wedged soul gets fixed, so
+    they are not held to a rule about which mind is which.
     """
+    if unrestricted:
+        return None
+    if entity_type != "Mind":
+        return None
+    # Deliberately NOT owner-scoped, and the only lookup in this module that
+    # is not. A mind whose own node this store cannot yet resolve to an owner
+    # holds it under a null owner — both of the boys' minds do, until their
+    # credentials are minted here — and a scoped lookup misses that row, finds
+    # no identity node, refuses nothing, and lets the mind mint a *second*
+    # node of its own name. `graph_query` keys its answer on the name, so the
+    # empty newcomer then shadows the soul-bearing original on every read
+    # while the original sits on disk untouched. A fork is a worse outcome
+    # than a refusal.
+    #
+    # The cost is that naming another owner's mind answers with a refusal
+    # rather than with absence. Mind names are not private — every mind reads
+    # the broker's own listing of them — so this leaks nothing the hive does
+    # not already publish.
     row = conn.execute(
-        "SELECT mind_id FROM nodes WHERE LOWER(name) = LOWER(?) AND type = 'Mind' LIMIT 1",
+        "SELECT mind_id FROM nodes WHERE LOWER(name) = LOWER(?) AND type = 'Mind'"
+        " LIMIT 1",
         (name,),
     ).fetchone()
     if row is None:
-        return None  # not a Mind node, no guard
+        return None  # no identity node of that name anywhere yet
     if row["mind_id"] == mind_id:
-        return None  # caller is the owning mind
+        return None  # caller is the mind this node represents
     return f"mind_id {mind_id!r} cannot edit identity node for {name!r}"
 
 
@@ -106,6 +186,10 @@ def graph_upsert_direct(
     target_type: str = "",
     edge_attrs: str = "{}",
     mind_id: str,
+    owner: str | None,
+    # Which owner a row this call *creates* is filed under. The scope above
+    # may be "every owner", which is not something a row can be.
+    stamp: str | None = None,
     as_of: str | None = None,
     source: str = "user",
 ) -> str:
@@ -138,9 +222,26 @@ def graph_upsert_direct(
         conn = _get_conn()
 
         # REQ-008: identity-node guard. A mind can only write its own identity node.
-        guard_err = _check_identity_guard(conn, name, mind_id)
+        guard_err = _check_identity_guard(
+            conn, name, mind_id, owner, entity_type=label
+        )
         if guard_err is not None:
             return json.dumps({"upserted": False, "error": guard_err})
+        # The relation target is a second node this call writes to, and the
+        # find-or-create below updates its columns. Unguarded, naming another
+        # mind's own node as the target of any edge rewrote that node's tier
+        # and data class — standing identity down to contextual, which drops
+        # it out of the retrieval it exists for.
+        if relation and target_name:
+            target_guard = _check_identity_guard(
+                conn, target_name, mind_id, owner,
+                entity_type=_validate_label(target_type or entity_type),
+            )
+            if target_guard is not None:
+                return json.dumps({"upserted": False, "error": target_guard})
+        # A row is filed under one owner. `owner` is the scope a call may
+        # reach, which for the console and the operator is every owner.
+        _stamped = stamp if stamp is not None else owner
 
         # Extract first_name / last_name from properties if provided
         first_name = props.pop("first_name", None)
@@ -149,10 +250,14 @@ def graph_upsert_direct(
         # No DB-level uniqueness on name/type — disambiguation is a
         # pre-write check (kg_guards.check_disambiguation). Find first,
         # then UPDATE existing or INSERT new.
-        preserve_soul(conn, name=name, label=label, props=props)
+        preserve_soul(
+            conn, name=name, label=label, props=props,
+            owner=_identity_scope(label, owner),
+        )
+        _own, _ownp = _owner_scope(_identity_scope(label, owner))
         existing = conn.execute(
-            "SELECT id FROM nodes WHERE name = ? AND type = ? LIMIT 1",
-            (name, label),
+            "SELECT id FROM nodes WHERE name = ? AND type = ?" + _own + " LIMIT 1",
+            (name, label, *_ownp),
         ).fetchone()
         if existing:
             node_id = existing["id"]
@@ -178,13 +283,13 @@ def graph_upsert_direct(
         else:
             cursor = conn.execute(
                 """
-                INSERT INTO nodes (mind_id, type, name, first_name, last_name,
+                INSERT INTO nodes (mind_id, owner, type, name, first_name, last_name,
                                    properties, data_class, tier, source, as_of,
                                    created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    mind_id, label, name, first_name, last_name,
+                    mind_id, _stamped, label, name, first_name, last_name,
                     json.dumps(props), meta.get("data_class"), meta.get("tier"),
                     meta.get("source", source), meta.get("as_of"),
                     props["created_at"], props["created_at"],
@@ -200,8 +305,8 @@ def graph_upsert_direct(
 
             # Find-or-create the target node
             existing_target = conn.execute(
-                "SELECT id FROM nodes WHERE name = ? AND type = ? LIMIT 1",
-                (target_name, tgt_label),
+                "SELECT id FROM nodes WHERE name = ? AND type = ?" + _own + " LIMIT 1",
+                (target_name, tgt_label, *_ownp),
             ).fetchone()
             if existing_target:
                 target_id = existing_target["id"]
@@ -224,12 +329,12 @@ def graph_upsert_direct(
             else:
                 tgt_cursor = conn.execute(
                     """
-                    INSERT INTO nodes (mind_id, type, name, properties, data_class, tier,
+                    INSERT INTO nodes (mind_id, owner, type, name, properties, data_class, tier,
                                        source, as_of, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        mind_id, tgt_label, target_name, json.dumps(meta),
+                        mind_id, _stamped, tgt_label, target_name, json.dumps(meta),
                         meta.get("data_class"), meta.get("tier"),
                         meta.get("source", source), meta.get("as_of"),
                         props["created_at"], props["created_at"],
@@ -242,9 +347,9 @@ def graph_upsert_direct(
             edge_props_json = edge_attrs if edge_attrs.strip() else "{}"
             conn.execute(
                 """
-                INSERT INTO edges (mind_id, source_id, target_id, type,
+                INSERT INTO edges (mind_id, owner, source_id, target_id, type,
                                    as_of, source, data_class, tier, created_at, properties)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source_id, target_id, type) DO UPDATE SET
                     as_of = excluded.as_of,
                     source = excluded.source,
@@ -253,7 +358,7 @@ def graph_upsert_direct(
                     properties = excluded.properties
                 """,
                 (
-                    mind_id, node_id, target_id, rel_type,
+                    mind_id, _stamped, node_id, target_id, rel_type,
                     meta.get("as_of"), meta.get("source", source),
                     meta.get("data_class"), meta.get("tier"),
                     props["created_at"], edge_props_json,
@@ -285,6 +390,10 @@ def graph_upsert(
     target_name: str = "",
     target_type: str = "",
     mind_id: str,
+    owner: str | None,
+    # Which owner a row this call *creates* is filed under. The scope above
+    # may be "every owner", which is not something a row can be.
+    stamp: str | None = None,
     as_of: str | None = None,
     source: str = "user",
 ) -> str:
@@ -297,7 +406,10 @@ def graph_upsert(
         relation: Relationship type to create (e.g. MANAGES, WORKS_ON). Leave empty for node-only.
         target_name: Name of the target node to link to. Required if relation is set.
         target_type: Entity type of the target node (defaults to entity_type if omitted).
-        mind_id: Which agent's graph this belongs to. Required.
+        mind_id: Which mind is writing. Recorded as provenance; it is not
+            an ownership claim and does not scope anything but a Mind node.
+        owner: Whose graph this node lives in. Every read and every write is
+            scoped to it, and None is every owner — a service or an admin.
         data_class: Data class for this entry (e.g. "person", "preference", "technical-config").
         as_of: ISO datetime for when the fact was established (defaults to now).
         source: Origin of the entry -- "user", "tool", "session", or "self".
@@ -318,7 +430,7 @@ def graph_upsert(
         if not allowed:
             return json.dumps({"upserted": False, "reason": orphan_msg})
 
-        disambig = check_disambiguation(name, entity_type, mind_id)
+        disambig = check_disambiguation(name, entity_type, mind_id, owner)
         if disambig.action == "disambiguate":
             send_disambiguation_message(name, disambig.existing_nodes)
             return json.dumps({
@@ -327,7 +439,9 @@ def graph_upsert(
                 "similar_nodes": disambig.existing_nodes,
             })
 
-        preserve_soul(conn := _get_conn(), name=name, label=label, props=props)
+        preserve_soul(
+            conn := _get_conn(), name=name, label=label, props=props, owner=owner
+        )
 
         props_str = f" {json.dumps(props)}" if props else ""
         node_repr = f"({label}:{name}{props_str})"
@@ -348,6 +462,7 @@ def graph_upsert(
             target_name=target_name,
             target_type=target_type,
             mind_id=mind_id,
+            owner=owner,
             data_class=data_class,
             as_of=as_of,
             source=source,
@@ -360,6 +475,7 @@ def graph_query(
     entity_name: str,
     mind_id: str = "",
     depth: int = 1,
+    owners: list[str] | None = None,
 ) -> str:
     """Retrieve knowledge graph node(s) and their connected relationships.
 
@@ -371,9 +487,14 @@ def graph_query(
 
     Args:
         entity_name: Name to look up. Empty string returns no results.
-        mind_id: Accepted for backward compatibility but ignored. Reads are
-            not partitioned by mind — every mind sees every node. mind_id
-            is a write-side provenance/protection field only.
+        mind_id: Accepted for backward compatibility but ignored. A read is
+            not partitioned by the mind that wrote the row: every one of an
+            owner's minds reads the whole of that owner's graph, which is
+            what makes it a hive rather than a set of private notebooks.
+        owners: Whose graphs this read may see. None is every owner, which
+            is a service or an admin. A node outside the list answers
+            exactly as a node that is not there — the alternative is a
+            name-guessing oracle across people.
         depth: How many hops to traverse (default 1, max 3).
 
     Returns:
@@ -385,21 +506,25 @@ def graph_query(
     try:
         conn = _get_conn()
 
-        # Identity-only match: name / first_name / last_name (exact, case-insensitive),
-        # or alias-element within the JSON aliases array. No mind_id filter —
-        # nodes are global, mind_id is provenance, not partition.
+        # Identity-only match: name / first_name / last_name (exact,
+        # case-insensitive), or alias-element within the JSON aliases array.
+        # Scoped by owner, never by the mind that wrote the row. The four
+        # identity predicates are parenthesised: an owner clause ANDed onto a
+        # bare OR chain binds to the last one only, which would serve every
+        # owner's node whose name matched.
         alias_pattern = f'%"{entity_name}"%'
+        own_clause, own_params = _owners_scope(owners)
         rows = conn.execute(
             """
             SELECT id, name, type, first_name, last_name, properties, mind_id,
                    data_class, tier, source, as_of, created_at, updated_at
             FROM nodes
-            WHERE name = ? COLLATE NOCASE
+            WHERE (name = ? COLLATE NOCASE
                OR first_name = ? COLLATE NOCASE
                OR last_name = ? COLLATE NOCASE
-               OR json_extract(properties, '$.aliases') LIKE ?
-            """,
-            (entity_name, entity_name, entity_name, alias_pattern),
+               OR json_extract(properties, '$.aliases') LIKE ?)
+            """ + own_clause,
+            (entity_name, entity_name, entity_name, alias_pattern, *own_params),
         ).fetchall()
 
         if not rows:
@@ -446,9 +571,9 @@ def graph_query(
                             (e.target_id = n.id AND e.source_id = ?)
                             OR (e.source_id = n.id AND e.target_id = ?)
                         )
-                        WHERE e.source_id = ? OR e.target_id = ?
-                        """,
-                        (nid, nid, nid, nid),
+                        WHERE (e.source_id = ? OR e.target_id = ?)
+                        """ + _owners_scope(owners, "n.owner")[0],
+                        (nid, nid, nid, nid, *_owners_scope(owners, "n.owner")[1]),
                     ).fetchall()
 
                     for edge in edges:
@@ -494,7 +619,9 @@ def graph_query(
         return json.dumps({"error": str(e)})
 
 
-def graph_search(text: str, limit: int = 25) -> str:
+def graph_search(
+    text: str, limit: int = 25, owners: list[str] | None = None
+) -> str:
     """Mention search: full-text scan across all property strings.
 
     Returns nodes whose property values *mention* the query text. This is
@@ -514,8 +641,9 @@ def graph_search(text: str, limit: int = 25) -> str:
     try:
         conn = _get_conn()
         rows = conn.execute(
-            "SELECT id, type, properties FROM nodes WHERE properties LIKE ? LIMIT ?",
-            (f"%{text}%", limit),
+            "SELECT id, type, properties FROM nodes WHERE properties LIKE ?"
+            + _owners_scope(owners)[0] + " LIMIT ?",
+            (f"%{text}%", *_owners_scope(owners)[1], limit),
         ).fetchall()
 
         results: list[dict[str, object]] = []
@@ -558,6 +686,7 @@ def search_person(
     relationship: str = "",
     *,
     mind_id: str = "",
+    owners: list[str] | None = None,
 ) -> str:
     """Search for Person nodes by any known name fragment or relationship.
 
@@ -569,8 +698,10 @@ def search_person(
         last_name: Surname fragment.
         title: Title or honorific fragment.
         relationship: How this person relates to Daniel.
-        mind_id: Accepted for backward compatibility but ignored. Reads are
-            not partitioned by mind — every mind sees every Person node.
+        mind_id: Accepted for backward compatibility but ignored. Every one
+            of an owner's minds sees every Person node in that owner's graph.
+        owners: Whose graphs to search. None is every owner, which is a
+            service or an admin.
 
     Returns:
         JSON with matching Person nodes and their properties.
@@ -581,9 +712,14 @@ def search_person(
     try:
         conn = _get_conn()
 
-        # Build dynamic WHERE clause. No mind_id partitioning on reads.
+        # Build dynamic WHERE clause. Partitioned by owner, never by the
+        # mind that wrote the row.
         conditions = ["type = 'Person'"]
         params: list[str] = []
+        own_clause, own_params = _owners_scope(owners)
+        if own_clause:
+            conditions.append(own_clause.removeprefix(" AND "))
+            params.extend(own_params)
 
         if first_name:
             conditions.append("LOWER(COALESCE(first_name, '')) LIKE LOWER(?)")
@@ -635,11 +771,16 @@ def search_person(
         return json.dumps({"error": str(e)})
 
 
-def audit_person_nodes(*, mind_id: str) -> str:
+def audit_person_nodes(*, owner: object) -> str:
     """Find all Person nodes missing first_name or last_name properties.
 
+    Scoped to one owner's graph rather than to one mind's writes. Keyed on
+    the writer, this answered "nothing to fix" over every Person node one of
+    the owner's *other* minds had written — a false clean bill of health,
+    which reads exactly like a tidy graph.
+
     Args:
-        mind_id: Which agent's graph to search.
+        owner: Whose graph to audit. None is every owner.
 
     Returns:
         JSON with found, count, and nodes list.
@@ -650,10 +791,10 @@ def audit_person_nodes(*, mind_id: str) -> str:
             """
             SELECT id, name, first_name, last_name, properties
             FROM nodes
-            WHERE type = 'Person' AND mind_id = ?
+            WHERE type = 'Person'
               AND (first_name IS NULL OR last_name IS NULL)
-            """,
-            (mind_id,),
+            """ + _owner_scope(owner)[0],
+            (*_owner_scope(owner)[1],),
         ).fetchall()
 
         if not rows:
@@ -681,7 +822,7 @@ def update_person_names(
     name: str,
     first_name: str = "",
     last_name: str = "",
-    mind_id: str,
+    owner: object,
 ) -> str:
     """Update first_name and/or last_name on a Person node identified by name.
 
@@ -689,7 +830,7 @@ def update_person_names(
         name: The existing name property of the Person node to update.
         first_name: Given name to set (omit or empty string to skip).
         last_name: Surname to set (omit or empty string to skip).
-        mind_id: Which agent's graph this belongs to.
+        owner: Whose graph the node lives in. None is every owner.
 
     Returns:
         JSON confirmation with updated status.
@@ -713,12 +854,14 @@ def update_person_names(
             params.append(last_name)
 
         set_clause = ", ".join(set_parts)
-        params.extend([name, mind_id])
+        own_clause, own_params = _owner_scope(owner)
+        params.append(name)
+        params.extend(own_params)
 
         cursor = conn.execute(
             f"""
             UPDATE nodes SET {set_clause}
-            WHERE type = 'Person' AND name = ? AND mind_id = ?
+            WHERE type = 'Person' AND name = ?{own_clause}
             """,
             params,
         )
@@ -727,7 +870,7 @@ def update_person_names(
         if cursor.rowcount == 0:
             return json.dumps({
                 "updated": False,
-                "reason": f"Person node not found with name={name!r} and mind_id={mind_id!r}",
+                "reason": f"Person node not found with name={name!r}",
             })
 
         response: dict[str, object] = {"updated": True, "name": name}
@@ -774,6 +917,10 @@ def graph_node_create(
     name: str,
     data_class: str,
     mind_id: str,
+    owner: str | None,
+    # Which owner a row this call *creates* is filed under. The scope above
+    # may be "every owner", which is not something a row can be.
+    stamp: str | None = None,
     properties: str = "{}",
     as_of: str | None = None,
     source: str = "user",
@@ -796,9 +943,13 @@ def graph_node_create(
             return refusal
 
         conn = _get_conn()
+        # A row is filed under one owner. `owner` is the scope a call may
+        # reach, which for the console and the operator is every owner.
+        _stamped = stamp if stamp is not None else owner
+        own_clause, own_params = _owner_scope(_identity_scope(label, owner))
         existing = conn.execute(
-            "SELECT id FROM nodes WHERE name = ? AND type = ? LIMIT 1",
-            (name, label),
+            "SELECT id FROM nodes WHERE name = ? AND type = ?" + own_clause + " LIMIT 1",
+            (name, label, *own_params),
         ).fetchone()
         if existing:
             return json.dumps({
@@ -808,7 +959,9 @@ def graph_node_create(
                 "id": existing["id"],
             })
 
-        guard_err = _check_identity_guard(conn, name, mind_id)
+        guard_err = _check_identity_guard(
+            conn, name, mind_id, owner, entity_type=label
+        )
         if guard_err is not None:
             return json.dumps({"ok": False, "code": "identity_guard", "detail": guard_err})
 
@@ -826,13 +979,13 @@ def graph_node_create(
 
         cursor = conn.execute(
             """
-            INSERT INTO nodes (mind_id, type, name, first_name, last_name,
+            INSERT INTO nodes (mind_id, owner, type, name, first_name, last_name,
                                properties, data_class, tier, source, as_of,
                                created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                mind_id, label, name, first_name, last_name,
+                mind_id, _stamped, label, name, first_name, last_name,
                 json.dumps(props), meta["data_class"], meta["tier"],
                 meta["source"], meta["as_of"],
                 props["created_at"], props["created_at"],
@@ -849,6 +1002,7 @@ def graph_properties_merge(
     entity_type: str,
     name: str,
     properties: str,
+    owner: str | None,
     as_of: str | None = None,
     source: str | None = None,
 ) -> str:
@@ -872,9 +1026,11 @@ def graph_properties_merge(
                                "detail": "properties must be a JSON object"})
 
         conn = _get_conn()
+        own_clause, own_params = _owner_scope(owner)
         row = conn.execute(
-            "SELECT id, properties FROM nodes WHERE name = ? AND type = ? LIMIT 1",
-            (name, label),
+            "SELECT id, properties FROM nodes WHERE name = ? AND type = ?"
+            + own_clause + " LIMIT 1",
+            (name, label, *own_params),
         ).fetchone()
         if not row:
             return json.dumps({"ok": False, "code": "not_found",
@@ -917,6 +1073,7 @@ def graph_properties_remove(
     entity_type: str,
     name: str,
     keys: list[str],
+    owner: str | None,
 ) -> str:
     """Remove named keys from an existing node's properties blob.
 
@@ -943,9 +1100,11 @@ def graph_properties_remove(
             })
 
         conn = _get_conn()
+        own_clause, own_params = _owner_scope(owner)
         row = conn.execute(
-            "SELECT id, properties FROM nodes WHERE name = ? AND type = ? LIMIT 1",
-            (name, label),
+            "SELECT id, properties FROM nodes WHERE name = ? AND type = ?"
+            + own_clause + " LIMIT 1",
+            (name, label, *own_params),
         ).fetchone()
         if not row:
             return json.dumps({"ok": False, "code": "not_found",
@@ -995,6 +1154,10 @@ def graph_edge_create(
     edge_attrs: str = "{}",
     data_class: str,
     mind_id: str,
+    owner: str | None,
+    # Which owner a row this call *creates* is filed under. The scope above
+    # may be "every owner", which is not something a row can be.
+    stamp: str | None = None,
     as_of: str | None = None,
     source: str = "user",
 ) -> str:
@@ -1014,16 +1177,20 @@ def graph_edge_create(
         attrs = json.loads(edge_attrs) if edge_attrs.strip() != "{}" else {}
 
         conn = _get_conn()
+        # A row is filed under one owner. `owner` is the scope a call may
+        # reach, which for the console and the operator is every owner.
+        _stamped = stamp if stamp is not None else owner
+        own_clause, own_params = _owner_scope(owner)
         src = conn.execute(
-            "SELECT id FROM nodes WHERE name = ? AND type = ? LIMIT 1",
-            (source_name, src_label),
+            "SELECT id FROM nodes WHERE name = ? AND type = ?" + own_clause + " LIMIT 1",
+            (source_name, src_label, *own_params),
         ).fetchone()
         if not src:
             return json.dumps({"ok": False, "code": "source_not_found",
                                "detail": f"{src_label}:{source_name} not found"})
         tgt = conn.execute(
-            "SELECT id FROM nodes WHERE name = ? AND type = ? LIMIT 1",
-            (target_name, tgt_label),
+            "SELECT id FROM nodes WHERE name = ? AND type = ?" + own_clause + " LIMIT 1",
+            (target_name, tgt_label, *own_params),
         ).fetchone()
         if not tgt:
             return json.dumps({"ok": False, "code": "target_not_found",
@@ -1033,12 +1200,12 @@ def graph_edge_create(
         try:
             cursor = conn.execute(
                 """
-                INSERT INTO edges (mind_id, source_id, target_id, type,
+                INSERT INTO edges (mind_id, owner, source_id, target_id, type,
                                    as_of, source, data_class, tier, created_at, properties)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    mind_id, src["id"], tgt["id"], rel_type,
+                    mind_id, _stamped, src["id"], tgt["id"], rel_type,
                     as_of or datetime.now(timezone.utc).isoformat(),
                     source, data_class or "", "contextual", now,
                     json.dumps(attrs),
@@ -1055,7 +1222,9 @@ def graph_edge_create(
 
 
 
-def _soul_bearing_node_refusal(entity_type: str, name: str) -> str | None:
+def _soul_bearing_node_refusal(
+    entity_type: str, name: str, owner: object = None
+) -> str | None:
     """Refuse a general-route delete of a Mind that still has a soul.
 
     An erasure leaves nothing behind to explain it: `soul_changes` records
@@ -1066,9 +1235,11 @@ def _soul_bearing_node_refusal(entity_type: str, name: str) -> str | None:
     if entity_type != "Mind":
         return None
     try:
+        clause, params = _owner_scope(owner)
         row = _get_conn().execute(
-            "SELECT properties FROM nodes WHERE name = ? AND type = 'Mind' LIMIT 1",
-            (name,),
+            "SELECT properties FROM nodes WHERE name = ? AND type = 'Mind'"
+            + clause + " LIMIT 1",
+            (name, *params),
         ).fetchone()
     except Exception:
         return None
@@ -1094,6 +1265,9 @@ def graph_node_delete(
     *,
     entity_type: str,
     name: str,
+    owner: str | None,
+    mind_id: str = "",
+    unrestricted: bool = False,
 ) -> str:
     """Hard-delete the node identified by (name, type) and every edge
     touching it (inbound or outbound). Returns counts. Use for true
@@ -1105,15 +1279,27 @@ def graph_node_delete(
         # the provenance table can never explain afterwards. Blocked here
         # rather than in the router because every caller of this function has
         # the same problem.
-        refusal = _soul_bearing_node_refusal(entity_type, name)
+        refusal = _soul_bearing_node_refusal(entity_type, name, owner)
         if refusal:
             return refusal
 
         label = _validate_label(entity_type)
         conn = _get_conn()
+        # A mind's own node is the one row in its owner's graph that the
+        # owner's other minds may read and not touch, and deleting it is the
+        # loudest form of touching it.
+        guard_err = _check_identity_guard(
+            conn, name, mind_id, owner, entity_type=label,
+            unrestricted=unrestricted,
+        )
+        if guard_err is not None:
+            return json.dumps(
+                {"ok": False, "code": "identity_guard", "detail": guard_err}
+            )
+        own_clause, own_params = _owner_scope(owner)
         row = conn.execute(
-            "SELECT id FROM nodes WHERE name = ? AND type = ? LIMIT 1",
-            (name, label),
+            "SELECT id FROM nodes WHERE name = ? AND type = ?" + own_clause + " LIMIT 1",
+            (name, label, *own_params),
         ).fetchone()
         if not row:
             return json.dumps({"ok": False, "code": "not_found",
@@ -1143,6 +1329,7 @@ def graph_edge_delete(
     target_name: str,
     target_type: str,
     relation: str,
+    owner: str | None,
 ) -> str:
     """Delete the edge(s) matching (source_name, source_type) -[relation]->
     (target_name, target_type). Returns the count deleted.
@@ -1152,13 +1339,14 @@ def graph_edge_delete(
         src_label = _validate_label(source_type)
         tgt_label = _validate_label(target_type)
         conn = _get_conn()
+        own_clause, own_params = _owner_scope(owner)
         src = conn.execute(
-            "SELECT id FROM nodes WHERE name = ? AND type = ? LIMIT 1",
-            (source_name, src_label),
+            "SELECT id FROM nodes WHERE name = ? AND type = ?" + own_clause + " LIMIT 1",
+            (source_name, src_label, *own_params),
         ).fetchone()
         tgt = conn.execute(
-            "SELECT id FROM nodes WHERE name = ? AND type = ? LIMIT 1",
-            (target_name, tgt_label),
+            "SELECT id FROM nodes WHERE name = ? AND type = ?" + own_clause + " LIMIT 1",
+            (target_name, tgt_label, *own_params),
         ).fetchone()
         if not src or not tgt:
             return json.dumps({"ok": False, "code": "endpoint_not_found",

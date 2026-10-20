@@ -17,42 +17,14 @@ import time
 import unittest
 from unittest.mock import patch
 
+from lucent_api.lucent import _init_schema
+
 
 def _make_test_conn() -> sqlite3.Connection:
     """In-memory SQLite with the minimal nodes/edges schema."""
     conn = sqlite3.connect(":memory:", check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    conn.executescript("""
-        CREATE TABLE nodes (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            mind_id    TEXT    NOT NULL,
-            type        TEXT    NOT NULL,
-            name        TEXT    NOT NULL,
-            first_name  TEXT,
-            last_name   TEXT,
-            properties  TEXT    DEFAULT '{}',
-            data_class  TEXT,
-            tier        TEXT,
-            source      TEXT,
-            as_of       TEXT,
-            created_at  REAL,
-            updated_at  REAL
-        );
-        CREATE TABLE edges (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            mind_id    TEXT    NOT NULL,
-            source_id   INTEGER NOT NULL,
-            target_id   INTEGER NOT NULL,
-            type        TEXT    NOT NULL,
-            as_of       TEXT,
-            source      TEXT,
-            data_class  TEXT,
-            tier        TEXT,
-            created_at  REAL,
-            properties  TEXT    NOT NULL DEFAULT '{}',
-            UNIQUE(source_id, target_id, type)
-        );
-    """)
+    _init_schema(conn)
     return conn
 
 
@@ -75,6 +47,7 @@ class NodeCreateTests(unittest.TestCase):
         with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
             from lucent_api.lucent_graph import graph_node_create
             result = json.loads(graph_node_create(
+                owner=None,
                 entity_type="Person", name="NewPerson",
                 data_class="current-state", mind_id="testmind",
                 properties='{"title": "Engineer"}',
@@ -91,6 +64,7 @@ class NodeCreateTests(unittest.TestCase):
         with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
             from lucent_api.lucent_graph import graph_node_create
             result = json.loads(graph_node_create(
+                owner=None,
                 entity_type="Person", name="Existing",
                 data_class="current-state", mind_id="testmind",
             ))
@@ -108,6 +82,7 @@ class PropertiesMergeTests(unittest.TestCase):
         with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
             from lucent_api.lucent_graph import graph_properties_merge
             result = json.loads(graph_properties_merge(
+                owner=None,
                 entity_type="Person", name="Manny",
                 properties='{"birthday": "1970-01-01"}',
             ))
@@ -125,6 +100,7 @@ class PropertiesMergeTests(unittest.TestCase):
         with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
             from lucent_api.lucent_graph import graph_properties_merge
             json.loads(graph_properties_merge(
+                owner=None,
                 entity_type="Person", name="Manny",
                 properties='{"title": "Head Coach"}',
             ))
@@ -137,6 +113,7 @@ class PropertiesMergeTests(unittest.TestCase):
         with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
             from lucent_api.lucent_graph import graph_properties_merge
             json.loads(graph_properties_merge(
+                owner=None,
                 entity_type="Person", name="Manny",
                 properties='{"first_name": "Manny"}',
             ))
@@ -150,6 +127,7 @@ class PropertiesMergeTests(unittest.TestCase):
         with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
             from lucent_api.lucent_graph import graph_properties_merge
             result = json.loads(graph_properties_merge(
+                owner=None,
                 entity_type="Person", name="DoesNotExist",
                 properties='{"title": "x"}',
             ))
@@ -164,6 +142,7 @@ class PropertiesRemoveTests(unittest.TestCase):
         with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
             from lucent_api.lucent_graph import graph_properties_remove
             result = json.loads(graph_properties_remove(
+                owner=None,
                 entity_type="Person", name="Manny", keys=["notes"],
             ))
         self.assertTrue(result["ok"])
@@ -179,6 +158,7 @@ class PropertiesRemoveTests(unittest.TestCase):
         with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
             from lucent_api.lucent_graph import graph_properties_remove
             json.loads(graph_properties_remove(
+                owner=None,
                 entity_type="Person", name="Manny", keys=["first_name"],
             ))
         row = conn.execute("SELECT first_name FROM nodes WHERE name='Manny'").fetchone()
@@ -191,6 +171,7 @@ class PropertiesRemoveTests(unittest.TestCase):
         with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
             from lucent_api.lucent_graph import graph_properties_remove
             result = json.loads(graph_properties_remove(
+                owner=None,
                 entity_type="Person", name="Manny", keys=["name", "type"],
             ))
         self.assertFalse(result["ok"])
@@ -208,6 +189,7 @@ class PropertiesRemoveTests(unittest.TestCase):
         with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
             from lucent_api.lucent_graph import graph_properties_remove
             result = json.loads(graph_properties_remove(
+                owner=None,
                 entity_type="Person",
                 name="Manny",
                 keys=["data_class", "tier", "source"],
@@ -230,6 +212,7 @@ class EdgeCreateTests(unittest.TestCase):
         with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
             from lucent_api.lucent_graph import graph_edge_create
             result = json.loads(graph_edge_create(
+                owner=None,
                 source_name="Manny", source_type="Person",
                 target_name="Zoe", target_type="Person",
                 relation="PARENT_OF", data_class="current-state",
@@ -250,6 +233,7 @@ class EdgeCreateTests(unittest.TestCase):
         with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
             from lucent_api.lucent_graph import graph_edge_create
             result = json.loads(graph_edge_create(
+                owner=None,
                 source_name="Ghost", source_type="Person",
                 target_name="Target", target_type="Person",
                 relation="PARENT_OF", data_class="current-state",
@@ -265,12 +249,14 @@ class EdgeCreateTests(unittest.TestCase):
         with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
             from lucent_api.lucent_graph import graph_edge_create
             first = json.loads(graph_edge_create(
+                owner=None,
                 source_name="Manny", source_type="Person",
                 target_name="Zoe", target_type="Person",
                 relation="PARENT_OF", data_class="current-state",
                 mind_id="testmind",
             ))
             second = json.loads(graph_edge_create(
+                owner=None,
                 source_name="Manny", source_type="Person",
                 target_name="Zoe", target_type="Person",
                 relation="PARENT_OF", data_class="current-state",
@@ -295,6 +281,7 @@ class EdgeDeleteTests(unittest.TestCase):
         with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
             from lucent_api.lucent_graph import graph_edge_delete
             result = json.loads(graph_edge_delete(
+                owner=None,
                 source_name="Manny", source_type="Person",
                 target_name="Zoe", target_type="Person",
                 relation="PARENT_OF",
@@ -326,7 +313,7 @@ class NodeDeleteTests(unittest.TestCase):
         conn.commit()
         with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
             from lucent_api.lucent_graph import graph_node_delete
-            result = json.loads(graph_node_delete(entity_type="Person", name="Manny"))
+            result = json.loads(graph_node_delete(entity_type="Person", name="Manny", owner=None))
         self.assertTrue(result["ok"])
         self.assertEqual(result["node_deleted"], 1)
         self.assertEqual(result["edges_deleted"], 2)
@@ -342,7 +329,7 @@ class NodeDeleteTests(unittest.TestCase):
         conn = _make_test_conn()
         with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
             from lucent_api.lucent_graph import graph_node_delete
-            result = json.loads(graph_node_delete(entity_type="Person", name="Nobody"))
+            result = json.loads(graph_node_delete(entity_type="Person", name="Nobody", owner=None))
         self.assertFalse(result["ok"])
         self.assertEqual(result["code"], "not_found")
 

@@ -23,6 +23,21 @@ so answering provenance with the owner would file ten minds' memories under
 one name and leave every per-mind read returning the union or nothing. A
 conversation answers to a person. A memory answers to the mind that formed it.
 
+## The graph answers to a person, and that is not an inconsistency
+
+A node is not a memory. A memory is one mind's recollection, formed in one
+mind's conversation, and nothing else should be able to recall it as its own.
+The graph is the facts a person's minds hold in common — who their people are,
+what their machines are, what their projects are — and a fact learned by one
+of a person's minds is useless locked inside that mind. So nodes are keyed by
+`owner`, every one of that person's minds reads and writes all of it, and
+nothing crosses between people.
+
+The single exception is a `Mind` node, which holds that mind's soul. Within
+one owner's graph it is the one row the owner's other minds may read and not
+change, and `mind_id` is still what decides that: a `Mind` node's provenance
+is the mind it represents.
+
 ## A service reads on behalf of a mind, and says so
 
 Comms composes every mind's system prompt — soul from the graph, decay-weighted
@@ -83,6 +98,17 @@ ROLES = (MIND, SERVICE, PERSON)
 #: Not a mind. The provenance hive-wide standing rules are written under, read
 #: by every mind alongside its own.
 SHARED = "shared"
+
+#: Who a graph row belongs to when the credential that wrote it answers for
+#: nobody — the admin value, which is the house key rather than a person.
+#: Named by the environment: a person's name in shipped code is one install's
+#: code. Shared with `lucent._migrate_graph_owner`, which uses it for the
+#: same decision about rows already on disk.
+PRIMARY_USER_ENV = "LUCENT_PRIMARY_USER"
+
+
+def primary_user() -> str:
+    return str(os.getenv(PRIMARY_USER_ENV, "")).strip().lower()
 
 CREDENTIALS_DDL = """
 CREATE TABLE IF NOT EXISTS credentials (
@@ -183,6 +209,86 @@ class Caller:
                 400, "a service writing on a mind's behalf must name the mind"
             )
         return asked
+
+    @property
+    def owner(self) -> str:
+        """Whose graph this caller writes into and reads from.
+
+        The credential row names the user its holder answers for, and that
+        user is the graph's partition. This is deliberately a different
+        answer from `provenance`, which stays per-mind: a memory answers to
+        the mind that formed it, while the graph is one space per person
+        that all of that person's minds build together.
+        """
+        return normalize_holder(self.username)
+
+    def owners_for_read(self) -> list[str] | None:
+        """Which owners' nodes this caller may see, or None for all of them.
+
+        A mind sees its owner's graph entire, whichever of that owner's
+        minds wrote each row. A service and an admin see everything: comms
+        composes every mind's prompt and the console draws every mind's
+        page, and neither has a person of its own to be scoped to.
+        """
+        if self.may_act_for_another_mind:
+            return None
+        if not self.owner:
+            # A recognised holder whose row names no user. It reaches no
+            # owner's graph rather than everyone's.
+            return []
+        return [self.owner]
+
+    def owner_for_write(self, named: object = None) -> str | None:
+        """Which owner's graph a write may *reach*, or None for every one.
+
+        Two different questions hide here and conflating them cost the
+        console and the operator their write access: which rows a call may
+        reach, and what owner a brand-new row is stamped with. This is the
+        first. A mind reaches its own owner's graph and the body cannot say
+        otherwise. A service and an admin reach every owner's, exactly as
+        they read every owner's — the console edits whichever mind's page the
+        operator opened, and the admin credential is how a wedged record gets
+        fixed. Naming an owner narrows them to it.
+        """
+        asked = normalize_holder(named)
+        if self.may_act_for_another_mind:
+            return asked or None
+        if asked and asked != self.owner:
+            raise HTTPException(
+                403,
+                f"{self.holder!r} writes into {self.owner!r}'s graph, not {asked!r}'s",
+            )
+        if not self.owner:
+            raise HTTPException(
+                403, "this credential has no owner whose graph it could write to"
+            )
+        return self.owner
+
+    def owner_to_stamp(self, named: object = None) -> str:
+        """The owner a row this call *creates* is filed under.
+
+        Unlike the scope, this cannot be "every owner": a row has one. A
+        mind stamps its own owner. A service stamps the owner it named, or
+        the user its own credential answers for. The admin credential
+        answers for nobody — it is the house key, not a person — so it
+        stamps the primary user, and where none is declared it is refused
+        rather than writing a row under the empty string, which is a node
+        no mind can ever read.
+        """
+        asked = normalize_holder(named)
+        if asked and not self.may_act_for_another_mind and asked != self.owner:
+            raise HTTPException(
+                403,
+                f"{self.holder!r} writes into {self.owner!r}'s graph, not {asked!r}'s",
+            )
+        stamped = asked or self.owner or primary_user()
+        if not stamped:
+            raise HTTPException(
+                403,
+                "this credential names no owner to file a new node under; set "
+                f"{PRIMARY_USER_ENV} or name an owner on the request",
+            )
+        return stamped
 
     def minds_for_read(self, named: object = None) -> list[str] | None:
         """Which minds a read may see, or None for every one of them.
