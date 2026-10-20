@@ -74,6 +74,21 @@ def _get_conn():
     return _get_connection()
 
 
+def _identity_scope(label: str, owner: object) -> object:
+    """The owner a lookup for this node type should be scoped to.
+
+    Every lookup is scoped to one person's graph except one: finding the
+    node that *is* a mind. A mind whose node this store cannot yet resolve
+    to an owner holds it under a null owner, and a scoped lookup misses that
+    row — so the mind's own next write does not find its node, inserts a
+    second one, and `graph_query`, which keys its answer on the name, serves
+    the empty newcomer while the soul-bearing original sits on disk. A mind's
+    name is unique across the hive and published in the broker's own listing,
+    so looking one up unscoped reveals nothing and prevents a fork.
+    """
+    return None if label == "Mind" else owner
+
+
 def _owner_scope(owner: object, column: str = "owner") -> tuple[str, list]:
     """A fragment scoping one statement to one person's graph.
 
@@ -106,27 +121,57 @@ def _owners_scope(owners: object, column: str = "owner") -> tuple[str, list]:
 
 
 def _check_identity_guard(
-    conn, name: str, mind_id: str, owner: object = None
+    conn,
+    name: str,
+    mind_id: str,
+    owner: object = None,
+    entity_type: str = "Mind",
+    unrestricted: bool = False,
 ) -> str | None:
     """Return an error string if the caller may not write to this node.
 
-    A node is an identity node when its ``type`` is ``Mind``. Only the
-    mind whose ``mind_id`` matches the existing node's ``mind_id``
-    (the original creator) may update it. Returns None when the write
-    is allowed: either the named node is not a Mind, or the caller is
-    the owning mind, or no Mind node by this name exists yet (first
-    writer claims ownership).
+    A node is an identity node when its ``type`` is ``Mind``, and only the
+    mind that node represents may change it. Returns None when the write is
+    allowed: the request is not about a Mind node, the caller is that mind,
+    no Mind node of the name exists in this owner's graph yet, or the caller
+    is the console or the operator.
+
+    ``entity_type`` is the type the *request* names, and it is load-bearing:
+    asked about a Person called "Hex" this used to answer for the Mind node
+    that happens to share the name, which made every node named after a mind
+    untouchable by everybody.
+
+    ``unrestricted`` is the admin and service credential. The console's
+    identity editor and the operator are how a wedged soul gets fixed, so
+    they are not held to a rule about which mind is which.
     """
-    clause, params = _owner_scope(owner)
+    if unrestricted:
+        return None
+    if entity_type != "Mind":
+        return None
+    # Deliberately NOT owner-scoped, and the only lookup in this module that
+    # is not. A mind whose own node this store cannot yet resolve to an owner
+    # holds it under a null owner — both of the boys' minds do, until their
+    # credentials are minted here — and a scoped lookup misses that row, finds
+    # no identity node, refuses nothing, and lets the mind mint a *second*
+    # node of its own name. `graph_query` keys its answer on the name, so the
+    # empty newcomer then shadows the soul-bearing original on every read
+    # while the original sits on disk untouched. A fork is a worse outcome
+    # than a refusal.
+    #
+    # The cost is that naming another owner's mind answers with a refusal
+    # rather than with absence. Mind names are not private — every mind reads
+    # the broker's own listing of them — so this leaks nothing the hive does
+    # not already publish.
     row = conn.execute(
         "SELECT mind_id FROM nodes WHERE LOWER(name) = LOWER(?) AND type = 'Mind'"
-        + clause + " LIMIT 1",
-        (name, *params),
+        " LIMIT 1",
+        (name,),
     ).fetchone()
     if row is None:
-        return None  # not a Mind node, no guard
+        return None  # no identity node of that name anywhere yet
     if row["mind_id"] == mind_id:
-        return None  # caller is the owning mind
+        return None  # caller is the mind this node represents
     return f"mind_id {mind_id!r} cannot edit identity node for {name!r}"
 
 
@@ -142,6 +187,9 @@ def graph_upsert_direct(
     edge_attrs: str = "{}",
     mind_id: str,
     owner: str | None,
+    # Which owner a row this call *creates* is filed under. The scope above
+    # may be "every owner", which is not something a row can be.
+    stamp: str | None = None,
     as_of: str | None = None,
     source: str = "user",
 ) -> str:
@@ -174,9 +222,26 @@ def graph_upsert_direct(
         conn = _get_conn()
 
         # REQ-008: identity-node guard. A mind can only write its own identity node.
-        guard_err = _check_identity_guard(conn, name, mind_id, owner)
+        guard_err = _check_identity_guard(
+            conn, name, mind_id, owner, entity_type=label
+        )
         if guard_err is not None:
             return json.dumps({"upserted": False, "error": guard_err})
+        # The relation target is a second node this call writes to, and the
+        # find-or-create below updates its columns. Unguarded, naming another
+        # mind's own node as the target of any edge rewrote that node's tier
+        # and data class — standing identity down to contextual, which drops
+        # it out of the retrieval it exists for.
+        if relation and target_name:
+            target_guard = _check_identity_guard(
+                conn, target_name, mind_id, owner,
+                entity_type=_validate_label(target_type or entity_type),
+            )
+            if target_guard is not None:
+                return json.dumps({"upserted": False, "error": target_guard})
+        # A row is filed under one owner. `owner` is the scope a call may
+        # reach, which for the console and the operator is every owner.
+        _stamped = stamp if stamp is not None else owner
 
         # Extract first_name / last_name from properties if provided
         first_name = props.pop("first_name", None)
@@ -185,8 +250,11 @@ def graph_upsert_direct(
         # No DB-level uniqueness on name/type — disambiguation is a
         # pre-write check (kg_guards.check_disambiguation). Find first,
         # then UPDATE existing or INSERT new.
-        preserve_soul(conn, name=name, label=label, props=props, owner=owner)
-        _own, _ownp = _owner_scope(owner)
+        preserve_soul(
+            conn, name=name, label=label, props=props,
+            owner=_identity_scope(label, owner),
+        )
+        _own, _ownp = _owner_scope(_identity_scope(label, owner))
         existing = conn.execute(
             "SELECT id FROM nodes WHERE name = ? AND type = ?" + _own + " LIMIT 1",
             (name, label, *_ownp),
@@ -221,7 +289,7 @@ def graph_upsert_direct(
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    mind_id, owner, label, name, first_name, last_name,
+                    mind_id, _stamped, label, name, first_name, last_name,
                     json.dumps(props), meta.get("data_class"), meta.get("tier"),
                     meta.get("source", source), meta.get("as_of"),
                     props["created_at"], props["created_at"],
@@ -266,7 +334,7 @@ def graph_upsert_direct(
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        mind_id, owner, tgt_label, target_name, json.dumps(meta),
+                        mind_id, _stamped, tgt_label, target_name, json.dumps(meta),
                         meta.get("data_class"), meta.get("tier"),
                         meta.get("source", source), meta.get("as_of"),
                         props["created_at"], props["created_at"],
@@ -290,7 +358,7 @@ def graph_upsert_direct(
                     properties = excluded.properties
                 """,
                 (
-                    mind_id, owner, node_id, target_id, rel_type,
+                    mind_id, _stamped, node_id, target_id, rel_type,
                     meta.get("as_of"), meta.get("source", source),
                     meta.get("data_class"), meta.get("tier"),
                     props["created_at"], edge_props_json,
@@ -323,6 +391,9 @@ def graph_upsert(
     target_type: str = "",
     mind_id: str,
     owner: str | None,
+    # Which owner a row this call *creates* is filed under. The scope above
+    # may be "every owner", which is not something a row can be.
+    stamp: str | None = None,
     as_of: str | None = None,
     source: str = "user",
 ) -> str:
@@ -700,7 +771,7 @@ def search_person(
         return json.dumps({"error": str(e)})
 
 
-def audit_person_nodes(*, owner: object = None) -> str:
+def audit_person_nodes(*, owner: object) -> str:
     """Find all Person nodes missing first_name or last_name properties.
 
     Scoped to one owner's graph rather than to one mind's writes. Keyed on
@@ -751,7 +822,7 @@ def update_person_names(
     name: str,
     first_name: str = "",
     last_name: str = "",
-    owner: object = None,
+    owner: object,
 ) -> str:
     """Update first_name and/or last_name on a Person node identified by name.
 
@@ -847,6 +918,9 @@ def graph_node_create(
     data_class: str,
     mind_id: str,
     owner: str | None,
+    # Which owner a row this call *creates* is filed under. The scope above
+    # may be "every owner", which is not something a row can be.
+    stamp: str | None = None,
     properties: str = "{}",
     as_of: str | None = None,
     source: str = "user",
@@ -869,7 +943,10 @@ def graph_node_create(
             return refusal
 
         conn = _get_conn()
-        own_clause, own_params = _owner_scope(owner)
+        # A row is filed under one owner. `owner` is the scope a call may
+        # reach, which for the console and the operator is every owner.
+        _stamped = stamp if stamp is not None else owner
+        own_clause, own_params = _owner_scope(_identity_scope(label, owner))
         existing = conn.execute(
             "SELECT id FROM nodes WHERE name = ? AND type = ?" + own_clause + " LIMIT 1",
             (name, label, *own_params),
@@ -882,7 +959,9 @@ def graph_node_create(
                 "id": existing["id"],
             })
 
-        guard_err = _check_identity_guard(conn, name, mind_id, owner)
+        guard_err = _check_identity_guard(
+            conn, name, mind_id, owner, entity_type=label
+        )
         if guard_err is not None:
             return json.dumps({"ok": False, "code": "identity_guard", "detail": guard_err})
 
@@ -906,7 +985,7 @@ def graph_node_create(
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                mind_id, owner, label, name, first_name, last_name,
+                mind_id, _stamped, label, name, first_name, last_name,
                 json.dumps(props), meta["data_class"], meta["tier"],
                 meta["source"], meta["as_of"],
                 props["created_at"], props["created_at"],
@@ -1076,6 +1155,9 @@ def graph_edge_create(
     data_class: str,
     mind_id: str,
     owner: str | None,
+    # Which owner a row this call *creates* is filed under. The scope above
+    # may be "every owner", which is not something a row can be.
+    stamp: str | None = None,
     as_of: str | None = None,
     source: str = "user",
 ) -> str:
@@ -1095,6 +1177,9 @@ def graph_edge_create(
         attrs = json.loads(edge_attrs) if edge_attrs.strip() != "{}" else {}
 
         conn = _get_conn()
+        # A row is filed under one owner. `owner` is the scope a call may
+        # reach, which for the console and the operator is every owner.
+        _stamped = stamp if stamp is not None else owner
         own_clause, own_params = _owner_scope(owner)
         src = conn.execute(
             "SELECT id FROM nodes WHERE name = ? AND type = ?" + own_clause + " LIMIT 1",
@@ -1120,7 +1205,7 @@ def graph_edge_create(
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    mind_id, owner, src["id"], tgt["id"], rel_type,
+                    mind_id, _stamped, src["id"], tgt["id"], rel_type,
                     as_of or datetime.now(timezone.utc).isoformat(),
                     source, data_class or "", "contextual", now,
                     json.dumps(attrs),
@@ -1182,6 +1267,7 @@ def graph_node_delete(
     name: str,
     owner: str | None,
     mind_id: str = "",
+    unrestricted: bool = False,
 ) -> str:
     """Hard-delete the node identified by (name, type) and every edge
     touching it (inbound or outbound). Returns counts. Use for true
@@ -1202,7 +1288,10 @@ def graph_node_delete(
         # A mind's own node is the one row in its owner's graph that the
         # owner's other minds may read and not touch, and deleting it is the
         # loudest form of touching it.
-        guard_err = _check_identity_guard(conn, name, mind_id, owner)
+        guard_err = _check_identity_guard(
+            conn, name, mind_id, owner, entity_type=label,
+            unrestricted=unrestricted,
+        )
         if guard_err is not None:
             return json.dumps(
                 {"ok": False, "code": "identity_guard", "detail": guard_err}

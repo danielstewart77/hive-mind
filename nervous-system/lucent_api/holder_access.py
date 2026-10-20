@@ -99,6 +99,17 @@ ROLES = (MIND, SERVICE, PERSON)
 #: by every mind alongside its own.
 SHARED = "shared"
 
+#: Who a graph row belongs to when the credential that wrote it answers for
+#: nobody — the admin value, which is the house key rather than a person.
+#: Named by the environment: a person's name in shipped code is one install's
+#: code. Shared with `lucent._migrate_graph_owner`, which uses it for the
+#: same decision about rows already on disk.
+PRIMARY_USER_ENV = "LUCENT_PRIMARY_USER"
+
+
+def primary_user() -> str:
+    return str(os.getenv(PRIMARY_USER_ENV, "")).strip().lower()
+
 CREDENTIALS_DDL = """
 CREATE TABLE IF NOT EXISTS credentials (
     -- NOT NULL is load-bearing: SQLite permits NULL in a non-INTEGER PRIMARY
@@ -227,18 +238,21 @@ class Caller:
             return []
         return [self.owner]
 
-    def owner_for_write(self, named: object = None) -> str:
-        """Which owner's graph a write lands in.
+    def owner_for_write(self, named: object = None) -> str | None:
+        """Which owner's graph a write may *reach*, or None for every one.
 
-        For a mind, its own owner, and the body cannot say otherwise. For a
-        service or an admin, the owner it named, or its own when it names
-        none — which is what keeps the console's provenance-less edge
-        writes working, and gives them a real owner instead of the empty
-        string that made a node nobody could ever read.
+        Two different questions hide here and conflating them cost the
+        console and the operator their write access: which rows a call may
+        reach, and what owner a brand-new row is stamped with. This is the
+        first. A mind reaches its own owner's graph and the body cannot say
+        otherwise. A service and an admin reach every owner's, exactly as
+        they read every owner's — the console edits whichever mind's page the
+        operator opened, and the admin credential is how a wedged record gets
+        fixed. Naming an owner narrows them to it.
         """
         asked = normalize_holder(named)
         if self.may_act_for_another_mind:
-            return asked or self.owner
+            return asked or None
         if asked and asked != self.owner:
             raise HTTPException(
                 403,
@@ -249,6 +263,32 @@ class Caller:
                 403, "this credential has no owner whose graph it could write to"
             )
         return self.owner
+
+    def owner_to_stamp(self, named: object = None) -> str:
+        """The owner a row this call *creates* is filed under.
+
+        Unlike the scope, this cannot be "every owner": a row has one. A
+        mind stamps its own owner. A service stamps the owner it named, or
+        the user its own credential answers for. The admin credential
+        answers for nobody — it is the house key, not a person — so it
+        stamps the primary user, and where none is declared it is refused
+        rather than writing a row under the empty string, which is a node
+        no mind can ever read.
+        """
+        asked = normalize_holder(named)
+        if asked and not self.may_act_for_another_mind and asked != self.owner:
+            raise HTTPException(
+                403,
+                f"{self.holder!r} writes into {self.owner!r}'s graph, not {asked!r}'s",
+            )
+        stamped = asked or self.owner or primary_user()
+        if not stamped:
+            raise HTTPException(
+                403,
+                "this credential names no owner to file a new node under; set "
+                f"{PRIMARY_USER_ENV} or name an owner on the request",
+            )
+        return stamped
 
     def minds_for_read(self, named: object = None) -> list[str] | None:
         """Which minds a read may see, or None for every one of them.
