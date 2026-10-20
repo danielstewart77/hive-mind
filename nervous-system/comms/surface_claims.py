@@ -56,10 +56,17 @@ _WORDS: tuple[str, ...] = (
     "verdigris", "willow", "zephyr",
 )
 
-#: How many words one phrase carries. Three from this list is about fifty
-#: bits with the deadline, which is far more than a thirty-minute window
-#: needs and still short enough to type without resenting it.
-_PHRASE_WORDS = 3
+#: How many words one phrase carries. Five from twenty-four is twenty-three
+#: bits — three was fourteen, which is thirteen thousand candidates against
+#: a thirty-minute window, and the comment claiming fifty was simply wrong.
+#: The attempt counter below is what actually closes it; this is for the
+#: case where somebody is guessing faster than the counter is read.
+_PHRASE_WORDS = 5
+
+#: How many wrong guesses retire a phrase. The route is reachable by anyone
+#: who can direct-message an unclaimed bot, so a window with no counter is a
+#: window somebody can simply walk through.
+MAX_PHRASE_ATTEMPTS = 8
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS surface_claims (
@@ -70,6 +77,8 @@ CREATE TABLE IF NOT EXISTS surface_claims (
     phrase_hash      TEXT,
     phrase_issued_at REAL,
     phrase_expires_at REAL,
+    bot_ref          TEXT,
+    phrase_attempts  INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (mind_id, surface)
 );
 """
@@ -161,6 +170,14 @@ def new_phrase() -> str:
 
 async def init(db: aiosqlite.Connection) -> None:
     await db.executescript(SCHEMA)
+    cur = await db.execute("PRAGMA table_info(surface_claims)")
+    have = {row[1] for row in await cur.fetchall()}
+    if "bot_ref" not in have:
+        await db.execute("ALTER TABLE surface_claims ADD COLUMN bot_ref TEXT")
+    if "phrase_attempts" not in have:
+        await db.execute(
+            "ALTER TABLE surface_claims ADD COLUMN phrase_attempts INTEGER NOT NULL DEFAULT 0"
+        )
     await db.commit()
 
 
@@ -230,7 +247,9 @@ async def mint_phrase(
         "ON CONFLICT(mind_id, surface) DO UPDATE SET "
         "phrase_hash = excluded.phrase_hash, "
         "phrase_issued_at = excluded.phrase_issued_at, "
-        "phrase_expires_at = excluded.phrase_expires_at",
+        "phrase_expires_at = excluded.phrase_expires_at, "
+        "phrase_attempts = 0 "
+        "WHERE surface_claims.claimed_ref IS NULL",
         (mind_id, key, _digest(text), moment, moment + ttl_seconds),
     )
     await db.commit()
@@ -269,10 +288,31 @@ async def attempt_claim(
     if float(row["phrase_expires_at"] or 0.0) <= moment:
         return ClaimOutcome(False, "expired")
     if not _matches(text, str(row["phrase_hash"])):
+        attempts = int(row["phrase_attempts"] or 0) + 1
+        if attempts >= MAX_PHRASE_ATTEMPTS:
+            await db.execute(
+                "UPDATE surface_claims SET phrase_hash = NULL, "
+                "phrase_issued_at = NULL, phrase_expires_at = NULL, "
+                "phrase_attempts = 0 WHERE mind_id = ? AND surface = ?",
+                (mind_id, key),
+            )
+            await db.commit()
+            log.warning(
+                "surface_claims: phrase retired after %d wrong guesses mind=%s surface=%s",
+                attempts, mind_id, key,
+            )
+            return ClaimOutcome(False, "too_many_attempts")
+        await db.execute(
+            "UPDATE surface_claims SET phrase_attempts = ? "
+            "WHERE mind_id = ? AND surface = ?",
+            (attempts, mind_id, key),
+        )
+        await db.commit()
         return ClaimOutcome(False, "mismatch")
     cur = await db.execute(
         "UPDATE surface_claims SET claimed_ref = ?, claimed_at = ?, "
-        "phrase_hash = NULL, phrase_issued_at = NULL, phrase_expires_at = NULL "
+        "phrase_hash = NULL, phrase_issued_at = NULL, phrase_expires_at = NULL, "
+        "phrase_attempts = 0 "
         "WHERE mind_id = ? AND surface = ? AND claimed_ref IS NULL",
         (ref, moment, mind_id, key),
     )
@@ -295,8 +335,8 @@ async def clear_claim(
     key = _check_surface(surface)
     await db.execute(
         "UPDATE surface_claims SET claimed_ref = NULL, claimed_at = NULL, "
-        "phrase_hash = NULL, phrase_issued_at = NULL, phrase_expires_at = NULL "
-        "WHERE mind_id = ? AND surface = ?",
+        "phrase_hash = NULL, phrase_issued_at = NULL, phrase_expires_at = NULL, "
+        "phrase_attempts = 0 WHERE mind_id = ? AND surface = ?",
         (mind_id, key),
     )
     await db.commit()
@@ -330,38 +370,78 @@ async def adopt_claim(
     if not ref:
         return ClaimOutcome(False, "no_sender")
     row = await _row(db, mind_id, key)
-    if row is not None and str(row["claimed_ref"] or ""):
-        existing = str(row["claimed_ref"])
-        return ClaimOutcome(existing == ref, "already_claimed", existing)
+    if row is not None:
+        # A row at all means this bot has been decided here: claimed,
+        # released, or holding a phrase somebody is about to send. Adoption
+        # runs on every boot, so an adoption that overwrote any of those
+        # would undo a release at the next restart and claim a freshly
+        # registered bot for whoever the old file happens to name — which is
+        # the YAML still deciding, one restart later.
+        existing = str(row["claimed_ref"] or "")
+        return ClaimOutcome(existing == ref, "already_decided", existing)
     await db.execute(
-        "INSERT INTO surface_claims (mind_id, surface, claimed_ref, claimed_at) "
-        "VALUES (?, ?, ?, ?) "
-        "ON CONFLICT(mind_id, surface) DO UPDATE SET "
-        "claimed_ref = excluded.claimed_ref, claimed_at = excluded.claimed_at "
-        "WHERE surface_claims.claimed_ref IS NULL",
+        "INSERT INTO surface_claims "
+        "(mind_id, surface, claimed_ref, claimed_at, phrase_hash, phrase_expires_at) "
+        "VALUES (?, ?, ?, ?, NULL, NULL) "
+        "ON CONFLICT(mind_id, surface) DO NOTHING",
         (mind_id, key, ref, moment),
     )
     await db.commit()
     state = await claim_state(db, mind_id, key, now=moment)
     if state.claimed_ref != ref:
-        return ClaimOutcome(False, "already_claimed", state.claimed_ref)
+        return ClaimOutcome(False, "already_decided", state.claimed_ref)
     log.info("surface_claims: adopted mind=%s surface=%s", mind_id, key)
     return ClaimOutcome(True, "adopted", ref)
 
 
-async def claimed_index(db: aiosqlite.Connection) -> dict[str, dict[str, str]]:
-    """`{surface -> {mind_id -> claimed_ref}}` for every claimed bot.
+async def record_bot(
+    db: aiosqlite.Connection,
+    mind_id: str,
+    surface: str,
+    bot_ref: str,
+    *,
+    now: float | None = None,
+) -> ClaimState:
+    """Note which bot account this mind's token belongs to.
 
-    One statement for the whole hive, because the surfaces ask per message
-    and a query per mind per message is a round trip nobody needs.
+    A claim is per mind and surface, but it is a claim on a *bot*: the person
+    sent a phrase to one. So replacing the token with a different bot's
+    releases the claim — otherwise a brand-new bot answers whoever claimed
+    the old one, having never been claimed at all, and nothing on the page
+    could tell the operator it had not.
+
+    The same bot's token pasted again changes nothing: re-pasting is how an
+    operator fixes a typo, not how they hand a bot on.
     """
-    cur = await db.execute(
-        "SELECT mind_id, surface, claimed_ref FROM surface_claims "
-        "WHERE claimed_ref IS NOT NULL AND claimed_ref != ''"
-    )
-    index: dict[str, dict[str, str]] = {surface: {} for surface in SURFACES}
-    for row in await cur.fetchall():
-        surface = str(row["surface"] or "")
-        if surface in index:
-            index[surface][str(row["mind_id"])] = str(row["claimed_ref"])
-    return index
+    key = _check_surface(surface)
+    moment = time.time() if now is None else now
+    ref = (bot_ref or "").strip()
+    if not ref:
+        return await claim_state(db, mind_id, key, now=moment)
+    row = await _row(db, mind_id, key)
+    known = str((row["bot_ref"] if row is not None else "") or "")
+    if row is None:
+        await db.execute(
+            "INSERT INTO surface_claims (mind_id, surface, bot_ref) VALUES (?, ?, ?) "
+            "ON CONFLICT(mind_id, surface) DO UPDATE SET bot_ref = excluded.bot_ref",
+            (mind_id, key, ref),
+        )
+    elif known and known != ref:
+        log.info(
+            "surface_claims: bot replaced, claim released mind=%s surface=%s",
+            mind_id, key,
+        )
+        await db.execute(
+            "UPDATE surface_claims SET bot_ref = ?, claimed_ref = NULL, "
+            "claimed_at = NULL, phrase_hash = NULL, phrase_issued_at = NULL, "
+            "phrase_expires_at = NULL, phrase_attempts = 0 "
+            "WHERE mind_id = ? AND surface = ?",
+            (ref, mind_id, key),
+        )
+    else:
+        await db.execute(
+            "UPDATE surface_claims SET bot_ref = ? WHERE mind_id = ? AND surface = ?",
+            (ref, mind_id, key),
+        )
+    await db.commit()
+    return await claim_state(db, mind_id, key, now=moment)

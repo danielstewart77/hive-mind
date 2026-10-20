@@ -34,7 +34,7 @@ def install_surface_token_routes(app: FastAPI, *, mind_id: str, log) -> None:
     """
 
     @app.get("/surface-token")
-    async def get_surface_token(request: Request) -> Any:
+    async def get_surface_token(request: Request, surface: str = "telegram") -> Any:
         """Whether this mind's surface has a token the bot API accepts.
 
         Never the token. A route that returned one would put every bot in the
@@ -46,8 +46,16 @@ def install_surface_token_routes(app: FastAPI, *, mind_id: str, log) -> None:
         refusal = authorize_admin(request)
         if refusal is not None:
             return refusal
-        state = await token_store.status()
+        try:
+            state = await token_store.status(surface=surface)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=422)
         return {
+            # Echoed, so a console asking a mind that predates this
+            # parameter cannot read a Telegram answer as a Discord one: one
+            # mind holds both bots, and an unknown query parameter is
+            # dropped without comment.
+            "surface": surface,
             "stored": state.stored,
             "accepted": state.accepted,
             "bot_username": state.bot_username,
@@ -57,7 +65,7 @@ def install_surface_token_routes(app: FastAPI, *, mind_id: str, log) -> None:
         }
 
     @app.put("/surface-token")
-    async def put_surface_token(request: Request) -> Any:
+    async def put_surface_token(request: Request, surface: str = "telegram") -> Any:
         """Replace the token this mind's surface authenticates with.
 
         Verified against the bot API before anything is stored, so a paste
@@ -76,7 +84,19 @@ def install_surface_token_routes(app: FastAPI, *, mind_id: str, log) -> None:
         if not token:
             return JSONResponse({"error": "token required"}, status_code=400)
         try:
-            state = await token_store.replace(token)
+            state = await token_store.replace(token, surface=surface)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=422)
+        except token_store.TokenUnverifiable as exc:
+            # 502, not 400: nothing is wrong with what was pasted as far as
+            # anyone here can tell, and a refusal sends the operator to
+            # reissue the token — which revokes the one the mind is running
+            # on.
+            log_event(
+                log, "mind.surface_token.unverifiable", level=logging.WARNING,
+                mind_id=mind_id, surface=surface, reason=str(exc),
+            )
+            return JSONResponse({"error": str(exc), "stored": False}, status_code=502)
         except token_store.TokenRefused as exc:
             # 400, not 401: the credential that reached this route was fine.
             # What was refused is the payload, and a 401 here would send the

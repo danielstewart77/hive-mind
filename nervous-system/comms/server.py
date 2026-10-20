@@ -418,6 +418,11 @@ class SurfaceClaimAttempt(BaseModel):
     text: str = ""
 
 
+class SurfaceClaimBot(BaseModel):
+    """The bot account a mind's stored token authenticates as."""
+    bot_ref: str
+
+
 class SurfaceClaimAdopt(BaseModel):
     """The one allow-list entry an install is carrying across."""
     surface: str = "telegram"
@@ -1830,26 +1835,31 @@ async def broker_register_mind(request: Request, body: RegisterMindRequest):
     return await broker.get_mind_by_id(db, body.mind_id)
 
 
-@app.get("/broker/surface-claims")
-async def broker_surface_claims():
-    """Every claimed bot in the hive, by surface.
+async def _refuse_foreign_claim(request: Request, mind_id: str) -> None:
+    """Refuse a mind asking about another mind's bot.
 
-    One statement for the whole hive because the surfaces ask per message:
-    `hive_surfaces.surface_claim` caches this exactly as `voice_routing`
-    caches the engine, which is what lets a person claim a bot and be
-    answered by the process already running rather than after a restart.
+    The phrase is never readable, which holds — but the id of the person who
+    claimed a bot was. `MACHINE` admits every mind on the hive, so a kid's
+    box could read whose Telegram account answers any other mind here. A
+    service holder and the admin credential pass, as everywhere else: comms
+    acts for every mind, and the console is how a wedged claim gets fixed.
     """
-    return {"claims": await surface_claims.claimed_index(app.state.broker_db)}
+    caller = _caller(request)
+    if not await _names_own_mind(caller, mind_id):
+        raise HTTPException(404, "No such claim")
 
 
 @app.get("/broker/minds/{mind_id}/surface-claim")
-async def broker_get_surface_claim(mind_id: str, surface: str = "telegram"):
+async def broker_get_surface_claim(
+    request: Request, mind_id: str, surface: str = "telegram"
+):
     """Who this bot answers, and whether a claim is on offer.
 
     Never the phrase, nor its digest. A phrase that could be read back is one
     a listing route hands to anybody who can reach this gateway, and the
     claim that follows is indistinguishable from the real person's.
     """
+    await _refuse_foreign_claim(request, mind_id)
     try:
         state = await surface_claims.claim_state(app.state.broker_db, mind_id, surface)
     except surface_claims.UnknownSurface as exc:
@@ -1890,6 +1900,32 @@ async def broker_mint_surface_claim_phrase(mind_id: str, surface: str = "telegra
     }
 
 
+@app.post(
+    "/broker/minds/{mind_id}/surface-claim/bot",
+    dependencies=[Depends(require_admin_bearer)],
+)
+async def broker_record_surface_claim_bot(
+    mind_id: str, body: SurfaceClaimBot, surface: str = "telegram"
+):
+    """Note which bot account this mind's token belongs to.
+
+    A claim is a claim on a bot. Replacing the token with a different bot's
+    releases it, so a brand-new bot does not answer whoever claimed the old
+    one having never been claimed itself. The same token pasted again changes
+    nothing — that is how a typo gets fixed, not how a bot is handed on.
+    """
+    try:
+        state = await surface_claims.record_bot(
+            app.state.broker_db, mind_id, surface, body.bot_ref
+        )
+    except surface_claims.UnknownSurface as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+    return {
+        "ok": True, "surface": state.surface,
+        "claimed": state.claimed, "claimed_ref": state.claimed_ref,
+    }
+
+
 @app.delete(
     "/broker/minds/{mind_id}/surface-claim",
     dependencies=[Depends(require_admin_bearer)],
@@ -1909,13 +1945,16 @@ async def broker_clear_surface_claim(mind_id: str, surface: str = "telegram"):
 
 
 @app.post("/broker/minds/{mind_id}/surface-claim/attempt")
-async def broker_attempt_surface_claim(mind_id: str, body: SurfaceClaimAttempt):
+async def broker_attempt_surface_claim(
+    request: Request, mind_id: str, body: SurfaceClaimAttempt
+):
     """One inbound message on an unclaimed bot, judged here.
 
     The comparison happens on this gateway rather than in the bot because the
     deadline is this clock's: a Windows box that has been powered off for a
     fortnight must not be able to void a live phrase, nor honour a dead one.
     """
+    await _refuse_foreign_claim(request, mind_id)
     try:
         outcome = await surface_claims.attempt_claim(
             app.state.broker_db, mind_id, body.surface, body.sender_ref, body.text
@@ -1927,7 +1966,9 @@ async def broker_attempt_surface_claim(mind_id: str, body: SurfaceClaimAttempt):
 
 
 @app.post("/broker/minds/{mind_id}/surface-claim/adopt")
-async def broker_adopt_surface_claim(mind_id: str, body: SurfaceClaimAdopt):
+async def broker_adopt_surface_claim(
+    request: Request, mind_id: str, body: SurfaceClaimAdopt
+):
     """Carry an install's existing single allow-list entry across as its claim.
 
     Every bot in the hive already answers somebody, recorded in that
@@ -1940,6 +1981,7 @@ async def broker_adopt_surface_claim(mind_id: str, body: SurfaceClaimAdopt):
     guessing which of several owns the bot is how somebody else's bot changes
     hands in silence.
     """
+    await _refuse_foreign_claim(request, mind_id)
     try:
         outcome = await surface_claims.adopt_claim(
             app.state.broker_db, mind_id, body.surface, body.sender_ref
