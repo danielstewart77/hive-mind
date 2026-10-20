@@ -155,3 +155,59 @@ class TestReadingIt:
 
         assert client.get("/surface-token").status_code == 401
         status.assert_not_awaited()
+
+
+class TestWhichSurface:
+    """One mind can hold both bots, so the route has to be told which — and
+    has to say which it answered about, because an unknown query parameter is
+    dropped without comment and a console reading a Telegram answer under a
+    Discord label states as fact that Discord is wired."""
+
+    def test_the_named_surface_is_the_one_asked_about_and_echoed(
+        self, client, monkeypatch
+    ) -> None:
+        asked: list = []
+
+        async def _status(session=None, surface="telegram"):
+            asked.append(surface)
+            return token_store.TokenStatus(
+                stored=True, accepted=True, bot_username=f"{surface}-bot", where="env"
+            )
+
+        monkeypatch.setattr(token_store, "status", _status)
+
+        body = client.get("/surface-token?surface=discord", headers=ADMIN).json()
+
+        assert asked == ["discord"]
+        assert body["surface"] == "discord"
+        assert body["bot_username"] == "discord-bot"
+
+    def test_the_named_surface_is_the_one_written(self, client, monkeypatch) -> None:
+        asked: list = []
+
+        async def _replace(token, session=None, surface="telegram"):
+            asked.append(surface)
+            return token_store.TokenStatus(
+                stored=True, accepted=True, bot_username="cypher-bot", where="env"
+            )
+
+        monkeypatch.setattr(token_store, "replace", _replace)
+
+        response = client.put(
+            "/surface-token?surface=discord", json={"token": GOOD}, headers=ADMIN
+        )
+
+        assert response.status_code == 200
+        assert asked == ["discord"]
+
+    def test_a_provider_nobody_could_reach_is_not_a_refused_token(
+        self, client, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(token_store, "replace", AsyncMock(
+            side_effect=token_store.TokenUnverifiable("could not reach the bot API"),
+        ))
+
+        response = client.put("/surface-token", json={"token": GOOD}, headers=ADMIN)
+
+        assert response.status_code == 502
+        assert response.json()["stored"] is False

@@ -247,6 +247,136 @@ def test_a_phrase_typed_by_a_phone_keyboard_still_claims(db_path):
     assert outcome.claimed_ref == "777"
 
 
+def test_a_phrase_is_retired_after_eight_wrong_guesses(db_path):
+    """The route is reachable by anyone who can message an unclaimed bot, so
+    a window with no counter is a window somebody can walk through."""
+    async def go():
+        db = await _open(db_path)
+        try:
+            phrase = await surface_claims.mint_phrase(
+                db, "m1", "telegram", now=1000.0, phrase="anchor basalt cinder"
+            )
+            for attempt in range(surface_claims.MAX_PHRASE_ATTEMPTS - 1):
+                outcome = await surface_claims.attempt_claim(
+                    db, "m1", "telegram", "666", f"guess {attempt}", now=1001.0
+                )
+                assert outcome.reason == "mismatch", attempt
+            last = await surface_claims.attempt_claim(
+                db, "m1", "telegram", "666", "one more", now=1002.0
+            )
+            # The real phrase no longer works either: the door is shut, not
+            # merely shut to that guesser.
+            after = await surface_claims.attempt_claim(
+                db, "m1", "telegram", "777", phrase, now=1003.0
+            )
+            return last, after
+        finally:
+            await db.close()
+
+    last, after = _run(go())
+    assert last.reason == "too_many_attempts"
+    assert after.claimed is False
+    assert after.reason == "no_phrase"
+
+
+def test_a_fresh_phrase_resets_the_guess_count(db_path):
+    async def go():
+        db = await _open(db_path)
+        try:
+            await surface_claims.mint_phrase(
+                db, "m1", "telegram", now=1000.0, phrase="anchor basalt cinder"
+            )
+            for attempt in range(surface_claims.MAX_PHRASE_ATTEMPTS - 1):
+                await surface_claims.attempt_claim(
+                    db, "m1", "telegram", "666", f"guess {attempt}", now=1001.0
+                )
+            second = await surface_claims.mint_phrase(
+                db, "m1", "telegram", now=1100.0, phrase="willow zephyr umber"
+            )
+            wrong = await surface_claims.attempt_claim(
+                db, "m1", "telegram", "666", "still wrong", now=1101.0
+            )
+            right = await surface_claims.attempt_claim(
+                db, "m1", "telegram", "777", second, now=1102.0
+            )
+            return wrong, right
+        finally:
+            await db.close()
+
+    wrong, right = _run(go())
+    assert wrong.reason == "mismatch"
+    assert right.claimed is True
+
+
+def test_adoption_never_takes_a_bot_back_after_it_was_released(db_path):
+    """Adoption runs on every boot. A release that a restart undid would be
+    the YAML deciding again, one reboot later — and on a logon-triggered
+    Windows mind the boot is the very event that lets the new person type."""
+    async def go():
+        db = await _open(db_path)
+        try:
+            phrase = await surface_claims.mint_phrase(db, "m1", "telegram", now=1000.0)
+            await surface_claims.attempt_claim(db, "m1", "telegram", "111", phrase, now=1001.0)
+            await surface_claims.clear_claim(db, "m1", "telegram")
+            outcome = await surface_claims.adopt_claim(
+                db, "m1", "telegram", "111", now=1002.0
+            )
+            state = await surface_claims.claim_state(db, "m1", "telegram", now=1002.0)
+            return outcome, state
+        finally:
+            await db.close()
+
+    outcome, state = _run(go())
+    assert outcome.claimed is False
+    assert outcome.reason == "already_decided"
+    assert state.claimed is False
+
+
+def test_a_new_bot_on_the_same_mind_is_not_the_claimed_bot(db_path):
+    """The claim was a claim on a bot. A different bot answering the person
+    who claimed the old one has never been claimed at all."""
+    async def go():
+        db = await _open(db_path)
+        try:
+            await surface_claims.record_bot(db, "m1", "telegram", "old_bot", now=900.0)
+            phrase = await surface_claims.mint_phrase(db, "m1", "telegram", now=1000.0)
+            await surface_claims.attempt_claim(db, "m1", "telegram", "111", phrase, now=1001.0)
+            same = await surface_claims.record_bot(
+                db, "m1", "telegram", "old_bot", now=1002.0
+            )
+            replaced = await surface_claims.record_bot(
+                db, "m1", "telegram", "new_bot", now=1003.0
+            )
+            return same, replaced
+        finally:
+            await db.close()
+
+    same, replaced = _run(go())
+    assert same.claimed_ref == "111"
+    assert replaced.claimed is False
+
+
+def test_a_claimed_bot_never_has_a_phrase_on_offer(db_path):
+    """Visible on the page as claimed, so a live phrase behind it could not
+    be seen at all."""
+    async def go():
+        db = await _open(db_path)
+        try:
+            phrase = await surface_claims.mint_phrase(db, "m1", "telegram", now=1000.0)
+            await surface_claims.attempt_claim(db, "m1", "telegram", "111", phrase, now=1001.0)
+            try:
+                await surface_claims.mint_phrase(db, "m1", "telegram", now=1002.0)
+            except ValueError:
+                pass
+            return await surface_claims.claim_state(db, "m1", "telegram", now=1003.0)
+        finally:
+            await db.close()
+
+    state = _run(go())
+    assert state.claimed_ref == "111"
+    assert state.phrase_pending is False
+
+
 def test_an_installs_single_allow_list_entry_becomes_its_claim(db_path):
     async def go():
         db = await _open(db_path)
@@ -290,13 +420,8 @@ def test_a_claim_on_one_surface_leaves_the_other_surface_alone(db_path):
         try:
             phrase = await surface_claims.mint_phrase(db, "m1", "telegram", now=1000.0)
             await surface_claims.attempt_claim(db, "m1", "telegram", "111", phrase, now=1001.0)
-            discord = await surface_claims.claim_state(db, "m1", "discord", now=1001.0)
-            index = await surface_claims.claimed_index(db)
-            return discord, index
+            return await surface_claims.claim_state(db, "m1", "discord", now=1001.0)
         finally:
             await db.close()
 
-    discord, index = _run(go())
-    assert discord.claimed is False
-    assert index["telegram"] == {"m1": "111"}
-    assert index["discord"] == {}
+    assert _run(go()).claimed is False

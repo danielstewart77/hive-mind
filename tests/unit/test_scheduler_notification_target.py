@@ -74,7 +74,7 @@ def test_a_mind_whose_bot_nobody_has_claimed_falls_back(monkeypatch):
     assert asyncio.run(go()) == 9999999
 
 
-def test_a_gateway_with_no_claim_routes_falls_back(monkeypatch):
+def test_a_gateway_that_refuses_the_claim_read_falls_back(monkeypatch):
     async def go():
         server = await _gateway({"status": 404})
         try:

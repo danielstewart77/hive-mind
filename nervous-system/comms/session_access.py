@@ -134,7 +134,6 @@ TABLE.add(
     # these names a conversation: the read returns no phrase and no digest,
     # and the attempt is decided here against this clock rather than the
     # bot's.
-    "GET /broker/surface-claims",
     "GET /broker/minds/{mind_id}/surface-claim",
     "POST /broker/minds/{mind_id}/surface-claim/attempt",
     "POST /broker/minds/{mind_id}/surface-claim/adopt",
@@ -161,6 +160,7 @@ TABLE.add(
     # presents the admin token for both and scopes the operator to minds they
     # own on its own side, exactly as it does for a surface token.
     "POST /broker/minds/{mind_id}/surface-claim/phrase",
+    "POST /broker/minds/{mind_id}/surface-claim/bot",
     "DELETE /broker/minds/{mind_id}/surface-claim",
     "PUT /broker/minds/{name}",
     "DELETE /broker/minds/{name}",
