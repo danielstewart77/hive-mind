@@ -16,7 +16,9 @@ import aiohttp
 import discord
 from discord import app_commands
 
-from hive_surfaces import effort_picker, harness_picker, model_picker, token_store, voice_routing
+from hive_surfaces import (
+    effort_picker, harness_picker, model_picker, surface_claim, token_store, voice_routing,
+)
 from hive_surfaces.config import config
 from hive_surfaces.gateway_client import GatewayClient
 from hive_surfaces.bot_utils import get_lock, time_ago
@@ -50,9 +52,56 @@ _voice_clients: dict[int, discord.VoiceClient] = {}
 # ---------------------------------------------------------------------------
 # Auth helpers
 # ---------------------------------------------------------------------------
-def _is_allowed_user(user_id: int) -> bool:
-    """Fail-closed: empty allowlist = no access."""
+async def _is_allowed_user(user_id: int) -> bool:
+    """Whether this is the one person this bot answers.
+
+    The claim is the authority. The allow-list answers only for a process
+    with no gateway and no mind to ask about, which is a host that configured
+    neither rather than an install.
+    """
+    resolver = surface_claim.installed("discord")
+    if resolver is not None:
+        allowed = await resolver.is_allowed(user_id)
+        if resolver.supported:
+            return allowed
     return user_id in config.discord_allowed_users
+
+
+async def _claim_or_refuse(message) -> bool:
+    """Admit the one person, or let an unclaimed bot be claimed in a DM.
+
+    Only in a direct message, and only silence elsewhere. The author gate sits
+    ahead of the mention and channel checks, so a refusal that spoke would
+    answer every message by every human in every channel this bot can read —
+    and announce in a shared server that this mind is listening there.
+    """
+    user_id = message.author.id
+    if await _is_allowed_user(user_id):
+        return True
+    resolver = surface_claim.installed("discord")
+    if resolver is not None and not resolver.supported:
+        resolver = None
+    is_dm = isinstance(message.channel, discord.DMChannel)
+    if is_dm and resolver is not None and not await resolver.is_claimed():
+        answer = await resolver.attempt_claim(user_id, message.content or "")
+        if answer.reason == "already_yours":
+            return True
+        if answer.claimed:
+            log_event(
+                log, "surface.claim.taken", surface="discord",
+                user_id=user_id, client_ref=message.channel.id,
+            )
+            await message.channel.send(
+                "This bot is yours now. Say anything and I will answer."
+            )
+            return False
+    log_event(
+        log, "surface.auth.rejected", level=logging.WARNING, surface="discord",
+        user_id=user_id, client_ref=message.channel.id,
+    )
+    if is_dm:
+        await message.channel.send("Not authorized.")
+    return False
 
 
 def _is_allowed_channel(channel_id: int) -> bool:
@@ -534,7 +583,7 @@ def register_discord_command(name: str, description: str, handler) -> None:
 
 @bot.tree.command(name="sessions", description="List your Hive Mind sessions")
 async def cmd_sessions(interaction: discord.Interaction):
-    if not _is_allowed_user(interaction.user.id):
+    if not await _is_allowed_user(interaction.user.id):
         await interaction.response.send_message("Not authorized.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
@@ -544,7 +593,7 @@ async def cmd_sessions(interaction: discord.Interaction):
 
 @bot.tree.command(name="new", description="Start a new Hive Mind session")
 async def cmd_new(interaction: discord.Interaction):
-    if not _is_allowed_user(interaction.user.id):
+    if not await _is_allowed_user(interaction.user.id):
         await interaction.response.send_message("Not authorized.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
@@ -554,7 +603,7 @@ async def cmd_new(interaction: discord.Interaction):
 
 @bot.tree.command(name="clear", description="Clear session and start fresh")
 async def cmd_clear(interaction: discord.Interaction):
-    if not _is_allowed_user(interaction.user.id):
+    if not await _is_allowed_user(interaction.user.id):
         await interaction.response.send_message("Not authorized.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
@@ -564,7 +613,7 @@ async def cmd_clear(interaction: discord.Interaction):
 
 @bot.tree.command(name="status", description="Show Hive Mind status")
 async def cmd_status(interaction: discord.Interaction):
-    if not _is_allowed_user(interaction.user.id):
+    if not await _is_allowed_user(interaction.user.id):
         await interaction.response.send_message("Not authorized.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
@@ -575,7 +624,7 @@ async def cmd_status(interaction: discord.Interaction):
 @bot.tree.command(name="model", description="List or switch model")
 @app_commands.describe(name="Model name to switch to (omit to list)")
 async def cmd_model(interaction: discord.Interaction, name: str = None):
-    if not _is_allowed_user(interaction.user.id):
+    if not await _is_allowed_user(interaction.user.id):
         await interaction.response.send_message("Not authorized.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
@@ -587,7 +636,7 @@ async def cmd_model(interaction: discord.Interaction, name: str = None):
 @bot.tree.command(name="effort", description="List or set this conversation's reasoning effort")
 @app_commands.describe(level="Effort level to set, or 'default' (omit to list)")
 async def cmd_effort(interaction: discord.Interaction, level: str = None):
-    if not _is_allowed_user(interaction.user.id):
+    if not await _is_allowed_user(interaction.user.id):
         await interaction.response.send_message("Not authorized.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
@@ -602,7 +651,7 @@ async def cmd_effort(interaction: discord.Interaction, level: str = None):
     model="Model to run on that harness (omit to list its models)",
 )
 async def cmd_harness(interaction: discord.Interaction, name: str = None, model: str = None):
-    if not _is_allowed_user(interaction.user.id):
+    if not await _is_allowed_user(interaction.user.id):
         await interaction.response.send_message("Not authorized.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
@@ -614,7 +663,7 @@ async def cmd_harness(interaction: discord.Interaction, name: str = None, model:
 
 @bot.tree.command(name="autopilot", description="Toggle autopilot mode")
 async def cmd_autopilot(interaction: discord.Interaction):
-    if not _is_allowed_user(interaction.user.id):
+    if not await _is_allowed_user(interaction.user.id):
         await interaction.response.send_message("Not authorized.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
@@ -625,7 +674,7 @@ async def cmd_autopilot(interaction: discord.Interaction):
 @bot.tree.command(name="switch", description="Switch to a different session")
 @app_commands.describe(target="Session number or ID")
 async def cmd_switch(interaction: discord.Interaction, target: str):
-    if not _is_allowed_user(interaction.user.id):
+    if not await _is_allowed_user(interaction.user.id):
         await interaction.response.send_message("Not authorized.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
@@ -636,7 +685,7 @@ async def cmd_switch(interaction: discord.Interaction, target: str):
 @bot.tree.command(name="kill", description="Kill a session")
 @app_commands.describe(target="Session number or ID")
 async def cmd_kill(interaction: discord.Interaction, target: str):
-    if not _is_allowed_user(interaction.user.id):
+    if not await _is_allowed_user(interaction.user.id):
         await interaction.response.send_message("Not authorized.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
@@ -649,7 +698,7 @@ async def cmd_kill(interaction: discord.Interaction, target: str):
 # ---------------------------------------------------------------------------
 @bot.tree.command(name="skills", description="List all available Claude skills")
 async def cmd_skills(interaction: discord.Interaction):
-    if not _is_allowed_user(interaction.user.id):
+    if not await _is_allowed_user(interaction.user.id):
         await interaction.response.send_message("Not authorized.", ephemeral=True)
         return
     skills = get_skills()
@@ -692,7 +741,7 @@ async def _autocomplete_skill_args(
 @app_commands.describe(name="Skill to invoke", args="Arguments for the skill")
 @app_commands.autocomplete(name=_autocomplete_skill_name, args=_autocomplete_skill_args)
 async def cmd_skill(interaction: discord.Interaction, name: str, args: str = None):
-    if not _is_allowed_user(interaction.user.id):
+    if not await _is_allowed_user(interaction.user.id):
         await interaction.response.send_message("Not authorized.", ephemeral=True)
         return
     await interaction.response.defer()
@@ -707,7 +756,7 @@ async def cmd_skill(interaction: discord.Interaction, name: str, args: str = Non
 # ---------------------------------------------------------------------------
 @bot.tree.command(name="join", description="Join your current voice channel for TTS")
 async def cmd_join(interaction: discord.Interaction):
-    if not _is_allowed_user(interaction.user.id):
+    if not await _is_allowed_user(interaction.user.id):
         await interaction.response.send_message("Not authorized.", ephemeral=True)
         return
     member = interaction.user
@@ -734,7 +783,7 @@ async def cmd_join(interaction: discord.Interaction):
 # ---------------------------------------------------------------------------
 @bot.tree.command(name="leave", description="Leave the current voice channel")
 async def cmd_leave(interaction: discord.Interaction):
-    if not _is_allowed_user(interaction.user.id):
+    if not await _is_allowed_user(interaction.user.id):
         await interaction.response.send_message("Not authorized.", ephemeral=True)
         return
     if not interaction.guild:
@@ -763,11 +812,7 @@ async def on_ready():
 async def on_message(message: discord.Message):
     if message.author.id == bot.user.id:
         return
-    if not _is_allowed_user(message.author.id):
-        log_event(
-            log, "surface.auth.rejected", level=logging.WARNING, surface="discord",
-            user_id=message.author.id, client_ref=message.channel.id,
-        )
+    if not await _claim_or_refuse(message):
         return
 
     is_dm = isinstance(message.channel, discord.DMChannel)

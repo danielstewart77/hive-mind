@@ -47,7 +47,7 @@ class TestHandleUnknownCommand:
         update.message.reply_text = AsyncMock(return_value=sent_msg)
 
         with (
-            patch("hive_surfaces.telegram_bot._is_allowed_user", return_value=True),
+            patch("hive_surfaces.telegram_bot._is_allowed_user", new=AsyncMock(return_value=True)),
             patch("hive_surfaces.telegram_bot.get_lock", return_value=mock_lock),
             patch(
                 "hive_surfaces.telegram_bot._stream_to_message",
@@ -74,7 +74,7 @@ class TestHandleUnknownCommand:
         update.message.reply_text = AsyncMock(return_value=sent_msg)
 
         with (
-            patch("hive_surfaces.telegram_bot._is_allowed_user", return_value=True),
+            patch("hive_surfaces.telegram_bot._is_allowed_user", new=AsyncMock(return_value=True)),
             patch("hive_surfaces.telegram_bot.get_lock", return_value=mock_lock),
             patch(
                 "hive_surfaces.telegram_bot._stream_to_message",
@@ -96,7 +96,7 @@ class TestHandleUnknownCommand:
         update = _make_update("/remember something")
         context = _make_context()
 
-        with patch("hive_surfaces.telegram_bot._is_allowed_user", return_value=False):
+        with patch("hive_surfaces.telegram_bot._is_allowed_user", new=AsyncMock(return_value=False)):
             await handle_unknown_command(update, context)
 
         update.message.reply_text.assert_called_once_with("Not authorized.")
@@ -112,7 +112,7 @@ class TestHandleUnknownCommand:
         update.message.reply_text = AsyncMock(return_value=sent_msg)
 
         with (
-            patch("hive_surfaces.telegram_bot._is_allowed_user", return_value=True),
+            patch("hive_surfaces.telegram_bot._is_allowed_user", new=AsyncMock(return_value=True)),
             patch("hive_surfaces.telegram_bot.get_lock", return_value=mock_lock),
             patch(
                 "hive_surfaces.telegram_bot._stream_to_message",
@@ -138,7 +138,7 @@ class TestHandleUnknownCommand:
         mock_queue.put = AsyncMock()
 
         with (
-            patch("hive_surfaces.telegram_bot._is_allowed_user", return_value=True),
+            patch("hive_surfaces.telegram_bot._is_allowed_user", new=AsyncMock(return_value=True)),
             patch("hive_surfaces.telegram_bot.get_lock", return_value=mock_lock),
             patch("hive_surfaces.telegram_bot.get_queue", return_value=mock_queue),
         ):

@@ -35,7 +35,8 @@ from hive_surfaces.config import config, photo_root
 from hive_surfaces.bot_utils import claim_picker, get_lock, get_queue, picker_spent, time_ago
 from hive_surfaces.gateway_client import GatewayClient
 from hive_surfaces import (
-    effort_picker, harness_picker, hitl, model_picker, rename_prompt, session_picker, voice_routing,
+    effort_picker, harness_picker, hitl, model_picker, rename_prompt, session_picker,
+    surface_claim, voice_routing,
 )
 from hive_surfaces.skills import get_skills
 from hive_surfaces.hive_logging import configure_logging, log_event
@@ -95,9 +96,67 @@ _menu_task: "asyncio.Task | None" = None
 # ---------------------------------------------------------------------------
 # Auth helpers
 # ---------------------------------------------------------------------------
-def _is_allowed_user(user_id: int) -> bool:
-    """Fail-closed: empty allowlist = no access."""
+async def _is_allowed_user(user_id: int) -> bool:
+    """Whether this is the one person this bot answers.
+
+    The claim is the authority. The allow-list answers only for a process the
+    host handed no resolver — a host that configured neither gateway nor mind
+    id, never an install — because an authorizer with nothing to read must
+    refuse rather than guess.
+    """
+    resolver = surface_claim.installed("telegram")
+    if resolver is not None:
+        allowed = await resolver.is_allowed(user_id)
+        if resolver.supported:
+            return allowed
     return user_id in config.telegram_allowed_users
+
+
+async def _claim_or_refuse(update: Update) -> bool:
+    """Admit the one person, or answer an unclaimed bot's first caller.
+
+    Nobody should have to hunt for their own numeric id, so an unclaimed bot
+    offers whatever it was sent to the gateway as a candidate pass phrase. A
+    refusal is a sentence in a private chat and silence anywhere else: a bot
+    invited into a family group that announced "Not authorized" to every
+    message would be both a nuisance and a disclosure that this mind is
+    listening in that room.
+    """
+    user_id = update.effective_user.id
+    if await _is_allowed_user(user_id):
+        return True
+    resolver = surface_claim.installed("telegram")
+    if resolver is not None and not resolver.supported:
+        resolver = None
+    private = getattr(update.effective_chat, "type", "private") == "private"
+    text = getattr(getattr(update, "message", None), "text", None) or ""
+    if private and resolver is not None and not await resolver.is_claimed():
+        answer = await resolver.attempt_claim(user_id, text)
+        if answer.reason == "already_yours":
+            # A stale cache, not a refusal: the person holds this bot. Their
+            # message goes through rather than being answered with a claim
+            # confirmation they did not ask for.
+            return True
+        if answer.claimed:
+            log_event(
+                log, "surface.claim.taken", surface="telegram",
+                user_id=user_id, client_ref=update.effective_chat.id,
+            )
+            if getattr(update, "message", None) is not None:
+                await update.message.reply_text(
+                    "This bot is yours now. Say anything and I will answer."
+                )
+            return False
+    log_event(
+        log, "surface.auth.rejected", level=logging.WARNING, surface="telegram",
+        user_id=user_id, client_ref=update.effective_chat.id,
+    )
+    if private and getattr(update, "message", None) is not None:
+        # An edited message arrives with no `message` at all, and a refusal
+        # that raised inside the handler would be silence — the one thing a
+        # refusal must never look like.
+        await update.message.reply_text("Not authorized.")
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -701,14 +760,7 @@ async def _handle_server_command(content: str, user_id: int, chat_id: int) -> st
 # Auth guard helper
 # ---------------------------------------------------------------------------
 async def _auth_check(update: Update) -> bool:
-    if not _is_allowed_user(update.effective_user.id):
-        log_event(
-            log, "surface.auth.rejected", level=logging.WARNING, surface="telegram",
-            user_id=update.effective_user.id, client_ref=update.effective_chat.id,
-        )
-        await update.message.reply_text("Not authorized.")
-        return False
-    return True
+    return await _claim_or_refuse(update)
 
 
 # ---------------------------------------------------------------------------
@@ -815,7 +867,7 @@ async def on_session_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
-    if not _is_allowed_user(user_id):
+    if not await _is_allowed_user(user_id):
         # Every typed command logs its rejection; a tap is the one surface
         # where an unauthorised attempt used to leave no record at all.
         log_event(
@@ -1478,7 +1530,7 @@ async def on_harness_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
-    if not _is_allowed_user(user_id):
+    if not await _is_allowed_user(user_id):
         log_event(
             log, "surface.auth.rejected", level=logging.WARNING, surface="telegram",
             user_id=user_id, client_ref=chat_id,
@@ -1742,11 +1794,11 @@ async def _handled_as_rename_reply(update, context, content: str) -> bool:
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed_user(update.effective_user.id):
-        log_event(
-            log, "surface.auth.rejected", level=logging.WARNING, surface="telegram",
-            user_id=update.effective_user.id, client_ref=update.effective_chat.id,
-        )
+    # The gate logs its own outcome. A second line here recorded a refusal
+    # for every successful claim too, since claiming answers the message
+    # rather than passing it through — so a grep for lockouts found the
+    # successes.
+    if not await _claim_or_refuse(update):
         return
 
     # Before the group gate, deliberately. `ForceReply(selective=True)` aims
@@ -1821,7 +1873,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Photo message handler
 # ---------------------------------------------------------------------------
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed_user(update.effective_user.id):
+    if not await _claim_or_refuse(update):
         return
 
     # In group chats, only respond to @mentions in the caption
@@ -1902,7 +1954,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Voice message handler
 # ---------------------------------------------------------------------------
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_allowed_user(update.effective_user.id):
+    if not await _claim_or_refuse(update):
         return
 
     chat_id = update.effective_chat.id
@@ -1993,8 +2045,7 @@ async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_T
     through to this catch-all.  The full command text (including the /)
     is sent as a regular prompt so Claude can process it as a skill.
     """
-    if not _is_allowed_user(update.effective_user.id):
-        await update.message.reply_text("Not authorized.")
+    if not await _claim_or_refuse(update):
         return
 
     content = update.message.text or ""
@@ -2240,7 +2291,7 @@ async def handle_hitl_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     """
     query = update.callback_query
 
-    if not _is_allowed_user(query.from_user.id):
+    if not await _is_allowed_user(query.from_user.id):
         await query.answer("Not authorized.")
         return
 
