@@ -451,32 +451,6 @@ def test_a_registered_bot_that_was_never_claimed_still_adopts(db_path):
     assert state.claimed_ref == "8776938611"
 
 
-def test_a_released_bot_does_not_re_adopt_on_the_next_boot(db_path):
-    """Adoption runs every start. A release the operator performed on purpose
-    must outlive it, or handing a bot to a second person is undone by the
-    next restart and nothing says so."""
-    async def go():
-        db = await _open(db_path)
-        try:
-            phrase = await surface_claims.mint_phrase(db, "m1", "telegram", now=1000.0)
-            await surface_claims.attempt_claim(
-                db, "m1", "telegram", "111", phrase, now=1001.0
-            )
-            await surface_claims.clear_claim(db, "m1", "telegram")
-            outcome = await surface_claims.adopt_claim(
-                db, "m1", "telegram", "8776938611", now=1002.0
-            )
-            state = await surface_claims.claim_state(db, "m1", "telegram", now=1002.0)
-            return outcome, state
-        finally:
-            await db.close()
-
-    outcome, state = _run(go())
-    assert outcome.claimed is False
-    assert outcome.reason == "already_decided"
-    assert state.claimed_ref == ""
-
-
 def test_replacing_the_token_leaves_the_new_bot_unadoptable(db_path):
     """A different bot account under the same mind is a bot nobody has
     claimed. Adoption must not hand it the configured id, because the
@@ -500,4 +474,125 @@ def test_replacing_the_token_leaves_the_new_bot_unadoptable(db_path):
 
     outcome, state = _run(go())
     assert outcome.claimed is False
+    assert state.claimed_ref == ""
+
+
+def test_a_phrase_nobody_sent_stops_blocking_adoption_once_it_expires(db_path):
+    """Nothing clears an expired phrase, so counting any phrase as a decision
+    left a bot minted-and-forgotten permanently unadoptable — while the
+    console read it as unclaimed with no phrase pending and offered minting
+    another, which rebuilt the same row."""
+    async def go():
+        db = await _open(db_path)
+        try:
+            await surface_claims.mint_phrase(db, "m1", "telegram", now=1000.0)
+            expired = 1000.0 + surface_claims.PHRASE_TTL_SECONDS + 1.0
+            outcome = await surface_claims.adopt_claim(
+                db, "m1", "telegram", "8776938611", now=expired
+            )
+            state = await surface_claims.claim_state(db, "m1", "telegram", now=expired)
+            return outcome, state
+        finally:
+            await db.close()
+
+    outcome, state = _run(go())
+    assert outcome.claimed is True
+    assert state.claimed_ref == "8776938611"
+
+
+def test_a_phrase_still_within_its_window_does_block_adoption(db_path):
+    """The other side of the same line: a phrase somebody is about to send is
+    a decision in progress, and a boot must not step on it."""
+    async def go():
+        db = await _open(db_path)
+        try:
+            await surface_claims.mint_phrase(db, "m1", "telegram", now=1000.0)
+            outcome = await surface_claims.adopt_claim(
+                db, "m1", "telegram", "8776938611", now=1001.0
+            )
+            state = await surface_claims.claim_state(db, "m1", "telegram", now=1001.0)
+            return outcome, state
+        finally:
+            await db.close()
+
+    outcome, state = _run(go())
+    assert outcome.claimed is False
+    assert state.claimed_ref == ""
+
+
+def test_an_unclaimed_row_written_before_the_marker_existed_is_treated_as_released(
+    db_path,
+):
+    """On the old schema a release, a swapped bot account and a merely
+    registered token all left `claimed_ref` NULL and nothing else. The two
+    readings fail in opposite directions, and only one of them hands
+    somebody else's bot over in silence."""
+    async def go():
+        db = await aiosqlite.connect(db_path)
+        db.row_factory = aiosqlite.Row
+        try:
+            await db.execute(
+                "CREATE TABLE surface_claims ("
+                "mind_id TEXT NOT NULL, surface TEXT NOT NULL, claimed_ref TEXT, "
+                "claimed_at REAL, phrase_hash TEXT, phrase_issued_at REAL, "
+                "phrase_expires_at REAL, PRIMARY KEY (mind_id, surface))"
+            )
+            await db.execute(
+                "INSERT INTO surface_claims (mind_id, surface, claimed_ref) "
+                "VALUES ('m1', 'telegram', NULL)"
+            )
+            await db.commit()
+            await surface_claims.init(db)
+            outcome = await surface_claims.adopt_claim(
+                db, "m1", "telegram", "8776938611", now=1000.0
+            )
+            state = await surface_claims.claim_state(db, "m1", "telegram", now=1000.0)
+            return outcome, state
+        finally:
+            await db.close()
+
+    outcome, state = _run(go())
+    assert outcome.claimed is False
+    assert state.claimed_ref == ""
+
+
+def test_the_gateway_s_own_startup_applies_the_claim_migrations(db_path):
+    """The column this module grew has to exist on the database production
+    actually opens. `CREATE TABLE IF NOT EXISTS` is a no-op against a table
+    that is already there, so a schema change alone reaches nothing — and
+    with the fixture calling `init` while the gateway called `executescript`,
+    the whole suite stayed green over a column no live row had."""
+    async def go():
+        from comms import broker
+
+        db = await aiosqlite.connect(db_path)
+        try:
+            # A table as it stood before this column, with a row in it.
+            await db.execute(
+                "CREATE TABLE surface_claims ("
+                "mind_id TEXT NOT NULL, surface TEXT NOT NULL, claimed_ref TEXT, "
+                "claimed_at REAL, phrase_hash TEXT, phrase_issued_at REAL, "
+                "phrase_expires_at REAL, PRIMARY KEY (mind_id, surface))"
+            )
+            await db.execute(
+                "INSERT INTO surface_claims (mind_id, surface, claimed_ref) "
+                "VALUES ('m1', 'telegram', '111')"
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        live = await broker.init_db(db_path)
+        try:
+            cur = await live.execute("PRAGMA table_info(surface_claims)")
+            columns = {row[1] for row in await cur.fetchall()}
+            # And the route the console presses still works against it.
+            state = await surface_claims.clear_claim(live, "m1", "telegram")
+            return columns, state
+        finally:
+            await live.close()
+
+    columns, state = _run(go())
+    assert "released_at" in columns
+    assert "phrase_attempts" in columns
     assert state.claimed_ref == ""

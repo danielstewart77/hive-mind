@@ -125,7 +125,12 @@ async def init_db(db_path: str) -> aiosqlite.Connection:
     db = await aiosqlite.connect(db_path)
     db.row_factory = aiosqlite.Row
     await db.executescript(_SCHEMA)
-    await db.executescript(surface_claims.SCHEMA)
+    # `init`, not `executescript(SCHEMA)`. The create is `IF NOT EXISTS`, so
+    # against an existing table it is a no-op and every column the schema
+    # grows afterwards is silently absent — the migrations live in `init` and
+    # were reached only by the test fixture, which is why the divergence
+    # could not be seen from the suite.
+    await surface_claims.init(db)
     await _migrate_minds(db)
     await db.commit()
     log.info("broker: db initialized at %s", db_path)

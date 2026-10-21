@@ -476,13 +476,37 @@ the surface's allow-list only when that list names exactly one person. The
 shared file cannot answer the question: one list for five minds means reading
 it hands one person's id to every mind's bot.
 
-Adoption runs before the first poll and **retries**. Every bot container
-declares `depends_on` for a voice server and nothing else, so a cold
-`docker compose up` and a host reboot both start bots while comms is still
-binding its port. One un-retried call there is not a transient failure but a
+Adoption runs before the first poll and **waits for the gateway**. Every bot
+container declares `depends_on` for a voice server and nothing else, so a
+cold `docker compose up` and a host reboot both start bots while comms is
+still binding its port. One ask there is not a transient failure but a
 permanent one: the resolver's 45-second fallback expires, the next read
 succeeds with an empty claim, and from that moment the bot refuses its own
-owner with nothing further in the log.
+owner with nothing further in the log — and the process never exits, so
+`restart: unless-stopped` never replaces it. A retry *budget* is no better
+for the same reason, so a gateway that has not answered is asked again for as
+long as it takes; waiting costs a bot that could not have served a message
+anyway. A 404 is the exception and is given up on after a few asks: the claim
+routes are not going to appear while the surfaces are held, and falling back
+to the configured list is what a half-deployed hive needs.
+
+The adoption reference is held to being an ASCII integer. `str.isdigit` is
+true of superscripts and circled numerals, which raise inside `int`, and of
+fullwidth digits, which `int` silently normalises — which produced a fallback
+list that looked right beside a claim no inbound id could ever equal. A
+reference that is not an id leaves the configured list standing and says so,
+because narrowing to something unmatchable is a bot that goes dark. A claim
+held by somebody other than the configured reference is a warning naming
+both: that is the shape a wrong digit in the deployment takes, and it is
+otherwise indistinguishable from a healthy boot.
+
+The gateway applies this table's migrations from `surface_claims.init`, which
+`broker.init_db` calls. Not `executescript(SCHEMA)`: the create is
+`IF NOT EXISTS`, so against a table that already exists it is a no-op and
+every column the schema grows afterwards is silently absent. That divergence
+— the test fixture calling `init` while the gateway called `executescript` —
+is invisible from the suite, because every test opens a fresh database whose
+`CREATE TABLE` already carries the new column.
 
 The allow-list each container is handed is narrowed to the adopted person
 (`claims.fallback_list`). That list is what the bot authorizes by for 45

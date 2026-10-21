@@ -30,20 +30,33 @@ from config import config as stack_config
 
 log = logging.getLogger("hive-mind-surfaces")
 
-#: How many times adoption asks before it gives up, and how long it waits
-#: between. Nothing orders a bot container after the gateway — every one of
-#: them declares `depends_on` for a voice server and nothing else — so a cold
-#: `docker compose up` and a host reboot both start bots while comms is still
-#: binding its port. One un-retried call there leaves the resolver answering
-#: "nobody" for the life of the process: the 45-second fallback expires, the
-#: next read succeeds with an empty claim, and from that moment the bot
-#: refuses its own owner with nothing further in the log.
-ADOPT_ATTEMPTS = 6
+#: How long adoption waits between asks. It does not give up: nothing orders a
+#: bot container after the gateway — every one declares `depends_on` for a
+#: voice server and nothing else — so a cold `docker compose up` and a host
+#: reboot both start bots while comms is still binding its port, next to two
+#: GPU voice servers and a migration.
+#:
+#: A budget was worse than no retry at all. Running out does not leave the bot
+#: on its allow-list: `_is_allowed_user` reads the claim before it consults
+#: `supported`, so the first inbound message after comms comes up succeeds
+#: with an empty claim, clears the backoff, and from that moment the bot
+#: refuses its own owner permanently — the process never exits, so
+#: `restart: unless-stopped` never rescues it, and the only trace is one
+#: warning at boot. Waiting here costs a bot that could not have served a
+#: message anyway.
 ADOPT_DELAY_SECONDS = 5.0
 
-#: Answers from `ClaimResolver.adopt` that mean the gateway never decided, as
-#: opposed to deciding against us. Only these are worth asking again.
-_RETRYABLE = ("unreachable", "unsupported")
+#: A gateway that is up and has no claim routes at all. Worth a couple of
+#: asks in case it is mid-restart, and then not worth waiting on: the routes
+#: are not going to appear, and the surface falling back to its configured
+#: list is exactly what a half-deployed hive needs.
+UNSUPPORTED_ATTEMPTS = 3
+
+#: The gateway never answered: refused the connection, timed out, or failed.
+#: Asked again for as long as it takes.
+_UNREACHABLE = "unreachable"
+#: The gateway answered 404 — it has no claim routes.
+_UNSUPPORTED = "unsupported"
 
 
 def _configured_list(surface: str) -> list:
@@ -51,6 +64,20 @@ def _configured_list(surface: str) -> list:
     if surface == "discord":
         return list(stack_config.discord_allowed_users or [])
     return list(stack_config.telegram_allowed_users or [])
+
+
+def _as_surface_id(ref: str) -> int | None:
+    """`ref` as the integer the surfaces compare against, or None.
+
+    ASCII digits only. `str.isdigit` is true of superscripts and circled
+    numerals, which raise inside `int`, and true of fullwidth digits, which
+    `int` silently normalises — so a pasted fullwidth id produced a fallback
+    list that looked right beside a claim that could never match.
+    """
+    body = ref[1:] if ref.startswith("-") else ref
+    if not body.isascii() or not body.isdigit():
+        return None
+    return int(ref)
 
 
 def adopt_reference(surface: str) -> str:
@@ -89,11 +116,30 @@ def fallback_list(surface: str) -> list:
         return allowed
     kept = [entry for entry in allowed if str(entry).strip() == ref]
     if kept:
+        dropped = [entry for entry in allowed if str(entry).strip() != ref]
+        if dropped:
+            # Said out loud, because it is a person losing access. Nothing
+            # else in the logs distinguishes somebody dropped from the list
+            # from a stranger: both arrive as one rejection line.
+            log.warning(
+                "surfaces: %s now answers %s alone; %s dropped from the "
+                "fallback list by this mind's claim",
+                surface, ref, ", ".join(str(entry) for entry in dropped),
+            )
         return kept
-    # A reference the list never held — a container named one explicitly. Keep
-    # the element type the surfaces compare against rather than the string it
-    # arrived as.
-    return [int(ref)] if ref.lstrip("-").isdigit() else [ref]
+    # A reference the list never held — a container named one explicitly.
+    numeric = _as_surface_id(ref)
+    if numeric is None:
+        # Narrowing to a value the surfaces can never match is a bot that
+        # goes dark on the first blip, so the configured list stands and the
+        # disagreement is said rather than enacted.
+        log.warning(
+            "surfaces: %s adoption reference %r is not a surface id; the "
+            "configured allow-list stands as the fallback",
+            surface, ref,
+        )
+        return allowed
+    return [numeric]
 
 
 def install_claim_resolver(surface: str) -> surface_claim.ClaimResolver | None:
@@ -122,15 +168,20 @@ def install_claim_resolver(surface: str) -> surface_claim.ClaimResolver | None:
 async def adopt_claim(
     surface: str,
     *,
-    attempts: int = ADOPT_ATTEMPTS,
+    attempts: int | None = None,
     delay: float = ADOPT_DELAY_SECONDS,
     sleep=None,
 ) -> str:
     """Carry this container's configured person across as the claim.
 
-    Runs before the surface starts polling, and keeps asking while the
-    gateway has not answered either way. `already_decided` is the expected
+    Runs before the surface starts polling, and keeps asking until the
+    gateway answers one way or the other. `already_decided` is the expected
     answer on every boot after the first and is not a failure.
+
+    `attempts` caps the asks, for tests and for a deployment that would
+    rather its bots came up unclaimed than waited. Unset means a gateway that
+    is merely not up yet is waited for, which is the only shape in which
+    requirement "nothing goes dark" survives a cold boot.
     """
     waiter = asyncio.sleep if sleep is None else sleep
     ref = adopt_reference(surface)
@@ -146,22 +197,54 @@ async def adopt_claim(
     if resolver is None:
         return "no_resolver"
     reason = "no_resolver"
-    for attempt in range(1, max(1, attempts) + 1):
+    asked = 0
+    unsupported_asks = 0
+    while True:
         answer = await resolver.adopt(ref)
         reason = answer.reason or ""
+        asked += 1
         if answer.claimed:
             log.info("surfaces: %s claim adopted for this mind", surface)
             return "adopted"
-        if reason not in _RETRYABLE:
+        if reason == _UNSUPPORTED:
+            unsupported_asks += 1
+            if unsupported_asks >= UNSUPPORTED_ATTEMPTS:
+                log.warning(
+                    "surfaces: %s claim routes absent after %d asks; this bot "
+                    "is answering its configured allow-list",
+                    surface, unsupported_asks,
+                )
+                return reason
+        elif reason != _UNREACHABLE:
             # The gateway decided, and decided against us. Expected on every
-            # boot after the first, so this is not a warning.
-            log.info("surfaces: %s claim left as it stands (%s)", surface, reason)
+            # boot after the first, so this is not a warning — unless the
+            # claim it is holding is somebody other than the one this
+            # container is configured to adopt, which is the shape a wrong
+            # digit in the deployment takes and is otherwise indistinguishable
+            # from a healthy boot.
+            standing = (answer.claimed_ref or "").strip()
+            if standing and standing != ref:
+                log.warning(
+                    "surfaces: %s is claimed by %s, not the %s this container "
+                    "is configured to adopt; the claim wins — release it to "
+                    "change hands",
+                    surface, standing, ref,
+                )
+            else:
+                log.info(
+                    "surfaces: %s claim left as it stands (%s)", surface, reason
+                )
             return reason
-        if attempt < max(1, attempts):
-            await waiter(delay)
-    log.warning(
-        "surfaces: %s claim not adopted after %d attempts (%s); the bot is "
-        "answering its configured allow-list until the gateway answers",
-        surface, max(1, attempts), reason,
-    )
-    return reason
+        if attempts is not None and asked >= max(1, attempts):
+            log.warning(
+                "surfaces: %s claim not adopted after %d asks (%s)",
+                surface, asked, reason,
+            )
+            return reason
+        if asked == 1 or asked % 12 == 0:
+            log.warning(
+                "surfaces: %s waiting on the gateway to adopt this bot's claim "
+                "(%s, ask %d); it will not start answering until this settles",
+                surface, reason, asked,
+            )
+        await waiter(delay)

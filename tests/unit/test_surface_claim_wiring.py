@@ -194,6 +194,68 @@ class TestAGatewayThatIsNotUpYet:
         assert len(state["adopts"]) == 3
         assert len(slept) == 2
 
+    async def test_adoption_waits_out_a_gateway_that_is_merely_late(
+        self, monkeypatch
+    ) -> None:
+        """A budget was worse than no retry at all. Running out does not leave
+        the bot on its allow-list: the first message after comms comes up
+        reads an empty claim, clears the backoff, and the bot refuses its own
+        owner for the life of a process `restart: unless-stopped` will never
+        replace."""
+        state: dict = {"refuse_adopts": 20}
+        slept: list[float] = []
+
+        async def _sleep(seconds: float) -> None:
+            slept.append(seconds)
+
+        server = await _gateway(state)
+        try:
+            _env(monkeypatch, server, "ada-uuid")
+            monkeypatch.setenv("SURFACE_CLAIM_ADOPT_REF", "8776938611")
+            claims.install_claim_resolver("telegram")
+
+            outcome = await claims.adopt_claim("telegram", sleep=_sleep)
+        finally:
+            await server.close()
+
+        assert outcome == "adopted"
+        assert len(state["adopts"]) == 21
+        assert len(slept) == 20
+
+    async def test_a_gateway_with_no_claim_routes_is_not_waited_on(
+        self, monkeypatch
+    ) -> None:
+        """A 404 is a hive that has not deployed the routes. They are not
+        going to appear while this bot holds its first poll, and falling back
+        to the configured list is what a half-deployed hive needs."""
+        asks: list[str] = []
+
+        async def absent(request: web.Request) -> web.Response:
+            asks.append(request.match_info["mind_id"])
+            return web.Response(status=404, text="no such route")
+
+        app = web.Application()
+        app.router.add_post(
+            "/broker/minds/{mind_id}/surface-claim/adopt", absent
+        )
+        server = TestServer(app)
+        await server.start_server()
+
+        async def _sleep(_seconds: float) -> None:
+            return None
+
+        try:
+            _env(monkeypatch, server, "bob-uuid")
+            monkeypatch.setenv("SURFACE_CLAIM_ADOPT_REF", "8776938611")
+            claims.install_claim_resolver("telegram")
+
+            outcome = await claims.adopt_claim("telegram", sleep=_sleep)
+        finally:
+            await server.close()
+
+        assert outcome == "unsupported"
+        assert len(asks) == claims.UNSUPPORTED_ATTEMPTS
+
     async def test_adoption_gives_up_and_says_which_way_it_failed(
         self, monkeypatch
     ) -> None:
@@ -241,3 +303,168 @@ class TestWhatTheFallbackListHolds:
         )
 
         assert claims.fallback_list("telegram") == [8776938611, 8636028257]
+
+
+class TestWhatAContainerDoesBeforeItPolls:
+    async def test_the_claim_is_adopted_before_the_telegram_bot_runs(
+        self, monkeypatch
+    ) -> None:
+        """Order is the behaviour. A surface that starts polling first answers
+        its first messages from the configured list, and the claim this whole
+        mechanism exists for decides nothing for them."""
+        import surfaces.telegram as entry
+
+        state: dict = {}
+        server = await _gateway(state)
+        seen: dict = {}
+
+        async def _run_bot() -> None:
+            resolver = surface_claim.installed("telegram")
+            seen["resolver_installed"] = resolver is not None
+            seen["adopts_by_now"] = len(state.get("adopts", []))
+
+        try:
+            _env(monkeypatch, server, "ada-uuid")
+            monkeypatch.setenv("SURFACE_CLAIM_ADOPT_REF", "8776938611")
+            monkeypatch.setattr(entry, "run_telegram_bot", _run_bot)
+
+            await entry._run()
+        finally:
+            await server.close()
+
+        assert seen["resolver_installed"] is True
+        assert seen["adopts_by_now"] == 1
+        assert state["adopts"] == [("ada-uuid", "telegram", "8776938611")]
+
+    async def test_the_claim_is_adopted_before_the_discord_bot_runs(
+        self, monkeypatch
+    ) -> None:
+        import surfaces.discord as entry
+
+        state: dict = {}
+        server = await _gateway(state)
+        seen: dict = {}
+
+        async def _run_bot() -> None:
+            seen["resolver_installed"] = (
+                surface_claim.installed("discord") is not None
+            )
+            seen["adopts_by_now"] = len(state.get("adopts", []))
+
+        try:
+            _env(monkeypatch, server, "ada-uuid")
+            monkeypatch.setenv("SURFACE_CLAIM_ADOPT_REF", "839112201109110825")
+            monkeypatch.setattr(entry, "run_discord_bot", _run_bot)
+
+            await entry._run()
+        finally:
+            await server.close()
+
+        assert seen["resolver_installed"] is True
+        assert seen["adopts_by_now"] == 1
+
+    async def test_the_surface_is_handed_the_narrowed_list_not_the_shared_one(
+        self, monkeypatch
+    ) -> None:
+        """`fallback_list` is guarded on its own, but what the bot authorises
+        by is the `SurfaceConfig` it was configured with — one layer further
+        on, and the layer the requirement is about."""
+        import surfaces.telegram as entry
+        from surfaces.config import surface_config
+
+        state: dict = {}
+        server = await _gateway(state)
+        handed: dict = {}
+
+        async def _run_bot() -> None:
+            return None
+
+        try:
+            _env(monkeypatch, server, "ada-uuid")
+            monkeypatch.setenv("SURFACE_CLAIM_ADOPT_REF", "8776938611")
+            monkeypatch.setattr(
+                claims, "_configured_list",
+                lambda surface: [8776938611, 8636028257],
+            )
+            monkeypatch.setattr(entry, "run_telegram_bot", _run_bot)
+            monkeypatch.setattr(
+                entry, "configure",
+                lambda cfg: handed.update(users=list(cfg.telegram_allowed_users)),
+            )
+
+            await entry._run()
+        finally:
+            await server.close()
+
+        assert handed["users"] == [8776938611]
+        # And the unnamed call still hands over the file's own list, which is
+        # what every other reader of this config expects.
+        assert list(surface_config().telegram_allowed_users) == [
+            8776938611, 8636028257
+        ]
+
+
+class TestAGatewayThatHasDecided:
+    async def test_a_decided_claim_stops_the_asking(self, monkeypatch) -> None:
+        """Expected on every boot after the first. Treating it as retryable
+        held every surface for the whole retry window before it started."""
+        state: dict = {"claimed_ref": "8776938611"}
+        slept: list[float] = []
+
+        async def _sleep(seconds: float) -> None:
+            slept.append(seconds)
+
+        server = await _gateway(state)
+        try:
+            _env(monkeypatch, server, "bob-uuid")
+            monkeypatch.setenv("SURFACE_CLAIM_ADOPT_REF", "8776938611")
+            claims.install_claim_resolver("telegram")
+
+            outcome = await claims.adopt_claim("telegram", sleep=_sleep)
+        finally:
+            await server.close()
+
+        assert outcome == "already_decided"
+        assert len(state["adopts"]) == 1
+        assert slept == []
+
+
+class TestAnAdoptionReferenceThatIsNotAnId:
+    def test_a_handle_rather_than_an_id_leaves_the_list_alone(
+        self, monkeypatch
+    ) -> None:
+        """Narrowing to something no inbound user can equal empties both
+        authorities at once, and the bot goes dark on the first blip."""
+        monkeypatch.setenv("SURFACE_CLAIM_ADOPT_REF", "@danielstewart")
+        monkeypatch.setattr(
+            claims, "_configured_list", lambda surface: [8776938611, 8636028257]
+        )
+
+        assert claims.fallback_list("telegram") == [8776938611, 8636028257]
+
+    def test_a_fullwidth_id_is_not_quietly_normalised(self, monkeypatch) -> None:
+        """`int` accepts fullwidth digits and `is_allowed` compares text, so
+        normalising here produced a fallback that looked right beside a claim
+        that could never match."""
+        monkeypatch.setenv("SURFACE_CLAIM_ADOPT_REF", "８７７６９３８６１１")
+        monkeypatch.setattr(claims, "_configured_list", lambda surface: [])
+
+        assert claims.fallback_list("telegram") == []
+
+    def test_a_circled_numeral_does_not_crash_the_container(
+        self, monkeypatch
+    ) -> None:
+        """`str.isdigit` is true of it and `int` raises on it, inside
+        `surface_config` at container start."""
+        monkeypatch.setenv("SURFACE_CLAIM_ADOPT_REF", "①")
+        monkeypatch.setattr(claims, "_configured_list", lambda surface: [111])
+
+        assert claims.fallback_list("telegram") == [111]
+
+    def test_a_reference_the_list_never_held_narrows_to_it(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("SURFACE_CLAIM_ADOPT_REF", "5550001")
+        monkeypatch.setattr(claims, "_configured_list", lambda surface: [111, 222])
+
+        assert claims.fallback_list("telegram") == [5550001]

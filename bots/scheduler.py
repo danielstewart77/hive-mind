@@ -340,6 +340,13 @@ async def _try_send_voice(bot_token: str, chat_id: int, text: str, voice_id: str
         log.exception("Voice delivery failed for %s (text already sent)", label)
 
 
+#: Where Telegram's bot API lives. A constant rather than a literal in each
+#: call so the two send paths can be driven against a stand-in: what matters
+#: about them is the status they read back, and that is the one thing a test
+#: cannot observe through the real endpoint.
+TELEGRAM_API_BASE = "https://api.telegram.org"
+
+
 async def _send_voice(bot_token: str, chat_id: int, audio: bytes) -> bool:
     """Deliver the audio, and say whether Telegram took it.
 
@@ -352,7 +359,7 @@ async def _send_voice(bot_token: str, chat_id: int, audio: bytes) -> bool:
     form.add_field("voice", audio, filename="response.ogg", content_type="audio/ogg")
     async with aiohttp.ClientSession() as s:
         async with s.post(
-            f"https://api.telegram.org/bot{bot_token}/sendVoice",
+            f"{TELEGRAM_API_BASE}/bot{bot_token}/sendVoice",
             params={"chat_id": str(chat_id)},
             data=form,
         ) as response:
@@ -373,7 +380,7 @@ async def _send_text(bot_token: str, chat_id: int, text: str) -> bool:
     for i in range(0, max(len(text), 1), limit):
         async with aiohttp.ClientSession() as s:
             async with s.post(
-                f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                f"{TELEGRAM_API_BASE}/bot{bot_token}/sendMessage",
                 json={"chat_id": str(chat_id), "text": text[i : i + limit]},
             ) as response:
                 if response.status >= 400:
@@ -387,7 +394,9 @@ async def _send_text(bot_token: str, chat_id: int, text: str) -> bool:
     return delivered
 
 
-async def _deliver_text(mind_id: str, bot_token: str, text: str) -> int:
+async def _deliver_text(
+    mind_id: str, bot_token: str, text: str, *, chat_id: int | None = None
+) -> int:
     """Deliver to the mind's own person, falling back to the operator.
 
     A reminder belongs to whoever asked for it. But the bot this process
@@ -400,7 +409,8 @@ async def _deliver_text(mind_id: str, bot_token: str, text: str) -> int:
     anything following them lands in the same place rather than resolving the
     claim a second time.
     """
-    chat_id = await owner_chat_for(mind_id)
+    if chat_id is None:
+        chat_id = await owner_chat_for(mind_id)
     if chat_id and await _send_text(bot_token, chat_id, text):
         return chat_id
     fallback = config.telegram_owner_chat_id
@@ -756,7 +766,14 @@ async def fire_skill(skill: ScheduledSkill) -> None:
                   response_chars=len(response or ""), notified=False)
         return
 
-    delivered_to = await _deliver_text(skill.mind_id, bot_token, response)
+    # The chat resolved once at the top of this fire, not resolved again
+    # here: the claim is read across a cache that no longer holds an empty
+    # answer, so two lookups in one fire genuinely can disagree — which put
+    # one person's reminder in another person's chat, one branch over from
+    # the voice note that had the same bug.
+    delivered_to = await _deliver_text(
+        skill.mind_id, bot_token, response, chat_id=chat_id
+    )
     if skill.voice and delivered_to:
         asyncio.create_task(
             _try_send_voice(bot_token, delivered_to, response, skill.mind_id, label)
