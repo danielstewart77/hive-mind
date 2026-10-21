@@ -173,3 +173,37 @@ def test_the_resolver_is_not_built_when_the_surfaces_core_is_absent(monkeypatch)
     monkeypatch.setattr(builtins, "__import__", refuse_surfaces)
 
     assert scheduler._build_voice_servers() is None
+
+
+async def test_a_refused_voice_note_is_reported_rather_than_discarded():
+    """This process holds one bot token and addresses whichever chat claimed
+    the raising mind's own bot. Telegram refuses `sendVoice` from a bot the
+    target never started, exactly as it refuses `sendMessage`."""
+    from unittest.mock import AsyncMock, patch
+
+    from bots import scheduler
+
+    with (
+        patch.object(scheduler, "_tts", new=AsyncMock(return_value=b"ogg")),
+        patch.object(scheduler, "_send_voice", new=AsyncMock(return_value=False)),
+        patch.object(scheduler, "log_event") as log_event,
+    ):
+        await scheduler._try_send_voice("token", 5550001, "hello", "voice", "label")
+
+    assert log_event.call_args is not None
+    assert log_event.call_args.args[1] == "scheduled_skill.voice_refused"
+
+
+async def test_a_delivered_voice_note_is_not_reported_as_refused():
+    from unittest.mock import AsyncMock, patch
+
+    from bots import scheduler
+
+    with (
+        patch.object(scheduler, "_tts", new=AsyncMock(return_value=b"ogg")),
+        patch.object(scheduler, "_send_voice", new=AsyncMock(return_value=True)),
+        patch.object(scheduler, "log_event") as log_event,
+    ):
+        await scheduler._try_send_voice("token", 5550001, "hello", "voice", "label")
+
+    assert log_event.call_args is None

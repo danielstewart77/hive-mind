@@ -24,6 +24,8 @@ from config import config as stack_config
 from core.scheduled_skills import discover_scheduled_skills
 from hive_surfaces import SurfaceConfig
 
+from surfaces import claims
+
 MINDS_ROOT = Path(os.environ.get("MINDS_ROOT", "/usr/src/app/minds"))
 
 # Discovery walks every mind's skills directory. That is milliseconds, but it
@@ -85,13 +87,30 @@ def state_dir() -> str:
     return str(Path("/usr/src/app/data/surfaces") / mind)
 
 
-def surface_config() -> SurfaceConfig:
-    """What this stack's surfaces read, assembled from its own config."""
+def surface_config(surface: str | None = None) -> SurfaceConfig:
+    """What this stack's surfaces read, assembled from its own config.
+
+    Naming the surface this container runs narrows that surface's allow-list
+    to the one person its claim is adopted for. The list is what the bot
+    authorizes by whenever the claim is unreadable — 45 seconds after every
+    failed read — so leaving the shared list in place meant every blip
+    re-authorised everyone it names, on every mind in the stack at once.
+    """
+    telegram_allowed = (
+        claims.fallback_list("telegram")
+        if surface == "telegram"
+        else stack_config.telegram_allowed_users
+    )
+    discord_allowed = (
+        claims.fallback_list("discord")
+        if surface == "discord"
+        else stack_config.discord_allowed_users
+    )
     return SurfaceConfig(
         default_model=stack_config.default_model,
-        telegram_allowed_users=stack_config.telegram_allowed_users,
+        telegram_allowed_users=telegram_allowed,
         telegram_owner_chat_id=getattr(stack_config, "telegram_owner_chat_id", 0),
-        discord_allowed_users=stack_config.discord_allowed_users,
+        discord_allowed_users=discord_allowed,
         discord_allowed_channels=stack_config.discord_allowed_channels,
         discord_task_channels=resident_channels,
         photo_dir=os.environ.get("TELEGRAM_PHOTO_DIR", "/usr/src/app/data/telegram_photos"),

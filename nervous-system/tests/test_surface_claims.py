@@ -425,3 +425,79 @@ def test_a_claim_on_one_surface_leaves_the_other_surface_alone(db_path):
             await db.close()
 
     assert _run(go()).claimed is False
+
+
+def test_a_registered_bot_that_was_never_claimed_still_adopts(db_path):
+    """Saving a token on the bots page writes a row holding only the bot
+    account. Treating that row as a decision made the documented way to set
+    a bot up also the way to make it permanently unadoptable."""
+    async def go():
+        db = await _open(db_path)
+        try:
+            await surface_claims.record_bot(
+                db, "m1", "telegram", "hive_m1_bot", now=1000.0
+            )
+            outcome = await surface_claims.adopt_claim(
+                db, "m1", "telegram", "8776938611", now=1001.0
+            )
+            state = await surface_claims.claim_state(db, "m1", "telegram", now=1001.0)
+            return outcome, state
+        finally:
+            await db.close()
+
+    outcome, state = _run(go())
+    assert outcome.claimed is True
+    assert outcome.reason == "adopted"
+    assert state.claimed_ref == "8776938611"
+
+
+def test_a_released_bot_does_not_re_adopt_on_the_next_boot(db_path):
+    """Adoption runs every start. A release the operator performed on purpose
+    must outlive it, or handing a bot to a second person is undone by the
+    next restart and nothing says so."""
+    async def go():
+        db = await _open(db_path)
+        try:
+            phrase = await surface_claims.mint_phrase(db, "m1", "telegram", now=1000.0)
+            await surface_claims.attempt_claim(
+                db, "m1", "telegram", "111", phrase, now=1001.0
+            )
+            await surface_claims.clear_claim(db, "m1", "telegram")
+            outcome = await surface_claims.adopt_claim(
+                db, "m1", "telegram", "8776938611", now=1002.0
+            )
+            state = await surface_claims.claim_state(db, "m1", "telegram", now=1002.0)
+            return outcome, state
+        finally:
+            await db.close()
+
+    outcome, state = _run(go())
+    assert outcome.claimed is False
+    assert outcome.reason == "already_decided"
+    assert state.claimed_ref == ""
+
+
+def test_replacing_the_token_leaves_the_new_bot_unadoptable(db_path):
+    """A different bot account under the same mind is a bot nobody has
+    claimed. Adoption must not hand it the configured id, because the
+    operator may have just pointed this mind at someone else's bot."""
+    async def go():
+        db = await _open(db_path)
+        try:
+            await surface_claims.record_bot(db, "m1", "telegram", "first_bot", now=1000.0)
+            phrase = await surface_claims.mint_phrase(db, "m1", "telegram", now=1000.0)
+            await surface_claims.attempt_claim(
+                db, "m1", "telegram", "111", phrase, now=1001.0
+            )
+            await surface_claims.record_bot(db, "m1", "telegram", "second_bot", now=1002.0)
+            outcome = await surface_claims.adopt_claim(
+                db, "m1", "telegram", "8776938611", now=1003.0
+            )
+            state = await surface_claims.claim_state(db, "m1", "telegram", now=1003.0)
+            return outcome, state
+        finally:
+            await db.close()
+
+    outcome, state = _run(go())
+    assert outcome.claimed is False
+    assert state.claimed_ref == ""
