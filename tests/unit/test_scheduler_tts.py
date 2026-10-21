@@ -173,3 +173,4 @@ def test_the_resolver_is_not_built_when_the_surfaces_core_is_absent(monkeypatch)
     monkeypatch.setattr(builtins, "__import__", refuse_surfaces)
 
     assert scheduler._build_voice_servers() is None
+

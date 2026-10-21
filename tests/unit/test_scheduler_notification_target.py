@@ -148,3 +148,26 @@ def test_two_minds_resolve_to_their_own_people(monkeypatch):
             await server.close()
 
     assert asyncio.run(go()) == (111, 222)
+
+
+def test_an_unclaimed_bot_is_asked_about_again_on_the_next_fire(monkeypatch):
+    """A mind passes through unclaimed between its container starting and its
+    claim being adopted. Caching that answer holds the mind on the stack-wide
+    chat for the window, which is another person's reminder delivered to the
+    operator."""
+    async def go():
+        state: dict = {"claimed_ref": ""}
+        server = await _gateway(state)
+        try:
+            _point_at(monkeypatch, server)
+            first = await scheduler.claimed_chat_id("mind-uuid")
+            state["claimed_ref"] = "5550001"
+            second = await scheduler.claimed_chat_id("mind-uuid")
+            return first, second, state["reads"]
+        finally:
+            await server.close()
+
+    first, second, reads = asyncio.run(go())
+    assert first == ""
+    assert second == "5550001"
+    assert reads == 2

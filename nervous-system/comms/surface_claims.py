@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS surface_claims (
     phrase_expires_at REAL,
     bot_ref          TEXT,
     phrase_attempts  INTEGER NOT NULL DEFAULT 0,
+    released_at      REAL,
     PRIMARY KEY (mind_id, surface)
 );
 """
@@ -178,6 +179,25 @@ async def init(db: aiosqlite.Connection) -> None:
         await db.execute(
             "ALTER TABLE surface_claims ADD COLUMN phrase_attempts INTEGER NOT NULL DEFAULT 0"
         )
+    if "released_at" not in have:
+        # When a person's hold on this bot was deliberately ended — a release
+        # from the console, or a token replaced with a different bot account.
+        # A row on its own cannot stand for that: `record_bot` writes one the
+        # moment a token is saved, which is the documented way to set a bot
+        # up, and reading that as a decision made it the way to leave the bot
+        # permanently unadoptable.
+        await db.execute("ALTER TABLE surface_claims ADD COLUMN released_at REAL")
+        # Rows written before this column existed cannot say which they are:
+        # a release performed on purpose, a bot account swapped out, and a
+        # token merely registered all left `claimed_ref` NULL and nothing
+        # else. Marked released, because the two readings fail in opposite
+        # directions — an unadoptable bot is one phrase away and visible on
+        # the console, while a wrongly adopted one hands somebody else's bot
+        # over in silence, which is the whole thing this guards.
+        await db.execute(
+            "UPDATE surface_claims SET released_at = ? WHERE claimed_ref IS NULL",
+            (time.time(),),
+        )
     await db.commit()
 
 
@@ -187,6 +207,31 @@ async def _row(db: aiosqlite.Connection, mind_id: str, surface: str) -> aiosqlit
         (mind_id, surface),
     )
     return await cur.fetchone()
+
+
+def _decided(row: aiosqlite.Row, now: float) -> bool:
+    """Whether a person's hold on this bot has already been settled here.
+
+    Three states count, and a row's bare existence is not one of them: a
+    claim someone holds, a release performed on purpose, and a phrase minted
+    and *still outstanding*. Everything else is a bot that has been
+    registered and never decided, which is exactly what adoption is for.
+
+    Still outstanding does the work. Nothing clears an expired `phrase_hash`
+    — `attempt_claim` answers "expired" and leaves it — so counting any
+    phrase at all meant one minted and never sent made the bot permanently
+    unadoptable, while the console read it as unclaimed with no phrase
+    pending and offered minting another, which reproduced the same row.
+    """
+    expires = row["phrase_expires_at"]
+    pending = bool(row["phrase_hash"] or "") and (
+        expires is None or float(expires) > now
+    )
+    return bool(
+        (row["claimed_ref"] or "")
+        or pending
+        or row["released_at"] is not None
+    )
 
 
 async def claim_state(
@@ -290,11 +335,17 @@ async def attempt_claim(
     if not _matches(text, str(row["phrase_hash"])):
         attempts = int(row["phrase_attempts"] or 0) + 1
         if attempts >= MAX_PHRASE_ATTEMPTS:
+            # Marked released as well as emptied. Without it the row reads as
+            # undecided, so the next container restart hands the bot to the
+            # configured adoption reference — a bot changing hands in silence,
+            # triggered by anybody who can message an unclaimed bot and guess
+            # wrong eight times. The operator mints again deliberately.
             await db.execute(
                 "UPDATE surface_claims SET phrase_hash = NULL, "
                 "phrase_issued_at = NULL, phrase_expires_at = NULL, "
-                "phrase_attempts = 0 WHERE mind_id = ? AND surface = ?",
-                (mind_id, key),
+                "phrase_attempts = 0, released_at = ? "
+                "WHERE mind_id = ? AND surface = ?",
+                (moment, mind_id, key),
             )
             await db.commit()
             log.warning(
@@ -312,7 +363,7 @@ async def attempt_claim(
     cur = await db.execute(
         "UPDATE surface_claims SET claimed_ref = ?, claimed_at = ?, "
         "phrase_hash = NULL, phrase_issued_at = NULL, phrase_expires_at = NULL, "
-        "phrase_attempts = 0 "
+        "phrase_attempts = 0, released_at = NULL "
         "WHERE mind_id = ? AND surface = ? AND claimed_ref IS NULL",
         (ref, moment, mind_id, key),
     )
@@ -325,7 +376,7 @@ async def attempt_claim(
 
 
 async def clear_claim(
-    db: aiosqlite.Connection, mind_id: str, surface: str
+    db: aiosqlite.Connection, mind_id: str, surface: str, *, now: float | None = None
 ) -> ClaimState:
     """Release a bot so it can be claimed again.
 
@@ -336,8 +387,8 @@ async def clear_claim(
     await db.execute(
         "UPDATE surface_claims SET claimed_ref = NULL, claimed_at = NULL, "
         "phrase_hash = NULL, phrase_issued_at = NULL, phrase_expires_at = NULL, "
-        "phrase_attempts = 0 WHERE mind_id = ? AND surface = ?",
-        (mind_id, key),
+        "phrase_attempts = 0, released_at = ? WHERE mind_id = ? AND surface = ?",
+        (time.time() if now is None else now, mind_id, key),
     )
     await db.commit()
     return await claim_state(db, mind_id, key)
@@ -370,21 +421,36 @@ async def adopt_claim(
     if not ref:
         return ClaimOutcome(False, "no_sender")
     row = await _row(db, mind_id, key)
-    if row is not None:
-        # A row at all means this bot has been decided here: claimed,
-        # released, or holding a phrase somebody is about to send. Adoption
-        # runs on every boot, so an adoption that overwrote any of those
-        # would undo a release at the next restart and claim a freshly
-        # registered bot for whoever the old file happens to name — which is
-        # the YAML still deciding, one restart later.
+    if row is not None and _decided(row, moment):
+        # Decided here already: claimed, deliberately released, or holding a
+        # phrase somebody is about to send. Adoption runs on every boot, so
+        # an adoption that overwrote any of those would undo a release at the
+        # next restart — the YAML still deciding, one restart later.
+        #
+        # A row that is merely *present* is not a decision. `record_bot`
+        # writes one the moment a token is saved, which is how every bot in
+        # this hive is set up, so reading presence as a decision made the
+        # documented setup path the way to leave a bot permanently
+        # unadoptable and dark.
         existing = str(row["claimed_ref"] or "")
         return ClaimOutcome(existing == ref, "already_decided", existing)
+    # Conditional on the row still being undecided rather than on it being
+    # absent: a bot whose token was saved already has one. Two containers
+    # starting at once therefore still produce one claim — the second finds
+    # the row decided and is refused by the re-read below.
     await db.execute(
         "INSERT INTO surface_claims "
         "(mind_id, surface, claimed_ref, claimed_at, phrase_hash, phrase_expires_at) "
         "VALUES (?, ?, ?, ?, NULL, NULL) "
-        "ON CONFLICT(mind_id, surface) DO NOTHING",
-        (mind_id, key, ref, moment),
+        "ON CONFLICT(mind_id, surface) DO UPDATE SET "
+        "claimed_ref = excluded.claimed_ref, claimed_at = excluded.claimed_at, "
+        "phrase_hash = NULL, phrase_issued_at = NULL, phrase_expires_at = NULL "
+        "WHERE surface_claims.claimed_ref IS NULL "
+        "AND surface_claims.released_at IS NULL "
+        "AND (surface_claims.phrase_hash IS NULL "
+        "     OR surface_claims.phrase_expires_at IS NOT NULL "
+        "     AND surface_claims.phrase_expires_at <= ?)",
+        (mind_id, key, ref, moment, moment),
     )
     await db.commit()
     state = await claim_state(db, mind_id, key, now=moment)
@@ -431,12 +497,17 @@ async def record_bot(
             "surface_claims: bot replaced, claim released mind=%s surface=%s",
             mind_id, key,
         )
+        # Marked released, not merely emptied. A different bot account under
+        # this mind is a bot nobody has claimed, and the next boot's adoption
+        # would otherwise hand it the configured id — which is how a bot the
+        # operator has just pointed somewhere else answers the previous
+        # person's replacement.
         await db.execute(
             "UPDATE surface_claims SET bot_ref = ?, claimed_ref = NULL, "
             "claimed_at = NULL, phrase_hash = NULL, phrase_issued_at = NULL, "
-            "phrase_expires_at = NULL, phrase_attempts = 0 "
+            "phrase_expires_at = NULL, phrase_attempts = 0, released_at = ? "
             "WHERE mind_id = ? AND surface = ?",
-            (ref, mind_id, key),
+            (ref, moment, mind_id, key),
         )
     else:
         await db.execute(
