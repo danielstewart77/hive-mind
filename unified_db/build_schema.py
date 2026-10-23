@@ -57,10 +57,24 @@ DEFAULTS: dict[str, str] = {
 }
 
 
+class SourceUnusable(RuntimeError):
+    """A source store reports nothing, so the DDL would be silently partial."""
+
+
+class UndecidedTable(RuntimeError):
+    """A table exists in a store and nowhere in the map."""
+
+
 @dataclass
 class Build:
     ddl: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    #: source -> the virtual tables and shadows left behind, per source. Not a
+    #: note and not a drop: lucent's `memories_fts` is a 7,663-row search
+    #: index that the "Memory search without FTS5" story replaces with
+    #: pgvector and a Postgres full-text index. Reported so the omission is
+    #: visible rather than inferred from a name filter.
+    search_indexes: dict[str, list[str]] = field(default_factory=dict)
 
 
 def _pg_type(decl: str) -> tuple[str, str | None]:
@@ -127,14 +141,99 @@ def _columns(con: sqlite3.Connection, table: str) -> tuple[list[str], list[str],
     return defs, pkcols, notes
 
 
+def _excluded(con: sqlite3.Connection) -> set[str]:
+    """Virtual tables and their shadow tables.
+
+    Asked of SQLite rather than guessed from names. A `name not like '%_fts%'`
+    filter is wrong twice over: `_` is a single-character wildcard, so it
+    swallows `drafts`, `shifts` and `gifts`; and even escaped it would exclude
+    an ordinary `token_fts_cache`. Worse, a name excluded by a pattern never
+    reaches the undecided-table gate, so the filter silently decided things.
+    """
+    virtual = [
+        r[0] for r in con.execute(
+            "select name from sqlite_master where type='table' "
+            "and sql like 'CREATE VIRTUAL TABLE%'")
+    ]
+    out: set[str] = set(virtual)
+    for v in virtual:
+        out |= {
+            r[0] for r in con.execute(
+                "select name from sqlite_master where type='table' "
+                "and name like ? escape '\\'",
+                (v.replace("_", r"\_") + r"\_%",))
+        }
+    return out
+
+
+def _unique_constraints(con: sqlite3.Connection, table: str) -> list[list[str]]:
+    """Column lists of every UNIQUE constraint on the table.
+
+    Read from `PRAGMA index_list`, where `origin` is `u` for a constraint and
+    `c` for a standalone `CREATE INDEX`. The earlier version of this module
+    reproduced only indexes whose `sqlite_master.sql` was non-NULL, and an
+    inline `UNIQUE` is implemented as a `sqlite_autoindex_*` with NULL `sql` —
+    so every one of them vanished, silently, including the `token_sha`
+    uniqueness whose own source comment explains that losing it lets one
+    holder authenticate as another.
+    """
+    out: list[list[str]] = []
+    for row in con.execute(f'PRAGMA index_list("{table}")'):
+        name, unique, origin = row[1], row[2], row[3]
+        if not unique or origin != "u":
+            continue
+        cols = [r[2] for r in con.execute(f'PRAGMA index_info("{name}")')]
+        if any(c is None for c in cols):
+            continue  # expression index; carried via its own CREATE statement
+        out.append(cols)
+    return out
+
+
+#: A table-level or column-level CHECK, as written in the source DDL.
+_CHECK = re.compile(r"\bCHECK\s*\(", re.IGNORECASE)
+
+
+def _checks(con: sqlite3.Connection, table: str) -> tuple[list[str], list[str]]:
+    """CHECK expressions on the table, and notes for any not carried.
+
+    No pragma reports a CHECK, so this one does read the source DDL — but it
+    reads it by balancing parentheses from each `CHECK(` rather than by
+    pattern-matching the expression, and anything it cannot balance is
+    reported rather than dropped.
+    """
+    row = con.execute(
+        "select sql from sqlite_master where type='table' and name=?", (table,)
+    ).fetchone()
+    if row is None or not row[0]:
+        return [], []
+    sql = row[0]
+    checks: list[str] = []
+    notes: list[str] = []
+    for m in _CHECK.finditer(sql):
+        i = m.end() - 1  # at the opening paren
+        depth = 0
+        for j in range(i, len(sql)):
+            if sql[j] == "(":
+                depth += 1
+            elif sql[j] == ")":
+                depth -= 1
+                if depth == 0:
+                    checks.append(" ".join(sql[i:j + 1].split()))
+                    break
+        else:
+            notes.append(f"{table}: unbalanced CHECK near offset {i}; not carried")
+    return checks, notes
+
+
 def _indexes(con: sqlite3.Connection, table: str, schema: str,
              new_table: str) -> tuple[list[str], list[str]]:
-    """Translated index DDL, and notes for anything not translated.
+    """Translated standalone-index DDL, and notes for anything not translated.
 
-    The index's own SQL is reused rather than rebuilt from `index_info`,
+    Only indexes with their own `CREATE INDEX` statement are handled here;
+    UNIQUE constraints come from `_unique_constraints` and ride on the table.
+    The statement's own SQL is reused rather than rebuilt from `index_info`,
     because `index_info` reports a NULL column for every expression index —
-    the console's `lower(email)` uniqueness among them — and rebuilding from
-    it would drop exactly the indexes that enforce something.
+    the console's `lower(email)` uniqueness among them.
     """
     out: list[str] = []
     notes: list[str] = []
@@ -165,17 +264,40 @@ def build(base: str) -> Build:
     paths = schema_map.source_paths(base)
     created: set[tuple[str, str]] = set()
 
+    # The schemas and pgvector were a hand step on the first host, which made
+    # the documented `build_schema | psql` fail on its first statement against
+    # a fresh database. A producer that cannot rebuild its own artifact is not
+    # a producer.
+    result.ddl.append("CREATE EXTENSION IF NOT EXISTS vector;")
+    for name, purpose in schema_map.SCHEMAS.items():
+        result.ddl.append(f"CREATE SCHEMA IF NOT EXISTS {name};")
+        esc = purpose.replace("'", "''")
+        result.ddl.append(f"COMMENT ON SCHEMA {name} IS '{esc}';")
+
     for source, path in paths.items():
         con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         try:
-            tables = [r[0] for r in con.execute(
-                "select name from sqlite_master where type='table' "
-                "and name not like 'sqlite_%' and name not like '%_fts%'")]
+            skip = _excluded(con)
+            tables = [
+                r[0] for r in con.execute(
+                    "select name from sqlite_master where type='table' "
+                    "and name not like 'sqlite\\_%' escape '\\'")
+                if r[0] not in skip
+            ]
+            result.search_indexes[source] = sorted(skip)
+            if not tables:
+                raise SourceUnusable(
+                    f"{source} ({path}) reports no tables. SQLite opens a "
+                    "zero-byte or truncated file as a valid empty database, so "
+                    "this is a wrong path or a damaged store, not an empty one "
+                    "— and emitting a schema without it would succeed while "
+                    "silently omitting everything it holds.")
             leftover = schema_map.unmapped(source, tables)
             if leftover:
-                result.notes.append(
-                    f"{source}: UNMAPPED tables {leftover} — decide them in "
-                    "schema_map before this DDL is trusted")
+                raise UndecidedTable(
+                    f"{source}: {leftover} appear in the store and nowhere in "
+                    "schema_map. Decide them — place them, or drop them with a "
+                    "reason — before this DDL is trusted.")
             for table in sorted(tables):
                 target = schema_map.placement(source, table)
                 if target is None:
@@ -192,6 +314,13 @@ def build(base: str) -> Build:
                 if pkcols:
                     cols = ", ".join(f'"{c}"' for c in pkcols)
                     defs.append(f"    PRIMARY KEY ({cols})")
+                for ucols in _unique_constraints(con, table):
+                    cols = ", ".join(f'"{c}"' for c in ucols)
+                    defs.append(f"    UNIQUE ({cols})")
+                checks, cnotes = _checks(con, table)
+                for expr in checks:
+                    defs.append(f"    CHECK {expr}")
+                result.notes.extend(f"{source}.{n}" for n in cnotes)
                 result.ddl.append(
                     f'CREATE TABLE {schema}."{new_table}" (\n'
                     + ",\n".join(defs) + "\n);"
@@ -214,11 +343,26 @@ if __name__ == "__main__":
     ap.add_argument("--notes-only", action="store_true")
     args = ap.parse_args()
 
-    b = build(args.base)
+    import sys
+
+    try:
+        b = build(args.base)
+    except (SourceUnusable, UndecidedTable) as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        sys.exit(2)
+
     if not args.notes_only:
         print("\n".join(b.ddl))
+    for src, skipped in sorted(b.search_indexes.items()):
+        if skipped:
+            print(f"-- {src}: search index not carried (replaced by pgvector "
+                  f"and Postgres full-text): {', '.join(skipped)}",
+                  file=sys.stderr)
     if b.notes:
-        import sys
         print(f"\n-- {len(b.notes)} note(s):", file=sys.stderr)
         for n in b.notes:
             print(f"--   {n}", file=sys.stderr)
+    # A note is something a person has to look at, so it is not an exit 0.
+    # The documented pipe into psql must not report success over a schema
+    # whose author was warned about it.
+    sys.exit(1 if b.notes else 0)

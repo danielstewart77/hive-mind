@@ -246,7 +246,12 @@ services:
     environment:
       - POSTGRES_DB=hive
       - POSTGRES_USER=hive
-      - POSTGRES_PASSWORD=${HIVE_PG_PASSWORD:?set HIVE_PG_PASSWORD in .env}
+      # Not `${VAR:?}`: that form fails interpolation for the whole
+      # file, so an unset password would break `compose down` and
+      # `restart hive-comms` in the middle of an incident. An empty
+      # value makes this container refuse to initialise, which is the
+      # blast radius it should have.
+      - POSTGRES_PASSWORD=${HIVE_PG_PASSWORD}
       # Checksums cannot be turned on after initdb without a rewrite, and a
       # silently corrupt page in the memory store is worse than a loud one.
       - POSTGRES_INITDB_ARGS=--data-checksums
@@ -256,7 +261,14 @@ services:
       # `pg_isready` alone answers true while the server is still replaying
       # WAL and refusing connections, so a dependent service can start
       # against a database that is not accepting queries yet.
-      test: ["CMD-SHELL", "psql -U hive -d hive -c 'select 1' > /dev/null 2>&1"]
+      # Over TCP to this container's own address, with the password.
+      # initdb writes `local all all trust` AND `host all all
+      # 127.0.0.1/32 trust`, so neither the socket nor loopback checks
+      # the credential — only an address matching the catch-all `host
+      # all all all scram-sha-256` rule does. POSTGRES_PASSWORD is
+      # only read at initdb, so rotating it in .env leaves the stored
+      # password behind — this is what notices.
+      test: ["CMD-SHELL", "PGPASSWORD=\"$$POSTGRES_PASSWORD\" psql -h \"$$(hostname -i)\" -U hive -d hive -c 'select 1' > /dev/null 2>&1"]
       interval: 10s
       timeout: 5s
       retries: 12
