@@ -228,6 +228,40 @@ services:
   # ─────────────────────────────────────────────────────────────
   # Example Discord bot.
   # ─────────────────────────────────────────────────────────────
+  # The one database every Hive service reads and writes.
+  #
+  # Its own instance rather than sharing a general-purpose Postgres: a
+  # database going into a corporate setting needs its own credentials, its
+  # own backup and its own tuning, and the memory store needs a current
+  # pgvector.
+  hive-postgres:
+    logging: *default-logging
+    image: pgvector/pgvector:pg17
+    container_name: hive-postgres
+    restart: unless-stopped
+    networks:
+      - hivemind
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - POSTGRES_DB=hive
+      - POSTGRES_USER=hive
+      - POSTGRES_PASSWORD=${HIVE_PG_PASSWORD:?set HIVE_PG_PASSWORD in .env}
+      # Checksums cannot be turned on after initdb without a rewrite, and a
+      # silently corrupt page in the memory store is worse than a loud one.
+      - POSTGRES_INITDB_ARGS=--data-checksums
+    volumes:
+      - hive-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # `pg_isready` alone answers true while the server is still replaying
+      # WAL and refusing connections, so a dependent service can start
+      # against a database that is not accepting queries yet.
+      test: ["CMD-SHELL", "psql -U hive -d hive -c 'select 1' > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
   discord-bot:
     build: .
     container_name: hive-mind-discord
@@ -277,6 +311,9 @@ networks:
     name: hivemind
 
 volumes:
+  # Named rather than a bind mount: Postgres wants the host's fastest
+  # disk, which is wherever the Docker root lives.
+  hive-postgres-data:
   whisper-cache:
   kokoro-cache:
 # BEGIN GENERATED VOLUMES
