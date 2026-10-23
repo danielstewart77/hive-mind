@@ -1,0 +1,368 @@
+"""Emit the one database's DDL from the SQLite stores, per `schema_map`.
+
+Read through `PRAGMA table_info` and `PRAGMA index_list` rather than by
+parsing `CREATE TABLE` text. The sources carry comments inside their DDL,
+partial indexes, expression indexes and quoted identifiers, and a regex over
+that is how a column quietly changes type in a migration that reports
+success.
+
+Types are mapped properly here because doing it twice is waste — but the
+foreign keys and the not-nulls the file split made impossible are
+deliberately *not* added. Those are the next story, where a session row can
+finally reference the mind it ran on.
+
+Anything this module cannot translate confidently is reported, never
+guessed and never skipped silently: `build()` returns the DDL and a list of
+notes, and a note is a thing a person has to look at.
+"""
+
+from __future__ import annotations
+
+import re
+import sqlite3
+from dataclasses import dataclass, field
+
+from . import schema_map
+
+#: SQLite's declared type (upper-cased, stripped of size) -> Postgres type.
+#: SQLite stores what it is given regardless of the declaration, so this is a
+#: translation of intent. Width-carrying declarations are handled separately.
+TYPES: dict[str, str] = {
+    "TEXT": "text",
+    "": "text",            # no declared type: SQLite's blob/any affinity
+    "INTEGER": "bigint",
+    "INT": "bigint",
+    "BIGINT": "bigint",
+    "SMALLINT": "smallint",
+    "REAL": "double precision",
+    "DOUBLE": "double precision",
+    "FLOAT": "double precision",
+    "NUMERIC": "numeric",
+    "DECIMAL": "numeric",
+    "BLOB": "bytea",
+    "BOOLEAN": "boolean",
+    "DATETIME": "timestamptz",
+    "TIMESTAMP": "timestamptz",
+    "DATE": "date",
+    "JSON": "jsonb",
+}
+
+#: SQLite default expressions that mean something in Postgres too.
+DEFAULTS: dict[str, str] = {
+    "CURRENT_TIMESTAMP": "now()",
+    "(CURRENT_TIMESTAMP)": "now()",
+    "CURRENT_DATE": "current_date",
+    "(UNIXEPOCH())": "EXTRACT(EPOCH FROM now())::bigint",
+    "UNIXEPOCH()": "EXTRACT(EPOCH FROM now())::bigint",
+}
+
+
+class SourceUnusable(RuntimeError):
+    """A source store reports nothing, so the DDL would be silently partial."""
+
+
+class UndecidedTable(RuntimeError):
+    """A table exists in a store and nowhere in the map."""
+
+
+@dataclass
+class Build:
+    ddl: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    #: source -> the virtual tables and shadows left behind, per source. Not a
+    #: note and not a drop: lucent's `memories_fts` is a 7,663-row search
+    #: index that the "Memory search without FTS5" story replaces with
+    #: pgvector and a Postgres full-text index. Reported so the omission is
+    #: visible rather than inferred from a name filter.
+    search_indexes: dict[str, list[str]] = field(default_factory=dict)
+
+
+def _pg_type(decl: str) -> tuple[str, str | None]:
+    """Postgres type for a SQLite declared type, plus a note if it is a guess."""
+    raw = (decl or "").strip()
+    upper = raw.upper()
+    m = re.match(r"^(VARCHAR|CHAR|CHARACTER)\s*\(\s*(\d+)\s*\)$", upper)
+    if m:
+        return f"varchar({m.group(2)})", None
+    base = re.sub(r"\s*\(.*\)$", "", upper).strip()
+    if base in TYPES:
+        return TYPES[base], None
+    return "text", f"unrecognised declared type {raw!r}; mapped to text"
+
+
+def _default(value: str | None) -> tuple[str | None, str | None]:
+    if value is None:
+        return None, None
+    v = value.strip()
+    if v.upper() in DEFAULTS:
+        return DEFAULTS[v.upper()], None
+    # SQLite's epoch-seconds idiom. Matched by pattern rather than by an
+    # upper-cased lookup, because upper-casing it would mangle the quoted
+    # format string inside it.
+    if re.fullmatch(r"\(?\s*strftime\(\s*'%s'\s*,\s*'now'\s*\)\s*\)?",
+                    v, re.IGNORECASE):
+        return "EXTRACT(EPOCH FROM now())::bigint", None
+    # A plain literal — number, quoted string, NULL — passes through.
+    if re.fullmatch(r"-?\d+(\.\d+)?|'[^']*'|NULL", v, re.IGNORECASE):
+        return v, None
+    return None, f"default {v!r} not translated; left unset"
+
+
+def _columns(con: sqlite3.Connection, table: str) -> tuple[list[str], list[str], list[str]]:
+    """Column definitions, the primary-key columns, and any notes."""
+    rows = list(con.execute(f'PRAGMA table_info("{table}")'))
+    defs: list[str] = []
+    pk: list[tuple[int, str]] = []
+    notes: list[str] = []
+    int_pk_single = sum(1 for r in rows if r[5]) == 1
+    for _cid, name, decl, notnull, dflt, pkpos in rows:
+        pgtype, tnote = _pg_type(decl)
+        if tnote:
+            notes.append(f"{table}.{name}: {tnote}")
+        # An INTEGER PRIMARY KEY in SQLite is the rowid: an autoincrementing
+        # surrogate. Identity BY DEFAULT rather than ALWAYS, because the
+        # loader inserts the existing ids explicitly and ALWAYS refuses that.
+        if pkpos and int_pk_single and (decl or "").upper() in ("INTEGER", "INT"):
+            defs.append(f'    "{name}" bigint GENERATED BY DEFAULT AS IDENTITY')
+            pk.append((pkpos, name))
+            continue
+        piece = f'    "{name}" {pgtype}'
+        if notnull:
+            piece += " NOT NULL"
+        dval, dnote = _default(dflt)
+        if dval is not None:
+            piece += f" DEFAULT {dval}"
+        if dnote:
+            notes.append(f"{table}.{name}: {dnote}")
+        defs.append(piece)
+        if pkpos:
+            pk.append((pkpos, name))
+    pkcols = [n for _, n in sorted(pk)]
+    return defs, pkcols, notes
+
+
+def _excluded(con: sqlite3.Connection) -> set[str]:
+    """Virtual tables and their shadow tables.
+
+    Asked of SQLite rather than guessed from names. A `name not like '%_fts%'`
+    filter is wrong twice over: `_` is a single-character wildcard, so it
+    swallows `drafts`, `shifts` and `gifts`; and even escaped it would exclude
+    an ordinary `token_fts_cache`. Worse, a name excluded by a pattern never
+    reaches the undecided-table gate, so the filter silently decided things.
+    """
+    virtual = [
+        r[0] for r in con.execute(
+            "select name from sqlite_master where type='table' "
+            "and sql like 'CREATE VIRTUAL TABLE%'")
+    ]
+    out: set[str] = set(virtual)
+    for v in virtual:
+        out |= {
+            r[0] for r in con.execute(
+                "select name from sqlite_master where type='table' "
+                "and name like ? escape '\\'",
+                (v.replace("_", r"\_") + r"\_%",))
+        }
+    return out
+
+
+def _unique_constraints(con: sqlite3.Connection, table: str) -> list[list[str]]:
+    """Column lists of every UNIQUE constraint on the table.
+
+    Read from `PRAGMA index_list`, where `origin` is `u` for a constraint and
+    `c` for a standalone `CREATE INDEX`. The earlier version of this module
+    reproduced only indexes whose `sqlite_master.sql` was non-NULL, and an
+    inline `UNIQUE` is implemented as a `sqlite_autoindex_*` with NULL `sql` —
+    so every one of them vanished, silently, including the `token_sha`
+    uniqueness whose own source comment explains that losing it lets one
+    holder authenticate as another.
+    """
+    out: list[list[str]] = []
+    for row in con.execute(f'PRAGMA index_list("{table}")'):
+        name, unique, origin = row[1], row[2], row[3]
+        if not unique or origin != "u":
+            continue
+        cols = [r[2] for r in con.execute(f'PRAGMA index_info("{name}")')]
+        if any(c is None for c in cols):
+            continue  # expression index; carried via its own CREATE statement
+        out.append(cols)
+    return out
+
+
+#: A table-level or column-level CHECK, as written in the source DDL.
+_CHECK = re.compile(r"\bCHECK\s*\(", re.IGNORECASE)
+
+
+def _checks(con: sqlite3.Connection, table: str) -> tuple[list[str], list[str]]:
+    """CHECK expressions on the table, and notes for any not carried.
+
+    No pragma reports a CHECK, so this one does read the source DDL — but it
+    reads it by balancing parentheses from each `CHECK(` rather than by
+    pattern-matching the expression, and anything it cannot balance is
+    reported rather than dropped.
+    """
+    row = con.execute(
+        "select sql from sqlite_master where type='table' and name=?", (table,)
+    ).fetchone()
+    if row is None or not row[0]:
+        return [], []
+    sql = row[0]
+    checks: list[str] = []
+    notes: list[str] = []
+    for m in _CHECK.finditer(sql):
+        i = m.end() - 1  # at the opening paren
+        depth = 0
+        for j in range(i, len(sql)):
+            if sql[j] == "(":
+                depth += 1
+            elif sql[j] == ")":
+                depth -= 1
+                if depth == 0:
+                    checks.append(" ".join(sql[i:j + 1].split()))
+                    break
+        else:
+            notes.append(f"{table}: unbalanced CHECK near offset {i}; not carried")
+    return checks, notes
+
+
+def _indexes(con: sqlite3.Connection, table: str, schema: str,
+             new_table: str) -> tuple[list[str], list[str]]:
+    """Translated standalone-index DDL, and notes for anything not translated.
+
+    Only indexes with their own `CREATE INDEX` statement are handled here;
+    UNIQUE constraints come from `_unique_constraints` and ride on the table.
+    The statement's own SQL is reused rather than rebuilt from `index_info`,
+    because `index_info` reports a NULL column for every expression index —
+    the console's `lower(email)` uniqueness among them.
+    """
+    out: list[str] = []
+    notes: list[str] = []
+    rows = con.execute(
+        "select name, sql from sqlite_master where type='index' and tbl_name=? "
+        "and sql is not null", (table,)).fetchall()
+    for name, sql in rows:
+        stmt = " ".join(sql.split())
+        m = re.match(
+            r'^CREATE\s+(UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?'
+            r'[`"\[]?([\w.]+)[`"\]]?\s+ON\s+[`"\[]?(\w+)[`"\]]?\s*(\(.*)$',
+            stmt, re.IGNORECASE | re.DOTALL)
+        if not m:
+            notes.append(f"{table}: index {name} not translated: {stmt}")
+            continue
+        unique = "UNIQUE " if m.group(1) else ""
+        body = m.group(4)
+        out.append(
+            f'CREATE {unique}INDEX "{schema}_{name}" '
+            f'ON {schema}."{new_table}" {body};'
+        )
+    return out, notes
+
+
+def build(base: str) -> Build:
+    """The whole DDL for the one database, in dependency-free order."""
+    result = Build()
+    paths = schema_map.source_paths(base)
+    created: set[tuple[str, str]] = set()
+
+    # The schemas and pgvector were a hand step on the first host, which made
+    # the documented `build_schema | psql` fail on its first statement against
+    # a fresh database. A producer that cannot rebuild its own artifact is not
+    # a producer.
+    result.ddl.append("CREATE EXTENSION IF NOT EXISTS vector;")
+    for name, purpose in schema_map.SCHEMAS.items():
+        result.ddl.append(f"CREATE SCHEMA IF NOT EXISTS {name};")
+        esc = purpose.replace("'", "''")
+        result.ddl.append(f"COMMENT ON SCHEMA {name} IS '{esc}';")
+
+    for source, path in paths.items():
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            skip = _excluded(con)
+            tables = [
+                r[0] for r in con.execute(
+                    "select name from sqlite_master where type='table' "
+                    "and name not like 'sqlite\\_%' escape '\\'")
+                if r[0] not in skip
+            ]
+            result.search_indexes[source] = sorted(skip)
+            if not tables:
+                raise SourceUnusable(
+                    f"{source} ({path}) reports no tables. SQLite opens a "
+                    "zero-byte or truncated file as a valid empty database, so "
+                    "this is a wrong path or a damaged store, not an empty one "
+                    "— and emitting a schema without it would succeed while "
+                    "silently omitting everything it holds.")
+            leftover = schema_map.unmapped(source, tables)
+            if leftover:
+                raise UndecidedTable(
+                    f"{source}: {leftover} appear in the store and nowhere in "
+                    "schema_map. Decide them — place them, or drop them with a "
+                    "reason — before this DDL is trusted.")
+            for table in sorted(tables):
+                target = schema_map.placement(source, table)
+                if target is None:
+                    continue
+                schema, new_table = target
+                # A merge target is created once, from the winner's shape.
+                winner = schema_map.MERGE_WINNER.get(target)
+                if winner is not None and winner != (source, table):
+                    continue
+                if target in created:
+                    continue
+                defs, pkcols, notes = _columns(con, table)
+                result.notes.extend(f"{source}.{n}" for n in notes)
+                if pkcols:
+                    cols = ", ".join(f'"{c}"' for c in pkcols)
+                    defs.append(f"    PRIMARY KEY ({cols})")
+                for ucols in _unique_constraints(con, table):
+                    cols = ", ".join(f'"{c}"' for c in ucols)
+                    defs.append(f"    UNIQUE ({cols})")
+                checks, cnotes = _checks(con, table)
+                for expr in checks:
+                    defs.append(f"    CHECK {expr}")
+                result.notes.extend(f"{source}.{n}" for n in cnotes)
+                result.ddl.append(
+                    f'CREATE TABLE {schema}."{new_table}" (\n'
+                    + ",\n".join(defs) + "\n);"
+                )
+                idx, inotes = _indexes(con, table, schema, new_table)
+                result.ddl.extend(idx)
+                result.notes.extend(f"{source}.{n}" for n in inotes)
+                created.add(target)
+        finally:
+            con.close()
+    return result
+
+
+if __name__ == "__main__":
+    import argparse  # noqa: PLC0415
+
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--base", default="/home/daniel/Storage",
+                    help="directory holding the Hive checkouts")
+    ap.add_argument("--notes-only", action="store_true")
+    args = ap.parse_args()
+
+    import sys
+
+    try:
+        b = build(args.base)
+    except (SourceUnusable, UndecidedTable) as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+    if not args.notes_only:
+        print("\n".join(b.ddl))
+    for src, skipped in sorted(b.search_indexes.items()):
+        if skipped:
+            print(f"-- {src}: search index not carried (replaced by pgvector "
+                  f"and Postgres full-text): {', '.join(skipped)}",
+                  file=sys.stderr)
+    if b.notes:
+        print(f"\n-- {len(b.notes)} note(s):", file=sys.stderr)
+        for n in b.notes:
+            print(f"--   {n}", file=sys.stderr)
+    # A note is something a person has to look at, so it is not an exit 0.
+    # The documented pipe into psql must not report success over a schema
+    # whose author was warned about it.
+    sys.exit(1 if b.notes else 0)

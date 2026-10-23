@@ -225,6 +225,52 @@ services:
       # - MIND_BACKEND_URL=http://example:8420
     command: ["/opt/venv/bin/python3", "-m", "surfaces.telegram"]
 
+  # The one database every Hive service reads and writes.
+  #
+  # Its own instance rather than sharing a general-purpose Postgres: a
+  # database going into a corporate setting needs its own credentials, its
+  # own backup and its own tuning, and the memory store needs a current
+  # pgvector.
+  hive-postgres:
+    logging: *default-logging
+    image: pgvector/pgvector:pg17
+    container_name: hive-postgres
+    restart: unless-stopped
+    networks:
+      - hivemind
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - POSTGRES_DB=hive
+      - POSTGRES_USER=hive
+      # Not `${VAR:?}`: that form fails interpolation for the whole
+      # file, so an unset password would break `compose down` and
+      # `restart hive-comms` in the middle of an incident. An empty
+      # value makes this container refuse to initialise, which is the
+      # blast radius it should have.
+      - POSTGRES_PASSWORD=${HIVE_PG_PASSWORD}
+      # Checksums cannot be turned on after initdb without a rewrite, and a
+      # silently corrupt page in the memory store is worse than a loud one.
+      - POSTGRES_INITDB_ARGS=--data-checksums
+    volumes:
+      - hive-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # `pg_isready` alone answers true while the server is still replaying
+      # WAL and refusing connections, so a dependent service can start
+      # against a database that is not accepting queries yet.
+      # Over TCP to this container's own address, with the password.
+      # initdb writes `local all all trust` AND `host all all
+      # 127.0.0.1/32 trust`, so neither the socket nor loopback checks
+      # the credential — only an address matching the catch-all `host
+      # all all all scram-sha-256` rule does. POSTGRES_PASSWORD is
+      # only read at initdb, so rotating it in .env leaves the stored
+      # password behind — this is what notices.
+      test: ["CMD-SHELL", "PGPASSWORD=\"$$POSTGRES_PASSWORD\" psql -h \"$$(hostname -i)\" -U hive -d hive -c 'select 1' > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
   # ─────────────────────────────────────────────────────────────
   # Example Discord bot.
   # ─────────────────────────────────────────────────────────────
@@ -277,6 +323,9 @@ networks:
     name: hivemind
 
 volumes:
+  # Named rather than a bind mount: Postgres wants the host's fastest
+  # disk, which is wherever the Docker root lives.
+  hive-postgres-data:
   whisper-cache:
   kokoro-cache:
 # BEGIN GENERATED VOLUMES
