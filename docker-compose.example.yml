@@ -225,9 +225,6 @@ services:
       # - MIND_BACKEND_URL=http://example:8420
     command: ["/opt/venv/bin/python3", "-m", "surfaces.telegram"]
 
-  # ─────────────────────────────────────────────────────────────
-  # Example Discord bot.
-  # ─────────────────────────────────────────────────────────────
   # The one database every Hive service reads and writes.
   #
   # Its own instance rather than sharing a general-purpose Postgres: a
@@ -274,6 +271,9 @@ services:
       retries: 12
       start_period: 30s
 
+  # ─────────────────────────────────────────────────────────────
+  # Example Discord bot.
+  # ─────────────────────────────────────────────────────────────
   discord-bot:
     build: .
     container_name: hive-mind-discord
