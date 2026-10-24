@@ -6,10 +6,18 @@ partial indexes, expression indexes and quoted identifiers, and a regex over
 that is how a column quietly changes type in a migration that reports
 success.
 
-Types are mapped properly here because doing it twice is waste — but the
-foreign keys and the not-nulls the file split made impossible are
-deliberately *not* added. Those are the next story, where a session row can
-finally reference the mind it ran on.
+Foreign keys come from two places. The ones a single source file could
+declare are read from it (`PRAGMA foreign_key_list`) and remapped through
+`schema_map.PLACEMENT`; the ones the file split made impossible are declared
+in `schema_map.CROSS_FILE`. Neither is emitted on faith: every relationship
+is counted against the live stores first, and one with so much as a single
+offending row is reported with its count and left undeclared, because a
+constraint the data cannot satisfy is a load that fails halfway.
+
+They are emitted as `ALTER TABLE` after every table exists, not inline. A
+table-order that satisfies every reference does not exist here — `sessions`
+references itself, and the stores reference each other both ways — and
+sorting tables into one would be a dependency solver nobody asked for.
 
 Anything this module cannot translate confidently is reported, never
 guessed and never skipped silently: `build()` returns the DDL and a list of
@@ -65,6 +73,28 @@ class UndecidedTable(RuntimeError):
     """A table exists in a store and nowhere in the map."""
 
 
+class DanglingReference(RuntimeError):
+    """A declared foreign key points at a table the map does not create."""
+
+
+class Uncountable(RuntimeError):
+    """A declared relationship could not be counted against the live stores.
+
+    Withholding it quietly would make a mistyped column indistinguishable from
+    a relationship that is legitimately unverifiable, and the remedy for those
+    two is not the same.
+    """
+
+
+class StaleDecision(RuntimeError):
+    """`UNKEYED` names a column that no longer exists.
+
+    The same reasoning as `unmapped()`: a decision nobody can check is not a
+    decision. An entry whose column has been renamed or dropped documents
+    nothing while still reading as deliberate.
+    """
+
+
 @dataclass
 class Build:
     ddl: list[str] = field(default_factory=list)
@@ -75,6 +105,22 @@ class Build:
     #: pgvector and a Postgres full-text index. Reported so the omission is
     #: visible rather than inferred from a name filter.
     search_indexes: dict[str, list[str]] = field(default_factory=dict)
+    #: Relationships actually declared, and the ones withheld. Reported so
+    #: the schema can be checked against what the build says it did rather
+    #: than against what somebody remembers deciding.
+    relationships: list[schema_map.Relationship] = field(default_factory=list)
+    #: Relationships the live data refuses. Separate from `unkeyed` because
+    #: these are not decisions: a row points at something that is not there,
+    #: and somebody has to look before the load runs.
+    withheld: list[str] = field(default_factory=list)
+    #: Columns that look like references and are not, with the reason. A
+    #: decision, so it does not move the exit code.
+    unkeyed: list[str] = field(default_factory=list)
+    #: Things this build decided, as opposed to things it could not do. Kept
+    #: apart from `notes` because the exit code turns on notes: a recorded
+    #: decision that never goes away would make a correct build exit non-zero
+    #: forever, and an exit code that is always 1 stops being read.
+    decisions: list[str] = field(default_factory=list)
 
 
 def _pg_type(decl: str) -> tuple[str, str | None]:
@@ -108,12 +154,15 @@ def _default(value: str | None) -> tuple[str | None, str | None]:
     return None, f"default {v!r} not translated; left unset"
 
 
-def _columns(con: sqlite3.Connection, table: str) -> tuple[list[str], list[str], list[str]]:
-    """Column definitions, the primary-key columns, and any notes."""
+def _columns(
+    con: sqlite3.Connection, table: str, target: tuple[str, str],
+) -> tuple[list[str], list[str], list[str], list[str]]:
+    """Column definitions, the primary-key columns, notes, and decisions."""
     rows = list(con.execute(f'PRAGMA table_info("{table}")'))
     defs: list[str] = []
     pk: list[tuple[int, str]] = []
     notes: list[str] = []
+    decisions: list[str] = []
     int_pk_single = sum(1 for r in rows if r[5]) == 1
     for _cid, name, decl, notnull, dflt, pkpos in rows:
         pgtype, tnote = _pg_type(decl)
@@ -129,6 +178,14 @@ def _columns(con: sqlite3.Connection, table: str) -> tuple[list[str], list[str],
         piece = f'    "{name}" {pgtype}'
         if notnull:
             piece += " NOT NULL"
+        dropped = schema_map.DROPPED_DEFAULTS.get((target[0], target[1], name))
+        if dropped is not None:
+            decisions.append(
+                f"{table}.{name}: source default {dflt!r} dropped. {dropped}")
+            defs.append(piece)
+            if pkpos:
+                pk.append((pkpos, name))
+            continue
         dval, dnote = _default(dflt)
         if dval is not None:
             piece += f" DEFAULT {dval}"
@@ -138,7 +195,7 @@ def _columns(con: sqlite3.Connection, table: str) -> tuple[list[str], list[str],
         if pkpos:
             pk.append((pkpos, name))
     pkcols = [n for _, n in sorted(pk)]
-    return defs, pkcols, notes
+    return defs, pkcols, notes, decisions
 
 
 def _excluded(con: sqlite3.Connection) -> set[str]:
@@ -258,16 +315,263 @@ def _indexes(con: sqlite3.Connection, table: str, schema: str,
     return out, notes
 
 
+
+def _source_relationships(
+    con: sqlite3.Connection, source: str, table: str,
+) -> tuple[list[schema_map.Relationship], list[str]]:
+    """Foreign keys the source file declares itself, remapped to the layout.
+
+    Read through `PRAGMA foreign_key_list`, which reports one row per column
+    of a key and groups them by its `id`. A key whose `to` column is NULL
+    references the parent's primary key implicitly, and SQLite expects the
+    reader to resolve that rather than reporting it.
+    """
+    child_target = schema_map.placement(source, table)
+    if child_target is None:
+        return [], []
+    grouped: dict[int, list[tuple[int, str, str, str | None, str]]] = {}
+    for row in con.execute(f'PRAGMA foreign_key_list("{table}")'):
+        fid, seq, parent_table, from_col, to_col, _upd, on_del = row[:7]
+        grouped.setdefault(fid, []).append(
+            (seq, parent_table, from_col, to_col, on_del))
+    out: list[schema_map.Relationship] = []
+    notes: list[str] = []
+    for fid in sorted(grouped):
+        cols = sorted(grouped[fid])
+        parent_table = cols[0][1]
+        on_delete = (cols[0][4] or "NO ACTION").upper()
+        parent_target = schema_map.placement(source, parent_table)
+        if parent_target is None:
+            raise DanglingReference(
+                f"{source}.{table} declares a foreign key onto "
+                f"{source}.{parent_table}, which schema_map does not create. "
+                "Either that table is wrongly dropped or this key is dead — "
+                "emitting it would produce DDL that cannot be applied.")
+        child_cols = tuple(c[2] for c in cols)
+        to_cols = [c[3] for c in cols]
+        if any(c is None for c in to_cols):
+            parent_cols = tuple(_primary_key(con, parent_table))
+            if not parent_cols:
+                notes.append(
+                    f"{table}: foreign key on {child_cols} names no target "
+                    f"column and {parent_table} has no primary key; withheld")
+                continue
+        else:
+            parent_cols = tuple(str(c) for c in to_cols)
+        override = schema_map.ON_DELETE_OVERRIDE.get(
+            (child_target[0], child_target[1], child_cols))
+        why = f"Declared by {source}.{table} itself."
+        if override is not None:
+            on_delete, reason = override
+            why = f"{why} ON DELETE {on_delete} rather than the source's: {reason}"
+        out.append(schema_map.Relationship(
+            child=child_target, child_columns=child_cols,
+            parent=parent_target, parent_columns=parent_cols,
+            on_delete=on_delete, why=why))
+    return out, notes
+
+
+def _primary_key(con: sqlite3.Connection, table: str) -> list[str]:
+    rows = [r for r in con.execute(f'PRAGMA table_info("{table}")') if r[5]]
+    return [r[1] for r in sorted(rows, key=lambda r: r[5])]
+
+
+def _origins() -> dict[tuple[str, str], list[tuple[str, str]]]:
+    """Unified table -> every source table whose rows land in it.
+
+    A list rather than one entry, because a merge target is fed by more than
+    one source and the rows that would break a key may be the loser's. The
+    winner only decides the *shape*; it does not decide whose rows arrive.
+    """
+    out: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    for mapping in (schema_map.PLACEMENT, schema_map.MERGES):
+        for (source, table), target in mapping.items():
+            if (source, table) not in out.setdefault(target, []):
+                out[target].append((source, table))
+    return out
+
+
+def _origin() -> dict[tuple[str, str], tuple[str, str]]:
+    """Unified table -> the source table whose shape it is built from."""
+    return {t: srcs[0] for t, srcs in _origins().items() if srcs}
+
+
+def _offenders(
+    con: sqlite3.Connection, rel: schema_map.Relationship,
+    origins: dict[tuple[str, str], list[tuple[str, str]]],
+) -> int:
+    """Rows that would break this relationship.
+
+    Asked against the live stores, attached side by side, because that is the
+    only place the data exists yet. A NULL child value is permitted by a
+    foreign key and is not an offender; an empty string is not NULL, so it is
+    one — which is the point, since Postgres will refuse it where SQLite
+    never looked.
+    """
+    children = origins.get(rel.child) or []
+    parents = origins.get(rel.parent) or []
+    if not children or not parents:
+        raise Uncountable(
+            f"{rel.child[0]}.{rel.child[1]} or {rel.parent[0]}."
+            f"{rel.parent[1]} is built from no source table, so the "
+            "relationship between them cannot be counted.")
+    pairs = list(zip(rel.child_columns, rel.parent_columns))
+    not_null = " AND ".join(f'c."{c}" IS NOT NULL' for c, _ in pairs)
+    joined = " AND ".join(f'p."{p}" = c."{c}"' for c, p in pairs)
+    present = " OR ".join(
+        f'EXISTS (SELECT 1 FROM "{ps}"."{pt}" p WHERE {joined})'
+        for ps, pt in parents)
+    try:
+        return sum(
+            int(con.execute(
+                f'SELECT count(*) FROM "{cs}"."{ct}" c WHERE {not_null} '
+                f'AND NOT ({present})').fetchone()[0])
+            for cs, ct in children)
+    except sqlite3.Error as exc:
+        raise Uncountable(
+            f"{rel.child[0]}.{rel.child[1]}."
+            f"{'/'.join(rel.child_columns)} -> {rel.parent[0]}."
+            f"{rel.parent[1]}: {exc}") from exc
+
+
+def _verifier(paths: dict[str, str]) -> sqlite3.Connection:
+    """One connection with every source attached under its own name."""
+    con = sqlite3.connect(":memory:")
+    # SQLite allows 10 attached databases by default. Seven stores fit; an
+    # eighth source would make the verifier raise where nothing expects it.
+    try:
+        con.setlimit(sqlite3.SQLITE_LIMIT_ATTACHED, max(len(paths), 10))
+    except (AttributeError, sqlite3.NotSupportedError):  # pragma: no cover
+        pass
+    for name, path in paths.items():
+        con.execute(f'ATTACH DATABASE ? AS "{name}"', (f"file:{path}?mode=ro",))
+    return con
+
+
+def _constraint_ddl(rel: schema_map.Relationship) -> str:
+    child_cols = ", ".join(f'"{c}"' for c in rel.child_columns)
+    parent_cols = ", ".join(f'"{c}"' for c in rel.parent_columns)
+    # A table referencing itself cannot be loaded in an order that satisfies
+    # the key, because the order is per row rather than per table: a session
+    # is inserted before the successor that rotated out of it as often as
+    # after. Deferring to commit is what lets the loader insert the table in
+    # one pass; every other key is satisfied by loading parents first.
+    defer = (" DEFERRABLE INITIALLY DEFERRED"
+             if rel.child == rel.parent else "")
+    return (f'ALTER TABLE {rel.child[0]}."{rel.child[1]}" '
+            f'ADD CONSTRAINT "{rel.name}" FOREIGN KEY ({child_cols}) '
+            f'REFERENCES {rel.parent[0]}."{rel.parent[1]}" ({parent_cols}) '
+            f'ON DELETE {rel.on_delete}{defer};')
+
+
+def _check_unkeyed(columns: dict[tuple[str, str], set[str]]) -> None:
+    """Every `UNKEYED` entry names a column the build actually creates."""
+    stale = [
+        f"{schema}.{table}.{column}"
+        for (schema, table, column) in schema_map.UNKEYED
+        if column not in columns.get((schema, table), set())
+    ]
+    if stale:
+        raise StaleDecision(
+            f"schema_map.UNKEYED names {stale}, which this build does not "
+            "create. A reason written against a column that no longer exists "
+            "reads as a decision and documents nothing.")
+
+
+def _unique_in_source(
+    paths: dict[str, str], origin: dict[tuple[str, str], tuple[str, str]],
+    target: tuple[str, str], columns: tuple[str, ...],
+) -> bool:
+    """Whether these columns are unique in the source behind `target`.
+
+    Postgres refuses a foreign key onto columns carrying no primary key or
+    unique constraint (error 42830), and that refusal arrives at apply time,
+    inside the one transaction, taking the whole schema down with it. Six of
+    the keys here reference `minds.mind_id`, whose uniqueness is an inline
+    UNIQUE rather than the primary key, so this is the live case rather than
+    a hypothetical.
+    """
+    source = origin.get(target)
+    if source is None:
+        return False
+    con = sqlite3.connect(f"file:{paths[source[0]]}?mode=ro", uri=True)
+    try:
+        if list(columns) == _primary_key(con, source[1]):
+            return True
+        return any(list(columns) == cols
+                   for cols in _unique_constraints(con, source[1]))
+    finally:
+        con.close()
+
+
+def _relationships(
+    paths: dict[str, str], declared: list[schema_map.Relationship],
+    created: set[tuple[str, str]],
+) -> tuple[list[str], list[schema_map.Relationship], list[str], list[str]]:
+    """The constraint DDL, what was declared, what the data refused, and the
+    columns that look like references and are not."""
+    origin = _origin()
+    origins = _origins()
+    con = _verifier(paths)
+    ddl: list[str] = []
+    kept: list[schema_map.Relationship] = []
+    withheld: list[str] = []
+    try:
+        for rel in declared:
+            where = f"{rel.child[0]}.{rel.child[1]}.{'/'.join(rel.child_columns)}"
+            onto = f"{rel.parent[0]}.{rel.parent[1]}"
+            if rel.child not in created or rel.parent not in created:
+                raise DanglingReference(
+                    f"{where} references {onto}, which this build does not "
+                    "create.")
+            if len(rel.child_columns) != len(rel.parent_columns):
+                raise DanglingReference(
+                    f"{where} -> {onto}: {len(rel.child_columns)} column(s) "
+                    f"against {len(rel.parent_columns)}. Postgres refuses a "
+                    "key whose sides disagree, and the refusal lands at apply "
+                    "time inside the one transaction, taking the whole schema "
+                    "with it.")
+            if not _unique_in_source(paths, origin, rel.parent,
+                                     rel.parent_columns):
+                raise DanglingReference(
+                    f"{where} -> {onto} ({', '.join(rel.parent_columns)}): the "
+                    "target carries no primary key or unique constraint, so "
+                    "Postgres would refuse the key at apply time and roll the "
+                    "whole schema back.")
+            bad = _offenders(con, rel, origins)
+            if bad:
+                withheld.append(
+                    f"{where} -> {onto}: {bad} row(s) point at something that "
+                    "is not there, so it is not declared.")
+                continue
+            kept.append(rel)
+            ddl.append(_constraint_ddl(rel))
+    finally:
+        con.close()
+    unkeyed = [
+        f"{schema}.{table}.{column}: not a reference. {reason}"
+        for (schema, table, column), reason in sorted(schema_map.UNKEYED.items())
+    ]
+    return ddl, kept, withheld, unkeyed
+
+
 def build(base: str) -> Build:
     """The whole DDL for the one database, in dependency-free order."""
     result = Build()
     paths = schema_map.source_paths(base)
     created: set[tuple[str, str]] = set()
+    declared: list[schema_map.Relationship] = []
+    columns: dict[tuple[str, str], set[str]] = {}
 
     # The schemas and pgvector were a hand step on the first host, which made
     # the documented `build_schema | psql` fail on its first statement against
     # a fresh database. A producer that cannot rebuild its own artifact is not
     # a producer.
+    # One transaction, so a statement that fails leaves nothing behind. A
+    # half-applied schema is worse than none: the re-run fails on its first
+    # statement for a reason that reads as a conflict rather than as the
+    # original error.
+    result.ddl.append("BEGIN;")
     result.ddl.append("CREATE EXTENSION IF NOT EXISTS vector;")
     for name, purpose in schema_map.SCHEMAS.items():
         result.ddl.append(f"CREATE SCHEMA IF NOT EXISTS {name};")
@@ -309,8 +613,11 @@ def build(base: str) -> Build:
                     continue
                 if target in created:
                     continue
-                defs, pkcols, notes = _columns(con, table)
+                columns[target] = {
+                    r[1] for r in con.execute(f'PRAGMA table_info("{table}")')}
+                defs, pkcols, notes, decided = _columns(con, table, target)
                 result.notes.extend(f"{source}.{n}" for n in notes)
+                result.decisions.extend(f"{source}.{n}" for n in decided)
                 if pkcols:
                     cols = ", ".join(f'"{c}"' for c in pkcols)
                     defs.append(f"    PRIMARY KEY ({cols})")
@@ -329,8 +636,33 @@ def build(base: str) -> Build:
                 result.ddl.extend(idx)
                 result.notes.extend(f"{source}.{n}" for n in inotes)
                 created.add(target)
+            # Read after the tables, and for every table in the store —
+            # including a merge loser, whose keys belong to the surviving
+            # shape rather than disappearing with it.
+            for table in sorted(tables):
+                rels, rnotes = _source_relationships(con, source, table)
+                declared.extend(rels)
+                result.notes.extend(f"{source}.{n}" for n in rnotes)
         finally:
             con.close()
+
+    _check_unkeyed(columns)
+    declared.extend(schema_map.CROSS_FILE)
+    seen: set[tuple] = set()
+    unique_declared: list[schema_map.Relationship] = []
+    for rel in declared:
+        key = (rel.child, rel.child_columns, rel.parent, rel.parent_columns)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_declared.append(rel)
+    fk_ddl, kept, withheld, unkeyed = _relationships(
+        paths, unique_declared, created)
+    result.ddl.extend(fk_ddl)
+    result.relationships = kept
+    result.withheld = withheld
+    result.unkeyed = unkeyed
+    result.ddl.append("COMMIT;")
     return result
 
 
@@ -347,8 +679,15 @@ if __name__ == "__main__":
 
     try:
         b = build(args.base)
-    except (SourceUnusable, UndecidedTable) as exc:
+    except (SourceUnusable, UndecidedTable, DanglingReference,
+            Uncountable, StaleDecision) as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
+        sys.exit(2)
+    except (sqlite3.Error, OSError) as exc:
+        # A store that cannot be opened or read is a refusal too, and must
+        # not exit 1 — that is the code for "I emitted a note", and a caller
+        # cannot tell a crash from a warning if they collide.
+        print(f"REFUSED: a source could not be read: {exc}", file=sys.stderr)
         sys.exit(2)
 
     if not args.notes_only:
@@ -358,11 +697,34 @@ if __name__ == "__main__":
             print(f"-- {src}: search index not carried (replaced by pgvector "
                   f"and Postgres full-text): {', '.join(skipped)}",
                   file=sys.stderr)
+    if b.decisions:
+        print(f"\n-- {len(b.decisions)} decision(s):", file=sys.stderr)
+        for d in b.decisions:
+            print(f"--   {d}", file=sys.stderr)
+    print(f"\n-- {len(b.relationships)} relationship(s) declared:",
+          file=sys.stderr)
+    for rel in b.relationships:
+        print(f"--   {rel.child[0]}.{rel.child[1]}"
+              f".{'/'.join(rel.child_columns)} -> "
+              f"{rel.parent[0]}.{rel.parent[1]} ON DELETE {rel.on_delete}",
+              file=sys.stderr)
+    if b.unkeyed:
+        print(f"\n-- {len(b.unkeyed)} column(s) that are not references:",
+              file=sys.stderr)
+        for u in b.unkeyed:
+            print(f"--   {u}", file=sys.stderr)
+    if b.withheld:
+        print(f"\n-- {len(b.withheld)} relationship(s) THE DATA REFUSED:",
+              file=sys.stderr)
+        for w in b.withheld:
+            print(f"--   {w}", file=sys.stderr)
     if b.notes:
         print(f"\n-- {len(b.notes)} note(s):", file=sys.stderr)
         for n in b.notes:
             print(f"--   {n}", file=sys.stderr)
-    # A note is something a person has to look at, so it is not an exit 0.
-    # The documented pipe into psql must not report success over a schema
-    # whose author was warned about it.
-    sys.exit(1 if b.notes else 0)
+    # A note, or a relationship the data refused, is something a person has to
+    # look at, so it is not an exit 0. A recorded decision is not: `unkeyed`
+    # and `decisions` never go away, and an exit code that is always 1 stops
+    # being read. The documented pipe into psql must not report success over a
+    # schema whose author was warned about it.
+    sys.exit(1 if (b.notes or b.withheld) else 0)
