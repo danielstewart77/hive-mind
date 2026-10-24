@@ -15,6 +15,8 @@ query for no gain; Postgres joins across schemas without ceremony.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 #: The six schemas and what each is for. Part of the decided layout, so the
 #: generator can create them rather than leaving them to a hand step.
 SCHEMAS: dict[str, str] = {
@@ -187,9 +189,10 @@ DROPS: dict[tuple[str, str], str] = {
         "Empty (0 rows) and superseded by core.credentials, which carries a "
         "username per holder.",
     ("console", "terminal_labels"):
-        "Carried as data, not as a table: label_backfill moves every kept row "
-        "onto its own core.sessions row, which is where names and colours live. "
-        "The table is dropped only once no label is left unplaced.",
+        "Retired. Names and colours live on core.sessions' own name and color "
+        "columns, where 171 rows carry them. Its single remaining row is a "
+        "superseded name whose conversation was renamed on the live row it "
+        "rotated into, so nothing is lost by dropping it.",
     ("proxy", "alembic_version"):
         "A migration bookkeeping row for the proxy's own SQLite history. The "
         "unified database keeps its own schema history.",
@@ -219,3 +222,197 @@ def unmapped(source: str, tables: list[str]) -> list[str]:
     known |= {t for (s, t) in MERGES if s == source}
     known |= {t for (s, t) in DROPS if s == source}
     return sorted(t for t in tables if t not in known)
+
+
+# ---------------------------------------------------------------------------
+# Relationships
+# ---------------------------------------------------------------------------
+#
+# SQLite could not express most of these. A foreign key cannot span two files,
+# so a session could not reference the mind it ran on, and every relationship
+# between the nervous system's three stores survived only as a convention in
+# application code. The ones a single file *could* declare are read from the
+# source itself (`PRAGMA foreign_key_list`) and remapped through `PLACEMENT`;
+# the ones below are the ones the file split made impossible.
+#
+# Nothing here is emitted on faith. `build_schema` counts the rows that would
+# break each one against the live stores, and a relationship with so much as
+# one offender is reported with its count and left undeclared rather than
+# producing DDL that cannot load.
+
+
+@dataclass(frozen=True)
+class Relationship:
+    """One foreign key in the unified schema.
+
+    `child` and `parent` are `(schema, table)` in the *unified* layout, not
+    source names. `on_delete` is Postgres's own vocabulary.
+    """
+
+    child: tuple[str, str]
+    child_columns: tuple[str, ...]
+    parent: tuple[str, str]
+    parent_columns: tuple[str, ...]
+    on_delete: str
+    why: str
+
+    @property
+    def name(self) -> str:
+        return (f"{self.child[1]}_{'_'.join(self.child_columns)}"
+                f"_fk_{self.parent[1]}")
+
+
+#: Relationships that could not be declared while each store was its own file.
+CROSS_FILE: tuple[Relationship, ...] = (
+    Relationship(
+        ("core", "sessions"), ("mind_id",), ("core", "minds"), ("mind_id",),
+        "RESTRICT",
+        "A session ran on a mind. The mind is not a part of the session and "
+        "deleting one out from under 8,140 sessions is never the intent.",
+    ),
+    Relationship(
+        ("core", "sessions"), ("rotated_from",), ("core", "sessions"), ("id",),
+        "SET NULL",
+        "A chat-surface rotation retires a row for a successor and records "
+        "which row it replaced. Self-referencing, and the successor outlives "
+        "the predecessor being purged.",
+    ),
+    Relationship(
+        ("core", "sessions"), ("group_session_id",),
+        ("core", "group_sessions"), ("id",), "SET NULL",
+        "A session may be part of a group conversation. The session survives "
+        "the group ending.",
+    ),
+    Relationship(
+        ("core", "group_sessions"), ("moderator_mind_id",),
+        ("core", "minds"), ("mind_id",), "RESTRICT",
+        "The mind moderating a group conversation.",
+    ),
+    Relationship(
+        ("core", "context_overhead"), ("mind_id",), ("core", "minds"),
+        ("mind_id",), "CASCADE",
+        "Observed per-mind prompt overhead. It is a measurement of that mind "
+        "and means nothing once the mind is gone.",
+    ),
+    Relationship(
+        ("core", "surface_claims"), ("mind_id",), ("core", "minds"),
+        ("mind_id",), "CASCADE",
+        "Who a mind's bot answers. A claim is part of the mind, not a thing "
+        "that outlives it.",
+    ),
+    Relationship(
+        ("memory", "edges"), ("mind_id",), ("core", "minds"), ("mind_id",),
+        "RESTRICT",
+        "Which mind's graph this edge belongs to. Memory is not deleted as a "
+        "side effect of retiring a mind.",
+    ),
+    Relationship(
+        ("memory", "soul_changes"), ("node_id",), ("memory", "nodes"), ("id",),
+        "RESTRICT",
+        "The audit trail of a soul node's edits. `node_id` is NOT NULL so it "
+        "cannot be blanked, and the history must not be destroyed as a side "
+        "effect of a node deletion — that deletion becomes a conversation.",
+    ),
+    Relationship(
+        ("board", "design_sessions"), ("mind_id",), ("core", "minds"),
+        ("mind_id",), "RESTRICT",
+        "The mind a design session is being run with.",
+    ),
+    Relationship(
+        ("board", "design_sessions"), ("conversation_id",),
+        ("core", "sessions"), ("id",), "SET NULL",
+        "The conversation a design session is attached to. The design "
+        "outlives the conversation.",
+    ),
+)
+
+#: Where the unified schema deliberately differs from what the source file
+#: declared, keyed by `(child schema, child table, child columns)`. A source
+#: saying `NO ACTION` mostly means nobody thought about it rather than that
+#: refusal was chosen, and three of these are parts of their parent: ending a
+#: session is meant to take the session with it.
+ON_DELETE_OVERRIDE: dict[tuple[str, str, tuple[str, ...]], tuple[str, str]] = {
+    ("core", "session_turns", ("session_id",)): (
+        "CASCADE", "A turn is part of its session's ledger."),
+    ("core", "active_sessions", ("session_id",)): (
+        "CASCADE", "A surface binding is part of its session."),
+    ("core", "messages", ("conversation_id",)): (
+        "CASCADE", "A message is part of its broker conversation."),
+    ("board", "design_notices", ("design_id",)): (
+        "CASCADE", "A notice is part of its design session."),
+    ("memory", "edges", ("source_id",)): (
+        "CASCADE", "An edge cannot exist without both of its nodes."),
+    ("memory", "edges", ("target_id",)): (
+        "CASCADE", "An edge cannot exist without both of its nodes."),
+}
+
+#: Defaults the source carries that no row could satisfy under the key now
+#: declared above the column. Dropped rather than translated, because a
+#: default is only reached by an insert that omits the column - and the row it
+#: would write is one the constraint refuses. `sessions.mind_id` defaults to
+#: the literal `'ada'` while `core.minds.mind_id` holds UUIDs, so the default
+#: has been writing a value that matches no mind for as long as it has
+#: existed; it is simply never reached, because every caller supplies the id.
+#: `group_sessions` is empty, which is the only reason its NOT NULL version of
+#: the same default has not fired yet.
+DROPPED_DEFAULTS: dict[tuple[str, str, str], str] = {
+    ("core", "sessions", "mind_id"):
+        "Literal 'ada' against a column of UUIDs.",
+    ("core", "group_sessions", "moderator_mind_id"):
+        "Literal 'ada' against a column of UUIDs, on a NOT NULL column of an "
+        "empty table - so the first insert omitting a moderator would be the "
+        "first one refused.",
+}
+
+#: Columns that look like references and are not, with the reason. Reported by
+#: the build so that "there is no foreign key here" is a decision somebody can
+#: read rather than an omission nobody noticed.
+UNKEYED: dict[tuple[str, str, str], str] = {
+    ("memory", "memories", "mind_id"):
+        "Holds the sentinel 'shared' on 7 rows, meaning hive-wide rather than "
+        "any one mind. A key would refuse the sentinel.",
+    ("memory", "nodes", "mind_id"):
+        "NOT NULL, and one row holds the empty string. Postgres treats '' as "
+        "a value, so a key would refuse that row.",
+    ("memory", "soul_changes", "mind_id"):
+        "One row holds the short name 'skippy' where a UUID belongs.",
+    ("core", "minds", "owner"):
+        "The person a mind belongs to, as free text. Two values name people "
+        "with no console account. Becomes a real reference in the "
+        "multi-user story, which creates the accounts first.",
+    ("core", "credentials", "holder"):
+        "17 of 28 holders are services (the scheduler, the voice server, "
+        "hive-tools) rather than minds. Not a mind reference.",
+    ("core", "messages", "from_mind"):
+        "Mostly a mind id, but also service names such as 'sms-gateway'. A "
+        "free-text sender, not a reference.",
+    ("core", "messages", "to_mind"):
+        "As `from_mind`.",
+    ("core", "messages", "recipient_session_id"):
+        "5 of 7,367 non-null values name sessions that have been swept. The "
+        "column records where a reply was delivered, not a live reference.",
+    ("core", "session_memory", "session_id"):
+        "Holds a harness conversation id, not a session row id. Read by "
+        "(mind_id, client_ref) and never by session: a provenance stamp. "
+        "Renamed in the harness-session-id cleanup story.",
+    ("core", "session_memory", "mind_id"):
+        "Whose carried-forward memory this is - but registration is "
+        "deliberately non-fatal and comms refuses a mind that names no owner, "
+        "so a mind can be running and serving while holding no broker row. "
+        "`POST /sessions/{id}/session-memory` writes the id whether or not "
+        "one exists, and a key would turn that into a 500 on the mind that "
+        "most needs its memory kept.",
+    ("tools", "hitl_requests", "caller_mind"):
+        "Holds the sentinel 'internal' on 3 rows, and names a mind by name "
+        "rather than id.",
+    ("tools", "sudo_grants", "caller_mind"):
+        "As `hitl_requests.caller_mind`.",
+    ("proxy", "usage_log", "model_name"):
+        "The model as named on the request, kept verbatim for the audit. 4 "
+        "rows name a model the proxy no longer lists; a key would rewrite "
+        "history when a model is retired.",
+    ("board", "capability_node_settings", "node_id"):
+        "Declared TEXT against memory.nodes.id, which is an integer, and both "
+        "rows name nodes that no longer exist. A stale settings table, not a "
+        "reference.",
+}
