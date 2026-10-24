@@ -77,6 +77,15 @@ class DanglingReference(RuntimeError):
     """A declared foreign key points at a table the map does not create."""
 
 
+class Uncountable(RuntimeError):
+    """A declared relationship could not be counted against the live stores.
+
+    Withholding it quietly would make a mistyped column indistinguishable from
+    a relationship that is legitimately unverifiable, and the remedy for those
+    two is not the same.
+    """
+
+
 class StaleDecision(RuntimeError):
     """`UNKEYED` names a column that no longer exists.
 
@@ -100,7 +109,13 @@ class Build:
     #: the schema can be checked against what the build says it did rather
     #: than against what somebody remembers deciding.
     relationships: list[schema_map.Relationship] = field(default_factory=list)
+    #: Relationships the live data refuses. Separate from `unkeyed` because
+    #: these are not decisions: a row points at something that is not there,
+    #: and somebody has to look before the load runs.
     withheld: list[str] = field(default_factory=list)
+    #: Columns that look like references and are not, with the reason. A
+    #: decision, so it does not move the exit code.
+    unkeyed: list[str] = field(default_factory=list)
     #: Things this build decided, as opposed to things it could not do. Kept
     #: apart from `notes` because the exit code turns on notes: a recorded
     #: decision that never goes away would make a correct build exit non-zero
@@ -361,25 +376,31 @@ def _primary_key(con: sqlite3.Connection, table: str) -> list[str]:
     return [r[1] for r in sorted(rows, key=lambda r: r[5])]
 
 
-def _origin() -> dict[tuple[str, str], tuple[str, str]]:
-    """Unified table -> the source table it is built from."""
-    out: dict[tuple[str, str], tuple[str, str]] = {}
-    for (source, table), target in schema_map.PLACEMENT.items():
-        winner = schema_map.MERGE_WINNER.get(target)
-        if target in out and winner != (source, table):
-            continue
-        out[target] = (source, table)
-    for (source, table), target in schema_map.MERGES.items():
-        if schema_map.MERGE_WINNER.get(target) == (source, table):
-            out[target] = (source, table)
+def _origins() -> dict[tuple[str, str], list[tuple[str, str]]]:
+    """Unified table -> every source table whose rows land in it.
+
+    A list rather than one entry, because a merge target is fed by more than
+    one source and the rows that would break a key may be the loser's. The
+    winner only decides the *shape*; it does not decide whose rows arrive.
+    """
+    out: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    for mapping in (schema_map.PLACEMENT, schema_map.MERGES):
+        for (source, table), target in mapping.items():
+            if (source, table) not in out.setdefault(target, []):
+                out[target].append((source, table))
     return out
+
+
+def _origin() -> dict[tuple[str, str], tuple[str, str]]:
+    """Unified table -> the source table whose shape it is built from."""
+    return {t: srcs[0] for t, srcs in _origins().items() if srcs}
 
 
 def _offenders(
     con: sqlite3.Connection, rel: schema_map.Relationship,
-    origin: dict[tuple[str, str], tuple[str, str]],
-) -> int | None:
-    """Rows that would break this relationship, or None if it cannot be asked.
+    origins: dict[tuple[str, str], list[tuple[str, str]]],
+) -> int:
+    """Rows that would break this relationship.
 
     Asked against the live stores, attached side by side, because that is the
     only place the data exists yet. A NULL child value is permitted by a
@@ -387,26 +408,41 @@ def _offenders(
     one — which is the point, since Postgres will refuse it where SQLite
     never looked.
     """
-    child = origin.get(rel.child)
-    parent = origin.get(rel.parent)
-    if child is None or parent is None:
-        return None
-    cs, ct = child
-    ps, pt = parent
+    children = origins.get(rel.child) or []
+    parents = origins.get(rel.parent) or []
+    if not children or not parents:
+        raise Uncountable(
+            f"{rel.child[0]}.{rel.child[1]} or {rel.parent[0]}."
+            f"{rel.parent[1]} is built from no source table, so the "
+            "relationship between them cannot be counted.")
     pairs = list(zip(rel.child_columns, rel.parent_columns))
     not_null = " AND ".join(f'c."{c}" IS NOT NULL' for c, _ in pairs)
     joined = " AND ".join(f'p."{p}" = c."{c}"' for c, p in pairs)
-    sql = (f'SELECT count(*) FROM "{cs}"."{ct}" c WHERE {not_null} '
-           f'AND NOT EXISTS (SELECT 1 FROM "{ps}"."{pt}" p WHERE {joined})')
+    present = " OR ".join(
+        f'EXISTS (SELECT 1 FROM "{ps}"."{pt}" p WHERE {joined})'
+        for ps, pt in parents)
     try:
-        return int(con.execute(sql).fetchone()[0])
-    except sqlite3.Error:
-        return None
+        return sum(
+            int(con.execute(
+                f'SELECT count(*) FROM "{cs}"."{ct}" c WHERE {not_null} '
+                f'AND NOT ({present})').fetchone()[0])
+            for cs, ct in children)
+    except sqlite3.Error as exc:
+        raise Uncountable(
+            f"{rel.child[0]}.{rel.child[1]}."
+            f"{'/'.join(rel.child_columns)} -> {rel.parent[0]}."
+            f"{rel.parent[1]}: {exc}") from exc
 
 
 def _verifier(paths: dict[str, str]) -> sqlite3.Connection:
     """One connection with every source attached under its own name."""
     con = sqlite3.connect(":memory:")
+    # SQLite allows 10 attached databases by default. Seven stores fit; an
+    # eighth source would make the verifier raise where nothing expects it.
+    try:
+        con.setlimit(sqlite3.SQLITE_LIMIT_ATTACHED, max(len(paths), 10))
+    except (AttributeError, sqlite3.NotSupportedError):  # pragma: no cover
+        pass
     for name, path in paths.items():
         con.execute(f'ATTACH DATABASE ? AS "{name}"', (f"file:{path}?mode=ro",))
     return con
@@ -442,12 +478,40 @@ def _check_unkeyed(columns: dict[tuple[str, str], set[str]]) -> None:
             "reads as a decision and documents nothing.")
 
 
+def _unique_in_source(
+    paths: dict[str, str], origin: dict[tuple[str, str], tuple[str, str]],
+    target: tuple[str, str], columns: tuple[str, ...],
+) -> bool:
+    """Whether these columns are unique in the source behind `target`.
+
+    Postgres refuses a foreign key onto columns carrying no primary key or
+    unique constraint (error 42830), and that refusal arrives at apply time,
+    inside the one transaction, taking the whole schema down with it. Six of
+    the keys here reference `minds.mind_id`, whose uniqueness is an inline
+    UNIQUE rather than the primary key, so this is the live case rather than
+    a hypothetical.
+    """
+    source = origin.get(target)
+    if source is None:
+        return False
+    con = sqlite3.connect(f"file:{paths[source[0]]}?mode=ro", uri=True)
+    try:
+        if list(columns) == _primary_key(con, source[1]):
+            return True
+        return any(list(columns) == cols
+                   for cols in _unique_constraints(con, source[1]))
+    finally:
+        con.close()
+
+
 def _relationships(
     paths: dict[str, str], declared: list[schema_map.Relationship],
     created: set[tuple[str, str]],
-) -> tuple[list[str], list[schema_map.Relationship], list[str]]:
-    """The constraint DDL, what was declared, and what was withheld and why."""
+) -> tuple[list[str], list[schema_map.Relationship], list[str], list[str]]:
+    """The constraint DDL, what was declared, what the data refused, and the
+    columns that look like references and are not."""
     origin = _origin()
+    origins = _origins()
     con = _verifier(paths)
     ddl: list[str] = []
     kept: list[schema_map.Relationship] = []
@@ -460,12 +524,21 @@ def _relationships(
                 raise DanglingReference(
                     f"{where} references {onto}, which this build does not "
                     "create.")
-            bad = _offenders(con, rel, origin)
-            if bad is None:
-                withheld.append(
-                    f"{where} -> {onto}: could not be counted against the live "
-                    "stores, so it is not declared.")
-                continue
+            if len(rel.child_columns) != len(rel.parent_columns):
+                raise DanglingReference(
+                    f"{where} -> {onto}: {len(rel.child_columns)} column(s) "
+                    f"against {len(rel.parent_columns)}. Postgres refuses a "
+                    "key whose sides disagree, and the refusal lands at apply "
+                    "time inside the one transaction, taking the whole schema "
+                    "with it.")
+            if not _unique_in_source(paths, origin, rel.parent,
+                                     rel.parent_columns):
+                raise DanglingReference(
+                    f"{where} -> {onto} ({', '.join(rel.parent_columns)}): the "
+                    "target carries no primary key or unique constraint, so "
+                    "Postgres would refuse the key at apply time and roll the "
+                    "whole schema back.")
+            bad = _offenders(con, rel, origins)
             if bad:
                 withheld.append(
                     f"{where} -> {onto}: {bad} row(s) point at something that "
@@ -475,9 +548,11 @@ def _relationships(
             ddl.append(_constraint_ddl(rel))
     finally:
         con.close()
-    for (schema, table, column), reason in sorted(schema_map.UNKEYED.items()):
-        withheld.append(f"{schema}.{table}.{column}: not a reference. {reason}")
-    return ddl, kept, withheld
+    unkeyed = [
+        f"{schema}.{table}.{column}: not a reference. {reason}"
+        for (schema, table, column), reason in sorted(schema_map.UNKEYED.items())
+    ]
+    return ddl, kept, withheld, unkeyed
 
 
 def build(base: str) -> Build:
@@ -581,10 +656,12 @@ def build(base: str) -> Build:
             continue
         seen.add(key)
         unique_declared.append(rel)
-    fk_ddl, kept, withheld = _relationships(paths, unique_declared, created)
+    fk_ddl, kept, withheld, unkeyed = _relationships(
+        paths, unique_declared, created)
     result.ddl.extend(fk_ddl)
     result.relationships = kept
     result.withheld = withheld
+    result.unkeyed = unkeyed
     result.ddl.append("COMMIT;")
     return result
 
@@ -602,8 +679,15 @@ if __name__ == "__main__":
 
     try:
         b = build(args.base)
-    except (SourceUnusable, UndecidedTable, DanglingReference) as exc:
+    except (SourceUnusable, UndecidedTable, DanglingReference,
+            Uncountable, StaleDecision) as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
+        sys.exit(2)
+    except (sqlite3.Error, OSError) as exc:
+        # A store that cannot be opened or read is a refusal too, and must
+        # not exit 1 — that is the code for "I emitted a note", and a caller
+        # cannot tell a crash from a warning if they collide.
+        print(f"REFUSED: a source could not be read: {exc}", file=sys.stderr)
         sys.exit(2)
 
     if not args.notes_only:
@@ -624,8 +708,13 @@ if __name__ == "__main__":
               f".{'/'.join(rel.child_columns)} -> "
               f"{rel.parent[0]}.{rel.parent[1]} ON DELETE {rel.on_delete}",
               file=sys.stderr)
+    if b.unkeyed:
+        print(f"\n-- {len(b.unkeyed)} column(s) that are not references:",
+              file=sys.stderr)
+        for u in b.unkeyed:
+            print(f"--   {u}", file=sys.stderr)
     if b.withheld:
-        print(f"\n-- {len(b.withheld)} relationship(s) NOT declared:",
+        print(f"\n-- {len(b.withheld)} relationship(s) THE DATA REFUSED:",
               file=sys.stderr)
         for w in b.withheld:
             print(f"--   {w}", file=sys.stderr)
@@ -633,7 +722,9 @@ if __name__ == "__main__":
         print(f"\n-- {len(b.notes)} note(s):", file=sys.stderr)
         for n in b.notes:
             print(f"--   {n}", file=sys.stderr)
-    # A note is something a person has to look at, so it is not an exit 0.
-    # The documented pipe into psql must not report success over a schema
-    # whose author was warned about it.
-    sys.exit(1 if b.notes else 0)
+    # A note, or a relationship the data refused, is something a person has to
+    # look at, so it is not an exit 0. A recorded decision is not: `unkeyed`
+    # and `decisions` never go away, and an exit code that is always 1 stops
+    # being read. The documented pipe into psql must not report success over a
+    # schema whose author was warned about it.
+    sys.exit(1 if (b.notes or b.withheld) else 0)

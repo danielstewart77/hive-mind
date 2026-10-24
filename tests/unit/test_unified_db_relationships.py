@@ -218,37 +218,101 @@ def built_database():
         _psql("postgres", f'DROP DATABASE IF EXISTS "{name}";')
 
 
-def test_the_database_enforces_exactly_what_the_build_reported(built_database):
-    name, built = built_database
+#: What the one database is supposed to relate, written out rather than read
+#: back off the build. A reconciliation between `Build.ddl` and
+#: `Build.relationships` would pass for any wrongness applied consistently to
+#: both — a key silently dropped, every constraint renamed — because the two
+#: sides move together. This list is the independent side.
+EXPECTED: set[tuple[str, str, str, str]] = {
+    ("board.design_sessions", "conversation_id", "core.sessions", "SET NULL"),
+    ("board.design_sessions", "mind_id", "core.minds", "RESTRICT"),
+    ("board.work_items", "parent_id", "board.work_items", "NO ACTION"),
+    ("core.active_sessions", "session_id", "core.sessions", "CASCADE"),
+    ("core.context_overhead", "mind_id", "core.minds", "CASCADE"),
+    ("core.group_members", "group_name", "core.groups", "NO ACTION"),
+    ("core.group_members", "user_id", "core.users", "NO ACTION"),
+    ("core.group_sessions", "moderator_mind_id", "core.minds", "RESTRICT"),
+    ("core.messages", "conversation_id", "core.conversations", "CASCADE"),
+    ("core.session_turns", "session_id", "core.sessions", "CASCADE"),
+    ("core.sessions", "group_session_id", "core.group_sessions", "SET NULL"),
+    ("core.sessions", "mind_id", "core.minds", "RESTRICT"),
+    ("core.surface_claims", "mind_id", "core.minds", "CASCADE"),
+    ("memory.edges", "mind_id", "core.minds", "RESTRICT"),
+    ("memory.edges", "source_id", "memory.nodes", "CASCADE"),
+    ("memory.edges", "target_id", "memory.nodes", "CASCADE"),
+    ("memory.nodes", "type", "memory.schema_types", "RESTRICT"),
+    ("memory.schema_edges", "source_type", "memory.schema_types", "RESTRICT"),
+    ("memory.schema_edges", "target_type", "memory.schema_types", "RESTRICT"),
+    ("memory.soul_changes", "node_id", "memory.nodes", "RESTRICT"),
+    ("proxy.keys", "client_id", "proxy.clients", "CASCADE"),
+    ("proxy.models", "credential_id", "proxy.credentials", "SET NULL"),
+    ("proxy.models", "provider_id", "proxy.providers", "SET NULL"),
+    ("proxy.providers", "credential_id", "proxy.credentials", "SET NULL"),
+    ("proxy.usage_log", "client_id", "proxy.clients", "NO ACTION"),
+    ("proxy.usage_log", "key_id", "proxy.keys", "NO ACTION"),
+}
+
+_DELETE_RULE = {"a": "NO ACTION", "r": "RESTRICT", "c": "CASCADE",
+                "n": "SET NULL", "d": "SET DEFAULT"}
+
+
+def test_the_database_relates_exactly_what_the_hive_relates(built_database):
+    name, _ = built_database
 
     rows = _psql(name, """
-        SELECT ns.nspname || '.' || cl.relname || '.' || con.conname
+        SELECT cn.nspname || '.' || cl.relname,
+               string_agg(ca.attname, '/' ORDER BY k.ord),
+               pn.nspname || '.' || pa.relname,
+               con.confdeltype
         FROM pg_constraint con
         JOIN pg_class cl ON cl.oid = con.conrelid
-        JOIN pg_namespace ns ON ns.oid = cl.relnamespace
-        WHERE con.contype = 'f' ORDER BY 1;""")
-    enforced = set(filter(None, rows.splitlines()))
-    reported = {
-        f"{r.child[0]}.{r.child[1]}.{r.name}" for r in built.relationships}
+        JOIN pg_namespace cn ON cn.oid = cl.relnamespace
+        JOIN pg_class pa ON pa.oid = con.confrelid
+        JOIN pg_namespace pn ON pn.oid = pa.relnamespace
+        JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS k(att, ord)
+             ON TRUE
+        JOIN pg_attribute ca ON ca.attrelid = cl.oid AND ca.attnum = k.att
+        WHERE con.contype = 'f'
+        GROUP BY 1, 3, 4, con.oid ORDER BY 1, 2;""")
 
-    assert enforced == reported
+    enforced = set()
+    for line in filter(None, rows.splitlines()):
+        child, cols, parent, code = line.split("|")
+        enforced.add((child, cols, parent, _DELETE_RULE[code]))
+
+    assert enforced == EXPECTED
 
 
-def test_the_on_delete_rule_is_the_one_the_build_decided(built_database):
-    name, built = built_database
-    decided = {r.name: r.on_delete for r in built.relationships}
+def test_a_table_that_references_itself_defers_to_commit(built_database):
+    """Without this the loader cannot insert such a table in one pass: its
+    order is per row, not per table."""
+    name, _ = built_database
 
     rows = _psql(name, """
-        SELECT conname, confdeltype FROM pg_constraint
-        WHERE contype = 'f' ORDER BY 1;""")
-    letters = {"a": "NO ACTION", "r": "RESTRICT", "c": "CASCADE",
-               "n": "SET NULL", "d": "SET DEFAULT"}
-    actual = {}
-    for line in filter(None, rows.splitlines()):
-        conname, code = line.split("|")
-        actual[conname] = letters[code]
+        SELECT conname, condeferrable FROM pg_constraint con
+        JOIN pg_class cl ON cl.oid = con.conrelid
+        WHERE con.contype = 'f' AND con.conrelid = con.confrelid
+        ORDER BY 1;""")
+    deferred = dict(line.split("|") for line in filter(None, rows.splitlines()))
 
-    assert actual == decided
+    assert deferred == {"work_items_parent_id_fk_work_items": "t"}
+
+
+def test_a_statement_that_fails_leaves_no_half_applied_schema(built_database):
+    """The whole DDL is one transaction, so a bad apply is a no-op."""
+    _, built = built_database
+    name = f"keys_atomic_{uuid.uuid4().hex[:10]}"
+    _psql("postgres", f'CREATE DATABASE "{name}";')
+    try:
+        broken = list(built.ddl)
+        broken.insert(-1, "CREATE TABLE core.\"boom\" (x no_such_type);")
+        with pytest.raises(AssertionError):
+            _psql(name, "", stdin="\n".join(broken))
+
+        assert _psql(name, "SELECT count(*) FROM information_schema.tables "
+                           "WHERE table_schema = 'core';") == "0"
+    finally:
+        _psql("postgres", f'DROP DATABASE IF EXISTS "{name}";')
 
 
 def test_ending_a_session_takes_its_turns_and_a_busy_mind_cannot_be_deleted(
@@ -301,3 +365,236 @@ def test_retiring_a_proxy_credential_empties_the_models_that_named_it(
     assert _psql(name, "SELECT credential_id IS NULL FROM proxy.models "
                        "WHERE id = 9001;") == "t"
     _psql(name, "DELETE FROM proxy.models WHERE id = 9001;")
+
+
+# ---------------------------------------------------------------------------
+# The judgement inside the check, driven by fixtures rather than live rows
+# ---------------------------------------------------------------------------
+
+def test_a_null_reference_is_not_a_row_pointing_nowhere(two_stores):
+    """A foreign key permits NULL. Counting it as an offender would withhold
+    every optional relationship in the hive."""
+    con = sqlite3.connect(two_stores / "left.db")
+    con.execute("INSERT INTO parent (id) VALUES ('real')")
+    con.execute("INSERT INTO child (id, parent_id) VALUES ('a', NULL)")
+    con.commit()
+    con.close()
+
+    built = build_schema.build(str(two_stores))
+
+    assert built.withheld == []
+    assert 'REFERENCES core."parent" ("id")' in _constraint_for(built, "child")
+
+
+def test_a_wildcard_in_the_data_does_not_count_as_a_match(two_stores):
+    """The offender count is an equality, not a pattern match."""
+    con = sqlite3.connect(two_stores / "left.db")
+    con.execute("INSERT INTO parent (id) VALUES ('real')")
+    con.execute("INSERT INTO child (id, parent_id) VALUES ('a', '%')")
+    con.commit()
+    con.close()
+
+    built = build_schema.build(str(two_stores))
+
+    assert any("1 row(s)" in w for w in built.withheld), built.withheld
+
+
+def test_a_relationship_the_data_refuses_moves_the_exit_code(two_stores):
+    """A recorded decision never goes away and must not move it; a row
+    pointing nowhere must, or the documented pipe into psql reports success
+    over a schema that is quietly missing a constraint."""
+    con = sqlite3.connect(two_stores / "left.db")
+    con.execute("INSERT INTO child (id, parent_id) VALUES ('a', 'gone')")
+    con.commit()
+    con.close()
+
+    refused = build_schema.build(str(two_stores))
+    assert refused.withheld and refused.notes == []
+
+    con = sqlite3.connect(two_stores / "left.db")
+    con.execute("DELETE FROM child")
+    con.commit()
+    con.close()
+    clean = build_schema.build(str(two_stores))
+
+    assert clean.withheld == []
+
+
+def test_a_column_that_is_not_a_reference_is_reported_with_its_reason(
+        two_stores, monkeypatch):
+    monkeypatch.setattr(schema_map, "UNKEYED", {
+        ("board", "child", "parent_id"): "A sentinel, not a reference."})
+
+    built = build_schema.build(str(two_stores))
+
+    assert any("board.child.parent_id" in u and "sentinel" in u
+               for u in built.unkeyed), built.unkeyed
+    assert built.withheld == []
+
+
+def test_a_decision_is_not_a_note(two_stores, monkeypatch):
+    """`notes` drives the exit code, so a decision that never goes away must
+    not land there."""
+    monkeypatch.setattr(schema_map, "DROPPED_DEFAULTS", {
+        ("board", "child", "parent_id"): "Points at nothing that can exist."})
+    built = build_schema.build(str(two_stores))
+
+    assert built.notes == []
+    assert any("parent_id" in d and "dropped" in d for d in built.decisions)
+
+
+def test_a_relationship_that_cannot_be_counted_refuses_the_build(
+        two_stores, monkeypatch):
+    """A mistyped column must not read as a relationship nobody could check."""
+    monkeypatch.setattr(schema_map, "CROSS_FILE", (
+        schema_map.Relationship(
+            ("memory", "far"), ("no_such_column",), ("core", "parent"),
+            ("id",), "RESTRICT", "Typed wrong."),
+    ))
+
+    with pytest.raises(build_schema.Uncountable) as caught:
+        build_schema.build(str(two_stores))
+
+    assert "no_such_column" in str(caught.value)
+
+
+def test_both_columns_of_a_two_column_key_are_checked(tmp_path, monkeypatch):
+    _store(
+        tmp_path / "only.db",
+        "CREATE TABLE parent (a TEXT, b TEXT, PRIMARY KEY (a, b))",
+        "CREATE TABLE child (id TEXT PRIMARY KEY, a TEXT, b TEXT, "
+        "FOREIGN KEY (a, b) REFERENCES parent(a, b))",
+        "INSERT INTO parent (a, b) VALUES ('x', 'y')",
+        "INSERT INTO child (id, a, b) VALUES ('1', 'x', 'WRONG')",
+    )
+    monkeypatch.setattr(schema_map, "SOURCES", {"only": "only.db"})
+    monkeypatch.setattr(schema_map, "PLACEMENT", {
+        ("only", "parent"): ("core", "parent"),
+        ("only", "child"): ("board", "child")})
+    for name in ("DROPS", "UNKEYED", "DROPPED_DEFAULTS", "ON_DELETE_OVERRIDE"):
+        monkeypatch.setattr(schema_map, name, {})
+    monkeypatch.setattr(schema_map, "CROSS_FILE", ())
+
+    built = build_schema.build(str(tmp_path))
+
+    assert any("1 row(s)" in w for w in built.withheld), built.withheld
+
+
+def test_a_key_naming_no_target_column_resolves_the_parents_primary_key(
+        tmp_path, monkeypatch):
+    _store(
+        tmp_path / "only.db",
+        "CREATE TABLE parent (id TEXT PRIMARY KEY)",
+        "CREATE TABLE child (id TEXT PRIMARY KEY, parent_id TEXT "
+        "REFERENCES parent)",
+    )
+    monkeypatch.setattr(schema_map, "SOURCES", {"only": "only.db"})
+    monkeypatch.setattr(schema_map, "PLACEMENT", {
+        ("only", "parent"): ("core", "parent"),
+        ("only", "child"): ("board", "child")})
+    for name in ("DROPS", "UNKEYED", "DROPPED_DEFAULTS", "ON_DELETE_OVERRIDE"):
+        monkeypatch.setattr(schema_map, name, {})
+    monkeypatch.setattr(schema_map, "CROSS_FILE", ())
+
+    built = build_schema.build(str(tmp_path))
+
+    assert 'REFERENCES core."parent" ("id")' in _constraint_for(built, "child")
+
+
+def test_the_same_relationship_declared_twice_is_emitted_once(
+        two_stores, monkeypatch):
+    monkeypatch.setattr(schema_map, "CROSS_FILE", (
+        schema_map.Relationship(
+            ("board", "child"), ("parent_id",), ("core", "parent"), ("id",),
+            "NO ACTION", "Also written out by hand."),
+    ))
+
+    built = build_schema.build(str(two_stores))
+
+    assert len([d for d in built.ddl if d.startswith("ALTER TABLE")]) == 1
+
+
+def test_a_key_whose_sides_disagree_in_width_refuses_the_build(
+        two_stores, monkeypatch):
+    """Postgres refuses it at apply time, inside the one transaction, taking
+    the whole schema with it."""
+    monkeypatch.setattr(schema_map, "CROSS_FILE", (
+        schema_map.Relationship(
+            ("memory", "far"), ("id", "parent_id"), ("core", "parent"),
+            ("id",), "RESTRICT", "Two columns against one."),
+    ))
+
+    with pytest.raises(build_schema.DanglingReference) as caught:
+        build_schema.build(str(two_stores))
+
+    assert "2 column(s) against 1" in str(caught.value)
+
+
+def test_a_key_onto_a_column_that_is_not_unique_refuses_the_build(
+        tmp_path, monkeypatch):
+    _store(
+        tmp_path / "only.db",
+        "CREATE TABLE parent (id TEXT PRIMARY KEY, label TEXT)",
+        "CREATE TABLE child (id TEXT PRIMARY KEY, label TEXT)",
+    )
+    monkeypatch.setattr(schema_map, "SOURCES", {"only": "only.db"})
+    monkeypatch.setattr(schema_map, "PLACEMENT", {
+        ("only", "parent"): ("core", "parent"),
+        ("only", "child"): ("board", "child")})
+    for name in ("DROPS", "UNKEYED", "DROPPED_DEFAULTS", "ON_DELETE_OVERRIDE"):
+        monkeypatch.setattr(schema_map, name, {})
+    monkeypatch.setattr(schema_map, "CROSS_FILE", (
+        schema_map.Relationship(
+            ("board", "child"), ("label",), ("core", "parent"), ("label",),
+            "RESTRICT", "Onto a column nothing makes unique."),
+    ))
+
+    with pytest.raises(build_schema.DanglingReference) as caught:
+        build_schema.build(str(tmp_path))
+
+    assert "no primary key or unique constraint" in str(caught.value)
+
+
+def test_a_key_onto_an_inline_unique_rather_than_the_primary_key_is_allowed():
+    """Six of the hive's keys reference `minds.mind_id`, whose uniqueness is
+    an inline UNIQUE while the primary key is `name`."""
+    built = build_schema.build("/home/daniel/Storage")
+
+    assert any(r.parent == ("core", "minds") and r.parent_columns == ("mind_id",)
+               for r in built.relationships)
+
+
+def test_a_merge_losers_rows_are_counted_too(tmp_path, monkeypatch):
+    """The winner decides the shape; it does not decide whose rows arrive."""
+    _store(
+        tmp_path / "win.db",
+        "CREATE TABLE parent (id TEXT PRIMARY KEY)",
+        "CREATE TABLE member (id TEXT PRIMARY KEY, parent_id TEXT)",
+        "INSERT INTO parent (id) VALUES ('real')",
+        "INSERT INTO member (id, parent_id) VALUES ('a', 'real')",
+    )
+    _store(
+        tmp_path / "lose.db",
+        "CREATE TABLE member (id TEXT PRIMARY KEY, parent_id TEXT)",
+        "INSERT INTO member (id, parent_id) VALUES ('b', 'nowhere')",
+    )
+    monkeypatch.setattr(schema_map, "SOURCES", {
+        "win": "win.db", "lose": "lose.db"})
+    monkeypatch.setattr(schema_map, "PLACEMENT", {
+        ("win", "parent"): ("core", "parent"),
+        ("win", "member"): ("core", "member")})
+    monkeypatch.setattr(schema_map, "MERGES", {
+        ("lose", "member"): ("core", "member")})
+    monkeypatch.setattr(schema_map, "MERGE_WINNER", {
+        ("core", "member"): ("win", "member")})
+    for name in ("DROPS", "UNKEYED", "DROPPED_DEFAULTS", "ON_DELETE_OVERRIDE"):
+        monkeypatch.setattr(schema_map, name, {})
+    monkeypatch.setattr(schema_map, "CROSS_FILE", (
+        schema_map.Relationship(
+            ("core", "member"), ("parent_id",), ("core", "parent"), ("id",),
+            "RESTRICT", "Clean in the winner, broken in the loser."),
+    ))
+
+    built = build_schema.build(str(tmp_path))
+
+    assert any("1 row(s)" in w for w in built.withheld), built.withheld
