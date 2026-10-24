@@ -271,13 +271,6 @@ CROSS_FILE: tuple[Relationship, ...] = (
         "deleting one out from under 8,140 sessions is never the intent.",
     ),
     Relationship(
-        ("core", "sessions"), ("rotated_from",), ("core", "sessions"), ("id",),
-        "SET NULL",
-        "A chat-surface rotation retires a row for a successor and records "
-        "which row it replaced. Self-referencing, and the successor outlives "
-        "the predecessor being purged.",
-    ),
-    Relationship(
         ("core", "sessions"), ("group_session_id",),
         ("core", "group_sessions"), ("id",), "SET NULL",
         "A session may be part of a group conversation. The session survives "
@@ -317,6 +310,32 @@ CROSS_FILE: tuple[Relationship, ...] = (
         ("board", "design_sessions"), ("mind_id",), ("core", "minds"),
         ("mind_id",), "RESTRICT",
         "The mind a design session is being run with.",
+    ),
+    Relationship(
+        ("memory", "nodes"), ("type",), ("memory", "schema_types"), ("name",),
+        "RESTRICT",
+        "A node's type against the registry that validates it. "
+        "`_validate_label` already refuses a type the registry does not hold, "
+        "so the key states a rule the graph enforces in code.",
+    ),
+    Relationship(
+        ("memory", "schema_edges"), ("source_type",), ("memory", "schema_types"),
+        ("name",), "RESTRICT",
+        "The registry's own shape: an edge type relates two node types.",
+    ),
+    Relationship(
+        ("memory", "schema_edges"), ("target_type",), ("memory", "schema_types"),
+        ("name",), "RESTRICT",
+        "As `source_type`.",
+    ),
+    Relationship(
+        ("proxy", "models"), ("provider_id",), ("proxy", "providers"), ("id",),
+        "SET NULL",
+        "Declared as a foreign key by the proxy's own ORM "
+        "(app/orm.py, ondelete SET NULL) and absent from the file, because "
+        "the column arrived by ALTER TABLE ADD COLUMN and SQLite cannot "
+        "attach a key that way. The file never carried what the application "
+        "always meant.",
     ),
     Relationship(
         ("board", "design_sessions"), ("conversation_id",),
@@ -395,6 +414,27 @@ UNKEYED: dict[tuple[str, str, str], str] = {
         "Holds a harness conversation id, not a session row id. Read by "
         "(mind_id, client_ref) and never by session: a provenance stamp. "
         "Renamed in the harness-session-id cleanup story.",
+    ("core", "sessions", "rotated_from"):
+        "Which row a rotation replaced. Not a reference: the predecessor is "
+        "expected to be deleted - `kill_session` hard-deletes a scheduler "
+        "session - and the value stays load-bearing afterwards. The "
+        "rotated-away guard, the label lineage walk and the gateway's own "
+        "`rotated_from` contract all read it after the row it names is gone, "
+        "so SET NULL would erase the answer and RESTRICT would refuse the "
+        "delete that creates the situation.",
+    ("memory", "edges", "type"):
+        "An edge's relation. Every one of the 112 rows happens to be in "
+        "`schema_edges`, but `_validate_relation` checks only that it is "
+        "uppercase letters and underscores - the registry is not consulted - "
+        "so a key here would start refusing edges the graph accepts today.",
+    ("memory", "credentials", "mind_id"):
+        "The mind a credential was minted for. `holder_access` names the "
+        "value `provenance` and stores it nullable; same reasoning as "
+        "`core.session_memory.mind_id`.",
+    ("tools", "hitl_requests", "tool_name"):
+        "All 103 rows name a tool with a settings row, but nothing seeds "
+        "`tool_hitl_settings` when a tool is added, so the first request for "
+        "a new tool would be refused rather than defaulted.",
     ("core", "session_memory", "mind_id"):
         "Whose carried-forward memory this is - but registration is "
         "deliberately non-fatal and comms refuses a mind that names no owner, "
