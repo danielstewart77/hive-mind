@@ -60,7 +60,18 @@ def two_stores(tmp_path, monkeypatch):
     monkeypatch.setattr(schema_map, "DROPPED_DEFAULTS", {})
     monkeypatch.setattr(schema_map, "CROSS_FILE", ())
     monkeypatch.setattr(schema_map, "ON_DELETE_OVERRIDE", {})
+    monkeypatch.setattr(schema_map, "COLUMN_RENAMES", {})
+    monkeypatch.setattr(schema_map, "DROPPED_COLUMNS", {})
+    monkeypatch.setattr(schema_map, "TYPE_OVERRIDES", {})
     return tmp_path
+
+
+def _table_ddl(built, schema: str, table: str) -> str:
+    for stmt in built.ddl:
+        if stmt.startswith(f'CREATE TABLE {schema}."{table}" ('):
+            return stmt
+    raise AssertionError(
+        f"no CREATE TABLE for {schema}.{table}:\n" + "\n".join(built.ddl))
 
 
 def _constraint_for(built, child_table: str) -> str:
@@ -169,6 +180,182 @@ def test_a_reason_written_against_a_missing_column_refuses_the_build(
 
 
 # ---------------------------------------------------------------------------
+# The column shape the map decides
+# ---------------------------------------------------------------------------
+
+def test_a_renamed_column_is_created_under_its_new_name_only(
+        two_stores, monkeypatch):
+    monkeypatch.setattr(schema_map, "COLUMN_RENAMES", {
+        ("board", "child", "parent_id"): ("owner_id", "Says what it holds.")})
+
+    built = build_schema.build(str(two_stores))
+    ddl = _table_ddl(built, "board", "child")
+
+    assert '"owner_id" text' in ddl
+    assert '"parent_id"' not in ddl
+
+
+def test_a_rename_follows_the_key_the_source_declared_on_that_column(
+        two_stores, monkeypatch):
+    """Without this the constraint names a column the table does not have,
+    and Postgres refuses the whole transaction at apply time."""
+    monkeypatch.setattr(schema_map, "COLUMN_RENAMES", {
+        ("board", "child", "parent_id"): ("owner_id", "Says what it holds.")})
+
+    built = build_schema.build(str(two_stores))
+
+    assert '("owner_id")' in _constraint_for(built, "child")
+
+
+def test_a_renamed_column_is_reported_as_a_decision_with_its_reason(
+        two_stores, monkeypatch):
+    monkeypatch.setattr(schema_map, "COLUMN_RENAMES", {
+        ("board", "child", "parent_id"): ("owner_id", "Says what it holds.")})
+
+    built = build_schema.build(str(two_stores))
+
+    assert any("renamed to owner_id" in d and "Says what it holds." in d
+               for d in built.decisions), built.decisions
+    assert built.notes == []
+
+
+def test_a_dropped_column_is_not_created_and_carries_its_reason(
+        two_stores, monkeypatch):
+    monkeypatch.setattr(schema_map, "DROPPED_COLUMNS", {
+        ("memory", "far", "parent_id"): "Never held a row."})
+
+    built = build_schema.build(str(two_stores))
+    ddl = _table_ddl(built, "memory", "far")
+
+    assert '"parent_id"' not in ddl
+    assert '"id" text' in ddl
+    assert any("not carried. Never held a row." in d
+               for d in built.decisions), built.decisions
+
+
+def test_dropping_a_primary_key_column_refuses_the_build(
+        two_stores, monkeypatch):
+    """A column decision cannot change what a row is identified by."""
+    monkeypatch.setattr(schema_map, "DROPPED_COLUMNS", {
+        ("memory", "far", "id"): "Looks unused."})
+
+    with pytest.raises(build_schema.StaleDecision) as caught:
+        build_schema.build(str(two_stores))
+
+    assert "primary key" in str(caught.value)
+
+
+def test_a_column_decision_naming_a_column_no_source_carries_refuses(
+        two_stores, monkeypatch):
+    monkeypatch.setattr(schema_map, "COLUMN_RENAMES", {
+        ("board", "child", "renamed_away"): ("whatever", "Documents nothing.")})
+
+    with pytest.raises(build_schema.StaleDecision) as caught:
+        build_schema.build(str(two_stores))
+
+    assert "board.child.renamed_away" in str(caught.value)
+
+
+def test_a_flag_retyped_to_boolean_takes_a_boolean_default(tmp_path,
+                                                           monkeypatch):
+    """`DEFAULT 0` against a boolean column is a type error Postgres raises
+    at apply time, inside the one transaction, taking the schema with it."""
+    _store(
+        tmp_path / "only.db",
+        "CREATE TABLE flags (id TEXT PRIMARY KEY, "
+        "held INTEGER NOT NULL DEFAULT 0)",
+    )
+    monkeypatch.setattr(schema_map, "SOURCES", {"only": "only.db"})
+    monkeypatch.setattr(schema_map, "PLACEMENT", {
+        ("only", "flags"): ("core", "flags")})
+    for name in ("DROPS", "UNKEYED", "DROPPED_DEFAULTS", "ON_DELETE_OVERRIDE",
+                 "COLUMN_RENAMES", "DROPPED_COLUMNS"):
+        monkeypatch.setattr(schema_map, name, {})
+    monkeypatch.setattr(schema_map, "CROSS_FILE", ())
+    monkeypatch.setattr(schema_map, "TYPE_OVERRIDES", {
+        ("core", "flags", "held"): ("boolean", "A flag.")})
+
+    built = build_schema.build(str(tmp_path))
+    ddl = _table_ddl(built, "core", "flags")
+
+    assert '"held" boolean NOT NULL DEFAULT false' in ddl
+    assert built.notes == []
+
+
+def test_a_retyped_column_whose_default_is_not_a_flag_value_is_reported(
+        tmp_path, monkeypatch):
+    _store(
+        tmp_path / "only.db",
+        "CREATE TABLE flags (id TEXT PRIMARY KEY, "
+        "held INTEGER NOT NULL DEFAULT 7)",
+    )
+    monkeypatch.setattr(schema_map, "SOURCES", {"only": "only.db"})
+    monkeypatch.setattr(schema_map, "PLACEMENT", {
+        ("only", "flags"): ("core", "flags")})
+    for name in ("DROPS", "UNKEYED", "DROPPED_DEFAULTS", "ON_DELETE_OVERRIDE",
+                 "COLUMN_RENAMES", "DROPPED_COLUMNS"):
+        monkeypatch.setattr(schema_map, name, {})
+    monkeypatch.setattr(schema_map, "CROSS_FILE", ())
+    monkeypatch.setattr(schema_map, "TYPE_OVERRIDES", {
+        ("core", "flags", "held"): ("boolean", "A flag.")})
+
+    built = build_schema.build(str(tmp_path))
+
+    assert '"held" boolean NOT NULL,' in _table_ddl(built, "core", "flags")
+    assert any("not a flag value" in n for n in built.notes), built.notes
+
+
+def test_a_uniqueness_on_a_dropped_column_refuses_the_build(tmp_path,
+                                                            monkeypatch):
+    """Dropping a column a uniqueness depends on changes what the table
+    refuses, which is not a column decision."""
+    _store(
+        tmp_path / "only.db",
+        "CREATE TABLE holders (id TEXT PRIMARY KEY, token TEXT UNIQUE)",
+    )
+    monkeypatch.setattr(schema_map, "SOURCES", {"only": "only.db"})
+    monkeypatch.setattr(schema_map, "PLACEMENT", {
+        ("only", "holders"): ("core", "holders")})
+    for name in ("DROPS", "UNKEYED", "DROPPED_DEFAULTS", "ON_DELETE_OVERRIDE",
+                 "COLUMN_RENAMES", "TYPE_OVERRIDES"):
+        monkeypatch.setattr(schema_map, name, {})
+    monkeypatch.setattr(schema_map, "CROSS_FILE", ())
+    monkeypatch.setattr(schema_map, "DROPPED_COLUMNS", {
+        ("core", "holders", "token"): "Looks unused."})
+
+    with pytest.raises(build_schema.StaleDecision) as caught:
+        build_schema.build(str(tmp_path))
+
+    assert "UNIQUE" in str(caught.value)
+
+
+def test_a_rename_reaches_inside_an_index_body(tmp_path, monkeypatch):
+    """The index statement is carried across as source SQL rather than
+    rebuilt, so a renamed column has to be rewritten inside the text."""
+    _store(
+        tmp_path / "only.db",
+        "CREATE TABLE notes (id TEXT PRIMARY KEY, session_id TEXT)",
+        "CREATE INDEX idx_notes_lookup ON notes (session_id)",
+    )
+    monkeypatch.setattr(schema_map, "SOURCES", {"only": "only.db"})
+    monkeypatch.setattr(schema_map, "PLACEMENT", {
+        ("only", "notes"): ("core", "notes")})
+    for name in ("DROPS", "UNKEYED", "DROPPED_DEFAULTS", "ON_DELETE_OVERRIDE",
+                 "DROPPED_COLUMNS", "TYPE_OVERRIDES"):
+        monkeypatch.setattr(schema_map, name, {})
+    monkeypatch.setattr(schema_map, "CROSS_FILE", ())
+    monkeypatch.setattr(schema_map, "COLUMN_RENAMES", {
+        ("core", "notes", "session_id"): (
+            "conversation_id", "It holds a conversation id.")})
+
+    built = build_schema.build(str(tmp_path))
+    index = next(d for d in built.ddl if d.startswith("CREATE INDEX"))
+
+    assert "(conversation_id)" in index
+    assert "session_id" not in index
+
+
+# ---------------------------------------------------------------------------
 # What Postgres then enforces
 # ---------------------------------------------------------------------------
 #
@@ -231,10 +418,8 @@ EXPECTED: set[tuple[str, str, str, str]] = {
     ("core.context_overhead", "mind_id", "core.minds", "CASCADE"),
     ("core.group_members", "group_name", "core.groups", "NO ACTION"),
     ("core.group_members", "user_id", "core.users", "NO ACTION"),
-    ("core.group_sessions", "moderator_mind_id", "core.minds", "RESTRICT"),
     ("core.messages", "conversation_id", "core.conversations", "CASCADE"),
     ("core.session_turns", "session_id", "core.sessions", "CASCADE"),
-    ("core.sessions", "group_session_id", "core.group_sessions", "SET NULL"),
     ("core.sessions", "mind_id", "core.minds", "RESTRICT"),
     ("core.surface_claims", "mind_id", "core.minds", "CASCADE"),
     ("memory.edges", "mind_id", "core.minds", "RESTRICT"),
@@ -323,7 +508,7 @@ def test_ending_a_session_takes_its_turns_and_a_busy_mind_cannot_be_deleted(
                                 registered_at, last_seen)
             VALUES ('m-1', 'tester', 'http://example.invalid', 'a-model',
                     'claude', 0, 0);
-        INSERT INTO core.sessions (id, mind_id, owner_type, owner_ref,
+        INSERT INTO core.sessions (id, mind_id, surface, surface_id,
                                    created_at, last_active)
             VALUES ('s-1', 'm-1', 'telegram', 'someone', 0, 0);
         INSERT INTO core.session_turns (session_id, role, content)
@@ -471,7 +656,9 @@ def test_both_columns_of_a_two_column_key_are_checked(tmp_path, monkeypatch):
     monkeypatch.setattr(schema_map, "PLACEMENT", {
         ("only", "parent"): ("core", "parent"),
         ("only", "child"): ("board", "child")})
-    for name in ("DROPS", "UNKEYED", "DROPPED_DEFAULTS", "ON_DELETE_OVERRIDE"):
+    for name in ("DROPS", "UNKEYED", "DROPPED_DEFAULTS",
+                 "ON_DELETE_OVERRIDE", "COLUMN_RENAMES",
+                 "DROPPED_COLUMNS", "TYPE_OVERRIDES"):
         monkeypatch.setattr(schema_map, name, {})
     monkeypatch.setattr(schema_map, "CROSS_FILE", ())
 
@@ -492,7 +679,9 @@ def test_a_key_naming_no_target_column_resolves_the_parents_primary_key(
     monkeypatch.setattr(schema_map, "PLACEMENT", {
         ("only", "parent"): ("core", "parent"),
         ("only", "child"): ("board", "child")})
-    for name in ("DROPS", "UNKEYED", "DROPPED_DEFAULTS", "ON_DELETE_OVERRIDE"):
+    for name in ("DROPS", "UNKEYED", "DROPPED_DEFAULTS",
+                 "ON_DELETE_OVERRIDE", "COLUMN_RENAMES",
+                 "DROPPED_COLUMNS", "TYPE_OVERRIDES"):
         monkeypatch.setattr(schema_map, name, {})
     monkeypatch.setattr(schema_map, "CROSS_FILE", ())
 
@@ -541,7 +730,9 @@ def test_a_key_onto_a_column_that_is_not_unique_refuses_the_build(
     monkeypatch.setattr(schema_map, "PLACEMENT", {
         ("only", "parent"): ("core", "parent"),
         ("only", "child"): ("board", "child")})
-    for name in ("DROPS", "UNKEYED", "DROPPED_DEFAULTS", "ON_DELETE_OVERRIDE"):
+    for name in ("DROPS", "UNKEYED", "DROPPED_DEFAULTS",
+                 "ON_DELETE_OVERRIDE", "COLUMN_RENAMES",
+                 "DROPPED_COLUMNS", "TYPE_OVERRIDES"):
         monkeypatch.setattr(schema_map, name, {})
     monkeypatch.setattr(schema_map, "CROSS_FILE", (
         schema_map.Relationship(
@@ -587,7 +778,9 @@ def test_a_merge_losers_rows_are_counted_too(tmp_path, monkeypatch):
         ("lose", "member"): ("core", "member")})
     monkeypatch.setattr(schema_map, "MERGE_WINNER", {
         ("core", "member"): ("win", "member")})
-    for name in ("DROPS", "UNKEYED", "DROPPED_DEFAULTS", "ON_DELETE_OVERRIDE"):
+    for name in ("DROPS", "UNKEYED", "DROPPED_DEFAULTS",
+                 "ON_DELETE_OVERRIDE", "COLUMN_RENAMES",
+                 "DROPPED_COLUMNS", "TYPE_OVERRIDES"):
         monkeypatch.setattr(schema_map, name, {})
     monkeypatch.setattr(schema_map, "CROSS_FILE", (
         schema_map.Relationship(

@@ -80,7 +80,6 @@ PLACEMENT: dict[tuple[str, str], tuple[str, str]] = {
     ("broker", "messages"): ("core", "messages"),
     ("sessions", "sessions"): ("core", "sessions"),
     ("sessions", "active_sessions"): ("core", "active_sessions"),
-    ("sessions", "group_sessions"): ("core", "group_sessions"),
     ("sessions", "session_memory"): ("core", "session_memory"),
     ("sessions", "session_turns"): ("core", "session_turns"),
     ("sessions", "context_overhead"): ("core", "context_overhead"),
@@ -196,6 +195,12 @@ DROPS: dict[tuple[str, str], str] = {
     ("proxy", "alembic_version"):
         "A migration bookkeeping row for the proxy's own SQLite history. The "
         "unified database keeps its own schema history.",
+    ("sessions", "group_sessions"):
+        "0 rows since it was written. The group-session experiment put "
+        "several minds in one conversation behind a moderator; it was tried "
+        "once, went badly, and nothing has written a row since. The two "
+        "declared relationships that named it go with it, and "
+        "`sessions.group_session_id` is dropped as a column.",
 }
 
 def placement(source: str, table: str) -> tuple[str, str] | None:
@@ -269,17 +274,6 @@ CROSS_FILE: tuple[Relationship, ...] = (
         "RESTRICT",
         "A session ran on a mind. The mind is not a part of the session and "
         "deleting one out from under 8,140 sessions is never the intent.",
-    ),
-    Relationship(
-        ("core", "sessions"), ("group_session_id",),
-        ("core", "group_sessions"), ("id",), "SET NULL",
-        "A session may be part of a group conversation. The session survives "
-        "the group ending.",
-    ),
-    Relationship(
-        ("core", "group_sessions"), ("moderator_mind_id",),
-        ("core", "minds"), ("mind_id",), "RESTRICT",
-        "The mind moderating a group conversation.",
     ),
     Relationship(
         ("core", "context_overhead"), ("mind_id",), ("core", "minds"),
@@ -372,15 +366,9 @@ ON_DELETE_OVERRIDE: dict[tuple[str, str, tuple[str, ...]], tuple[str, str]] = {
 #: the literal `'ada'` while `core.minds.mind_id` holds UUIDs, so the default
 #: has been writing a value that matches no mind for as long as it has
 #: existed; it is simply never reached, because every caller supplies the id.
-#: `group_sessions` is empty, which is the only reason its NOT NULL version of
-#: the same default has not fired yet.
 DROPPED_DEFAULTS: dict[tuple[str, str, str], str] = {
     ("core", "sessions", "mind_id"):
         "Literal 'ada' against a column of UUIDs.",
-    ("core", "group_sessions", "moderator_mind_id"):
-        "Literal 'ada' against a column of UUIDs, on a NOT NULL column of an "
-        "empty table - so the first insert omitting a moderator would be the "
-        "first one refused.",
 }
 
 #: Columns that look like references and are not, with the reason. Reported by
@@ -410,18 +398,12 @@ UNKEYED: dict[tuple[str, str, str], str] = {
     ("core", "messages", "recipient_session_id"):
         "5 of 7,367 non-null values name sessions that have been swept. The "
         "column records where a reply was delivered, not a live reference.",
-    ("core", "session_memory", "session_id"):
+    ("core", "session_memory", "conversation_id"):
         "Holds a harness conversation id, not a session row id. Read by "
         "(mind_id, client_ref) and never by session: a provenance stamp. "
-        "Renamed in the harness-session-id cleanup story.",
-    ("core", "sessions", "rotated_from"):
-        "Which row a rotation replaced. Not a reference: the predecessor is "
-        "expected to be deleted - `kill_session` hard-deletes a scheduler "
-        "session - and the value stays load-bearing afterwards. The "
-        "rotated-away guard, the label lineage walk and the gateway's own "
-        "`rotated_from` contract all read it after the row it names is gone, "
-        "so SET NULL would erase the answer and RESTRICT would refuse the "
-        "delete that creates the situation.",
+        "The name it carried in SQLite, `session_id`, is what invited the "
+        "key; `COLUMN_RENAMES` fixes the name and this entry records that "
+        "there is still nothing to reference.",
     ("memory", "edges", "type"):
         "An edge's relation. Every one of the 112 rows happens to be in "
         "`schema_edges`, but `_validate_relation` checks only that it is "
@@ -456,3 +438,141 @@ UNKEYED: dict[tuple[str, str, str], str] = {
         "rows name nodes that no longer exist. A stale settings table, not a "
         "reference.",
 }
+
+
+# ---------------------------------------------------------------------------
+# The final column shape
+# ---------------------------------------------------------------------------
+#
+# A SQLite column name travelled into the unified schema unexamined, because
+# the generator reads `PRAGMA table_info` and emits what it finds. Four names
+# on `core.sessions` and one on `core.session_memory` are wrong about what
+# they hold, three columns are not worth carrying at all, and two are integers
+# only because SQLite has no boolean.
+#
+# All of it is declared here rather than fixed afterwards. The map is a
+# declaration, so the final shape costs one edit; renaming after the data
+# access layer is written means two passes over every call site, and renaming
+# after the cut-over means two passes over every live service.
+#
+# Every entry below is keyed by the **source** column name, because that is
+# what the generator reads out of the file. The build refuses if an entry
+# names a column no source carries — the same rule as `unmapped` and
+# `UNKEYED`, for the same reason: a decision written against a column that no
+# longer exists is a decision nobody can act on, and it must not read as a
+# column that was handled.
+
+#: (schema, table, source column) -> (new name, why).
+COLUMN_RENAMES: dict[tuple[str, str, str], tuple[str, str]] = {
+    ("core", "sessions", "claude_sid"): (
+        "conversation_id",
+        "The gateway mints this id for every harness and hands it to claude, "
+        "codex and dsh alike. The vendor's name on a harness-neutral thing "
+        "is the defect: a reader has to know that `claude_sid` on a codex "
+        "conversation is not a claude anything.",
+    ),
+    ("core", "sessions", "owner_type"): (
+        "surface",
+        "The kind of the single endpoint currently holding the conversation, "
+        "not an owner and not a from-and-to pair. `surface` is the word used "
+        "everywhere else in the system - `HIVE_SURFACE`, `_surface_label`, "
+        "the surface claims, the per-turn `<message-surface>` block - so "
+        "this makes the table agree with the vocabulary instead of being the "
+        "one place that disagrees.",
+    ),
+    ("core", "sessions", "owner_ref"): (
+        "surface_id",
+        "The address on that surface. The reply goes back to the address the "
+        "message arrived from, which is why it is one column and not two. "
+        "`source`/`source_id` was considered and dropped for underselling "
+        "the reply direction.",
+    ),
+    ("core", "sessions", "summary"): (
+        "opening_line",
+        "The first 100 characters of the first user message, written once "
+        "under an `if summary == 'New session'` guard and never updated; 176 "
+        "live rows still hold the default. Calling it a summary invites "
+        "someone to write a summarizer into it, or to show it to a user as "
+        "one. It stays because the gateway holds no transcript and the "
+        "session picker needs something for the conversations that were "
+        "never named.",
+    ),
+    ("core", "session_memory", "session_id"): (
+        "conversation_id",
+        "It holds a harness conversation id, never a session row id, and the "
+        "table is read by (mind_id, client_ref). The name is the whole "
+        "reason this column kept being mistaken for a reference - see its "
+        "`UNKEYED` entry.",
+    ),
+}
+
+#: (schema, table, source column) -> why it is not carried. A dropped column
+#: is named here so that "it isn't in the new database" is a decision
+#: somebody can read rather than an omission nobody noticed. Everything that
+#: has to be deleted from the services alongside each one is enumerated in
+#: the cleanup story, not here: this file decides the shape, not the code.
+DROPPED_COLUMNS: dict[tuple[str, str, str], str] = {
+    ("core", "sessions", "autopilot"): (
+        "0 of 8,142 rows have ever held 1. One spawn flag for one harness, "
+        "reached by a route nothing calls."
+    ),
+    ("core", "sessions", "rotated_from"): (
+        "Exists only because a chat rotation inserts a successor row rather "
+        "than rotating in place. It records which row a rotation replaced, "
+        "and every reader of it reads it after the row it names is gone."
+    ),
+    ("core", "sessions", "group_session_id"): (
+        "The group-session experiment, which has 0 rows. Dropped with "
+        "`core.group_sessions` itself."
+    ),
+}
+
+#: (schema, table, source column) -> (Postgres type, why). The source type is
+#: not wrong so much as unable to say what was meant: SQLite has no boolean,
+#: so a flag was declared INTEGER and the type map carried that across as
+#: `bigint`.
+#:
+#: `core.sessions.rotation_armed` is deliberately absent. It looks like the
+#: same thing and is not: it is three-state - 0 unarmed, 1 a chat surface
+#: finalized into a successor row, 2 a staged terminal only the pane's own
+#: fire may swap - and collapsing it to a boolean destroys a permanent
+#: session row, because a staged terminal read as merely "armed" is retired
+#: for a successor instead of being respawned in place.
+TYPE_OVERRIDES: dict[tuple[str, str, str], tuple[str, str]] = {
+    ("core", "sessions", "terminal_held"): (
+        "boolean",
+        "Whether a browser terminal holds this conversation. A flag, "
+        "INTEGER only because SQLite had nothing better.",
+    ),
+    ("core", "sessions", "context_has_images"): (
+        "boolean",
+        "Whether the history holds images, which the gateway reads to decide "
+        "whether a model that cannot take them may be offered. A flag.",
+    ),
+}
+
+
+def column_name(schema: str, table: str, column: str) -> str:
+    """The unified name for a source column."""
+    renamed = COLUMN_RENAMES.get((schema, table, column))
+    return renamed[0] if renamed else column
+
+
+def column_dropped(schema: str, table: str, column: str) -> str | None:
+    """Why this source column is not carried, or None if it is."""
+    return DROPPED_COLUMNS.get((schema, table, column))
+
+
+def column_type(schema: str, table: str, column: str) -> tuple[str, str] | None:
+    """The declared Postgres type for a source column, if the map sets one."""
+    return TYPE_OVERRIDES.get((schema, table, column))
+
+
+def column_decisions() -> set[tuple[str, str, str]]:
+    """Every (schema, table, source column) this file decides something about.
+
+    The build checks these against the columns it actually read, so an entry
+    naming a column that has since been renamed or dropped in the source
+    refuses the build rather than sitting here looking handled.
+    """
+    return (set(COLUMN_RENAMES) | set(DROPPED_COLUMNS) | set(TYPE_OVERRIDES))

@@ -50,10 +50,71 @@ for the memory store. `tools.users` holds one row whose `is_admin` has no
 counterpart in `core.users`, and both rows are `id = 1` with incompatible
 hashes.
 
+## The column shape
+
+A source column name travelled into the unified schema unexamined, because the
+generator reads `PRAGMA table_info` and emits what it finds. `schema_map`
+decides the final shape instead, and `build_schema` applies it as the DDL is
+emitted rather than in an ALTER pass afterwards — an ALTER pass is a second
+place the shape is decided, and the one the generator does not read.
+
+`COLUMN_RENAMES` fixes five names that were wrong about what they hold.
+`core.sessions.claude_sid` becomes `conversation_id`, because the gateway mints
+that id for claude, codex and dsh alike and the vendor's name on a
+harness-neutral thing makes a reader decode it. `owner_type` and `owner_ref`
+become `surface` and `surface_id`: they are the kind and the address of the one
+endpoint holding the conversation, not a from and a to, and `surface` is the
+word the rest of the system already uses. `summary` becomes `opening_line` —
+it is the first 100 characters of the first user message, written once and
+never updated, and calling it a summary invites someone to write a summarizer
+into it. `core.session_memory.session_id` becomes `conversation_id` for the
+same reason its `UNKEYED` entry exists: the name is what kept inviting a
+foreign key onto a column that holds no session id.
+
+`DROPPED_COLUMNS` carries three that are not worth the trip, each with its
+count: `autopilot` (0 of 8,142 rows ever held 1), `rotated_from` (an artifact
+of a chat rotation inserting a successor row) and `group_session_id`, which
+goes with `core.group_sessions` itself — 0 rows since it was written, and the
+two declared relationships that named it. The hive's declared relationship
+count falls from 26 to 24.
+
+`TYPE_OVERRIDES` makes `terminal_held` and `context_has_images` real
+`boolean`s; they were `bigint` only because SQLite has no boolean and the type
+map carried `INTEGER` across. A retyped column's default is translated too,
+since `DEFAULT 0` against a `boolean` is a type error Postgres raises at apply
+time, inside the one transaction, taking the whole schema down rather than the
+one column.
+
+`core.sessions.rotation_armed` is deliberately *not* converted. It looks like
+the same thing and is not: 0 is unarmed, 1 is a chat surface finalized into a
+successor row, and 2 is a staged terminal only the pane's own fire may swap.
+Collapsing it to a boolean destroys a permanent session row, because a staged
+terminal read as merely "armed" is retired for a successor instead of being
+respawned in place.
+
+A rename is not only a column definition. It follows the primary key, the
+UNIQUE constraints, the foreign keys the source declared, and the bodies of
+CHECK expressions and standalone indexes — the two places the generator
+carries source SQL across verbatim instead of rebuilding it. It is also
+reversed on the way *out*: the row counts behind every relationship are taken
+against the live SQLite stores, which keep their own names until they are
+retired, so a query built from unified names would fail on a renamed column
+and be reported as a relationship nobody could count.
+
+Three things refuse the build rather than being carried: a column decision
+naming a column no source carries (the same rule as `unmapped()` — a decision
+nobody can check is not a decision, and a stale rename means the real column
+travels under its old name with nothing saying so), a drop that would take a
+primary-key column or a column some uniqueness depends on, and a CHECK or
+index naming a dropped column.
+
+The SQLite files keep their own column names until they are retired. The
+old-to-new mapping lives only in `schema_map` and in the loader.
+
 ## Files
 
-- `schema_map.py` — the layout: placements, three merges, four drops, and the
-  files that are deliberately not stores.
+- `schema_map.py` — the layout: placements, no merges, four drops, the
+  final column shape, and the files that are deliberately not stores.
 - `build_schema.py` — emits the Postgres DDL, read through `PRAGMA table_info`
   rather than by parsing `CREATE TABLE` text. Anything it cannot translate
   confidently is reported, never guessed and never silently skipped.
