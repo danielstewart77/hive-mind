@@ -7,6 +7,7 @@ All Claude Code interaction flows through the gateway — no SDK dependency.
 
 import asyncio
 import contextlib
+import io
 import logging
 import os
 import tempfile
@@ -40,6 +41,11 @@ VOICE_COMMS_URL = os.environ.get("VOICE_COMMS_URL", "http://localhost:8422")
 # record, never off this environment.
 VOICE_SERVER_URL_CHATTERBOX = os.environ.get("VOICE_SERVER_URL_CHATTERBOX", "")
 VOICE_SERVER_URL_KOKORO = os.environ.get("VOICE_SERVER_URL_KOKORO", "")
+# When on (default), every conversational reply is voiced: the text is sent and
+# edited as it streams, then the whole reply follows as an audio attachment.
+# The same switch Telegram reads, so a host decides once for both surfaces.
+# A missing or unreachable voice server degrades to text-only.
+ALWAYS_VOICE = os.environ.get("ALWAYS_VOICE", "1").strip().lower() not in ("0", "false", "no", "")
 
 # Persistent HTTP session and gateway client (created in setup_hook)
 http: aiohttp.ClientSession | None = None
@@ -210,6 +216,41 @@ async def _tts(text: str, voice_id: str) -> bytes:
         if resp.status != 200:
             raise RuntimeError(f"TTS error {resp.status}: {await resp.text()}")
         return await resp.read()
+
+
+async def _send_voice_note(channel, text: str) -> None:
+    """Upload the whole reply to `channel` as an audio attachment.
+
+    A text channel on a phone has no voice client to play into, so the audio
+    is a file on the channel rather than playback. Never raised: a voice
+    server that is down, or a file Discord refuses for its size, costs the
+    audio and nothing else — the text reply is already on screen.
+    """
+    body = text.strip()
+    if not body:
+        return
+    try:
+        ogg = await _tts(body, voice_id=gateway.mind_id)
+        await channel.send(file=discord.File(io.BytesIO(ogg), filename="reply.ogg"))
+    except Exception:
+        log_event(
+            log, "surface.voice.failed", level=logging.WARNING, surface="discord",
+            reply_chars=len(body),
+        )
+        log.debug("Discord voice note failed", exc_info=True)
+
+
+def speak_reply(channel, text: str):
+    """Start the voice note for a finished reply, or None when voice is off.
+
+    Detached on purpose: synthesis of a long reply takes longer than the turn
+    did, and awaiting it here holds the channel lock, which is what queues
+    the next message behind audio nobody is waiting for. Returns the task so
+    a caller can see whether one was started.
+    """
+    if not ALWAYS_VOICE:
+        return None
+    return asyncio.create_task(_send_voice_note(channel, text))
 
 
 async def _play_tts_for_member(member: discord.Member | discord.User, text: str) -> None:
@@ -748,6 +789,7 @@ async def cmd_skill(interaction: discord.Interaction, name: str, args: str = Non
     prompt = f"/{name} {args}" if args else f"/{name}"
     sent = await interaction.followup.send("\u2026", wait=True)
     response = await _stream_to_message(sent, interaction.user.id, interaction.channel_id, prompt)
+    speak_reply(interaction.channel, response)
     await _play_tts_for_member(interaction.user, response)
 
 
@@ -862,6 +904,7 @@ async def on_message(message: discord.Message):
                 async with message.channel.typing():
                     sent = await message.reply("\u2026")
                 response = await _stream_to_message(sent, message.author.id, channel_id, content)
+                speak_reply(message.channel, response)
                 await _play_tts_for_member(message.author, response)
 
         except Exception:
