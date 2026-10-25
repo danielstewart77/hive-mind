@@ -398,7 +398,15 @@ class TestWhatAContainerDoesBeforeItPolls:
 
         assert handed["users"] == [8776938611]
         # And the unnamed call still hands over the file's own list, which is
-        # what every other reader of this config expects.
+        # what every other reader of this config expects. The list is
+        # injected rather than read off this host's `config.yaml`: that file
+        # is gitignored, so an assertion against the ids it happens to hold
+        # passes on the machine it was written on and fails in a worktree or
+        # a fresh clone, for a reason that has nothing to do with the code.
+        from surfaces import config as surfaces_config
+        monkeypatch.setattr(
+            surfaces_config.stack_config, "telegram_allowed_users",
+            [8776938611, 8636028257], raising=False)
         assert list(surface_config().telegram_allowed_users) == [
             8776938611, 8636028257
         ]
