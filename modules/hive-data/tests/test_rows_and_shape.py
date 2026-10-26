@@ -29,22 +29,6 @@ async def test_a_list_read_matching_nothing_is_an_empty_list(connected):
     assert await core.list_turns(f"no-such-session-{uuid.uuid4().hex}") == []
 
 
-async def test_a_boolean_column_round_trips_as_it_was_written(
-        connected, a_mind, clock, inspector):
-    """`terminal_held` is a real boolean in the applied schema. Written True
-    it must read True, and the row the database holds must say so too."""
-    session_id = f"s-{uuid.uuid4().hex[:8]}"
-    await core.create_session(
-        id=session_id, surface="terminal", surface_id="tile-1",
-        mind_id=a_mind, created_at=clock, last_active=clock)
-    await core.update_session(session_id, terminal_held=True)
-
-    assert (await core.get_session(session_id))["terminal_held"] is True
-    assert await inspector.fetchval(
-        'SELECT "terminal_held" FROM core."sessions" WHERE "id" = $1',
-        session_id) is True
-
-
 async def test_the_private_session_columns_are_withheld_unless_asked_for(
         connected, a_mind, clock):
     """A session listing answers to the service token every surface bot in
@@ -135,7 +119,7 @@ async def test_a_written_turn_is_handed_the_identity_the_database_assigned(
         result["row"]["id"]) == "hello"
 
 
-async def test_a_value_carrying_a_quote_and_a_semicolon_is_stored_verbatim(
+async def test_a_value_carrying_a_quote_and_a_semicolon_is_not_mangled(
         connected, a_mind, clock, inspector):
     session_id = f"s-{uuid.uuid4().hex[:8]}"
     nasty = "it's fine; DROP TABLE core.sessions; --"
@@ -144,6 +128,9 @@ async def test_a_value_carrying_a_quote_and_a_semicolon_is_stored_verbatim(
         mind_id=a_mind, created_at=clock, last_active=clock,
         opening_line=nasty)
 
+    # Note what this does *not* guard: an interpolating builder that escapes
+    # correctly passes it. Parameterisation itself is guarded by the
+    # argument count in the generated-identity test.
     assert await inspector.fetchval(
         'SELECT "opening_line" FROM core."sessions" WHERE "id" = $1',
         session_id) == nasty

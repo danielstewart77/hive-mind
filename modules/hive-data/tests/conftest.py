@@ -60,6 +60,21 @@ async def scratch_dsn() -> str:
     name = f"hive_data_test_{uuid.uuid4().hex[:12]}"
     admin = await asyncpg.connect(ADMIN_DSN)
     try:
+        # A run that is killed never reaches the teardown below, so it
+        # leaves its database behind — one per interrupted run, for ever.
+        # Swept here rather than left to somebody noticing: the names are
+        # this suite's own and nothing else creates them.
+        stale = [
+            r["datname"] for r in await admin.fetch(
+                "SELECT datname FROM pg_database WHERE datname LIKE ANY("
+                r"ARRAY['hive\_data\_test\_%', 'hive\_data\_other\_%',"
+                r" 'hive\_data\_seq\_%'])")
+        ]
+        for leftover in stale:
+            await admin.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                "WHERE datname = $1 AND pid <> pg_backend_pid()", leftover)
+            await admin.execute(f'DROP DATABASE IF EXISTS "{leftover}"')
         await admin.execute(f'CREATE DATABASE "{name}"')
     finally:
         await admin.close()

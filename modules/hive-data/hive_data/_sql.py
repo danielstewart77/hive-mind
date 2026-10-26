@@ -33,17 +33,16 @@ def _checked(table: str, names: Iterable[str], *,
     allowed = settable if settable is not None else frozenset(declared)
     out = []
     for name in names:
-        if name not in declared:
-            raise UnsettableColumn(
-                f"core.{table} has no column {name!r}. Column names are not "
-                "parameters, so an unrecognised one is refused rather than "
-                "written into the statement.")
         if name not in allowed:
+            known = "" if name in declared else (
+                f" core.{table} has no column by that name.")
             raise UnsettableColumn(
                 f"core.{table}.{name} is not settable through this "
-                "operation. The settable columns are declared so that a "
-                "caller's keys never reach the SQL: "
-                f"{', '.join(sorted(allowed))}.")
+                "operation.{known} Column names are not parameters, so the "
+                "allowed ones are declared and anything else is refused "
+                "rather than written into the statement: "
+                f"{', '.join(sorted(allowed))}.".replace(
+                    "{known}", known))
         out.append(name)
     return out
 
@@ -64,6 +63,10 @@ def insert(table: str, values: Mapping[str, Any], *,
             "round-tripping a row dict straight back into an insert is how "
             "this happens by accident.")
     columns = _checked(table, named)
+    if not columns:
+        raise UnsettableColumn(
+            f"an insert into core.{table} named no columns. An insert with "
+            "an empty column list is a syntax error, not an empty row.")
     placeholders = ", ".join(f"${i}" for i in range(1, len(columns) + 1))
     quoted = ", ".join(f'"{c}"' for c in columns)
     sql = f'INSERT INTO core."{table}" ({quoted}) VALUES ({placeholders})'
@@ -112,9 +115,27 @@ def update(table: str, values: Mapping[str, Any], where: Mapping[str, Any], *,
 
 def where(table: str, conditions: Mapping[str, Any],
           start: int = 1) -> tuple[str, list[Any]]:
-    """A WHERE clause over declared columns, with its arguments."""
+    """A WHERE clause over declared columns, with its arguments.
+
+    `None` becomes `IS NULL`, not `= NULL`. `= NULL` is never true, so the
+    natural spelling of "only while this is still unset" would match nothing
+    and report zero rows changed — which the caller reads as having lost a
+    race it actually won, every time.
+    """
     names = _checked(table, list(conditions))
-    args = [conditions[n] for n in names]
-    clause = " AND ".join(
-        f'"{n}" = ${i}' for i, n in enumerate(names, start=start))
-    return clause, args
+    pieces: list[str] = []
+    args: list[Any] = []
+    for name in names:
+        value = conditions[name]
+        if value is None:
+            pieces.append(f'"{name}" IS NULL')
+            continue
+        if value is UNSET:
+            raise UnsettableColumn(
+                f"core.{table}.{name} was given UNSET as a condition. UNSET "
+                "means nobody passed it, which is not something a row can "
+                "be compared against. Leave it out, or pass None to mean "
+                "IS NULL.")
+        args.append(value)
+        pieces.append(f'"{name}" = ${start + len(args) - 1}')
+    return " AND ".join(pieces), args

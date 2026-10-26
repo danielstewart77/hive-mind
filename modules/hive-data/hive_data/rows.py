@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Mapping
 
+from .errors import HiveDataError
+
 
 class _Unset:
     """A parameter nobody passed, as distinct from one passed as null.
@@ -81,8 +83,16 @@ def row_count(status: str) -> int:
     asyncpg reports `"UPDATE 0"` rather than a number, and the tag varies by
     statement (`INSERT 0 1` carries an oid first). The count is the last
     field in every one of them.
+
+    A status this cannot read raises rather than returning zero. The count is
+    the arbitration — one caller is told it won a race and the others are
+    told they lost — so a zero nobody measured is a caller told it lost for
+    no reason, which is the one answer this must never guess.
     """
     try:
         return int(status.rsplit(" ", 1)[-1])
     except (AttributeError, ValueError):
-        return 0
+        raise HiveDataError(
+            f"could not read a row count out of the command status "
+            f"{status!r}. The count decides which caller won, so it is not "
+            "defaulted to zero.") from None

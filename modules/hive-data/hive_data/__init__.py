@@ -40,7 +40,9 @@ from .errors import (
     NotConfigured,
     NotInitialised,
     SchemaMismatch,
+    SequenceBehind,
     TimedOut,
+    TransactionAborted,
     TransactionMisuse,
     Unreachable,
     UnsettableColumn,
@@ -50,15 +52,17 @@ from .errors import (
 from .pool import close_pool, live_pool, open_pool, run, settings_in_use
 from .rows import UNSET
 from .schema import COLUMNS
-from .unit import Unit, transaction
+from .unit import Unit, conversation_lock, transaction
 
 __all__ = [
     "COLUMNS", "Conflict", "CredentialRefused", "DatabaseMissing",
     "HiveDataError", "IdentityNotWritable", "MissingReference",
     "NoConnectionAvailable", "NotConfigured", "NotInitialised",
-    "SchemaMismatch", "Settings", "TimedOut", "TransactionMisuse", "UNSET",
+    "SchemaMismatch", "SequenceBehind", "Settings", "TimedOut",
+    "TransactionAborted", "TransactionMisuse", "UNSET",
     "Unit", "Unreachable", "UnsettableColumn", "ValueRefused",
-    "WriteRejected", "close", "connect", "core", "from_environment",
+    "WriteRejected", "close", "connect", "conversation_lock", "core",
+    "from_environment",
     "live_pool", "run", "settings_in_use", "transaction", "verify_schema",
 ]
 

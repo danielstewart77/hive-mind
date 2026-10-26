@@ -20,6 +20,7 @@ from .config import Settings, from_environment
 from .errors import (
     CredentialRefused,
     Conflict,
+    TransactionAborted,
     DatabaseMissing,
     HiveDataError,
     MissingReference,
@@ -33,6 +34,9 @@ from .errors import (
 
 log = logging.getLogger("hive-data")
 
+#: The fallback drain deadline, for the path that has no settings to read.
+DEFAULT_DRAIN_TIMEOUT = 30.0
+
 T = TypeVar("T")
 
 #: The live pool and the settings it was opened with. Module-level because a
@@ -40,11 +44,30 @@ T = TypeVar("T")
 #: and re-opening cannot hand back a pool pointed somewhere else.
 _pool: asyncpg.Pool | None = None
 _settings: Settings | None = None
-#: Guards open and close against each other and against themselves.
-_gate = asyncio.Lock()
+#: The loop the live pool belongs to. asyncpg ties a pool to the loop that
+#: created it, and a pool handed to a second loop fails on its first
+#: statement with "Event loop is closed" - which arrives nowhere near the
+#: call that reused it.
+_loop: asyncio.AbstractEventLoop | None = None
+
+#: Guards open and close against each other and against themselves, per
+#: loop. A module-level `asyncio.Lock` only touches its loop on the
+#: contended path, so a single shared one works until two coroutines
+#: genuinely race on a second loop - and then raises "is bound to a
+#: different event loop" out of the one function whose docstring promises
+#: idempotency under concurrency.
+_gates: dict[asyncio.AbstractEventLoop, asyncio.Lock] = {}
 
 
-def translate(exc: BaseException) -> HiveDataError:
+def _gate() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    gate = _gates.get(loop)
+    if gate is None:
+        gate = _gates[loop] = asyncio.Lock()
+    return gate
+
+
+def translate(exc: BaseException, *, connecting: bool = False) -> HiveDataError:
     """A driver exception as the thing the caller has to act on.
 
     Only a driver exception. Anything this function does not recognise is
@@ -57,6 +80,16 @@ def translate(exc: BaseException) -> HiveDataError:
     """
     if isinstance(exc, HiveDataError):
         return exc
+    if connecting and isinstance(exc, asyncio.TimeoutError):
+        # `TimeoutError` is `asyncio.TimeoutError` and is a subclass of
+        # `OSError`, so the class alone cannot say whether a host never
+        # answered or a statement ran long. At connect time it is always the
+        # former - and a dead host reported as a timeout asserts the
+        # database accepted work it never received, sending the operator to
+        # the database instead of to the host.
+        return Unreachable(
+            "no answer from the database inside the connect deadline: "
+            f"{exc or 'the host did not respond'}")
     if isinstance(exc, asyncpg.InvalidPasswordError):
         return CredentialRefused(str(exc))
     if isinstance(exc, asyncpg.InvalidAuthorizationSpecificationError):
@@ -73,15 +106,31 @@ def translate(exc: BaseException) -> HiveDataError:
         return ValueRefused(str(exc))
     if isinstance(exc, asyncpg.QueryCanceledError):
         return TimedOut(str(exc))
+    if isinstance(exc, asyncpg.InFailedSQLTransactionError):
+        return TransactionAborted(str(exc))
+    if isinstance(exc, asyncpg.TooManyConnectionsError):
+        # The database is up and answering everybody else. Reporting this as
+        # unreachable sends somebody to a healthy server; reporting it as a
+        # rejected write blames a statement nobody read.
+        return NoConnectionAvailable(str(exc))
+    if isinstance(exc, (asyncpg.PostgresConnectionError,
+                        asyncpg.OperatorInterventionError)):
+        # The server went away under us: a restart, an administrative
+        # shutdown, a crash, a connection closed mid-statement. Before the
+        # generic `PostgresError` branch below, which would otherwise call a
+        # Postgres restart a refused write.
+        return Unreachable(str(exc) or exc.__class__.__name__)
     if isinstance(exc, asyncpg.IntegrityConstraintViolationError):
         return WriteRejected(str(exc))
     if isinstance(exc, asyncio.TimeoutError):
+        # Reached only outside the connect phase, where `connecting=True`
+        # answers first. A timeout here is a statement the database took
+        # and did not finish.
         return TimedOut("the database did not answer inside the deadline")
     if isinstance(exc, (OSError, socket.gaierror,
                         asyncpg.CannotConnectNowError)):
         # A refused connection, a name that does not resolve, a host that is
-        # not there. Deliberately not folded in with a refused credential:
-        # those are two different machines to go and look at.
+        # not there.
         return Unreachable(str(exc) or exc.__class__.__name__)
     if isinstance(exc, asyncpg.PostgresError):
         return WriteRejected(str(exc))
@@ -102,16 +151,38 @@ async def open_pool(settings: Settings | None = None) -> asyncpg.Pool:
     with one pool between them.
     """
     global _pool, _settings
+    global _loop
     resolved = settings or from_environment()
-    async with _gate:
+    running = asyncio.get_running_loop()
+    async with _gate():
+        if _pool is not None and _loop is not None and _loop is not running:
+            raise HiveDataError(
+                "a pool is already open on another event loop. asyncpg ties "
+                "a pool to the loop that created it, so this one would fail "
+                "on its first statement with a closed-loop error far from "
+                "the call that reused it. Close the pool before the loop "
+                "that opened it goes away.")
         if _pool is not None:
-            if _settings is not None and _settings.dsn != resolved.dsn:
-                raise HiveDataError(
-                    "a pool is already open against "
-                    f"{_settings.describes}; close it before opening one "
-                    f"against {resolved.describes}. Two pools in one process "
-                    "would let two operations in one request answer from two "
-                    "databases.")
+            if _settings is not None and _settings != resolved:
+                if _settings.dsn != resolved.dsn:
+                    raise HiveDataError(
+                        "a pool is already open against "
+                        f"{_settings.describes}; close it before opening "
+                        f"one against {resolved.describes}. Two pools in "
+                        "one process would let two operations in one "
+                        "request answer from two databases.")
+                # Same database, different numbers. Said out loud rather
+                # than ignored: a second call asking for a larger pool is
+                # somebody expecting a larger pool, and getting the first
+                # call's size silently is how a service runs all year
+                # against a ceiling nobody set.
+                log.warning(
+                    "hive-data: a pool is already open against %s with "
+                    "%d-%d connections; keeping it. The settings this call "
+                    "asked for (%d-%d) are not applied — close the pool "
+                    "and open it again to change them.",
+                    _settings.describes, _settings.pool_min,
+                    _settings.pool_max, resolved.pool_min, resolved.pool_max)
             return _pool
         try:
             _pool = await asyncpg.create_pool(
@@ -134,9 +205,14 @@ async def open_pool(settings: Settings | None = None) -> asyncpg.Pool:
         except BaseException as exc:
             _pool = None
             _settings = None
-            raise translate(exc) from exc
+            raise translate(exc, connecting=True) from exc
         _settings = resolved
-    log.info(
+        _loop = running
+    # At WARNING, deliberately. The one line whose job is to catch "this
+    # service is pointed at a half-loaded database" is worthless at INFO:
+    # nothing in the hive configures a handler for this logger, so an INFO
+    # line is never printed by anybody.
+    log.warning(
         "hive-data: pool open against %s, %d-%d connections, statement "
         "deadline %.1fs", resolved.describes, resolved.pool_min,
         resolved.pool_max, resolved.statement_timeout)
@@ -150,15 +226,24 @@ async def close_pool(drain_timeout: float | None = None) -> None:
     hangs on one wedged connection never reaches the rest of the shutdown,
     and the process is killed with its other work half-done.
     """
-    global _pool, _settings
-    async with _gate:
+    global _pool, _settings, _loop
+    async with _gate():
         pool, settings = _pool, _settings
         _pool = None
         _settings = None
+        _loop = None
     if pool is None:
         return
-    deadline = (settings.transaction_timeout if drain_timeout is None
-                and settings is not None else drain_timeout)
+    if drain_timeout is not None:
+        deadline = drain_timeout
+    elif settings is not None:
+        deadline = settings.transaction_timeout
+    else:
+        # Never reached today - `_pool` and `_settings` are only ever set
+        # together inside the gate - but written out so a later edit cannot
+        # reach the unbounded wait this deadline exists to prevent, nor
+        # format None into the warning below.
+        deadline = DEFAULT_DRAIN_TIMEOUT
     try:
         await asyncio.wait_for(pool.close(), timeout=deadline)
     except asyncio.TimeoutError:

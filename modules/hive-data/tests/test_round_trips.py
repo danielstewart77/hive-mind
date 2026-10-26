@@ -218,15 +218,28 @@ async def test_settings_scopes_people_and_overhead_round_trip(
     assert [m["user_id"] for m in await core.list_group_members(group)] == [
         user["row"]["id"]]
 
-    await core.record_overhead(
-        mind_id=a_mind, harness="claude", model="claude-opus-5",
-        surface="telegram", tokens=1234, observed_at=clock)
-    await core.record_overhead(
-        mind_id=a_mind, harness="claude", model="claude-opus-5",
-        surface="telegram", tokens=4321, observed_at=clock + 1)
+    # The figure is the floor the prompt costs, so the lowest reading wins
+    # and a later higher one is a turn that carried more rather than a
+    # cheaper overhead. Last-write-wins here would ratchet the measurement
+    # upward on every long turn.
+    for tokens, at in ((1234, clock), (4321, clock + 1), (900, clock + 2)):
+        await core.record_overhead(
+            mind_id=a_mind, harness="claude", model="claude-opus-5",
+            surface="telegram", tokens=tokens, observed_at=at)
+        if tokens == 4321:
+            held = await inspector.fetchrow(
+                'SELECT "tokens", "observed_at" FROM '
+                'core."context_overhead" WHERE "mind_id" = $1', a_mind)
+            assert held["tokens"] == 1234
+            # And the timestamp belongs to the reading that is standing.
+            assert held["observed_at"] == clock
+
     assert (await core.get_overhead(
         mind_id=a_mind, harness="claude", model="claude-opus-5",
-        surface="telegram"))["tokens"] == 4321
+        surface="telegram"))["tokens"] == 900
+    assert await inspector.fetchval(
+        'SELECT "observed_at" FROM core."context_overhead" '
+        'WHERE "mind_id" = $1', a_mind) == clock + 2
     assert await inspector.fetchval(
         'SELECT count(*) FROM core."context_overhead" WHERE "mind_id" = $1',
         a_mind) == 1

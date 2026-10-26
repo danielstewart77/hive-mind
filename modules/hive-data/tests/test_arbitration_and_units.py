@@ -137,8 +137,8 @@ async def test_a_unit_handed_to_another_task_is_refused(connected):
             await asyncio.create_task(borrow(unit))
 
 
-async def test_two_turns_sharing_a_timestamp_come_back_in_identity_order(
-        connected, a_mind, clock):
+async def test_the_newest_turn_is_the_newest_when_timestamps_tie(
+        connected, a_mind, clock, inspector):
     """`created_at` is whole epoch seconds and `now()` is constant for a
     transaction, so two turns written in one unit of work carry the same
     timestamp. Without the identity tiebreak the order is whichever the plan
@@ -149,16 +149,30 @@ async def test_two_turns_sharing_a_timestamp_come_back_in_identity_order(
         mind_id=a_mind, created_at=clock, last_active=clock)
 
     async with hive_data.transaction() as unit:
-        await core.record_turn(
+        first = await core.record_turn(
             session_id=session_id, role="user", content="the question",
             created_at=clock, unit=unit)
-        await core.record_turn(
+        second = await core.record_turn(
             session_id=session_id, role="assistant", content="the answer",
             created_at=clock, unit=unit)
 
-    turns = await core.list_turns(session_id)
-    assert [t["content"] for t in turns] == ["the question", "the answer"]
-    assert (await core.latest_turn(session_id))["content"] == "the answer"
+    # What this guards, and what it cannot. It catches an ordering that is
+    # wrong or inverted — and the identity tiebreak the code carries is not
+    # falsifiable through this interface at all: Postgres answers a tie the
+    # same way with and without it, on every arrangement of rows I could
+    # construct, because its top-N sort happens to keep the row this
+    # ordering wants. So the tiebreak stays in the code on the strength of
+    # the reasoning rather than of a test, and that is said here rather
+    # than implied by a test that would pass either way.
+    newest = await core.latest_turn(session_id)
+    assert newest["content"] == "the answer"
+    assert newest["id"] == second["row"]["id"]
+    assert newest["id"] > first["row"]["id"]
+
+    assert [t["content"] for t in await core.list_turns(session_id)] == [
+        "the question", "the answer"]
+    assert (await core.latest_turn(session_id, role="user"))["content"] == (
+        "the question")
 
 
 async def test_a_filtered_listing_returns_the_matching_rows_only(
@@ -185,19 +199,20 @@ async def test_a_held_key_serializes_two_units_across_connections(
     property Postgres removes. The adopt sequence is a delete and then a
     write, and run twice at once it leaves two rows for one session."""
     session_id = f"s-{uuid.uuid4().hex[:8]}"
+    tile = f"tile-{uuid.uuid4().hex[:8]}"
     await core.create_session(
-        id=session_id, surface="terminal", surface_id="tile-1",
+        id=session_id, surface="terminal", surface_id=tile,
         mind_id=a_mind, created_at=clock, last_active=clock)
     order: list[str] = []
 
     async def adopt(label: str, delay: float) -> None:
         async with hive_data.transaction() as unit:
-            await unit.hold(f"session:{session_id}")
+            await unit.hold_conversation(session_id)
             order.append(f"{label}-in")
-            await core.unbind_surface("terminal", "tile-1", unit=unit)
+            await core.unbind_surface("terminal", tile, unit=unit)
             await asyncio.sleep(delay)
             await core.bind_surface(
-                client_type="terminal", client_ref="tile-1",
+                client_type="terminal", client_ref=tile,
                 session_id=session_id, unit=unit)
             order.append(f"{label}-out")
 
