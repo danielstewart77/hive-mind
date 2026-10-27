@@ -19,6 +19,7 @@ import asyncpg
 from .config import Settings, from_environment
 from .errors import (
     CredentialRefused,
+    SchemaMismatch,
     Conflict,
     TransactionAborted,
     DatabaseMissing,
@@ -36,6 +37,59 @@ log = logging.getLogger("hive-data")
 
 #: The fallback drain deadline, for the path that has no settings to read.
 DEFAULT_DRAIN_TIMEOUT = 30.0
+
+
+def _vector_literal(value: Any) -> str:
+    """A sequence of numbers as pgvector's own input syntax."""
+    if isinstance(value, str):
+        # Already a literal. Passed straight through rather than re-encoded,
+        # so a caller holding one from somewhere else is not refused.
+        return value
+    return "[" + ",".join(repr(float(v)) for v in value) + "]"
+
+
+def _vector_values(value: str) -> list[float]:
+    """pgvector's output syntax as the numbers it stands for."""
+    return [float(part) for part in value.strip()[1:-1].split(",") if part]
+
+
+async def _register_codecs(connection: Any) -> None:
+    """Teach a connection the types this package reads that asyncpg lacks.
+
+    Run on every connection the pool opens, which is the only place it can
+    be: a pool that grew past its minimum later would otherwise hold some
+    connections that know `vector` and some that do not, and the same
+    operation would return numbers or a 50,000-character string depending
+    on which one it was handed.
+
+    A database with no `vector` type is not an error here. `core` alone is
+    a perfectly good install - comms needs none of this - and refusing to
+    open a pool for it would make a memory-side type decision break every
+    service in the hive.
+    """
+    # The schema is asked for rather than assumed. `set_type_codec` resolves
+    # a type by (schema, name), and `CREATE EXTENSION vector` lands wherever
+    # `search_path` pointed when somebody ran it. Hardcoding `public` meant a
+    # database with the extension anywhere else registered no codec at all
+    # and said nothing — and the startup type check passes there, because
+    # `udt_name` is just `vector` in any schema.
+    where = await connection.fetchval(
+        "SELECT n.nspname FROM pg_type t "
+        "JOIN pg_namespace n ON n.oid = t.typnamespace "
+        "WHERE t.typname = 'vector'")
+    if where is None:
+        return
+    try:
+        await connection.set_type_codec(
+            "vector", schema=where,
+            encoder=_vector_literal, decoder=_vector_values,
+            format="text")
+    except (asyncpg.exceptions.UndefinedObjectError, ValueError):
+        # asyncpg raises a plain `ValueError: unknown type: public.vector`
+        # when the type is not there, not the Postgres error class the name
+        # suggests. Both are caught, because a `core`-only database — which
+        # is every install that runs comms and not lucent — reaches this.
+        return
 
 T = TypeVar("T")
 
@@ -96,6 +150,16 @@ def translate(exc: BaseException, *, connecting: bool = False) -> HiveDataError:
         return CredentialRefused(str(exc))
     if isinstance(exc, asyncpg.InvalidCatalogNameError):
         return DatabaseMissing(str(exc))
+    if isinstance(exc, (asyncpg.InvalidSchemaNameError,
+                        asyncpg.UndefinedTableError,
+                        asyncpg.UndefinedColumnError)):
+        # The database is not the one these operations are written against.
+        # Before the generic branch below, which would call a missing schema
+        # a refused write and send somebody to read a statement that is
+        # fine. The common cause is real and benign: an install that runs
+        # comms and not lucent has no `memory` schema, so the first memory
+        # operation it calls should say that rather than imply a constraint.
+        return SchemaMismatch(str(exc) or exc.__class__.__name__)
     if isinstance(exc, asyncpg.UniqueViolationError):
         return Conflict(str(exc))
     if isinstance(exc, asyncpg.ForeignKeyViolationError):
@@ -201,6 +265,7 @@ async def open_pool(settings: Settings | None = None) -> asyncpg.Pool:
                         str(int(resolved.transaction_timeout * 1000)),
                     "application_name": "hive-data",
                 },
+                init=_register_codecs,
             )
         except BaseException as exc:
             _pool = None

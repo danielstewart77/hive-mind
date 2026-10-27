@@ -45,7 +45,13 @@ NO_SERVER = (
     "credential in a tracked file."
 )
 
-SCHEMA_SQL = Path(hive_data.__file__).parent / "schema" / "core.sql"
+_SCHEMA_DIR = Path(hive_data.__file__).parent / "schema"
+SCHEMA_SQL = _SCHEMA_DIR / "core.sql"
+#: Applied beside `core.sql`. A separate artifact because a deployment can
+#: simply not create a context it does not run — comms needs `core` and
+#: nothing else — and because this one needs the `vector` extension, which
+#: is not a trusted extension and so needs a superuser to install.
+MEMORY_SCHEMA_SQL = _SCHEMA_DIR / "memory.sql"
 
 
 def _with_database(dsn: str, name: str) -> str:
@@ -82,6 +88,7 @@ async def scratch_dsn() -> str:
     target = await asyncpg.connect(dsn)
     try:
         await target.execute(SCHEMA_SQL.read_text())
+        await target.execute(MEMORY_SCHEMA_SQL.read_text())
     finally:
         await target.close()
     try:

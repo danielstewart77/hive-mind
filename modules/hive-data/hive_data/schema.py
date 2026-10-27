@@ -64,7 +64,35 @@ COLUMNS: dict[str, tuple[str, ...]] = {
     "users": (
         "id", "username", "password_hash", "created_at", "disabled_at",
         "must_change", "email", "domain_account", "session_version"),
+    "memories": (
+        "id", "mind_id", "content", "embedding", "content_search", "tags",
+        "source", "data_class", "tier", "as_of", "expires_at", "superseded",
+        "recurring", "codebase_ref", "created_at"),
 }
+
+#: The Postgres schema a declared table lives in. Absent means `core`, which
+#: is where all but one of them are.
+#:
+#: A map rather than qualified keys in `COLUMNS`, because the bare name is
+#: what every operation passes and what every error message reads better
+#: with. The one thing to know before adding to it: `credentials` exists in
+#: both `core` and `memory` and they are NOT the same registry - 12 holders
+#: appear in both and none of the 12 share a `token_sha`. A bare
+#: `"credentials"` here means the `core` one. The day an operation needs
+#: lucent's, this map stops being enough and the keys have to be qualified.
+SCHEMAS: dict[str, str] = {
+    "memories": "memory",
+}
+
+
+def schema_of(table: str) -> str:
+    """The Postgres schema a declared table lives in."""
+    return SCHEMAS.get(table, "core")
+
+
+def qualified(table: str) -> str:
+    """A table's name as a statement has to spell it."""
+    return f'{schema_of(table)}."{table}"'
 
 #: Columns a caller must ask for by name. A session listing answers to the
 #: service token every surface bot holds, and these two are a composed system
@@ -80,6 +108,18 @@ PRIVATE: dict[str, frozenset[str]] = {
     #: another.
     "credentials": frozenset({"token_sha"}),
     "users": frozenset({"password_hash"}),
+    #: The 4096 floats. Private because no caller reading memories wants
+    #: them: lucent has never returned an embedding, and a listing that
+    #: included one hands back 4096 numbers per row, as a 50,000-character
+    #: literal over the wire, on a route called every turn. A caller that
+    #: genuinely needs the vector asks for it by name.
+    #:
+    #: The searchable form of the text, not the text. It is a tsvector, it
+    #: is the size of the content again, and asyncpg has no codec for it, so
+    #: a listing that selected it would hand every caller a large string of
+    #: lexeme positions nobody asked for. Declared so the drift check sees
+    #: it; private so no read returns it.
+    "memories": frozenset({"content_search", "embedding"}),
     "sessions": frozenset({
         "carry_forward", "carry_forward_sid", "carry_forward_at",
         "carry_forward_prompt_cap", "resend_content", "resend_images",
@@ -94,6 +134,29 @@ GENERATED: dict[str, frozenset[str]] = {
     "session_memory": frozenset({"id"}),
     "session_turns": frozenset({"id"}),
     "users": frozenset({"id"}),
+    #: `content_search` is GENERATED ALWAYS, not BY DEFAULT: Postgres
+    #: refuses a value for it outright. Named here so the refusal happens
+    #: before the statement is built, with a sentence saying why, rather
+    #: than arriving from the server as a syntax-shaped error.
+    "memories": frozenset({"id", "content_search"}),
+}
+
+
+#: Columns whose *type* is checked at startup, not only their name.
+#:
+#: Names alone are not enough for these two. A `memory.memories.embedding`
+#: left as `bytea` passes a name check, and then asyncpg — with the vector
+#: codec registered but the column not actually a vector — hands the row
+#: back as raw bytes, or, the other way round, hands an unregistered vector
+#: back as a 50KB `str`. Neither raises. Both make every similarity number
+#: wrong in a way that reads as a working search, and a dimension check
+#: written the obvious way measures characters instead of dimensions.
+#:
+#: `udt_name` as Postgres spells it, which is why it is `tsvector` rather
+#: than `TSVECTOR` and `vector` rather than `vector(4096)`.
+TYPED: dict[tuple[str, str], str] = {
+    ("memories", "embedding"): "vector",
+    ("memories", "content_search"): "tsvector",
 }
 
 
@@ -109,13 +172,37 @@ def select_list(table: str, columns: tuple[str, ...] | None = None) -> str:
     unknown = [c for c in chosen if c not in COLUMNS[table]]
     if unknown:
         raise KeyError(
-            f"core.{table} has no column(s) {unknown}. The declared columns "
+            f"{schema_of(table)}.{table} has no column(s) {unknown}. The declared columns "
             "are the ones these operations are written against; a name not "
             "among them is a typo, not a column.")
     return ", ".join(f'"{c}"' for c in chosen)
 
 
-async def _sequences_behind(connection: Any) -> list[str]:
+#: The one schema every install has. A deployment can decline to create any
+#: of the others — comms runs `core` and nothing else, and the health context
+#: is the one a corporate install deliberately does not create — but a
+#: database with no `core` is not this hive's database.
+REQUIRED_SCHEMA = "core"
+
+
+async def _present_schemas(connection: Any) -> set[str]:
+    """Which of the declared schemas this database actually has.
+
+    An absent schema is a context this deployment does not run, not a
+    mismatch. The distinction matters in both directions: declaring a
+    `memory` table must not stop comms — which uses none of them — from
+    opening a pool at all, and a `memory` schema that *is* there still has
+    every column and type checked.
+    """
+    wanted = sorted({schema_of(table) for table in COLUMNS})
+    rows = await connection.fetch(
+        "SELECT schema_name FROM information_schema.schemata "
+        "WHERE schema_name = ANY($1)", wanted)
+    return {row["schema_name"] for row in rows}
+
+
+async def _sequences_behind(connection: Any,
+                            present: set[str]) -> list[str]:
     """Identity sequences whose next value a row already occupies.
 
     Checked at startup for the same reason the column names are: the failure
@@ -124,26 +211,38 @@ async def _sequences_behind(connection: Any) -> list[str]:
     """
     out: list[str] = []
     for table, generated in GENERATED.items():
+        if schema_of(table) not in present:
+            continue
         for column in sorted(generated):
+            where = schema_of(table)
+            # The sequence is asked for on its own, before anything reads the
+            # column. `GENERATED` holds every column the database fills in,
+            # and not all of them are identities — `memories.content_search`
+            # is a generated tsvector, and `max()` of one is not a function
+            # that exists. Asking in one statement made that a hard failure
+            # at startup for every consumer.
+            sequence = await connection.fetchval(
+                "SELECT pg_get_serial_sequence($1, $2)",
+                f"{where}.{table}", column)
+            if sequence is None:
+                continue
             row = await connection.fetchrow(
-                f'SELECT pg_get_serial_sequence($1, $2) AS "seq", '
-                f'max("{column}") AS "top" FROM core."{table}"',
-                f"core.{table}", column)
-            if row is None or row["seq"] is None or row["top"] is None:
+                f'SELECT max("{column}") AS "top" FROM {qualified(table)}')
+            if row is None or row["top"] is None:
                 continue
             # Read off the sequence relation itself. `pg_sequences` carries
             # `last_value` but not `is_called`, and the difference is
             # exactly one: a sequence that has never been called will
             # issue `last_value`, one that has will issue the next.
             state = await connection.fetchrow(
-                f'SELECT last_value, is_called FROM {row["seq"]}')
+                f"SELECT last_value, is_called FROM {sequence}")
             if state is None:
                 continue
             nextval = int(state["last_value"]) + (
                 1 if state["is_called"] else 0)
             if nextval <= int(row["top"]):
                 out.append(
-                    f"core.{table}.{column} would next issue {nextval} "
+                    f"{where}.{table}.{column} would next issue {nextval} "
                     f"and row {int(row['top'])} already exists")
     return out
 
@@ -161,22 +260,55 @@ async def verify(connection: Any) -> None:
     """
     from .errors import SchemaMismatch, SequenceBehind
 
+    present = await _present_schemas(connection)
+    if REQUIRED_SCHEMA not in present:
+        raise SchemaMismatch(
+            f"the database has no {REQUIRED_SCHEMA} schema. Every operation "
+            "in this package but the memory ones is written against it, so "
+            "this is either an empty database or the wrong one — not a "
+            "deployment that declined to run a context.")
+    declared = {t for t in COLUMNS if schema_of(t) in present}
     rows = await connection.fetch(
-        "SELECT table_name, column_name FROM information_schema.columns "
-        "WHERE table_schema = 'core'")
-    applied: dict[str, set[str]] = {}
+        "SELECT table_schema, table_name, column_name, data_type, udt_name "
+        "FROM information_schema.columns WHERE table_schema = ANY($1)",
+        sorted(present))
+    applied: dict[tuple[str, str], dict[str, str]] = {}
     for row in rows:
-        applied.setdefault(row["table_name"], set()).add(row["column_name"])
+        applied.setdefault(
+            (row["table_schema"], row["table_name"]), {}
+        )[row["column_name"]] = row["udt_name"]
 
-    missing_tables = sorted(t for t in COLUMNS if t not in applied)
+    missing_tables = sorted(
+        f"{schema_of(table)}.{table}"
+        for table in declared
+        if (schema_of(table), table) not in applied)
     missing_columns = sorted(
-        f"core.{table}.{column}"
+        f"{schema_of(table)}.{table}.{column}"
         for table, columns in COLUMNS.items()
-        if table in applied
+        if table in declared and (schema_of(table), table) in applied
         for column in columns
-        if column not in applied[table]
+        if column not in applied[(schema_of(table), table)]
     )
-    behind = await _sequences_behind(connection)
+    wrong_types = sorted(
+        f"{schema_of(table)}.{table}.{column} is "
+        f"{applied[(schema_of(table), table)][column]} where these "
+        f"operations are written against {expected}"
+        for (table, column), expected in TYPED.items()
+        if table in declared and (schema_of(table), table) in applied
+        and column in applied[(schema_of(table), table)]
+        and applied[(schema_of(table), table)][column] != expected
+    )
+    # Reported before the sequence probe below, and the order is the finding
+    # rather than a tidiness preference. `pg_get_serial_sequence` raises on a
+    # table or column that is not there, so a `memories` or `users` missing a
+    # declared column used to come back as the driver's own sentence about
+    # that one column - and anything else that had drifted went unmentioned.
+    # The operator fixed the column they were told about, restarted, and got
+    # the rest of the drift on the next boot.
+    if missing_tables or missing_columns or wrong_types:
+        _refuse(missing_tables, missing_columns, wrong_types)
+
+    behind = await _sequences_behind(connection, present)
     if behind:
         raise SequenceBehind(
             "identity sequences are behind the rows already in their "
@@ -188,17 +320,24 @@ async def verify(connection: Any) -> None:
             "caller is told is benign, so a ledger would record nothing "
             "while reporting a harmless duplicate. Run setval on each.")
 
-    if missing_tables or missing_columns:
-        parts = []
-        if missing_tables:
-            parts.append(
-                "tables absent: " + ", ".join(f"core.{t}"
-                                              for t in missing_tables))
-        if missing_columns:
-            parts.append("columns absent: " + ", ".join(missing_columns))
-        raise SchemaMismatch(
-            "the applied schema is not the one these operations were "
-            "written against — " + "; ".join(parts) + ". Refusing at "
-            "startup rather than at the call site: a column this package "
-            "names and the database does not have arrives as a missing dict "
-            "key, and a missing key reads as a value.")
+    return None
+
+
+def _refuse(missing_tables: list[str], missing_columns: list[str],
+            wrong_types: list[str]) -> None:
+    """Refuse to open, naming everything that has drifted at once."""
+    from .errors import SchemaMismatch
+
+    parts = []
+    if missing_tables:
+        parts.append("tables absent: " + ", ".join(missing_tables))
+    if missing_columns:
+        parts.append("columns absent: " + ", ".join(missing_columns))
+    if wrong_types:
+        parts.append("columns of the wrong type: " + "; ".join(wrong_types))
+    raise SchemaMismatch(
+        "the applied schema is not the one these operations were written "
+        "against — " + "; ".join(parts) + ". Refusing at startup rather "
+        "than at the call site: a column this package names and the "
+        "database does not have arrives as a missing dict key, and a "
+        "missing key reads as a value.")
