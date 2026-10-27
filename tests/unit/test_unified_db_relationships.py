@@ -791,3 +791,142 @@ def test_a_merge_losers_rows_are_counted_too(tmp_path, monkeypatch):
     built = build_schema.build(str(tmp_path))
 
     assert any("1 row(s)" in w for w in built.withheld), built.withheld
+
+
+# ---------------------------------------------------------------------------
+# Searchable text, in place of the FTS5 virtual table
+# ---------------------------------------------------------------------------
+
+def _search_store(tmp_path, monkeypatch, *, over: str = "body"):
+    _store(
+        tmp_path / "only.db",
+        "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL)",
+    )
+    monkeypatch.setattr(schema_map, "SOURCES", {"only": "only.db"})
+    monkeypatch.setattr(schema_map, "PLACEMENT", {
+        ("only", "notes"): ("memory", "notes")})
+    for name in ("DROPS", "UNKEYED", "DROPPED_DEFAULTS", "ON_DELETE_OVERRIDE",
+                 "COLUMN_RENAMES", "DROPPED_COLUMNS", "TYPE_OVERRIDES"):
+        monkeypatch.setattr(schema_map, name, {})
+    monkeypatch.setattr(schema_map, "CROSS_FILE", ())
+    monkeypatch.setattr(schema_map, "SEARCH_COLUMNS", {
+        ("memory", "notes"): (
+            "body_search", over, 100_000, "Replaces an FTS5 table."),
+    })
+    return tmp_path
+
+
+def test_a_table_declared_searchable_is_emitted_with_a_generated_column(
+        tmp_path, monkeypatch):
+    """lucent's `memories_fts` exists on disk and in no source file, so there
+    is nothing for the generator to translate — the replacement has to be
+    declared. A generated column rather than an expression index, so the
+    write path needs to know nothing about text search and the drift check
+    can see it."""
+    base = _search_store(tmp_path, monkeypatch)
+
+    built = build_schema.build(str(base))
+    ddl = _table_ddl(built, "memory", "notes")
+
+    assert ('"body_search" tsvector GENERATED ALWAYS AS '
+            "(to_tsvector('memory.hive_text'::regconfig, "
+            'CASE WHEN length("body") > 100000 THEN '
+            "regexp_replace(left(\"body\", 100000), '\\S+$', '') "
+            'ELSE "body" END)) STORED') in ddl
+    assert any(
+        'CREATE INDEX "memory_idx_notes_body_search"' in stmt
+        and 'USING gin ("body_search")' in stmt
+        for stmt in built.ddl)
+
+
+def test_the_text_configuration_the_searchable_columns_need_is_emitted(
+        tmp_path, monkeypatch):
+    """A generated column referring to a configuration the file never creates
+    fails at apply time, inside the one transaction, taking the whole schema
+    with it. It stems and folds accents and removes no stopwords, which is
+    what FTS5's `porter unicode61` does."""
+    base = _search_store(tmp_path, monkeypatch)
+
+    built = build_schema.build(str(base))
+    text = "\n".join(built.ddl)
+
+    assert ("CREATE EXTENSION IF NOT EXISTS unaccent WITH SCHEMA public;"
+            in text)
+    assert ("CREATE TEXT SEARCH DICTIONARY memory.hive_stem "
+            "(TEMPLATE = snowball, Language = english);") in text
+    assert "CREATE TEXT SEARCH CONFIGURATION memory.hive_text" in text
+    assert "WITH unaccent, memory.hive_stem;" in text
+    assert "StopWords" not in text
+    assert text.index("CREATE TEXT SEARCH CONFIGURATION") < text.index(
+        'CREATE TABLE memory."notes"')
+
+
+def test_a_searchable_declaration_over_a_column_no_source_carries_refuses(
+        tmp_path, monkeypatch):
+    """The same rule as `unmapped()`: a decision nobody can check is not a
+    decision. A stale one here emits a generated column over a name that
+    does not exist."""
+    base = _search_store(tmp_path, monkeypatch, over="prose")
+
+    with pytest.raises(build_schema.StaleDecision):
+        build_schema.build(str(base))
+
+
+def test_a_column_retyped_to_something_other_than_a_flag_keeps_its_default(
+        tmp_path, monkeypatch):
+    """`_boolean_default` translates 0 and 1. A column retyped to a vector
+    has a default that means nothing to it, and routing one through the flag
+    translator reports a note about a flag nobody declared."""
+    _store(
+        tmp_path / "only.db",
+        "CREATE TABLE rows_ (id TEXT PRIMARY KEY, "
+        "label TEXT DEFAULT 'none')",
+    )
+    monkeypatch.setattr(schema_map, "SOURCES", {"only": "only.db"})
+    monkeypatch.setattr(schema_map, "PLACEMENT", {
+        ("only", "rows_"): ("core", "rows_")})
+    for name in ("DROPS", "UNKEYED", "DROPPED_DEFAULTS", "ON_DELETE_OVERRIDE",
+                 "COLUMN_RENAMES", "DROPPED_COLUMNS"):
+        monkeypatch.setattr(schema_map, name, {})
+    monkeypatch.setattr(schema_map, "CROSS_FILE", ())
+    monkeypatch.setattr(schema_map, "SEARCH_COLUMNS", {})
+    monkeypatch.setattr(schema_map, "TYPE_OVERRIDES", {
+        ("core", "rows_", "label"): ("text", "Still text, said out loud.")})
+
+    built = build_schema.build(str(tmp_path))
+    ddl = _table_ddl(built, "core", "rows_")
+
+    assert '"label" text DEFAULT \'none\'' in ddl
+    assert built.notes == []
+
+
+def test_the_shipped_search_declaration_names_the_column_hive_data_applies(
+        ):
+    """A cross-repo contract with nothing holding the two ends together.
+    `hive-data` hard-codes `content_search` in its declared columns, its
+    private columns, its generated columns and its vendored artifact, and a
+    rename here refuses that package's pool at startup for every service in
+    the hive — comms included, which uses none of the memory operations.
+
+    The four tests above all monkeypatch `SEARCH_COLUMNS` with a synthetic
+    fixture, so the entry that actually ships was never exercised by any of
+    them."""
+    declared = schema_map.search_column("memory", "memories")
+
+    assert declared is not None
+    column, over, cap, why = declared
+    assert column == "content_search"
+    assert over == "content"
+    assert cap == 100_000
+    assert why
+
+
+def test_the_shipped_embedding_declaration_carries_its_width():
+    """A bare `vector` is legal, types as a vector, and passes a type-name
+    check — and then takes a row of any width, with the mismatch arriving at
+    query time on every recall as an error about a row nobody can identify.
+    The width is the declaration."""
+    declared = schema_map.column_type("memory", "memories", "embedding")
+
+    assert declared is not None
+    assert declared[0] == "vector(4096)"
