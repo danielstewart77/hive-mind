@@ -302,6 +302,11 @@ TABLE.add(
     "POST /api/sentinel/review/mark",
     "POST /api/sentinel/review/overturn",
     "POST /api/sentinel/queue/apply",
+    # The catalogue is admin-only rather than merely authenticated: Sloan and
+    # Aiden hold console accounts, and these rows decide what escalates to
+    # Daniel at three in the morning.
+    "GET /api/sentinel/buckets",
+    "POST /api/sentinel/buckets/save",
     # training
     "GET /training",
     "GET /api/training/status",

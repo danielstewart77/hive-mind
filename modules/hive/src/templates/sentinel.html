@@ -17,6 +17,23 @@
     </div>
 
     <div class="terminal-box">
+        <h3>bucket catalogue</h3>
+        <p id="catalogue-state" class="event-hints" data-state="{{ catalogue.state }}">{{ catalogue.detail }}</p>
+        <p id="catalogue-figures" class="event-hints"></p>
+        <div id="catalogue-error" class="events-error" style="display:none"></div>
+        <div class="rules-filters">
+            <button id="catalogue-refresh" type="button">refresh</button>
+        </div>
+        <table class="console-table" id="catalogue-table">
+            <thead><tr>
+                <th>bucket</th><th>condition</th><th>disposition</th><th>qualifier</th>
+                <th>promotion</th><th>facts</th><th>status</th><th>events</th><th></th>
+            </tr></thead>
+            <tbody></tbody>
+        </table>
+    </div>
+
+    <div class="terminal-box">
         <h3>awaiting decision, by class</h3>
         <table class="console-table" id="sentinel-queue">
             <thead><tr><th>class</th><th>bucket</th><th>queued</th><th>rules</th><th>first seen</th><th>last seen</th></tr></thead>
@@ -41,4 +58,5 @@
     </div>
 </main>
 <script src="{{ request.url_for('static', path='sentinel.js') }}"></script>
+<script src="{{ request.url_for('static', path='sentinel-catalogue.js') }}"></script>
 {% endblock %}
