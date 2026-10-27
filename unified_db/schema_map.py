@@ -549,7 +549,69 @@ TYPE_OVERRIDES: dict[tuple[str, str, str], tuple[str, str]] = {
         "Whether the history holds images, which the gateway reads to decide "
         "whether a model that cannot take them may be offered. A flag.",
     ),
+    ("memory", "memories", "embedding"): (
+        "vector(4096)",
+        "A 4096-dimension embedding, a BLOB only because SQLite had no "
+        "vector type and lucent therefore scanned every row into numpy to "
+        "score cosine in Python. The dimension is declared rather than left "
+        "open: a bare `vector` accepts a row of any width and the mismatch "
+        "then arrives at query time, on every recall, as an error about a "
+        "row nobody can identify. All live rows are 16384 bytes, which is "
+        "4096 float32s exactly. No approximate index is possible at this "
+        "width - pgvector caps HNSW and IVFFlat at 2000 dimensions and "
+        "halfvec at 4000 - so recall is an exact scan, which is both "
+        "accurate and, measured at 190ms warm over the live corpus, faster "
+        "than shipping every row to Python.",
+    ),
 }
+
+#: The text search configuration the searchable columns are built with, and
+#: the dictionaries behind it.
+#:
+#: Not stock `english`, and not `simple`. The configuration has to match what
+#: FTS5 is doing today, which is `tokenize='porter unicode61'`:
+#:
+#: * It stems. The live index holds `rotat` (1,151 rows), `restart` (983) and
+#:   `run` (1,599) and holds no `rotation`, `restarting` or `running` at all,
+#:   so a query for "rotation" matches every inflection today. `simple` would
+#:   match only the literal word and silently narrow every keyword result.
+#: * It folds diacritics. `unicode61` defaults to `remove_diacritics=1`, so
+#:   the index holds `jose`, and 4,097 of the live rows carry non-ASCII
+#:   bytes. Hence `unaccent`, which is a trusted extension.
+#: * It keeps stopwords. FTS5 indexes every token; lucent filters its own
+#:   80-word stoplist out of the *query* before it is ever run. Stock
+#:   `english` removes its own stopwords from the *documents* too, so a query
+#:   token in Postgres's list but not in lucent's (`same`, `than`, `most`,
+#:   `such`, `about`, `against`, ...) would match nothing where it matches
+#:   now. So the snowball stemmer is declared with no stopword file.
+TEXT_CONFIG = "hive_text"
+TEXT_CONFIG_SCHEMA = "memory"
+
+#: (schema, table) -> the generated searchable column, the source column it
+#: is built from, how much of it is indexed, and why.
+#:
+#: A generated column rather than an expression index, because the column is
+#: what makes "stored and findable in one write" true without the writer
+#: knowing anything about text search - and because the drift check can see
+#: a column.
+SEARCH_COLUMNS: dict[tuple[str, str], tuple[str, str, int, str]] = {
+    ("memory", "memories"): (
+        "content_search", "content", 100_000,
+        "Replaces lucent's `memories_fts`, an FTS5 virtual table that exists "
+        "on disk and in no source file, with a column this generator can "
+        "declare. Capped, because a tsvector is hard-limited to 1MB and "
+        "`to_tsvector` over a large enough paste raises - which, on a "
+        "generated column, fails the INSERT and loses the memory outright. "
+        "A memory past the cap is stored whole and findable by its first "
+        "100,000 characters, because an unfindable memory is recoverable and "
+        "a refused one is gone.",
+    ),
+}
+
+
+def search_column(schema: str, table: str) -> tuple[str, str, int, str] | None:
+    """The generated searchable column for a table, if the map declares one."""
+    return SEARCH_COLUMNS.get((schema, table))
 
 
 def column_name(schema: str, table: str, column: str) -> str:

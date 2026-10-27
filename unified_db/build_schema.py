@@ -250,7 +250,10 @@ def _columns(
             if pkpos:
                 pk.append((pkpos, final))
             continue
-        if retyped is not None:
+        # Only a boolean retype: `_boolean_default` translates 0 and 1, and
+        # a column retyped to anything else (a vector, say) has a default
+        # that means nothing to it.
+        if retyped is not None and pgtype == "boolean":
             dval, dnote = _boolean_default(dflt)
         else:
             dval, dnote = _default(dflt)
@@ -261,6 +264,26 @@ def _columns(
         defs.append(piece)
         if pkpos:
             pk.append((pkpos, final))
+    declared_search = schema_map.search_column(schema, new_table)
+    if declared_search is not None:
+        column, over, cap, why = declared_search
+        source_names = {r[1] for r in rows}
+        if over not in source_names:
+            raise StaleDecision(
+                f"{schema}.{new_table} declares a searchable column over "
+                f"{over!r}, which the source does not carry. A decision "
+                "nobody can check is not a decision — the same rule as "
+                "`unmapped()` — and a stale one here would emit a generated "
+                "column over a name that does not exist, taking the whole "
+                "schema down at apply time inside the one transaction.")
+        final_over = schema_map.column_name(schema, new_table, over)
+        config = f"{schema_map.TEXT_CONFIG_SCHEMA}.{schema_map.TEXT_CONFIG}"
+        defs.append(
+            f'    "{column}" tsvector GENERATED ALWAYS AS (to_tsvector('
+            f"'{config}'::regconfig, left(\"{final_over}\", {cap}))) STORED")
+        decisions.append(
+            f"{table}.{column}: generated from {final_over}, first {cap} "
+            f"characters. {why}")
     pkcols = [n for _, n in sorted(pk)]
     return defs, pkcols, notes, decisions
 
@@ -715,6 +738,52 @@ def _relationships(
     return ddl, kept, withheld, unkeyed
 
 
+def _text_configuration() -> list[str]:
+    """The text search configuration the searchable columns are built with.
+
+    Declared here rather than left as a hand step on one host, for the reason
+    the extensions above are: a producer that cannot rebuild its own artifact
+    is not a producer. The mapping names every token type `simple` maps, so a
+    hyphenated word, a host name, a file path and a version number all stem
+    and fold the same way the rest of the text does.
+
+    `COPY = simple` is the starting point only — it supplies the parser and
+    the token-type list, and every mapping is then replaced. What makes this
+    the equivalent of FTS5's `porter unicode61` is in `schema_map`.
+    """
+    schema = schema_map.TEXT_CONFIG_SCHEMA
+    name = f"{schema}.{schema_map.TEXT_CONFIG}"
+    token_types = (
+        "asciiword, asciihword, hword_asciipart, word, hword, hword_part, "
+        "hword_numpart, numword, numhword, email, url, host, url_path, "
+        "file, float, sfloat, int, uint, version"
+    )
+    return [
+        # Snowball with no `StopWords` option removes no stopwords, which is
+        # what FTS5 does. Naming a stopword file here would quietly drop
+        # query tokens lucent's own stoplist keeps.
+        f"DROP TEXT SEARCH CONFIGURATION IF EXISTS {name};",
+        f"DROP TEXT SEARCH DICTIONARY IF EXISTS {schema}.hive_stem;",
+        f"CREATE TEXT SEARCH DICTIONARY {schema}.hive_stem ("
+        "TEMPLATE = snowball, Language = english);",
+        f"CREATE TEXT SEARCH CONFIGURATION {name} (COPY = simple);",
+        f"ALTER TEXT SEARCH CONFIGURATION {name} ALTER MAPPING FOR "
+        f"{token_types} WITH unaccent, {schema}.hive_stem;",
+    ]
+
+
+def _search_index(schema: str, table: str) -> list[str]:
+    """A GIN index over a table's generated searchable column."""
+    declared = schema_map.search_column(schema, table)
+    if declared is None:
+        return []
+    column = declared[0]
+    return [
+        f'CREATE INDEX "{schema}_idx_{table}_{column}" ON {schema}."{table}" '
+        f'USING gin ("{column}");'
+    ]
+
+
 def build(base: str) -> Build:
     """The whole DDL for the one database, in dependency-free order."""
     result = Build()
@@ -737,10 +806,13 @@ def build(base: str) -> Build:
     # original error.
     result.ddl.append("BEGIN;")
     result.ddl.append("CREATE EXTENSION IF NOT EXISTS vector;")
+    # Trusted, unlike `vector`, so this one does not need a superuser.
+    result.ddl.append("CREATE EXTENSION IF NOT EXISTS unaccent;")
     for name, purpose in schema_map.SCHEMAS.items():
         result.ddl.append(f"CREATE SCHEMA IF NOT EXISTS {name};")
         esc = purpose.replace("'", "''")
         result.ddl.append(f"COMMENT ON SCHEMA {name} IS '{esc}';")
+    result.ddl.extend(_text_configuration())
 
     for source, path in paths.items():
         con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
@@ -803,6 +875,7 @@ def build(base: str) -> Build:
                 )
                 idx, inotes = _indexes(con, table, schema, new_table)
                 result.ddl.extend(idx)
+                result.ddl.extend(_search_index(schema, new_table))
                 result.notes.extend(f"{source}.{n}" for n in inotes)
                 created.add(target)
             # Read after the tables, and for every table in the store —

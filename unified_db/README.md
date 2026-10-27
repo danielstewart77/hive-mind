@@ -192,12 +192,44 @@ nothing behind. A self-reference is `DEFERRABLE INITIALLY DEFERRED`, which is
 what lets the loader insert such a table in one pass: its order is per row,
 not per table.
 
+## Searchable text, in place of the virtual table
+
+lucent's `memories_fts` is an FTS5 virtual table that exists on disk and in
+no source file, so there is nothing here to translate — the replacement has
+to be *declared*. `SEARCH_COLUMNS` declares it: a generated `tsvector`
+column with a GIN index, rather than an expression index, so the write path
+needs to know nothing about text search and the access layer's drift check
+can see a column. It is capped at the first 100,000 characters, because a
+tsvector is hard-limited to 1MB and `to_tsvector` over a larger paste raises
+— which on a generated column fails the INSERT and loses the memory outright.
+A declaration naming a column no source carries refuses the build, the same
+rule as `unmapped()`.
+
+`TEXT_CONFIG` is the configuration those columns are built with, and it is
+neither `simple` nor stock `english`. FTS5 is configured
+`tokenize='porter unicode61'`, so it stems (the live index holds `rotat`,
+`restart` and `run` and holds no `rotation`, `restarting` or `running` at
+all), it folds diacritics (`jose`, over 4,097 rows carrying non-ASCII
+bytes), and it keeps every stopword while lucent filters its own stoplist out
+of the query. So the configuration is the snowball stemmer with no stopword
+file, behind `unaccent` — which is a trusted extension, unlike `vector`.
+Emitted before any table, because a generated column referring to a
+configuration the file never creates fails at apply time inside the one
+transaction and takes the whole schema with it.
+
+`memories.embedding` is `vector(4096)` through `TYPE_OVERRIDES`. The
+dimension is declared rather than left open, and there is no approximate
+index to build at that width: pgvector caps HNSW and IVFFlat at 2000
+dimensions and `halfvec` at 4000. Note for the loader: there is no cast from
+`bytea` to `vector` in **either** direction, so this is a conversion program
+rather than an ALTER, and the rollback is restoring the column from a copy
+rather than casting back. `USING v::text::bytea` yields the ASCII bytes of
+the literal, which `np.frombuffer` accepts without raising whenever the
+length happens to divide by four.
+
 ## What is not here yet
 
-The move
-of memory search off FTS5 onto pgvector — lucent's `memories_fts` is 7,663
-rows of search index and the generator names it as not carried rather than
-hiding it behind a filter; the data loader and its row-for-row verification,
+The data loader and its row-for-row verification,
 which must also `setval` every identity sequence or the first insert after
-cutover collides on a primary key; and the cutover. Each is its own story under "One database for
-all of Hive".
+cutover collides on a primary key; and the cutover. Each is its own story
+under "One database for all of Hive".
