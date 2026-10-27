@@ -278,9 +278,18 @@ def _columns(
                 "schema down at apply time inside the one transaction.")
         final_over = schema_map.column_name(schema, new_table, over)
         config = f"{schema_map.TEXT_CONFIG_SCHEMA}.{schema_map.TEXT_CONFIG}"
+        # `left()` cuts at a character, which can land mid-word: the word
+        # straddling the cap would be indexed as a truncated stem no query
+        # can produce, and the index would hold a lexeme that came from no
+        # word. So the trailing partial token is dropped — but ONLY when the
+        # text was actually cut. Trimming unconditionally drops the last word
+        # of every memory shorter than the cap, which is all of them, and the
+        # suite caught exactly that.
         defs.append(
             f'    "{column}" tsvector GENERATED ALWAYS AS (to_tsvector('
-            f"'{config}'::regconfig, left(\"{final_over}\", {cap}))) STORED")
+            f"'{config}'::regconfig, CASE WHEN length(\"{final_over}\") > "
+            f"{cap} THEN regexp_replace(left(\"{final_over}\", {cap}), "
+            f"'\\S+$', '') ELSE \"{final_over}\" END)) STORED")
         decisions.append(
             f"{table}.{column}: generated from {final_over}, first {cap} "
             f"characters. {why}")
@@ -805,9 +814,16 @@ def build(base: str) -> Build:
     # statement for a reason that reads as a conflict rather than as the
     # original error.
     result.ddl.append("BEGIN;")
-    result.ddl.append("CREATE EXTENSION IF NOT EXISTS vector;")
+    # `WITH SCHEMA public` on both, named rather than left to `search_path`.
+    # An extension that lands somewhere else still passes a type-name check
+    # — `udt_name` is `vector` in any schema — while the access layer, which
+    # resolves the type by (schema, name), registers no codec for it and a
+    # vector comes back as a 50,000-character string with nothing raising.
+    result.ddl.append(
+        "CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;")
     # Trusted, unlike `vector`, so this one does not need a superuser.
-    result.ddl.append("CREATE EXTENSION IF NOT EXISTS unaccent;")
+    result.ddl.append(
+        "CREATE EXTENSION IF NOT EXISTS unaccent WITH SCHEMA public;")
     for name, purpose in schema_map.SCHEMAS.items():
         result.ddl.append(f"CREATE SCHEMA IF NOT EXISTS {name};")
         esc = purpose.replace("'", "''")
