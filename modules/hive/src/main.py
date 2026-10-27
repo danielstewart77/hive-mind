@@ -2273,9 +2273,55 @@ async def _fetch_rules_for_mind(
 async def sentinel_page(request: Request):
     if not get_current_user_from_request(request):
         return _login_redirect_for(request)
+    # The catalogue state travels in the render rather than being fetched by
+    # the page: an unreachable sensor has to read as unreachable, and a page
+    # that fetched its own catalogue would have nothing to show but an empty
+    # table.
+    catalogue = await sentinel_review.catalogue_state()
     return _render_template(
-        request, "sentinel.html", sentinel_configured=bool(sentinel_review.base_url())
+        request,
+        "sentinel.html",
+        sentinel_configured=bool(sentinel_review.base_url()),
+        catalogue=catalogue,
     )
+
+
+@app.get("/api/sentinel/buckets")
+async def api_sentinel_buckets(user: dict = Depends(require_auth)):
+    del user
+    return await sentinel_review.fetch_buckets()
+
+
+@app.post("/api/sentinel/buckets/save")
+async def api_sentinel_bucket_save(
+    request: Request, user: dict = Depends(require_auth)
+):
+    del user
+    body = await request.json()
+    slug = (body.get("slug") or "").strip()
+    if not slug:
+        raise HTTPException(status_code=400, detail="slug is required")
+    if "revision" not in body:
+        raise HTTPException(
+            status_code=400,
+            detail="a save must carry the revision the read handed back",
+        )
+    fields = {
+        name: body[name]
+        for name in (
+            "description",
+            "disposition",
+            "qualifier",
+            "promotes_above",
+            "promotes_into",
+            "promotion_window_minutes",
+            "requires_facts",
+        )
+        if name in body
+    }
+    if not fields:
+        raise HTTPException(status_code=400, detail="nothing to save")
+    return await sentinel_review.save_bucket(slug, body["revision"], fields)
 
 
 @app.get("/api/sentinel/review")

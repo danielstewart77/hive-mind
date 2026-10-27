@@ -208,3 +208,230 @@ def test_an_unknown_review_kind_is_refused_here_rather_than_relayed(
 
     assert response.status_code == 400
     assert not any(path == "/review/mark" for _method, path, _body in sensor.seen)
+
+
+# ---------------------------------------------------------------------------
+# The bucket catalogue
+# ---------------------------------------------------------------------------
+
+
+_CATALOGUE = {
+    "ok": True,
+    "build": "abc123def456",
+    "total_events": 48036,
+    "last_intake": "2026-10-21 01:30:10",
+    "remainder": {
+        "on_retired_classes": 749,
+        "on_classes_outside_the_nine": 0,
+        "on_no_class": 0,
+    },
+    "supplied_facts": [],
+    "buckets": [
+        {
+            "slug": "compromise_inside_the_perimeter",
+            "description": "a host behaving like it is not ours",
+            "disposition": "escalates",
+            "qualifier": "always",
+            "promotes_above": None,
+            "promotes_into": None,
+            "promotion_window_minutes": None,
+            "requires_facts": ["destination_is_new_for_this_device"],
+            "revision": 3,
+            "updated_at": "2026-10-26 20:00:00",
+            "updated_by": "console",
+            "events": 400,
+            "last_event": "2026-10-20T04:00:00Z",
+            "unreachable": True,
+            "missing_facts": ["destination_is_new_for_this_device"],
+            "promotes": False,
+        }
+    ],
+}
+
+
+class StubCatalogueSensor:
+    """A sensor whose bucket catalogue lives in a dict."""
+
+    def __init__(self, *, status: int = 200, payload: dict | None = None):
+        self.status = status
+        self.payload = _CATALOGUE if payload is None else payload
+        self.saves: list[dict] = []
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        if request.headers.get("Authorization") != "Bearer sensor-token":
+            return httpx.Response(401, json={"ok": False, "error": "bearer token required"})
+        if request.url.path == "/buckets":
+            if self.status != 200:
+                return httpx.Response(self.status, json={"ok": False, "error": "no"})
+            return httpx.Response(200, json=self.payload)
+        if request.url.path == "/buckets/save":
+            body = _json.loads(request.content or b"{}")
+            self.saves.append(body)
+            if body.get("revision") != 3:
+                return httpx.Response(
+                    409,
+                    json={
+                        "ok": False,
+                        "error": "changed by somebody else",
+                        "current_revision": 4,
+                    },
+                )
+            bucket = dict(self.payload["buckets"][0])
+            bucket.update({k: v for k, v in body.items() if k not in ("slug", "revision")})
+            bucket["revision"] = 4
+            return httpx.Response(200, json={"ok": True, "bucket": bucket, "saved": True})
+        return httpx.Response(404, json={"ok": False, "error": "no route"})
+
+
+def _install(monkeypatch, stub, *, url: str | None = SENSOR, token: str | None = "sensor-token"):
+    if url is None:
+        monkeypatch.delenv("SENTINEL_REVIEW_URL", raising=False)
+    else:
+        monkeypatch.setenv("SENTINEL_REVIEW_URL", url)
+    if token is None:
+        monkeypatch.delenv("SENTINEL_REVIEW_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("SENTINEL_REVIEW_TOKEN", token)
+    transport = httpx.MockTransport(stub.handler)
+    real_client = httpx.AsyncClient
+
+    def patched(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(sentinel_review.httpx, "AsyncClient", patched)
+    return stub
+
+
+def test_the_catalogue_read_carries_the_sensors_rows_and_its_build(tmp_path, monkeypatch):
+    stub = _install(monkeypatch, StubCatalogueSensor())
+    client = _authed_client(tmp_path, monkeypatch)
+
+    body = client.get("/api/sentinel/buckets").json()
+
+    assert body["build"] == "abc123def456"
+    assert body["buckets"][0]["slug"] == "compromise_inside_the_perimeter"
+    assert body["remainder"]["on_retired_classes"] == 749
+    del stub
+
+
+def test_a_save_carries_the_revision_to_the_sensor(tmp_path, monkeypatch):
+    stub = _install(monkeypatch, StubCatalogueSensor())
+    client = _authed_client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/api/sentinel/buckets/save",
+        json={
+            "slug": "compromise_inside_the_perimeter",
+            "revision": 3,
+            "description": "a host behaving like it is not ours, dynamic DNS weighed",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["bucket"]["revision"] == 4
+    assert stub.saves[0]["revision"] == 3
+    assert "dynamic DNS" in stub.saves[0]["description"]
+
+
+def test_a_save_with_no_revision_never_reaches_the_sensor(tmp_path, monkeypatch):
+    """One that is optional on the wire is not a check at all."""
+    stub = _install(monkeypatch, StubCatalogueSensor())
+    client = _authed_client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/api/sentinel/buckets/save",
+        json={"slug": "compromise_inside_the_perimeter", "description": "no revision"},
+    )
+
+    assert response.status_code == 400
+    assert stub.saves == []
+
+
+def test_a_stale_save_is_passed_through_as_a_conflict(tmp_path, monkeypatch):
+    _install(monkeypatch, StubCatalogueSensor())
+    client = _authed_client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/api/sentinel/buckets/save",
+        json={
+            "slug": "compromise_inside_the_perimeter",
+            "revision": 1,
+            "description": "the stale tab's copy",
+        },
+    )
+
+    assert response.status_code == 409
+
+
+@pytest.mark.parametrize(
+    "status, expected",
+    [
+        (404, sentinel_review.SENSOR_TOO_OLD),
+        (503, sentinel_review.SENSOR_BUSY),
+    ],
+)
+def test_the_page_distinguishes_why_the_catalogue_could_not_be_read(
+    monkeypatch, status, expected
+):
+    """Five readings, five different machines to go and look at. "Sensor too
+    old" is the EXPECTED first state after deploying the console half, and its
+    remedy is a pull on the sensor."""
+    import asyncio
+
+    _install(monkeypatch, StubCatalogueSensor(status=status))
+
+    state = asyncio.run(sentinel_review.catalogue_state())
+
+    assert state["state"] == expected
+    assert state["buckets"] == []
+
+
+def test_an_unreachable_sensor_is_not_reported_as_an_empty_catalogue(monkeypatch):
+    import asyncio
+
+    class Dead:
+        def handler(self, request):
+            raise httpx.ConnectError("no route to host")
+
+    _install(monkeypatch, Dead())
+
+    state = asyncio.run(sentinel_review.catalogue_state())
+
+    assert state["state"] == sentinel_review.UNREACHABLE
+    assert state["buckets"] == []
+
+
+def test_a_console_with_no_sensor_configured_says_so_rather_than_unreachable(monkeypatch):
+    import asyncio
+
+    _install(monkeypatch, StubCatalogueSensor(), url=None)
+
+    state = asyncio.run(sentinel_review.catalogue_state())
+
+    assert state["state"] == sentinel_review.NOT_CONFIGURED
+
+
+def test_a_refused_bearer_token_is_not_reported_as_an_unreachable_sensor(monkeypatch):
+    import asyncio
+
+    _install(monkeypatch, StubCatalogueSensor(), token="the-wrong-token")
+
+    state = asyncio.run(sentinel_review.catalogue_state())
+
+    assert state["state"] == sentinel_review.CREDENTIAL_REFUSED
+
+
+def test_a_sensor_holding_no_catalogue_reads_as_reachable_with_nothing(monkeypatch):
+    import asyncio
+
+    _install(
+        monkeypatch,
+        StubCatalogueSensor(payload={"ok": True, "build": "abc", "buckets": []}),
+    )
+
+    state = asyncio.run(sentinel_review.catalogue_state())
+
+    assert state["state"] == sentinel_review.EMPTY

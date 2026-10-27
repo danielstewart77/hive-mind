@@ -130,3 +130,64 @@ async def overturn_rule(
 
 async def apply_queue(class_slug: str | None = None) -> dict:
     return await _post("/queue/apply", {"class_slug": class_slug})
+
+
+async def fetch_buckets() -> dict:
+    return await _get("/buckets")
+
+
+async def save_bucket(slug: str, revision: int, fields: dict) -> dict:
+    return await _post("/buckets/save", {"slug": slug, "revision": revision, **fields})
+
+
+# The states the catalogue page has to tell apart. Folding them loses the one
+# thing the operator needs: which machine to go and look at. "Sensor too old"
+# in particular is the EXPECTED first state after deploying the console half,
+# and its remedy is a pull on the sensor -- nothing like the remedy for any of
+# the others.
+NOT_CONFIGURED = "not_configured"
+UNREACHABLE = "unreachable"
+SENSOR_TOO_OLD = "sensor_too_old"
+CREDENTIAL_REFUSED = "credential_refused"
+SENSOR_BUSY = "sensor_busy"
+EMPTY = "reachable_with_nothing"
+READY = "ready"
+
+_STATE_BY_STATUS = {
+    501: SENSOR_TOO_OLD,
+    401: CREDENTIAL_REFUSED,
+    403: CREDENTIAL_REFUSED,
+    503: SENSOR_BUSY,
+    502: UNREACHABLE,
+}
+
+
+async def catalogue_state() -> dict:
+    """The catalogue, or which of the five ways reading it did not work.
+
+    Returned rather than raised, because this feeds a page render: a template
+    that got an exception would show the generic error panel, and a template
+    that got `{"buckets": []}` would show an empty catalogue -- which reads as
+    "there are no buckets" rather than "nobody could ask".
+    """
+    if not base_url():
+        return {
+            "state": NOT_CONFIGURED,
+            "detail": "SENTINEL_REVIEW_URL is not set on this console",
+            "buckets": [],
+        }
+    try:
+        payload = await fetch_buckets()
+    except HTTPException as exc:
+        state = _STATE_BY_STATUS.get(exc.status_code, UNREACHABLE)
+        if exc.status_code == 503 and "not configured" in str(exc.detail):
+            state = NOT_CONFIGURED
+        return {"state": state, "detail": str(exc.detail), "buckets": []}
+    if not payload.get("buckets"):
+        return {
+            "state": EMPTY,
+            "detail": "the sensor answered, and holds no bucket catalogue yet",
+            "buckets": [],
+            "build": payload.get("build"),
+        }
+    return {"state": READY, "detail": "", **payload}
