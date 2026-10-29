@@ -52,6 +52,10 @@ SCHEMA_SQL = _SCHEMA_DIR / "core.sql"
 #: nothing else — and because this one needs the `vector` extension, which
 #: is not a trusted extension and so needs a superuser to install.
 MEMORY_SCHEMA_SQL = _SCHEMA_DIR / "memory.sql"
+#: Applied beside the other two, for the same reason they are separate
+#: artifacts: a deployment creates the contexts it runs and no others.
+#: hive-tools needs this one and nothing else needs it at all.
+TOOLS_SCHEMA_SQL = _SCHEMA_DIR / "tools.sql"
 
 
 def _with_database(dsn: str, name: str) -> str:
@@ -77,9 +81,17 @@ async def scratch_dsn() -> str:
                 r" 'hive\_data\_seq\_%'])")
         ]
         for leftover in stale:
-            await admin.execute(
-                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                "WHERE datname = $1 AND pid <> pg_backend_pid()", leftover)
+            # Only one nobody is using. A database with live backends is
+            # another run of this suite, not a leftover — and dropping it
+            # out from under that run makes every test after its next query
+            # fail, in a pattern that reads as a flaky suite rather than as
+            # one run killing another. Three reviewers each running pytest
+            # against one server is the normal case during a grill.
+            busy = await admin.fetchval(
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = $1",
+                leftover)
+            if busy:
+                continue
             await admin.execute(f'DROP DATABASE IF EXISTS "{leftover}"')
         await admin.execute(f'CREATE DATABASE "{name}"')
     finally:
@@ -89,6 +101,7 @@ async def scratch_dsn() -> str:
     try:
         await target.execute(SCHEMA_SQL.read_text())
         await target.execute(MEMORY_SCHEMA_SQL.read_text())
+        await target.execute(TOOLS_SCHEMA_SQL.read_text())
     finally:
         await target.close()
     try:

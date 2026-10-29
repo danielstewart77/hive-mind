@@ -288,8 +288,14 @@ async def test_a_conversation_lock_is_released_for_the_next_holder(connected):
     async with hive_data.conversation_lock(conversation, wait=False) as again:
         assert again is True
 
+    # Scoped to this run's own database. `pg_locks` is a server-wide view
+    # and an advisory lock is namespaced per database, so an unscoped count
+    # answers for every other suite run on the same server — which turns a
+    # second concurrent run into a failure here and reads as a flaky test.
     held = await hive_data.run(lambda c: c.fetchval(
-        "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'"))
+        "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' "
+        "AND database = (SELECT oid FROM pg_database "
+        "WHERE datname = current_database())"))
     assert held == 0
 
 

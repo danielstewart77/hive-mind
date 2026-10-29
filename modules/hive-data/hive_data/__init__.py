@@ -50,6 +50,7 @@ from .errors import (
     WriteRejected,
 )
 from . import memory
+from . import tools
 from .pool import close_pool, live_pool, open_pool, run, settings_in_use
 from .rows import UNSET
 from .schema import COLUMNS
@@ -64,7 +65,8 @@ __all__ = [
     "Unit", "Unreachable", "UnsettableColumn", "ValueRefused",
     "WriteRejected", "close", "connect", "conversation_lock", "core",
     "from_environment",
-    "live_pool", "memory", "run", "settings_in_use", "transaction",
+    "live_pool", "memory", "run", "settings_in_use", "tools",
+    "transaction",
     "verify_schema",
 ]
 

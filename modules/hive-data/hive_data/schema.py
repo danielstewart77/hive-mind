@@ -68,6 +68,24 @@ COLUMNS: dict[str, tuple[str, ...]] = {
         "id", "mind_id", "content", "embedding", "content_search", "tags",
         "source", "data_class", "tier", "as_of", "expires_at", "superseded",
         "recurring", "codebase_ref", "created_at"),
+    # Keyed `schema.table`, which the bare keys above are not. `tools` has a
+    # `users` table and so does `core`, and they are different registries —
+    # the console's people and hive-tools' own. A bare `"users"` was already
+    # spoken for, so this is the day the comment below stopped being a
+    # warning and became the rule for anything outside `core` and `memory`.
+    "tools.api_tokens": (
+        "id", "name", "token_hash", "created_at", "last_used_at",
+        "revoked_at"),
+    "tools.hitl_requests": (
+        "id", "tool_name", "caller_mind", "params_json", "status",
+        "created_at", "expires_at", "decided_at", "tool_method", "tool_path",
+        "tool_body"),
+    "tools.sudo_grants": (
+        "id", "tool_name", "caller_mind", "granted_at", "expires_at"),
+    "tools.tool_hitl_settings": ("tool_name", "mode", "sudo_timeout_minutes"),
+    "tools.users": (
+        "id", "username", "password_hash", "is_admin", "created_at",
+        "disabled_at"),
 }
 
 #: The Postgres schema a declared table lives in. Absent means `core`, which
@@ -87,12 +105,25 @@ SCHEMAS: dict[str, str] = {
 
 def schema_of(table: str) -> str:
     """The Postgres schema a declared table lives in."""
+    if "." in table:
+        return table.split(".", 1)[0]
     return SCHEMAS.get(table, "core")
+
+
+def bare(table: str) -> str:
+    """A declared key without the schema it may carry.
+
+    `information_schema` answers in two columns, so every lookup against the
+    applied database needs the table name on its own. A dotted key is the
+    only form that can name two tables of the same name in two schemas, and
+    the bare name is still what Postgres calls the table.
+    """
+    return table.split(".", 1)[1] if "." in table else table
 
 
 def qualified(table: str) -> str:
     """A table's name as a statement has to spell it."""
-    return f'{schema_of(table)}."{table}"'
+    return f'{schema_of(table)}."{bare(table)}"'
 
 #: Columns a caller must ask for by name. A session listing answers to the
 #: service token every surface bot holds, and these two are a composed system
@@ -108,6 +139,17 @@ PRIVATE: dict[str, frozenset[str]] = {
     #: another.
     "credentials": frozenset({"token_sha"}),
     "users": frozenset({"password_hash"}),
+    #: The same two reasons as above, in hive-tools' own registries: the
+    #: bearer digest a caller authenticates with, and a password hash.
+    "tools.api_tokens": frozenset({"token_hash"}),
+    "tools.users": frozenset({"password_hash"}),
+    #: What a gated call was actually called with. The approvals queue is a
+    #: listing, and these two are the captured request body of every tool
+    #: call a person was asked to approve — on live data the newest fifty
+    #: rows carry three megabytes of it, some of it holding credentials. The
+    #: page this listing is modelled on selects neither. The replay path,
+    #: which genuinely needs the body, names it.
+    "tools.hitl_requests": frozenset({"params_json", "tool_body"}),
     #: The 4096 floats. Private because no caller reading memories wants
     #: them: lucent has never returned an embedding, and a listing that
     #: included one hands back 4096 numbers per row, as a 50,000-character
@@ -134,6 +176,9 @@ GENERATED: dict[str, frozenset[str]] = {
     "session_memory": frozenset({"id"}),
     "session_turns": frozenset({"id"}),
     "users": frozenset({"id"}),
+    "tools.api_tokens": frozenset({"id"}),
+    "tools.sudo_grants": frozenset({"id"}),
+    "tools.users": frozenset({"id"}),
     #: `content_search` is GENERATED ALWAYS, not BY DEFAULT: Postgres
     #: refuses a value for it outright. Named here so the refusal happens
     #: before the statement is built, with a sentence saying why, rather
@@ -160,6 +205,16 @@ TYPED: dict[tuple[str, str], str] = {
 }
 
 
+def key(table: str) -> tuple[str, str]:
+    """A declared table as `information_schema` keys it."""
+    return (schema_of(table), bare(table))
+
+
+def qualified_name(table: str) -> str:
+    """A declared table as a sentence names it, unquoted."""
+    return f"{schema_of(table)}.{bare(table)}"
+
+
 def public(table: str) -> tuple[str, ...]:
     """Every column of a table except the ones a caller must name."""
     private = PRIVATE.get(table, frozenset())
@@ -172,7 +227,8 @@ def select_list(table: str, columns: tuple[str, ...] | None = None) -> str:
     unknown = [c for c in chosen if c not in COLUMNS[table]]
     if unknown:
         raise KeyError(
-            f"{schema_of(table)}.{table} has no column(s) {unknown}. The declared columns "
+            f"{qualified_name(table)} has no column(s) {unknown}. The declared "
+            "columns "
             "are the ones these operations are written against; a name not "
             "among them is a typo, not a column.")
     return ", ".join(f'"{c}"' for c in chosen)
@@ -202,7 +258,7 @@ async def _present_schemas(connection: Any) -> set[str]:
 
 
 async def _sequences_behind(connection: Any,
-                            present: set[str]) -> list[str]:
+                            declared: set[str]) -> list[str]:
     """Identity sequences whose next value a row already occupies.
 
     Checked at startup for the same reason the column names are: the failure
@@ -211,7 +267,11 @@ async def _sequences_behind(connection: Any,
     """
     out: list[str] = []
     for table, generated in GENERATED.items():
-        if schema_of(table) not in present:
+        # `declared` is the tables this database actually has, so a context
+        # it does not run — or one whose schema exists with no tables in it
+        # — is skipped. `pg_get_serial_sequence` raises on a table that is
+        # not there, which would make the probe the failure.
+        if table not in declared:
             continue
         for column in sorted(generated):
             where = schema_of(table)
@@ -223,7 +283,7 @@ async def _sequences_behind(connection: Any,
             # at startup for every consumer.
             sequence = await connection.fetchval(
                 "SELECT pg_get_serial_sequence($1, $2)",
-                f"{where}.{table}", column)
+                f"{where}.{bare(table)}", column)
             if sequence is None:
                 continue
             row = await connection.fetchrow(
@@ -242,7 +302,7 @@ async def _sequences_behind(connection: Any,
                 1 if state["is_called"] else 0)
             if nextval <= int(row["top"]):
                 out.append(
-                    f"{where}.{table}.{column} would next issue {nextval} "
+                    f"{where}.{bare(table)}.{column} would next issue {nextval} "
                     f"and row {int(row['top'])} already exists")
     return out
 
@@ -278,25 +338,38 @@ async def verify(connection: Any) -> None:
             (row["table_schema"], row["table_name"]), {}
         )[row["column_name"]] = row["udt_name"]
 
+    # A schema that exists and holds none of its declared tables is a
+    # context nobody created — `CREATE SCHEMA` on its own is not one — and
+    # not drift. The distinction is load-bearing: every service in the hive
+    # shares this database, so a half-run migration that made the schema and
+    # no tables would otherwise stop comms, lucent and every mind from
+    # opening a pool over a context none of them use. A schema holding
+    # *some* of its tables is drift, and still refuses.
+    empty = {
+        schema for schema in present
+        if not any(key(table) in applied
+                   for table in declared if schema_of(table) == schema)
+    } - {REQUIRED_SCHEMA}
+    declared = {t for t in declared if schema_of(t) not in empty}
     missing_tables = sorted(
-        f"{schema_of(table)}.{table}"
+        qualified_name(table)
         for table in declared
-        if (schema_of(table), table) not in applied)
+        if key(table) not in applied)
     missing_columns = sorted(
-        f"{schema_of(table)}.{table}.{column}"
+        f"{qualified_name(table)}.{column}"
         for table, columns in COLUMNS.items()
-        if table in declared and (schema_of(table), table) in applied
+        if table in declared and key(table) in applied
         for column in columns
-        if column not in applied[(schema_of(table), table)]
+        if column not in applied[key(table)]
     )
     wrong_types = sorted(
-        f"{schema_of(table)}.{table}.{column} is "
-        f"{applied[(schema_of(table), table)][column]} where these "
+        f"{qualified_name(table)}.{column} is "
+        f"{applied[key(table)][column]} where these "
         f"operations are written against {expected}"
         for (table, column), expected in TYPED.items()
-        if table in declared and (schema_of(table), table) in applied
-        and column in applied[(schema_of(table), table)]
-        and applied[(schema_of(table), table)][column] != expected
+        if table in declared and key(table) in applied
+        and column in applied[key(table)]
+        and applied[key(table)][column] != expected
     )
     # Reported before the sequence probe below, and the order is the finding
     # rather than a tidiness preference. `pg_get_serial_sequence` raises on a
@@ -308,7 +381,7 @@ async def verify(connection: Any) -> None:
     if missing_tables or missing_columns or wrong_types:
         _refuse(missing_tables, missing_columns, wrong_types)
 
-    behind = await _sequences_behind(connection, present)
+    behind = await _sequences_behind(connection, declared)
     if behind:
         raise SequenceBehind(
             "identity sequences are behind the rows already in their "
