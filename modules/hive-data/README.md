@@ -369,3 +369,14 @@ Postgres on its container network rather than loopback, and that is
 load-bearing for one test: `pg_hba.conf` trusts loopback and demands scram
 from everywhere else, so a wrong password over loopback *succeeds* and the
 refused-credential test would pass for the wrong reason.
+
+Several runs against one server is the normal case — three reviewers each
+running pytest during a grill — so every scratch database a run creates is
+*claimed*: a session-level advisory lock held on one connection for as long
+as the database is wanted, keyed by the database's own name and taken before
+the `CREATE`. A sweep drops only what it can take the claim for. Deciding
+idleness by counting backends instead does not work, because a run's own
+database has no connections to it between tests: the pool fixture opens one
+per test and closes it again, so the question is answered "nobody" about a
+database in active use and the owning run loses every remaining test to
+`database "..." does not exist`. See `tests/_scratch.py`.

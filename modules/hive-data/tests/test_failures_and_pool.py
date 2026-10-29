@@ -14,6 +14,9 @@ from urllib.parse import urlsplit, urlunsplit
 import pytest
 
 import hive_data
+
+from tests._scratch import open_claimed
+from tests.conftest import ADMIN_DSN
 from hive_data import core
 
 
@@ -161,13 +164,8 @@ async def test_pointing_the_configuration_at_another_database_reads_that_one(
     answering from the first one."""
     import asyncpg
 
-    other = f"hive_data_other_{uuid.uuid4().hex[:8]}"
-    admin = await asyncpg.connect(scratch_dsn)
-    try:
-        await admin.execute(f'CREATE DATABASE "{other}"')
-    finally:
-        await admin.close()
-    other_dsn = _swap(scratch_dsn, database=other)
+    scratch = await open_claimed(ADMIN_DSN, "hive_data_other_")
+    other_dsn = scratch.dsn
     setup = await asyncpg.connect(other_dsn)
     try:
         from pathlib import Path
@@ -189,14 +187,7 @@ async def test_pointing_the_configuration_at_another_database_reads_that_one(
         assert await core.list_minds() == []
     finally:
         await hive_data.close(drain_timeout=5.0)
-        admin = await asyncpg.connect(scratch_dsn)
-        try:
-            await admin.execute(
-                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                "WHERE datname = $1 AND pid <> pg_backend_pid()", other)
-            await admin.execute(f'DROP DATABASE IF EXISTS "{other}"')
-        finally:
-            await admin.close()
+        await scratch.close()
 
 
 async def test_a_second_pool_against_another_database_is_refused(scratch_dsn):

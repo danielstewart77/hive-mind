@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import math
 import uuid
-from urllib.parse import urlsplit, urlunsplit
 
 import asyncpg
 import pytest
 
 import hive_data
+
+from tests._scratch import open_claimed
+from tests.conftest import ADMIN_DSN
 from hive_data import memory
 
 pytestmark = pytest.mark.asyncio
@@ -503,14 +505,8 @@ async def test_a_memory_schema_whose_embedding_is_still_bytes_refuses_at_startup
     registered against a column that is not a vector — a string, and
     neither raises. Every similarity number is then wrong in a way that
     reads as a working search."""
-    name = f"hive_data_other_{uuid.uuid4().hex[:8]}"
-    parts = urlsplit(scratch_dsn)
-    admin = await asyncpg.connect(scratch_dsn)
-    try:
-        await admin.execute(f'CREATE DATABASE "{name}"')
-    finally:
-        await admin.close()
-    dsn = urlunsplit(parts._replace(path=f"/{name}"))
+    scratch = await open_claimed(ADMIN_DSN, "hive_data_other_")
+    dsn = scratch.dsn
     target = await asyncpg.connect(dsn)
     try:
         from tests.conftest import MEMORY_SCHEMA_SQL, SCHEMA_SQL
@@ -530,14 +526,7 @@ async def test_a_memory_schema_whose_embedding_is_still_bytes_refuses_at_startup
         assert "embedding" in str(refusal.value)
     finally:
         await hive_data.close(drain_timeout=5.0)
-        admin = await asyncpg.connect(scratch_dsn)
-        try:
-            await admin.execute(
-                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                "WHERE datname = $1 AND pid <> pg_backend_pid()", name)
-            await admin.execute(f'DROP DATABASE IF EXISTS "{name}"')
-        finally:
-            await admin.close()
+        await scratch.close()
 
 
 async def test_a_database_with_no_memory_schema_still_opens_for_everyone_else(
@@ -545,14 +534,8 @@ async def test_a_database_with_no_memory_schema_still_opens_for_everyone_else(
     """Comms runs `core` and nothing else. A memory-side declaration that
     refused to open a pool for it would make one context's type decision
     break every service in the hive."""
-    name = f"hive_data_other_{uuid.uuid4().hex[:8]}"
-    parts = urlsplit(scratch_dsn)
-    admin = await asyncpg.connect(scratch_dsn)
-    try:
-        await admin.execute(f'CREATE DATABASE "{name}"')
-    finally:
-        await admin.close()
-    dsn = urlunsplit(parts._replace(path=f"/{name}"))
+    scratch = await open_claimed(ADMIN_DSN, "hive_data_other_")
+    dsn = scratch.dsn
     target = await asyncpg.connect(dsn)
     try:
         from tests.conftest import SCHEMA_SQL
@@ -568,14 +551,7 @@ async def test_a_database_with_no_memory_schema_still_opens_for_everyone_else(
             await memory.similar(unit(), mind_id="whoever")
     finally:
         await hive_data.close(drain_timeout=5.0)
-        admin = await asyncpg.connect(scratch_dsn)
-        try:
-            await admin.execute(
-                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                "WHERE datname = $1 AND pid <> pg_backend_pid()", name)
-            await admin.execute(f'DROP DATABASE IF EXISTS "{name}"')
-        finally:
-            await admin.close()
+        await scratch.close()
 
 
 # --------------------------------------------------------------------------

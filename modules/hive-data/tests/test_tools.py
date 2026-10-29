@@ -14,6 +14,9 @@ import asyncpg
 import pytest
 
 import hive_data
+
+from tests._scratch import open_claimed
+from tests.conftest import ADMIN_DSN
 from hive_data import tools
 
 
@@ -458,16 +461,9 @@ async def test_a_tools_schema_with_no_tables_does_not_stop_everyone_else(
     the schema and not the tables would otherwise stop comms, lucent and
     every mind from opening a pool at all, over a context none of them use.
     `CREATE SCHEMA` on its own is not a context."""
-    from urllib.parse import urlsplit, urlunsplit
 
-    name = f"hive_data_other_{uuid.uuid4().hex[:8]}"
-    parts = urlsplit(scratch_dsn)
-    admin = await asyncpg.connect(scratch_dsn)
-    try:
-        await admin.execute(f'CREATE DATABASE "{name}"')
-    finally:
-        await admin.close()
-    dsn = urlunsplit(parts._replace(path=f"/{name}"))
+    scratch = await open_claimed(ADMIN_DSN, "hive_data_other_")
+    dsn = scratch.dsn
     target = await asyncpg.connect(dsn)
     try:
         from tests.conftest import SCHEMA_SQL
@@ -481,29 +477,15 @@ async def test_a_tools_schema_with_no_tables_does_not_stop_everyone_else(
         await hive_data.connect()
     finally:
         await hive_data.close(drain_timeout=5.0)
-        admin = await asyncpg.connect(scratch_dsn)
-        try:
-            await admin.execute(
-                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                "WHERE datname = $1 AND pid <> pg_backend_pid()", name)
-            await admin.execute(f'DROP DATABASE IF EXISTS "{name}"')
-        finally:
-            await admin.close()
+        await scratch.close()
 
 
 async def test_a_tools_schema_missing_one_table_still_refuses(
         scratch_dsn, monkeypatch):
     """Half a context is drift, not an absent context, and it is named."""
-    from urllib.parse import urlsplit, urlunsplit
 
-    name = f"hive_data_other_{uuid.uuid4().hex[:8]}"
-    parts = urlsplit(scratch_dsn)
-    admin = await asyncpg.connect(scratch_dsn)
-    try:
-        await admin.execute(f'CREATE DATABASE "{name}"')
-    finally:
-        await admin.close()
-    dsn = urlunsplit(parts._replace(path=f"/{name}"))
+    scratch = await open_claimed(ADMIN_DSN, "hive_data_other_")
+    dsn = scratch.dsn
     target = await asyncpg.connect(dsn)
     try:
         from tests.conftest import SCHEMA_SQL, TOOLS_SCHEMA_SQL
@@ -520,11 +502,4 @@ async def test_a_tools_schema_missing_one_table_still_refuses(
         assert "tools.sudo_grants" in str(refusal.value)
     finally:
         await hive_data.close(drain_timeout=5.0)
-        admin = await asyncpg.connect(scratch_dsn)
-        try:
-            await admin.execute(
-                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                "WHERE datname = $1 AND pid <> pg_backend_pid()", name)
-            await admin.execute(f'DROP DATABASE IF EXISTS "{name}"')
-        finally:
-            await admin.close()
+        await scratch.close()

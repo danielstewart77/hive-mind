@@ -7,6 +7,9 @@ supposed to prove the migration correct. `core.sessions.mind_id` is also
 ON DELETE RESTRICT, so cleaning up afterwards is order-dependent and one
 failed teardown leaves the live schema dirty.
 
+The database is *claimed* for the length of the run — see `tests/_scratch.py`
+for why a concurrent run would otherwise drop it out from under this one.
+
 The schema comes from `hive_data/schema/core.sql`, a captured `pg_dump -s` of
 the applied `core` schema, vendored into the package. The generator that
 produced it reads the seven live SQLite stores, so it cannot be run from
@@ -19,13 +22,14 @@ from __future__ import annotations
 import os
 import uuid
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
 
 import asyncpg
 import pytest
 import pytest_asyncio
 
 import hive_data
+
+from tests._scratch import claimed_database, sweep_stale
 
 #: Where the server is. Named in the environment with no default, because a
 #: default would be a credential in a tracked file.
@@ -58,63 +62,29 @@ MEMORY_SCHEMA_SQL = _SCHEMA_DIR / "memory.sql"
 TOOLS_SCHEMA_SQL = _SCHEMA_DIR / "tools.sql"
 
 
-def _with_database(dsn: str, name: str) -> str:
-    parts = urlsplit(dsn)
-    return urlunsplit(parts._replace(path=f"/{name}"))
-
-
 @pytest_asyncio.fixture(scope="session")
 async def scratch_dsn() -> str:
     if not ADMIN_DSN:
         pytest.skip(NO_SERVER)
-    name = f"hive_data_test_{uuid.uuid4().hex[:12]}"
     admin = await asyncpg.connect(ADMIN_DSN)
     try:
         # A run that is killed never reaches the teardown below, so it
         # leaves its database behind — one per interrupted run, for ever.
         # Swept here rather than left to somebody noticing: the names are
-        # this suite's own and nothing else creates them.
-        stale = [
-            r["datname"] for r in await admin.fetch(
-                "SELECT datname FROM pg_database WHERE datname LIKE ANY("
-                r"ARRAY['hive\_data\_test\_%', 'hive\_data\_other\_%',"
-                r" 'hive\_data\_seq\_%'])")
-        ]
-        for leftover in stale:
-            # Only one nobody is using. A database with live backends is
-            # another run of this suite, not a leftover — and dropping it
-            # out from under that run makes every test after its next query
-            # fail, in a pattern that reads as a flaky suite rather than as
-            # one run killing another. Three reviewers each running pytest
-            # against one server is the normal case during a grill.
-            busy = await admin.fetchval(
-                "SELECT count(*) FROM pg_stat_activity WHERE datname = $1",
-                leftover)
-            if busy:
-                continue
-            await admin.execute(f'DROP DATABASE IF EXISTS "{leftover}"')
-        await admin.execute(f'CREATE DATABASE "{name}"')
+        # this suite's own and nothing else creates them. Only the ones no
+        # live run has claimed.
+        await sweep_stale(admin)
     finally:
         await admin.close()
-    dsn = _with_database(ADMIN_DSN, name)
-    target = await asyncpg.connect(dsn)
-    try:
-        await target.execute(SCHEMA_SQL.read_text())
-        await target.execute(MEMORY_SCHEMA_SQL.read_text())
-        await target.execute(TOOLS_SCHEMA_SQL.read_text())
-    finally:
-        await target.close()
-    try:
-        yield dsn
-    finally:
-        admin = await asyncpg.connect(ADMIN_DSN)
+    async with claimed_database(ADMIN_DSN, "hive_data_test_") as dsn:
+        target = await asyncpg.connect(dsn)
         try:
-            await admin.execute(
-                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                "WHERE datname = $1 AND pid <> pg_backend_pid()", name)
-            await admin.execute(f'DROP DATABASE IF EXISTS "{name}"')
+            await target.execute(SCHEMA_SQL.read_text())
+            await target.execute(MEMORY_SCHEMA_SQL.read_text())
+            await target.execute(TOOLS_SCHEMA_SQL.read_text())
         finally:
-            await admin.close()
+            await target.close()
+        yield dsn
 
 
 @pytest_asyncio.fixture

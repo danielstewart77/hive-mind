@@ -9,12 +9,14 @@ from __future__ import annotations
 import asyncio
 import uuid
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
 
 import asyncpg
 import pytest
 
 import hive_data
+
+from tests._scratch import open_claimed
+from tests.conftest import ADMIN_DSN
 from hive_data import core
 from hive_data.pool import translate
 
@@ -653,14 +655,8 @@ async def test_a_sequence_behind_its_rows_refuses_at_startup(scratch_dsn):
     """What a bulk load leaves. The next insert collides as a uniqueness
     conflict — the one outcome a caller is told is benign — so a ledger
     would record nothing while reporting a harmless duplicate."""
-    other = f"hive_data_seq_{uuid.uuid4().hex[:8]}"
-    parts = urlsplit(scratch_dsn)
-    admin = await asyncpg.connect(scratch_dsn)
-    try:
-        await admin.execute(f'CREATE DATABASE "{other}"')
-    finally:
-        await admin.close()
-    other_dsn = urlunsplit(parts._replace(path=f"/{other}"))
+    scratch = await open_claimed(ADMIN_DSN, "hive_data_seq_")
+    other_dsn = scratch.dsn
     setup = await asyncpg.connect(other_dsn)
     try:
         await setup.execute(
@@ -686,14 +682,7 @@ async def test_a_sequence_behind_its_rows_refuses_at_startup(scratch_dsn):
         assert "core.session_turns.id" in str(caught.value)
     finally:
         await hive_data.close(drain_timeout=5.0)
-        admin = await asyncpg.connect(scratch_dsn)
-        try:
-            await admin.execute(
-                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                "WHERE datname = $1 AND pid <> pg_backend_pid()", other)
-            await admin.execute(f'DROP DATABASE IF EXISTS "{other}"')
-        finally:
-            await admin.close()
+        await scratch.close()
 
 
 def test_a_command_status_that_cannot_be_read_is_not_reported_as_zero():
