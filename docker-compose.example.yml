@@ -252,6 +252,14 @@ services:
       # Checksums cannot be turned on after initdb without a rewrite, and a
       # silently corrupt page in the memory store is worse than a loud one.
       - POSTGRES_INITDB_ARGS=--data-checksums
+    # Loopback only, and published at all because some consumers are not on
+    # this network and never will be: the inference proxy runs as a bare host
+    # process, and bare-metal edge minds run in host venvs. Every container
+    # reaches this by name instead. 5432 is left free for a stock install.
+    # Widening this to 0.0.0.0 is a decision about exposing the whole hive's
+    # data to the LAN, not a convenience.
+    ports:
+      - "127.0.0.1:5433:5432"
     volumes:
       - hive-postgres-data:/var/lib/postgresql/data
     healthcheck:
