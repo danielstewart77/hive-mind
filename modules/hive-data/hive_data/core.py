@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import Any, Sequence
 
 from . import _sql, pool
-from .errors import UnsettableColumn
+from .errors import UnsettableColumn, ValueRefused
 from .rows import UNSET, as_row, as_rows, row_count, written
 from .schema import COLUMNS, select_list
 from .unit import Unit
@@ -680,12 +680,147 @@ async def list_secret_scopes(mind_name: str, *,
         mind_name)
 
 
-async def get_user(username: str, *, unit: Unit | None = None) -> Row | None:
+async def get_user(username: str, *, private: bool = False,
+                   unit: Unit | None = None) -> Row | None:
+    """One person's record by name.
+
+    `private` has to be asked for, and `password_hash` is the one column it
+    adds. Sign-in needs it and nothing else does: every other read of a
+    person is rendered on a page or handed to a route table, and a hash that
+    travels by default is a hash in a log the day somebody dumps a row.
+    """
+    columns = COLUMNS["users"] if private else None
+    return await _fetch_one(
+        unit,
+        f'SELECT {select_list("users", columns)} FROM core."users" '
+        'WHERE "username" = $1',
+        username)
+
+
+async def get_user_by_id(user_id: int, *, private: bool = False,
+                         unit: Unit | None = None) -> Row | None:
+    """One person's record by the id a session cookie carries."""
+    columns = COLUMNS["users"] if private else None
+    return await _fetch_one(
+        unit,
+        f'SELECT {select_list("users", columns)} FROM core."users" '
+        'WHERE "id" = $1',
+        user_id)
+
+
+async def list_users(*, unit: Unit | None = None) -> list[Row]:
+    """Everybody with an account, by name."""
+    return await _fetch(
+        unit,
+        f'SELECT {select_list("users")} FROM core."users" ORDER BY "username"')
+
+
+async def count_users(*, unit: Unit | None = None) -> int:
+    """How many accounts there are, for the install that has to seed one."""
+    row = await _fetch_one(unit, 'SELECT count(*) AS "n" FROM core."users"')
+    assert row is not None  # an aggregate always answers
+    return int(row["n"])
+
+
+async def find_user(*, email: str | None = None,
+                    domain_account: str | None = None,
+                    unit: Unit | None = None) -> Row | None:
+    """The account an outside identity names, case-insensitively.
+
+    One of the two, named. Both at once is refused rather than resolved by
+    precedence: a caller holding an email and a domain account that name
+    different people has a question this operation cannot answer, and
+    whichever one happened to win would sign somebody in as somebody else.
+    """
+    if (email is None) == (domain_account is None):
+        raise ValueRefused(
+            "find_user takes exactly one of email or domain_account. Neither "
+            "names nobody, and both is two identities that may name two "
+            "people - which is a sign-in as whichever one the code happened "
+            "to check first.")
+    column = "email" if email is not None else "domain_account"
+    value = (email if email is not None else domain_account) or ""
+    value = value.strip()
+    if not value:
+        return None
     return await _fetch_one(
         unit,
         f'SELECT {select_list("users")} FROM core."users" '
-        'WHERE "username" = $1',
-        username)
+        f'WHERE lower("{column}") = lower($1)',
+        value)
+
+
+async def groups_of(user_id: int, *, unit: Unit | None = None) -> list[str]:
+    """The groups a person is in, by name.
+
+    A list of names rather than rows: membership is read on every request to
+    decide what a page may show, and the only thing read off the row is the
+    group's name.
+    """
+    rows = await _fetch(
+        unit,
+        'SELECT "group_name" FROM core."group_members" '
+        'WHERE "user_id" = $1 ORDER BY "group_name"',
+        user_id)
+    return [row["group_name"] for row in rows]
+
+
+async def group_usernames(group_name: str, *,
+                          unit: Unit | None = None) -> list[str]:
+    """Who is in a group, by name, as the groups page lists them."""
+    rows = await _fetch(
+        unit,
+        'SELECT u."username" FROM core."group_members" AS m '
+        'JOIN core."users" AS u ON u."id" = m."user_id" '
+        'WHERE m."group_name" = $1 ORDER BY u."username"',
+        group_name)
+    return [row["username"] for row in rows]
+
+
+async def get_group(name: str, *, unit: Unit | None = None) -> Row | None:
+    """One group, or None when there is no such group."""
+    return await _fetch_one(
+        unit,
+        f'SELECT {select_list("groups")} FROM core."groups" '
+        'WHERE "name" = $1',
+        name)
+
+
+async def enabled_members_besides(*, group_name: str, user_id: int,
+                                  unit: Unit | None = None) -> int:
+    """How many enabled people are in a group, not counting this one.
+
+    The last-admin guard, as one statement. Counted in the database inside
+    the caller's unit rather than by listing the group and filtering in
+    Python: two admins disabling each other at the same moment both read a
+    list that still holds the other, and both pass a check made against it.
+    """
+    row = await _fetch_one(
+        unit,
+        'SELECT count(*) AS "n" FROM core."users" AS u '
+        'JOIN core."group_members" AS m ON m."user_id" = u."id" '
+        'WHERE m."group_name" = $1 AND u."disabled_at" IS NULL '
+        'AND u."id" <> $2',
+        group_name, user_id)
+    assert row is not None
+    return int(row["n"])
+
+
+async def bump_session_version(user_id: int, *,
+                               unit: Unit | None = None) -> Row:
+    """End every session this person holds, by moving the version they carry.
+
+    An increment rather than a value the caller computed, because a caller
+    that read the version, added one and wrote it back loses the other
+    writer's bump - and the whole point of the column is that a disable or a
+    password reset ends a session that is open right now. The new version is
+    returned so a caller reissuing a cookie does not have to read it again.
+    """
+    return await _execute_returning(
+        unit,
+        'UPDATE core."users" SET "session_version" = "session_version" + 1 '
+        'WHERE "id" = $1 RETURNING "id", "username", "session_version"',
+        user_id)
 
 
 async def create_user(
@@ -1089,6 +1224,40 @@ async def put_sso_binding(*, provider: str, subject: str, username: str,
                      '"username" = EXCLUDED."username"'),
         returning=COLUMNS["sso_bindings"])
     return await _execute_returning(unit, sql, *args)
+
+
+async def sso_usernames(provider: str, *,
+                        unit: Unit | None = None) -> list[str]:
+    """Who has an outside identity bound for a provider, by account name.
+
+    The console's accounts page draws a badge from this, so what it wants is
+    the set of names rather than the subjects behind them - and the subject
+    is the opaque identifier the identity provider issued, which has no
+    business on a page.
+    """
+    rows = await _fetch(
+        unit,
+        'SELECT DISTINCT "username" FROM core."sso_bindings" '
+        'WHERE "provider" = $1 ORDER BY "username"',
+        provider)
+    return [row["username"] for row in rows]
+
+
+async def delete_sso_binding(*, provider: str, username: str,
+                             unit: Unit | None = None) -> Row:
+    """Unbind an outside identity from an account.
+
+    By account rather than by subject, which is what the console's route
+    asks for: the operator knows whose Microsoft sign-in they are detaching
+    and does not know the subject. The row count says whether there was one,
+    so the route can answer "nothing to unbind" rather than reporting a
+    success over an account that never had a binding.
+    """
+    return await _execute(
+        unit,
+        'DELETE FROM core."sso_bindings" '
+        'WHERE "provider" = $1 AND "username" = $2',
+        provider, username)
 
 
 async def least_overhead(*, mind_id: str, harness: str,

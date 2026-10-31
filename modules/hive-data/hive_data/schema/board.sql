@@ -113,6 +113,17 @@ CREATE TABLE board.edge_mind_settings (
 
 
 --
+-- Name: operation_requesters; Type: TABLE; Schema: board; Owner: -
+--
+
+CREATE TABLE board.operation_requesters (
+    request_id text NOT NULL,
+    username text NOT NULL,
+    created_at bigint NOT NULL
+);
+
+
+--
 -- Name: work_items; Type: TABLE; Schema: board; Owner: -
 --
 
@@ -161,6 +172,14 @@ ALTER TABLE ONLY board.design_sessions
 
 ALTER TABLE ONLY board.edge_mind_settings
     ADD CONSTRAINT edge_mind_settings_pkey PRIMARY KEY (name);
+
+
+--
+-- Name: operation_requesters operation_requesters_pkey; Type: CONSTRAINT; Schema: board; Owner: -
+--
+
+ALTER TABLE ONLY board.operation_requesters
+    ADD CONSTRAINT operation_requesters_pkey PRIMARY KEY (request_id);
 
 
 --

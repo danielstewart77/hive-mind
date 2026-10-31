@@ -315,6 +315,24 @@ few rows gets fewer candidates than the pool is sized for. Filtering first
 is a better answer and a different one, which a story that ports the blend
 unchanged does not get to make.
 
+`memory.tables` and `memory.rows` are the console's memory browser rather
+than part of recall: the table listing with a row count each, and one page of
+any one of them. Read from the database's own catalogue, scoped to this
+schema, which is what the SQLite browser did through `sqlite_master` and
+`PRAGMA table_info` — so a table added to the memory schema appears on the
+page instead of being invisible until somebody declares it, and the
+identifier on the request is only ever used after it has been matched against
+that catalogue. Two things the port had to decide rather than transcribe. A
+`vector`, a `tsvector` and a `bytea` are summarised in the database — `<vector
+4096 dims>` — so 4096 floats a row never cross the wire, which is what
+`<BLOB n bytes>` did for the same reason. And the page is ordered by the
+table's primary key: the old browser named no order and got away with it,
+because an unordered scan of a SQLite rowid table comes back in rowid order
+in practice, while Postgres promises nothing and the same query may use a
+different plan on the second call — so paging without an order repeats some
+rows and skips others, which on a browser built to check a load is the one
+failure that reads as a bad load.
+
 `docs/memory-search-parity.md` is the measured comparison and
 `tools/memory_search_parity.py` regenerates it. It snapshots the live store
 through SQLite's own backup API into a 0700 directory it removes afterwards,
@@ -371,6 +389,16 @@ other's — with both told they succeeded and two siblings left holding one
 position. Postgres offers no equivalent of SQLite's file-wide write lock and
 row locks are no help, because the rows a reorder will renumber are not known
 until it has read them.
+
+`board.operation_requesters` is the fifth table and the console created it on
+demand, having never been asked: it reached the cutover with no rows and no
+home in the new database. It is carried rather than dropped because the two
+routes that write and read it are live — a gated hive-tools answer carrying a
+request id is recorded against the signed-in user, and that operation's
+status is then only theirs to read. Recording the same request id twice keeps
+the later name instead of refusing the write, because a tool reporting one id
+twice is a replay or a re-POSTed webhook on a path whose whole job is
+bookkeeping.
 
 The derived backlog numbers are `board.backlog_numbers`, and they answer what
 the console answers today — including two cases that are arguably wrong and

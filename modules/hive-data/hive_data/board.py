@@ -57,6 +57,7 @@ SESSIONS = "board.design_sessions"
 NOTICES = "board.design_notices"
 CAPABILITIES = "board.capability_node_settings"
 EDGE_MINDS = "board.edge_mind_settings"
+REQUESTERS = "board.operation_requesters"
 
 #: The three levels of the board, as `kind` spells them.
 KINDS = ("epic", "feature", "story")
@@ -678,3 +679,37 @@ async def edge_minds(*, unit: Unit | None = None) -> list[Row]:
     return await _fetch(
         unit, f"SELECT {select_list(EDGE_MINDS)} FROM {qualified(EDGE_MINDS)} "
         'ORDER BY "name"')
+
+
+# ----------------------------------------------------- who started an operation
+
+async def record_operation_requester(request_id: str, username: str,
+                                     created_at: int, *,
+                                     unit: Unit | None = None) -> Row:
+    """Remember who started an operation, so its status is theirs to read.
+
+    An upsert rather than an insert. The console records the requester from
+    whatever a gated call answered with, and a tool that reports the same
+    request id twice — a replay, a retry of a webhook — must not turn the
+    second report into a refused write on a path whose whole purpose is
+    bookkeeping.
+    """
+    sql, args = _sql.insert(REQUESTERS, {
+        "request_id": request_id, "username": username,
+        "created_at": created_at,
+    }, on_conflict=('ON CONFLICT ("request_id") DO UPDATE SET '
+                    '"username" = excluded."username", '
+                    '"created_at" = excluded."created_at"'))
+    return await _execute(unit, sql, *args)
+
+
+async def operation_requester(request_id: str, *,
+                              unit: Unit | None = None) -> Row | None:
+    """The person an operation belongs to, or None when nobody recorded one.
+
+    None is the answer the console's route table wants: an operation with no
+    recorded requester belongs to nobody, so only an admin may read it.
+    """
+    return await _fetch_one(
+        unit, f"SELECT {select_list(REQUESTERS)} FROM {qualified(REQUESTERS)} "
+        'WHERE "request_id" = $1', request_id)

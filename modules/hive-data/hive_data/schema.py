@@ -99,6 +99,7 @@ COLUMNS: dict[str, tuple[str, ...]] = {
         "created_at", "updated_at"),
     "board.edge_mind_settings": (
         "name", "profile", "role", "deployment", "updated_at"),
+    "board.operation_requesters": ("request_id", "username", "created_at"),
     "board.work_items": (
         "id", "kind", "parent_id", "title", "status", "position",
         "description", "requirements", "acceptance_criteria", "qa_tests",
