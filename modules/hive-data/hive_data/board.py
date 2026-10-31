@@ -57,6 +57,7 @@ SESSIONS = "board.design_sessions"
 NOTICES = "board.design_notices"
 CAPABILITIES = "board.capability_node_settings"
 EDGE_MINDS = "board.edge_mind_settings"
+REQUESTERS = "board.operation_requesters"
 
 #: The three levels of the board, as `kind` spells them.
 KINDS = ("epic", "feature", "story")
@@ -332,6 +333,41 @@ async def update_work_item(item_id: str, fields: dict[str, Any], *,
     """Set a work item's own fields, leaving its place on the board alone."""
     sql, args = _sql.update(ITEMS, _sql.passed(fields), {"id": item_id},
                             settable=_ITEM_FIELDS)
+    return await _execute(unit, sql, *args)
+
+
+async def retype(item_id: str, kind: str, *, status: str | None = None,
+                 subtype: str = "", parent_id: str | None = None,
+                 position: int, unit: Unit | None = None) -> Row:
+    """Change what an item *is*, in one statement.
+
+    Its own operation rather than a settable `kind` on `update_work_item`,
+    because a retype is one fact made of five columns and every one of them
+    follows from the new kind. An epic has no status and a story has one; a
+    bug is a story carrying the bug subtype; a row becoming an epic loses its
+    parent, and a row that moves parents needs a position, since the number
+    it held was only unique under the parent it left. Written one column at a
+    time, the board is briefly a feature with a story's status or a row at a
+    duplicate number - and the console reads it in between.
+
+    `update_work_item` is deliberately left unable to do this. The title, the
+    prose and the status are the operator's to edit from a form; the kind is
+    not something a form field sets in passing.
+    """
+    if kind not in KINDS:
+        raise ValueRefused(
+            f"{kind!r} is not a kind of work item: {', '.join(KINDS)}.")
+    if parent_id == item_id:
+        raise ValueRefused(
+            "a work item cannot be its own parent. The board walks down from "
+            "its roots, so a row pointing at itself is a row that renders "
+            "nowhere and a recursive read that never ends.")
+    sql, args = _sql.update(
+        ITEMS, {"kind": kind, "status": status, "subtype": subtype,
+                "parent_id": parent_id, "position": position},
+        {"id": item_id},
+        settable=frozenset({"kind", "status", "subtype", "parent_id",
+                            "position"}))
     return await _execute(unit, sql, *args)
 
 
@@ -678,3 +714,37 @@ async def edge_minds(*, unit: Unit | None = None) -> list[Row]:
     return await _fetch(
         unit, f"SELECT {select_list(EDGE_MINDS)} FROM {qualified(EDGE_MINDS)} "
         'ORDER BY "name"')
+
+
+# ----------------------------------------------------- who started an operation
+
+async def record_operation_requester(request_id: str, username: str,
+                                     created_at: int, *,
+                                     unit: Unit | None = None) -> Row:
+    """Remember who started an operation, so its status is theirs to read.
+
+    An upsert rather than an insert. The console records the requester from
+    whatever a gated call answered with, and a tool that reports the same
+    request id twice — a replay, a retry of a webhook — must not turn the
+    second report into a refused write on a path whose whole purpose is
+    bookkeeping.
+    """
+    sql, args = _sql.insert(REQUESTERS, {
+        "request_id": request_id, "username": username,
+        "created_at": created_at,
+    }, on_conflict=('ON CONFLICT ("request_id") DO UPDATE SET '
+                    '"username" = excluded."username", '
+                    '"created_at" = excluded."created_at"'))
+    return await _execute(unit, sql, *args)
+
+
+async def operation_requester(request_id: str, *,
+                              unit: Unit | None = None) -> Row | None:
+    """The person an operation belongs to, or None when nobody recorded one.
+
+    None is the answer the console's route table wants: an operation with no
+    recorded requester belongs to nobody, so only an admin may read it.
+    """
+    return await _fetch_one(
+        unit, f"SELECT {select_list(REQUESTERS)} FROM {qualified(REQUESTERS)} "
+        'WHERE "request_id" = $1', request_id)

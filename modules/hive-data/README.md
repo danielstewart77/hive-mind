@@ -315,6 +315,24 @@ few rows gets fewer candidates than the pool is sized for. Filtering first
 is a better answer and a different one, which a story that ports the blend
 unchanged does not get to make.
 
+`memory.tables` and `memory.rows` are the console's memory browser rather
+than part of recall: the table listing with a row count each, and one page of
+any one of them. Read from the database's own catalogue, scoped to this
+schema, which is what the SQLite browser did through `sqlite_master` and
+`PRAGMA table_info` — so a table added to the memory schema appears on the
+page instead of being invisible until somebody declares it, and the
+identifier on the request is only ever used after it has been matched against
+that catalogue. Two things the port had to decide rather than transcribe. A
+`vector`, a `tsvector` and a `bytea` are summarised in the database — `<vector
+4096 dims>` — so 4096 floats a row never cross the wire, which is what
+`<BLOB n bytes>` did for the same reason. And the page is ordered by the
+table's primary key: the old browser named no order and got away with it,
+because an unordered scan of a SQLite rowid table comes back in rowid order
+in practice, while Postgres promises nothing and the same query may use a
+different plan on the second call — so paging without an order repeats some
+rows and skips others, which on a browser built to check a load is the one
+failure that reads as a bad load.
+
 `docs/memory-search-parity.md` is the measured comparison and
 `tools/memory_search_parity.py` regenerates it. It snapshots the live store
 through SQLite's own backup API into a 0700 directory it removes afterwards,
@@ -364,6 +382,18 @@ restoring a subtree needs. The cost is stated rather than hidden: a
 Nothing sets the constraints back to `IMMEDIATE` to move that error earlier,
 because doing so would also refuse the legitimate out-of-order write.
 
+Changing what an item *is* is `board.retype`, its own operation rather than
+a settable `kind` on `update_work_item`. A retype is one fact made of five
+columns and every one of them follows from the new kind: an epic has no
+status and a story has one, a bug is a story carrying the bug subtype, a row
+becoming an epic loses its parent, and a row that moves parents needs a
+position because the number it held was only unique under the parent it left.
+Written one column at a time the board is briefly a feature with a story's
+status, or a row at a duplicate number, and the console reads it in between.
+`update_work_item` is deliberately left unable to do it: the title, the prose
+and the status are the operator's to edit from a form, and the kind is not
+something a form field sets in passing.
+
 Every reordering write takes `board.hold_board(unit)` first. Each one reads
 the sibling list, decides a new numbering against it and writes the whole
 list back, so two interleaved is one tab's drag silently replaced by the
@@ -371,6 +401,16 @@ other's — with both told they succeeded and two siblings left holding one
 position. Postgres offers no equivalent of SQLite's file-wide write lock and
 row locks are no help, because the rows a reorder will renumber are not known
 until it has read them.
+
+`board.operation_requesters` is the fifth table and the console created it on
+demand, having never been asked: it reached the cutover with no rows and no
+home in the new database. It is carried rather than dropped because the two
+routes that write and read it are live — a gated hive-tools answer carrying a
+request id is recorded against the signed-in user, and that operation's
+status is then only theirs to read. Recording the same request id twice keeps
+the later name instead of refusing the write, because a tool reporting one id
+twice is a replay or a re-POSTed webhook on a path whose whole job is
+bookkeeping.
 
 The derived backlog numbers are `board.backlog_numbers`, and they answer what
 the console answers today — including two cases that are arguably wrong and

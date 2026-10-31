@@ -564,3 +564,155 @@ async def recall(*, query: str, embedding: Sequence[float],
 
     return {"memories": out, "count": len(out), "mode": "hybrid",
             "pool_size": len(pool_ids)}
+
+
+# --------------------------------------------------------------- the browser
+
+#: What the memory pages may read, and how wide a page of it may be. The
+#: console's memory browser is a table browser: it lists the memory store's
+#: own tables with their row counts and pages through any one of them. On
+#: SQLite that was `sqlite_master` and `PRAGMA table_info`; here it is the
+#: database's own catalogue, scoped to this one schema.
+BROWSE_SCHEMA = "memory"
+
+#: The widest page the browser will answer, whatever it was asked for. The
+#: page has no paging of its own beyond this, so a larger number is a longer
+#: page rather than more information - and `memories` holds a column of
+#: 4096 floats per row, which is why the ceiling is low rather than absent.
+BROWSE_LIMIT_MAX = 1000
+
+#: Types no page can render, and what is shown instead of the value. An
+#: embedding is 4096 floats and a `tsvector` is the content again as lexeme
+#: positions; `bytea` is whatever bytes somebody stored. The SQLite browser
+#: showed `<BLOB n bytes>` for exactly this reason, and the summary is
+#: computed in the database so the bytes never cross the wire at all.
+#:
+#: Keyed by `udt_name`, as Postgres spells it.
+_SUMMARISED: dict[str, str] = {
+    "vector": '\'<vector \' || vector_dims("{c}") || \' dims>\'',
+    "tsvector": '\'<tsvector \' || length("{c}") || \' lexemes>\'',
+    "bytea": '\'<BLOB \' || octet_length("{c}") || \' bytes>\'',
+}
+
+
+async def _browsable(unit: Unit | None = None) -> dict[str, list[tuple[str, str]]]:
+    """Every table in the memory schema, with each column and its type.
+
+    Read from the catalogue rather than declared, because this is a browser:
+    a table added to the memory schema should appear on the page rather than
+    be invisible until somebody remembers to name it here. The catalogue is
+    also what makes the identifiers safe - a table or column named on a
+    request is only ever used after it has been matched against this answer,
+    never quoted and hoped for.
+    """
+    rows = await _fetch(
+        unit,
+        'SELECT c."table_name", c."column_name", c."udt_name" '
+        'FROM information_schema."columns" AS c '
+        'JOIN information_schema."tables" AS t '
+        '  ON t."table_schema" = c."table_schema" '
+        ' AND t."table_name" = c."table_name" '
+        'WHERE c."table_schema" = $1 AND t."table_type" = $2 '
+        'ORDER BY c."table_name", c."ordinal_position"',
+        BROWSE_SCHEMA, "BASE TABLE")
+    out: dict[str, list[tuple[str, str]]] = {}
+    for row in rows:
+        out.setdefault(row["table_name"], []).append(
+            (row["column_name"], row["udt_name"]))
+    return out
+
+
+async def _browse_order(unit: Unit | None = None) -> dict[str, list[str]]:
+    """The columns each memory table is paged by, in key order.
+
+    A page needs an order or it is not a page. SQLite's browser named none
+    and got away with it: an unordered scan of a rowid table comes back in
+    rowid order in practice, so clicking to page two showed the next rows.
+    Postgres promises nothing of the sort - the same query may use a
+    different plan on the second call - so paging without an order silently
+    repeats some rows and skips others, which on a browser built to check a
+    load is the one failure that would be read as a bad load.
+
+    The primary key, since every table in this schema has one and it is
+    unique by construction. A table that somehow has none falls back to its
+    whole column list, which is an order even when it is not a cheap one.
+    """
+    rows = await _fetch(
+        unit,
+        'SELECT c."table_name", k."column_name" '
+        'FROM information_schema."table_constraints" AS c '
+        'JOIN information_schema."key_column_usage" AS k '
+        '  ON k."constraint_name" = c."constraint_name" '
+        ' AND k."constraint_schema" = c."constraint_schema" '
+        'WHERE c."constraint_schema" = $1 AND c."constraint_type" = $2 '
+        'ORDER BY c."table_name", k."ordinal_position"',
+        BROWSE_SCHEMA, "PRIMARY KEY")
+    out: dict[str, list[str]] = {}
+    for row in rows:
+        out.setdefault(row["table_name"], []).append(row["column_name"])
+    return out
+
+
+async def tables(*, unit: Unit | None = None) -> list[dict[str, Any]]:
+    """The memory store's tables, each with how many rows it holds.
+
+    One count per table rather than an estimate off the planner's
+    statistics: the page exists to be looked at after a load, and an
+    estimate that is right to within a few per cent cannot answer the
+    question the operator is actually asking.
+    """
+    found = await _browsable(unit)
+    out: list[dict[str, Any]] = []
+    for name in sorted(found):
+        row = await _fetch_one(
+            unit, f'SELECT count(*) AS "n" FROM {BROWSE_SCHEMA}."{name}"')
+        assert row is not None  # an aggregate always answers
+        out.append({"name": name, "row_count": int(row["n"])})
+    return out
+
+
+async def rows(table: str, *, limit: int = 200, offset: int = 0,
+               unit: Unit | None = None) -> dict[str, Any] | None:
+    """One page of a memory table, with its columns and its total.
+
+    `None` when the memory schema has no such table, which is the answer the
+    console turns into a 404 - a name that matches nothing is a typo in a
+    URL, not a failure of the store.
+
+    The limit and offset are clamped rather than refused. They arrive as
+    query parameters on a page somebody is clicking through, and a browser
+    that answers 400 to `?limit=0` is a page that breaks on its own
+    controls.
+    """
+    found = await _browsable(unit)
+    columns = found.get(table)
+    if columns is None:
+        return None
+    safe_limit = max(1, min(int(limit), BROWSE_LIMIT_MAX))
+    safe_offset = max(0, int(offset))
+    chosen = []
+    for name, udt in columns:
+        summary = _SUMMARISED.get(udt)
+        if summary is None:
+            chosen.append(f'"{name}"')
+        else:
+            chosen.append(summary.format(c=name) + f' AS "{name}"')
+    keys = (await _browse_order(unit)).get(table) or [
+        n for n, udt in columns if udt not in _SUMMARISED]
+    order = (" ORDER BY " + ", ".join(f'"{name}"' for name in keys)
+             if keys else "")
+    count = await _fetch_one(
+        unit, f'SELECT count(*) AS "n" FROM {BROWSE_SCHEMA}."{table}"')
+    assert count is not None
+    page = await _fetch(
+        unit,
+        f'SELECT {", ".join(chosen)} FROM {BROWSE_SCHEMA}."{table}" '
+        f"{order} LIMIT $1 OFFSET $2", safe_limit, safe_offset)
+    return {
+        "table": table,
+        "columns": [name for name, _ in columns],
+        "rows": page,
+        "total": int(count["n"]),
+        "limit": safe_limit,
+        "offset": safe_offset,
+    }
