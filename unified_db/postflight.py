@@ -193,63 +193,6 @@ async def restore_journal(conn: asyncpg.Connection) -> str:
             f'{record["original"]!r} from {path}')
 
 
-def _items(answer: object, key: str) -> list:
-    """The list inside an answer, however the service wrapped it.
-
-    These five services were written by different hands and some answer a
-    bare JSON array where others answer an object with the array under a
-    key. A check that assumed one shape would report a working app as
-    broken, which is the one thing a cutover check must not do.
-    """
-    if isinstance(answer, list):
-        return answer
-    if isinstance(answer, dict):
-        value = answer.get(key)
-        if isinstance(value, list):
-            return value
-    return []
-
-
-class Absent(RuntimeError):
-    """The app is not running here, which is not a failure."""
-
-
-class _Probe:
-    """Change one value in Postgres, so a read through the app can prove it.
-
-    A read-only comparison cannot tell a service reading Postgres from a
-    service still reading its SQLite file: the loader made the two agree, so
-    both answer correctly. The only question that separates them is one whose
-    answer exists in exactly one of the stores — so this writes a marker into
-    Postgres, lets the check read the app, and puts the original value back
-    whatever happens.
-    """
-
-    def __init__(self, conn: asyncpg.Connection, table: str, column: str,
-                 key: str, key_value: object, marker: str):
-        self._conn = conn
-        self._table = table
-        self._column = column
-        self._key = key
-        self._key_value = key_value
-        self._marker = marker
-        self._original: object = None
-
-    async def __aenter__(self) -> str:
-        self._original = await self._conn.fetchval(
-            f'SELECT "{self._column}" FROM {self._table} '
-            f'WHERE "{self._key}" = $1', self._key_value)
-        await self._conn.execute(
-            f'UPDATE {self._table} SET "{self._column}" = $1 '
-            f'WHERE "{self._key}" = $2', self._marker, self._key_value)
-        return self._marker
-
-    async def __aexit__(self, *_exc: object) -> None:
-        await self._conn.execute(
-            f'UPDATE {self._table} SET "{self._column}" = $1 '
-            f'WHERE "{self._key}" = $2', self._original, self._key_value)
-
-
 class Down(RuntimeError):
     """The app is installed here and not answering. A failure, not an absence."""
 
@@ -368,17 +311,28 @@ async def _comms(conn: asyncpg.Connection) -> tuple[str, str]:
                   "core.minds came back through the gateway")
 
 
-async def _console(conn: asyncpg.Connection) -> tuple[str, str]:
-    """The console's own board read, with a marker only Postgres holds.
+#: How wide a page of the memory browser the check asks for. The marked row
+#: is the lowest id in the table, and the browser pages by the primary key,
+#: so the first page holds it — but a page of one would also pass for a
+#: console serving any single row, so the check asks for a real page.
+_MEMORY_PAGE = 50
 
-    The board API is guarded by a signed-in admin session rather than a
-    bearer, so unless this install has issued a token there is no credential
-    a check outside a browser can present — reported absent, because a check
-    that cannot authenticate has learned nothing. When there *is* one, it
-    marks a title in `board.work_items` and requires it back: comparing two
+
+async def _console(conn: asyncpg.Connection) -> tuple[str, str]:
+    """The console's board read and its memory pages, each with a marker
+    only Postgres holds.
+
+    Both reads are guarded by a signed-in admin session, so a check running
+    outside a browser has no session to present: the console issues a bearer
+    of its own for this (`HIVE_SITE_ADMIN_TOKEN`), and an install that has
+    not is reported absent, because a check that cannot authenticate has
+    learned nothing.
+
+    When there is one, each read is marked and required back. Comparing
     counts the loader deliberately made equal would pass a console still
-    reading its SQLite file, which is the one sentence this module exists to
-    make impossible.
+    reading its own files, which is the one sentence this module exists to
+    make impossible — and the memory pages are a second store, read by path
+    rather than through lucent, so they are marked separately.
     """
     base = os.environ.get("HIVE_SITE_URL", "http://127.0.0.1:8710").rstrip("/")
     token = os.environ.get("HIVE_SITE_ADMIN_TOKEN", "")
@@ -410,8 +364,36 @@ async def _console(conn: asyncpg.Connection) -> tuple[str, str]:
         return "fail", (f"a board item retitled {marker!r} in "
                         "board.work_items did not come back from the "
                         "console — it is still on SQLite")
-    return "ok", (f"{total} board item(s); a marker written only into "
-                  "board.work_items came back through the console")
+
+    # The memory pages are the console's second store and the one window
+    # this cutover had to close: the board and lucent's rows were loaded and
+    # made equal, so a console reading its own file answers the board
+    # correctly — but it also read *lucent's* file directly, by path, and a
+    # console left on that path would go on answering from a store nothing
+    # writes to any more. Marked the same way, for the same reason a count
+    # comparison cannot answer it.
+    memory = await conn.fetchrow(
+        "SELECT id, content FROM memory.memories ORDER BY id LIMIT 1")
+    if memory is None:
+        return "fail", ("memory.memories is empty, so there is nothing to "
+                        "ask the console's memory pages for; this app is "
+                        "unchecked")
+    note = f"postflight-{uuid.uuid4().hex[:8]}"
+    async with _Probe(conn, "memory.memories", "content", "id",
+                      memory["id"], note):
+        rows = _call("GET", f"{base}/api/memory/rows?table=memories"
+                     f"&limit={_MEMORY_PAGE}", token)
+    served = [r.get("content") for r in _items(rows, "rows")
+              if isinstance(r, dict)]
+    if not served:
+        return "fail", "the console's memory pages returned no rows"
+    if note not in served:
+        return "fail", (f"a memory retitled {note!r} in memory.memories did "
+                        "not come back from the console's memory pages — "
+                        "they are still reading lucent's own file")
+    return "ok", (f"{total} board item(s) and the memory pages; a marker "
+                  "written only into board.work_items, and one written only "
+                  "into memory.memories, both came back through the console")
 
 
 async def _tools(conn: asyncpg.Connection) -> tuple[str, str]:
