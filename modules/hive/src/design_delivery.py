@@ -197,21 +197,21 @@ async def deliver_notice(notice_id: int) -> bool:
     be lost because the send failed.
     """
     try:
-        notice = design_data.claim_notice(notice_id)
+        notice = await design_data.claim_notice(notice_id)
     except design_data.DesignNotFound:
         return False
     try:
-        record = design_data.get_design_session(notice["design_id"])
+        record = await design_data.get_design_session(notice["design_id"])
         conversation_id = record["conversation_id"]
         if not conversation_id:
-            design_data.release_notice(notice_id)
+            await design_data.release_notice(notice_id)
             return False
         content = compose_message(record, notice["page"], notice["kind"])
         await adopt_conversation(record["id"], conversation_id)
         await send_turn(conversation_id, content)
     except Exception:  # noqa: BLE001 — a failed send is never a lost submission
         log.exception("design notice %s could not be delivered", notice_id)
-        design_data.release_notice(notice_id)
+        await design_data.release_notice(notice_id)
         return False
     except BaseException:
         # BaseException, not Exception. This runs detached, so a console
@@ -220,10 +220,10 @@ async def deliver_notice(notice_id: int) -> bool:
         # `deliver_pending` steps over claimed notices — so that submission
         # would never be delivered by any later path.
         log.exception("design notice %s could not be delivered", notice_id)
-        design_data.release_notice(notice_id)
+        await design_data.release_notice(notice_id)
         raise
     try:
-        design_data.mark_delivered(notice_id)
+        await design_data.mark_delivered(notice_id)
     except design_data.DesignNotFound:
         # The design session was deleted while the turn was in flight. The
         # message has already reached the mind; there is nothing left to mark
@@ -241,7 +241,7 @@ async def deliver_pending() -> int:
     stored, unsent, and invisible until Daniel asked why nothing happened.
     """
     sent = 0
-    for notice in design_data.pending_notices():
+    for notice in await design_data.pending_notices():
         if notice.get("claimed_at"):
             continue
         try:

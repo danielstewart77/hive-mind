@@ -1,6 +1,12 @@
 services:
   hive:
-    build: .
+    build:
+      context: .
+      additional_contexts:
+        # The access layer lives in its own repository and is private, so it
+        # arrives as a second build context rather than as a git install
+        # needing a credential in the build.
+        hive_data: ${HIVE_DATA_DIR:?set HIVE_DATA_DIR in .env}
     container_name: hive-site
     restart: unless-stopped
     ports:
@@ -9,6 +15,12 @@ services:
     environment:
       - HIVE_HOST=0.0.0.0
       - HIVE_LOG_FORMAT=json
+      # Which store answers. Set means the hive's one Postgres through
+      # `hive_data`; unset means this host's own hive.db as before, which is
+      # the revert: one value in .env and a restart, with the file left on
+      # disk and reachable. The two paths below are that file and lucent's,
+      # and they are read only on the SQLite half.
+      - HIVE_DATABASE_URL=${HIVE_DATABASE_URL:-}
       - HIVE_DB_PATH=/data/hive.db
       - LUCENT_DB_PATH=/lucent/lucent.db
       # Parent domain so the session cookie is shared with the terminal

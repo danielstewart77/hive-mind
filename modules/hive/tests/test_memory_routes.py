@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import auth
 import main as main_mod
+import accounts
 
 
 def _seed_lucent(path):
@@ -29,9 +30,9 @@ def _authed_client(tmp_path, monkeypatch):
     lucent_path = tmp_path / "lucent.db"
     _seed_lucent(lucent_path)
     monkeypatch.setenv("LUCENT_DB_PATH", str(lucent_path))
-    user = auth.create_user("daniel", "secret-pass", is_admin=True, replace=True)
+    user = accounts.make_user("daniel", "secret-pass", is_admin=True, replace=True)
     client = TestClient(main_mod.app)
-    client.cookies.set(auth.SESSION_COOKIE_NAME, auth.create_session_token(user))
+    client.cookies.set(auth.SESSION_COOKIE_NAME, accounts.session_token(user))
     return client
 
 
@@ -111,9 +112,9 @@ def test_memory_rows_renders_blob_columns_as_placeholder(tmp_path, monkeypatch):
     conn.commit()
     conn.close()
     monkeypatch.setenv("LUCENT_DB_PATH", str(lucent_path))
-    user = auth.create_user("daniel", "secret-pass", is_admin=True, replace=True)
+    user = accounts.make_user("daniel", "secret-pass", is_admin=True, replace=True)
     client = TestClient(main_mod.app)
-    client.cookies.set(auth.SESSION_COOKIE_NAME, auth.create_session_token(user))
+    client.cookies.set(auth.SESSION_COOKIE_NAME, accounts.session_token(user))
 
     response = client.get("/api/memory/rows?table=vec_rows")
 

@@ -1,46 +1,74 @@
 """Unit tests for the built-in account store's helpers."""
 
+import sqlite3
+
+import accounts
 import auth
+import store as data_store
 
 
-def test_session_token_round_trip(tmp_path, monkeypatch):
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
+async def test_session_token_round_trip(monkeypatch):
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
-    user = auth.create_user("bob", "correct-horse", replace=True)
+    user = await auth.create_user("bob", "correct-horse", replace=True)
 
-    token = auth.create_session_token(user)
-    payload = auth.read_session_token(token)
+    token = await auth.create_session_token(user)
+    payload = await auth.read_session_token(token)
 
     assert payload["user_id"] == user["id"]
     assert payload["username"] == "bob"
 
 
-def test_an_older_db_moves_is_admin_into_the_admins_group(tmp_path, monkeypatch):
-    import sqlite3
+async def test_an_older_db_moves_is_admin_into_the_admins_group(tmp_path):
+    """A file that held admin as a column reads with admin as a group.
 
-    path = tmp_path / "hive.db"
-    monkeypatch.setenv("HIVE_DB_PATH", str(path))
+    The move happens as the store opens, in one transaction, so no reader
+    ever sees an admin who is neither — and the column is gone afterwards,
+    which is what stops the two answers existing side by side.
+    """
+    path = tmp_path / "legacy.db"
     old = sqlite3.connect(path)
     old.execute(
-        "CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE, "
-        "password_hash TEXT NOT NULL, is_admin INTEGER NOT NULL DEFAULT 0, "
-        "created_at INTEGER NOT NULL, disabled_at INTEGER)"
+        "CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT NOT NULL "
+        "UNIQUE, password_hash TEXT NOT NULL, is_admin INTEGER NOT NULL "
+        "DEFAULT 0, created_at INTEGER NOT NULL, disabled_at INTEGER)"
     )
     old.execute(
-        "INSERT INTO users (username, password_hash, is_admin, created_at) VALUES (?, ?, 1, 0)",
+        "INSERT INTO users (username, password_hash, is_admin, created_at) "
+        "VALUES (?, ?, 1, 0)",
         ("daniel", auth.hash_password("daniels-pass")),
     )
     old.execute(
-        "INSERT INTO users (username, password_hash, is_admin, created_at) VALUES (?, ?, 0, 0)",
+        "INSERT INTO users (username, password_hash, is_admin, created_at) "
+        "VALUES (?, ?, 0, 0)",
         ("guest", auth.hash_password("guests-pass")),
     )
     old.commit()
     old.close()
 
-    store = auth.BuiltinStore()
-    assert store.get_user("daniel")["is_admin"] is True
-    assert store.get_user("guest")["is_admin"] is False
-    assert store.sign_in("daniel", "daniels-pass")[0]["must_change"] is False
+    await data_store.close()
+    await data_store.open(path)
 
-    columns = {row[1] for row in sqlite3.connect(path).execute("PRAGMA table_info(users)")}
+    store = auth.BuiltinStore()
+    assert (await store.get_user("daniel"))["is_admin"] is True
+    assert (await store.get_user("guest"))["is_admin"] is False
+    assert (await store.sign_in("daniel", "daniels-pass"))[0][
+        "must_change"] is False
+
+    columns = {row[1] for row in
+               sqlite3.connect(path).execute("PRAGMA table_info(users)")}
     assert "is_admin" not in columns
+
+
+def test_the_helper_a_synchronous_test_sets_an_account_up_with(monkeypatch):
+    """`accounts.make_user` and `accounts.session_token` drive the real ones.
+
+    Most of this suite is synchronous and these two are the setup step every
+    route test takes, so the pair has to produce a real account and a cookie
+    the console will accept. Deliberately not a coroutine: running the
+    wrappers is the behaviour under test, and they run a loop of their own.
+    """
+    monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
+    user = accounts.make_user("sync-setup", "a-password", is_admin=True)
+
+    assert user["is_admin"] is True
+    assert accounts.session_token(user)

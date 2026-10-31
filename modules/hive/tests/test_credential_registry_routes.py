@@ -21,14 +21,15 @@ from fastapi import HTTPException
 import auth
 import credential_registry as registry
 import main as main_mod
+import accounts
 
 
-def _authed_client(tmp_path, monkeypatch):
+async def _authed_client(tmp_path, monkeypatch):
     monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
-    user = auth.create_user("daniel", "secret-pass", is_admin=True, replace=True)
+    user = await auth.create_user("daniel", "secret-pass", is_admin=True, replace=True)
     client = TestClient(main_mod.app)
-    client.cookies.set(auth.SESSION_COOKIE_NAME, auth.create_session_token(user))
+    client.cookies.set(auth.SESSION_COOKIE_NAME, await auth.create_session_token(user))
     return client
 
 
@@ -43,10 +44,10 @@ MINDS = [
 
 
 class TestTheListing:
-    def test_it_carries_a_row_per_holder_beside_the_credentials(
+    async def test_it_carries_a_row_per_holder_beside_the_credentials(
         self, tmp_path, monkeypatch
     ) -> None:
-        client = _authed_client(tmp_path, monkeypatch)
+        client = await _authed_client(tmp_path, monkeypatch)
         registry.forget_all()
 
         with patch.object(main_mod, "_gateway_json", AsyncMock(return_value=MINDS)):
@@ -59,12 +60,12 @@ class TestTheListing:
         )
         assert any(c["key"] == "comms_admin_bearer_token" for c in body["credentials"])
 
-    def test_a_broker_it_cannot_read_is_said_rather_than_shown_as_empty(
+    async def test_a_broker_it_cannot_read_is_said_rather_than_shown_as_empty(
         self, tmp_path, monkeypatch
     ) -> None:
         """A credentials page with no holders on it looks exactly like a
         credentials page with nothing wrong."""
-        client = _authed_client(tmp_path, monkeypatch)
+        client = await _authed_client(tmp_path, monkeypatch)
         registry.forget_all()
 
         with patch.object(
@@ -77,10 +78,10 @@ class TestTheListing:
         # still every bit as true.
         assert any(c["key"] == "comms_admin_bearer_token" for c in body["credentials"])
 
-    def test_it_takes_no_live_check(self, tmp_path, monkeypatch) -> None:
+    async def test_it_takes_no_live_check(self, tmp_path, monkeypatch) -> None:
         """This is the whole content of the page; waiting on a mind that is
         down, or on GitHub once per row, would hang it."""
-        client = _authed_client(tmp_path, monkeypatch)
+        client = await _authed_client(tmp_path, monkeypatch)
         registry.forget_all()
         checked = AsyncMock()
         monkeypatch.setattr(registry, "check", checked)
@@ -102,10 +103,10 @@ class TestTheListing:
 
 
 class TestOneRowsCheck:
-    def test_it_checks_the_credential_and_holder_it_was_asked_about(
+    async def test_it_checks_the_credential_and_holder_it_was_asked_about(
         self, tmp_path, monkeypatch
     ) -> None:
-        client = _authed_client(tmp_path, monkeypatch)
+        client = await _authed_client(tmp_path, monkeypatch)
         answer = {"credential": "mind_github_token", "holder": "cypher",
                   "status": registry.WORKING, "names": "danielstewart77"}
         checked = AsyncMock(return_value=answer)
@@ -121,12 +122,12 @@ class TestOneRowsCheck:
         assert response.json()["status"] == registry.WORKING
         assert checked.await_args.args[:2] == ("mind_github_token", "cypher")
 
-    def test_a_credential_the_hive_does_not_have_is_refused(
+    async def test_a_credential_the_hive_does_not_have_is_refused(
         self, tmp_path, monkeypatch
     ) -> None:
         """The key arrives on a URL, and an entry per invented name is a
         dictionary that grows for as long as the console is up."""
-        client = _authed_client(tmp_path, monkeypatch)
+        client = await _authed_client(tmp_path, monkeypatch)
         checked = AsyncMock()
         monkeypatch.setattr(registry, "check", checked)
 
@@ -138,13 +139,13 @@ class TestOneRowsCheck:
         assert response.status_code == 404
         checked.assert_not_awaited()
 
-    def test_a_broker_it_cannot_read_is_not_reported_as_an_absent_holder(
+    async def test_a_broker_it_cannot_read_is_not_reported_as_an_absent_holder(
         self, tmp_path, monkeypatch
     ) -> None:
         """Otherwise every mind at once is remembered as "not in the
         registry" — a confident sentence, false, with nothing on screen
         attributing it to comms."""
-        client = _authed_client(tmp_path, monkeypatch)
+        client = await _authed_client(tmp_path, monkeypatch)
         registry.forget_all()
         checked = AsyncMock()
         monkeypatch.setattr(registry, "check", checked)
@@ -161,8 +162,8 @@ class TestOneRowsCheck:
         checked.assert_not_awaited()
         assert registry.recall("mind_github_token", "cypher") is None
 
-    def test_a_check_with_no_holder_is_refused(self, tmp_path, monkeypatch) -> None:
-        client = _authed_client(tmp_path, monkeypatch)
+    async def test_a_check_with_no_holder_is_refused(self, tmp_path, monkeypatch) -> None:
+        client = await _authed_client(tmp_path, monkeypatch)
         checked = AsyncMock()
         monkeypatch.setattr(registry, "check", checked)
 
@@ -175,10 +176,10 @@ class TestOneRowsCheck:
 
 
 class TestTheTokenTheConsoleRelays:
-    def test_a_stored_token_names_the_account_and_owes_no_restart(
+    async def test_a_stored_token_names_the_account_and_owes_no_restart(
         self, tmp_path, monkeypatch
     ) -> None:
-        client = _authed_client(tmp_path, monkeypatch)
+        client = await _authed_client(tmp_path, monkeypatch)
         pushed = AsyncMock(return_value={
             "login": "danielstewart77",
             "where": "keyring:CYPHER_GITHUB_TOKEN",
@@ -198,12 +199,12 @@ class TestTheTokenTheConsoleRelays:
         assert body["restart_required"] is False
         assert pushed.await_args.args[1] == "ghp_pasted"
 
-    def test_storing_it_fills_the_row_in_without_a_second_round_trip(
+    async def test_storing_it_fills_the_row_in_without_a_second_round_trip(
         self, tmp_path, monkeypatch
     ) -> None:
         """The Mind just verified. Asking again would spend another GitHub
         call to learn what it already said."""
-        client = _authed_client(tmp_path, monkeypatch)
+        client = await _authed_client(tmp_path, monkeypatch)
         registry.forget_all()
         pushed = AsyncMock(return_value={
             "login": "danielstewart77", "where": "keyring:CYPHER_GITHUB_TOKEN",
@@ -217,12 +218,12 @@ class TestTheTokenTheConsoleRelays:
         assert entry.status == registry.WORKING
         assert entry.names == "danielstewart77"
 
-    def test_a_mind_that_refused_the_token_keeps_its_own_status(
+    async def test_a_mind_that_refused_the_token_keeps_its_own_status(
         self, tmp_path, monkeypatch
     ) -> None:
         """A 400 from the Mind means the token was refused, not the
         credential this console presented."""
-        client = _authed_client(tmp_path, monkeypatch)
+        client = await _authed_client(tmp_path, monkeypatch)
         with patch.object(
             main_mod, "_mind_gateway_url", AsyncMock(return_value="http://cypher:8420")
         ), patch.object(
@@ -236,12 +237,12 @@ class TestTheTokenTheConsoleRelays:
         assert response.status_code == 400
         assert "rejected" in response.json()["detail"]
 
-    def test_a_mind_that_cannot_store_one_keeps_that_status_too(
+    async def test_a_mind_that_cannot_store_one_keeps_that_status_too(
         self, tmp_path, monkeypatch
     ) -> None:
         """503 means this mind names no key of its own — a compose change,
         not a new token and not a trip to the machine."""
-        client = _authed_client(tmp_path, monkeypatch)
+        client = await _authed_client(tmp_path, monkeypatch)
         with patch.object(
             main_mod, "_mind_gateway_url", AsyncMock(return_value="http://bob:8420")
         ), patch.object(
@@ -254,8 +255,8 @@ class TestTheTokenTheConsoleRelays:
 
         assert response.status_code == 503
 
-    def test_an_empty_token_never_reaches_the_mind(self, tmp_path, monkeypatch) -> None:
-        client = _authed_client(tmp_path, monkeypatch)
+    async def test_an_empty_token_never_reaches_the_mind(self, tmp_path, monkeypatch) -> None:
+        client = await _authed_client(tmp_path, monkeypatch)
         pushed = AsyncMock()
         with patch.object(main_mod.mind_runtime, "push_github_token", pushed):
             response = client.put("/api/minds/cypher/github-token", json={"token": "  "})
@@ -271,12 +272,12 @@ class TestTheTokenTheConsoleRelays:
             "/api/minds/cypher/github-token", json={"token": "ghp_x"}
         ).status_code == 401
 
-    def test_the_audit_line_names_the_mind_and_the_account_and_not_the_token(
+    async def test_the_audit_line_names_the_mind_and_the_account_and_not_the_token(
         self, tmp_path, monkeypatch
     ) -> None:
         """This log is shipped and searchable, and a value in it outlives
         every page that was careful with it."""
-        client = _authed_client(tmp_path, monkeypatch)
+        client = await _authed_client(tmp_path, monkeypatch)
         emitted: list[dict] = []
         monkeypatch.setattr(
             main_mod, "log_event",
@@ -299,12 +300,12 @@ class TestTheTokenTheConsoleRelays:
 
 
 class TestRotation:
-    def test_a_rotation_discards_every_remembered_check(
+    async def test_a_rotation_discards_every_remembered_check(
         self, tmp_path, monkeypatch
     ) -> None:
         """A stale "working" beside a freshly rotated holder is the one thing
         on this page nobody should believe."""
-        client = _authed_client(tmp_path, monkeypatch)
+        client = await _authed_client(tmp_path, monkeypatch)
         registry.remember("comms_admin_bearer_token", "skippy", status=registry.WORKING)
 
         async def rotated(service, holder):
@@ -317,21 +318,21 @@ class TestRotation:
 
         assert registry.recall("comms_admin_bearer_token", "skippy") is None
 
-    def test_a_rotation_on_a_service_this_console_does_not_know_is_a_404(
+    async def test_a_rotation_on_a_service_this_console_does_not_know_is_a_404(
         self, tmp_path, monkeypatch
     ) -> None:
-        client = _authed_client(tmp_path, monkeypatch)
+        client = await _authed_client(tmp_path, monkeypatch)
 
         answer = client.post("/api/settings/holders/quokka/ada/rotate")
 
         assert answer.status_code == 404
 
-    def test_a_stranded_rotation_is_not_reported_as_a_bad_request(
+    async def test_a_stranded_rotation_is_not_reported_as_a_bad_request(
         self, tmp_path, monkeypatch
     ) -> None:
         """A 400 reads as "nothing happened", and the one thing this failure
         guarantees is that something did."""
-        client = _authed_client(tmp_path, monkeypatch)
+        client = await _authed_client(tmp_path, monkeypatch)
 
         async def stranded(service, holder):
             raise main_mod.holder_credentials.Stranded("mint landed, write did not", restored=False)
@@ -460,12 +461,12 @@ class TestTheRelayItself:
 
 
 class TestWhatTheRouteRelaysBack:
-    def test_an_edge_mind_that_owes_a_restart_says_so_on_the_row_too(
+    async def test_an_edge_mind_that_owes_a_restart_says_so_on_the_row_too(
         self, tmp_path, monkeypatch
     ) -> None:
         """The alert said it and the row did not, so the row read Working
         over a token the running process has never loaded."""
-        client = _authed_client(tmp_path, monkeypatch)
+        client = await _authed_client(tmp_path, monkeypatch)
         registry.forget_all()
         pushed = AsyncMock(return_value={
             "login": "danielstewart77", "where": "env", "restart_required": True,
@@ -482,7 +483,7 @@ class TestWhatTheRouteRelaysBack:
 
 
 class TestWhatAStoreSaysAboutWhatIsRunning:
-    def test_a_container_mind_is_told_what_an_open_conversation_still_holds(
+    async def test_a_container_mind_is_told_what_an_open_conversation_still_holds(
         self, tmp_path, monkeypatch
     ) -> None:
         """`git` reads its file per invocation and a newly spawned harness
@@ -490,7 +491,7 @@ class TestWhatAStoreSaysAboutWhatIsRunning:
         one it booted with — `gh` prefers that variable over its hosts file.
         Left unsaid, the operator discovers it when a push in an open session
         authenticates as the previous account."""
-        client = _authed_client(tmp_path, monkeypatch)
+        client = await _authed_client(tmp_path, monkeypatch)
         registry.forget_all()
         pushed = AsyncMock(return_value={
             "login": "danielstewart77", "where": "keyring:CYPHER_GITHUB_TOKEN",
@@ -505,10 +506,10 @@ class TestWhatAStoreSaysAboutWhatIsRunning:
 
         assert "already running" in body["note"]
 
-    def test_an_edge_mind_owed_a_restart_is_not_also_told_that(
+    async def test_an_edge_mind_owed_a_restart_is_not_also_told_that(
         self, tmp_path, monkeypatch
     ) -> None:
-        client = _authed_client(tmp_path, monkeypatch)
+        client = await _authed_client(tmp_path, monkeypatch)
         registry.forget_all()
         pushed = AsyncMock(return_value={
             "login": "danielstewart77", "where": "env", "restart_required": True,

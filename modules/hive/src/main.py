@@ -12,7 +12,6 @@ import logging
 import os
 import re
 import shlex
-import sqlite3
 import time
 import urllib.error
 import urllib.parse
@@ -56,10 +55,10 @@ import mind_symbols
 import route_access
 import sentinel_review
 import sso
+import store
 from auth import (
     clear_session_cookie,
     get_current_user_from_request,
-    init_auth_db,
     require_auth,
     seed_first_user,
     set_session_cookie,
@@ -112,9 +111,18 @@ _DESIGN_DELIVERIES: set = set()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Open the store, seed the first account, send what is owed, and stop.
+
+    The store is opened here rather than on first use. A lazy open under two
+    concurrent first requests builds two connection pools and holds double
+    the connections against a ceiling shared with every other service in the
+    hive, with nothing reporting that it happened.
+    """
     del app
-    init_auth_db()
-    seed_first_user()
+    await store.open()
+    log_event(log, "store.opened", component="hive-control-plane",
+              engine="postgres" if store.on_postgres() else "sqlite")
+    await seed_first_user()
     global _canvas_elements
     _canvas_elements = _load_canvas_state()
     log_event(log, "service.started", component="hive-control-plane")
@@ -129,6 +137,39 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         log_event(log, "service.stopped", component="hive-control-plane")
+        # The delivery tasks go before the store does, and are waited for.
+        # Left to the loop's own cancellation they are cancelled *after* the
+        # store is closed, and `deliver_notice`'s own handler — the one that
+        # releases a claimed notice so a later sweep can retry it — then
+        # reaches a closed store and raises instead. The notice stays
+        # claimed, every later sweep steps over it, and a submission the page
+        # reported as saved is never delivered by any path.
+        await _settle_design_deliveries()
+        await store.close()
+
+
+#: How long shutdown waits for a design delivery to put its notice back. The
+#: release is one statement; what it may be waiting on is the model turn the
+#: cancellation interrupts, and a shutdown that waited on that would be a
+#: restart that hangs for minutes.
+DELIVERY_SETTLE_SECONDS = 10.0
+
+
+async def _settle_design_deliveries() -> None:
+    """Cancel the in-flight deliveries and let each release its notice."""
+    tasks = [task for task in _DESIGN_DELIVERIES if not task.done()]
+    for task in tasks:
+        task.cancel()
+    if not tasks:
+        return
+    done, pending = await asyncio.wait(tasks,
+                                       timeout=DELIVERY_SETTLE_SECONDS)
+    if pending:
+        log_event(log, "design.delivery.not_settled",
+                  level=logging.WARNING, component="hive-control-plane",
+                  waiting=len(pending),
+                  detail="a claimed notice may still be claimed; the next "
+                         "start will step over it")
 
 
 app = FastAPI(
@@ -289,8 +330,10 @@ def _asset_versions() -> dict[str, int]:
     }
 
 
-def _render_template(request: Request, template_name: str, **context) -> HTMLResponse:
-    context.setdefault("current_user", get_current_user_from_request(request))
+async def _render_template(request: Request, template_name: str,
+                           **context) -> HTMLResponse:
+    context.setdefault("current_user",
+                       await get_current_user_from_request(request))
     context.setdefault("asset_versions", _asset_versions())
     context["request"] = request
     return templates.TemplateResponse(request, template_name, context)
@@ -410,7 +453,7 @@ async def _lucent_request(
 async def home(request: Request):
     # Public routes are not resolved by the route table, so the lookup — a
     # call to auth-service at home — happens here, off the event loop.
-    user = await run_in_threadpool(get_current_user_from_request, request)
+    user = await get_current_user_from_request(request)
     if not user:
         return _login_redirect_for(request)
     if user.get("must_change"):
@@ -420,14 +463,15 @@ async def home(request: Request):
 
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request, next: str = "/overview"):
-    current_user = await run_in_threadpool(get_current_user_from_request, request)
+    current_user = await get_current_user_from_request(request)
     if current_user:
         return RedirectResponse(url=_safe_next_path(next), status_code=303)
-    return _login_page(request, next_path=_safe_next_path(next))
+    return await _login_page(request, next_path=_safe_next_path(next))
 
 
-def _login_page(request: Request, *, status_code: int = 200, **context) -> HTMLResponse:
-    response = _render_template(
+async def _login_page(request: Request, *, status_code: int = 200,
+                      **context) -> HTMLResponse:
+    response = await _render_template(
         request,
         "login.html",
         current_user=None,
@@ -445,15 +489,15 @@ async def login_submit(
     password: str = Form(...),
     next: str = Form("/overview"),
 ):
-    store = auth.get_store()
+    account_store = auth.get_store()
     try:
-        user, token = await run_in_threadpool(store.sign_in, username, password)
+        user, token = await account_store.sign_in(username, password)
     except auth.AuthError as exc:
         log_event(
             log, "auth.login.rejected", level=logging.WARNING,
             actor_username=username, reason=type(exc).__name__,
         )
-        return _login_page(
+        return await _login_page(
             request,
             status_code=exc.status,
             error=exc.message,
@@ -469,12 +513,12 @@ async def login_submit(
 
 @app.post("/logout")
 async def logout(request: Request):
-    user = await run_in_threadpool(get_current_user_from_request, request)
-    store = auth.get_store()
-    token = auth.session_token(request, store)
+    user = await get_current_user_from_request(request)
+    account_store = auth.get_store()
+    token = auth.session_token(request, account_store)
     if token:
         with suppress(auth.ServiceUnavailable):
-            await run_in_threadpool(store.sign_out, token)
+            await account_store.sign_out(token)
     response = RedirectResponse(url="/login", status_code=303)
     clear_session_cookie(response)
     log_event(log, "auth.logout", **_actor_fields(user))
@@ -484,24 +528,27 @@ async def logout(request: Request):
 # ── Microsoft and Windows sign-in (sso.py) ─────────────────────────────
 
 
-def _sso_signed_in(request: Request, store, user: dict, via: str, next_path: str):
+async def _sso_signed_in(request: Request, account_store, user: dict,
+                         via: str, next_path: str):
     """A console session for an account an outside identity matched."""
-    token = sso.start_session(store, user, via)
+    token = await sso.start_session(account_store, user, via)
     response = RedirectResponse(url=_safe_next_path(next_path), status_code=303)
     auth.set_sso_cookie(response, token)
     log_event(log, "auth.login.succeeded", **_actor_fields(user), via=via)
     return response
 
 
-def _sso_refused(request: Request, exc: Exception, via: str, next_path: str):
+async def _sso_refused(request: Request, exc: Exception, via: str,
+                       next_path: str):
     status = getattr(exc, "status", 401)
     message = getattr(exc, "message", None) or "Sign-in failed."
     log_event(
         log, "auth.login.rejected", level=logging.WARNING, via=via,
         reason=type(exc).__name__, detail=str(exc)[:300],
     )
-    return _login_page(
-        request, status_code=status, error=message, next_path=_safe_next_path(next_path)
+    return await _login_page(
+        request, status_code=status, error=message,
+        next_path=_safe_next_path(next_path)
     )
 
 
@@ -513,7 +560,7 @@ async def login_microsoft(request: Request, next: str = "/overview"):
     try:
         location, flow = await sso.begin_microsoft(config, _safe_next_path(next))
     except sso.SignInFailed as exc:
-        return _sso_refused(request, exc, sso.MICROSOFT, next)
+        return await _sso_refused(request, exc, sso.MICROSOFT, next)
     response = RedirectResponse(url=location, status_code=303)
     response.set_cookie(
         sso.FLOW_COOKIE_NAME, flow, max_age=sso.FLOW_MAX_AGE, path=sso.MICROSOFT_PATH,
@@ -530,23 +577,23 @@ async def login_microsoft_callback(
     if config is None:
         raise HTTPException(status_code=404)
     flow_cookie = request.cookies.get(sso.FLOW_COOKIE_NAME, "")
-    next_path = str((auth.read_flow(flow_cookie) or {}).get("next") or "/overview")
-    store = auth.get_store()
+    next_path = str((await auth.read_flow(flow_cookie) or {}).get("next")
+                    or "/overview")
+    account_store = auth.get_store()
     try:
         if error:
             raise sso.SignInFailed("Microsoft sign-in was cancelled or refused.")
         _, claims = await sso.finish_microsoft(
             config, code=code, state=state, flow_cookie=flow_cookie
         )
-        user = await run_in_threadpool(
-            sso.match_microsoft, store,
-            subject=sso.microsoft_subject(claims), email=sso.verified_email(claims),
+        user = await sso.match_microsoft(
+            account_store, subject=sso.microsoft_subject(claims),
+            email=sso.verified_email(claims),
         )
-        response = await run_in_threadpool(
-            _sso_signed_in, request, store, user, sso.MICROSOFT, next_path
-        )
+        response = await _sso_signed_in(
+            request, account_store, user, sso.MICROSOFT, next_path)
     except (sso.SignInFailed, auth.AuthError) as exc:
-        response = _sso_refused(request, exc, sso.MICROSOFT, next_path)
+        response = await _sso_refused(request, exc, sso.MICROSOFT, next_path)
     response.delete_cookie(sso.FLOW_COOKIE_NAME, path=sso.MICROSOFT_PATH)
     return response
 
@@ -566,14 +613,14 @@ async def login_windows(request: Request, next: str = "/overview"):
     if token is None:
         # The one place the console asks for a ticket. A browser that has
         # none shows this body: the sign-in page with the other methods.
-        page = _login_page(
+        page = await _login_page(
             request, status_code=401, error=_NO_DOMAIN_TICKET, next_path=next_path
         )
         page.headers["WWW-Authenticate"] = "Negotiate"
         return page
     if not token or sso.is_ntlm(token):
         # Challenging again would loop a browser that has only NTLM to give.
-        return _sso_refused(
+        return await _sso_refused(
             request, sso.SignInFailed(_NO_DOMAIN_TICKET), "windows", next_path
         )
     try:
@@ -585,17 +632,15 @@ async def login_windows(request: Request, next: str = "/overview"):
             log, "auth.windows.ticket_refused", level=logging.WARNING,
             reason=type(exc).__name__, detail=str(exc)[:300],
         )
-        return _sso_refused(request, sso.SignInFailed(_NO_DOMAIN_TICKET), "windows", next_path)
-    store = auth.get_store()
+        return await _sso_refused(request, sso.SignInFailed(_NO_DOMAIN_TICKET), "windows", next_path)
+    account_store = auth.get_store()
     try:
-        user = await run_in_threadpool(
-            sso.match_domain_account, store, sso.domain_account_for(principal, config)
-        )
-        response = await run_in_threadpool(
-            _sso_signed_in, request, store, user, "windows", next_path
-        )
+        user = await sso.match_domain_account(
+            account_store, sso.domain_account_for(principal, config))
+        response = await _sso_signed_in(
+            request, account_store, user, "windows", next_path)
     except auth.AuthError as exc:
-        return _sso_refused(request, exc, "windows", next_path)
+        return await _sso_refused(request, exc, "windows", next_path)
     if reply:
         response.headers["WWW-Authenticate"] = (
             "Negotiate " + base64.b64encode(reply).decode("ascii")
@@ -603,9 +648,10 @@ async def login_windows(request: Request, next: str = "/overview"):
     return response
 
 
-def _password_page(request: Request, *, status_code: int = 200, **context) -> HTMLResponse:
-    user = get_current_user_from_request(request)
-    response = _render_template(
+async def _password_page(request: Request, *, status_code: int = 200,
+                         **context) -> HTMLResponse:
+    user = await get_current_user_from_request(request)
+    response = await _render_template(
         request,
         "password.html",
         current_user=None,
@@ -619,7 +665,7 @@ def _password_page(request: Request, *, status_code: int = 200, **context) -> HT
 
 @app.get("/password", response_class=HTMLResponse)
 async def password_page(request: Request):
-    return _password_page(request)
+    return await _password_page(request)
 
 
 @app.post("/password")
@@ -631,19 +677,18 @@ async def password_submit(
 ):
     """A signed-in user sets their own password — the only page a user who
     must change theirs can reach."""
-    user = get_current_user_from_request(request)
+    user = await get_current_user_from_request(request)
     if new_password != confirm_password:
-        return _password_page(request, status_code=400, error="The new passwords do not match.")
-    store = auth.get_store()
+        return await _password_page(request, status_code=400, error="The new passwords do not match.")
+    account_store = auth.get_store()
     try:
-        token = await run_in_threadpool(
-            store.change_password,
-            auth.session_token(request, store),
+        token = await account_store.change_password(
+            auth.session_token(request, account_store),
             current_password,
             new_password,
         )
     except auth.AuthError as exc:
-        return _password_page(request, status_code=exc.status, error=exc.message)
+        return await _password_page(request, status_code=exc.status, error=exc.message)
     response = RedirectResponse(url="/overview", status_code=303)
     set_session_cookie(response, token)
     log_event(log, "auth.password.changed", **_actor_fields(user))
@@ -653,10 +698,10 @@ async def password_submit(
 # ── Control center ─────────────────────────────────────────────────────
 
 
-def _console_page(request: Request, template_name: str, **context):
-    if not get_current_user_from_request(request):
+async def _console_page(request: Request, template_name: str, **context):
+    if not await get_current_user_from_request(request):
         return _login_redirect_for(request)
-    response = _render_template(request, template_name, **context)
+    response = await _render_template(request, template_name, **context)
     # Every console page carries its own script inline, so a heuristically
     # cached copy is a cached application. A phone that fetched a page before
     # a fix keeps running the broken version across reloads — and there is no
@@ -669,33 +714,33 @@ def _console_page(request: Request, template_name: str, **context):
 
 @app.get("/overview", response_class=HTMLResponse)
 async def overview_page(request: Request):
-    return _console_page(request, "overview.html")
+    return await _console_page(request, "overview.html")
 
 
 @app.get("/setup", response_class=HTMLResponse)
 async def setup_page(request: Request):
-    return _console_page(request, "setup.html")
+    return await _console_page(request, "setup.html")
 
 
 @app.get("/minds", response_class=HTMLResponse)
 async def minds_page(request: Request):
-    return _console_page(request, "minds.html")
+    return await _console_page(request, "minds.html")
 
 
 @app.get("/bots", response_class=HTMLResponse)
 async def bots_page(request: Request):
-    return _console_page(request, "bots.html")
+    return await _console_page(request, "bots.html")
 
 
 # Registered before /minds/{mind_id}: FastAPI matches in declaration order,
 # so the parameterised route would otherwise swallow this literal one.
 @app.get("/minds/new", response_class=HTMLResponse)
 async def new_mind_page(request: Request):
-    return _console_page(
+    return await _console_page(
         request,
         "mind_new.html",
         install_options=_mind_install_options(),
-        default_ollama_url=get_capability_endpoint("ollama")
+        default_ollama_url=await get_capability_endpoint("ollama")
         or os.getenv("OLLAMA_URL", "")
         or DEFAULT_OLLAMA_BASE_URL,
     )
@@ -703,14 +748,14 @@ async def new_mind_page(request: Request):
 
 @app.get("/minds/{mind_id}", response_class=HTMLResponse)
 async def mind_detail_page(request: Request, mind_id: str):
-    return _console_page(request, "mind_detail.html", mind_id=mind_id)
+    return await _console_page(request, "mind_detail.html", mind_id=mind_id)
 
 
 @app.get("/kanban", response_class=HTMLResponse)
 async def kanban_page(request: Request):
     # A page, not an API: an unauthenticated browser belongs at the login
     # form like every other console route, not holding a bare 401.
-    if not get_current_user_from_request(request):
+    if not await get_current_user_from_request(request):
         return _login_redirect_for(request)
     target = "/kanban/board"
     if request.url.query:
@@ -720,12 +765,12 @@ async def kanban_page(request: Request):
 
 @app.get("/kanban/board", response_class=HTMLResponse)
 async def kanban_board_page(request: Request):
-    return _console_page(request, "kanban.html", view="board")
+    return await _console_page(request, "kanban.html", view="board")
 
 
 @app.get("/kanban/backlog", response_class=HTMLResponse)
 async def kanban_backlog_page(request: Request):
-    return _console_page(request, "kanban.html", view="backlog")
+    return await _console_page(request, "kanban.html", view="backlog")
 
 
 @app.get("/api/kanban/relations/{record_id}")
@@ -736,29 +781,29 @@ async def api_kanban_relations(record_id: str, user: dict = Depends(require_auth
 
 @app.get("/kanban/item/{record_id}", response_class=HTMLResponse)
 async def kanban_item_page(request: Request, record_id: str):
-    if not get_current_user_from_request(request):
+    if not await get_current_user_from_request(request):
         return _login_redirect_for(request)
     try:
-        record = await run_in_threadpool(kanban_data.find_item, record_id)
+        record = await kanban_data.find_item(record_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
-    return _console_page(request, "kanban_item.html", item=record)
+    return await _console_page(request, "kanban_item.html", item=record)
 
 
 @app.get("/edge-minds", response_class=HTMLResponse)
 async def edge_minds_page(request: Request):
-    return _console_page(request, "edge_minds.html")
+    return await _console_page(request, "edge_minds.html")
 
 
 @app.get("/edge-minds/new", response_class=HTMLResponse)
 async def new_edge_mind_page(request: Request):
-    return _console_page(
+    return await _console_page(
         request,
         "edge_mind_new.html",
         edge_comms_url=os.getenv("EDGE_COMMS_URL", ""),
         edge_lucent_url=os.getenv("EDGE_LUCENT_URL", ""),
         edge_hive_tools_url=os.getenv("EDGE_HIVE_TOOLS_URL", ""),
-        edge_ollama_url=get_capability_endpoint("ollama")
+        edge_ollama_url=await get_capability_endpoint("ollama")
         or os.getenv("OLLAMA_URL", ""),
         install_options=_mind_install_options(),
     )
@@ -799,22 +844,39 @@ async def _kanban_body(request: Request, allowed: set[str], required: set[str] =
 
 
 async def _kanban_call(function, *args, **kwargs):
-    """Run a store call off the event loop and map its errors to the wire.
+    """Run a board operation and map its refusals to the wire.
 
-    The store talks to SQLite, which blocks. This database also holds the
-    console's logins, so a contended board write made on the loop stalls
-    every other request in the process, login included.
+    Awaited rather than run off the loop. The store is async on both halves
+    now: on Postgres a statement is a pooled round trip, and on SQLite the
+    store runs it on its own single worker thread — so neither blocks the
+    loop, and the bridge that used to be here would be a second thread hop
+    over a connection only one thread may touch.
     """
     try:
-        return await run_in_threadpool(function, *args, **kwargs)
+        return await function(*args, **kwargs)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+async def require_admin_or_cutover_check(request: Request) -> dict:
+    """A signed-in admin, or the one-database check's own bearer.
+
+    The three reads the check makes are guarded by a session like every other
+    admin route, and a check running outside a browser has no session to
+    present. The bearer is verified by the route table before the route runs
+    (`console_access.CUTOVER`); this only reads which of the two it was, so
+    the credential is never compared here.
+    """
+    if route_access.bearer_of(request) == console_access.CUTOVER:
+        return {"username": "cutover-check", "via": "bearer"}
+    return await require_auth(request)
+
+
 @app.get("/api/kanban/data")
-async def api_kanban_data(user: dict = Depends(require_auth)):
+async def api_kanban_data(
+        user: dict = Depends(require_admin_or_cutover_check)):
     del user
     return await _kanban_call(kanban_data.get_data)
 
@@ -958,7 +1020,7 @@ async def api_create_mind(request: Request, user: dict = Depends(require_auth)):
     if provider == "ollama":
         ollama_base_url = str(
             body.get("ollama_url")
-            or get_capability_endpoint("ollama")
+            or await get_capability_endpoint("ollama")
             or os.getenv("OLLAMA_URL")
             or DEFAULT_OLLAMA_BASE_URL
         )
@@ -1038,7 +1100,7 @@ async def _new_mind_owner(body: dict, user: dict) -> str:
     if not OWNER_RE.fullmatch(owner):
         raise HTTPException(status_code=400, detail="Every Mind needs an owner")
     try:
-        await run_in_threadpool(auth.get_store().get_user, owner)
+        await auth.get_store().get_user(owner)
     except auth.NotFound as exc:
         raise HTTPException(status_code=400, detail=f"No user named {owner}") from exc
     except auth.AuthError as exc:
@@ -1110,13 +1172,13 @@ async def api_register_mind(
 
 @app.get("/capability-nodes", response_class=HTMLResponse)
 async def capability_nodes_page(request: Request):
-    return _console_page(request, "capability_nodes.html")
+    return await _console_page(request, "capability_nodes.html")
 
 
 @app.get("/outposts", include_in_schema=False)
 @app.get("/outposts/new", include_in_schema=False)
 async def legacy_outpost_page(request: Request):
-    if not get_current_user_from_request(request):
+    if not await get_current_user_from_request(request):
         return _login_redirect_for(request)
     target = "/edge-minds/new" if request.url.path.endswith("/new") else "/edge-minds"
     return RedirectResponse(target, status_code=308)
@@ -1124,24 +1186,24 @@ async def legacy_outpost_page(request: Request):
 
 @app.get("/tools", include_in_schema=False)
 async def legacy_tools_page(request: Request):
-    if not get_current_user_from_request(request):
+    if not await get_current_user_from_request(request):
         return _login_redirect_for(request)
     return RedirectResponse("/capability-nodes", status_code=308)
 
 
 @app.get("/activity", response_class=HTMLResponse)
 async def activity_page(request: Request):
-    return _console_page(request, "activity.html")
+    return await _console_page(request, "activity.html")
 
 
 @app.get("/training", response_class=HTMLResponse)
 async def training_page(request: Request):
-    return _console_page(request, "training.html")
+    return await _console_page(request, "training.html")
 
 
 @app.get("/harness-runs", response_class=HTMLResponse)
 async def harness_runs_page(request: Request):
-    return _console_page(request, "harness_runs.html")
+    return await _console_page(request, "harness_runs.html")
 
 
 # The run collector writes this file; the console only reads it. The model-testing
@@ -1168,12 +1230,12 @@ async def api_harness_runs(user: dict = Depends(require_auth)):
 
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard_page(request: Request):
-    return _console_page(request, "dashboard.html")
+    return await _console_page(request, "dashboard.html")
 
 
-def _proxy_base_url() -> str:
+async def _proxy_base_url() -> str:
     return (
-        get_capability_endpoint("inference-proxy")
+        await get_capability_endpoint("inference-proxy")
         or os.getenv("INFERENCE_PROXY_URL")
         or "http://inference-proxy:8888"
     ).rstrip("/")
@@ -1196,7 +1258,7 @@ async def _proxy_json(path: str) -> dict:
     if not headers:
         raise RuntimeError("INFERENCE_PROXY_KEY is not configured for this console")
     async with httpx.AsyncClient(timeout=6.0) as client:
-        response = await client.get(f"{_proxy_base_url()}{path}", headers=headers)
+        response = await client.get(f"{await _proxy_base_url()}{path}", headers=headers)
     response.raise_for_status()
     return response.json()
 
@@ -1426,7 +1488,7 @@ async def api_overview(user: dict = Depends(require_auth)):
     tools_node = next(
         node for node in capability_data["nodes"] if node["id"] == "hive-tools"
     )
-    edge_minds = _edge_mind_rows(registry)
+    edge_minds = await _edge_mind_rows(registry)
     active_sessions = [
         session for session in sessions if session.get("status") in {"active", "running"}
     ]
@@ -1454,7 +1516,7 @@ async def api_overview(user: dict = Depends(require_auth)):
     }
 
 
-def _edge_mind_rows(registry: list[dict]) -> list[dict]:
+async def _edge_mind_rows(registry: list[dict]) -> list[dict]:
     rows = []
     profile_overrides = _edge_mind_profile_overrides()
     name_overrides = _edge_mind_name_overrides() | set(profile_overrides)
@@ -1463,7 +1525,7 @@ def _edge_mind_rows(registry: list[dict]) -> list[dict]:
         local = local_value if isinstance(local_value, dict) else {}
         config = local.get("config") or {}
         name = str(mind.get("name") or "")
-        stored = get_edge_mind_metadata(name) or {}
+        stored = await get_edge_mind_metadata(name) or {}
         gateway_url = str(mind.get("gateway_url") or "")
         parsed = urllib.parse.urlparse(gateway_url)
         external_address = False
@@ -1525,7 +1587,7 @@ async def api_edge_minds(user: dict = Depends(require_auth)):
     except Exception:
         sessions = []
     registry = _add_session_activity(registry, sessions)
-    return {"edge_minds": _edge_mind_rows(registry)}
+    return {"edge_minds": await _edge_mind_rows(registry)}
 
 
 _EDGE_MIND_PROFILES = {"standard", "sentinel"}
@@ -1618,7 +1680,7 @@ _EDGE_MIND_BUNDLES = {
 }
 
 
-def _build_edge_mind_bootstrap(body: dict) -> dict:
+async def _build_edge_mind_bootstrap(body: dict) -> dict:
     name = str(body.get("name") or "").strip().lower()
     profile = str(body.get("profile") or "standard")
     role = str(body.get("role") or "")
@@ -1672,7 +1734,7 @@ def _build_edge_mind_bootstrap(body: dict) -> dict:
         ollama_url = str(
             body.get("ollama_url")
             or os.getenv("OLLAMA_URL")
-            or get_capability_endpoint("ollama")
+            or await get_capability_endpoint("ollama")
             or ""
         )
         if not ollama_url:
@@ -1787,7 +1849,7 @@ async def api_edge_mind_bootstrap(request: Request, user: dict = Depends(require
         body = await request.json()
         body = body if isinstance(body, dict) else {}
         body = {**body, "owner": await _new_mind_owner(body, user)}
-        result = _build_edge_mind_bootstrap(body)
+        result = await _build_edge_mind_bootstrap(body)
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     log_event(
@@ -1879,7 +1941,7 @@ async def api_edge_mind_verify(request: Request, user: dict = Depends(require_au
     broker_result = await _gateway_request(
         "POST", "/broker/minds", json_body=registration, admin=True
     )
-    set_edge_mind_metadata(
+    await set_edge_mind_metadata(
         name,
         profile=profile,
         role=role,
@@ -1924,7 +1986,7 @@ async def api_capability_node_configure(
 ):
     body = await request.json()
     try:
-        endpoint = set_capability_endpoint(
+        endpoint = await set_capability_endpoint(
             node_id, str(body.get("endpoint") if isinstance(body, dict) else "")
         )
     except ValueError as exc:
@@ -1942,7 +2004,7 @@ async def api_capability_node_configuration_delete(
     node_id: str, user: dict = Depends(require_auth)
 ):
     try:
-        removed = clear_capability_endpoint(node_id)
+        removed = await clear_capability_endpoint(node_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     log_event(
@@ -1982,8 +2044,8 @@ async def api_hive_tools_install(user: dict = Depends(require_auth)):
     return result
 
 
-def _ollama_endpoint() -> str:
-    endpoint = get_capability_endpoint("ollama") or os.getenv("OLLAMA_URL") or os.getenv(
+async def _ollama_endpoint() -> str:
+    endpoint = await get_capability_endpoint("ollama") or os.getenv("OLLAMA_URL") or os.getenv(
         "OLLAMA_BASE_URL"
     )
     if not endpoint:
@@ -2002,7 +2064,7 @@ async def _ollama_request(
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.request(
                 method,
-                f"{_ollama_endpoint()}{path}",
+                f"{await _ollama_endpoint()}{path}",
                 json=json_body,
             )
         response.raise_for_status()
@@ -2080,65 +2142,39 @@ async def graph_public_data(limit: int = 400, user: dict = Depends(require_auth)
 
 @app.get("/graph", response_class=HTMLResponse)
 async def graph(request: Request):
-    if not get_current_user_from_request(request):
+    if not await get_current_user_from_request(request):
         return _login_redirect_for(request)
-    return _render_template(request, "graph.html")
+    return await _render_template(request, "graph.html")
 
 
 # ── Memory ─────────────────────────────────────────────────────────────
 
-_TABLE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_MEMORY_ROW_LIMIT_DEFAULT = 200
-_MEMORY_ROW_LIMIT_MAX = 1000
-
-
-def _lucent_db_path() -> str:
-    return os.getenv("LUCENT_DB_PATH", "/data/lucent.db")
-
-
-def _open_lucent_readonly() -> sqlite3.Connection:
-    path = _lucent_db_path()
-    if not os.path.exists(path):
-        raise HTTPException(status_code=503, detail="lucent database not mounted")
-    uri = f"file:{path}?mode=ro&immutable=0"
-    conn = sqlite3.connect(uri, uri=True)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def _memory_cell_for_json(value):
-    if isinstance(value, (bytes, bytearray, memoryview)):
-        return f"<BLOB {len(bytes(value))} bytes>"
-    return value
-
-
-def _list_lucent_tables(conn: sqlite3.Connection) -> list[str]:
-    rows = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
-    ).fetchall()
-    return [r["name"] for r in rows]
+_MEMORY_ROW_LIMIT_DEFAULT = store.MEMORY_LIMIT_DEFAULT
+_MEMORY_ROW_LIMIT_MAX = store.MEMORY_LIMIT_MAX
 
 
 @app.get("/memory", response_class=HTMLResponse)
 async def memory_page(request: Request):
-    if not get_current_user_from_request(request):
+    if not await get_current_user_from_request(request):
         return _login_redirect_for(request)
-    return _render_template(request, "memory.html")
+    return await _render_template(request, "memory.html")
 
 
 @app.get("/api/memory/tables")
-async def api_memory_tables(user: dict = Depends(require_auth)):
+async def api_memory_tables(
+        user: dict = Depends(require_admin_or_cutover_check)):
+    """The memory store's tables, with a row count each.
+
+    Which store that is follows the one the console is pointed at: the
+    `memory` schema of the hive's database, or lucent's own file on a console
+    still on SQLite. Reading one while writing the other is the window this
+    cutover closes.
+    """
     del user
-    conn = _open_lucent_readonly()
     try:
-        tables = _list_lucent_tables(conn)
-        results = []
-        for name in tables:
-            count_row = conn.execute(f'SELECT COUNT(*) AS c FROM "{name}"').fetchone()
-            results.append({"name": name, "row_count": int(count_row["c"])})
-    finally:
-        conn.close()
-    return {"tables": results}
+        return {"tables": await store.memory_tables()}
+    except store.MemoryUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.get("/api/memory/rows")
@@ -2146,39 +2182,16 @@ async def api_memory_rows(
     table: str,
     limit: int = _MEMORY_ROW_LIMIT_DEFAULT,
     offset: int = 0,
-    user: dict = Depends(require_auth),
+    user: dict = Depends(require_admin_or_cutover_check),
 ):
     del user
-    if not _TABLE_NAME_RE.match(table):
-        raise HTTPException(status_code=404, detail="table not found")
-    safe_limit = max(1, min(int(limit), _MEMORY_ROW_LIMIT_MAX))
-    safe_offset = max(0, int(offset))
-    conn = _open_lucent_readonly()
     try:
-        if table not in _list_lucent_tables(conn):
-            raise HTTPException(status_code=404, detail="table not found")
-        columns = [
-            r["name"]
-            for r in conn.execute(f'PRAGMA table_info("{table}")').fetchall()
-        ]
-        total = int(conn.execute(f'SELECT COUNT(*) AS c FROM "{table}"').fetchone()["c"])
-        rows = [
-            {col: _memory_cell_for_json(row[col]) for col in columns}
-            for row in conn.execute(
-                f'SELECT * FROM "{table}" LIMIT ? OFFSET ?',
-                (safe_limit, safe_offset),
-            ).fetchall()
-        ]
-    finally:
-        conn.close()
-    return {
-        "table": table,
-        "columns": columns,
-        "rows": rows,
-        "total": total,
-        "limit": safe_limit,
-        "offset": safe_offset,
-    }
+        page = await store.memory_rows(table, limit=limit, offset=offset)
+    except store.MemoryUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if page is None:
+        raise HTTPException(status_code=404, detail="table not found")
+    return page
 
 
 # ── Standing rules ─────────────────────────────────────────────────────
@@ -2271,14 +2284,14 @@ async def _fetch_rules_for_mind(
 
 @app.get("/sentinel", response_class=HTMLResponse)
 async def sentinel_page(request: Request):
-    if not get_current_user_from_request(request):
+    if not await get_current_user_from_request(request):
         return _login_redirect_for(request)
     # The catalogue state travels in the render rather than being fetched by
     # the page: an unreachable sensor has to read as unreachable, and a page
     # that fetched its own catalogue would have nothing to show but an empty
     # table.
     catalogue = await sentinel_review.catalogue_state()
-    return _render_template(
+    return await _render_template(
         request,
         "sentinel.html",
         sentinel_configured=bool(sentinel_review.base_url()),
@@ -2375,7 +2388,7 @@ async def api_sentinel_queue_apply(request: Request, user: dict = Depends(requir
 
 @app.get("/rules", response_class=HTMLResponse)
 async def rules_page(request: Request):
-    if not get_current_user_from_request(request):
+    if not await get_current_user_from_request(request):
         return _login_redirect_for(request)
     minds = await _broker_minds_safe()
     alias_to_canonical: dict[str, str] = {"shared": "shared"}
@@ -2387,7 +2400,7 @@ async def rules_page(request: Request):
             alias_to_canonical[uuid] = canonical
         if name:
             alias_to_canonical[name] = canonical
-    return _render_template(
+    return await _render_template(
         request,
         "rules.html",
         minds=minds,
@@ -2588,7 +2601,7 @@ async def canvas_render_svg(request: Request, slide: int | None = None):
 @app.post("/canvas/submit")
 async def canvas_submit(request: Request):
     """Daniel's 'I'm done drawing' poke. Fires a Skippy turn via the broker."""
-    user = get_current_user_from_request(request)
+    user = await get_current_user_from_request(request)
     if not user:
         raise HTTPException(status_code=401, detail="unauthorized")
     try:
@@ -2650,14 +2663,14 @@ async def canvas_submit(request: Request):
 
 @app.get("/canvas", response_class=HTMLResponse)
 async def canvas(request: Request):
-    return _console_page(request, "canvas.html")
+    return await _console_page(request, "canvas.html")
 
 
 @app.websocket("/ws/canvas")
 async def ws_canvas(websocket: WebSocket):
     # Admin-only in the route table, which also closes the socket if its
     # user stops being one while it is open.
-    user = await run_in_threadpool(get_current_user_from_request, websocket)
+    user = await get_current_user_from_request(websocket)
     can_draw = user is not None
     await websocket.accept()
     _canvas_connections.add(websocket)
@@ -2680,7 +2693,7 @@ async def ws_canvas(websocket: WebSocket):
 
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request):
-    user = get_current_user_from_request(request)
+    user = await get_current_user_from_request(request)
     if not user:
         return _login_redirect_for(request)
     # The access section is the one a non-admin is shown: their sessions.
@@ -2695,11 +2708,11 @@ _SETTINGS_SECTIONS = {
 
 @app.get("/settings/{section}", response_class=HTMLResponse)
 async def settings_section_page(request: Request, section: str):
-    if not get_current_user_from_request(request):
+    if not await get_current_user_from_request(request):
         return _login_redirect_for(request)
     if section not in _SETTINGS_SECTIONS:
         raise HTTPException(status_code=404, detail="settings section not found")
-    return _render_template(request, "settings.html", settings_section=section)
+    return await _render_template(request, "settings.html", settings_section=section)
 
 
 @app.get("/api/settings/minds")
@@ -3103,7 +3116,7 @@ async def api_mind_mounts_update(
     except HTTPException as exc:
         raise HTTPException(status_code=502, detail=written + str(exc.detail)) from exc
     if recreate.get("hitl_request_id"):
-        console_access.record_operation_from(recreate, user)
+        await console_access.record_operation_from(recreate, user)
         return {
             "saved": True,
             "recreated": False,
@@ -3916,7 +3929,7 @@ async def api_mind_restart(name: str, user: dict = Depends(require_auth)):
             "service": name,
         },
     )
-    console_access.record_operation_from(result, user)
+    await console_access.record_operation_from(result, user)
     log_event(log, "mind.restart.requested", **_actor_fields(user), mind_name=name)
     return result
 
@@ -3931,7 +3944,7 @@ async def api_operation_status(
     return await _hive_tools_request("GET", f"/hitl/{request_id}")
 
 
-def _capability_node_specs() -> list[dict]:
+async def _capability_node_specs() -> list[dict]:
     voice_urls = _voice_server_urls()
     proxy_installation = inference_proxy_status()
     tools_installation = hive_tools_install_status()
@@ -3974,13 +3987,13 @@ def _capability_node_specs() -> list[dict]:
             "name": "Inference Proxy",
             "kind": "Inference gateway",
             "description": "One private endpoint for upstream models, issued client keys, routing, and usage accounting.",
-            "endpoint": get_capability_endpoint("inference-proxy")
+            "endpoint": await get_capability_endpoint("inference-proxy")
             or os.getenv("INFERENCE_PROXY_URL")
             or "http://inference-proxy:8888",
             "health_path": "/health",
             "auto_discover": True,
             "configured": bool(
-                get_capability_endpoint("inference-proxy")
+                await get_capability_endpoint("inference-proxy")
                 or os.getenv("INFERENCE_PROXY_URL")
             ),
             "configurable": True,
@@ -3998,7 +4011,7 @@ def _capability_node_specs() -> list[dict]:
             "name": "Ollama",
             "kind": "Inference",
             "description": "Local model inference supplied without embedding model infrastructure in a mind.",
-            "endpoint": get_capability_endpoint("ollama")
+            "endpoint": await get_capability_endpoint("ollama")
             or os.getenv("OLLAMA_URL")
             or os.getenv("OLLAMA_BASE_URL")
             or "",
@@ -4039,7 +4052,7 @@ def _capability_node_specs() -> list[dict]:
             "name": "Pi-hole",
             "kind": "Network service",
             "description": "Network-level DNS filtering and operational visibility.",
-            "endpoint": get_capability_endpoint("pihole")
+            "endpoint": await get_capability_endpoint("pihole")
             or os.getenv("PIHOLE_URL")
             or "",
             "health_path": "/api/auth",
@@ -4057,7 +4070,7 @@ async def _capability_node_data() -> dict:
     tools = hive_tools_status()
     nodes: list[dict] = []
     probes = []
-    for spec in _capability_node_specs():
+    for spec in await _capability_node_specs():
         node = dict(spec)
         endpoint = str(node.pop("endpoint") or "").rstrip("/")
         health_path = str(node.pop("health_path") or "")
@@ -4655,7 +4668,7 @@ async def api_settings_check_mind_name(name: str, user: dict = Depends(require_a
 DESIGN_PREFIX = "/api/design"
 
 
-def require_design_writer(request: Request) -> dict:
+async def require_design_writer(request: Request) -> dict:
     """Daniel's browser login, or the Mind's own bearer. Nothing else.
 
     Applied to every design route including the reads: a design session
@@ -4665,7 +4678,7 @@ def require_design_writer(request: Request) -> dict:
     """
     if route_access.bearer_of(request) == console_access.DESIGN:
         return {"sub": "mind", "via": "bearer"}
-    user = get_current_user_from_request(request)
+    user = await get_current_user_from_request(request)
     if not user:
         raise HTTPException(status_code=401, detail="Authentication required")
     return dict(user, via="cookie")
@@ -4675,6 +4688,10 @@ def _design_error(exc: Exception) -> HTTPException:
     """One mapping, so every design route refuses in the same shape."""
     if isinstance(exc, design_data.DesignNotFound):
         return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, design_data.DesignUnknownReference):
+        # The caller named a Mind or a conversation the hive does not hold.
+        # A refused input, not a fault here, so it must not read as a 500.
+        return HTTPException(status_code=400, detail=str(exc))
     if isinstance(exc, design_data.DesignConflict):
         return HTTPException(status_code=409, detail=str(exc))
     if isinstance(exc, design_data.DesignRefused):
@@ -4685,7 +4702,7 @@ def _design_error(exc: Exception) -> HTTPException:
 @app.get("/design", response_class=HTMLResponse)
 async def design_index(request: Request, user: dict = Depends(require_auth)):
     del user
-    return _render_template(request, "design_list.html", path="/design")
+    return await _render_template(request, "design_list.html", path="/design")
 
 
 @app.get("/design/{design_id}", response_class=HTMLResponse)
@@ -4694,10 +4711,10 @@ async def design_detail(
 ):
     del user
     try:
-        design_data.get_design_session(design_id)
+        await design_data.get_design_session(design_id)
     except design_data.DesignNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return _render_template(
+    return await _render_template(
         request, "design_detail.html", path="/design", design_id=design_id
     )
 
@@ -4706,7 +4723,7 @@ async def design_detail(
 async def api_design_list(actor: dict = Depends(require_design_writer)):
     del actor
     rows = []
-    for record in design_data.list_design_sessions():
+    for record in await design_data.list_design_sessions():
         rows.append(
             {
                 "id": record["id"],
@@ -4725,7 +4742,7 @@ async def api_design_create(
     payload: dict, actor: dict = Depends(require_design_writer)
 ):
     try:
-        record = design_data.create_design_session(
+        record = await design_data.create_design_session(
             str(payload.get("title") or ""),
             conversation_id=payload.get("conversation_id"),
             surface=payload.get("surface"),
@@ -4742,13 +4759,15 @@ async def api_design_create(
 async def api_design_get(design_id: str, actor: dict = Depends(require_design_writer)):
     del actor
     try:
-        record = design_data.get_design_session(design_id)
+        record = await design_data.get_design_session(design_id)
     except design_data.DesignError as exc:
         raise _design_error(exc) from exc
     return dict(
         record,
-        pages={page: design_data.ordered_items(record, page) for page in design_data.PAGES},
-        gates={page: design_data.can_advance(design_id, page) for page in design_data.PAGES},
+        pages={page: design_data.ordered_items(record, page)
+               for page in design_data.PAGES},
+        gates={page: await design_data.can_advance(design_id, page)
+               for page in design_data.PAGES},
     )
 
 
@@ -4757,7 +4776,7 @@ async def api_design_delete(
     design_id: str, actor: dict = Depends(require_design_writer)
 ):
     try:
-        design_data.delete_design_session(design_id)
+        await design_data.delete_design_session(design_id)
     except design_data.DesignError as exc:
         raise _design_error(exc) from exc
     log_event(log, "design.deleted", **_actor_fields(actor), design_id=design_id)
@@ -4770,7 +4789,7 @@ async def api_design_attach(
 ):
     del actor
     try:
-        record = design_data.attach_design_session(
+        record = await design_data.attach_design_session(
             design_id,
             payload.get("conversation_id"),
             surface=payload.get("surface"),
@@ -4794,7 +4813,7 @@ async def api_design_publish(
 ):
     del actor
     try:
-        return design_data.publish_page(
+        return await design_data.publish_page(
             design_id,
             page,
             payload.get("items") or {},
@@ -4811,7 +4830,7 @@ async def api_design_submit(
 ):
     del actor
     try:
-        record = design_data.submit_page(
+        record = await design_data.submit_page(
             design_id,
             page,
             items=payload.get("items") or {},
@@ -4840,7 +4859,7 @@ async def api_design_accept(
 ):
     del actor
     try:
-        record = design_data.accept_page(
+        record = await design_data.accept_page(
             design_id, page, revision=payload.get("revision")
         )
     except design_data.DesignError as exc:
@@ -4880,7 +4899,7 @@ async def api_design_symbol(
     """
     del actor
     if not repo and design_id:
-        targets = design_data.get_design_session(design_id)["repos"]
+        targets = (await design_data.get_design_session(design_id))["repos"]
         if len(targets) == 1:
             repo = targets[0]
     if not repo:
@@ -4935,7 +4954,7 @@ async def api_mind_owner_set(name: str, request: Request, user: dict = Depends(r
 
 async def _store_call(function, *args, **kwargs):
     try:
-        return await run_in_threadpool(function, *args, **kwargs)
+        return await function(*args, **kwargs)
     except auth.AuthError as exc:
         raise HTTPException(status_code=exc.status, detail=exc.message) from exc
 
@@ -4952,11 +4971,11 @@ def _optional_text(body: dict, key: str) -> str | None:
 @app.get("/api/admin/users")
 async def api_admin_users(user: dict = Depends(require_auth)):
     del user
-    store = auth.get_store()
+    account_store = auth.get_store()
     users, groups, bound = await asyncio.gather(
-        _store_call(store.list_users),
-        _store_call(store.list_groups),
-        run_in_threadpool(sso.bound_usernames, sso.MICROSOFT),
+        _store_call(account_store.list_users),
+        _store_call(account_store.list_groups),
+        sso.bound_usernames(sso.MICROSOFT),
     )
     for row in users:
         row["microsoft_bound"] = row["username"] in bound
@@ -4990,10 +5009,11 @@ async def api_admin_user_update(
     if disabled is not None and not isinstance(disabled, bool):
         raise HTTPException(status_code=400, detail="disabled must be true or false")
     email = _optional_text(body, "email")
-    store = auth.get_store()
-    before = await _store_call(store.get_user, username) if email is not None else None
+    account_store = auth.get_store()
+    before = (await _store_call(account_store.get_user, username)
+              if email is not None else None)
     updated = await _store_call(
-        store.update_user,
+        account_store.update_user,
         username,
         email=email,
         disabled=disabled,
@@ -5002,7 +5022,7 @@ async def api_admin_user_update(
         updated.get("email") or ""
     ).lower():
         # The Microsoft binding was made on the old address.
-        await run_in_threadpool(sso.unbind, sso.MICROSOFT, updated["username"])
+        await sso.unbind(sso.MICROSOFT, updated["username"])
     log_event(
         log, "auth.user.updated", **_actor_fields(user), username=updated["username"],
         disabled=updated["disabled"], email_changed="email" in body,
@@ -5015,7 +5035,7 @@ async def api_admin_user_microsoft_unbind(username: str, user: dict = Depends(re
     """Forget the Microsoft identity an account is bound to; its next
     Microsoft sign-in selects it by email again."""
     target = await _store_call(auth.get_store().get_user, username)
-    await run_in_threadpool(sso.unbind, sso.MICROSOFT, target["username"])
+    await sso.unbind(sso.MICROSOFT, target["username"])
     log_event(
         log, "auth.user.microsoft_unbound", **_actor_fields(user), username=target["username"]
     )

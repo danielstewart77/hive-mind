@@ -24,14 +24,15 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import auth
 import dashboard_data
 import main as main_mod
+import accounts
 
 
-def _authed_client(tmp_path, monkeypatch):
+async def _authed_client(tmp_path, monkeypatch):
     monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
-    user = auth.create_user("daniel", "secret-pass", is_admin=True, replace=True)
+    user = await auth.create_user("daniel", "secret-pass", is_admin=True, replace=True)
     client = TestClient(main_mod.app)
-    client.cookies.set(auth.SESSION_COOKIE_NAME, auth.create_session_token(user))
+    client.cookies.set(auth.SESSION_COOKIE_NAME, await auth.create_session_token(user))
     return client
 
 
@@ -134,8 +135,8 @@ def test_the_text_route_refuses_an_anonymous_caller(tmp_path, monkeypatch):
     assert response.status_code in (303, 401, 403)
 
 
-def test_an_authenticated_visitor_gets_the_page(tmp_path, monkeypatch):
-    client = _authed_client(tmp_path, monkeypatch)
+async def test_an_authenticated_visitor_gets_the_page(tmp_path, monkeypatch):
+    client = await _authed_client(tmp_path, monkeypatch)
 
     response = client.get("/dashboard")
 
@@ -146,31 +147,31 @@ def test_an_authenticated_visitor_gets_the_page(tmp_path, monkeypatch):
 # --- The assembled payload --------------------------------------------------
 
 
-def test_the_payload_splits_live_conversations_into_columns(tmp_path, monkeypatch, wired):
-    client = _authed_client(tmp_path, monkeypatch)
+async def test_the_payload_splits_live_conversations_into_columns(tmp_path, monkeypatch, wired):
+    client = await _authed_client(tmp_path, monkeypatch)
 
     body = client.get("/api/dashboard").json()
 
     assert [row["session_id"] for row in body["columns"]] == ["s1"]
 
 
-def test_a_session_without_a_reported_window_takes_it_from_the_model_map(
+async def test_a_session_without_a_reported_window_takes_it_from_the_model_map(
     tmp_path, monkeypatch, wired
 ):
     """Requirement 9. The proxy owns the model map; the console relays it
     rather than keeping a second copy that would disagree the first time
     somebody edited a row."""
-    client = _authed_client(tmp_path, monkeypatch)
+    client = await _authed_client(tmp_path, monkeypatch)
 
     body = client.get("/api/dashboard").json()
 
     assert body["columns"][0]["context"]["window"] == 1_000_000
 
 
-def test_the_context_is_rendered_as_progress_toward_the_rotation_point(
+async def test_the_context_is_rendered_as_progress_toward_the_rotation_point(
     tmp_path, monkeypatch, wired
 ):
-    client = _authed_client(tmp_path, monkeypatch)
+    client = await _authed_client(tmp_path, monkeypatch)
 
     context = client.get("/api/dashboard").json()["columns"][0]["context"]
 
@@ -178,8 +179,8 @@ def test_the_context_is_rendered_as_progress_toward_the_rotation_point(
     assert context["threshold"] == 300_000
 
 
-def test_each_provider_is_carried_separately(tmp_path, monkeypatch, wired):
-    client = _authed_client(tmp_path, monkeypatch)
+async def test_each_provider_is_carried_separately(tmp_path, monkeypatch, wired):
+    client = await _authed_client(tmp_path, monkeypatch)
 
     providers = {
         row["name"]: row for row in client.get("/api/dashboard").json()["providers"]["providers"]
@@ -189,7 +190,7 @@ def test_each_provider_is_carried_separately(tmp_path, monkeypatch, wired):
     assert providers["openai"]["reporting"] is False
 
 
-def test_a_gateway_that_is_down_does_not_take_the_page_with_it(
+async def test_a_gateway_that_is_down_does_not_take_the_page_with_it(
     tmp_path, monkeypatch, wired
 ):
     """Hosts and allowances still render when comms cannot be reached, and
@@ -197,7 +198,7 @@ def test_a_gateway_that_is_down_does_not_take_the_page_with_it(
     monkeypatch.setattr(
         main_mod, "_live_sessions", AsyncMock(side_effect=RuntimeError("comms down"))
     )
-    client = _authed_client(tmp_path, monkeypatch)
+    client = await _authed_client(tmp_path, monkeypatch)
 
     body = client.get("/api/dashboard").json()
 
@@ -206,14 +207,14 @@ def test_a_gateway_that_is_down_does_not_take_the_page_with_it(
     assert body["hosts"]["hosts"][0]["hostname"] == "workstation"
 
 
-def test_a_proxy_that_is_down_leaves_the_conversations_rendering(
+async def test_a_proxy_that_is_down_leaves_the_conversations_rendering(
     tmp_path, monkeypatch, wired
 ):
     main_mod._provider_snapshot.invalidate()
     main_mod._catalog_snapshot.invalidate()
     main_mod._provider_snapshot._fetch = AsyncMock(side_effect=RuntimeError("proxy down"))
     main_mod._catalog_snapshot._fetch = AsyncMock(side_effect=RuntimeError("proxy down"))
-    client = _authed_client(tmp_path, monkeypatch)
+    client = await _authed_client(tmp_path, monkeypatch)
 
     body = client.get("/api/dashboard").json()
 
@@ -221,14 +222,14 @@ def test_a_proxy_that_is_down_leaves_the_conversations_rendering(
     assert body["providers"]["stale"] is True
 
 
-def test_an_unreachable_proxy_leaves_the_window_unknown_rather_than_guessed(
+async def test_an_unreachable_proxy_leaves_the_window_unknown_rather_than_guessed(
     tmp_path, monkeypatch, wired
 ):
     """Requirement 10c's live case. A guessed denominator draws a
     conversation at 95% as one at 40%."""
     main_mod._catalog_snapshot.invalidate()
     main_mod._catalog_snapshot._fetch = AsyncMock(side_effect=RuntimeError("proxy down"))
-    client = _authed_client(tmp_path, monkeypatch)
+    client = await _authed_client(tmp_path, monkeypatch)
 
     context = client.get("/api/dashboard").json()["columns"][0]["context"]
 
@@ -236,7 +237,7 @@ def test_an_unreachable_proxy_leaves_the_window_unknown_rather_than_guessed(
     assert context["fraction_of_window"] is None
 
 
-def test_repeated_page_loads_do_not_re_probe_the_machines(
+async def test_repeated_page_loads_do_not_re_probe_the_machines(
     tmp_path, monkeypatch, wired
 ):
     """Requirement 26. Every tab reads one shared reading; without it, ten
@@ -244,7 +245,7 @@ def test_repeated_page_loads_do_not_re_probe_the_machines(
     probe = AsyncMock(return_value=HOSTS)
     main_mod._host_snapshot.invalidate()
     main_mod._host_snapshot._fetch = probe
-    client = _authed_client(tmp_path, monkeypatch)
+    client = await _authed_client(tmp_path, monkeypatch)
 
     client.get("/api/dashboard")
     client.get("/api/dashboard")
@@ -253,13 +254,13 @@ def test_repeated_page_loads_do_not_re_probe_the_machines(
     assert probe.await_count == 1
 
 
-def test_the_text_route_relays_the_sequenced_blocks(tmp_path, monkeypatch, wired):
+async def test_the_text_route_relays_the_sequenced_blocks(tmp_path, monkeypatch, wired):
     relay = AsyncMock(
         return_value={"session_id": "s1", "blocks": [{"seq": 4, "text": "hi"}],
                       "first_available_seq": 1}
     )
     monkeypatch.setattr(main_mod, "_gateway_json", relay)
-    client = _authed_client(tmp_path, monkeypatch)
+    client = await _authed_client(tmp_path, monkeypatch)
 
     body = client.get("/api/dashboard/text?session_id=s1&since=3").json()
 
@@ -406,7 +407,7 @@ def test_the_dashboard_reads_the_gateway_as_admin(monkeypatch):
     assert all(call["admin"] for call in seen)
 
 
-def test_a_column_reaches_the_page_headed_by_its_mind_name(
+async def test_a_column_reaches_the_page_headed_by_its_mind_name(
     tmp_path, monkeypatch, wired
 ):
     """Requirement 3 at the layer it lands on: the registry is actually
@@ -416,14 +417,14 @@ def test_a_column_reaches_the_page_headed_by_its_mind_name(
         "_broker_minds_safe",
         AsyncMock(return_value=[{"id": "skippy", "name": "Skippy"}]),
     )
-    client = _authed_client(tmp_path, monkeypatch)
+    client = await _authed_client(tmp_path, monkeypatch)
 
     body = client.get("/api/dashboard").json()
 
     assert body["columns"][0]["mind_name"] == "Skippy"
 
 
-def test_an_allowance_window_reaches_the_page_carrying_its_band(
+async def test_an_allowance_window_reaches_the_page_carrying_its_band(
     tmp_path, monkeypatch, wired
 ):
     """Requirement 10 at the layer it lands on: the browser is handed the
@@ -445,14 +446,14 @@ def test_an_allowance_window_reaches_the_page_carrying_its_band(
     )
     main_mod._provider_snapshot._fetch = main_mod._fetch_provider_limits
     main_mod._provider_snapshot.invalidate()
-    client = _authed_client(tmp_path, monkeypatch)
+    client = await _authed_client(tmp_path, monkeypatch)
 
     body = client.get("/api/dashboard").json()
 
     assert body["providers"]["providers"][0]["windows"][0]["band"] == "hot"
 
 
-def test_an_idle_conversation_reaches_the_page_with_its_size_threshold_and_window(
+async def test_an_idle_conversation_reaches_the_page_with_its_size_threshold_and_window(
     tmp_path, monkeypatch, wired
 ):
     """T13. A conversation that is not producing is absent from the live
@@ -464,7 +465,7 @@ def test_an_idle_conversation_reaches_the_page_with_its_size_threshold_and_windo
                     "kind": "estimated", "observed_at": 10.0, "age_seconds": 30.0},
     }]
     monkeypatch.setattr(main_mod, "_live_sessions", AsyncMock(return_value=live))
-    client = _authed_client(tmp_path, monkeypatch)
+    client = await _authed_client(tmp_path, monkeypatch)
 
     body = client.get("/api/dashboard").json()
 
@@ -476,7 +477,7 @@ def test_an_idle_conversation_reaches_the_page_with_its_size_threshold_and_windo
     assert idle["context"]["kind"] == "estimated"
 
 
-def test_a_conversation_with_no_reported_threshold_rotates_at_its_models_percent(
+async def test_a_conversation_with_no_reported_threshold_rotates_at_its_models_percent(
     tmp_path, monkeypatch, wired
 ):
     """The rotation percentage is on the proxy's row for the model, so a
@@ -485,7 +486,7 @@ def test_a_conversation_with_no_reported_threshold_rotates_at_its_models_percent
     live = copy.deepcopy(LIVE)
     live["sessions"][0]["context"]["threshold"] = None
     monkeypatch.setattr(main_mod, "_live_sessions", AsyncMock(return_value=live))
-    client = _authed_client(tmp_path, monkeypatch)
+    client = await _authed_client(tmp_path, monkeypatch)
 
     context = client.get("/api/dashboard").json()["columns"][0]["context"]
 

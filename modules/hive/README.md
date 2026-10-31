@@ -6,10 +6,57 @@ and standing rules. Edge Mind deployments use the
 [`hive-edge-minds`](https://github.com/danielstewart77/hive-edge-minds)
 runtime.
 
-Auth lives in the hive itself — one sqlite db (`data/hive.db`) and a
-signing secret, no external auth service — so a cloned hive is
-self-contained. The terminal site shares this same db, secret, and
-cookie domain, so one login covers both.
+Auth lives in the hive itself — accounts and a signing secret, no external
+auth service — so a cloned hive is self-contained. The terminal site shares
+the same store, secret and cookie domain, so one login covers both.
+
+## Where the data is
+
+Nothing in `src/` opens a database or writes SQL. Every page and every route
+calls a named operation in `store.py`, and which store answers is one value
+in the environment: `HIVE_DATABASE_URL` set means the hive's one Postgres
+through [`hive-data`](https://github.com/danielstewart77/hive-data), unset
+means this host's own `data/hive.db` as before. Unsetting it and restarting
+is the revert — the file stays on disk and reachable, and retiring it is its
+own story rather than part of this one.
+
+Two things follow from that and are worth knowing before reading `store.py`.
+
+The composite rules are not in it. Which parents an item may be given, what a
+board drop does to two sibling lists, when a design page may advance, whether
+a change would leave the hive with no enabled admin — those live in
+`kanban_data`, `design_data` and `auth`, once, on top of the store's
+operations, so the two backends cannot disagree about them.
+
+And the store is async on both halves, which is why the console is async all
+the way down to `require_auth`. `hive_data` is async only; the SQLite half
+runs its statements off the event loop, each on a connection of its own,
+created and closed inside the one thread that uses it — which is the shape
+the synchronous code had and the bar that half has to clear, since its whole
+point is to be the revert lever.
+
+Sharing one connection is not an option, and not for the obvious reason. A
+`sqlite3.Connection` is unsafe across threads whatever `check_same_thread`
+says, but the worse failure is a transaction: a connection inside one
+request's `BEGIN IMMEDIATE` is a connection every other request's write
+lands in, and those writes are discarded when the first request rolls back.
+A design notice claimed, sent and acknowledged goes back to pending because
+somebody else's board drag answered 404, and the next sweep sends it again —
+two harnesses in one working tree. A second `BEGIN IMMEDIATE` on one
+connection is also an error rather than a wait, so two tabs dragging cards
+answer 500 where they used to take turns. A unit of work therefore owns a
+connection and a thread for its whole life; two of them serialise through
+SQLite's own file lock, each waiting on its own thread rather than on the one
+thread that has to do the committing.
+
+The memory pages are the one operation whose two halves read two different
+*databases*: lucent's own file, mounted read-only, or the `memory` schema of
+the one database. That was the window this cutover had to close — both stores
+were loaded and equal, so a console reading the file answered correctly while
+writing nowhere. `HIVE_SITE_ADMIN_TOKEN` is the bearer the one-database check
+(`unified_db.postflight`) reads the board and the memory pages with; unset,
+those routes admit no bearer and only a signed-in admin session reaches them,
+which is where an install that is not mid-cutover sits.
 
 ## Run
 

@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import auth
 import configuration_data
 import main as main_mod
+import accounts
 
 FRAGMENT = """\
 services:
@@ -104,9 +105,9 @@ def client(tmp_path, monkeypatch):
         "_hive_tools_request",
         AsyncMock(return_value={"status": "success", "return_code": 0}),
     )
-    user = auth.create_user("daniel", "secret-pass", is_admin=True, replace=True)
+    user = accounts.make_user("daniel", "secret-pass", is_admin=True, replace=True)
     test_client = TestClient(main_mod.app)
-    test_client.cookies.set(auth.SESSION_COOKIE_NAME, auth.create_session_token(user))
+    test_client.cookies.set(auth.SESSION_COOKIE_NAME, accounts.session_token(user))
     test_client.fragment = minds_dir / "atlas" / "container" / "compose.yaml"
     test_client.dev = dev
     return test_client

@@ -10,25 +10,25 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import configuration_data
 
 
-def test_capability_endpoint_round_trip_normalizes_url(tmp_path, monkeypatch):
+async def test_capability_endpoint_round_trip_normalizes_url(tmp_path, monkeypatch):
     monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
 
-    saved = configuration_data.set_capability_endpoint(
+    saved = await configuration_data.set_capability_endpoint(
         "ollama", " http://192.168.4.64:11434/ "
     )
 
     assert saved == "http://192.168.4.64:11434"
-    assert configuration_data.get_capability_endpoint("ollama") == saved
+    assert await configuration_data.get_capability_endpoint("ollama") == saved
 
 
-def test_inference_proxy_endpoint_is_configurable(tmp_path, monkeypatch):
+async def test_inference_proxy_endpoint_is_configurable(tmp_path, monkeypatch):
     monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
 
-    saved = configuration_data.set_capability_endpoint(
+    saved = await configuration_data.set_capability_endpoint(
         "inference-proxy", "http://inference-proxy:8888"
     )
 
-    assert configuration_data.get_capability_endpoint("inference-proxy") == saved
+    assert await configuration_data.get_capability_endpoint("inference-proxy") == saved
 
 
 @pytest.mark.parametrize(
@@ -40,26 +40,26 @@ def test_inference_proxy_endpoint_is_configurable(tmp_path, monkeypatch):
         ("ollama", "http://service/path?secret=value"),
     ],
 )
-def test_capability_endpoint_rejects_unsafe_values(
+async def test_capability_endpoint_rejects_unsafe_values(
     tmp_path, monkeypatch, node_id, endpoint
 ):
     monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
 
     with pytest.raises(ValueError):
-        configuration_data.set_capability_endpoint(node_id, endpoint)
+        await configuration_data.set_capability_endpoint(node_id, endpoint)
 
 
-def test_edge_mind_metadata_round_trip(tmp_path, monkeypatch):
+async def test_edge_mind_metadata_round_trip(tmp_path, monkeypatch):
     monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
 
-    configuration_data.set_edge_mind_metadata(
+    await configuration_data.set_edge_mind_metadata(
         "sentinel-one",
         profile="sentinel",
         role="operator",
         deployment="container",
     )
 
-    assert configuration_data.get_edge_mind_metadata("sentinel-one") == {
+    assert await configuration_data.get_edge_mind_metadata("sentinel-one") == {
         "profile": "sentinel",
         "role": "operator",
         "deployment": "container",

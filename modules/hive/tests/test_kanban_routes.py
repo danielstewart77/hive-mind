@@ -4,14 +4,15 @@ from starlette.testclient import TestClient
 
 import auth
 import main as main_mod
+import accounts
 
 
 @pytest.fixture
 def client(monkeypatch):
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
-    user = auth.create_user("kanban", "secret-pass", is_admin=True, replace=True)
+    user = accounts.make_user("kanban", "secret-pass", is_admin=True, replace=True)
     client = TestClient(main_mod.app)
-    client.cookies.set(auth.SESSION_COOKIE_NAME, auth.create_session_token(user))
+    client.cookies.set(auth.SESSION_COOKIE_NAME, accounts.session_token(user))
     return client
 
 
@@ -40,15 +41,38 @@ def test_item_detail_page_loads_and_saves_metadata(client):
     assert client.get("/kanban/item/no-such-item").status_code == 404
 
 
-def test_data_api_migrates_an_existing_board_database(client):
-    import os
+def test_data_api_migrates_an_existing_board_database(tmp_path, monkeypatch):
+    """A board file predating the prose columns is served, not refused.
+
+    The store brings the file forward as it opens, so the legacy rows come
+    back through the route with the new columns empty — rather than the page
+    failing on a column the read names and the file does not have.
+    """
+    import asyncio
     import sqlite3
 
-    database = sqlite3.connect(os.environ["HIVE_DB_PATH"])
-    database.execute("CREATE TABLE work_items (id TEXT PRIMARY KEY, kind TEXT NOT NULL, parent_id TEXT REFERENCES work_items(id), title TEXT NOT NULL, status TEXT, position INTEGER NOT NULL)")
-    database.execute("INSERT INTO work_items VALUES ('e-existing', 'epic', NULL, 'Existing', NULL, 1)")
+    import store as data_store
+
+    legacy = tmp_path / "legacy.db"
+    database = sqlite3.connect(legacy)
+    database.execute(
+        "CREATE TABLE work_items (id TEXT PRIMARY KEY, kind TEXT NOT NULL, "
+        "parent_id TEXT REFERENCES work_items(id), title TEXT NOT NULL, "
+        "status TEXT, position INTEGER NOT NULL)")
+    database.execute(
+        "INSERT INTO work_items VALUES ('e-existing', 'epic', NULL, "
+        "'Existing', NULL, 1)")
     database.commit()
     database.close()
+
+    asyncio.run(data_store.close())
+    asyncio.run(data_store.open(legacy))
+
+    monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
+    user = accounts.make_user("kanban-legacy", "secret-pass", is_admin=True,
+                              replace=True)
+    client = TestClient(main_mod.app)
+    client.cookies.set(auth.SESSION_COOKIE_NAME, accounts.session_token(user))
 
     response = client.get("/api/kanban/data")
     assert response.status_code == 200

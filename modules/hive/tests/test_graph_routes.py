@@ -12,6 +12,7 @@ from starlette.testclient import TestClient
 
 import auth
 import main as main_mod
+import accounts
 
 _SAMPLE = {
     "nodes": [
@@ -29,12 +30,10 @@ _ERROR: dict[str, object] = {"nodes": [], "edges": [], "error": "connection refu
 
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
-    auth.init_auth_db()
-    user = auth.create_user("daniel", "secret-pass", is_admin=True, replace=True)
+    user = accounts.make_user("daniel", "secret-pass", is_admin=True, replace=True)
     client = TestClient(main_mod.app)
-    client.cookies.set(auth.SESSION_COOKIE_NAME, auth.create_session_token(user))
+    client.cookies.set(auth.SESSION_COOKIE_NAME, accounts.session_token(user))
     return client
 
 
@@ -97,9 +96,7 @@ def test_graph_page_contains_cytoscape_reference(client):
 
 def test_graph_requires_authentication(tmp_path, monkeypatch):
     """GET /graph redirects to login when the request is unauthenticated."""
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
-    auth.init_auth_db()
     client = TestClient(main_mod.app)
 
     resp = client.get("/graph", follow_redirects=False)

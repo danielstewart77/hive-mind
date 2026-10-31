@@ -17,6 +17,7 @@ from starlette.testclient import TestClient
 import auth
 import capability_install
 import main as main_mod
+import accounts
 
 
 def _render_installation_controls(node: dict) -> str:
@@ -51,18 +52,18 @@ def _render_installation_controls(node: dict) -> str:
     return result.stdout
 
 
-def _hive_tools_node() -> dict:
+async def _hive_tools_node() -> dict:
     return next(
-        node for node in main_mod._capability_node_specs() if node["id"] == "hive-tools"
+        node for node in await main_mod._capability_node_specs() if node["id"] == "hive-tools"
     )
 
 
-def _authed_client(tmp_path, monkeypatch) -> TestClient:
+async def _authed_client(tmp_path, monkeypatch) -> TestClient:
     monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
-    user = auth.create_user("daniel", "secret-pass", is_admin=True, replace=True)
+    user = await auth.create_user("daniel", "secret-pass", is_admin=True, replace=True)
     client = TestClient(main_mod.app)
-    client.cookies.set(auth.SESSION_COOKIE_NAME, auth.create_session_token(user))
+    client.cookies.set(auth.SESSION_COOKIE_NAME, await auth.create_session_token(user))
     return client
 
 
@@ -72,8 +73,8 @@ INSTALL_ROUTE = "/api/capability-nodes/hive-tools/install"
 # Requirement 1 — the button exists to be clicked, and clicking it is what
 # runs the install. Without this the whole route could be deleted, or replaced
 # with a hardcoded success, and every other test would still pass.
-def test_clicking_clone_runs_the_install_and_reports_the_result(tmp_path, monkeypatch):
-    client = _authed_client(tmp_path, monkeypatch)
+async def test_clicking_clone_runs_the_install_and_reports_the_result(tmp_path, monkeypatch):
+    client = await _authed_client(tmp_path, monkeypatch)
     with patch.object(
         main_mod,
         "clone_hive_tools",
@@ -100,14 +101,14 @@ def test_the_install_route_refuses_an_unauthenticated_caller(tmp_path, monkeypat
 
 # Requirement 1 — the card offers the action at all. `installable` is what the
 # template keys the button off; false and the button silently never renders.
-def test_the_hive_tools_card_offers_the_install_action():
-    assert _hive_tools_node()["installable"] is True
+async def test_the_hive_tools_card_offers_the_install_action():
+    assert (await _hive_tools_node())["installable"] is True
 
 
 # Requirement 1 — a failure reaches the operator as the reason it failed, and
 # a second concurrent click is distinguishable from a blocked destination.
-def test_install_failures_reach_the_card_with_their_own_status(tmp_path, monkeypatch):
-    client = _authed_client(tmp_path, monkeypatch)
+async def test_install_failures_reach_the_card_with_their_own_status(tmp_path, monkeypatch):
+    client = await _authed_client(tmp_path, monkeypatch)
 
     with patch.object(
         main_mod, "clone_hive_tools", side_effect=RuntimeError("could not resolve host")
@@ -131,14 +132,14 @@ def test_install_failures_reach_the_card_with_their_own_status(tmp_path, monkeyp
 
 # Requirement 3 — an installed hive-tools offers a link to its own site rather
 # than an install action.
-def test_installed_hive_tools_node_carries_the_configure_link(tmp_path, monkeypatch):
+async def test_installed_hive_tools_node_carries_the_configure_link(tmp_path, monkeypatch):
     destination = tmp_path / "hive-tools"
     (destination / ".git").mkdir(parents=True)
     (destination / "README.md").write_text("# hive-tools\n")
     monkeypatch.setenv("HIVE_TOOLS_REPO_DIR", str(destination))
     monkeypatch.setenv("EDGE_HIVE_TOOLS_URL", "http://192.168.4.64:9421")
 
-    node = _hive_tools_node()
+    node = await _hive_tools_node()
 
     assert node["installed"] is True
     assert node["configure_url"] == "http://192.168.4.64:9421"
@@ -147,7 +148,7 @@ def test_installed_hive_tools_node_carries_the_configure_link(tmp_path, monkeypa
 
 # Requirement 3, fresh install — the placeholder host .env.example ships is not
 # a reachable site, so the card must not offer it as a link to open.
-def test_placeholder_hive_tools_url_is_not_offered_as_a_link(tmp_path, monkeypatch):
+async def test_placeholder_hive_tools_url_is_not_offered_as_a_link(tmp_path, monkeypatch):
     destination = tmp_path / "hive-tools"
     (destination / ".git").mkdir(parents=True)
     (destination / "README.md").write_text("# hive-tools\n")
@@ -158,7 +159,7 @@ def test_placeholder_hive_tools_url_is_not_offered_as_a_link(tmp_path, monkeypat
     # the operator's browser can follow it, so it is not a fallback either.
     monkeypatch.setenv("HIVE_TOOLS_URL", "http://hive-tools:9421")
 
-    node = _hive_tools_node()
+    node = await _hive_tools_node()
 
     assert node["configure_url"] == ""
     # And the card says how to get one, rather than substituting the git clone
@@ -168,16 +169,16 @@ def test_placeholder_hive_tools_url_is_not_offered_as_a_link(tmp_path, monkeypat
 
 # Requirement 2, wording — the card tells the operator to recreate the
 # container, because a restart re-reads neither the mount nor the env.
-def test_hive_tools_node_path_hint_names_the_setting_and_the_recreate_command():
-    hint = _hive_tools_node()["path_hint"]
+async def test_hive_tools_node_path_hint_names_the_setting_and_the_recreate_command():
+    hint = (await _hive_tools_node())["path_hint"]
 
     assert "HIVE_TOOLS_DIR" in hint
     assert "docker compose up -d" in hint
 
 
 # Requirement 6 — the card names the approval-gate placement boundary.
-def test_hive_tools_node_carries_the_placement_note():
-    note = _hive_tools_node()["placement_note"]
+async def test_hive_tools_node_carries_the_placement_note():
+    note = (await _hive_tools_node())["placement_note"]
 
     # Behaviour, not a comparison against the constant being tested: the note
     # has to actually name the boundary and who is on the wrong side of it.
@@ -216,17 +217,17 @@ def test_every_install_card_branch_emits_the_placement_note():
 # Until the in-flight state was server truth, that repaint handed every tab a
 # fresh enabled Clone button over a running install: the tab that started it
 # lost its own progress line, and a second operator's click earned a 503.
-def test_an_install_in_flight_is_visible_to_every_tab(tmp_path, monkeypatch):
+async def test_an_install_in_flight_is_visible_to_every_tab(tmp_path, monkeypatch):
     destination = tmp_path / "hive-tools"
     destination.mkdir()
     monkeypatch.setenv("HIVE_TOOLS_REPO_DIR", str(destination))
 
-    assert _hive_tools_node()["installing"] is False
+    assert (await _hive_tools_node())["installing"] is False
 
     # A tab that did not start the install reads the same process state the
     # one that did is holding.
     with capability_install._HIVE_TOOLS_INSTALL_LOCK:
-        during = _hive_tools_node()
+        during = await _hive_tools_node()
 
     assert during["installing"] is True
     assert during["installed"] is False
@@ -250,30 +251,30 @@ def test_an_install_in_flight_is_visible_to_every_tab(tmp_path, monkeypatch):
     assert "disabled" not in idle
 
 
-def test_the_inference_proxy_node_guards_its_clone_like_hive_tools(tmp_path, monkeypatch):
+async def test_the_inference_proxy_node_guards_its_clone_like_hive_tools(tmp_path, monkeypatch):
     """Requirement 14 — real-checkout truth, a refused second clone, in-flight to every tab."""
     destination = tmp_path / "inference-proxy"
     destination.mkdir()
     monkeypatch.setenv("INFERENCE_PROXY_REPO_DIR", str(destination))
 
-    def _node() -> dict:
+    async def _node() -> dict:
         return next(
-            node for node in main_mod._capability_node_specs()
+            node for node in await main_mod._capability_node_specs()
             if node["id"] == "inference-proxy"
         )
 
     # A bare .git is the wreckage of an interrupted clone, not an install.
     # Reading it as one is what made a broken node look permanently successful.
     (destination / ".git").mkdir()
-    assert _node()["installed"] is False
+    assert (await _node())["installed"] is False
     (destination / "README.md").write_text("real content\n")
-    assert _node()["installed"] is True
+    assert (await _node())["installed"] is True
 
     # A tab that did not start the clone reads the same process state as the
     # one that did, and a second install is refused rather than run twice over
     # the same directory.
-    assert _node()["installing"] is False
+    assert (await _node())["installing"] is False
     with capability_install._INFERENCE_PROXY_INSTALL_LOCK:
-        assert _node()["installing"] is True
+        assert (await _node())["installing"] is True
         with pytest.raises(capability_install.InstallInProgress):
             capability_install.clone_inference_proxy()

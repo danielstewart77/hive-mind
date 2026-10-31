@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import os
 import re
-import sqlite3
 import time
 import urllib.parse
 from pathlib import Path
@@ -12,7 +10,7 @@ from typing import Any
 
 import yaml
 
-from config import BASE_DIR
+import store
 
 HIVE_MIND_MINDS_DIR = Path("/minds_hive_mind")
 HIVE_MIND_MINDS_CONFIG_DIR = Path("/minds_hive_mind_config")
@@ -21,39 +19,6 @@ EDGE_MINDS_DIR = Path("/minds_edge")
 _CONFIGURABLE_CAPABILITY_IDS = {"inference-proxy", "ollama", "pihole"}
 _MIND_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$")
-
-
-def _db_path() -> Path:
-    return Path(os.getenv("HIVE_DB_PATH", str(BASE_DIR.parent / "data" / "hive.db")))
-
-
-def _connect() -> sqlite3.Connection:
-    path = _db_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(path)
-    connection.row_factory = sqlite3.Row
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS capability_node_settings (
-            node_id TEXT PRIMARY KEY,
-            endpoint TEXT NOT NULL,
-            updated_at INTEGER NOT NULL
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS edge_mind_settings (
-            name TEXT PRIMARY KEY,
-            profile TEXT NOT NULL,
-            role TEXT NOT NULL,
-            deployment TEXT NOT NULL,
-            updated_at INTEGER NOT NULL
-        )
-        """
-    )
-    connection.commit()
-    return connection
 
 
 def normalize_endpoint(endpoint: str) -> str:
@@ -74,93 +39,39 @@ def normalize_endpoint(endpoint: str) -> str:
     return normalized
 
 
-def set_capability_endpoint(node_id: str, endpoint: str) -> str:
+async def set_capability_endpoint(node_id: str, endpoint: str) -> str:
     if node_id not in _CONFIGURABLE_CAPABILITY_IDS:
-        raise ValueError("This Capability Node does not support endpoint configuration")
+        raise ValueError(
+            "This Capability Node does not support endpoint configuration")
     normalized = normalize_endpoint(endpoint)
-    connection = _connect()
-    try:
-        connection.execute(
-            """
-            INSERT INTO capability_node_settings (node_id, endpoint, updated_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(node_id) DO UPDATE SET
-                endpoint = excluded.endpoint,
-                updated_at = excluded.updated_at
-            """,
-            (node_id, normalized, int(time.time())),
-        )
-        connection.commit()
-    finally:
-        connection.close()
+    await store.set_capability_endpoint(node_id, normalized, int(time.time()))
     return normalized
 
 
-def get_capability_endpoint(node_id: str) -> str | None:
-    connection = _connect()
-    try:
-        row = connection.execute(
-            "SELECT endpoint FROM capability_node_settings WHERE node_id = ?",
-            (node_id,),
-        ).fetchone()
-    finally:
-        connection.close()
+async def get_capability_endpoint(node_id: str) -> str | None:
+    row = await store.capability_endpoint(node_id)
     return str(row["endpoint"]) if row else None
 
 
-def clear_capability_endpoint(node_id: str) -> bool:
+async def clear_capability_endpoint(node_id: str) -> bool:
     if node_id not in _CONFIGURABLE_CAPABILITY_IDS:
-        raise ValueError("This Capability Node does not support endpoint configuration")
-    connection = _connect()
-    try:
-        cursor = connection.execute(
-            "DELETE FROM capability_node_settings WHERE node_id = ?", (node_id,)
-        )
-        connection.commit()
-        return cursor.rowcount > 0
-    finally:
-        connection.close()
+        raise ValueError(
+            "This Capability Node does not support endpoint configuration")
+    return await store.clear_capability_endpoint(node_id) > 0
 
 
-def set_edge_mind_metadata(
+async def set_edge_mind_metadata(
     name: str, *, profile: str, role: str, deployment: str
 ) -> None:
     normalized = name.strip().lower()
     if not _MIND_NAME_RE.fullmatch(normalized):
         raise ValueError("Invalid Mind name")
-    connection = _connect()
-    try:
-        connection.execute(
-            """
-            INSERT INTO edge_mind_settings
-                (name, profile, role, deployment, updated_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(name) DO UPDATE SET
-                profile = excluded.profile,
-                role = excluded.role,
-                deployment = excluded.deployment,
-                updated_at = excluded.updated_at
-            """,
-            (normalized, profile, role, deployment, int(time.time())),
-        )
-        connection.commit()
-    finally:
-        connection.close()
+    await store.set_edge_mind(normalized, profile, role, deployment,
+                             int(time.time()))
 
 
-def get_edge_mind_metadata(name: str) -> dict[str, str] | None:
-    connection = _connect()
-    try:
-        row = connection.execute(
-            """
-            SELECT profile, role, deployment
-            FROM edge_mind_settings
-            WHERE name = ?
-            """,
-            (name.strip().lower(),),
-        ).fetchone()
-    finally:
-        connection.close()
+async def get_edge_mind_metadata(name: str) -> dict[str, str] | None:
+    row = await store.edge_mind(name.strip().lower())
     if not row:
         return None
     return {

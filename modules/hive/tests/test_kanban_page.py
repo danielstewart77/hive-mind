@@ -4,14 +4,15 @@ from starlette.testclient import TestClient
 
 import auth
 import main as main_mod
+import accounts
 
 
 @pytest.fixture
 def signed_in(monkeypatch):
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
-    user = auth.create_user("kanban-page", "secret-pass", is_admin=True, replace=True)
+    user = accounts.make_user("kanban-page", "secret-pass", is_admin=True, replace=True)
     client = TestClient(main_mod.app)
-    client.cookies.set(auth.SESSION_COOKIE_NAME, auth.create_session_token(user))
+    client.cookies.set(auth.SESSION_COOKIE_NAME, accounts.session_token(user))
     return client
 
 
