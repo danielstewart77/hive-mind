@@ -2,7 +2,7 @@
 
 import asyncio
 
-import httpx
+import accounts
 import pytest
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 from multiuser_support import (
@@ -15,7 +15,6 @@ from multiuser_support import (
 
 import auth
 from tests.conftest import Console
-import accounts
 
 SHIPPED_SECRET = "change-this-in-production"  # secret-guard: allow
 
@@ -114,42 +113,21 @@ def test_a_fresh_install_with_no_key_never_signs_with_the_shipped_constant(
     assert client.get("/overview", follow_redirects=False).status_code == 200
 
 
-@pytest.mark.parametrize(
-    "method, path", [("GET", "/"), ("GET", "/login"), ("POST", "/logout")]
-)
-def test_a_public_route_asks_the_sign_in_service_through_an_async_client(
-    monkeypatch, fake_comms, method, path
-):
-    """Who is signed in is asked of auth-service on every public route, and
-    asked with a client that does not hold the event loop while it waits.
+def test_the_sign_in_client_is_one_per_event_loop() -> None:
+    """Not one per store, and not one per call.
 
-    The console used to make this call on a worker thread, because the store
-    was synchronous. It is a coroutine now, so the call is made on the loop
-    and must not block it — which is a property of the transport, not of
-    where the code runs. A sync `httpx.Client` put back here would never see
-    this mock transport, so the ask would not be recorded at all.
+    An `httpx.AsyncClient` holds a connection pool bound to the loop that
+    opened it: shared across loops it raises "event loop is closed" on the
+    first reuse, and rebuilt per call it costs a TLS handshake on `/verify`,
+    which runs on every single request the console serves.
     """
-    monkeypatch.setenv("GATEWAY_API_URL", fake_comms.url)
-    _use_auth_service(monkeypatch, "http://auth-service.invalid")
-    asked: list[str] = []
+    store = auth.AuthServiceStore("http://auth-service.invalid", "a-token")
 
-    def answer(request: httpx.Request) -> httpx.Response:
-        asked.append(str(request.url))
-        return httpx.Response(401, json={"detail": "expired"})
+    async def twice() -> tuple[object, object]:
+        return store._loop_client(), store._loop_client()
 
-    store = auth.get_store()
-    transport = httpx.MockTransport(answer)
+    first, again = asyncio.run(twice())
+    other_loop, _ = asyncio.run(twice())
 
-    def _async_only() -> httpx.AsyncClient:
-        return httpx.AsyncClient(transport=transport)
-
-    monkeypatch.setattr(store, "_loop_client", _async_only)
-    client = Console("auth-service").client()
-    client.cookies.set("auth_session", "a-token")
-
-    client.request(method, path, follow_redirects=False)
-
-    assert asked, "the console did not ask auth-service who is signed in"
-    # The ask itself is `/verify`; the logout route goes on to end the
-    # session, which is the second call on that path and not this one.
-    assert asked[0].endswith("/verify?site=hive"), asked
+    assert first is again, "a client was built per call"
+    assert other_loop is not first, "a client was shared across loops"
