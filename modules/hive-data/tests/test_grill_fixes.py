@@ -51,6 +51,20 @@ def test_a_server_that_went_away_is_not_a_refused_write():
         assert isinstance(translate(exc), hive_data.Unreachable), exc
 
 
+def test_a_connection_the_driver_cannot_continue_from_is_the_server_gone():
+    """`InternalClientError` derives straight from `Exception`, so it misses
+    the `InterfaceError`, `PostgresError` and `OSError` branches alike and
+    reaches the re-raise reserved for bugs in our own code. Terminating every
+    backend under a live pool raises it once per pooled connection, and the
+    caller was being handed `cannot switch to state 11; another operation is
+    in progress` - which reads as a concurrency bug in its own store."""
+    translated = translate(
+        asyncpg.InternalClientError(
+            "cannot switch to state 11; another operation (2) is in "
+            "progress"))
+    assert isinstance(translated, hive_data.Unreachable)
+
+
 def test_a_server_out_of_connections_is_not_unreachable():
     """It is up and answering everybody else."""
     assert isinstance(
