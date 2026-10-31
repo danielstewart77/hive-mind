@@ -1204,6 +1204,30 @@ async def put_auth_setting(key: str, value: str, *,
     return await _execute_returning(unit, sql, *args)
 
 
+async def put_auth_setting_if_absent(key: str, value: str, *,
+                                     unit: Unit | None = None) -> Row:
+    """Store a setting unless it is already there, and report what holds.
+
+    One statement rather than a read and a write, because the one caller is
+    the console minting its cookie-signing key on first use: two workers
+    reaching an empty install at once would each generate a key and each
+    write it, and whichever landed second would sign every later cookie and
+    invalidate the ones the other had already issued — which presents as the
+    whole install being signed out.
+
+    The `DO UPDATE` is a no-op write of the value already there, which is how
+    one statement both inserts and reports. `DO NOTHING` would return no row
+    at all when the key exists, leaving the caller to read it in a second
+    statement — the race this exists to close.
+    """
+    sql, args = _sql.insert(
+        "auth_settings", {"key": key, "value": value},
+        on_conflict=('ON CONFLICT ("key") DO UPDATE SET '
+                     '"value" = core."auth_settings"."value"'),
+        returning=COLUMNS["auth_settings"])
+    return await _execute_returning(unit, sql, *args)
+
+
 async def get_sso_binding(*, provider: str, subject: str,
                           unit: Unit | None = None) -> Row | None:
     return await _fetch_one(
