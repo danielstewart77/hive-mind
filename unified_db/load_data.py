@@ -77,7 +77,8 @@ class LoadRefused(RuntimeError):
 # Snapshot
 # ---------------------------------------------------------------------------
 
-def snapshot(base: str, work: Path) -> dict[str, Path]:
+def snapshot(base: str, work: Path,
+             only: set[str] | None = None) -> dict[str, Path]:
     """Copy every source this loader reads into `work`, and check each one.
 
     Taken through SQLite's own backup API rather than `cp`, because a plain
@@ -89,6 +90,8 @@ def snapshot(base: str, work: Path) -> dict[str, Path]:
     out: dict[str, Path] = {}
     for name, path in schema_map.source_paths(base).items():
         if name in SKIPPED_SOURCES:
+            continue
+        if only is not None and name not in only:
             continue
         src = Path(path)
         if not src.exists():
@@ -819,7 +822,8 @@ def _short(value: object) -> str:
 
 async def run(base: str, dsn: str, *, verify_only: bool = False,
               work: Path | None = None, keep: bool = True,
-              reuse: Path | None = None) -> Report:
+              reuse: Path | None = None,
+              only: set[str] | None = None) -> Report:
     """Snapshot, load, verify — against one snapshot, start to finish.
 
     `reuse` names a snapshot a previous run kept. Verification has to be
@@ -835,9 +839,16 @@ async def run(base: str, dsn: str, *, verify_only: bool = False,
     the services stopped, it has to be nothing.
     """
     report = Report()
+    only = _only(only)
     LOSSY.clear()
     for name, why in sorted(SKIPPED_SOURCES.items()):
         report.notes.append(f"{name}: not loaded. {why}")
+    if only is not None:
+        left = sorted({name for name in schema_map.SOURCES
+                       if name not in SKIPPED_SOURCES} - only)
+        report.notes.append(
+            f"restricted to {', '.join(sorted(only))}. Left as they are, "
+            f"neither loaded nor verified: {', '.join(left)}.")
     directory = reuse or work or Path(tempfile.mkdtemp(prefix="hive-load-"))
     # 0700: a snapshot is every memory, every message and every credential
     # digest in the hive. World-readable copies of that under /tmp is how a
@@ -848,12 +859,13 @@ async def run(base: str, dsn: str, *, verify_only: bool = False,
         if reuse is not None:
             snapshots = {name: reuse / f"{name}.db"
                          for name in schema_map.SOURCES
-                         if name not in SKIPPED_SOURCES}
+                         if name not in SKIPPED_SOURCES
+                         and (only is None or name in only)}
             for name, path in sorted(snapshots.items()):
                 check_source(name, path)
             report.notes.append(f"verified against the snapshot at {reuse}")
         else:
-            snapshots = snapshot(base, directory)
+            snapshots = snapshot(base, directory, only)
         conn = await asyncpg.connect(dsn)
         try:
             await _register_vector(conn)
@@ -872,6 +884,32 @@ async def run(base: str, dsn: str, *, verify_only: bool = False,
     for where, why in sorted(LOSSY.items()):
         report.notes.append(f"{where}: {why}")
     return report
+
+
+def _only(only: set[str] | None) -> set[str] | None:
+    """The sources this run touches, checked against the ones there are.
+
+    A staged cutover moves one service at a time, so the loader has to be
+    able to move one service's tables at the moment that service is stopped
+    and leave every other table as it is. A name that is not a source is
+    refused rather than silently matching nothing: a typo would otherwise
+    load no tables at all and report a clean run over an empty plan.
+    """
+    if only is None:
+        return None
+    known = {name for name in schema_map.SOURCES
+             if name not in SKIPPED_SOURCES}
+    unknown = sorted(only - known)
+    if unknown:
+        raise LoadRefused(
+            f"no such source(s): {', '.join(unknown)}. The sources this "
+            f"loader reads are {', '.join(sorted(known))}.")
+    if not only:
+        raise LoadRefused(
+            "a run restricted to no sources would truncate nothing, verify "
+            "nothing, and report a clean load. Name at least one source, or "
+            "leave the restriction off to load them all.")
+    return set(only)
 
 
 def _drift(base: str, snapshots: dict[str, Path], report: Report) -> None:
@@ -923,6 +961,11 @@ def main(argv: list[str] | None = None) -> int:
                          "check needs it, so it is kept by default")
     ap.add_argument("--snapshot", default=None,
                     help="verify against a snapshot a previous run kept")
+    ap.add_argument("--only", action="append", default=None, metavar="SOURCE",
+                    help="load and verify only this source, leaving every "
+                         "other table as it is. Repeatable. For a staged "
+                         "cutover, where one service is stopped and moved "
+                         "while the rest keep running.")
     args = ap.parse_args(argv)
     if not args.dsn:
         print("REFUSED: no database named. Set HIVE_DATABASE_URL or pass "
@@ -940,7 +983,8 @@ def main(argv: list[str] | None = None) -> int:
                                  verify_only=args.verify_only,
                                  keep=not args.discard,
                                  reuse=Path(args.snapshot) if args.snapshot
-                                 else None))
+                                 else None,
+                                 only=set(args.only) if args.only else None))
     except LoadRefused as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 2
