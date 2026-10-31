@@ -382,6 +382,18 @@ restoring a subtree needs. The cost is stated rather than hidden: a
 Nothing sets the constraints back to `IMMEDIATE` to move that error earlier,
 because doing so would also refuse the legitimate out-of-order write.
 
+Changing what an item *is* is `board.retype`, its own operation rather than
+a settable `kind` on `update_work_item`. A retype is one fact made of five
+columns and every one of them follows from the new kind: an epic has no
+status and a story has one, a bug is a story carrying the bug subtype, a row
+becoming an epic loses its parent, and a row that moves parents needs a
+position because the number it held was only unique under the parent it left.
+Written one column at a time the board is briefly a feature with a story's
+status, or a row at a duplicate number, and the console reads it in between.
+`update_work_item` is deliberately left unable to do it: the title, the prose
+and the status are the operator's to edit from a form, and the kind is not
+something a form field sets in passing.
+
 Every reordering write takes `board.hold_board(unit)` first. Each one reads
 the sibling list, decides a new numbering against it and writes the whole
 list back, so two interleaved is one tab's drag silently replaced by the

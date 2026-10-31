@@ -336,6 +336,41 @@ async def update_work_item(item_id: str, fields: dict[str, Any], *,
     return await _execute(unit, sql, *args)
 
 
+async def retype(item_id: str, kind: str, *, status: str | None = None,
+                 subtype: str = "", parent_id: str | None = None,
+                 position: int, unit: Unit | None = None) -> Row:
+    """Change what an item *is*, in one statement.
+
+    Its own operation rather than a settable `kind` on `update_work_item`,
+    because a retype is one fact made of five columns and every one of them
+    follows from the new kind. An epic has no status and a story has one; a
+    bug is a story carrying the bug subtype; a row becoming an epic loses its
+    parent, and a row that moves parents needs a position, since the number
+    it held was only unique under the parent it left. Written one column at a
+    time, the board is briefly a feature with a story's status or a row at a
+    duplicate number - and the console reads it in between.
+
+    `update_work_item` is deliberately left unable to do this. The title, the
+    prose and the status are the operator's to edit from a form; the kind is
+    not something a form field sets in passing.
+    """
+    if kind not in KINDS:
+        raise ValueRefused(
+            f"{kind!r} is not a kind of work item: {', '.join(KINDS)}.")
+    if parent_id == item_id:
+        raise ValueRefused(
+            "a work item cannot be its own parent. The board walks down from "
+            "its roots, so a row pointing at itself is a row that renders "
+            "nowhere and a recursive read that never ends.")
+    sql, args = _sql.update(
+        ITEMS, {"kind": kind, "status": status, "subtype": subtype,
+                "parent_id": parent_id, "position": position},
+        {"id": item_id},
+        settable=frozenset({"kind", "status", "subtype", "parent_id",
+                            "position"}))
+    return await _execute(unit, sql, *args)
+
+
 async def place(item_id: str, parent_id: str | None, position: int, *,
                 unit: Unit | None = None) -> Row:
     """Put a row under a parent at a position, in one statement.

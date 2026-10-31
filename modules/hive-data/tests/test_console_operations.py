@@ -17,7 +17,7 @@ import uuid
 import pytest
 
 from hive_data import board, core, memory
-from hive_data.errors import ValueRefused
+from hive_data.errors import UnsettableColumn, ValueRefused
 
 
 def _name(prefix: str) -> str:
@@ -328,3 +328,59 @@ async def test_two_pages_of_a_browsed_table_do_not_overlap(connected):
 
     assert len(seen) == len(set(seen)), "a row was served on two pages"
     assert len(seen) == total, "a row was skipped between pages"
+
+
+# ----------------------------------------------------------------- retyping
+
+async def test_a_retype_moves_every_column_the_new_kind_decides_at_once(
+        connected, inspector):
+    """A retype is one fact made of five columns. Written one at a time the
+    board is briefly a feature carrying a story's status, or a row at a
+    number another row already holds, and the console reads it in between."""
+    epic = _name("e")
+    story = _name("s")
+    await board.create_work_item(epic, "epic", "an epic", 1)
+    await board.create_work_item(story, "story", "a story", 2,
+                                 parent_id=epic, status="backlog")
+
+    await board.retype(story, "feature", status=None, subtype="",
+                       parent_id=epic, position=9)
+
+    row = await inspector.fetchrow(
+        'SELECT "kind", "status", "subtype", "parent_id", "position" '
+        'FROM board."work_items" WHERE "id" = $1', story)
+    assert row["kind"] == "feature"
+    assert row["status"] is None
+    assert row["subtype"] == ""
+    assert row["parent_id"] == epic
+    assert row["position"] == 9
+
+
+async def test_a_retype_to_a_kind_the_board_has_no_lane_for_is_refused(
+        connected):
+    """The three kinds are the board's whole vocabulary; a fourth is a row
+    that renders in none of the three lanes."""
+    item = _name("s")
+    await board.create_work_item(item, "story", "a story", 1)
+    with pytest.raises(ValueRefused):
+        await board.retype(item, "milestone", position=2)
+
+
+async def test_a_retype_cannot_make_an_item_its_own_parent(connected):
+    """The board walks down from its roots, so a row pointing at itself is a
+    row that renders nowhere and a recursive read that never ends."""
+    item = _name("s")
+    await board.create_work_item(item, "story", "a story", 1)
+    with pytest.raises(ValueRefused):
+        await board.retype(item, "story", parent_id=item, position=2)
+
+
+async def test_an_update_cannot_change_what_an_item_is(connected):
+    """The kind is not something a form field sets in passing: the title and
+    the prose come off a page the operator typed into, and a `kind` arriving
+    with them would retype the row with none of the four columns that follow
+    from it."""
+    item = _name("s")
+    await board.create_work_item(item, "story", "a story", 1)
+    with pytest.raises(UnsettableColumn):
+        await board.update_work_item(item, {"kind": "epic"})
