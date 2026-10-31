@@ -60,6 +60,11 @@ MEMORY_SCHEMA_SQL = _SCHEMA_DIR / "memory.sql"
 #: artifacts: a deployment creates the contexts it runs and no others.
 #: hive-tools needs this one and nothing else needs it at all.
 TOOLS_SCHEMA_SQL = _SCHEMA_DIR / "tools.sql"
+#: The console's own context. Applied after `core.sql` and not before it:
+#: `board.design_sessions` has real foreign keys into `core.sessions` and
+#: `core.minds`, which is the first thing in this database that could not
+#: exist while each store was its own SQLite file.
+BOARD_SCHEMA_SQL = _SCHEMA_DIR / "board.sql"
 
 
 @pytest_asyncio.fixture(scope="session")
@@ -82,6 +87,7 @@ async def scratch_dsn() -> str:
             await target.execute(SCHEMA_SQL.read_text())
             await target.execute(MEMORY_SCHEMA_SQL.read_text())
             await target.execute(TOOLS_SCHEMA_SQL.read_text())
+            await target.execute(BOARD_SCHEMA_SQL.read_text())
         finally:
             await target.close()
         yield dsn

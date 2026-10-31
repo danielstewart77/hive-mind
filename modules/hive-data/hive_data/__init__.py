@@ -27,6 +27,7 @@ first operation against an unopened package is an error that says so.
 
 from __future__ import annotations
 
+from . import board
 from . import core
 from .config import Settings, from_environment
 from .errors import (
@@ -63,7 +64,8 @@ __all__ = [
     "SchemaMismatch", "SequenceBehind", "Settings", "TimedOut",
     "TransactionAborted", "TransactionMisuse", "UNSET",
     "Unit", "Unreachable", "UnsettableColumn", "ValueRefused",
-    "WriteRejected", "close", "connect", "conversation_lock", "core",
+    "WriteRejected", "board", "close", "connect", "conversation_lock",
+    "core",
     "from_environment",
     "live_pool", "memory", "run", "settings_in_use", "tools",
     "transaction",
