@@ -339,7 +339,8 @@ def test_the_cutover_check_reaches_the_board_and_the_memory_pages_with_its_own_b
     monkeypatch.setenv("HIVE_SITE_ADMIN_TOKEN", "a-cutover-token")
     anonymous = builtin_console.client()
 
-    for path in ("/api/kanban/data", "/api/memory/tables"):
+    for path in ("/api/kanban/data", "/api/memory/tables",
+                 "/api/memory/rows?table=memories"):
         with_token = anonymous.get(
             path, headers={"Authorization": "Bearer a-cutover-token"})
         assert with_token.status_code != 401, (path, with_token.text)
@@ -370,3 +371,37 @@ def test_an_install_that_issued_no_cutover_token_admits_no_bearer(
     refused = anonymous.get(
         "/api/kanban/data", headers={"Authorization": "Bearer anything"})
     assert refused.status_code == 401, refused.text
+
+
+def test_the_cutover_bearer_is_attached_to_those_three_routes_and_no_others():
+    """Read off the table itself, because a bearer in the wrong rule is a
+    sessionless way into whatever that rule covers.
+
+    `Rule(OWNER, param="name")` carries about twenty-five per-mind routes
+    including the writes to a Mind's hooks, its skills, its soul and its bot
+    token. The cutover check needs three reads; a bearer that reached those
+    writes would be a credential in one `.env` that edits every Mind on the
+    hive without a session. Asserting the three by looping over them cannot
+    see that, which is why this asserts the whole set.
+    """
+    carrying = {
+        f"{method} {path}"
+        for (method, path), rule in console_access.TABLE.rules.items()
+        if rule.bearer == console_access.CUTOVER
+    }
+
+    assert carrying == {
+        "GET /api/kanban/data",
+        "GET /api/memory/tables",
+        "GET /api/memory/rows",
+    }
+
+
+def test_every_bearer_the_table_declares_is_used_by_some_rule():
+    """A bearer nobody names is a credential the table reads as configured
+    and no route ever admits — which looks like a working guard and is a
+    dead one."""
+    named = {rule.bearer for rule in console_access.TABLE.rules.values()
+             if rule.bearer}
+
+    assert named == set(console_access.TABLE.bearers)

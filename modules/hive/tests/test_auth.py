@@ -2,7 +2,6 @@
 
 import sqlite3
 
-import accounts
 import auth
 import store as data_store
 
@@ -57,18 +56,3 @@ async def test_an_older_db_moves_is_admin_into_the_admins_group(tmp_path):
     columns = {row[1] for row in
                sqlite3.connect(path).execute("PRAGMA table_info(users)")}
     assert "is_admin" not in columns
-
-
-def test_the_helper_a_synchronous_test_sets_an_account_up_with(monkeypatch):
-    """`accounts.make_user` and `accounts.session_token` drive the real ones.
-
-    Most of this suite is synchronous and these two are the setup step every
-    route test takes, so the pair has to produce a real account and a cookie
-    the console will accept. Deliberately not a coroutine: running the
-    wrappers is the behaviour under test, and they run a loop of their own.
-    """
-    monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
-    user = accounts.make_user("sync-setup", "a-password", is_admin=True)
-
-    assert user["is_admin"] is True
-    assert accounts.session_token(user)

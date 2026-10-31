@@ -314,18 +314,28 @@ def test_the_two_halves_claim_a_notice_once(tmp_path: Path) -> None:
         again = await store.claim_notice(notice_id, 5.0)
         delivered = await store.mark_notice_delivered(notice_id, 6.0)
         twice = await store.mark_notice_delivered(notice_id, 7.0)
+        # Released *after* delivery, which is the guard the other half of
+        # this pair exists for: an acknowledgement racing a failure report
+        # must not un-deliver a notice that actually landed, and a released
+        # notice is one the next sweep sends again.
+        un_delivered = await store.release_notice(notice_id)
+        after = await store.notice(notice_id)
         return [
             won is not None and won["body"], lost, released,
-            again is not None, delivered, twice,
+            again is not None, delivered, twice, un_delivered,
+            after is not None and after["claimed_at"] is not None,
             [row["kind"] for row in await store.pending_notices("d-1")],
         ]
 
     on_file, on_server = both_halves(sequence, tmp_path / "parity.db")
     assert on_file == on_server
-    body, lost, released, again, delivered, twice, pending = on_file
+    (body, lost, released, again, delivered, twice, un_delivered,
+     still_claimed, pending) = on_file
     assert body == "go"
     assert lost is None
     assert [released, again, delivered, twice] == [1, True, 1, 0]
+    assert un_delivered == 0, "a delivered notice was un-delivered"
+    assert still_claimed is True, "a delivered notice lost its claim"
     assert pending == []
 
 
@@ -617,21 +627,44 @@ def test_a_unit_refuses_a_second_task_reaching_into_it(
     assert titles == ["outer"]
 
 
-def test_a_store_that_never_opened_does_not_report_a_shutdown() -> None:
-    """The two sentences send somebody to different places: a route running
-    outside the app, or work that outlived one."""
-    async def unopened() -> str:
-        os.environ[store.DSN_VAR] = ""
-        store._engine = None
-        store._was_open = False
+def test_the_two_reasons_there_is_no_store_are_told_apart(
+        tmp_path: Path) -> None:
+    """A straggling background task and a route outside the app are different
+    sentences, and each sends somebody somewhere else.
+
+    Both halves of the distinction, from a module in each state rather than
+    from private globals set by hand: a reimported module has genuinely never
+    opened, and a closed one genuinely has.
+    """
+    import importlib
+
+    async def after_closing(module: Any) -> str:
+        os.environ[module.DSN_VAR] = ""
+        await module.open(tmp_path / "closed.db")
+        await module.close()
         try:
-            await store.release_notice(1)
+            await module.release_notice(1)
         except RuntimeError as exc:
             return str(exc)
         return "no refusal"
 
-    said = asyncio.run(unopened())
-    assert "never opened" in said
+    async def before_opening(module: Any) -> str:
+        try:
+            await module.release_notice(1)
+        except RuntimeError as exc:
+            return str(exc)
+        return "no refusal"
+
+    fresh = importlib.reload(importlib.import_module("store"))
+    never = asyncio.run(before_opening(fresh))
+    closed = asyncio.run(after_closing(fresh))
+    # Every other test in this suite holds the module the rest of the console
+    # imported, so it is put back as it was.
+    importlib.reload(fresh)
+
+    assert "never opened" in never, never
+    assert "closed" in closed, closed
+    assert "never opened" not in closed, closed
 
 
 def test_a_unit_cancelled_waiting_for_the_file_lock_leaves_nothing_open(
@@ -732,26 +765,292 @@ def test_a_nul_byte_in_a_board_field_is_refused_rather_than_stored(
     """
     async def sequence() -> list[Any]:
         epic = await kanban_data.create_epic("An epic")
-        refusals = []
-        for field, value in (("title", "a\x00b"),
-                             ("description", "a\x00b")):
+        fields = ("title", "description", "requirements",
+                  "acceptance_criteria", "qa_tests")
+        updates = []
+        for field in fields:
             try:
-                await kanban_data.update_epic(epic["id"], **{field: value})
+                await kanban_data.update_epic(epic["id"],
+                                              **{field: "a\x00b"})
             except ValueError as exc:
-                refusals.append((field, "NUL byte" in str(exc)))
-        try:
-            await kanban_data.create_epic("fine", requirements="a\x00b")
-        except ValueError as exc:
-            refusals.append(("requirements", "NUL byte" in str(exc)))
+                updates.append((field, "NUL byte" in str(exc)))
+        creates = []
+        for field in fields:
+            argument = {field: "a\x00b"} if field != "title" else {}
+            title = "a\x00b" if field == "title" else "fine"
+            try:
+                await kanban_data.create_epic(title, **argument)
+            except ValueError as exc:
+                creates.append((field, "NUL byte" in str(exc)))
         after = await kanban_data.find_item(epic["id"])
-        return [refusals, after["title"], after["description"],
+        return [updates, creates, after["title"], after["description"],
                 len(await kanban_data.list_epics())]
 
     on_file, on_server = both_halves(sequence, tmp_path / "parity.db")
     assert on_file == on_server
-    refusals, title, description, epics = on_file
-    assert refusals == [("title", True), ("description", True),
-                        ("requirements", True)]
+    updates, creates, title, description, epics = on_file
+    expected = [(field, True) for field in
+                ("title", "description", "requirements",
+                 "acceptance_criteria", "qa_tests")]
+    assert updates == expected
+    assert creates == expected
     assert title == "An epic"
     assert description == ""
     assert epics == 1, "a refused creation left a row behind"
+
+
+def test_a_unit_that_raises_leaves_none_of_its_writes_behind(
+        tmp_path: Path) -> None:
+    """The whole reason the construct exists.
+
+    Several writes, all of them or none: a unit that committed what it had
+    done before it failed would leave the board holding half a move — a row
+    under its new parent with the sibling list never renumbered.
+    """
+    class Deliberate(Exception):
+        """Raised to fail the unit on purpose."""
+
+    async def sequence() -> list[Any]:
+        await kanban_data.create_epic("Survivor")
+        try:
+            async with store.board_transaction():
+                await store.create_work_item("e-one", "epic", "one", 10)
+                await store.create_work_item("e-two", "epic", "two", 11)
+                raise Deliberate
+        except Deliberate:
+            pass
+        return [sorted(row["title"]
+                       for row in await kanban_data.list_epics()),
+                await store.work_item("e-one"),
+                await store.work_item("e-two")]
+
+    on_file, on_server = both_halves(sequence, tmp_path / "parity.db")
+    assert on_file == on_server
+    titles, one, two = on_file
+    assert titles == ["Survivor"]
+    assert one is None and two is None
+
+
+def test_a_unit_inside_a_unit_is_refused(tmp_path: Path) -> None:
+    """SQLite has no savepoint here, so the inner block would commit the
+    outer one's work on its way out and a failure after it would roll back
+    nothing. Refused on both halves rather than on one."""
+    async def sequence() -> list[Any]:
+        refused = None
+        async with store.board_transaction():
+            await store.create_work_item("e-outer", "epic", "outer", 1)
+            try:
+                async with store.transaction():
+                    await store.create_work_item("e-inner", "epic",
+                                                 "inner", 2)
+            except RuntimeError as exc:
+                refused = "nest" in str(exc)
+        return [refused,
+                sorted(row["title"]
+                       for row in await kanban_data.list_epics())]
+
+    on_file, on_server = both_halves(sequence, tmp_path / "parity.db")
+    assert on_file == on_server
+    refused, titles = on_file
+    assert refused is True
+    assert titles == ["outer"], "the refused inner unit wrote anyway"
+
+
+# ---------------------------------------------------------------------------
+# the Postgres branches nothing else reaches
+
+
+def test_the_two_halves_answer_the_same_about_a_person_and_their_groups(
+        tmp_path: Path) -> None:
+    """Every read of a person, including the ones the console reaches on the
+    accounts page and on every request that carries a cookie.
+
+    Each of these is a `hive_data` call with its own argument order and its
+    own result key, and the console's own suite runs on the SQLite half, so
+    nothing else here would notice the Postgres branch of any of them calling
+    the wrong function or reading the wrong key.
+    """
+    import auth
+
+    async def sequence() -> list[Any]:
+        first = await auth.create_user("daniel", "daniels-pass",
+                                       is_admin=True)
+        await auth.create_user("sloan", "sloans-pass")
+        by_name = await store.get_user("daniel")
+        by_id = await store.get_user_by_id(first["id"])
+        private = await store.get_user("daniel", private=True)
+        await store.update_user(first["id"], email="D.Stewart@UTSystem.edu")
+        found = await store.find_user(email="d.stewart@utsystem.EDU")
+        missing = await store.find_user(domain_account="HIVE\\nobody")
+        account_store = auth.BuiltinStore()
+        await account_store.add_member("admins", "sloan")
+        before = sorted(await store.groups_of(first["id"]))
+        members = await store.group_usernames("admins")
+        await store.remove_group_member(group_name="admins",
+                                        user_id=first["id"])
+        return [
+            by_name["username"], by_id["username"],
+            "password_hash" in by_name, "password_hash" in private,
+            found is not None and found["username"],
+            missing,
+            [row["username"] for row in await store.list_users()],
+            await store.count_users(),
+            before, members,
+            sorted(await store.groups_of(first["id"])),
+            (await store.get_group("admins"))["name"],
+            await store.get_group("no-such-group"),
+        ]
+
+    on_file, on_server = both_halves(sequence, tmp_path / "parity.db")
+    assert on_file == on_server
+    (by_name, by_id, hash_in_plain, hash_in_private, found, missing, listed,
+     counted, before, members, after, group, absent) = on_file
+    assert by_name == "daniel" and by_id == "daniel"
+    assert hash_in_plain is False and hash_in_private is True
+    assert found == "daniel"
+    assert missing is None
+    assert listed == ["daniel", "sloan"]
+    assert counted == 2
+    assert before == ["admins"]
+    assert members == ["daniel", "sloan"]
+    assert after == [], "the member was not removed"
+    assert group == "admins"
+    assert absent is None
+
+
+def test_the_two_halves_bind_and_unbind_an_outside_identity_the_same_way(
+        tmp_path: Path) -> None:
+    """Microsoft sign-in, which had no coverage on the Postgres half at all.
+
+    A binding read by the wrong key signs the wrong person in, and a binding
+    that is written and then not found is a tenant where everybody's first
+    sign-in creates a second account.
+    """
+    async def sequence() -> list[Any]:
+        absent = await store.get_sso_binding(provider="microsoft",
+                                             subject="oid-1")
+        await store.put_sso_binding(provider="microsoft", subject="oid-1",
+                                    username="daniel", created_at=1)
+        bound = await store.get_sso_binding(provider="microsoft",
+                                            subject="oid-1")
+        # The same subject again, naming somebody else: the subject is the
+        # key, so this moves the binding rather than adding a second.
+        await store.put_sso_binding(provider="microsoft", subject="oid-1",
+                                    username="sloan", created_at=2)
+        moved = await store.get_sso_binding(provider="microsoft",
+                                            subject="oid-1")
+        # Two more subjects, so the listing has somebody in it to report:
+        # every assertion below used to want an empty answer, which an
+        # implementation returning nothing at all satisfies.
+        await store.put_sso_binding(provider="microsoft", subject="oid-2",
+                                    username="aiden", created_at=3)
+        await store.put_sso_binding(provider="windows", subject="sid-1",
+                                    username="daniel", created_at=4)
+        bound_now = sorted(await store.sso_usernames("microsoft"))
+        other_provider = sorted(await store.sso_usernames("windows"))
+        unknown_provider = sorted(await store.sso_usernames("okta"))
+        removed = await store.delete_sso_binding(provider="microsoft",
+                                                 username="sloan")
+        again = await store.delete_sso_binding(provider="microsoft",
+                                               username="sloan")
+        return [absent, bound["username"], bound["subject"],
+                moved["username"], bound_now, other_provider,
+                unknown_provider, removed, again,
+                sorted(await store.sso_usernames("microsoft"))]
+
+    on_file, on_server = both_halves(sequence, tmp_path / "parity.db")
+    assert on_file == on_server
+    (absent, bound, subject, moved, bound_now, other, unknown, removed,
+     again, left) = on_file
+    assert absent is None
+    assert bound == "daniel" and subject == "oid-1"
+    assert moved == "sloan"
+    assert bound_now == ["aiden", "sloan"], "the bound accounts went missing"
+    assert other == ["daniel"], "the other provider's binding went missing"
+    assert unknown == []
+    assert [removed, again] == [1, 0]
+    assert left == ["aiden"]
+
+
+def test_the_two_halves_answer_the_same_about_the_rest_of_the_board(
+        tmp_path: Path) -> None:
+    """The four board and design reads the other parity tests do not reach.
+
+    `update_work_item` above all: it is the write behind every edit on the
+    item page, and its Postgres branch returning zero without writing would
+    be a page that saves nothing and says it saved.
+    """
+    async def sequence() -> list[Any]:
+        epic = await kanban_data.create_epic("An epic")
+        changed = await store.update_work_item(
+            epic["id"], {"title": "Renamed", "description": "why"})
+        nothing = await store.update_work_item(epic["id"], {})
+        missing = await store.update_work_item("e-nope", {"title": "no"})
+        read = await store.work_item(epic["id"])
+
+        await store.create_design_session("d-1", "A design", 1.0, 1.0)
+        await store.create_design_session("d-2", "Another", 2.0, 2.0)
+        listed = [row["title"] for row in await store.design_sessions()]
+        notice_id = await store.queue_notice("d-1", "feedback",
+                                             "requirements", 3.0, body="hm")
+        one = await store.notice(notice_id)
+
+        await store.set_edge_mind("skippy", "operator", "operator",
+                                  "systemd", 4)
+        named = await store.edge_mind("skippy")
+        unknown = await store.edge_mind("nobody")
+        return [changed, nothing, missing, read["title"], read["description"],
+                listed, one["body"], one["delivered_at"],
+                named["deployment"], unknown]
+
+    on_file, on_server = both_halves(sequence, tmp_path / "parity.db")
+    assert on_file == on_server
+    (changed, nothing, missing, title, description, listed, body, delivered,
+     deployment, unknown) = on_file
+    assert changed == 1
+    assert nothing == 0
+    assert missing == 0, "an update named a row that is not there and wrote"
+    assert title == "Renamed" and description == "why"
+    # Most recently written first, which only a write moves.
+    assert listed == ["Another", "A design"]
+    assert body == "hm" and delivered is None
+    assert deployment == "systemd"
+    assert unknown is None
+
+
+def test_the_postgres_half_refuses_a_design_session_naming_no_such_mind(
+        tmp_path: Path) -> None:
+    """One half only, because the refusal is the one database's own.
+
+    `design_sessions.mind_id` and `conversation_id` are real foreign keys
+    where the split files could not have them, and a mind re-claims a session
+    on every turn that touches it. A Mind naming its short name where its
+    UUID belongs used to store a row pointing nowhere; it has to come back as
+    a bad reference rather than as a fault in the console.
+    """
+    if not ADMIN_DSN:
+        pytest.skip(NO_SERVER)
+    import design_data
+
+    async def sequence() -> list[Any]:
+        said = []
+        try:
+            await design_data.create_design_session("A design",
+                                                    mind_id="skippy")
+        except design_data.DesignUnknownReference as exc:
+            said.append(("create", "not a row this hive holds" in str(exc)))
+
+        await _conversations("conv-real")
+        record = await design_data.create_design_session(
+            "Attached", conversation_id="conv-real")
+        try:
+            await design_data.attach_design_session(record["id"],
+                                                    "conv-swept")
+        except design_data.DesignUnknownReference as exc:
+            said.append(("attach", "conversation" in str(exc)))
+        still = await design_data.get_design_session(record["id"])
+        return [said, still["conversation_id"]]
+
+    said, conversation = asyncio.run(_on_postgres(sequence))
+    assert said == [("create", True), ("attach", True)]
+    assert conversation == "conv-real", "the refused attach moved the session"

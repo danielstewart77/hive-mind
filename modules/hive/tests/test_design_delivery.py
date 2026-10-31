@@ -305,3 +305,46 @@ async def test_an_acceptance_carries_the_page_that_was_accepted(store):
 
     assert "Sessions are listed" in accepted_text
     assert "Sessions are listed" not in feedback_text
+
+
+async def test_the_shutdown_settles_an_in_flight_delivery_before_the_store_goes(
+        store, gateway, monkeypatch):
+    """A claimed notice is released as the console stops, not after.
+
+    The delivery runs detached and holds its notice claimed across a whole
+    model turn. Left to the event loop's own cancellation it is cancelled
+    *after* the lifespan has closed the store, so the handler that releases
+    the notice reaches a closed store and raises instead — the notice stays
+    claimed, `deliver_pending` steps over it on every later sweep, and a
+    submission the page reported as saved is never delivered by any path.
+    """
+    import main
+    import store as data_store
+    import design_delivery as module
+
+    record = await _session_with_feedback(store)
+    notice_id = (await store.pending_notices(record["id"]))[0]["id"]
+
+    sending = asyncio.Event()
+    never = asyncio.Event()
+
+    async def hangs(conversation_id, content):
+        sending.set()
+        await never.wait()
+
+    monkeypatch.setattr(module, "send_turn", hangs)
+
+    task = asyncio.ensure_future(module.deliver_notice(notice_id))
+    main._DESIGN_DELIVERIES.add(task)
+    task.add_done_callback(main._DESIGN_DELIVERIES.discard)
+    await sending.wait()
+
+    claimed = await data_store.notice(notice_id)
+    assert claimed["claimed_at"] is not None, "the delivery never claimed it"
+
+    await main._settle_design_deliveries()
+
+    pending = await store.pending_notices(record["id"])
+    assert [n["id"] for n in pending] == [notice_id]
+    assert pending[0]["claimed_at"] is None, (
+        "the notice is still claimed, so no later sweep will send it")
