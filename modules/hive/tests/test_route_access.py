@@ -5,6 +5,7 @@ multiuser_support): Arnold is sloan's, zack is aiden's, skippy is daniel's,
 and `orphan` registered before owners existed.
 """
 
+import asyncio
 import json
 import re
 
@@ -62,8 +63,11 @@ def people(builtin_console):
     admin = builtin_console.admin()
     sloan = builtin_console.settled_user(admin, "sloan", "sloans-own-pass")
     builtin_console.create_user(admin, "aiden", "aiden-temp-pass")
-    console_access.record_operation("op-sloan", "sloan")
-    console_access.record_operation("op-aiden", "aiden")
+    # Recorded through the real operation, on a loop of its own: the store
+    # is one SQLite connection on one worker thread, so a write made here is
+    # a write the next request sees.
+    asyncio.run(console_access.record_operation("op-sloan", "sloan"))
+    asyncio.run(console_access.record_operation("op-aiden", "aiden"))
     return admin, sloan
 
 
@@ -324,3 +328,45 @@ def test_the_canvas_review_tells_the_mind_to_fetch_the_snapshot_with_its_bearer(
     content = json.loads(sent["body"])["content"]
     assert "https://testserver/canvas/render.svg" in content
     assert "Authorization: Bearer $CANVAS_PUSH_TOKEN" in content
+
+
+def test_the_cutover_check_reaches_the_board_and_the_memory_pages_with_its_own_bearer(
+        builtin_console, monkeypatch):
+    """The one-database check runs outside a browser, so it has no session to
+    present — and an unchecked app is reported as unchecked rather than
+    counted as working. The three reads it makes take a bearer this install
+    issued for the purpose; nothing else does, and a wrong one is refused."""
+    monkeypatch.setenv("HIVE_SITE_ADMIN_TOKEN", "a-cutover-token")
+    anonymous = builtin_console.client()
+
+    for path in ("/api/kanban/data", "/api/memory/tables"):
+        with_token = anonymous.get(
+            path, headers={"Authorization": "Bearer a-cutover-token"})
+        assert with_token.status_code != 401, (path, with_token.text)
+        assert REFUSED not in with_token.headers, (path, with_token.text)
+
+        wrong = anonymous.get(
+            path, headers={"Authorization": "Bearer not-the-token"})
+        assert wrong.status_code == 401, (path, wrong.text)
+
+        without = anonymous.get(path, follow_redirects=False)
+        assert without.status_code in (303, 401), (path, without.text)
+
+    # The bearer admits those reads and nothing else: it is not a way into
+    # the console at large.
+    elsewhere = anonymous.get(
+        "/api/admin/users",
+        headers={"Authorization": "Bearer a-cutover-token"})
+    assert elsewhere.status_code in (401, 403), elsewhere.text
+
+
+def test_an_install_that_issued_no_cutover_token_admits_no_bearer(
+        builtin_console, monkeypatch):
+    """Where every install that is not mid-cutover sits: the routes answer to
+    a session and to nothing else, so an unset token is not an open door."""
+    monkeypatch.delenv("HIVE_SITE_ADMIN_TOKEN", raising=False)
+    anonymous = builtin_console.client()
+
+    refused = anonymous.get(
+        "/api/kanban/data", headers={"Authorization": "Bearer anything"})
+    assert refused.status_code == 401, refused.text

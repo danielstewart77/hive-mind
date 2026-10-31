@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import auth
 import configuration_data
 import main as main_mod
+import accounts
 
 _PAIRS = [
     ("claude_cli", "anthropic", "claude-sonnet-5"),
@@ -37,9 +38,9 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(configuration_data, "HIVE_MIND_MINDS_DIR", minds_dir)
     monkeypatch.setattr(configuration_data, "HIVE_MIND_MINDS_CONFIG_DIR", minds_dir)
     monkeypatch.setattr(main_mod, "_broker_minds_safe", AsyncMock(return_value=[]))
-    user = auth.create_user("daniel", "secret-pass", is_admin=True, replace=True)
+    user = accounts.make_user("daniel", "secret-pass", is_admin=True, replace=True)
     test_client = TestClient(main_mod.app)
-    test_client.cookies.set(auth.SESSION_COOKIE_NAME, auth.create_session_token(user))
+    test_client.cookies.set(auth.SESSION_COOKIE_NAME, accounts.session_token(user))
     test_client.minds_dir = minds_dir
     return test_client
 
@@ -202,7 +203,7 @@ def test_register_sends_the_scaffolded_identity_to_the_broker(client):
 
 
 def test_a_new_mind_is_scaffolded_for_the_owner_named_or_the_admin_creating_it(client):
-    auth.create_user("sloan", "sloans-own-pass")
+    accounts.make_user("sloan", "sloans-own-pass")
 
     assert _create(client, name="atlas", owner="Sloan").json()["registration"]["owner"] == "sloan"
     assert _create(client, name="borealis").status_code == 200
@@ -231,7 +232,7 @@ def _broker_writes(comms):
 
 
 def test_register_reaches_comms_with_the_admin_token_and_the_scaffolded_owner(client, comms):
-    auth.create_user("sloan", "sloans-own-pass")
+    accounts.make_user("sloan", "sloans-own-pass")
     assert _create(client, owner="sloan").status_code == 200
 
     assert client.post("/api/minds/atlas/register", json={}).status_code == 200

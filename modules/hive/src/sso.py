@@ -45,7 +45,6 @@ import hmac
 import os
 import re
 import secrets
-import sqlite3
 import time
 import urllib.parse
 from dataclasses import dataclass
@@ -55,6 +54,7 @@ import httpx
 import jwt
 
 import auth
+import store as data_store
 
 MICROSOFT_PATH = "/login/microsoft"
 MICROSOFT_CALLBACK_PATH = "/login/microsoft/callback"
@@ -157,69 +157,44 @@ def sign_in_methods(next_path: str = "/overview") -> list[dict[str, str]]:
 # ── matching an outside identity to an account ─────────────────────────
 
 
-def _bindings() -> sqlite3.Connection:
-    conn = sqlite3.connect(auth.init_auth_db(), isolation_level=None, timeout=10)
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS sso_bindings ("
-        "provider TEXT NOT NULL, subject TEXT NOT NULL, username TEXT NOT NULL, "
-        "created_at INTEGER NOT NULL, PRIMARY KEY (provider, subject), "
-        "UNIQUE (provider, username))"
-    )
-    return conn
+async def _bound_username(provider: str, subject: str) -> str | None:
+    row = await data_store.get_sso_binding(provider=provider,
+                                           subject=subject)
+    return None if row is None else str(row["username"])
 
 
-def _bound_username(provider: str, subject: str) -> str | None:
-    conn = _bindings()
-    try:
-        row = conn.execute(
-            "SELECT username FROM sso_bindings WHERE provider = ? AND subject = ?",
-            (provider, subject),
-        ).fetchone()
-    finally:
-        conn.close()
-    return row[0] if row else None
+async def _bind(provider: str, subject: str, username: str) -> None:
+    """Bind an outside identity to an account, once.
+
+    Refused when the account already holds a binding for this provider: the
+    email now belongs to someone else in the tenant, and the uniqueness on
+    (provider, username) is what says so. Checked in the same unit as the
+    write, since two first sign-ins from one tenant arriving together would
+    both read an empty table.
+    """
+    async with data_store.transaction():
+        taken = await data_store.sso_usernames(provider)
+        if username in taken:
+            existing = await data_store.get_sso_binding(provider=provider,
+                                                        subject=subject)
+            if existing is None or existing["username"] != username:
+                raise auth.NotSetUp()
+        await data_store.put_sso_binding(provider=provider, subject=subject,
+                                         username=username,
+                                         created_at=int(time.time()))
 
 
-def _bind(provider: str, subject: str, username: str) -> None:
-    conn = _bindings()
-    try:
-        conn.execute(
-            "INSERT INTO sso_bindings (provider, subject, username, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            (provider, subject, username, int(time.time())),
-        )
-    except sqlite3.IntegrityError as exc:
-        # The account is already bound to a different identity: the email
-        # now belongs to someone else in the tenant.
-        raise auth.NotSetUp() from exc
-    finally:
-        conn.close()
-
-
-def unbind(provider: str, username: str) -> bool:
+async def unbind(provider: str, username: str) -> bool:
     """Forget the outside identity bound to an account. The account's next
     sign-in by that method selects it by email again, as the first one did.
     Returns whether there was a binding."""
-    conn = _bindings()
-    try:
-        cursor = conn.execute(
-            "DELETE FROM sso_bindings WHERE provider = ? AND username = ?",
-            (provider, auth.normalize_username(username)),
-        )
-    finally:
-        conn.close()
-    return cursor.rowcount > 0
+    removed = await data_store.delete_sso_binding(
+        provider=provider, username=auth.normalize_username(username))
+    return removed > 0
 
 
-def bound_usernames(provider: str) -> set[str]:
-    conn = _bindings()
-    try:
-        rows = conn.execute(
-            "SELECT username FROM sso_bindings WHERE provider = ?", (provider,)
-        ).fetchall()
-    finally:
-        conn.close()
-    return {row[0] for row in rows}
+async def bound_usernames(provider: str) -> set[str]:
+    return await data_store.sso_usernames(provider)
 
 
 def _admit(store: auth.Store, user: dict | None) -> dict:
@@ -230,28 +205,34 @@ def _admit(store: auth.Store, user: dict | None) -> dict:
     return user
 
 
-def match_microsoft(store: auth.Store, *, subject: str, email: str | None) -> dict:
+async def match_microsoft(store: auth.Store, *, subject: str,
+                          email: str | None) -> dict:
     """The account a verified Microsoft identity signs in as."""
-    bound = _bound_username(MICROSOFT, subject)
+    bound = await _bound_username(MICROSOFT, subject)
     if bound is not None:
         try:
-            return _admit(store, store.get_user(bound))
+            return _admit(store, await store.get_user(bound))
         except auth.NotFound as exc:
             raise auth.NotSetUp() from exc
-    user = _admit(store, store.find_user(email=email) if email else None)
-    _bind(MICROSOFT, subject, user["username"])
+    user = _admit(store,
+                  await store.find_user(email=email) if email else None)
+    await _bind(MICROSOFT, subject, user["username"])
     return user
 
 
-def match_domain_account(store: auth.Store, domain_account: str | None) -> dict:
-    return _admit(store, store.find_user(domain_account=domain_account) if domain_account else None)
+async def match_domain_account(store: auth.Store,
+                               domain_account: str | None) -> dict:
+    return _admit(
+        store,
+        await store.find_user(domain_account=domain_account)
+        if domain_account else None)
 
 
-def start_session(store: auth.Store, user: dict, via: str) -> str:
+async def start_session(store: auth.Store, user: dict, via: str) -> str:
     """A console session for the account; refuses one the store would not
     honour on the next request (an account not granted the hive)."""
-    token = auth.issue_sso_token(store, user["username"], via)
-    if auth.user_for_sso_token(store, token) is None:
+    token = await auth.issue_sso_token(store, user["username"], via)
+    if await auth.user_for_sso_token(store, token) is None:
         raise auth.NotSetUp()
     return token
 
@@ -312,8 +293,9 @@ async def begin_microsoft(config: MicrosoftConfig, next_path: str) -> tuple[str,
             "code_challenge_method": "S256",
         }
     )
-    flow = auth.sign_flow(
-        {"state": state, "nonce": nonce, "verifier": verifier, "next": next_path}
+    flow = await auth.sign_flow(
+        {"state": state, "nonce": nonce, "verifier": verifier,
+         "next": next_path}
     )
     return f"{metadata['authorization_endpoint']}?{query}", flow
 
@@ -372,7 +354,7 @@ async def finish_microsoft(
 
     Returns (verified flow, claims). Raises SignInFailed.
     """
-    flow = auth.read_flow(flow_cookie)
+    flow = await auth.read_flow(flow_cookie)
     if not flow or not state or not hmac.compare_digest(str(flow.get("state")), state):
         raise SignInFailed("Microsoft sign-in was not started from this browser. Try again.", 400)
     if not code:

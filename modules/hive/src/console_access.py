@@ -9,11 +9,10 @@ Enforcement lives in route_access.AccessMiddleware.
 from __future__ import annotations
 
 import os
-import sqlite3
 import time
-from pathlib import Path
 
 import auth
+import store
 from route_access import (
     ADMIN,
     BEARER,
@@ -31,52 +30,26 @@ from route_access import (
 # ── operations: a request id resolves to whoever started it ────────────
 
 
-def _db_path() -> Path:
-    return auth.init_auth_db()
-
-
-def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(_db_path(), isolation_level=None, timeout=10)
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS operation_requesters ("
-        "request_id TEXT PRIMARY KEY, username TEXT NOT NULL, created_at INTEGER NOT NULL)"
-    )
-    return conn
-
-
-def record_operation(request_id: str, username: str) -> None:
+async def record_operation(request_id: str, username: str) -> None:
     """Remember who started an operation, so its status is theirs to read."""
     if not request_id or not username:
         return
-    conn = _connect()
-    try:
-        conn.execute(
-            "INSERT OR REPLACE INTO operation_requesters (request_id, username, created_at) "
-            "VALUES (?, ?, ?)",
-            (str(request_id), auth.normalize_username(username), int(time.time())),
-        )
-    finally:
-        conn.close()
+    await store.record_operation_requester(
+        str(request_id), auth.normalize_username(username), int(time.time()))
 
 
-def record_operation_from(result: object, user: dict | None) -> None:
+async def record_operation_from(result: object, user: dict | None) -> None:
     """Record the operation a hive-tools answer started, if it started one."""
     if not isinstance(result, dict) or not user:
         return
     for key in ("hitl_request_id", "request_id"):
         if result.get(key):
-            record_operation(str(result[key]), str(user.get("username") or ""))
+            await record_operation(str(result[key]),
+                                   str(user.get("username") or ""))
 
 
 async def requester_of(request_id: str) -> str | None:
-    conn = _connect()
-    try:
-        row = conn.execute(
-            "SELECT username FROM operation_requesters WHERE request_id = ?", (request_id,)
-        ).fetchone()
-    finally:
-        conn.close()
-    return row[0] if row else None
+    return await store.operation_requester(request_id)
 
 
 # ── the bearers a mind presents ────────────────────────────────────────
@@ -104,8 +77,32 @@ def design_push_token() -> str:
     return os.getenv("DESIGN_PUSH_TOKEN", "")
 
 
+def cutover_check_token() -> str:
+    """The credential the one-database check reads the console with.
+
+    Deliberately its own, with no fallback to the house tokens. The read it
+    admits — the whole board, and every row of the memory store — is the
+    reason it has to be a value this install issued for this purpose rather
+    than one every mind in the hive already holds.
+
+    It exists because the check cannot be made any other way. The board and
+    the memory pages answer to a signed-in admin session, so a check running
+    outside a browser has no credential to present, and an unchecked console
+    is reported as unchecked — which is not a pass. And a read-only
+    comparison could not answer the question anyway: the loader made the two
+    stores agree, so a console still reading its SQLite file answers
+    correctly. The check marks a row in Postgres and requires it back, which
+    is why it needs a way in at all.
+
+    Unset means these routes admit no bearer and only a session reaches
+    them, which is where every install that is not mid-cutover sits.
+    """
+    return os.getenv("HIVE_SITE_ADMIN_TOKEN", "")
+
+
 CANVAS = "canvas"
 DESIGN = "design"
+CUTOVER = "cutover"
 
 # ── the table ──────────────────────────────────────────────────────────
 
@@ -123,6 +120,10 @@ TABLE = RouteTable(
         DESIGN: BearerToken(
             design_push_token, unset_status=503,
             unset_message="DESIGN_PUSH_TOKEN is not configured",
+        ),
+        CUTOVER: BearerToken(
+            cutover_check_token, unset_status=401,
+            unset_message="Authentication required",
         ),
     },
 )
@@ -221,6 +222,19 @@ TABLE.add(
     "GET /api/design/symbol-roots",
 )
 
+# The three reads the one-database check makes, which a signed-in admin
+# reaches as before and the check reaches with its own bearer. They are here
+# rather than among the admin-only routes below because the bearer is part of
+# the rule: without it the console is the one app the cutover cannot verify,
+# and an unchecked app is reported as unchecked rather than counted as
+# working.
+TABLE.add(
+    Rule(ADMIN, bearer=CUTOVER),
+    "GET /api/kanban/data",
+    "GET /api/memory/tables",
+    "GET /api/memory/rows",
+)
+
 # House-wide: named so the table is complete, and so nobody mistakes a
 # missing line for an oversight. Each moves when its own story scopes it.
 TABLE.add(
@@ -272,7 +286,6 @@ TABLE.add(
     "GET /kanban/backlog",
     "GET /kanban/item/{record_id}",
     "GET /api/kanban/relations/{record_id}",
-    "GET /api/kanban/data",
     "GET /api/kanban/numbers",
     "GET /api/kanban/{kind}/{record_id}/descendants",
     "POST /api/kanban/epics",
@@ -288,8 +301,6 @@ TABLE.add(
     "GET /graph/data",
     "GET /graph/public-data",
     "GET /memory",
-    "GET /api/memory/tables",
-    "GET /api/memory/rows",
     "GET /rules",
     "GET /api/rules",
     "POST /api/rules",

@@ -25,6 +25,11 @@ requirement is exactly what marks the later pages stale, and those rows
 carry no feedback of their own — enforcing it there would freeze a stale
 page with no way back.
 
+No SQL lives here. Every read and write goes through `store`, which answers
+from the hive's Postgres or from this host's own file depending on one
+environment variable, so the three rules below are decided once and both
+stores obey them.
+
 **A refusal is loud.** A publish that tries to rewrite a protected item, or
 a save carrying a revision that has since moved, fails and says which items
 or which revision. Silently keeping the older value and reporting success
@@ -34,14 +39,11 @@ is how two browser tabs quietly delete each other's work.
 from __future__ import annotations
 
 import json
-import os
-import sqlite3
 import time
 import uuid
-from pathlib import Path
 from typing import Any
 
-from config import BASE_DIR
+import store
 
 PAGES = ("requirements", "tests", "functions")
 NOTICE_KINDS = ("feedback", "build", "accept")
@@ -107,53 +109,6 @@ class DesignRefused(DesignError):
         )
 
 
-def _db_path() -> Path:
-    return Path(os.getenv("HIVE_DB_PATH", str(BASE_DIR.parent / "data" / "hive.db")))
-
-
-def _connect() -> sqlite3.Connection:
-    path = _db_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(path)
-    connection.row_factory = sqlite3.Row
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS design_sessions (
-            id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            conversation_id TEXT,
-            surface TEXT,
-            mind_id TEXT,
-            repos TEXT NOT NULL DEFAULT '[]',
-            requirements TEXT NOT NULL DEFAULT '{}',
-            tests TEXT NOT NULL DEFAULT '{}',
-            functions TEXT NOT NULL DEFAULT '{}',
-            accepted TEXT NOT NULL DEFAULT '{}',
-            stale TEXT NOT NULL DEFAULT '{}',
-            revision INTEGER NOT NULL DEFAULT 1,
-            created_at REAL NOT NULL,
-            updated_at REAL NOT NULL
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS design_notices (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            design_id TEXT NOT NULL,
-            kind TEXT NOT NULL,
-            page TEXT NOT NULL,
-            body TEXT NOT NULL DEFAULT '',
-            created_at REAL NOT NULL,
-            claimed_at REAL,
-            delivered_at REAL
-        )
-        """
-    )
-    connection.commit()
-    return connection
-
-
 def _now() -> float:
     return time.time()
 
@@ -169,7 +124,7 @@ def new_item_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
-def _row_to_record(row: sqlite3.Row) -> dict[str, Any]:
+def _row_to_record(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": row["id"],
         "title": row["title"],
@@ -206,7 +161,7 @@ def ordered_items(record: dict[str, Any], page: str) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def create_design_session(
+async def create_design_session(
     title: str,
     *,
     conversation_id: str | None = None,
@@ -214,77 +169,51 @@ def create_design_session(
     mind_id: str | None = None,
     repos: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Open a design session, optionally already attached to a conversation."""
+    """Open a design session, optionally already attached to a conversation.
+
+    The five page columns take the schema's own defaults, so a session is
+    created with five empty objects without this restating what they are.
+    """
     clean_title = (title or "").strip()
     if not clean_title:
         raise DesignError("A design session needs a title")
     design_id = str(uuid.uuid4())
     now = _now()
-    with _connect() as connection:
-        connection.execute(
-            """
-            INSERT INTO design_sessions
-                (id, title, conversation_id, surface, mind_id, repos,
-                 requirements, tests, functions, accepted, stale, revision,
-                 created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, '{}', '{}', '{}', '{}', '{}', 1, ?, ?)
-            """,
-            (
-                design_id,
-                clean_title,
-                conversation_id,
-                surface,
-                mind_id,
-                json.dumps(list(repos or [])),
-                now,
-                now,
-            ),
-        )
-    return get_design_session(design_id)
+    await store.create_design_session(
+        design_id, clean_title, now, now, conversation_id=conversation_id,
+        surface=surface, mind_id=mind_id,
+        repos=json.dumps(list(repos or [])))
+    return await get_design_session(design_id)
 
 
-def list_design_sessions() -> list[dict[str, Any]]:
+async def list_design_sessions() -> list[dict[str, Any]]:
     """Every design session, most recently written first.
 
     Ordered by `updated_at`, which only a write moves. Opening a session to
     read it leaves it where it was, so the top of the list stays a record of
     what is actually in flight rather than of what was looked at last.
     """
-    with _connect() as connection:
-        rows = connection.execute(
-            "SELECT * FROM design_sessions ORDER BY updated_at DESC"
-        ).fetchall()
-    return [_row_to_record(row) for row in rows]
+    return [_row_to_record(row) for row in await store.design_sessions()]
 
 
-def get_design_session(design_id: str) -> dict[str, Any]:
-    with _connect() as connection:
-        row = connection.execute(
-            "SELECT * FROM design_sessions WHERE id = ?", (design_id,)
-        ).fetchone()
+async def get_design_session(design_id: str) -> dict[str, Any]:
+    row = await store.design_session(design_id)
     if row is None:
         raise DesignNotFound(f"No design session {design_id}")
     return _row_to_record(row)
 
 
-def delete_design_session(design_id: str) -> None:
+async def delete_design_session(design_id: str) -> None:
     """Remove a design session. An id the store does not hold is an error.
 
     Reporting success for an id that was never there tells a caller its
     delete landed somewhere, which is the one thing it did not do.
     """
-    with _connect() as connection:
-        cursor = connection.execute(
-            "DELETE FROM design_sessions WHERE id = ?", (design_id,)
-        )
-        if cursor.rowcount == 0:
-            raise DesignNotFound(f"No design session {design_id}")
-        connection.execute(
-            "DELETE FROM design_notices WHERE design_id = ?", (design_id,)
-        )
+    if await store.delete_design_session(design_id) == 0:
+        raise DesignNotFound(f"No design session {design_id}")
 
 
-def attach_design_session(
+async def attach_design_session(
     design_id: str,
     conversation_id: str | None,
     *,
@@ -304,18 +233,10 @@ def attach_design_session(
     that touches a design session, and a bump would invalidate whatever
     Daniel was halfway through typing each time it did.
     """
-    get_design_session(design_id)
-    with _connect() as connection:
-        connection.execute(
-            """
-            UPDATE design_sessions
-               SET conversation_id = ?, surface = COALESCE(?, surface),
-                   mind_id = COALESCE(?, mind_id), updated_at = ?
-             WHERE id = ?
-            """,
-            (conversation_id, surface, mind_id, _now(), design_id),
-        )
-    return get_design_session(design_id)
+    await get_design_session(design_id)
+    await store.attach_design_session(
+        design_id, conversation_id, _now(), surface=surface, mind_id=mind_id)
+    return await get_design_session(design_id)
 
 
 # ---------------------------------------------------------------------------
@@ -361,7 +282,7 @@ def _check_revision(record: dict[str, Any], revision: int | None) -> None:
         )
 
 
-def publish_page(
+async def publish_page(
     design_id: str,
     page: str,
     items: dict[str, dict[str, Any]],
@@ -384,7 +305,7 @@ def publish_page(
     a Mind and a browser tab quietly overwrite each other.
     """
     _check_page(page)
-    record = get_design_session(design_id)
+    record = await get_design_session(design_id)
     _check_revision(record, revision)
     existing: dict[str, dict[str, Any]] = record[page]
     mind_fields = _MIND_FIELDS[page]
@@ -459,13 +380,13 @@ def publish_page(
     else:
         stale[page] = False
 
-    return _write_page(
+    return await _write_page(
         design_id, page, merged, accepted=accepted, stale=stale,
         expected_revision=record["revision"],
     )
 
 
-def submit_page(
+async def submit_page(
     design_id: str,
     page: str,
     *,
@@ -485,7 +406,7 @@ def submit_page(
         raise DesignError(f"Unknown action: {action}")
     if action == "build" and page != "functions":
         raise DesignError("Build is only offered on the functions page")
-    record = get_design_session(design_id)
+    record = await get_design_session(design_id)
     _check_revision(record, revision)
     if action == "build":
         if not record["conversation_id"]:
@@ -497,7 +418,7 @@ def submit_page(
         # consults every gate rather than only the one on the page it was
         # pressed from. A disabled button is a courtesy; this is the check.
         for gate_page in PAGES:
-            allowed, reason = can_advance(design_id, gate_page)
+            allowed, reason = await can_advance(design_id, gate_page)
             if not allowed:
                 raise DesignError(f"{gate_page}: {reason}")
             if record["stale"].get(gate_page):
@@ -528,13 +449,13 @@ def submit_page(
     if page == "requirements":
         stale.update(_downstream_stale(record["requirements"], merged, record))
 
-    return _write_page(
+    return await _write_page(
         design_id, page, merged, accepted=accepted, stale=stale,
         expected_revision=record["revision"], notice=(action, page),
     )
 
 
-def accept_page(
+async def accept_page(
     design_id: str, page: str, *, revision: int | None = None
 ) -> dict[str, Any]:
     """Record that Daniel has accepted a page as it stands.
@@ -550,9 +471,9 @@ def accept_page(
     next one does not know it happened.
     """
     _check_page(page)
-    record = get_design_session(design_id)
+    record = await get_design_session(design_id)
     _check_revision(record, revision)
-    allowed, reason = can_advance(design_id, page)
+    allowed, reason = await can_advance(design_id, page)
     if not allowed:
         raise DesignError(reason)
     if record["stale"].get(page):
@@ -562,8 +483,9 @@ def accept_page(
         )
     accepted = dict(record["accepted"])
     accepted[page] = True
-    return _write_page(
-        design_id, page, record[page], accepted=accepted, stale=record["stale"],
+    return await _write_page(
+        design_id, page, record[page], accepted=accepted,
+        stale=record["stale"],
         expected_revision=record["revision"], notice=("accept", page),
     )
 
@@ -586,7 +508,7 @@ def _downstream_stale(
     return {page: True for page in ("tests", "functions") if record[page]}
 
 
-def _write_page(
+async def _write_page(
     design_id: str,
     page: str,
     items: dict[str, dict[str, Any]],
@@ -604,28 +526,17 @@ def _write_page(
     pass the check and both write, and the second one wins silently — which
     is the exact failure the revision exists to prevent.
 
-    A notice is queued on the same connection, so a submission cannot end up
-    stored with nobody ever told about it, or a notice orphaned against a
-    session that was deleted between the two writes.
+    A notice is queued inside the same unit of work, so a submission cannot
+    end up stored with nobody ever told about it, or a notice orphaned
+    against a session that was deleted between the two writes.
     """
-    with _connect() as connection:
-        cursor = connection.execute(
-            f"UPDATE design_sessions SET {page} = ?, accepted = ?, stale = ?,"
-            " revision = revision + 1, updated_at = ?"
-            " WHERE id = ? AND revision = ?",
-            (
-                json.dumps(items),
-                json.dumps(accepted),
-                json.dumps(stale),
-                _now(),
-                design_id,
-                expected_revision,
-            ),
-        )
-        if cursor.rowcount == 0:
-            row = connection.execute(
-                "SELECT revision FROM design_sessions WHERE id = ?", (design_id,)
-            ).fetchone()
+    now = _now()
+    async with store.transaction():
+        written = await store.write_design_page(
+            design_id, page, json.dumps(items), json.dumps(accepted),
+            json.dumps(stale), expected_revision, now)
+        if written == 0:
+            row = await store.design_session(design_id)
             if row is None:
                 raise DesignNotFound(f"No design session {design_id}")
             raise DesignConflict(
@@ -634,15 +545,11 @@ def _write_page(
             )
         if notice is not None:
             kind, notice_page = notice
-            connection.execute(
-                "INSERT INTO design_notices (design_id, kind, page, created_at)"
-                " VALUES (?, ?, ?, ?)",
-                (design_id, kind, notice_page, _now()),
-            )
-    return get_design_session(design_id)
+            await store.queue_notice(design_id, kind, notice_page, now)
+    return await get_design_session(design_id)
 
 
-def can_advance(design_id: str, page: str) -> tuple[bool, str]:
+async def can_advance(design_id: str, page: str) -> tuple[bool, str]:
     """Whether a page may be accepted, and why not when it may not.
 
     The tests page carries the real gate. A test naming a function that is
@@ -650,7 +557,7 @@ def can_advance(design_id: str, page: str) -> tuple[bool, str]:
     accepting the page would carry that fiction into the build.
     """
     _check_page(page)
-    record = get_design_session(design_id)
+    record = await get_design_session(design_id)
     items = record[page]
     if not items:
         return False, "This page has nothing on it yet"
@@ -692,35 +599,22 @@ def can_advance(design_id: str, page: str) -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 
 
-def _queue_notice(design_id: str, *, kind: str, page: str) -> None:
-    with _connect() as connection:
-        connection.execute(
-            "INSERT INTO design_notices (design_id, kind, page, created_at)"
-            " VALUES (?, ?, ?, ?)",
-            (design_id, kind, page, _now()),
-        )
+async def _queue_notice(design_id: str, *, kind: str, page: str) -> None:
+    await store.queue_notice(design_id, kind, page, _now())
 
 
-def pending_notices(design_id: str | None = None) -> list[dict[str, Any]]:
-    """Undelivered notices, oldest first, with the conversation to reach."""
-    query = (
-        "SELECT n.id, n.design_id, n.kind, n.page, n.created_at, n.claimed_at,"
-        "       d.title, d.conversation_id, d.surface, d.mind_id"
-        "  FROM design_notices n"
-        "  JOIN design_sessions d ON d.id = n.design_id"
-        " WHERE n.delivered_at IS NULL"
-    )
-    params: tuple[Any, ...] = ()
-    if design_id is not None:
-        query += " AND n.design_id = ?"
-        params = (design_id,)
-    query += " ORDER BY n.created_at ASC, n.id ASC"
-    with _connect() as connection:
-        rows = connection.execute(query, params).fetchall()
-    return [dict(row) for row in rows]
+async def pending_notices(design_id: str | None = None) -> list[dict[str, Any]]:
+    """Undelivered notices, oldest first, with the conversation to reach.
+
+    Joined to the session by the store rather than read in a second
+    statement: the delivery path needs the conversation, the surface and the
+    mind to send anything at all, and a notice whose session was deleted
+    between two reads is a send with nowhere to go.
+    """
+    return list(await store.pending_notices(design_id))
 
 
-def claim_notice(notice_id: int) -> dict[str, Any]:
+async def claim_notice(notice_id: int) -> dict[str, Any]:
     """Take a notice for delivery, so two senders cannot both send it.
 
     Claiming and delivering are separate because Build is the one signal
@@ -728,41 +622,22 @@ def claim_notice(notice_id: int) -> dict[str, Any]:
     one working tree, each unaware of the other. The claim is the guard, and
     it fails rather than returning a second copy.
     """
-    with _connect() as connection:
-        cursor = connection.execute(
-            "UPDATE design_notices SET claimed_at = ?"
-            " WHERE id = ? AND claimed_at IS NULL AND delivered_at IS NULL",
-            (_now(), notice_id),
-        )
-        if cursor.rowcount == 0:
-            raise DesignNotFound(f"Notice {notice_id} is not available to claim")
-        row = connection.execute(
-            "SELECT * FROM design_notices WHERE id = ?", (notice_id,)
-        ).fetchone()
+    row = await store.claim_notice(notice_id, _now())
+    if row is None:
+        raise DesignNotFound(f"Notice {notice_id} is not available to claim")
     return dict(row)
 
 
-def release_notice(notice_id: int) -> None:
+async def release_notice(notice_id: int) -> None:
     """Hand a claimed notice back when the send failed.
 
     Delivery is acknowledged after the fact, never assumed at hand-off: a
     transport that raised has delivered nothing, and a notice that stays
     claimed would be a submission Daniel never hears about again.
     """
-    with _connect() as connection:
-        connection.execute(
-            "UPDATE design_notices SET claimed_at = NULL"
-            " WHERE id = ? AND delivered_at IS NULL",
-            (notice_id,),
-        )
+    await store.release_notice(notice_id)
 
 
-def mark_delivered(notice_id: int) -> None:
-    with _connect() as connection:
-        cursor = connection.execute(
-            "UPDATE design_notices SET delivered_at = ?"
-            " WHERE id = ? AND delivered_at IS NULL",
-            (_now(), notice_id),
-        )
-        if cursor.rowcount == 0:
-            raise DesignNotFound(f"No undelivered notice {notice_id}")
+async def mark_delivered(notice_id: int) -> None:
+    if await store.mark_notice_delivered(notice_id, _now()) == 0:
+        raise DesignNotFound(f"No undelivered notice {notice_id}")

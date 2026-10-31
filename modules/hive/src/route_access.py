@@ -55,7 +55,6 @@ from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 
 import httpx
-from starlette.concurrency import run_in_threadpool
 from starlette.requests import HTTPConnection
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.routing import BaseRoute, Match, Mount
@@ -467,7 +466,7 @@ class AccessMiddleware:
     async def _decide(self, scope, rule: Rule, params: dict, page: bool) -> Response | None:
         conn = HTTPConnection(scope)
         try:
-            user = await run_in_threadpool(auth.resolve_user, conn)
+            user = await auth.resolve_user(conn)
         except auth.ServiceUnavailable as exc:
             return _unavailable(exc.message, page)
         if user is None:

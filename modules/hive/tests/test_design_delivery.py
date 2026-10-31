@@ -62,9 +62,9 @@ def gateway(monkeypatch):
     return StubGateway().install(monkeypatch)
 
 
-def _session_with_feedback(store, conversation_id="conv-1"):
-    record = store.create_design_session("Design sessions", conversation_id=conversation_id)
-    published = store.publish_page(
+async def _session_with_feedback(store, conversation_id="conv-1"):
+    record = await store.create_design_session("Design sessions", conversation_id=conversation_id)
+    published = await store.publish_page(
         record["id"],
         "requirements",
         {
@@ -73,7 +73,7 @@ def _session_with_feedback(store, conversation_id="conv-1"):
         },
         revision=record["revision"],
     )
-    return store.submit_page(
+    return await store.submit_page(
         published["id"],
         "requirements",
         items={"r2": {"feedback": "Does that remove its notices too?"}},
@@ -81,11 +81,11 @@ def _session_with_feedback(store, conversation_id="conv-1"):
     )
 
 
-def test_the_conversation_is_adopted_before_it_is_spoken_to(store, gateway):
-    record = _session_with_feedback(store)
-    notice_id = store.pending_notices(record["id"])[0]["id"]
+async def test_the_conversation_is_adopted_before_it_is_spoken_to(store, gateway):
+    record = await _session_with_feedback(store)
+    notice_id = (await store.pending_notices(record["id"]))[0]["id"]
 
-    assert asyncio.run(design_delivery.deliver_notice(notice_id)) is True
+    assert await design_delivery.deliver_notice(notice_id) is True
 
     assert gateway.paths == [
         "/sessions/conv-1/activate",
@@ -97,11 +97,11 @@ def test_the_conversation_is_adopted_before_it_is_spoken_to(store, gateway):
     assert gateway.calls[0]["authorization"] == "Bearer service-token"
 
 
-def test_the_message_carries_the_question_daniel_asked(store, gateway):
-    record = _session_with_feedback(store)
-    notice_id = store.pending_notices(record["id"])[0]["id"]
+async def test_the_message_carries_the_question_daniel_asked(store, gateway):
+    record = await _session_with_feedback(store)
+    notice_id = (await store.pending_notices(record["id"]))[0]["id"]
 
-    asyncio.run(design_delivery.deliver_notice(notice_id))
+    await design_delivery.deliver_notice(notice_id)
 
     content = gateway.calls[1]["body"]["content"]
     assert "Does that remove its notices too?" in content
@@ -109,8 +109,8 @@ def test_the_message_carries_the_question_daniel_asked(store, gateway):
     assert record["id"] in content
 
 
-def test_an_untouched_item_is_left_out_of_the_message(store):
-    record = _session_with_feedback(store)
+async def test_an_untouched_item_is_left_out_of_the_message(store):
+    record = await _session_with_feedback(store)
 
     content = design_delivery.compose_message(record, "requirements", "feedback")
 
@@ -118,12 +118,12 @@ def test_an_untouched_item_is_left_out_of_the_message(store):
     assert "Sessions are listed" not in content
 
 
-def test_a_delivered_notice_is_not_sent_again(store, gateway):
-    record = _session_with_feedback(store)
-    notice_id = store.pending_notices(record["id"])[0]["id"]
-    asyncio.run(design_delivery.deliver_notice(notice_id))
+async def test_a_delivered_notice_is_not_sent_again(store, gateway):
+    record = await _session_with_feedback(store)
+    notice_id = (await store.pending_notices(record["id"]))[0]["id"]
+    await design_delivery.deliver_notice(notice_id)
 
-    assert asyncio.run(design_delivery.deliver_notice(notice_id)) is False
+    assert await design_delivery.deliver_notice(notice_id) is False
 
     assert gateway.paths == [
         "/sessions/conv-1/activate",
@@ -131,37 +131,37 @@ def test_a_delivered_notice_is_not_sent_again(store, gateway):
     ]
 
 
-def test_a_failed_send_leaves_the_notice_pending_for_another_try(store, gateway):
-    record = _session_with_feedback(store)
-    notice_id = store.pending_notices(record["id"])[0]["id"]
+async def test_a_failed_send_leaves_the_notice_pending_for_another_try(store, gateway):
+    record = await _session_with_feedback(store)
+    notice_id = (await store.pending_notices(record["id"]))[0]["id"]
     gateway.fail_on = "/message"
 
-    assert asyncio.run(design_delivery.deliver_notice(notice_id)) is False
+    assert await design_delivery.deliver_notice(notice_id) is False
 
-    still_pending = store.pending_notices(record["id"])
+    still_pending = await store.pending_notices(record["id"])
     assert [notice["id"] for notice in still_pending] == [notice_id]
     assert still_pending[0]["claimed_at"] is None
 
     gateway.fail_on = None
-    assert asyncio.run(design_delivery.deliver_notice(notice_id)) is True
-    assert store.pending_notices(record["id"]) == []
+    assert await design_delivery.deliver_notice(notice_id) is True
+    assert await store.pending_notices(record["id"]) == []
 
 
-def test_a_submission_with_nothing_attached_stays_pending(store, gateway):
-    record = _session_with_feedback(store, conversation_id=None)
-    notice_id = store.pending_notices(record["id"])[0]["id"]
+async def test_a_submission_with_nothing_attached_stays_pending(store, gateway):
+    record = await _session_with_feedback(store, conversation_id=None)
+    notice_id = (await store.pending_notices(record["id"]))[0]["id"]
 
-    assert asyncio.run(design_delivery.deliver_notice(notice_id)) is False
+    assert await design_delivery.deliver_notice(notice_id) is False
 
     assert gateway.calls == []
-    assert [n["id"] for n in store.pending_notices(record["id"])] == [notice_id]
+    assert [n["id"] for n in await store.pending_notices(record["id"])] == [notice_id]
 
 
-def test_pending_work_is_sent_on_startup(store, gateway):
-    first = _session_with_feedback(store, conversation_id="conv-1")
-    second = _session_with_feedback(store, conversation_id="conv-2")
+async def test_pending_work_is_sent_on_startup(store, gateway):
+    first = await _session_with_feedback(store, conversation_id="conv-1")
+    second = await _session_with_feedback(store, conversation_id="conv-2")
 
-    assert asyncio.run(design_delivery.deliver_pending()) == 2
+    assert await design_delivery.deliver_pending() == 2
 
     assert gateway.paths == [
         "/sessions/conv-1/activate",
@@ -169,27 +169,27 @@ def test_pending_work_is_sent_on_startup(store, gateway):
         "/sessions/conv-2/activate",
         "/sessions/conv-2/message",
     ]
-    assert store.pending_notices(first["id"]) == []
-    assert store.pending_notices(second["id"]) == []
+    assert await store.pending_notices(first["id"]) == []
+    assert await store.pending_notices(second["id"]) == []
 
 
-def test_a_notice_owed_while_nothing_was_attached_is_sent_once_it_is(store, gateway):
-    record = _session_with_feedback(store, conversation_id=None)
-    assert asyncio.run(design_delivery.deliver_pending()) == 0
+async def test_a_notice_owed_while_nothing_was_attached_is_sent_once_it_is(store, gateway):
+    record = await _session_with_feedback(store, conversation_id=None)
+    assert await design_delivery.deliver_pending() == 0
     assert gateway.calls == []
 
-    store.attach_design_session(record["id"], "conv-late", surface="telegram")
+    await store.attach_design_session(record["id"], "conv-late", surface="telegram")
 
-    assert asyncio.run(design_delivery.deliver_pending()) == 1
+    assert await design_delivery.deliver_pending() == 1
     assert gateway.paths == [
         "/sessions/conv-late/activate",
         "/sessions/conv-late/message",
     ]
 
 
-def test_a_cancelled_send_releases_its_notice_rather_than_stranding_it(store, gateway):
-    record = _session_with_feedback(store)
-    notice_id = store.pending_notices(record["id"])[0]["id"]
+async def test_a_cancelled_send_releases_its_notice_rather_than_stranding_it(store, gateway):
+    record = await _session_with_feedback(store)
+    notice_id = (await store.pending_notices(record["id"]))[0]["id"]
 
     def cancelled(path, body, *, headers, stream):
         raise asyncio.CancelledError()
@@ -201,31 +201,31 @@ def test_a_cancelled_send_releases_its_notice_rather_than_stranding_it(store, ga
     module._post_sync = cancelled
     try:
         with pytest.raises(asyncio.CancelledError):
-            asyncio.run(design_delivery.deliver_notice(notice_id))
+            await design_delivery.deliver_notice(notice_id)
     finally:
         module._post_sync = original
 
-    pending = store.pending_notices(record["id"])
+    pending = await store.pending_notices(record["id"])
     assert [n["id"] for n in pending] == [notice_id]
     assert pending[0]["claimed_at"] is None
 
 
-def test_the_build_message_carries_the_whole_agreed_specification(store):
-    record = store.create_design_session("Design", conversation_id="conv-1")
-    record = store.publish_page(
+async def test_the_build_message_carries_the_whole_agreed_specification(store):
+    record = await store.create_design_session("Design", conversation_id="conv-1")
+    record = await store.publish_page(
         record["id"],
         "requirements",
         {"r1": {"order": 1, "text": "Every design session is listed"}},
         revision=record["revision"],
     )
-    record = store.publish_page(
+    record = await store.publish_page(
         record["id"],
         "functions",
         {"f1": {"order": 1, "name": "list_design_sessions", "changed": True,
                 "calls": ["_connect"]}},
         revision=record["revision"],
     )
-    record = store.publish_page(
+    record = await store.publish_page(
         record["id"],
         "tests",
         {"t1": {"order": 1, "sentence": "Listing reports every session",
@@ -252,9 +252,9 @@ def test_the_build_message_carries_the_whole_agreed_specification(store):
 # page advanced in the browser and nothing was ever told, so a design session
 # stalled at an empty next page with both parties waiting on the other.
 # ---------------------------------------------------------------------------
-def _accepted_requirements(store, conversation_id="conv-1"):
-    record = store.create_design_session("Design", conversation_id=conversation_id)
-    record = store.publish_page(
+async def _accepted_requirements(store, conversation_id="conv-1"):
+    record = await store.create_design_session("Design", conversation_id=conversation_id)
+    record = await store.publish_page(
         record["id"],
         "requirements",
         {"r1": {"order": 1, "text": "Sessions are listed"}},
@@ -263,30 +263,30 @@ def _accepted_requirements(store, conversation_id="conv-1"):
     return record
 
 
-def test_accepting_a_page_queues_a_notice_for_the_mind(store):
+async def test_accepting_a_page_queues_a_notice_for_the_mind(store):
     """Breaks if accept_page stops writing a notice, or writes one under a
     kind the delivery loop does not carry."""
-    record = _accepted_requirements(store)
-    assert store.pending_notices(record["id"]) == []
+    record = await _accepted_requirements(store)
+    assert await store.pending_notices(record["id"]) == []
 
-    accepted = store.accept_page(
+    accepted = await store.accept_page(
         record["id"], "requirements", revision=record["revision"]
     )
 
-    notices = store.pending_notices(accepted["id"])
+    notices = await store.pending_notices(accepted["id"])
     assert [(n["kind"], n["page"]) for n in notices] == [("accept", "requirements")]
 
 
-def test_the_accepted_page_is_delivered_into_the_conversation(store, gateway):
+async def test_the_accepted_page_is_delivered_into_the_conversation(store, gateway):
     """Breaks if the notice is queued but never sent, or sent without
     adopting the conversation first."""
-    record = _accepted_requirements(store)
-    accepted = store.accept_page(
+    record = await _accepted_requirements(store)
+    accepted = await store.accept_page(
         record["id"], "requirements", revision=record["revision"]
     )
-    notice_id = store.pending_notices(accepted["id"])[0]["id"]
+    notice_id = (await store.pending_notices(accepted["id"]))[0]["id"]
 
-    assert asyncio.run(design_delivery.deliver_notice(notice_id)) is True
+    assert await design_delivery.deliver_notice(notice_id) is True
 
     assert gateway.paths == [
         "/sessions/conv-1/activate",
@@ -294,11 +294,11 @@ def test_the_accepted_page_is_delivered_into_the_conversation(store, gateway):
     ]
 
 
-def test_an_acceptance_carries_the_page_that_was_accepted(store):
+async def test_an_acceptance_carries_the_page_that_was_accepted(store):
     """The feedback branch reports only flagged rows, so an acceptance
     composed through it arrives saying nothing was changed or asked. Breaks
     if accept falls back to that branch, or stops carrying the items."""
-    record = _accepted_requirements(store)
+    record = await _accepted_requirements(store)
 
     accepted_text = design_delivery.compose_message(record, "requirements", "accept")
     feedback_text = design_delivery.compose_message(record, "requirements", "feedback")

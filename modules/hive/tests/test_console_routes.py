@@ -14,19 +14,20 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import auth
 import main as main_mod
+import accounts
 
 
-def _authed_client(tmp_path, monkeypatch):
+async def _authed_client(tmp_path, monkeypatch):
     monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
-    user = auth.create_user("daniel", "secret-pass", is_admin=True, replace=True)
+    user = await auth.create_user("daniel", "secret-pass", is_admin=True, replace=True)
     client = TestClient(main_mod.app)
-    client.cookies.set(auth.SESSION_COOKIE_NAME, auth.create_session_token(user))
+    client.cookies.set(auth.SESSION_COOKIE_NAME, await auth.create_session_token(user))
     return client
 
 
-def test_home_redirects_authenticated_owner_to_overview(tmp_path, monkeypatch):
-    client = _authed_client(tmp_path, monkeypatch)
+async def test_home_redirects_authenticated_owner_to_overview(tmp_path, monkeypatch):
+    client = await _authed_client(tmp_path, monkeypatch)
 
     response = client.get("/", follow_redirects=False)
 
@@ -62,8 +63,8 @@ def test_console_pages_require_authentication(tmp_path, monkeypatch):
         assert response.headers["location"].startswith("/login?next="), path
 
 
-def test_console_pages_render_the_new_application_shell(tmp_path, monkeypatch):
-    client = _authed_client(tmp_path, monkeypatch)
+async def test_console_pages_render_the_new_application_shell(tmp_path, monkeypatch):
+    client = await _authed_client(tmp_path, monkeypatch)
 
     for path, marker in (
         ("/overview", "System overview"),
@@ -79,10 +80,10 @@ def test_console_pages_render_the_new_application_shell(tmp_path, monkeypatch):
         assert "console-sidebar" in response.text, path
 
 
-def test_a_console_page_is_never_served_from_cache(tmp_path, monkeypatch):
+async def test_a_console_page_is_never_served_from_cache(tmp_path, monkeypatch):
     """Each page carries its script inline, so a cached page is a cached app —
     and a stale tab's controls silently send nothing."""
-    client = _authed_client(tmp_path, monkeypatch)
+    client = await _authed_client(tmp_path, monkeypatch)
 
     for path in ("/minds", "/minds/ada", "/canvas", "/overview"):
         headers = client.get(path).headers
@@ -90,18 +91,18 @@ def test_a_console_page_is_never_served_from_cache(tmp_path, monkeypatch):
         assert headers["Pragma"] == "no-cache", path
 
 
-def test_configuration_surfaces_render_actionable_controls(tmp_path, monkeypatch):
-    client = _authed_client(tmp_path, monkeypatch)
+async def test_configuration_surfaces_render_actionable_controls(tmp_path, monkeypatch):
+    client = await _authed_client(tmp_path, monkeypatch)
 
     assert "Save and test" in client.get("/capability-nodes").text
     assert "Verify and register Mind" in client.get("/edge-minds/new").text
     assert "Save model" in client.get("/minds/ada").text
 
 
-def test_both_kinds_of_mind_are_reachable_from_the_console(tmp_path, monkeypatch):
+async def test_both_kinds_of_mind_are_reachable_from_the_console(tmp_path, monkeypatch):
     """Internal and edge minds are separate install paths, and the console has
     to offer both — /minds only ever linked to the edge form."""
-    client = _authed_client(tmp_path, monkeypatch)
+    client = await _authed_client(tmp_path, monkeypatch)
 
     setup = client.get("/setup").text
     minds = client.get("/minds").text
@@ -138,8 +139,8 @@ def test_new_configuration_mutations_require_authentication(tmp_path, monkeypatc
     assert all(response.status_code == 401 for response in requests)
 
 
-def test_legacy_topology_pages_redirect_to_new_names(tmp_path, monkeypatch):
-    client = _authed_client(tmp_path, monkeypatch)
+async def test_legacy_topology_pages_redirect_to_new_names(tmp_path, monkeypatch):
+    client = await _authed_client(tmp_path, monkeypatch)
 
     for old_path, new_path in (
         ("/outposts", "/edge-minds"),
@@ -151,8 +152,8 @@ def test_legacy_topology_pages_redirect_to_new_names(tmp_path, monkeypatch):
         assert response.headers["location"] == new_path
 
 
-def test_overview_consumers_normalize_live_data_before_rendering(tmp_path, monkeypatch):
-    client = _authed_client(tmp_path, monkeypatch)
+async def test_overview_consumers_normalize_live_data_before_rendering(tmp_path, monkeypatch):
+    client = await _authed_client(tmp_path, monkeypatch)
 
     for path in ("/overview", "/setup", "/settings/connections"):
         response = client.get(path)
@@ -171,8 +172,8 @@ def test_console_javascript_exports_overview_normalization():
     assert "Diagnostic" in source
 
 
-def test_mind_detail_renders_for_authenticated_owner(tmp_path, monkeypatch):
-    client = _authed_client(tmp_path, monkeypatch)
+async def test_mind_detail_renders_for_authenticated_owner(tmp_path, monkeypatch):
+    client = await _authed_client(tmp_path, monkeypatch)
 
     response = client.get("/minds/b9f2")
 
@@ -181,8 +182,8 @@ def test_mind_detail_renders_for_authenticated_owner(tmp_path, monkeypatch):
     assert "b9f2" in response.text
 
 
-def test_settings_redirects_to_general_and_scoped_pages_render(tmp_path, monkeypatch):
-    client = _authed_client(tmp_path, monkeypatch)
+async def test_settings_redirects_to_general_and_scoped_pages_render(tmp_path, monkeypatch):
+    client = await _authed_client(tmp_path, monkeypatch)
 
     root = client.get("/settings", follow_redirects=False)
     assert root.status_code == 303
@@ -194,14 +195,14 @@ def test_settings_redirects_to_general_and_scoped_pages_render(tmp_path, monkeyp
         assert f'data-settings-section="{section}"' in response.text
 
 
-def test_unknown_settings_section_is_not_found(tmp_path, monkeypatch):
-    client = _authed_client(tmp_path, monkeypatch)
+async def test_unknown_settings_section_is_not_found(tmp_path, monkeypatch):
+    client = await _authed_client(tmp_path, monkeypatch)
 
     assert client.get("/settings/not-real").status_code == 404
 
 
-def test_overview_api_combines_minds_sessions_and_service_health(tmp_path, monkeypatch):
-    client = _authed_client(tmp_path, monkeypatch)
+async def test_overview_api_combines_minds_sessions_and_service_health(tmp_path, monkeypatch):
+    client = await _authed_client(tmp_path, monkeypatch)
     minds = [
         {
             "name": "ada",
@@ -318,8 +319,8 @@ def test_unlabelled_mind_identifiers_are_not_rendered_in_console_views():
     assert 'h.escapeHtml((item.id || "").slice(0, 8))' not in rosters
 
 
-def test_edge_minds_api_returns_external_minds_as_managed_nodes(tmp_path, monkeypatch):
-    client = _authed_client(tmp_path, monkeypatch)
+async def test_edge_minds_api_returns_external_minds_as_managed_nodes(tmp_path, monkeypatch):
+    client = await _authed_client(tmp_path, monkeypatch)
     registry = [
         {
             "name": "arnold",
@@ -349,7 +350,7 @@ def test_edge_minds_api_returns_external_minds_as_managed_nodes(tmp_path, monkey
     assert response.json()["edge_minds"][0]["profile"] == "standard"
 
 
-def test_edge_mind_rows_require_topology_evidence_and_apply_profile_overrides(
+async def test_edge_mind_rows_require_topology_evidence_and_apply_profile_overrides(
     monkeypatch,
 ):
     monkeypatch.setenv("EDGE_MIND_PROFILES", "hex:sentinel")
@@ -368,7 +369,7 @@ def test_edge_mind_rows_require_topology_evidence_and_apply_profile_overrides(
         },
     ]
 
-    rows = main_mod._edge_mind_rows(registry)
+    rows = await main_mod._edge_mind_rows(registry)
 
     assert [row["name"] for row in rows] == ["hex"]
     assert rows[0]["profile"] == "sentinel"
@@ -402,10 +403,10 @@ _HARNESS_PROVIDER_PAIRS = [
 
 @pytest.mark.parametrize("harness,provider,model", _HARNESS_PROVIDER_PAIRS)
 @pytest.mark.parametrize("deployment", ["systemd", "container", "windows-task"])
-def test_edge_mind_bootstrap_covers_every_harness_provider_deployment(
+async def test_edge_mind_bootstrap_covers_every_harness_provider_deployment(
     tmp_path, monkeypatch, harness, provider, model, deployment
 ):
-    client = _authed_client(tmp_path, monkeypatch)
+    client = await _authed_client(tmp_path, monkeypatch)
     monkeypatch.setenv("OLLAMA_URL", "http://192.168.4.64:8899")
 
     response = client.post(
@@ -427,10 +428,10 @@ def test_edge_mind_bootstrap_covers_every_harness_provider_deployment(
     assert body["registration"]["model"] == model
 
 
-def test_edge_mind_bootstrap_emits_the_role_setup_sh_accepts(tmp_path, monkeypatch):
+async def test_edge_mind_bootstrap_emits_the_role_setup_sh_accepts(tmp_path, monkeypatch):
     """setup.sh's roles are operator|sandboxed. The console said `satellite`,
     so every satellite bootstrap it generated died on setup.sh's role check."""
-    client = _authed_client(tmp_path, monkeypatch)
+    client = await _authed_client(tmp_path, monkeypatch)
 
     ok = client.post(
         "/api/edge-minds/bootstrap", json=_bootstrap_body(role="sandboxed")
@@ -444,10 +445,10 @@ def test_edge_mind_bootstrap_emits_the_role_setup_sh_accepts(tmp_path, monkeypat
     assert stale.status_code == 400
 
 
-def test_edge_mind_bootstrap_rejects_pairs_the_cli_cannot_serve(
+async def test_edge_mind_bootstrap_rejects_pairs_the_cli_cannot_serve(
     tmp_path, monkeypatch
 ):
-    client = _authed_client(tmp_path, monkeypatch)
+    client = await _authed_client(tmp_path, monkeypatch)
 
     for harness, provider in [("claude_cli", "openai"), ("codex_cli", "anthropic")]:
         response = client.post(
@@ -465,10 +466,10 @@ def test_edge_mind_bootstrap_rejects_pairs_the_cli_cannot_serve(
         assert field in response.json()["detail"].lower()
 
 
-def test_edge_mind_bootstrap_validates_input_and_never_includes_credentials(
+async def test_edge_mind_bootstrap_validates_input_and_never_includes_credentials(
     tmp_path, monkeypatch
 ):
-    client = _authed_client(tmp_path, monkeypatch)
+    client = await _authed_client(tmp_path, monkeypatch)
     monkeypatch.setenv("EDGE_COMMS_URL", "http://192.168.4.64:8426")
     monkeypatch.setenv("EDGE_LUCENT_URL", "http://192.168.4.64:8425")
 
@@ -495,10 +496,10 @@ def test_edge_mind_bootstrap_validates_input_and_never_includes_credentials(
     assert invalid.status_code == 400
 
 
-def test_sentinel_edge_mind_bootstrap_is_rejected_until_bundle_exists(
+async def test_sentinel_edge_mind_bootstrap_is_rejected_until_bundle_exists(
     tmp_path, monkeypatch
 ):
-    client = _authed_client(tmp_path, monkeypatch)
+    client = await _authed_client(tmp_path, monkeypatch)
 
     response = client.post(
         "/api/edge-minds/bootstrap", json=_bootstrap_body(profile="sentinel")
@@ -510,8 +511,8 @@ def test_sentinel_edge_mind_bootstrap_is_rejected_until_bundle_exists(
     assert 'name="profile" value="sentinel"' not in page
 
 
-def test_ollama_provider_requires_a_url_and_rewrites_config(tmp_path, monkeypatch):
-    client = _authed_client(tmp_path, monkeypatch)
+async def test_ollama_provider_requires_a_url_and_rewrites_config(tmp_path, monkeypatch):
+    client = await _authed_client(tmp_path, monkeypatch)
     monkeypatch.delenv("OLLAMA_URL", raising=False)
 
     with patch.object(main_mod, "get_capability_endpoint", return_value=""):
@@ -533,10 +534,10 @@ def test_ollama_provider_requires_a_url_and_rewrites_config(tmp_path, monkeypatc
     assert response.json()["registration"]["model"] == "qwen3:8b"
 
 
-def test_edge_mind_bootstrap_preserves_an_empty_surface_selection(
+async def test_edge_mind_bootstrap_preserves_an_empty_surface_selection(
     tmp_path, monkeypatch
 ):
-    client = _authed_client(tmp_path, monkeypatch)
+    client = await _authed_client(tmp_path, monkeypatch)
 
     response = client.post(
         "/api/edge-minds/bootstrap",
@@ -547,8 +548,8 @@ def test_edge_mind_bootstrap_preserves_an_empty_surface_selection(
     assert "--surfaces none" in response.json()["command"]
 
 
-def test_install_options_are_the_forms_single_source_of_truth(tmp_path, monkeypatch):
-    client = _authed_client(tmp_path, monkeypatch)
+async def test_install_options_are_the_forms_single_source_of_truth(tmp_path, monkeypatch):
+    client = await _authed_client(tmp_path, monkeypatch)
     monkeypatch.setenv("OLLAMA_URL", "http://192.168.4.64:8899")
 
     options = client.get("/api/minds/install-options").json()
@@ -569,8 +570,8 @@ def test_install_options_are_the_forms_single_source_of_truth(tmp_path, monkeypa
             )
             assert response.status_code == 200, (harness, provider)
 
-def test_edge_mind_verify_checks_health_and_registers_with_comms(tmp_path, monkeypatch):
-    client = _authed_client(tmp_path, monkeypatch)
+async def test_edge_mind_verify_checks_health_and_registers_with_comms(tmp_path, monkeypatch):
+    client = await _authed_client(tmp_path, monkeypatch)
     mind_id = "6f12a60a-b5fd-4ba4-b2f1-07065a49145d"
     gateway_request = AsyncMock(return_value={"status": "registered"})
     metadata = patch.object(main_mod, "set_edge_mind_metadata")
@@ -610,8 +611,8 @@ def test_edge_mind_verify_checks_health_and_registers_with_comms(tmp_path, monke
     )
 
 
-def test_edge_mind_verify_rejects_mismatched_identity(tmp_path, monkeypatch):
-    client = _authed_client(tmp_path, monkeypatch)
+async def test_edge_mind_verify_rejects_mismatched_identity(tmp_path, monkeypatch):
+    client = await _authed_client(tmp_path, monkeypatch)
     with patch.object(
         main_mod,
         "_probe_edge_mind",
@@ -636,8 +637,8 @@ def test_edge_mind_verify_rejects_mismatched_identity(tmp_path, monkeypatch):
     assert "identity" in response.json()["detail"].lower()
 
 
-def test_edge_mind_verify_rejects_an_unready_runtime(tmp_path, monkeypatch):
-    client = _authed_client(tmp_path, monkeypatch)
+async def test_edge_mind_verify_rejects_an_unready_runtime(tmp_path, monkeypatch):
+    client = await _authed_client(tmp_path, monkeypatch)
     mind_id = "6f12a60a-b5fd-4ba4-b2f1-07065a49145d"
     with patch.object(
         main_mod,
@@ -663,8 +664,8 @@ def test_edge_mind_verify_rejects_an_unready_runtime(tmp_path, monkeypatch):
     assert "not ready" in response.json()["detail"].lower()
 
 
-def test_tools_api_returns_capability_catalog(tmp_path, monkeypatch):
-    client = _authed_client(tmp_path, monkeypatch)
+async def test_tools_api_returns_capability_catalog(tmp_path, monkeypatch):
+    client = await _authed_client(tmp_path, monkeypatch)
     status = {
         "present": True,
         "path": "/tools",
@@ -685,8 +686,8 @@ def test_tools_api_returns_capability_catalog(tmp_path, monkeypatch):
     assert response.json()["health"]["reachable"] is True
 
 
-def test_capability_nodes_api_groups_external_services_by_function(tmp_path, monkeypatch):
-    client = _authed_client(tmp_path, monkeypatch)
+async def test_capability_nodes_api_groups_external_services_by_function(tmp_path, monkeypatch):
+    client = await _authed_client(tmp_path, monkeypatch)
     monkeypatch.setenv("OLLAMA_URL", "http://ollama:11434")
     monkeypatch.setenv("PIHOLE_URL", "http://pihole")
     status = {
@@ -726,8 +727,8 @@ def test_capability_nodes_api_groups_external_services_by_function(tmp_path, mon
     assert by_id["hive-tools"]["capabilities"][0]["name"] == "Gmail"
 
 
-def test_capability_node_configuration_route_saves_endpoint(tmp_path, monkeypatch):
-    client = _authed_client(tmp_path, monkeypatch)
+async def test_capability_node_configuration_route_saves_endpoint(tmp_path, monkeypatch):
+    client = await _authed_client(tmp_path, monkeypatch)
     configured = {
         "summary": {"total": 1, "configured": 1, "healthy": 1, "attention": 0},
         "nodes": [{"id": "ollama", "configured": True, "endpoint": "http://ollama:11434"}],
@@ -754,8 +755,8 @@ def test_capability_node_configuration_route_saves_endpoint(tmp_path, monkeypatc
     save.assert_called_once_with("ollama", "http://ollama:11434")
 
 
-def test_inference_proxy_install_route_clones_fixed_repository(tmp_path, monkeypatch):
-    client = _authed_client(tmp_path, monkeypatch)
+async def test_inference_proxy_install_route_clones_fixed_repository(tmp_path, monkeypatch):
+    client = await _authed_client(tmp_path, monkeypatch)
     result = {
         "installed": True,
         "path": "/inference_proxy_repo",
@@ -769,8 +770,8 @@ def test_inference_proxy_install_route_clones_fixed_repository(tmp_path, monkeyp
     clone.assert_called_once_with()
 
 
-def test_ollama_models_api_lists_installed_and_running_models(tmp_path, monkeypatch):
-    client = _authed_client(tmp_path, monkeypatch)
+async def test_ollama_models_api_lists_installed_and_running_models(tmp_path, monkeypatch):
+    client = await _authed_client(tmp_path, monkeypatch)
     responses = {
         "/api/version": {"version": "0.30.8"},
         "/api/tags": {"models": [{"name": "qwen3:8b"}]},
@@ -790,8 +791,8 @@ def test_ollama_models_api_lists_installed_and_running_models(tmp_path, monkeypa
     assert response.json()["running"][0]["name"] == "qwen3-embedding:8b"
 
 
-def test_ollama_model_pull_and_delete_proxy_validated_requests(tmp_path, monkeypatch):
-    client = _authed_client(tmp_path, monkeypatch)
+async def test_ollama_model_pull_and_delete_proxy_validated_requests(tmp_path, monkeypatch):
+    client = await _authed_client(tmp_path, monkeypatch)
     request = AsyncMock(return_value={"status": "success"})
     with patch.object(main_mod, "_ollama_request", new=request):
         pull = client.post(
@@ -846,8 +847,8 @@ def test_pihole_unauthorized_probe_is_reachable_but_not_ready():
     assert health["authentication_required"] is True
 
 
-def test_capability_nodes_leave_optional_unconfigured_services_idle(tmp_path, monkeypatch):
-    client = _authed_client(tmp_path, monkeypatch)
+async def test_capability_nodes_leave_optional_unconfigured_services_idle(tmp_path, monkeypatch):
+    client = await _authed_client(tmp_path, monkeypatch)
     for name in ("HIVE_TOOLS_URL", "OLLAMA_URL", "OLLAMA_BASE_URL", "PIHOLE_URL"):
         monkeypatch.delenv(name, raising=False)
     async def probe(url, **kwargs):
@@ -899,7 +900,7 @@ def test_capability_nodes_leave_optional_unconfigured_services_idle(tmp_path, mo
     assert health.await_count == 4
 
 
-def test_capability_node_health_probes_run_concurrently(monkeypatch):
+async def test_capability_node_health_probes_run_concurrently(monkeypatch):
     monkeypatch.setenv("OLLAMA_URL", "http://ollama:11434")
     monkeypatch.setenv("PIHOLE_URL", "http://pihole")
 
@@ -930,7 +931,7 @@ def test_capability_node_health_probes_run_concurrently(monkeypatch):
         ):
             return await main_mod._capability_node_data()
 
-    assert asyncio.run(scenario())["summary"]["healthy"] == 6
+    assert (await scenario())["summary"]["healthy"] == 6
 
 
 def test_service_health_accepts_successful_non_json_response():
@@ -967,13 +968,13 @@ def test_service_health_accepts_successful_non_json_response():
     }
 
 
-def test_a_kokoro_sample_is_spoken_by_the_engine_and_names_no_mind(
+async def test_a_kokoro_sample_is_spoken_by_the_engine_and_names_no_mind(
     tmp_path, monkeypatch
 ):
     """A Kokoro voice belongs to the engine, as the catalogue already does, so
     the route names no Mind and asks the one speech server every Mind on this
     hive reads from."""
-    client = _authed_client(tmp_path, monkeypatch)
+    client = await _authed_client(tmp_path, monkeypatch)
     monkeypatch.setenv("KOKORO_VOICE_URL", "http://voice-kokoro:8422")
 
     with patch.object(
@@ -987,12 +988,12 @@ def test_a_kokoro_sample_is_spoken_by_the_engine_and_names_no_mind(
     assert sample.await_args.args == ("http://voice-kokoro:8422", "bm_george", "")
 
 
-def test_a_chatterbox_sample_is_spoken_by_the_chatterbox_server_for_one_mind(
+async def test_a_chatterbox_sample_is_spoken_by_the_chatterbox_server_for_one_mind(
     tmp_path, monkeypatch
 ):
     """Test 23: a reference clip lives in one Mind's own directory, so the
     engine decides the server and the Mind decides whose recording."""
-    client = _authed_client(tmp_path, monkeypatch)
+    client = await _authed_client(tmp_path, monkeypatch)
     monkeypatch.setenv("CHATTERBOX_VOICE_URL", "http://voice-chatterbox:8422")
 
     with patch.object(
@@ -1016,10 +1017,10 @@ def test_a_chatterbox_sample_is_spoken_by_the_chatterbox_server_for_one_mind(
     )
 
 
-def test_a_chatterbox_sample_without_a_mind_is_refused(tmp_path, monkeypatch):
+async def test_a_chatterbox_sample_without_a_mind_is_refused(tmp_path, monkeypatch):
     """Nothing could tell the server whose directory to look in, and the
     clip it fell back to would be a sample of the wrong voice."""
-    client = _authed_client(tmp_path, monkeypatch)
+    client = await _authed_client(tmp_path, monkeypatch)
 
     with patch.object(main_mod.mind_runtime, "sample_voice", new=AsyncMock()) as sample:
         response = client.post(
@@ -1031,10 +1032,10 @@ def test_a_chatterbox_sample_without_a_mind_is_refused(tmp_path, monkeypatch):
     sample.assert_not_awaited()
 
 
-def test_a_sample_naming_an_engine_that_does_not_exist_is_refused(
+async def test_a_sample_naming_an_engine_that_does_not_exist_is_refused(
     tmp_path, monkeypatch
 ):
-    client = _authed_client(tmp_path, monkeypatch)
+    client = await _authed_client(tmp_path, monkeypatch)
 
     with patch.object(main_mod.mind_runtime, "sample_voice", new=AsyncMock()) as sample:
         response = client.post(
@@ -1058,11 +1059,11 @@ def test_a_voice_sample_refuses_an_unauthenticated_caller(tmp_path, monkeypatch)
     assert response.status_code in (401, 303)
 
 
-def test_a_voice_sample_refuses_a_body_naming_no_voice(tmp_path, monkeypatch):
+async def test_a_voice_sample_refuses_a_body_naming_no_voice(tmp_path, monkeypatch):
     """`str(body.get("voice"))` made an absent key the literal string "None",
     which is truthy, matches the name pattern, and reaches the voice server as
     a voice — or lands in a Mind's runtime.yaml on the save route."""
-    client = _authed_client(tmp_path, monkeypatch)
+    client = await _authed_client(tmp_path, monkeypatch)
 
     with patch.object(main_mod.mind_runtime, "sample_voice", new=AsyncMock()) as sample:
         absent = client.post("/api/voices/sample", json={})
@@ -1073,9 +1074,9 @@ def test_a_voice_sample_refuses_a_body_naming_no_voice(tmp_path, monkeypatch):
     assert sample.await_count == 0
 
 
-def test_a_voice_sample_refuses_a_body_that_is_not_json(tmp_path, monkeypatch):
+async def test_a_voice_sample_refuses_a_body_that_is_not_json(tmp_path, monkeypatch):
     """The caller's mistake answers 400, not a 500 out of the JSON decoder."""
-    client = _authed_client(tmp_path, monkeypatch)
+    client = await _authed_client(tmp_path, monkeypatch)
 
     response = client.post(
         "/api/voices/sample",
@@ -1086,7 +1087,7 @@ def test_a_voice_sample_refuses_a_body_that_is_not_json(tmp_path, monkeypatch):
     assert response.status_code == 400
 
 
-def test_the_voice_panel_offers_every_clip_in_the_minds_directory(
+async def test_the_voice_panel_offers_every_clip_in_the_minds_directory(
     tmp_path, monkeypatch
 ):
     """Test 18: the other recordings in the directory are the alternatives.
@@ -1095,7 +1096,7 @@ def test_the_voice_panel_offers_every_clip_in_the_minds_directory(
     Mind that speaks by cloning, and the two takes sitting beside the active
     clip could only be selected by renaming files on the voice server's disk.
     """
-    client = _authed_client(tmp_path, monkeypatch)
+    client = await _authed_client(tmp_path, monkeypatch)
     clips = [
         {"name": "_dramitac_mono_voice_ref.wav", "size_bytes": 11, "modified_at": 1.0},
         {"name": "voice_ref.wav", "size_bytes": 12, "modified_at": 2.0},
@@ -1125,14 +1126,14 @@ def test_the_voice_panel_offers_every_clip_in_the_minds_directory(
     assert body["clip_missing"] is False
 
 
-def test_the_voice_panel_says_so_when_the_named_clip_is_gone(tmp_path, monkeypatch):
+async def test_the_voice_panel_says_so_when_the_named_clip_is_gone(tmp_path, monkeypatch):
     """Test 19: a missing recording and never having picked one differ.
 
     Under Chatterbox a Mind in this state does not speak at all, and the
     remedy is to pick another clip or re-upload that one — not the remedy for
     a Mind that has simply never been configured.
     """
-    client = _authed_client(tmp_path, monkeypatch)
+    client = await _authed_client(tmp_path, monkeypatch)
     with patch.object(
         main_mod, "_mind_gateway_url", new=AsyncMock(return_value="http://skippy:8421")
     ), patch.object(
@@ -1155,11 +1156,11 @@ def test_the_voice_panel_says_so_when_the_named_clip_is_gone(tmp_path, monkeypat
     assert body["voice"] == "deleted.wav"
 
 
-def test_a_kokoro_minds_voice_is_not_reported_as_a_missing_clip(
+async def test_a_kokoro_minds_voice_is_not_reported_as_a_missing_clip(
     tmp_path, monkeypatch
 ):
     """A Kokoro voice is not a file, so no directory can be missing it."""
-    client = _authed_client(tmp_path, monkeypatch)
+    client = await _authed_client(tmp_path, monkeypatch)
     with patch.object(
         main_mod, "_mind_gateway_url", new=AsyncMock(return_value="http://ada:8421")
     ), patch.object(
@@ -1178,10 +1179,10 @@ def test_a_kokoro_minds_voice_is_not_reported_as_a_missing_clip(
     assert body["clip_missing"] is False
 
 
-def test_saving_a_voice_writes_the_file_before_the_broker_row(tmp_path, monkeypatch):
+async def test_saving_a_voice_writes_the_file_before_the_broker_row(tmp_path, monkeypatch):
     """Test 20: the Mind re-registers from its file on its next start, so a
     row written against a file that never took would be undone anyway."""
-    client = _authed_client(tmp_path, monkeypatch)
+    client = await _authed_client(tmp_path, monkeypatch)
     order = []
 
     async def push(gateway_url, voice, engine=""):
@@ -1223,14 +1224,14 @@ def test_saving_a_voice_writes_the_file_before_the_broker_row(tmp_path, monkeypa
     }
 
 
-def test_saving_a_clip_the_mind_no_longer_has_is_refused(tmp_path, monkeypatch):
+async def test_saving_a_clip_the_mind_no_longer_has_is_refused(tmp_path, monkeypatch):
     """A clip removed under a loaded page would mute the Mind on save.
 
     Chatterbox resolves the name against the Mind's own directory and refuses
     when it finds nothing, so a save that took this value would report success
     and leave the Mind silent until somebody noticed.
     """
-    client = _authed_client(tmp_path, monkeypatch)
+    client = await _authed_client(tmp_path, monkeypatch)
 
     with patch.object(
         main_mod.mind_runtime, "push_voice", new=AsyncMock()
@@ -1246,11 +1247,11 @@ def test_saving_a_clip_the_mind_no_longer_has_is_refused(tmp_path, monkeypatch):
     assert push.await_count == 0
 
 
-def test_saving_a_kokoro_voice_is_not_checked_against_the_clip_directory(
+async def test_saving_a_kokoro_voice_is_not_checked_against_the_clip_directory(
     tmp_path, monkeypatch
 ):
     """A Kokoro voice is not a file, so no directory can be missing it."""
-    client = _authed_client(tmp_path, monkeypatch)
+    client = await _authed_client(tmp_path, monkeypatch)
 
     async def push(gateway_url, voice, engine=""):
         return {"voice": voice, "voice_engine": engine}
@@ -1268,9 +1269,9 @@ def test_saving_a_kokoro_voice_is_not_checked_against_the_clip_directory(
     assert response.status_code == 200
 
 
-def test_uploading_a_clip_whose_name_is_taken_is_refused(tmp_path, monkeypatch):
+async def test_uploading_a_clip_whose_name_is_taken_is_refused(tmp_path, monkeypatch):
     """The name a second take gets is the name the active clip already has."""
-    client = _authed_client(tmp_path, monkeypatch)
+    client = await _authed_client(tmp_path, monkeypatch)
 
     with patch.object(
         main_mod,
@@ -1286,9 +1287,9 @@ def test_uploading_a_clip_whose_name_is_taken_is_refused(tmp_path, monkeypatch):
     assert response.status_code == 409
 
 
-def test_saving_a_voice_refuses_an_engine_that_does_not_exist(tmp_path, monkeypatch):
+async def test_saving_a_voice_refuses_an_engine_that_does_not_exist(tmp_path, monkeypatch):
     """A Mind pointed at a server nobody runs goes silent, not noisy."""
-    client = _authed_client(tmp_path, monkeypatch)
+    client = await _authed_client(tmp_path, monkeypatch)
 
     with patch.object(main_mod.mind_runtime, "push_voice", new=AsyncMock()) as push:
         response = client.put(
@@ -1300,9 +1301,9 @@ def test_saving_a_voice_refuses_an_engine_that_does_not_exist(tmp_path, monkeypa
     assert push.await_count == 0
 
 
-def test_saving_a_voice_refuses_a_body_naming_no_voice(tmp_path, monkeypatch):
+async def test_saving_a_voice_refuses_a_body_naming_no_voice(tmp_path, monkeypatch):
     """The same idiom on the save route wrote `voice: None` into runtime.yaml."""
-    client = _authed_client(tmp_path, monkeypatch)
+    client = await _authed_client(tmp_path, monkeypatch)
 
     with patch.object(main_mod.mind_runtime, "push_voice", new=AsyncMock()) as push:
         response = client.put("/api/minds/skippy/voice", json={"voice": None})
@@ -1311,9 +1312,9 @@ def test_saving_a_voice_refuses_a_body_naming_no_voice(tmp_path, monkeypatch):
     assert push.await_count == 0
 
 
-def test_an_edge_mind_bootstrap_installs_for_the_owner_named_or_the_admin(tmp_path, monkeypatch):
-    client = _authed_client(tmp_path, monkeypatch)
-    auth.create_user("sloan", "sloans-own-pass")
+async def test_an_edge_mind_bootstrap_installs_for_the_owner_named_or_the_admin(tmp_path, monkeypatch):
+    client = await _authed_client(tmp_path, monkeypatch)
+    await auth.create_user("sloan", "sloans-own-pass")
 
     named = client.post("/api/edge-minds/bootstrap", json=_bootstrap_body(owner="Sloan"))
     default = client.post("/api/edge-minds/bootstrap", json=_bootstrap_body())
@@ -1325,11 +1326,11 @@ def test_an_edge_mind_bootstrap_installs_for_the_owner_named_or_the_admin(tmp_pa
     assert unknown.status_code == 400
 
 
-def test_edge_mind_verify_registers_with_the_admin_token_and_the_owner(
+async def test_edge_mind_verify_registers_with_the_admin_token_and_the_owner(
     tmp_path, monkeypatch, fake_comms
 ):
-    client = _authed_client(tmp_path, monkeypatch)
-    auth.create_user("sloan", "sloans-own-pass")
+    client = await _authed_client(tmp_path, monkeypatch)
+    await auth.create_user("sloan", "sloans-own-pass")
     monkeypatch.setenv("GATEWAY_API_URL", fake_comms.url)
     monkeypatch.setenv("COMMS_BEARER_TOKEN", "service-token")
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-token")

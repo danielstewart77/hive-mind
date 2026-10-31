@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import auth
 import design_data
 import main as main_mod
+import accounts
 
 PUSH_TOKEN = "design-push-token"  # secret-guard: allow
 
@@ -43,9 +44,11 @@ def anon(tmp_path, monkeypatch):
 @pytest.fixture()
 def daniel(tmp_path, monkeypatch):
     _env(tmp_path, monkeypatch)
-    user = auth.create_user("daniel", "secret-pass", is_admin=True, replace=True)
+    user = accounts.make_user("daniel", "secret-pass", is_admin=True,
+                              replace=True)
     client = TestClient(main_mod.app)
-    client.cookies.set(auth.SESSION_COOKIE_NAME, auth.create_session_token(user))
+    client.cookies.set(auth.SESSION_COOKIE_NAME,
+                       accounts.session_token(user))
     return client
 
 
@@ -277,7 +280,7 @@ def test_the_house_tokens_do_not_open_the_design_routes(tmp_path, monkeypatch):
         assert client.get(f"{main_mod.DESIGN_PREFIX}/sessions").status_code == 401
 
 
-def test_a_mind_with_no_symbols_route_is_reported_as_out_of_date(tmp_path, monkeypatch):
+async def test_a_mind_with_no_symbols_route_is_reported_as_out_of_date(tmp_path, monkeypatch):
     """Starlette answers a bare 404 for a path matching no route. Passed
     through as a 404 that reads as 'no such function', it would send Daniel
     hunting a typo instead of redeploying the mind."""
@@ -302,19 +305,15 @@ def test_a_mind_with_no_symbols_route_is_reported_as_out_of_date(tmp_path, monke
 
     monkeypatch.setattr(mind_symbols.httpx, "AsyncClient", lambda **kw: _Client())
 
-    import asyncio
-
     from fastapi import HTTPException
 
     with pytest.raises(HTTPException) as refusal:
-        asyncio.run(mind_symbols.resolve("http://mind:8421", "/repo", "x.py", "thing"))
+        await mind_symbols.resolve("http://mind:8421", "/repo", "x.py", "thing")
 
     assert refusal.value.status_code == 501
 
 
-def test_a_mind_refusing_a_repository_is_passed_through_as_a_404(monkeypatch):
-    import asyncio
-
+async def test_a_mind_refusing_a_repository_is_passed_through_as_a_404(monkeypatch):
     import httpx
     from fastapi import HTTPException
 
@@ -337,7 +336,7 @@ def test_a_mind_refusing_a_repository_is_passed_through_as_a_404(monkeypatch):
     monkeypatch.setattr(mind_symbols.httpx, "AsyncClient", lambda **kw: _Client())
 
     with pytest.raises(HTTPException) as refusal:
-        asyncio.run(mind_symbols.resolve("http://mind:8421", "/repo", "x.py", "thing"))
+        await mind_symbols.resolve("http://mind:8421", "/repo", "x.py", "thing")
 
     assert refusal.value.status_code == 404
     assert "will read" in refusal.value.detail

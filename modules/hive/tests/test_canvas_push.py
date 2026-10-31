@@ -8,6 +8,7 @@ from starlette.testclient import TestClient
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import main as main_mod
+import accounts
 
 
 def _client(tmp_path, monkeypatch, token="draw-token"):
@@ -191,7 +192,7 @@ class _FakeClient:
         return _FakeResp()
 
 
-def _authed_submit_client(tmp_path, monkeypatch):
+async def _authed_submit_client(tmp_path, monkeypatch):
     import auth
 
     monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "stb.db"))
@@ -201,9 +202,9 @@ def _authed_submit_client(tmp_path, monkeypatch):
     monkeypatch.setattr(main_mod, "_canvas_elements", [{"type": "path", "id": "p1", "d": "M0,0 L5,5"}])
     monkeypatch.setattr(main_mod.httpx, "AsyncClient", _FakeClient)
     _FakeClient.last = None
-    user = auth.create_user("daniel", "secret-pass", is_admin=True, replace=True)
+    user = await auth.create_user("daniel", "secret-pass", is_admin=True, replace=True)
     client = TestClient(main_mod.app)
-    client.cookies.set(auth.SESSION_COOKIE_NAME, auth.create_session_token(user))
+    client.cookies.set(auth.SESSION_COOKIE_NAME, await auth.create_session_token(user))
     return client
 
 
@@ -217,8 +218,8 @@ def test_canvas_submit_requires_auth(tmp_path, monkeypatch):
     assert response.status_code == 401
 
 
-def test_canvas_submit_dispatches_broker_message(tmp_path, monkeypatch):
-    client = _authed_submit_client(tmp_path, monkeypatch)
+async def test_canvas_submit_dispatches_broker_message(tmp_path, monkeypatch):
+    client = await _authed_submit_client(tmp_path, monkeypatch)
 
     response = client.post("/canvas/submit", json={"note": "look at the capture flow"})
 

@@ -4,24 +4,24 @@ import pytest
 import kanban_data as store
 
 
-def test_an_epic_becomes_a_feature_under_the_epic_it_is_given(tmp_path, monkeypatch):
+async def test_an_epic_becomes_a_feature_under_the_epic_it_is_given(tmp_path, monkeypatch):
     monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
-    target = store.create_epic("Gnome Shell stability")
-    parent = store.create_epic("Desktop")
-    changed = store.change_type(target["id"], "feature", parent["id"])
+    target = await store.create_epic("Gnome Shell stability")
+    parent = await store.create_epic("Desktop")
+    changed = await store.change_type(target["id"], "feature", parent["id"])
     assert changed["epic_id"] == parent["id"]
-    assert [f["id"] for f in store.list_features()] == [target["id"]]
+    assert [f["id"] for f in await store.list_features()] == [target["id"]]
 
 
-def test_an_epic_can_change_type_with_no_parent(tmp_path, monkeypatch):
+async def test_an_epic_can_change_type_with_no_parent(tmp_path, monkeypatch):
     monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
-    target = store.create_epic("Gnome Shell stability")
-    changed = store.change_type(target["id"], "feature")
+    target = await store.create_epic("Gnome Shell stability")
+    changed = await store.change_type(target["id"], "feature")
     assert changed["epic_id"] is None
 
 
-def test_an_epic_cannot_sit_under_itself(tmp_path, monkeypatch):
+async def test_an_epic_cannot_sit_under_itself(tmp_path, monkeypatch):
     monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
-    target = store.create_epic("Gnome Shell stability")
+    target = await store.create_epic("Gnome Shell stability")
     with pytest.raises(ValueError, match="own parent"):
-        store.change_type(target["id"], "feature", target["id"])
+        await store.change_type(target["id"], "feature", target["id"])

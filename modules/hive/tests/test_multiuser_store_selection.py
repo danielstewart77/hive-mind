@@ -15,6 +15,7 @@ from multiuser_support import (
 
 import auth
 from tests.conftest import Console
+import accounts
 
 SHIPPED_SECRET = "change-this-in-production"  # secret-guard: allow
 
@@ -35,7 +36,7 @@ def test_the_console_signs_in_against_hive_db_unless_auth_service_is_configured(
 ):
     monkeypatch.setenv("GATEWAY_API_URL", fake_comms.url)
     _no_auth_service(monkeypatch)
-    auth.create_user("local-only", "local-only-pass")
+    accounts.make_user("local-only", "local-only-pass")
     console = Console("builtin")
 
     _, local = console.sign_in("local-only", "local-only-pass")
@@ -60,7 +61,7 @@ def test_an_old_hive_session_cookie_is_refused_once_auth_service_is_the_store(
 ):
     monkeypatch.setenv("GATEWAY_API_URL", fake_comms.url)
     _no_auth_service(monkeypatch)
-    auth.create_user(SEED_USERNAME, "the-old-local-pass", is_admin=True)
+    accounts.make_user(SEED_USERNAME, "the-old-local-pass", is_admin=True)
     console = Console("builtin")
     client, signed_in = console.sign_in(SEED_USERNAME, "the-old-local-pass")
     assert signed_in.status_code == 303
@@ -78,7 +79,7 @@ def test_sign_in_service_down_is_a_503_and_never_falls_back_to_hive_db(
     monkeypatch, fake_comms
 ):
     monkeypatch.setenv("GATEWAY_API_URL", fake_comms.url)
-    auth.create_user(SEED_USERNAME, SEED_PASSWORD, is_admin=True)
+    accounts.make_user(SEED_USERNAME, SEED_PASSWORD, is_admin=True)
     _use_auth_service(monkeypatch, f"http://127.0.0.1:{free_port()}")
     console = Console("auth-service")
 
@@ -101,7 +102,7 @@ def test_a_fresh_install_with_no_key_never_signs_with_the_shipped_constant(
     monkeypatch.setenv("GATEWAY_API_URL", fake_comms.url)
     _no_auth_service(monkeypatch)
     monkeypatch.delenv("HIVE_SECRET_KEY", raising=False)
-    auth.create_user(SEED_USERNAME, SEED_PASSWORD, is_admin=True)
+    accounts.make_user(SEED_USERNAME, SEED_PASSWORD, is_admin=True)
     console = Console("builtin")
 
     client, signed_in = console.sign_in(SEED_USERNAME, SEED_PASSWORD)
@@ -116,28 +117,39 @@ def test_a_fresh_install_with_no_key_never_signs_with_the_shipped_constant(
 @pytest.mark.parametrize(
     "method, path", [("GET", "/"), ("GET", "/login"), ("POST", "/logout")]
 )
-def test_a_public_route_asks_the_sign_in_service_who_is_signed_in_off_the_event_loop(
+def test_a_public_route_asks_the_sign_in_service_through_an_async_client(
     monkeypatch, fake_comms, method, path
 ):
-    """A call to auth-service made on the event loop stalls every other
-    request the console is serving until it answers."""
+    """Who is signed in is asked of auth-service on every public route, and
+    asked with a client that does not hold the event loop while it waits.
+
+    The console used to make this call on a worker thread, because the store
+    was synchronous. It is a coroutine now, so the call is made on the loop
+    and must not block it — which is a property of the transport, not of
+    where the code runs. A sync `httpx.Client` put back here would never see
+    this mock transport, so the ask would not be recorded at all.
+    """
     monkeypatch.setenv("GATEWAY_API_URL", fake_comms.url)
     _use_auth_service(monkeypatch, "http://auth-service.invalid")
-    asked_from: list[str] = []
+    asked: list[str] = []
 
     def answer(request: httpx.Request) -> httpx.Response:
-        try:
-            asyncio.get_running_loop()
-            asked_from.append("the event loop")
-        except RuntimeError:
-            asked_from.append("a worker thread")
+        asked.append(str(request.url))
         return httpx.Response(401, json={"detail": "expired"})
 
     store = auth.get_store()
-    monkeypatch.setattr(store, "_client", httpx.Client(transport=httpx.MockTransport(answer)))
+    transport = httpx.MockTransport(answer)
+
+    def _async_only() -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=transport)
+
+    monkeypatch.setattr(store, "_loop_client", _async_only)
     client = Console("auth-service").client()
     client.cookies.set("auth_session", "a-token")
 
     client.request(method, path, follow_redirects=False)
-    assert asked_from
-    assert set(asked_from) == {"a worker thread"}
+
+    assert asked, "the console did not ask auth-service who is signed in"
+    # The ask itself is `/verify`; the logout route goes on to end the
+    # session, which is the second call on that path and not this one.
+    assert asked[0].endswith("/verify?site=hive"), asked
