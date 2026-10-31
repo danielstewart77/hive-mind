@@ -382,6 +382,16 @@ the report says so in those words.
     python -m unified_db.postflight
     python -m unified_db.postflight --restore
 
+The console is checked in two places, because it had two stores. Its board
+read is marked in `board.work_items`; its memory pages are marked in
+`memory.memories`, separately, because the console read lucent's file
+directly by path rather than through lucent — so a console left on that path
+would go on answering correctly from a store nothing writes to any more, and
+a single marker on the board would not see it. Both reads answer to a
+signed-in admin session, so the console issues a bearer of its own for the
+check (`HIVE_SITE_ADMIN_TOKEN`); an install that has not issued one is
+reported absent, which is not a pass.
+
 What the probe overwrote goes to a file *before* the write. The three columns
 it marks are all `NOT NULL` and load-bearing — a mind whose `model` is a name
 the proxy does not list has every spawn refused — and the window is an HTTP
