@@ -384,3 +384,44 @@ async def test_an_update_cannot_change_what_an_item_is(connected):
     await board.create_work_item(item, "story", "a story", 1)
     with pytest.raises(UnsettableColumn):
         await board.update_work_item(item, {"kind": "epic"})
+
+
+# -------------------------------------------- the two the console had no name for
+
+async def test_one_notice_is_read_by_id_whatever_state_it_is_in(
+        connected, clock, a_mind):
+    """The delivery path's other read answers only undelivered notices, so a
+    caller holding an id cannot tell "delivered" from "never existed"."""
+    design_id = _name("d")
+    await board.create_design_session(design_id, "a design", clock, clock,
+                                      mind_id=a_mind)
+    queued = await board.queue_notice(design_id, "build", "functions", clock,
+                                      body="go")
+    notice_id = queued["row"]["id"]
+
+    await board.mark_delivered(notice_id, clock + 1)
+
+    assert await board.pending_notices(design_id) == []
+    delivered = await board.notice(notice_id)
+    assert delivered is not None
+    assert delivered["body"] == "go"
+    assert delivered["delivered_at"] == clock + 1
+    assert await board.notice(999_999_999) is None
+
+
+async def test_a_setting_is_minted_once_and_every_later_write_reads_it_back(
+        connected, inspector):
+    """The console's cookie-signing key. Two workers reaching an empty
+    install at once would each generate one and each write it, and whichever
+    landed second would sign every later cookie and invalidate the ones the
+    other had already issued — the whole install signed out."""
+    key = _name("setting-")
+
+    first = await core.put_auth_setting_if_absent(key, "the-first-key")
+    second = await core.put_auth_setting_if_absent(key, "a-rival-key")
+
+    assert first["row"]["value"] == "the-first-key"
+    assert second["row"]["value"] == "the-first-key"
+    assert await inspector.fetchval(
+        'SELECT value FROM core."auth_settings" WHERE key = $1',
+        key) == "the-first-key"

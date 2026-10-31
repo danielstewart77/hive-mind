@@ -402,6 +402,18 @@ position. Postgres offers no equivalent of SQLite's file-wide write lock and
 row locks are no help, because the rows a reorder will renumber are not known
 until it has read them.
 
+`board.notice` reads one notice by id whatever state it is in, which the
+delivery path's own listing cannot: that answers only undelivered ones, so a
+caller holding an id gets nothing back and cannot tell "delivered" from
+"never existed". `core.put_auth_setting_if_absent` is the console minting its
+cookie-signing key on first use, as one statement — two workers reaching an
+empty install at once would each generate a key and each write it, and
+whichever landed second would sign every later cookie and invalidate the ones
+the other had already issued, which presents as the whole install being
+signed out. The `DO UPDATE` is a no-op write of the value already there,
+because `DO NOTHING` returns no row when the key exists and leaves the caller
+reading it in a second statement — the race this exists to close.
+
 `board.operation_requesters` is the fifth table and the console created it on
 demand, having never been asked: it reached the cutover with no rows and no
 home in the new database. It is carried rather than dropped because the two

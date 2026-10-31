@@ -581,6 +581,21 @@ async def queue_notice(design_id: str, kind: str, page: str,
     return await _execute_returning(unit, sql, *args)
 
 
+async def notice(notice_id: int, *,
+                 unit: Unit | None = None) -> Row | None:
+    """One notice by id, whatever state it is in.
+
+    Its own operation because the delivery path's other read answers only
+    undelivered ones: a caller holding an id and asking what became of it —
+    a replay, an operator looking at a notice that was never acknowledged —
+    gets nothing from that listing and cannot tell "delivered" from "never
+    existed".
+    """
+    return await _fetch_one(
+        unit, f"SELECT {select_list(NOTICES)} FROM {qualified(NOTICES)} "
+        'WHERE "id" = $1', notice_id)
+
+
 async def pending_notices(design_id: str | None = None, *,
                           unit: Unit | None = None) -> list[Row]:
     """Undelivered notices, oldest first, with the conversation to reach.
