@@ -14,7 +14,8 @@ How it is kept honest:
 
 * **Both sides are the real implementation.** `kanban_data.backlog_numbers`
   is imported from the console's own checkout and called, not reimplemented
-  here. `hive_data.board.backlog_numbers` is called through the layer.
+  here — through the console's own store, opened on the file being compared,
+  since that module reads whichever store it is pointed at. `hive_data.board.backlog_numbers` is called through the layer.
 * **Both sides hold the same rows.** The console's board is copied into a
   scratch Postgres database this script creates and drops, so a difference in
   the answers is a difference in the numbering and never a difference in the
@@ -59,13 +60,28 @@ DEFAULT_SQLITE = Path("/home/daniel/Storage/Dev/hive/data/hive.db")
 _SCHEMA_DIR = Path(hive_data.__file__).parent / "schema"
 
 
-def console_numbers(console_src: Path, db_path: Path) -> dict[str, str]:
-    """The numbers the console computes today, from the console's own code."""
+async def console_numbers(console_src: Path,
+                          db_path: Path) -> dict[str, str]:
+    """The numbers the console computes today, from the console's own code.
+
+    Through the console's own store, opened on the file being compared and
+    with `HIVE_DATABASE_URL` cleared: the console's numbering is async now
+    and reads whichever store that module is pointed at, so a report run on
+    the machine that serves the console would otherwise read the numbers out
+    of Postgres and compare them against themselves.
+    """
     sys.path.insert(0, str(console_src))
     os.environ["HIVE_DB_PATH"] = str(db_path)
+    os.environ[hive_data.config.DSN_VAR] = ""
     import kanban_data  # noqa: E402  - the path is set above on purpose
+    import store as console_store  # noqa: E402  - as above
 
-    return kanban_data.backlog_numbers()
+    await console_store.open(db_path)
+    try:
+        assert not console_store.on_postgres()
+        return await kanban_data.backlog_numbers()
+    finally:
+        await console_store.close()
 
 
 def sqlite_rows(db_path: Path) -> list[tuple]:
@@ -127,7 +143,7 @@ def main() -> int:
               "report may create and drop a database on.", file=sys.stderr)
         return 2
 
-    before = console_numbers(args.console_src, args.sqlite)
+    before = asyncio.run(console_numbers(args.console_src, args.sqlite))
     rows = sqlite_rows(args.sqlite)
     after, titles = asyncio.run(layer_numbers(admin_dsn, rows))
 
