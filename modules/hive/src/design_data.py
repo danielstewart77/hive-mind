@@ -99,6 +99,19 @@ class DesignConflict(DesignError):
     """The record moved since the caller last read it."""
 
 
+class DesignUnknownReference(DesignError):
+    """A design session named a mind or a conversation that does not exist.
+
+    Its own refusal because the one database has real foreign keys where the
+    split files could not: `design_sessions.mind_id` references the broker's
+    minds and `conversation_id` references the gateway's sessions. A mind
+    publishing its short name where its UUID belongs, or naming a
+    conversation that has since been swept, used to store a row that pointed
+    nowhere — it is refused now, and the refusal has to read as a bad
+    reference rather than as a fault in the console.
+    """
+
+
 class DesignRefused(DesignError):
     """A publish tried to rewrite items Daniel did not touch."""
 
@@ -107,6 +120,23 @@ class DesignRefused(DesignError):
         super().__init__(
             "Refusing to change items with no feedback: " + ", ".join(self.keys)
         )
+
+
+def _unknown_reference(mind_id: str | None,
+                       conversation_id: str | None) -> str:
+    """Which of the two names the store would not accept, said as both.
+
+    Both, rather than one guessed from the error: the refusal names a
+    constraint and the caller passed up to two references, so saying "one of
+    these two is not a row" is the whole of what is known.
+    """
+    named = [f"mind {mind_id!r}" for mind_id in (mind_id,) if mind_id]
+    named += [f"conversation {conversation_id!r}"
+              for conversation_id in (conversation_id,) if conversation_id]
+    which = " or ".join(named) if named else "a reference"
+    return (f"{which} is not a row this hive holds. A Mind is named by its "
+            "UUID rather than its short name, and a conversation that has "
+            "been swept cannot be attached to.")
 
 
 def _now() -> float:
@@ -179,10 +209,14 @@ async def create_design_session(
         raise DesignError("A design session needs a title")
     design_id = str(uuid.uuid4())
     now = _now()
-    await store.create_design_session(
-        design_id, clean_title, now, now, conversation_id=conversation_id,
-        surface=surface, mind_id=mind_id,
-        repos=json.dumps(list(repos or [])))
+    try:
+        await store.create_design_session(
+            design_id, clean_title, now, now,
+            conversation_id=conversation_id, surface=surface,
+            mind_id=mind_id, repos=json.dumps(list(repos or [])))
+    except store.UnknownReference as exc:
+        raise DesignUnknownReference(_unknown_reference(
+            mind_id, conversation_id)) from exc
     return await get_design_session(design_id)
 
 
@@ -234,8 +268,13 @@ async def attach_design_session(
     Daniel was halfway through typing each time it did.
     """
     await get_design_session(design_id)
-    await store.attach_design_session(
-        design_id, conversation_id, _now(), surface=surface, mind_id=mind_id)
+    try:
+        await store.attach_design_session(
+            design_id, conversation_id, _now(), surface=surface,
+            mind_id=mind_id)
+    except store.UnknownReference as exc:
+        raise DesignUnknownReference(_unknown_reference(
+            mind_id, conversation_id)) from exc
     return await get_design_session(design_id)
 
 

@@ -137,7 +137,39 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         log_event(log, "service.stopped", component="hive-control-plane")
+        # The delivery tasks go before the store does, and are waited for.
+        # Left to the loop's own cancellation they are cancelled *after* the
+        # store is closed, and `deliver_notice`'s own handler — the one that
+        # releases a claimed notice so a later sweep can retry it — then
+        # reaches a closed store and raises instead. The notice stays
+        # claimed, every later sweep steps over it, and a submission the page
+        # reported as saved is never delivered by any path.
+        await _settle_design_deliveries()
         await store.close()
+
+
+#: How long shutdown waits for a design delivery to put its notice back. The
+#: release is one statement; what it may be waiting on is the model turn the
+#: cancellation interrupts, and a shutdown that waited on that would be a
+#: restart that hangs for minutes.
+DELIVERY_SETTLE_SECONDS = 10.0
+
+
+async def _settle_design_deliveries() -> None:
+    """Cancel the in-flight deliveries and let each release its notice."""
+    tasks = [task for task in _DESIGN_DELIVERIES if not task.done()]
+    for task in tasks:
+        task.cancel()
+    if not tasks:
+        return
+    done, pending = await asyncio.wait(tasks,
+                                       timeout=DELIVERY_SETTLE_SECONDS)
+    if pending:
+        log_event(log, "design.delivery.not_settled",
+                  level=logging.WARNING, component="hive-control-plane",
+                  waiting=len(pending),
+                  detail="a claimed notice may still be claimed; the next "
+                         "start will step over it")
 
 
 app = FastAPI(
@@ -4656,6 +4688,10 @@ def _design_error(exc: Exception) -> HTTPException:
     """One mapping, so every design route refuses in the same shape."""
     if isinstance(exc, design_data.DesignNotFound):
         return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, design_data.DesignUnknownReference):
+        # The caller named a Mind or a conversation the hive does not hold.
+        # A refused input, not a fault here, so it must not read as a 500.
+        return HTTPException(status_code=400, detail=str(exc))
     if isinstance(exc, design_data.DesignConflict):
         return HTTPException(status_code=409, detail=str(exc))
     if isinstance(exc, design_data.DesignRefused):

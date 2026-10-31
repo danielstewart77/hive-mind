@@ -23,17 +23,28 @@ statements off the event loop: the file is on local disk and the statements
 are small, but blocking the loop for any of them would stall every other page
 the process is serving.
 
-Off the loop on **one** thread, not on the default pool. There is a single
-`sqlite3.Connection` and a `sqlite3.Connection` is not safe to use from two
-threads at once whatever `check_same_thread` says: two statements interleaved
-on it return each other's rows and raise `bad parameter or other API misuse`.
-Measured through hive-tools' live routes, that rejected valid bearer tokens
-with a 401 because a token read came back holding another request's row. The
-whole point of this half is to be the revert lever, so it has to be at least
-as sound as the synchronous code it replaced, which was serialised on the
-event loop by construction. One worker restores exactly that, and it is also
-what makes `check_same_thread=False` honest: the connection is touched by one
-thread for its whole life.
+**One connection per caller, each on the one thread that uses it.** A
+`sqlite3.Connection` is not safe to use from two threads at once whatever
+`check_same_thread` says — two statements interleaved on it return each
+other's rows — so a connection here is created, used and closed inside a
+single `asyncio.to_thread` call, and no two tasks ever hold the same one.
+
+That is the shape the synchronous code had, and keeping it is not a detail.
+A single shared connection with a transaction driven per request is a
+connection inside *somebody else's* `BEGIN IMMEDIATE`: a second request's
+ordinary write lands in that transaction and is discarded when the first
+request rolls back — a design notice claimed, sent and acknowledged becomes
+pending again because an unrelated board drag answered 404, and the next
+sweep sends it a second time. Two harnesses in one working tree, which is
+the one outcome the claim exists to prevent. A second `BEGIN IMMEDIATE` on
+one connection is also an error rather than a wait, so two tabs dragging
+cards would answer 500 where they used to take turns.
+
+A unit of work therefore owns a connection of its own for its whole life, on
+a thread of its own, and releases both when it ends. Two concurrent units
+serialise the way they always did: through SQLite's own file-wide write lock
+and `busy_timeout`, each waiting on its own thread rather than on the one
+thread that has to do the committing.
 
 The memory browser is the one operation whose two halves read two different
 *databases*. On SQLite it reads lucent's own file, mounted read-only; on
@@ -46,11 +57,13 @@ drift apart, and after the cutover there is one store.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import os
 import re
 import sqlite3
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Literal, TypeVar
@@ -75,14 +88,24 @@ _TABLE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 Row = dict[str, Any]
 
-_sqlite: sqlite3.Connection | None = None
-_postgres = False
-#: The one thread every SQLite statement runs on. See the module docstring.
-_worker: ThreadPoolExecutor | None = None
+#: Which half is answering: "sqlite", "postgres", or None for a store that is
+#: not open. One value rather than a flag and a connection, so a closed store
+#: cannot read as the other engine — a `_postgres = False` on shutdown sent
+#: every straggling call down the SQLite branch, where it raised only because
+#: there happened to be nothing for it to use.
+_engine: str | None = None
+
+#: The file the SQLite half opens, fixed when the store opens rather than
+#: read per connection: a test that moves `HIVE_DB_PATH` after opening would
+#: otherwise have half its operations on one file and half on another.
+_path: Path | None = None
+
 #: Whether this store was opened and then closed, as against never opened.
 #: The two are different sentences: the first is a straggling background task
 #: reaching a store the lifespan has already shut down, which is ordinary at
-#: shutdown, and the second is a route running outside the app.
+#: shutdown, and the second is a route running outside the app. Set only once
+#: an open has actually succeeded, so a failed open does not report as a
+#: shutdown — which is the one misdiagnosis `_unopened` exists to prevent.
 _was_open = False
 
 #: The unit of work the current task is inside, if any. A context variable
@@ -99,7 +122,7 @@ T = TypeVar("T")
 
 def on_postgres() -> bool:
     """Which store is answering. For the status the health route reports."""
-    return _postgres
+    return _engine == "postgres"
 
 
 def dsn_configured() -> bool:
@@ -123,48 +146,60 @@ async def open(db_path: str | Path | None = None) -> None:
     Called from the application's lifespan rather than at import, because
     opening a pool is async and because a module that connected on import
     would do it again in every test that imported it.
+
+    On the SQLite half this creates the tables and brings an older file
+    forward, once, on a connection of its own that is closed again — every
+    operation after it opens its own.
     """
-    global _sqlite, _postgres, _worker, _was_open
-    _was_open = True
+    global _engine, _path, _was_open
     if dsn_configured():
         import hive_data
 
         await hive_data.connect()
-        _postgres = True
-        _sqlite = None
+        _engine = "postgres"
+        _path = None
+        _was_open = True
+        await _seed_admins_group()
         return
-    _postgres = False
-    _worker = ThreadPoolExecutor(max_workers=1,
-                                 thread_name_prefix="hive-console-sqlite")
-    _sqlite = await _off_loop(lambda: _open_sqlite(db_path))
+    _path = Path(db_path) if db_path is not None else sqlite_path()
+    await asyncio.to_thread(_prepare_sqlite, _path)
+    _engine = "sqlite"
+    _was_open = True
+    await _seed_admins_group()
+
+
+#: The group admin *is*. Nothing else grants it, and the console's groups
+#: page offers no way to create it.
+ADMINS_GROUP = "admins"
+
+
+async def _seed_admins_group() -> None:
+    """Make sure the group admin is exists, on whichever store answers.
+
+    Unconditional, as it was before this module: the console's own schema
+    creation inserted it on every open. Left to the first
+    `create_user(is_admin=True)`, a store holding people but no admin yet has
+    no such group at all — the groups page omits it, and adding the first
+    admin to it answers "No such group", with nothing on screen saying the
+    row is simply missing.
+    """
+    await create_group(name=ADMINS_GROUP, created_at=int(time.time()))
 
 
 async def close() -> None:
-    global _sqlite, _postgres, _worker
-    if _postgres:
+    """Shut the store down. Nothing holds a connection afterwards.
+
+    The engine is cleared first, so a straggling background call arriving
+    after this reports a closed store rather than being sent down the other
+    half's branch.
+    """
+    global _engine, _path
+    engine, _engine = _engine, None
+    _path = None
+    if engine == "postgres":
         import hive_data
 
         await hive_data.close(drain_timeout=5.0)
-        _postgres = False
-        return
-    connection, _sqlite = _sqlite, None
-    worker, _worker = _worker, None
-    if connection is not None and worker is not None:
-        await asyncio.get_running_loop().run_in_executor(
-            worker, connection.close)
-    if worker is not None:
-        worker.shutdown(wait=True)
-
-
-def sqlite_connection() -> sqlite3.Connection | None:
-    """The SQLite connection this store is using, or None on Postgres.
-
-    For the length of the migration only, and for one caller: the test suite
-    sets up rows directly rather than through a route. It is the same
-    connection the operations use, so a test cannot set up state the store
-    would not see. It goes when the SQLite half goes.
-    """
-    return _sqlite
 
 
 #: Columns `work_items` gained after the board shipped. An older file is
@@ -281,23 +316,40 @@ CREATE TABLE IF NOT EXISTS sso_bindings (
 """
 
 
-def _open_sqlite(db_path: str | Path | None) -> sqlite3.Connection:
-    """Open the console's own file and bring an older one forward.
+#: How long a statement waits for another writer's lock before giving up.
+#: The same ten seconds every connection the console opened before this
+#: module existed waited: in rollback-journal mode a writer locks the whole
+#: file, so a board transaction allowed to hold longer than a login will wait
+#: is a failed login write.
+_BUSY_TIMEOUT_MS = 10_000
 
-    Runs on the worker thread, once, as the store opens — rather than on
-    every connect, which is what four modules each doing their own `CREATE
-    TABLE IF NOT EXISTS` amounted to.
+
+def _connect(path: Path) -> sqlite3.Connection:
+    """One connection, for the one thread that is about to use it.
+
+    `check_same_thread` is left at its default rather than turned off: a
+    connection here never leaves the thread that made it, and saying so is
+    what makes the rest of this half safe to reason about.
     """
-    path = Path(db_path) if db_path is not None else sqlite_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     # `isolation_level=None` — this store drives its own transactions.
     # Python's sqlite3 otherwise opens one implicitly before a write and
     # closes it on `commit()`, which fights an explicit `BEGIN IMMEDIATE`.
-    connection = sqlite3.connect(str(path), check_same_thread=False,
-                                 isolation_level=None, timeout=10)
+    connection = sqlite3.connect(str(path), isolation_level=None, timeout=10)
     connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA busy_timeout = 10000")
+    connection.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
     connection.execute("PRAGMA foreign_keys = ON")
+    return connection
+
+
+def _prepare_sqlite(path: Path) -> None:
+    """Create the console's own tables and bring an older file forward.
+
+    Runs once, as the store opens, rather than on every connect — which is
+    what four modules each doing their own `CREATE TABLE IF NOT EXISTS`
+    amounted to.
+    """
+    connection = _connect(path)
     connection.execute("BEGIN IMMEDIATE")
     try:
         for statement in _SCHEMA.split(";"):
@@ -337,9 +389,9 @@ def _open_sqlite(db_path: str | Path | None) -> sqlite3.Connection:
         connection.execute("COMMIT")
     except BaseException:
         connection.execute("ROLLBACK")
-        connection.close()
         raise
-    return connection
+    finally:
+        connection.close()
 
 
 def _unopened() -> RuntimeError:
@@ -362,56 +414,164 @@ def _unopened() -> RuntimeError:
         "running outside the app.")
 
 
-def _connection() -> sqlite3.Connection:
-    if _sqlite is None:
-        raise _unopened()
-    return _sqlite
+async def _off_loop(run: Callable[[sqlite3.Connection], T]) -> T:
+    """Run one piece of SQLite work, on a connection of its own.
 
-
-async def _off_loop(run: Callable[[], T]) -> T:
-    """Run one piece of SQLite work on the store's single worker thread."""
-    if _worker is None:
+    Inside a unit of work the unit's connection and the unit's thread are
+    used, so the statement is part of that transaction. Outside one, a
+    connection is opened, used and closed inside a single thread — nothing is
+    shared, so no task can land a statement inside another task's
+    transaction, and two writers take turns through SQLite's own file lock
+    rather than through this process.
+    """
+    unit = _sqlite_unit()
+    if unit is not None:
+        return await unit.run(run)
+    if _engine != "sqlite":
         raise _unopened()
-    return await asyncio.get_running_loop().run_in_executor(_worker, run)
+    path = _path
+    assert path is not None  # set with the engine, cleared with it
+
+    def once() -> T:
+        connection = _connect(path)
+        try:
+            return run(connection)
+        finally:
+            connection.close()
+
+    return await asyncio.to_thread(once)
 
 
 async def _one(sql: str, args: tuple[Any, ...] = ()) -> Row | None:
-    def run() -> Row | None:
-        row = _connection().execute(sql, args).fetchone()
+    def run(connection: sqlite3.Connection) -> Row | None:
+        row = connection.execute(sql, args).fetchone()
         return dict(row) if row is not None else None
 
     return await _off_loop(run)
 
 
 async def _all(sql: str, args: tuple[Any, ...] = ()) -> list[Row]:
-    def run() -> list[Row]:
-        return [dict(r) for r in _connection().execute(sql, args).fetchall()]
+    def run(connection: sqlite3.Connection) -> list[Row]:
+        return [dict(r) for r in connection.execute(sql, args).fetchall()]
 
     return await _off_loop(run)
 
 
 async def _write(sql: str, args: tuple[Any, ...] = ()) -> int:
-    def run() -> int:
+    def run(connection: sqlite3.Connection) -> int:
         # No `commit()`. The connection is in autocommit mode, so a statement
-        # outside a transaction has already landed, and one inside this
-        # store's own unit of work is the unit's to commit.
-        return _connection().execute(sql, args).rowcount
+        # outside a transaction has already landed, and one inside a unit of
+        # work is the unit's to commit.
+        return connection.execute(sql, args).rowcount
 
     return await _off_loop(run)
 
 
 # ---------------------------------------------------------------- units of work
 
-#: What the context variable holds on the SQLite half. The connection is
-#: module state, so there is nothing to carry — but "a unit is open" still has
-#: to be distinguishable from "no unit", which is what this sentinel is.
-_SQLITE_UNIT = object()
+class _SqliteUnit:
+    """A connection and the one thread that touches it, for one transaction.
+
+    Its own connection, not a shared one: a transaction driven on a
+    connection other tasks also write to puts their statements inside it, and
+    they are discarded when it rolls back. Its own thread, because the
+    waiting is the point — a second unit's `BEGIN IMMEDIATE` blocks until the
+    first commits, and if both waited on one thread the waiter would be
+    holding the thread the committer needs.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._worker = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="hive-console-unit")
+        self._connection: sqlite3.Connection | None = None
+        self._task: Any = None
+
+    async def run(self, action: Callable[[sqlite3.Connection], Any]) -> Any:
+        """Run one statement on this unit's connection, on its own thread.
+
+        Refused from any task but the one that opened it, which is what
+        `hive_data.Unit` does on the other half. A task created inside a unit
+        inherits it through the context variable, and a transaction is one
+        connection: two tasks writing through it can each roll back the
+        other's committed-looking work. Without this the same code would
+        silently work here and raise there, which is the one thing the revert
+        lever must not do.
+        """
+        running = asyncio.current_task()
+        if self._task is not None and running is not self._task:
+            raise RuntimeError(
+                "a unit of work cannot be used from a second task. A "
+                "transaction is one connection, so sharing it means each "
+                "task can roll back the other's committed-looking work. Do "
+                "the writes in the task that opened the unit, or open a "
+                "unit of its own.")
+        connection = self._connection
+        assert connection is not None  # opened by `begin`, cleared by `end`
+        return await asyncio.get_running_loop().run_in_executor(
+            self._worker, lambda: action(connection))
+
+    async def begin(self) -> None:
+        """Take the file's write lock, or release everything and raise.
+
+        The connection is opened on this unit's own thread and the `BEGIN`
+        runs there too, so a cancellation that lands while the lock is being
+        waited for cannot leave an open transaction behind on a connection
+        anybody else will ever see: this one is closed on the way out and
+        nothing else has a reference to it.
+        """
+        loop = asyncio.get_running_loop()
+
+        def start() -> sqlite3.Connection:
+            connection = _connect(self._path)
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+            except BaseException:
+                connection.close()
+                raise
+            return connection
+
+        try:
+            self._connection = await loop.run_in_executor(self._worker, start)
+        except BaseException:
+            self._worker.shutdown(wait=False)
+            raise
+        self._task = asyncio.current_task()
+
+    async def end(self, *, commit: bool) -> None:
+        connection, self._connection = self._connection, None
+        try:
+            if connection is not None:
+                await asyncio.get_running_loop().run_in_executor(
+                    self._worker,
+                    lambda: _finish(connection, commit=commit))
+        finally:
+            self._worker.shutdown(wait=False)
+
+
+def _finish(connection: sqlite3.Connection, *, commit: bool) -> None:
+    """Commit or roll back, and close either way.
+
+    The close is in a `finally` because a failed `COMMIT` — the file's lock
+    lost to another writer after a long transaction — would otherwise leak
+    the connection and leave the journal behind.
+    """
+    try:
+        connection.execute("COMMIT" if commit else "ROLLBACK")
+    finally:
+        connection.close()
+
+
+def _sqlite_unit() -> _SqliteUnit | None:
+    """The SQLite unit of work this task is inside, or None."""
+    unit = _unit.get()
+    return unit if isinstance(unit, _SqliteUnit) else None
 
 
 def _pg_unit() -> Any:
     """The `hive_data` unit this task is inside, or None."""
     unit = _unit.get()
-    return None if unit is _SQLITE_UNIT else unit
+    return None if isinstance(unit, _SqliteUnit) else unit
 
 
 def in_transaction() -> bool:
@@ -460,19 +620,36 @@ class transaction:
                 "outer one's work on its way out, so a failure after it "
                 "would roll back nothing. Open one unit at the top of the "
                 "operation.")
-        if _postgres:
+        if _engine == "postgres":
             import hive_data
 
             self._scope = hive_data.transaction()
             unit = await self._scope.__aenter__()
-            if self._hold is not None:
-                # First statement in the unit, which `Unit.hold` enforces: a
-                # hold taken after a read does not protect that read.
-                await unit.hold(self._hold)
+            try:
+                if self._hold is not None:
+                    # First statement in the unit, which `Unit.hold`
+                    # enforces: a hold taken after a read does not protect
+                    # that read.
+                    await unit.hold(self._hold)
+            except BaseException:
+                # `__aenter__` raising means `async with` never calls
+                # `__aexit__`, so the scope has to be ended here. Left
+                # abandoned it is a suspended async generator holding an open
+                # transaction, a pooled connection and the board's advisory
+                # lock until the event loop's finalizer reaches it — the
+                # exact hazard `hive_data` refuses a unit in a generator for,
+                # reintroduced under this module's name.
+                self._scope, scope = None, self._scope
+                await scope.__aexit__(type(None), None, None)
+                raise
             self._token = _unit.set(unit)
             return None
-        await _off_loop(lambda: _connection().execute("BEGIN IMMEDIATE"))
-        self._token = _unit.set(_SQLITE_UNIT)
+        if _engine != "sqlite":
+            raise _unopened()
+        assert _path is not None  # set with the engine, cleared with it
+        unit = _SqliteUnit(_path)
+        await unit.begin()
+        self._token = _unit.set(unit)
         return None
 
     async def __aexit__(self, kind: Any, value: Any,
@@ -488,19 +665,19 @@ class transaction:
         """
         # The context variable is reset before the commit or the rollback, so
         # the statement that ends the unit is not itself run as part of one.
+        unit = _unit.get()
         _unit.reset(self._token)
         if self._scope is not None:
             await self._scope.__aexit__(kind, value, trace)
             return False
-        await _off_loop(
-            lambda: _connection().execute(
-                "ROLLBACK" if kind is not None else "COMMIT"))
+        assert isinstance(unit, _SqliteUnit)
+        await unit.end(commit=kind is None)
         return False
 
 
 def board_transaction() -> transaction:
     """A unit of work that serialises against every other board write."""
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import board
 
         return transaction(hold=board.BOARD_KEY)
@@ -535,7 +712,7 @@ MIN_POSITION = 1
 
 
 async def work_items(kind: str | None = None) -> list[Row]:
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import board
 
         return await board.work_items(kind=kind, unit=_pg_unit())
@@ -546,7 +723,7 @@ async def work_items(kind: str | None = None) -> list[Row]:
 
 
 async def work_item(item_id: str) -> Row | None:
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import board
 
         return await board.work_item(item_id, unit=_pg_unit())
@@ -554,7 +731,7 @@ async def work_item(item_id: str) -> Row | None:
 
 
 async def children(parent_id: str | None, kind: str | None = None) -> list[Row]:
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import board
 
         return await board.children(parent_id, kind=kind, unit=_pg_unit())
@@ -568,7 +745,7 @@ async def children(parent_id: str | None, kind: str | None = None) -> list[Row]:
 
 
 async def descendants(item_id: str) -> list[Row]:
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import board
 
         return await board.descendants(item_id, unit=_pg_unit())
@@ -591,7 +768,7 @@ async def next_position() -> int:
     everything that has been deleted, or deleting from the middle hands the
     next row a slot it has to share.
     """
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import board
 
         return await board.next_position(unit=_pg_unit())
@@ -604,7 +781,7 @@ async def next_position() -> int:
 
 async def first_position() -> int:
     """A position before every row there is, so a new epic lands at the top."""
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import board
 
         return await board.first_position(unit=_pg_unit())
@@ -621,7 +798,7 @@ async def create_work_item(item_id: str, kind: str, title: str, position: int,
                            description: str = "", requirements: str = "",
                            acceptance_criteria: str = "",
                            qa_tests: str = "") -> int:
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import board
 
         written = await board.create_work_item(
@@ -642,7 +819,7 @@ async def create_work_item(item_id: str, kind: str, title: str, position: int,
 async def update_work_item(item_id: str, fields: dict[str, Any]) -> int:
     if not fields:
         return 0
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import board
 
         written = await board.update_work_item(item_id, fields,
@@ -667,7 +844,7 @@ async def retype(item_id: str, kind: str, *, status: str | None = None,
     board is briefly a feature with a story's status, or a row at a duplicate
     number, and the console reads it in between.
     """
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import board
 
         written = await board.retype(
@@ -687,7 +864,7 @@ async def place(item_id: str, parent_id: str | None, position: int) -> int:
     moved and whose position did not is a row holding a number that was only
     unique under the parent it left.
     """
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import board
 
         written = await board.place(item_id, parent_id, position,
@@ -702,15 +879,14 @@ async def renumber(ordered_ids: list[str], *, start: int = MIN_POSITION) -> int:
     """Give a sibling list consecutive positions."""
     if not ordered_ids:
         return 0
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import board
 
         written = await board.renumber(ordered_ids, start=start,
                                        unit=_pg_unit())
         return int(written["rows"])
 
-    def run() -> int:
-        connection = _connection()
+    def run(connection: sqlite3.Connection) -> int:
         changed = 0
         for position, item_id in enumerate(ordered_ids, start=start):
             changed += connection.execute(
@@ -730,7 +906,7 @@ async def delete_subtree(item_id: str) -> int:
     board while being unreachable from the only delete button. Postgres has a
     real key, deferred, checked once at commit with the whole subtree gone.
     """
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import board
 
         written = await board.delete_subtree(item_id, unit=_pg_unit())
@@ -745,6 +921,23 @@ async def delete_subtree(item_id: str) -> int:
         (item_id,))
 
 
+@contextlib.contextmanager
+def _reference_refused() -> Iterator[None]:
+    """Turn the access layer's missing-reference refusal into this module's.
+
+    Scoped to the writes that carry a reference a caller supplied, rather
+    than wrapped around everything: a `MissingReference` from a write whose
+    references are all this module's own is a bug here, and dressing it as a
+    bad input would hide it.
+    """
+    from hive_data.errors import MissingReference
+
+    try:
+        yield
+    except MissingReference as exc:
+        raise UnknownReference(str(exc)) from exc
+
+
 # ------------------------------------------------------------ design sessions
 
 async def create_design_session(design_id: str, title: str, created_at: float,
@@ -753,13 +946,14 @@ async def create_design_session(design_id: str, title: str, created_at: float,
                                 mind_id: str | None = None,
                                 conversation_id: str | None = None,
                                 repos: str = "[]") -> int:
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import board
 
-        written = await board.create_design_session(
-            design_id, title, created_at, updated_at, surface=surface,
-            mind_id=mind_id, conversation_id=conversation_id, repos=repos,
-            unit=_pg_unit())
+        with _reference_refused():
+            written = await board.create_design_session(
+                design_id, title, created_at, updated_at, surface=surface,
+                mind_id=mind_id, conversation_id=conversation_id,
+                repos=repos, unit=_pg_unit())
         return int(written["rows"])
     return await _write(
         "INSERT INTO design_sessions (id, title, conversation_id, surface,"
@@ -770,7 +964,7 @@ async def create_design_session(design_id: str, title: str, created_at: float,
 
 
 async def design_session(design_id: str) -> Row | None:
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import board
 
         return await board.design_session(design_id, unit=_pg_unit())
@@ -779,7 +973,7 @@ async def design_session(design_id: str) -> Row | None:
 
 
 async def design_sessions() -> list[Row]:
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import board
 
         return await board.design_sessions(unit=_pg_unit())
@@ -800,12 +994,13 @@ async def attach_design_session(design_id: str,
     the surface was decided when the page was opened. Writing None instead
     would blank the mind a page was published by on every attach.
     """
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import board
 
-        written = await board.attach_design_session(
-            design_id, conversation_id, updated_at, surface=surface,
-            mind_id=mind_id, unit=_pg_unit())
+        with _reference_refused():
+            written = await board.attach_design_session(
+                design_id, conversation_id, updated_at, surface=surface,
+                mind_id=mind_id, unit=_pg_unit())
         return int(written["rows"])
     return await _write(
         "UPDATE design_sessions SET conversation_id = ?,"
@@ -823,7 +1018,7 @@ async def write_design_page(design_id: str, page: str, items: str,
     not silently overwrite each other: a stale revision changes nothing and
     reports nothing changed.
     """
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import board
 
         written = await board.write_page(
@@ -844,15 +1039,14 @@ async def delete_design_session(design_id: str) -> int:
     key, so nothing in the database removes a session's notices when the
     session goes. The console's own delete did it in two, on one connection.
     """
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import board
 
         written = await board.delete_design_session(design_id,
                                                     unit=_pg_unit())
         return int(written["rows"])
 
-    def run() -> int:
-        connection = _connection()
+    def run(connection: sqlite3.Connection) -> int:
         removed = connection.execute(
             "DELETE FROM design_sessions WHERE id = ?", (design_id,)).rowcount
         connection.execute("DELETE FROM design_notices WHERE design_id = ?",
@@ -869,7 +1063,7 @@ async def queue_notice(design_id: str, kind: str, page: str,
     The id comes back because the database mints it on both halves, and the
     delivery path claims a notice by that id.
     """
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import board
 
         written = await board.queue_notice(design_id, kind, page, created_at,
@@ -877,8 +1071,8 @@ async def queue_notice(design_id: str, kind: str, page: str,
         row = written.get("row")
         return None if row is None else int(row["id"])
 
-    def run() -> int | None:
-        cursor = _connection().execute(
+    def run(connection: sqlite3.Connection) -> int | None:
+        cursor = connection.execute(
             "INSERT INTO design_notices (design_id, kind, page, body,"
             " created_at) VALUES (?, ?, ?, ?, ?)",
             (design_id, kind, page, body, created_at))
@@ -903,7 +1097,7 @@ _NOTICE_SELECT = """
 
 
 async def pending_notices(design_id: str | None = None) -> list[Row]:
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import board
 
         return await board.pending_notices(design_id, unit=_pg_unit())
@@ -923,15 +1117,14 @@ async def claim_notice(notice_id: int, claimed_at: float) -> Row | None:
     starts a harness writing code, and delivered twice is two processes
     editing one working tree, each unaware of the other.
     """
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import board
 
         written = await board.claim_notice(notice_id, claimed_at,
                                            unit=_pg_unit())
         return written.get("row")
 
-    def run() -> Row | None:
-        connection = _connection()
+    def run(connection: sqlite3.Connection) -> Row | None:
         taken = connection.execute(
             "UPDATE design_notices SET claimed_at = ?"
             " WHERE id = ? AND claimed_at IS NULL AND delivered_at IS NULL",
@@ -953,7 +1146,7 @@ async def release_notice(notice_id: int) -> int:
     Guarded on it not having been delivered, so an acknowledgement racing a
     failure report cannot un-deliver a notice that actually landed.
     """
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import board
 
         written = await board.release_notice(notice_id, unit=_pg_unit())
@@ -971,7 +1164,7 @@ async def mark_notice_delivered(notice_id: int, delivered_at: float) -> int:
     answer: delivery is acknowledged after the fact, and a second
     acknowledgement for one send is a second send nobody made.
     """
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import board
 
         written = await board.mark_delivered(notice_id, delivered_at,
@@ -986,16 +1179,13 @@ async def mark_notice_delivered(notice_id: int, delivered_at: float) -> int:
 async def notice(notice_id: int) -> Row | None:
     """One notice by id, whatever its state.
 
-    The only read here with no named counterpart in the access layer: every
-    other notice read is the delivery path's listing of undelivered ones.
+    The delivery path's own listing answers only undelivered notices, so a
+    caller holding an id cannot tell "delivered" from "never existed".
     """
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import board
-        from hive_data.schema import select_list
 
-        return await _pg_fetch_one(
-            f"SELECT {select_list(board.NOTICES)} "
-            'FROM board."design_notices" WHERE "id" = $1', notice_id)
+        return await board.notice(notice_id, unit=_pg_unit())
     return await _one(
         "SELECT id, design_id, kind, page, body, created_at, claimed_at,"
         " delivered_at FROM design_notices WHERE id = ?", (notice_id,))
@@ -1005,7 +1195,7 @@ async def notice(notice_id: int) -> Row | None:
 
 async def set_capability_endpoint(node_id: str, endpoint: str,
                                   updated_at: int) -> int:
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import board
 
         written = await board.set_capability_endpoint(
@@ -1019,7 +1209,7 @@ async def set_capability_endpoint(node_id: str, endpoint: str,
 
 
 async def capability_endpoint(node_id: str) -> Row | None:
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import board
 
         return await board.capability_endpoint(node_id, unit=_pg_unit())
@@ -1028,7 +1218,7 @@ async def capability_endpoint(node_id: str) -> Row | None:
 
 
 async def clear_capability_endpoint(node_id: str) -> int:
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import board
 
         written = await board.clear_capability_endpoint(node_id,
@@ -1040,7 +1230,7 @@ async def clear_capability_endpoint(node_id: str) -> int:
 
 async def set_edge_mind(name: str, profile: str, role: str, deployment: str,
                         updated_at: int) -> int:
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import board
 
         written = await board.set_edge_mind(name, profile, role, deployment,
@@ -1055,7 +1245,7 @@ async def set_edge_mind(name: str, profile: str, role: str, deployment: str,
 
 
 async def edge_mind(name: str) -> Row | None:
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import board
 
         return await board.edge_mind(name, unit=_pg_unit())
@@ -1064,7 +1254,7 @@ async def edge_mind(name: str) -> Row | None:
 
 
 async def edge_minds() -> list[Row]:
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import board
 
         return await board.edge_minds(unit=_pg_unit())
@@ -1075,7 +1265,7 @@ async def edge_minds() -> list[Row]:
 
 async def record_operation_requester(request_id: str, username: str,
                                      created_at: int) -> int:
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import board
 
         written = await board.record_operation_requester(
@@ -1093,7 +1283,7 @@ async def operation_requester(request_id: str) -> str | None:
 
     None is what the route table turns into "only an admin may read this".
     """
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import board
 
         row = await board.operation_requester(request_id, unit=_pg_unit())
@@ -1114,7 +1304,7 @@ _USER_COLUMNS = ("id", "username", "created_at", "disabled_at",
 
 
 async def get_user(username: str, *, private: bool = False) -> Row | None:
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import core
 
         return await core.get_user(username, private=private,
@@ -1126,7 +1316,7 @@ async def get_user(username: str, *, private: bool = False) -> Row | None:
 
 
 async def get_user_by_id(user_id: int, *, private: bool = False) -> Row | None:
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import core
 
         return await core.get_user_by_id(user_id, private=private,
@@ -1137,7 +1327,7 @@ async def get_user_by_id(user_id: int, *, private: bool = False) -> Row | None:
 
 
 async def list_users() -> list[Row]:
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import core
 
         return await core.list_users(unit=_pg_unit())
@@ -1146,7 +1336,7 @@ async def list_users() -> list[Row]:
 
 
 async def count_users() -> int:
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import core
 
         return await core.count_users(unit=_pg_unit())
@@ -1157,7 +1347,7 @@ async def count_users() -> int:
 async def find_user(*, email: str | None = None,
                     domain_account: str | None = None) -> Row | None:
     """The account an outside identity names, case-insensitively."""
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import core
 
         return await core.find_user(email=email,
@@ -1185,17 +1375,22 @@ async def create_user(*, username: str, password_hash: str, created_at: int,
     rather than be read afterwards by name — a read by name after the write
     is a second round trip that another writer can land between.
     """
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import core
 
         written = await core.create_user(
             username=username, password_hash=password_hash,
             created_at=created_at, must_change=must_change, email=email,
             domain_account=domain_account, unit=_pg_unit())
-        return written.get("row")
+        row = written.get("row")
+        # The access layer's insert returns every column, the hash included.
+        # Withheld here so the two halves hand back the same keys and so the
+        # rule the read side states — the hash travels only when a caller
+        # asks for it — is true of the write side as well.
+        return (None if row is None
+                else {column: row[column] for column in _USER_COLUMNS})
 
-    def run() -> Row | None:
-        connection = _connection()
+    def run(connection: sqlite3.Connection) -> Row | None:
         cursor = connection.execute(
             "INSERT INTO users (username, password_hash, created_at,"
             " must_change, email, domain_account) VALUES (?, ?, ?, ?, ?, ?)",
@@ -1225,7 +1420,7 @@ async def update_user(user_id: int, **fields: Any) -> int:
     if unknown:
         raise ValueError(
             f"a person's record has no settable column(s) {sorted(unknown)}")
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import core
 
         written = await core.update_user(user_id, unit=_pg_unit(), **fields)
@@ -1243,7 +1438,7 @@ async def bump_session_version(user_id: int) -> int:
     bump, and the whole point of the column is ending a session that is open
     right now.
     """
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import core
 
         written = await core.bump_session_version(user_id, unit=_pg_unit())
@@ -1254,7 +1449,7 @@ async def bump_session_version(user_id: int) -> int:
 
 
 async def groups_of(user_id: int) -> list[str]:
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import core
 
         return await core.groups_of(user_id, unit=_pg_unit())
@@ -1265,7 +1460,7 @@ async def groups_of(user_id: int) -> list[str]:
 
 
 async def group_usernames(group_name: str) -> list[str]:
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import core
 
         return await core.group_usernames(group_name, unit=_pg_unit())
@@ -1277,7 +1472,7 @@ async def group_usernames(group_name: str) -> list[str]:
 
 
 async def get_group(name: str) -> Row | None:
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import core
 
         return await core.get_group(name, unit=_pg_unit())
@@ -1286,7 +1481,7 @@ async def get_group(name: str) -> Row | None:
 
 
 async def list_groups() -> list[Row]:
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import core
 
         return await core.list_groups(unit=_pg_unit())
@@ -1300,7 +1495,7 @@ async def create_group(*, name: str, created_at: int) -> int:
     which the console turns into a conflict rather than reporting a creation
     that did not happen.
     """
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import core
 
         written = await core.create_group(name=name, created_at=created_at,
@@ -1312,7 +1507,7 @@ async def create_group(*, name: str, created_at: int) -> int:
 
 
 async def add_group_member(*, group_name: str, user_id: int) -> int:
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import core
 
         written = await core.add_group_member(group_name=group_name,
@@ -1326,7 +1521,7 @@ async def add_group_member(*, group_name: str, user_id: int) -> int:
 
 
 async def remove_group_member(*, group_name: str, user_id: int) -> int:
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import core
 
         written = await core.remove_group_member(group_name=group_name,
@@ -1345,7 +1540,7 @@ async def enabled_members_besides(*, group_name: str, user_id: int) -> int:
     admins disabling each other at the same moment both read a list that
     still holds the other, and both pass a check made against it.
     """
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import core
 
         return await core.enabled_members_besides(group_name=group_name,
@@ -1362,7 +1557,7 @@ async def enabled_members_besides(*, group_name: str, user_id: int) -> int:
 # ----------------------------------------------------------------- auth settings
 
 async def get_auth_setting(key: str) -> str | None:
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import core
 
         row = await core.get_auth_setting(key, unit=_pg_unit())
@@ -1378,21 +1573,16 @@ async def put_auth_setting_if_absent(key: str, value: str) -> str:
     One statement rather than a read and a write. The cookie-signing key is
     generated on first use, and two workers reaching that at once with a read
     followed by a write issue two keys — which signs every cookie with
-    whichever one landed second and signs the rest of the install out. On
-    Postgres the `DO UPDATE` is a no-op write of the existing value, which is
-    how one statement both inserts and reports what is there.
+    whichever one landed second and signs the rest of the install out.
     """
-    if _postgres:
-        row = await _pg_fetch_one(
-            'INSERT INTO core."auth_settings" ("key", "value") '
-            'VALUES ($1, $2) ON CONFLICT ("key") DO UPDATE '
-            'SET "value" = core."auth_settings"."value" RETURNING "value"',
-            key, value)
-        assert row is not None  # the statement always returns its row
-        return str(row["value"])
+    if _engine == "postgres":
+        from hive_data import core
 
-    def run() -> str:
-        connection = _connection()
+        written = await core.put_auth_setting_if_absent(key, value,
+                                                         unit=_pg_unit())
+        return str(written["row"]["value"])
+
+    def run(connection: sqlite3.Connection) -> str:
         connection.execute(
             "INSERT INTO auth_settings (key, value) VALUES (?, ?)"
             " ON CONFLICT(key) DO NOTHING", (key, value))
@@ -1406,7 +1596,7 @@ async def put_auth_setting_if_absent(key: str, value: str) -> str:
 # ---------------------------------------------------------------- sso bindings
 
 async def get_sso_binding(*, provider: str, subject: str) -> Row | None:
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import core
 
         return await core.get_sso_binding(provider=provider, subject=subject,
@@ -1418,7 +1608,7 @@ async def get_sso_binding(*, provider: str, subject: str) -> Row | None:
 
 async def put_sso_binding(*, provider: str, subject: str, username: str,
                           created_at: int) -> int:
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import core
 
         written = await core.put_sso_binding(
@@ -1433,7 +1623,7 @@ async def put_sso_binding(*, provider: str, subject: str, username: str,
 
 
 async def sso_usernames(provider: str) -> set[str]:
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import core
 
         return set(await core.sso_usernames(provider, unit=_pg_unit()))
@@ -1444,7 +1634,7 @@ async def sso_usernames(provider: str) -> set[str]:
 
 
 async def delete_sso_binding(*, provider: str, username: str) -> int:
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import core
 
         written = await core.delete_sso_binding(provider=provider,
@@ -1458,6 +1648,17 @@ async def delete_sso_binding(*, provider: str, username: str) -> int:
 
 # -------------------------------------------------------------- memory browser
 
+class UnknownReference(RuntimeError):
+    """A write named a row another table does not hold.
+
+    The one database has real foreign keys where the split files could not,
+    so a reference that used to be stored and simply point nowhere is now
+    refused at the write. Raised as this module's own class rather than
+    `hive_data`'s, so a caller catching it does not have to import the access
+    layer — which on the SQLite half is not installed at all.
+    """
+
+
 class MemoryUnavailable(RuntimeError):
     """The memory store is not reachable from this console.
 
@@ -1467,6 +1668,24 @@ class MemoryUnavailable(RuntimeError):
     look at, and folding that into an empty listing would report a store with
     no tables.
     """
+
+
+async def _off_loop_lucent(run: Callable[[sqlite3.Connection], T]) -> T:
+    """Run one read of lucent's own file, on a thread of its own.
+
+    Not through `_off_loop`: that opens the console's file and, inside a unit
+    of work, would run on the unit's connection and its thread. This is a
+    different database, read-only, and nothing about it belongs in a
+    transaction over the console's own rows.
+    """
+    def once() -> T:
+        connection = _open_lucent_readonly()
+        try:
+            return run(connection)
+        finally:
+            connection.close()
+
+    return await asyncio.to_thread(once)
 
 
 def _open_lucent_readonly() -> sqlite3.Connection:
@@ -1486,27 +1705,23 @@ def _memory_cell(value: Any) -> Any:
 
 async def memory_tables() -> list[Row]:
     """The memory store's tables, each with how many rows it holds."""
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import memory
 
         return await memory.tables(unit=_pg_unit())
 
-    def run() -> list[Row]:
-        connection = _open_lucent_readonly()
-        try:
-            names = [r["name"] for r in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-                " AND name NOT LIKE 'sqlite_%' ORDER BY name").fetchall()]
-            out = []
-            for name in names:
-                count = connection.execute(
-                    f'SELECT COUNT(*) AS c FROM "{name}"').fetchone()
-                out.append({"name": name, "row_count": int(count["c"])})
-            return out
-        finally:
-            connection.close()
+    def run(connection: sqlite3.Connection) -> list[Row]:
+        names = [r["name"] for r in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+            " AND name NOT LIKE 'sqlite_%' ORDER BY name").fetchall()]
+        out = []
+        for name in names:
+            count = connection.execute(
+                f'SELECT COUNT(*) AS c FROM "{name}"').fetchone()
+            out.append({"name": name, "row_count": int(count["c"])})
+        return out
 
-    return await _off_loop(run)
+    return await _off_loop_lucent(run)
 
 
 async def memory_rows(table: str, *, limit: int = MEMORY_LIMIT_DEFAULT,
@@ -1516,7 +1731,7 @@ async def memory_rows(table: str, *, limit: int = MEMORY_LIMIT_DEFAULT,
     None is what the console turns into a 404: a name that matches nothing is
     a typo in a URL, not a failure of the store.
     """
-    if _postgres:
+    if _engine == "postgres":
         from hive_data import memory
 
         return await memory.rows(table, limit=limit, offset=offset,
@@ -1526,51 +1741,25 @@ async def memory_rows(table: str, *, limit: int = MEMORY_LIMIT_DEFAULT,
     safe_limit = max(1, min(int(limit), MEMORY_LIMIT_MAX))
     safe_offset = max(0, int(offset))
 
-    def run() -> Row | None:
-        connection = _open_lucent_readonly()
-        try:
-            names = {r["name"] for r in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-                " AND name NOT LIKE 'sqlite_%'").fetchall()}
-            if table not in names:
-                return None
-            columns = [r["name"] for r in connection.execute(
-                f'PRAGMA table_info("{table}")').fetchall()]
-            total = int(connection.execute(
-                f'SELECT COUNT(*) AS c FROM "{table}"').fetchone()["c"])
-            rows = [
-                {column: _memory_cell(row[column]) for column in columns}
-                for row in connection.execute(
-                    f'SELECT * FROM "{table}" LIMIT ? OFFSET ?',
-                    (safe_limit, safe_offset)).fetchall()
-            ]
-            return {
-                "table": table, "columns": columns, "rows": rows,
-                "total": total, "limit": safe_limit, "offset": safe_offset,
-            }
-        finally:
-            connection.close()
+    def run(connection: sqlite3.Connection) -> Row | None:
+        names = {r["name"] for r in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+            " AND name NOT LIKE 'sqlite_%'").fetchall()}
+        if table not in names:
+            return None
+        columns = [r["name"] for r in connection.execute(
+            f'PRAGMA table_info("{table}")').fetchall()]
+        total = int(connection.execute(
+            f'SELECT COUNT(*) AS c FROM "{table}"').fetchone()["c"])
+        rows = [
+            {column: _memory_cell(row[column]) for column in columns}
+            for row in connection.execute(
+                f'SELECT * FROM "{table}" LIMIT ? OFFSET ?',
+                (safe_limit, safe_offset)).fetchall()
+        ]
+        return {
+            "table": table, "columns": columns, "rows": rows,
+            "total": total, "limit": safe_limit, "offset": safe_offset,
+        }
 
-    return await _off_loop(run)
-
-
-# ------------------------------------------------------------------- internals
-
-async def _pg_fetch_one(sql: str, *args: Any) -> Row | None:
-    """One row off the Postgres half, inside this task's unit if it has one.
-
-    For the two operations with no named counterpart in the access layer: a
-    notice read by id, and the insert-or-read that mints the cookie-signing
-    key. Everything else goes through a named operation there.
-    """
-    import hive_data
-    from hive_data.rows import as_row
-
-    unit = _pg_unit()
-    if unit is not None:
-        return await unit.fetch_one(sql, *args)
-
-    async def run(connection: Any) -> Row | None:
-        return as_row(await connection.fetchrow(sql, *args))
-
-    return await hive_data.run(run)
+    return await _off_loop_lucent(run)

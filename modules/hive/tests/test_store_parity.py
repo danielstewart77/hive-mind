@@ -26,6 +26,7 @@ tracked file.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import uuid
 from collections.abc import Awaitable, Callable
@@ -547,3 +548,210 @@ def test_the_postgres_half_reads_memory_out_of_the_one_database(
     assert "content" in columns and "embedding" in columns
     assert contents == ["a memory on postgres"]
     assert embedding == "<vector 4096 dims>"
+
+
+# ---------------------------------------------------------------------------
+# what one request's transaction may do to another's
+
+
+def test_two_board_mutations_at_once_both_land(tmp_path: Path) -> None:
+    """They take turns rather than one of them answering 500.
+
+    On one shared connection the second `BEGIN IMMEDIATE` is an error rather
+    than a wait, so two tabs dragging cards — or one double-tapped drop — is
+    a refusal nobody can explain. Each unit holds its own connection, so the
+    second waits out the file's write lock the way every caller did before
+    this module existed.
+    """
+    async def sequence() -> list[Any]:
+        async def create(name: str) -> str:
+            return (await kanban_data.create_epic(name))["id"]
+
+        first, second, third = await asyncio.gather(
+            create("One"), create("Two"), create("Three"))
+        titles = sorted(row["title"]
+                        for row in await kanban_data.list_epics())
+        positions = sorted(
+            row["position"] for row in await store.work_items("epic"))
+        return [titles, len({first, second, third}), len(set(positions))]
+
+    on_file, on_server = both_halves(sequence, tmp_path / "parity.db")
+    assert on_file == on_server
+    titles, distinct_ids, distinct_positions = on_file
+    assert titles == ["One", "Three", "Two"]
+    assert distinct_ids == 3
+    assert distinct_positions == 3, "two epics landed on one position"
+
+
+def test_a_unit_refuses_a_second_task_reaching_into_it(
+        tmp_path: Path) -> None:
+    """A task created inside a unit inherits it, and must not use it.
+
+    A transaction is one connection: two tasks writing through it can each
+    roll back the other's committed-looking work. `hive_data`'s unit refuses
+    this outright, and the SQLite half has to refuse it too — otherwise the
+    same code silently works on one half and raises on the other, which is
+    the one thing the revert lever must not do.
+    """
+    async def sequence() -> list[Any]:
+        refusals: list[str] = []
+
+        async def reaches_in() -> None:
+            try:
+                await store.create_work_item("e-inner", "epic", "inner", 9)
+            except Exception as exc:  # noqa: BLE001 - the class differs
+                refusals.append(type(exc).__name__)
+
+        async with store.board_transaction():
+            await store.create_work_item("e-outer", "epic", "outer", 1)
+            await asyncio.ensure_future(reaches_in())
+
+        return [len(refusals) == 1,
+                sorted(row["title"]
+                       for row in await kanban_data.list_epics())]
+
+    on_file, on_server = both_halves(sequence, tmp_path / "parity.db")
+    assert on_file == on_server
+    refused, titles = on_file
+    assert refused is True, "a child task wrote through its parent's unit"
+    assert titles == ["outer"]
+
+
+def test_a_store_that_never_opened_does_not_report_a_shutdown() -> None:
+    """The two sentences send somebody to different places: a route running
+    outside the app, or work that outlived one."""
+    async def unopened() -> str:
+        os.environ[store.DSN_VAR] = ""
+        store._engine = None
+        store._was_open = False
+        try:
+            await store.release_notice(1)
+        except RuntimeError as exc:
+            return str(exc)
+        return "no refusal"
+
+    said = asyncio.run(unopened())
+    assert "never opened" in said
+
+
+def test_a_unit_cancelled_waiting_for_the_file_lock_leaves_nothing_open(
+        tmp_path: Path) -> None:
+    """The SQLite half only, because the scenario is the file's write lock.
+
+    A rival writer holds it — the terminal site runs this same module against
+    this same file — so the unit blocks inside `BEGIN IMMEDIATE`, and the
+    request is cancelled there. A browser tab closing does that now: the
+    handlers are native coroutines, so there is no threadpool bridge left to
+    absorb it.
+
+    Shared, the connection was left inside a transaction with nobody to end
+    it. The console then read back everything it wrote and lost all of it
+    when the store closed, with only the next board mutation saying anything
+    at all. The unit's connection is its own and is closed on the way out, so
+    what follows is an ordinary store.
+    """
+    if not ADMIN_DSN:
+        pytest.skip(NO_SERVER)
+
+    db_path = tmp_path / "cancelled.db"
+
+    async def sequence() -> list[Any]:
+        import sqlite3
+
+        await kanban_data.create_epic("Before")
+
+        rival = sqlite3.connect(str(db_path), isolation_level=None)
+        rival.execute("BEGIN IMMEDIATE")
+        try:
+            blocked = asyncio.ensure_future(_opens_a_unit())
+            # Long enough to be inside the blocking BEGIN, short enough that
+            # the ten-second busy timeout has not expired.
+            await asyncio.sleep(0.2)
+            blocked.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await blocked
+        finally:
+            rival.execute("ROLLBACK")
+            rival.close()
+
+        after = await kanban_data.create_epic("After")
+        return [sorted(row["title"]
+                       for row in await kanban_data.list_epics()),
+                after["title"]]
+
+    answered = asyncio.run(_on_sqlite(sequence, db_path))
+    titles, after = answered
+    assert titles == ["After", "Before"]
+    assert after == "After"
+
+
+async def _opens_a_unit() -> None:
+    """A board mutation, for the cancellation test to interrupt."""
+    async with store.board_transaction():
+        await store.create_work_item("e-never", "epic", "never", 5)
+
+
+def test_the_group_admin_is_exists_on_a_store_that_has_no_admin_yet(
+        tmp_path: Path) -> None:
+    """Both halves seed it as the store opens, as the console's own schema
+    creation did on every open.
+
+    Left to the first `create_user(is_admin=True)`, a store holding people
+    and no admin yet has no such group: the groups page omits it, and adding
+    the first admin to it answers "No such group" with nothing on screen
+    saying the row is simply missing.
+    """
+    import auth
+
+    async def sequence() -> list[Any]:
+        account_store = auth.BuiltinStore()
+        before = sorted(group["name"]
+                        for group in await account_store.list_groups())
+        await auth.create_user("somebody", "a-password")
+        # The first admin is made by adding them to the group that is there.
+        await account_store.add_member("admins", "somebody")
+        return [before, (await account_store.get_user("somebody"))["groups"]]
+
+    on_file, on_server = both_halves(sequence, tmp_path / "parity.db")
+    assert on_file == on_server
+    before, groups = on_file
+    assert before == ["admins"]
+    assert groups == ["admins"]
+
+
+def test_a_nul_byte_in_a_board_field_is_refused_rather_than_stored(
+        tmp_path: Path) -> None:
+    """One paste, one answer, on both halves.
+
+    SQLite holds a NUL byte in a text column quite happily and Postgres
+    cannot encode one at all, so left to the engines the same paste is a
+    stored row on one half and an unhandled error on the other. Refused
+    rather than stripped: a requirement quietly altered on its way in is a
+    document that does not say what was typed, with nothing on the page
+    saying so.
+    """
+    async def sequence() -> list[Any]:
+        epic = await kanban_data.create_epic("An epic")
+        refusals = []
+        for field, value in (("title", "a\x00b"),
+                             ("description", "a\x00b")):
+            try:
+                await kanban_data.update_epic(epic["id"], **{field: value})
+            except ValueError as exc:
+                refusals.append((field, "NUL byte" in str(exc)))
+        try:
+            await kanban_data.create_epic("fine", requirements="a\x00b")
+        except ValueError as exc:
+            refusals.append(("requirements", "NUL byte" in str(exc)))
+        after = await kanban_data.find_item(epic["id"])
+        return [refusals, after["title"], after["description"],
+                len(await kanban_data.list_epics())]
+
+    on_file, on_server = both_halves(sequence, tmp_path / "parity.db")
+    assert on_file == on_server
+    refusals, title, description, epics = on_file
+    assert refusals == [("title", True), ("description", True),
+                        ("requirements", True)]
+    assert title == "An epic"
+    assert description == ""
+    assert epics == 1, "a refused creation left a row behind"

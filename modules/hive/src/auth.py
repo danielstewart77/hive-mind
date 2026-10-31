@@ -26,8 +26,12 @@ the switch to auth-service is not a session.
 Admin is membership of the `admins` group and nothing else. Users are never
 deleted. The last enabled admin cannot be disabled or leave `admins`.
 
-This file imports nothing from the app around it, so the terminal site runs
-the identical module against the identical db.
+The accounts live wherever `store` is pointed — the hive's one Postgres or
+this host's own file. The terminal site ran a verbatim copy of this module
+against the same file and cannot any longer: this one is async and reads a
+store the terminal does not have. Moving it is its own story, and until it
+runs the two sites share accounts only on an install where both are pointed
+at the same store.
 """
 
 from __future__ import annotations

@@ -60,10 +60,28 @@ def _new_id(kind: str) -> str:
     return _PREFIX[kind] + secrets.token_hex(_ID_BYTES)
 
 
+#: What a text column will not take. Refused here rather than at the store,
+#: so both stores refuse it: SQLite holds a NUL byte in a text column quite
+#: happily, and Postgres cannot encode one at all. Left to the engines, the
+#: same paste is a stored row on one and an unhandled error on the other.
+#:
+#: Refused rather than stripped, for the reason the hive refuses it
+#: elsewhere: a title or a requirement quietly altered on its way in is a
+#: document that does not say what its author typed, and nothing on the page
+#: says so.
+def _no_nul(field: str, value: str) -> str:
+    if "\x00" in value:
+        raise ValueError(
+            f"{field} contains a NUL byte, which no text column here will "
+            "take. It is refused rather than stripped: a document quietly "
+            "altered on its way in is one that does not say what was typed.")
+    return value
+
+
 def _title(value: Any) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError("title must be a nonblank string")
-    trimmed = value.strip()
+    trimmed = _no_nul("title", value.strip())
     if len(trimmed) > MAX_TITLE_LENGTH:
         raise ValueError(f"title must be at most {MAX_TITLE_LENGTH} characters")
     return trimmed
@@ -363,6 +381,10 @@ async def _insert(kind: str, title: str, parent_id: str | None,
                   subtype: str = "", description: str = "",
                   requirements: str = "", acceptance_criteria: str = "",
                   qa_tests: str = "") -> dict[str, Any]:
+    description = _no_nul("description", description)
+    requirements = _no_nul("requirements", requirements)
+    acceptance_criteria = _no_nul("acceptance_criteria", acceptance_criteria)
+    qa_tests = _no_nul("qa_tests", qa_tests)
     record_id = _new_id(kind)
     await store.create_work_item(
         record_id, kind, title, position, parent_id=parent_id, status=status,
@@ -460,7 +482,7 @@ async def _update(kind: str, record_id: str,
             assignments["status"] = _check_status(changes["status"])
         for field in _PROSE:
             if field in changes:
-                assignments[field] = str(changes[field])
+                assignments[field] = _no_nul(field, str(changes[field]))
 
         if kind in ("feature", "story") and changes.get("parent") == "none":
             await store.place(record_id, None, await store.next_position())
