@@ -361,6 +361,19 @@ async def user_by_id(user_id: int, *,
         f"FROM {qualified(USERS)} WHERE id = $1", user_id)
 
 
+async def count_users(*, unit: Unit | None = None) -> int:
+    """How many logins there are.
+
+    A count rather than the rows. The one caller asks at every boot to decide
+    whether to seed the bootstrap admin, and answering it by reading the
+    whole table back is a full scan and every password hash over the wire to
+    answer a question about a number.
+    """
+    row = await _fetch_one(
+        unit, f'SELECT count(*) AS "count" FROM {qualified(USERS)}')
+    return 0 if row is None else int(row["count"])
+
+
 async def users(*, unit: Unit | None = None) -> list[Row]:
     """Every login, without the hashes."""
     return await _fetch(

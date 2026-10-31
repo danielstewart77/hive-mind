@@ -503,3 +503,17 @@ async def test_a_tools_schema_missing_one_table_still_refuses(
     finally:
         await hive_data.close(drain_timeout=5.0)
         await scratch.close()
+
+
+async def test_the_login_count_counts_logins(connected, inspector):
+    """Asked at every boot to decide whether the bootstrap admin is needed.
+    The count is the answer, not the length of a listing that carried every
+    password hash over the wire to produce it."""
+    before = await tools.count_users()
+    at = 1_800_000_000
+    await tools.create_user(f"user-{uuid.uuid4().hex[:8]}", "hash", 0, at)
+    await tools.create_user(f"user-{uuid.uuid4().hex[:8]}", "hash", 0, at)
+
+    assert await tools.count_users() == before + 2
+    assert await tools.count_users() == await inspector.fetchval(
+        'SELECT count(*) FROM tools."users"')

@@ -200,6 +200,23 @@ def translate(exc: BaseException, *, connecting: bool = False) -> HiveDataError:
         return WriteRejected(str(exc))
     if isinstance(exc, asyncpg.InterfaceError):
         return Unreachable(str(exc))
+    if isinstance(exc, asyncpg.InternalClientError):
+        # The driver found its connection in a state it could not continue
+        # from - which in practice is the server having gone away mid-protocol
+        # and taken the connection's state with it. It derives straight from
+        # `Exception`, so it misses `InterfaceError`, `PostgresError` and
+        # `OSError` alike and would otherwise reach the re-raise below, whose
+        # comment reserves that path for a bug in our own code.
+        #
+        # Measured: terminating every backend under a live pool costs one
+        # operation per pooled connection, and that operation arrived at the
+        # caller as `cannot switch to state 11; another operation is in
+        # progress` - which reads as a concurrency bug in the caller's own
+        # store and sends somebody hunting one. The pool recovers by itself
+        # on the next call; what was wrong was the sentence.
+        return Unreachable(
+            "the database connection was left in a state the driver could "
+            f"not continue from, which is the server having gone away: {exc}")
     # Anything else is not this package's to rename. A NameError or a
     # TypeError dressed as a HiveDataError is a bug wearing the costume of
     # an outcome the caller has a branch for - and the branch will swallow
