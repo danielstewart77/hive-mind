@@ -106,6 +106,14 @@ PLACEMENT: dict[tuple[str, str], tuple[str, str]] = {
     ("console", "design_notices"): ("board", "design_notices"),
     ("console", "capability_node_settings"): ("board", "capability_node_settings"),
     ("console", "edge_mind_settings"): ("board", "edge_mind_settings"),
+    # Who started an operation, so its status is theirs to read. The console
+    # creates this table on demand and had never been asked, so it reached
+    # the cutover with no rows and — until the console's store declared it —
+    # no home in the new database either. It is placed rather than dropped
+    # because the two routes that write it are live: a hive-tools answer
+    # carrying a request id is recorded against the signed-in user, and
+    # `GET /api/operations/{request_id}` is scoped to whoever that was.
+    ("console", "operation_requesters"): ("board", "operation_requesters"),
 
     # tools — hive-tools.
     ("tools", "users"): ("tools", "users"),
