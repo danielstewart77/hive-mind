@@ -329,10 +329,62 @@ schema opens normally — that is comms, which needs `core` and nothing else —
 and the first memory operation such a process calls says the schema is not
 there rather than implying a refused write.
 
+## The board
+
+`hive_data.board` is the console's own context: the Kanban board every epic,
+feature and story in the hive lives on, the design sessions whose three pages
+are read before any code is written, the notices that carry a submission back
+to a mind, and two small settings tables.
+
+Three things in it are not a transcription of the SQLite module it replaces.
+
+**The order has a tie-break that exists.** Every board read was
+`ORDER BY position, rowid`, and Postgres has no `rowid`. Ties break on `id`
+instead, which decides nothing the old order decided — `position` is unique
+within a parent on the loaded board, so sibling order is settled by
+`position` alone, and the only ties are between rows under *different*
+parents in a flat listing every consumer regroups by parent. What it buys is
+that the flat listing is the same list twice in a row, which
+`ORDER BY "position"` on its own does not promise.
+
+**The cascade is the database's.** The SQLite module walked the tree in
+Python and deleted the whole frontier in one statement, because SQLite's
+`foreign_keys` pragma is off by default and per connection — so a declared
+cascade was decorative on any connection that forgot it, and the orphans it
+left still rendered on the board while being unreachable from the only
+delete button. Here the key is real, so `delete_subtree` is one recursive
+statement.
+
+**The deferred key is honoured rather than worked around.**
+`work_items.parent_id` is `DEFERRABLE INITIALLY DEFERRED`, so a child may be
+written before its parent inside one unit of work — which is what a loader
+restoring a subtree needs. The cost is stated rather than hidden: a
+`parent_id` naming nothing at all is refused at the *commit*, as a
+`MissingReference` out of the `async with` and not out of the operation.
+Nothing sets the constraints back to `IMMEDIATE` to move that error earlier,
+because doing so would also refuse the legitimate out-of-order write.
+
+Every reordering write takes `board.hold_board(unit)` first. Each one reads
+the sibling list, decides a new numbering against it and writes the whole
+list back, so two interleaved is one tab's drag silently replaced by the
+other's — with both told they succeeded and two siblings left holding one
+position. Postgres offers no equivalent of SQLite's file-wide write lock and
+row locks are no help, because the rows a reorder will renumber are not known
+until it has read them.
+
+The derived backlog numbers are `board.backlog_numbers`, and they answer what
+the console answers today — including two cases that are arguably wrong and
+were carried over regardless, because every story's number appears in
+conversations, commit messages and the lucent graph, and a port that
+renumbers the board is a port that renames work. An **epic** numbers as a
+root whatever `parent_id` holds, and a **story under a story** does too.
+`tools/board_numbering_parity.py` is the evidence: it copies the console's
+own board into a scratch database and compares the two implementations row
+for row. 646 rows, zero numbers differing.
+
 ## Scope
 
-This package covers the `core` and `memory` schemas. `board` and `tools`
-follow as their services convert, one story each.
+This package covers the `core`, `memory`, `tools` and `board` schemas.
 
 Two things are deliberately outside it. **hive-health** is not part of the one
 database at all. The **inference proxy** keeps SQLAlchemy and its own store:
@@ -353,14 +405,19 @@ python3 -m venv .venv
 The suite creates a database of its own per run and drops it afterwards — never
 the live `hive` database, whose rows are the pre-cutover copies the loader
 story still has to verify row for row. It applies
-`hive_data/schema/core.sql` and `hive_data/schema/memory.sql`, captured
-`pg_dump -s` output for the applied schemas and vendored into the package:
+`hive_data/schema/core.sql`, `memory.sql`, `tools.sql` and `board.sql`,
+captured `pg_dump -s` output for the applied schemas and vendored into the
+package:
 the generator that produced them reads the seven live SQLite stores, so it
 cannot run from here, and a suite depending on another checkout would fail on
-every other machine. Two artifacts rather than one because a deployment can
-decline to create a context it does not run, and because the memory one needs
+every other machine. One artifact per schema rather than one for the
+database, because a deployment can decline to create a context it does not
+run — comms needs `core` and nothing else — and because the memory one needs
 the `vector` extension, which is not a trusted extension and so needs a
-superuser to install.
+superuser to install. `board.sql` is applied after `core.sql` and not before
+it: `board.design_sessions` has real foreign keys into `core.sessions` and
+`core.minds`, which is the first thing in this database that could not exist
+while each store was its own SQLite file.
 
 `HIVE_DATA_TEST_ADMIN_DSN` points it at a server, with no default, because a
 default would be a credential in a tracked file. The suite skips cleanly

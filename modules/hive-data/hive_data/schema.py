@@ -86,6 +86,23 @@ COLUMNS: dict[str, tuple[str, ...]] = {
     "tools.users": (
         "id", "username", "password_hash", "is_admin", "created_at",
         "disabled_at"),
+    # Dotted for the same reason `tools` is: `board` has a `requirements`
+    # column on two of its tables and the console's own people live in
+    # `core.users`, not here. Nothing in this schema may claim a bare name.
+    "board.capability_node_settings": ("node_id", "endpoint", "updated_at"),
+    "board.design_notices": (
+        "id", "design_id", "kind", "page", "body", "created_at", "claimed_at",
+        "delivered_at"),
+    "board.design_sessions": (
+        "id", "title", "conversation_id", "surface", "mind_id", "repos",
+        "requirements", "tests", "functions", "accepted", "stale", "revision",
+        "created_at", "updated_at"),
+    "board.edge_mind_settings": (
+        "name", "profile", "role", "deployment", "updated_at"),
+    "board.work_items": (
+        "id", "kind", "parent_id", "title", "status", "position",
+        "description", "requirements", "acceptance_criteria", "qa_tests",
+        "subtype"),
 }
 
 #: The Postgres schema a declared table lives in. Absent means `core`, which
@@ -179,6 +196,7 @@ GENERATED: dict[str, frozenset[str]] = {
     "tools.api_tokens": frozenset({"id"}),
     "tools.sudo_grants": frozenset({"id"}),
     "tools.users": frozenset({"id"}),
+    "board.design_notices": frozenset({"id"}),
     #: `content_search` is GENERATED ALWAYS, not BY DEFAULT: Postgres
     #: refuses a value for it outright. Named here so the refusal happens
     #: before the statement is built, with a sentence saying why, rather
