@@ -392,23 +392,65 @@ async def wakeup_and_collect(
     request_type = (metadata or {}).get("request_type")
     backstop = get_backstop_seconds(request_type)
     session_id = None
+    # A mind addressing itself is the standing wake channel: one conversation
+    # per mind, reused and never killed. A dispatch between two different
+    # minds keeps its own session per message, because that one is a task with
+    # a beginning and an end and a caller waiting on its result.
+    standing = from_mind == to_mind
+    client_ref = (
+        f"broker-self-{to_mind}" if standing
+        else f"broker-{conversation_id}-{to_mind}"
+    )
 
     try:
         # 1. Dispatched
         await update_message_status(db, message_id, "dispatched")
 
-        # 2. Create callee session — use the mind's configured model
+        # 2. The callee's session — use the mind's configured model
         mind_model = None
         row = await get_mind_by_id(db, to_mind)
         if row:
             mind_model = row.get("model")
-        session = await session_mgr.create_session(
-            owner_type="broker",
-            owner_ref=f"broker-{conversation_id}",
-            client_ref=f"broker-{conversation_id}-{to_mind}",
-            mind_id=to_mind,
-            model=mind_model,
-        )
+        mind_name = (row or {}).get("name") or to_mind
+        if standing:
+            # A mind waking itself is a scheduler, a watch or a pass, and it
+            # does it over and over: the sentinel alone had sent 21,114 of
+            # these, one session minted and killed per wake, which is a
+            # session list nobody can read and a mind with no memory of the
+            # last thing it was told. So a self-addressed wake has one
+            # conversation per mind, keyed on the mind rather than on the
+            # message, and it is named so the operator can find it.
+            existing = await session_mgr.get_active_session("broker", client_ref)
+            if existing:
+                session = existing
+            else:
+                session = await session_mgr.create_session(
+                    owner_type="broker",
+                    owner_ref=client_ref,
+                    client_ref=client_ref,
+                    mind_id=to_mind,
+                    model=mind_model,
+                )
+                try:
+                    await session_mgr.set_session_name(
+                        session["id"], name=f"{mind_name}-wakes"
+                    )
+                except Exception:
+                    # A name is how the operator finds it, not how the wake
+                    # reaches the mind. Losing the label must not lose the
+                    # dispatch.
+                    log.warning(
+                        "broker: could not name standing wake session=%s",
+                        session["id"],
+                    )
+        else:
+            session = await session_mgr.create_session(
+                owner_type="broker",
+                owner_ref=f"broker-{conversation_id}",
+                client_ref=client_ref,
+                mind_id=to_mind,
+                model=mind_model,
+            )
         session_id = session["id"]
         await update_message_status(db, message_id, "dispatched", recipient_session_id=session_id)
 
@@ -465,8 +507,11 @@ async def wakeup_and_collect(
                   error_type=type(e).__name__, exc_info=True)
 
     finally:
-        # 6. Kill callee session
-        if session_id is not None:
+        # 6. Kill the callee session — unless it is the standing wake channel,
+        # which the next wake reuses. Killing it is what made every wake mint
+        # a new row, and a killed session is also a mind that opens its next
+        # wake having forgotten the last one.
+        if session_id is not None and not standing:
             try:
                 await session_mgr.kill_session(session_id)
             except Exception:
