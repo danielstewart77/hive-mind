@@ -28,11 +28,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 
 from fastapi import APIRouter, Header
 from fastapi.responses import JSONResponse
 
+from core.hive_logging import log_event
+
 log = logging.getLogger("hive-mind.proactive")
+NAME = os.environ.get("MIND_NAME", "")
 
 
 def extract_assistant_texts(event: dict) -> list[str]:
@@ -142,16 +146,29 @@ async def idle_drain(session: dict, buffer: list[dict]) -> None:
                 continue
             for text in texts:
                 buffer.append({"chat_id": chat_id_int, "text": text})
+                # A write is the only evidence this channel carries anything.
+                # The read empties the buffer, so without this line the
+                # question "has an unsolicited turn ever been produced on this
+                # mind" has no answer but somebody's reading of the code.
+                log_event(
+                    log, "proactive.buffered", mind_name=NAME,
+                    surface=session.get("surface") or "",
+                    client_ref=chat_id_int, content_chars=len(text),
+                )
 
 
 def make_proactive_router(buffer: list[dict], token: str | None) -> APIRouter:
     """Return a FastAPI router exposing ``GET /proactive``.
 
     The endpoint drains ``buffer`` (pop-all) and returns the items as JSON. It
-    is protected with the shared bearer ``token`` — the same token the backend
-    already trusts on the internal docker network (``COMMS_BEARER_TOKEN``). When
-    ``token`` is falsy the endpoint is unauthenticated (parity with the
-    backend's other routes, which are network-trusted).
+    is protected with ``token``, which is this mind's own credential — the
+    surface is handed the same value through ``MIND_PROACTIVE_TOKEN`` and
+    presents it here. It used to be described as "the token the backend
+    already trusts", meaning the one gateway token every caller in the stack
+    shared; once each holder got its own, a bot presenting the gateway token
+    it holds was refused on every poll. When ``token`` is falsy the endpoint
+    is unauthenticated (parity with the backend's other routes, which are
+    network-trusted).
     """
     router = APIRouter()
 
