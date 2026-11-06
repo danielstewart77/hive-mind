@@ -2490,7 +2490,8 @@ async def _proactive_poll_source() -> None:
     healthy.
     """
     url = f"{config.proactive_poll_url.rstrip('/')}/proactive"
-    headers = {"Authorization": f"Bearer {COMMS_BEARER_TOKEN}"} if COMMS_BEARER_TOKEN else {}
+    poll_token = config.proactive_poll_token
+    headers = {"Authorization": f"Bearer {poll_token}"} if poll_token else {}
     interval = config.proactive_poll_interval_s
     log_event(
         log, "surface.proactive.poll.started", surface="telegram",
