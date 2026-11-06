@@ -114,6 +114,54 @@ class TestWhatPollingPutsOnTheQueue:
         assert list(proactive.drain()) == []
 
 
+class TestWhichCredentialThePollPresents:
+    async def test_the_poll_presents_the_minds_own_credential(self) -> None:
+        """The backend being polled is the mind, so the mind's token is what it checks.
+
+        The gateway token the surfaces carry everywhere else was the same
+        string until every holder in the hive got its own; presenting it here
+        after that is a refusal on every poll.
+        """
+        configure(SurfaceConfig(
+            proactive_poll_url="http://mind.example:8420",
+            proactive_poll_interval_s=0.01,
+            proactive_poll_token="the-minds-own",
+        ))
+        seen = {}
+
+        session = MagicMock()
+
+        def _get(_url, **kwargs):
+            seen.update(kwargs.get("headers") or {})
+            return _Response(200, [{"chat_id": 1, "text": "x"}])
+
+        session.get = _get
+        with patch.object(tb, "COMMS_BEARER_TOKEN", "the-gateways"):
+            await _run_source_until(session)
+
+        assert seen.get("Authorization") == "Bearer the-minds-own"
+
+    async def test_a_poll_with_no_credential_configured_asks_without_one(self) -> None:
+        """A backend that checks nothing is what the unset case is for."""
+        configure(SurfaceConfig(
+            proactive_poll_url="http://mind.example:8420",
+            proactive_poll_interval_s=0.01,
+        ))
+        seen = {"headers": None}
+
+        session = MagicMock()
+
+        def _get(_url, **kwargs):
+            seen["headers"] = kwargs.get("headers")
+            return _Response(200, [{"chat_id": 1, "text": "x"}])
+
+        session.get = _get
+        with patch.object(tb, "COMMS_BEARER_TOKEN", "the-gateways"):
+            await _run_source_until(session)
+
+        assert seen["headers"] == {}
+
+
 class TestThePollerSurvivesABadBackend:
     async def test_a_rejected_poll_does_not_end_the_loop(self) -> None:
         """A healthy conversation must not depend on a healthy proactive channel."""

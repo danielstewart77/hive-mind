@@ -53,6 +53,16 @@ class SurfaceConfig:
     proactive_poll_url: str = ""
     proactive_poll_interval_s: float = 5.0
 
+    # The credential for that poll. Deliberately not the gateway token the
+    # surfaces carry everywhere else: `proactive_poll_url` is the mind's own
+    # backend, which checks the mind's own credential, and the two were the
+    # same string only until each holder in the hive got its own. They then
+    # diverged and every poll was refused — for twelve days, silently, because
+    # the loop is best-effort by design and an empty queue and a refused one
+    # look alike from here. Empty means ask without one, which is what a
+    # backend that checks nothing expects.
+    proactive_poll_token: str = ""
+
     # What `/models` lists. The catalog is relayed from whatever inference
     # proxy this host talks to, through a module that belongs to the host and
     # not to a surface — so the host hands over a coroutine returning the rows
