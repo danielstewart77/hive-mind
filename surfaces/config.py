@@ -117,4 +117,9 @@ def surface_config(surface: str | None = None) -> SurfaceConfig:
         state_dir=state_dir(),
         proactive_poll_url=os.environ.get("MIND_BACKEND_URL", ""),
         proactive_poll_interval_s=float(os.environ.get("PROACTIVE_POLL_INTERVAL", "5.0")),
+        # The mind's own credential, which is what its backend checks on that
+        # route. Not `COMMS_BEARER_TOKEN`: this container holds the *bot*
+        # holder's token under that name, and the two stopped being one value
+        # the day each holder got its own.
+        proactive_poll_token=os.environ.get("MIND_PROACTIVE_TOKEN", ""),
     )

@@ -59,3 +59,14 @@ class TestWhatTheSurfacesAreHanded:
         monkeypatch.setenv("MIND_BACKEND_URL", "http://ada:8420")
 
         assert surface_config().proactive_poll_url == "http://ada:8420"
+
+    def test_the_surface_is_told_the_minds_own_credential_for_that_poll(
+        self, monkeypatch
+    ) -> None:
+        """The route being polled belongs to the mind, so the mind's token is
+        what it checks. This container holds the bot holder's token under
+        `COMMS_BEARER_TOKEN`, and presenting that is refused on every poll."""
+        monkeypatch.setenv("MIND_PROACTIVE_TOKEN", "adas-own-token")
+        monkeypatch.setenv("COMMS_BEARER_TOKEN", "the-bot-holders-token")
+
+        assert surface_config().proactive_poll_token == "adas-own-token"
