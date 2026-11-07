@@ -40,6 +40,12 @@ class AreaResult:
     area: str
     ok: bool
     detail: str = ""
+    #: False when this run did not load the store the area reads, so the
+    #: area was not asked. A staged cutover loads two stores out of six, and
+    #: an area whose snapshot was never taken has to say it was not checked
+    #: rather than fail on a missing file - which reads, to the operator, as
+    #: the database being wrong.
+    checked: bool = True
 
 
 @dataclass
@@ -48,10 +54,12 @@ class Preflight:
 
     @property
     def ok(self) -> bool:
-        return bool(self.areas) and all(a.ok for a in self.areas)
+        asked = [a for a in self.areas if a.checked]
+        return bool(asked) and all(a.ok for a in asked)
 
-    def record(self, area: str, ok: bool, detail: str = "") -> None:
-        self.areas.append(AreaResult(area, ok, detail))
+    def record(self, area: str, ok: bool, detail: str = "",
+               *, checked: bool = True) -> None:
+        self.areas.append(AreaResult(area, ok, detail, checked))
 
 
 def _sqlite(path: Path) -> sqlite3.Connection:
@@ -427,6 +435,21 @@ async def _write_path(conn: asyncpg.Connection,
                   f"insert took id {new_id} and was rolled back")
 
 
+#: Which store each area reads, so a restricted run knows which questions it
+#: is in a position to ask. `None` is a question of the database alone.
+AREA_SOURCE: dict[str, str | None] = {
+    "minds": "broker",
+    "session picker": "sessions",
+    "memory": "lucent",
+    "search index": "lucent",
+    "knowledge graph": "lucent",
+    "board": "console",
+    "tools": "tools",
+    "proxy": "proxy",
+    "foreign keys": None,
+    "write path": None,
+}
+
 AREAS: tuple[tuple[str, object], ...] = (
     ("minds", _minds),
     ("session picker", _session_picker),
@@ -441,12 +464,29 @@ AREAS: tuple[tuple[str, object], ...] = (
 )
 
 
-async def run(dsn: str, snapshot: Path) -> Preflight:
+async def run(dsn: str, snapshot: Path, *,
+              only: set[str] | None = None) -> Preflight:
+    """Every question, against the database the load just left.
+
+    `only` names the stores the load read. An area reading a store this run
+    did not load has no snapshot to compare against, and the comparison is
+    the whole check - so it is reported as not checked. Saying `FAIL
+    OperationalError: unable to open database file` about the board, after a
+    load that deliberately left the board alone, is how an operator decides
+    a good cutover went wrong.
+    """
     report = Preflight()
     conn = await asyncpg.connect(dsn)
     try:
         await load_data._register_vector(conn)
         for name, check in AREAS:
+            source = AREA_SOURCE.get(name)
+            if only is not None and source is not None and source not in only:
+                report.record(
+                    name, True,
+                    f"not checked: this run did not load {source}",
+                    checked=False)
+                continue
             try:
                 ok, detail = await check(conn, snapshot)
             except (asyncpg.PostgresError, sqlite3.Error, OSError,
@@ -466,12 +506,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dsn", default=os.environ.get("HIVE_DATABASE_URL", ""))
     ap.add_argument("--snapshot", required=True,
                     help="the snapshot the load read")
+    ap.add_argument("--only", action="append", default=None, metavar="SOURCE",
+                    help="the sources that load read; repeatable. Areas "
+                         "reading any other store are reported as not "
+                         "checked rather than failed.")
     args = ap.parse_args(argv)
     if not args.dsn:
         print("REFUSED: no database named. Set HIVE_DATABASE_URL or pass "
               "--dsn.", file=sys.stderr)
         return 2
-    report = asyncio.run(run(args.dsn, Path(args.snapshot)))
+    report = asyncio.run(run(args.dsn, Path(args.snapshot),
+                             only=set(args.only) if args.only
+                             else None))
     width = max(len(a.area) for a in report.areas)
     for a in report.areas:
         print(f"{'ok  ' if a.ok else 'FAIL'} {a.area:<{width}}  {a.detail}")
