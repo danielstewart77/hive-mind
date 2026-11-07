@@ -7,12 +7,6 @@ server_port: 8420
 max_sessions: 10
 default_model: sonnet
 
-# Autopilot guard rails
-autopilot_guards:
-  max_budget_usd: 5.00
-  max_turns_without_input: 50
-  max_minutes_without_input: 30
-
 # Providers — env overrides applied per-subprocess, not globally
 providers:
   anthropic: {}
