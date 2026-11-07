@@ -104,7 +104,6 @@ writes the first carry-forward row.
 {
   "session_id": "<uuid>",
   "model": "<model>",
-  "autopilot": false,
   "resume_sid": "<optional>",
   "surface_prompt": "<optional>",
   "allowed_directories": ["…"],
