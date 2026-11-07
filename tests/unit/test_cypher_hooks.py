@@ -293,7 +293,7 @@ def mind(tmp_path, monkeypatch):
     monkeypatch.setenv("CLIENT_REF", "chat-1")
     monkeypatch.setenv("HIVE_HARNESS", "dsh")
     monkeypatch.setenv("HIVE_ROTATION_THRESHOLD_TOKENS", "80000")
-    for var in ("HIVE_SURFACE", "HIVE_GOAL_RUN", "HIVEMIND_GROUP_SESSION", "ROTATION_SPAWN"):
+    for var in ("HIVE_SURFACE", "HIVE_GOAL_RUN", "ROTATION_SPAWN"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(check, "LOG_DIR", tmp_path / "log")
     monkeypatch.setattr(check, "_SPAWN_MODEL_ARG", "")

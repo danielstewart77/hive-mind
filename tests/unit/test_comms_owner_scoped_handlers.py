@@ -669,7 +669,7 @@ def test_a_persons_credential_is_refused_inter_mind_dispatch(gateway):
 
 
 @pytest.mark.parametrize(
-    "content", ["/new", "/clear", "/autopilot", "/model", "/effort", "/harness"]
+    "content", ["/new", "/clear", "/model", "/effort", "/harness"]
 )
 def test_a_mind_bound_command_is_refused_on_another_users_mind(gateway, content):
     """`/new` killed the live conversation on a body-supplied reference and

@@ -255,84 +255,6 @@ def test_the_lock_is_held_for_the_whole_switch_not_just_tested():
     _run(scenario())
 
 
-def test_an_autopilot_toggle_while_the_turn_is_streaming_is_refused():
-    """The same teardown-and-respawn, and it had no guard at all.
-
-    `/autopilot` typed during a streaming turn destroyed the answer with no
-    race to lose, which is strictly easier to reach than the switch.
-    """
-    async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr, "claude-opus-5")
-            lock = mgr._locks.setdefault("sess-1", asyncio.Lock())
-            async with lock:
-                with patch.object(mgr, "_kill_process", new=AsyncMock()) as killed, \
-                        patch.object(mgr, "_spawn", new=AsyncMock()) as spawned, \
-                        patch.object(mgr, "_routing_for", new=AsyncMock(return_value={})):
-                    with pytest.raises(ValueError):
-                        await asyncio.wait_for(mgr.toggle_autopilot("sess-1"), 5)
-                assert killed.await_count == 0
-                assert spawned.await_count == 0
-            row = await mgr._get_row("sess-1")
-            assert row["autopilot"] == 0
-            await mgr.shutdown()
-
-    _run(scenario())
-
-
-def test_an_autopilot_toggle_with_nothing_running_still_flips_and_respawns():
-    async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr, "claude-opus-5")
-            with patch.object(mgr, "_kill_process", new=AsyncMock()) as killed, \
-                    patch.object(mgr, "_spawn", new=AsyncMock()) as spawned, \
-                    patch.object(mgr, "_routing_for", new=AsyncMock(return_value={})):
-                await mgr.toggle_autopilot("sess-1")
-            row = await mgr._get_row("sess-1")
-            assert row["autopilot"] == 1
-            assert killed.await_count == 1
-            assert spawned.await_count == 1
-            await mgr.shutdown()
-
-    _run(scenario())
-
-
-def test_an_autopilot_toggle_holds_the_lock_through_kill_and_respawn():
-    """Taken, not tested — the same race the switch closed."""
-    async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr, "claude-opus-5")
-            held: dict[str, bool] = {}
-            spawned: dict = {}
-
-            async def kill(*args, **kwargs):
-                held["kill"] = mgr._locks["sess-1"].locked()
-                await asyncio.sleep(0)
-
-            async def spawn(*args, **kwargs):
-                held["spawn"] = mgr._locks["sess-1"].locked()
-                spawned.update(kwargs)
-                await asyncio.sleep(0)
-
-            with patch.object(mgr, "_kill_process", new=kill), \
-                    patch.object(mgr, "_spawn", new=spawn), \
-                    patch.object(mgr, "_routing_for", new=AsyncMock(return_value={})):
-                await mgr.toggle_autopilot("sess-1")
-
-            assert held == {"kill": True, "spawn": True}
-            assert mgr._locks["sess-1"].locked() is False
-            # The process runs what the row says: a respawn on the old setting
-            # leaves the row claiming autopilot over a process without it.
-            assert spawned["autopilot"] is True
-            assert spawned["resume_sid"] == "conv-1"
-            await mgr.shutdown()
-
-    _run(scenario())
-
-
 # ---------------------------------------------------------------------------
 # Effort
 # ---------------------------------------------------------------------------
@@ -525,7 +447,11 @@ def test_a_respawn_from_nothing_carries_the_conversations_effort():
     _run(scenario())
 
 
-def test_a_rotation_successor_inherits_the_effort():
+def test_a_rotation_keeps_the_conversations_effort():
+    """The effort is the operator's, chosen for this conversation with
+    `/effort`. A rotation replaces the harness conversation under the row and
+    nothing else, so a successor spawned at the mind's default would quietly
+    undo a setting nobody changed."""
     async def scenario():
         with tempfile.TemporaryDirectory() as tmp:
             mgr = await _manager(tmp)
@@ -534,14 +460,23 @@ def test_a_rotation_successor_inherits_the_effort():
             await mgr._db.commit()
             await _mind(mgr)
             posted, wired = _wire()
+            session = await mgr._get_row("sess-1")
             with wired, \
-                    patch("comms.broker.get_mind_by_id", new=AsyncMock(return_value={"name": "ada"})), \
-                    patch("comms.bootstrap_loader.compose_prompt_blocks", new=AsyncMock(return_value="")):
-                new = await mgr.create_session(
-                    owner_type="telegram", owner_ref="123", client_ref="123",
-                    model="claude-opus-5", mind_id="ada", rotated_from="sess-1",
+                    patch("comms.broker.get_mind_by_id", new=AsyncMock(
+                        return_value={"name": "ada", "model": "claude-opus-5",
+                                      "gateway_url": "http://mind"})), \
+                    patch("comms.bootstrap_loader.compose_prompt_blocks", new=AsyncMock(return_value="")), \
+                    patch.object(mgr, "_kill_process", new=AsyncMock()), \
+                    patch.object(mgr, "_render_handover_on_mind", new=AsyncMock(return_value="before")), \
+                    patch.object(mgr, "_clear_rotation_marker_on_mind", new=AsyncMock()):
+                same_id = await mgr._replace_conversation(
+                    dict(session), model="claude-opus-5",
+                    effort=session["effort"], window=None, threshold=None,
                 )
-            assert (await mgr._get_row(new["id"]))["effort"] == "high"
+            assert same_id == "sess-1"
+            row = await mgr._get_row("sess-1")
+            assert row["effort"] == "high"
+            assert row["claude_sid"] != "conv-1"
             assert posted[-1]["effort"] == "high"
             await mgr.shutdown()
 

@@ -31,6 +31,9 @@ from fastapi.testclient import TestClient
 from comms.sessions import SessionManager
 
 SEED = "<soul>who you are</soul>\n<recent>what just happened</recent>"
+#: What the mind renders of the conversation being replaced. A pane opens on
+#: this as its user turn, with the soul beside it as a system prompt.
+HANDOVER = "here is what came before"
 
 
 #: These tests are about their own subject, not about authorization, so they
@@ -58,8 +61,8 @@ async def _seed_terminal_session(mgr: SessionManager) -> str:
     now = time.time()
     await mgr._db.execute(
         """INSERT INTO sessions (id, owner_type, owner_ref, model, claude_sid,
-                                 created_at, last_active, status, mind_id)
-           VALUES (?, 'web', 'terminal', 'opus', 'conv-old', ?, ?, 'running', 'ada')""",
+                                 created_at, last_active, status, mind_id, terminal_held)
+           VALUES (?, 'web', 'terminal', 'opus', 'conv-old', ?, ?, 'running', 'ada', 1)""",
         (session_id, now, now),
     )
     await mgr._db.execute(
@@ -83,8 +86,14 @@ def _a_mind_with_a_live_pane():
     async def rotated(_self, **_kw):
         return True
 
+    async def handover(_self, *_a, **_kw):
+        return HANDOVER
+
     with patch("comms.broker.get_mind_by_id", mind_row), \
             patch("comms.bootstrap_loader.compose_prompt_blocks", blocks), \
+            patch.object(SessionManager, "_render_handover_on_mind", handover), \
+            patch.object(SessionManager, "_clear_rotation_marker_on_mind",
+                         lambda *_a, **_kw: asyncio.sleep(0)), \
             patch.object(SessionManager, "_rotate_pty_on_mind", rotated):
         yield
 
@@ -100,22 +109,22 @@ async def _row(mgr: SessionManager, session_id: str) -> dict:
 async def _rotate(mgr: SessionManager, session_id: str, prompt: str = "go on") -> dict:
     """Take a terminal all the way through a rotation.
 
-    Staging composes and stores the seed; the pane's own typed turn is what
-    starts the successor. Every case below is about the seed, so both halves
-    run and the assertions stay on what the row holds afterwards.
+    Arming records only that a rotation is pending; the pane's own typed turn
+    is what replaces the conversation. Every case below is about the seed, so
+    both halves run and the assertions stay on what the row holds afterwards.
     """
-    await mgr.arm_rotation("web", session_id, surface="terminal")
+    await mgr.arm_rotation("web", session_id)
     return await mgr.fire_rotation(
         "web", session_id, claude_sid="conv-old", prompt=prompt,
     )
 
 
 def _delivered(prompt: str = "go on") -> str:
-    """What the pane is actually handed: the seed and the typed message as
-    one opening turn. The row stores this, not the seed alone — a tile that
-    dies before the first turn completes reattaches asking for it, and the
-    summary without the message loses what the user typed."""
-    return f"{SEED}\n\n{prompt}"
+    """What the pane is actually handed: the handover and the typed message as
+    one opening turn. The row stores this, not the handover alone — a tile
+    that dies before the first turn completes reattaches asking for it, and
+    the handover without the message loses what the user typed."""
+    return f"{HANDOVER}\n\n{prompt}"
 
 
 def test_rotating_a_terminal_stores_the_carry_forward_on_the_session() -> None:
