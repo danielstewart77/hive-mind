@@ -280,10 +280,14 @@ def _soul():
 
 
 # ---------------------------------------------------------------------------
-# 1. The harness is recorded at birth and carried by a rotation
+# 1. The harness is recorded at birth
 # ---------------------------------------------------------------------------
 
-def test_a_new_conversation_records_the_minds_default_and_a_successor_keeps_its_parents():
+def test_a_new_conversation_records_the_minds_default_harness():
+    """A rotation no longer creates a row, so the only thing that reads the
+    mind's default is a conversation being born. One that did not record it
+    would resolve the default again on every respawn, and a default changed
+    in the console would move a live conversation's harness under it."""
     async def scenario():
         with tempfile.TemporaryDirectory() as tmp:
             mgr = await _manager(tmp, harness="claude_cli")
@@ -292,20 +296,9 @@ def test_a_new_conversation_records_the_minds_default_and_a_successor_keeps_its_
                 born = await mgr.create_session(
                     owner_type="telegram", owner_ref="123", client_ref="123", mind_id=MIND,
                 )
-                # Moved to codex mid-conversation; the mind's default is still claude.
-                await mgr._db.execute(
-                    "UPDATE sessions SET harness = 'codex', model = 'gpt-5.6-terra' WHERE id = ?",
-                    (born["id"],),
-                )
-                await mgr._db.commit()
-                successor = await mgr.create_session(
-                    owner_type="telegram", owner_ref="123", client_ref="123",
-                    model="gpt-5.6-terra", mind_id=MIND, rotated_from=born["id"],
-                )
             assert born["harness"] == "claude"
-            assert (await mgr._get_row(successor["id"]))["harness"] == "codex"
-            assert successor["harness"] == "codex"
-            assert [s["harness"] for s in mind.spawns()] == ["claude", "codex"]
+            assert (await mgr._get_row(born["id"]))["harness"] == "claude"
+            assert [s["harness"] for s in mind.spawns()] == ["claude"]
             await _close(mgr)
 
     _run(scenario())
@@ -1115,7 +1108,7 @@ def test_a_fire_reported_by_codex_thread_id_is_not_taken_for_a_stale_conversatio
             await _seed(mgr)
             await _stored_handover(mgr)
             await mgr._db.execute(
-                "UPDATE sessions SET rotation_armed = 2, carry_forward_sid = 'conv-3' "
+                "UPDATE sessions SET rotation_armed = 1, carry_forward_sid = 'conv-3' "
                 "WHERE id = 'sess-1'"
             )
             await mgr._db.commit()
@@ -1128,7 +1121,7 @@ def test_a_fire_reported_by_codex_thread_id_is_not_taken_for_a_stale_conversatio
                     "telegram", "123", claude_sid="conv-1", prompt="next",
                 )
             assert fired["ok"] is True, fired
-            assert stale["error"] in ("stale conversation", "not staged")
+            assert stale["error"] in ("stale conversation", "not armed")
             await _close(mgr)
 
     _run(scenario())
@@ -1285,7 +1278,11 @@ def test_a_pane_holding_a_chat_owned_conversation_is_switched_in_place():
     _run(scenario())
 
 
-def test_closing_a_conversation_clears_its_pane_hold():
+def test_ending_a_conversation_leaves_no_row_no_turns_and_no_binding():
+    """A session is deleted, not tombstoned. 2,866 of the live store's 3,046
+    rows were tombstones nothing read; and a row left behind marked closed
+    with its pane hold cleared is a conversation every listing has to
+    remember to filter."""
     async def scenario():
         with tempfile.TemporaryDirectory() as tmp:
             mgr = await _manager(tmp)
@@ -1293,8 +1290,18 @@ def test_closing_a_conversation_clears_its_pane_hold():
             mind = FakeMind()
             with mind.wired(), _soul():
                 await _adopted_but_chat_owned(mgr)
+                await mgr.record_turn("telegram", "123", "user", "something said")
                 await mgr.kill_session("sess-1")
-            assert (await mgr._get_row("sess-1"))["terminal_held"] == 0
+
+            assert await mgr._get_row("sess-1") is None
+            cur = await mgr._db.execute(
+                "SELECT COUNT(*) AS n FROM session_turns WHERE session_id = 'sess-1'"
+            )
+            assert (await cur.fetchone())["n"] == 0
+            cur = await mgr._db.execute(
+                "SELECT COUNT(*) AS n FROM active_sessions WHERE session_id = 'sess-1'"
+            )
+            assert (await cur.fetchone())["n"] == 0
             await _close(mgr)
 
     _run(scenario())

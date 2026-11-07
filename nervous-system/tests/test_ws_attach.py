@@ -443,31 +443,6 @@ class TestWsAttach:
 
         assert excinfo.value.code == 4410
 
-    def test_kill_session_with_rotated_to_closes_4412_with_successor(self, app_client, monkeypatch):
-        """A chat-surface rotation retires the session for a successor whose
-        id is already known. An observer should reconnect straight to it
-        instead of being told the session simply ended (4410) and having to
-        poll to find out what replaced it."""
-        from starlette.websockets import WebSocketDisconnect
-
-        client, server_module = app_client
-        _run(_seed_session_and_mind(server_module, session_id="sess-rotating"))
-
-        fake_ws = _FakeMindWS(incoming=[b"tui up\r\n"])
-        _FakeHttpSession.ws_to_return = fake_ws
-        _FakeHttpSession.raise_on_connect = None
-        monkeypatch.setattr(server_module.aiohttp, "ClientSession", _FakeHttpSession)
-
-        with pytest.raises(WebSocketDisconnect) as excinfo:
-            with client.websocket_connect("/sessions/sess-rotating/attach") as ws:
-                assert ws.receive_bytes() == b"tui up\r\n"
-                client.portal.call(
-                    server_module.session_mgr.kill_session, "sess-rotating", "sess-successor"
-                )
-                ws.receive_bytes()  # blocks until the watcher closes the bridge
-
-        assert excinfo.value.code == 4412
-        assert excinfo.value.reason == "sess-successor"
 
     def test_mind_close_code_reaches_the_browser(self, app_client, monkeypatch):
         """A mind evicting a stale attach closes 1012, which is the tile's
@@ -594,7 +569,15 @@ class TestRotationReachesTheTile:
         async def fake_blocks(**_kw):
             return "<soul>seed</soul>"
 
+        async def fake_handover(*_a, **_kw):
+            return "what came before"
+
+        async def nothing(*_a, **_kw):
+            return None
+
         mgr._rotate_pty_on_mind = fake_rotate  # type: ignore[assignment]
+        mgr._render_handover_on_mind = fake_handover  # type: ignore[assignment]
+        mgr._clear_rotation_marker_on_mind = nothing  # type: ignore[assignment]
         monkeypatch.setattr(
             "comms.bootstrap_loader.compose_prompt_blocks", fake_blocks
         )
@@ -607,11 +590,9 @@ class TestRotationReachesTheTile:
         with client.websocket_connect("/sessions/sess-rot/attach") as ws:
             assert ws.receive_bytes() == b"tui output\r\n"
 
-            # Staged at the threshold, fired by the pane's own typed turn —
+            # Armed at the threshold, fired by the pane's own typed turn —
             # which is the moment the screen is actually replaced.
-            _run(mgr.arm_rotation(
-                "terminal", "terminal-sess-rot", surface="terminal"
-            ))
+            _run(mgr.arm_rotation("terminal", "terminal-sess-rot"))
             _run(mgr.fire_rotation(
                 "terminal", "terminal-sess-rot",
                 claude_sid="claude-abc", prompt="why did it go blank?",

@@ -156,6 +156,12 @@ CREATE TABLE IF NOT EXISTS sessions (
     owner_ref     TEXT NOT NULL,
     summary       TEXT DEFAULT 'New session',
     model         TEXT,
+    -- Retained, unread. `unified_db`'s DROPPED_COLUMNS names `autopilot`,
+    -- `group_session_id` and `rotated_from` as columns the unified database
+    -- does not carry, and its build refuses a drop decision naming a column
+    -- no source has — so the shape a fresh install writes has to keep
+    -- matching the live file the cutover loads. Nothing reads or writes
+    -- them; the file and these columns go together in the retirement story.
     autopilot     INTEGER NOT NULL DEFAULT 0,
     created_at    REAL NOT NULL,
     last_active   REAL NOT NULL,
@@ -194,6 +200,9 @@ CREATE TABLE IF NOT EXISTS active_sessions (
     PRIMARY KEY (client_type, client_ref)
 );
 
+-- Retained, unread, for the same reason as the columns above: `unified_db`
+-- declares this table dropped, and that decision is checked against the
+-- source. 0 rows since it was written, and nothing can write one.
 CREATE TABLE IF NOT EXISTS group_sessions (
     id                TEXT PRIMARY KEY,
     moderator_mind_id TEXT NOT NULL DEFAULT 'ada',
@@ -249,24 +258,29 @@ CREATE INDEX IF NOT EXISTS idx_session_turns_lookup
 # Every listing route answers to the far weaker service token, so a
 # `SELECT *` that reached the wire would hand the same blob to any surface
 # bot or mind container that holds it.
+# `autopilot`, `group_session_id` and `rotated_from` are here for a
+# different reason: the table still carries them so that a fresh install's
+# shape matches the live file the cutover loads (see `_SCHEMA`), and a
+# listing that put them on the wire would be the one reader this story
+# exists to remove.
 _PRIVATE_SESSION_COLUMNS = (
     "carry_forward", "carry_forward_sid", "carry_forward_at", "resend_content",
-    "resend_images",
+    "resend_images", "autopilot", "group_session_id", "rotated_from",
 )
 
-# The two armed values are not interchangeable, and nothing may test
-# `rotation_armed` for truth. A chat surface (1) is finalized by
-# `send_message` into a *successor row*; a staged terminal (2) keeps its row
-# and swaps only the conversation beneath it. A staged terminal that reached
-# `_finalize_rotation` would be retired for a successor, destroying the
-# permanent session row, its label and its ledger binding — which is the
-# outcome in-place rotation exists to prevent.
 # The owner type a conversation carries while a browser tile hosts it. One of
 # `_ADOPTABLE_OWNER_TYPES`, so a chat's picker still offers it back.
 TERMINAL_OWNER_TYPE = "terminal"
 
-ROTATION_ARMED_CHAT = 1
-ROTATION_ARMED_TERMINAL = 2
+# Armed is armed. The flag once had two values because a chat rotation
+# retired the row for a successor while a terminal rotation kept it, and a
+# staged terminal read as merely "armed" would have been retired — now every
+# surface rotates in place, so there is one state and one mechanism. What
+# still differs is who fires the swap, and that is read off the pane hold
+# rather than off this flag: a conversation a pane holds is swapped only by
+# the pane's own typed turn, because a chat process answering it would
+# respawn the pane under a user mid-keystroke.
+ROTATION_ARMED = 1
 
 # A tile's name has to fit on a tab and in a Telegram button; the store this
 # replaced capped it at the same length, so no existing name is truncated by
@@ -559,7 +573,9 @@ class SessionManager:
             await self._db.commit()
         except Exception:
             pass  # Column already exists
-        # Migration: add group_session_id column for existing databases
+        # Retained, unread. See the note in `_SCHEMA`: the shape a fresh
+        # install writes has to keep matching the live file the cutover
+        # loads, and these three columns are declared dropped there.
         try:
             await self._db.execute(
                 "ALTER TABLE sessions ADD COLUMN group_session_id TEXT"
@@ -568,9 +584,9 @@ class SessionManager:
         except Exception:
             pass  # Column already exists
         # Migration: add rotation_armed column for existing databases. When
-        # set, the next user turn finalizes a pending session rotation (swap
-        # to a fresh session) instead of the rotation Stop hook clearing the
-        # session on the assistant's turn. See arm_rotation / send_message.
+        # set, the next user turn replaces the harness conversation under
+        # this row instead of the rotation Stop hook clearing the session on
+        # the assistant's turn. See arm_rotation / send_message.
         try:
             await self._db.execute(
                 "ALTER TABLE sessions ADD COLUMN rotation_armed INTEGER NOT NULL DEFAULT 0"
@@ -578,11 +594,8 @@ class SessionManager:
             await self._db.commit()
         except Exception:
             pass  # Column already exists
-        # Migration: add rotated_from, the id of the session this one replaced.
-        # Surfaces that reattach across a rotation need to identify the
-        # successor exactly; without lineage they guess by mind, and with two
-        # terminals open on one mind the guess lands on the *other* live
-        # session and the two conversations cross.
+        # Retained, unread. A rotation no longer replaces a row, so nothing
+        # has a predecessor to name. See the note in `_SCHEMA`.
         try:
             await self._db.execute("ALTER TABLE sessions ADD COLUMN rotated_from TEXT")
             await self._db.commit()
@@ -783,20 +796,13 @@ class SessionManager:
         allowed_directories: list[str] | None = None,
         *,
         mind_id: str,
-        rotated_from: str | None = None,
-        carry_forward: str | None = None,
-        effort: str | None = None,
-        system_prompt_blocks: str | None = None,
     ) -> dict:
         """Create a new session, spawn process, return session info.
 
-        ``carry_forward`` is a handover the new conversation opens on: stored
-        against the conversation id minted here, so the spawn below — and any
-        respawn until a turn lands — delivers it as the opening user turn.
-        ``effort`` overrides the one a successor would inherit, for a
-        successor on a different model whose effort was already checked
-        against it. ``system_prompt_blocks`` saves recomposing a prompt the
-        caller has just composed to size the handover around.
+        Always a conversation that has no past. A rotation and a harness
+        switch both replace the harness conversation under a row that
+        already exists (see ``_replace_conversation``), so nothing reaches
+        here carrying a handover, an inherited name or a predecessor's id.
         """
         # The mind's preferred model lives in broker.minds (set at registration
         # from each mind's own config). The caller can override per-session,
@@ -814,10 +820,9 @@ class SessionManager:
                     "is not in broker.minds (or has no model column set)"
                 )
 
-        if not rotated_from:
-            await self._refuse_unavailable_harness(
-                mind_id, normalise_harness((mind_row or {}).get("harness"))
-            )
+        await self._refuse_unavailable_harness(
+            mind_id, normalise_harness((mind_row or {}).get("harness"))
+        )
 
         session_id = str(uuid.uuid4())
         # The conversation id is minted HERE and nowhere else. A session owns
@@ -829,44 +834,14 @@ class SessionManager:
         claude_sid = str(uuid.uuid4())
         now = time.time()
 
-        # A rotation replaces the conversation, not the conversation. The name
-        # the operator gave it is theirs and outlives the harness context, so
-        # the successor is born wearing it — copied at creation rather than
-        # read through `rotated_from` on display, because the predecessor is
-        # retired moments later and a read-through would inherit from a row
-        # anything later cleaning up closed sessions is free to touch.
-        inherited_name, inherited_color, inherited_effort = None, None, None
-        inherited_window, inherited_threshold = None, None
-        # The mind's default harness is for a new conversation. A rotation
-        # successor is the same conversation, so it stays on the harness its
-        # parent was switched to.
         harness = normalise_harness((mind_row or {}).get("harness"))
-        if rotated_from:
-            parent = await self._get_row(rotated_from)
-            if parent:
-                inherited_name = parent.get("name")
-                inherited_color = parent.get("color")
-                # The effort travels with the model it was chosen for.
-                if parent.get("model") == model:
-                    inherited_effort = parent.get("effort")
-                    # So does the room: the window and the point it rotates
-                    # at belong to the model, not to the conversation.
-                    inherited_window = parent.get("context_window")
-                    inherited_threshold = parent.get("context_threshold")
-                if parent.get("harness"):
-                    harness = parent["harness"]
-        if effort is not None:
-            inherited_effort = effort or None
 
         await self._db.execute(
-            """INSERT INTO sessions (id, owner_type, owner_ref, model, claude_sid, created_at, last_active, status, mind_id, rotated_from, name, color, effort, harness,
-                                     carry_forward, carry_forward_sid, carry_forward_at, conversation_started_at,
-                                     context_window, context_threshold)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (session_id, owner_type, owner_ref, model, claude_sid, now, now, mind_id, rotated_from,
-             inherited_name, inherited_color, inherited_effort, harness or None,
-             carry_forward or None, claude_sid if carry_forward else None,
-             now if carry_forward else None, now, inherited_window, inherited_threshold),
+            """INSERT INTO sessions (id, owner_type, owner_ref, model, claude_sid, created_at, last_active, status, mind_id, harness,
+                                     conversation_started_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)""",
+            (session_id, owner_type, owner_ref, model, claude_sid, now, now, mind_id,
+             harness or None, now),
         )
         await self._db.execute(
             """INSERT OR REPLACE INTO active_sessions (client_type, client_ref, session_id)
@@ -878,36 +853,21 @@ class SessionManager:
         # Graph is authoritative; MIND.md soul_seed is one-time bootstrap only
         soul_file = None
 
-        if system_prompt_blocks is None:
-            system_prompt_blocks = await bootstrap_loader.compose_prompt_blocks(
-                mind_id=mind_id,
-                mind_name=mind_name,
-                client_ref=client_ref,
-                db=self._db,
-                max_bytes=(await self._rotation_seed_budget(rotated_from, PROCESS))
-                if rotated_from else None,
-            )
-        if rotated_from:
-            # A successor opens on its composed prompt, which carries the
-            # conversation it replaces forward; that is its size until it
-            # has a reply of its own. Recorded before the spawn, so a spawn
-            # that fails leaves a conversation with a size, not a blank.
-            await self._open_conversation_size(
-                session_id, model, system_prompt_blocks or "",
-                mind_id=mind_id, harness=harness, surface=PROCESS,
-                threshold=inherited_threshold,
-            )
+        system_prompt_blocks = await bootstrap_loader.compose_prompt_blocks(
+            mind_id=mind_id,
+            mind_name=mind_name,
+            client_ref=client_ref,
+            db=self._db,
+        )
 
         await self._spawn(
             session_id,
             model,
-            autopilot=False,
             resume_sid=claude_sid,
             surface_prompt=surface_prompt,
             allowed_directories=allowed_directories,
             soul_file=soul_file,
             mind_id=mind_id,
-            is_group_session=(owner_type == "group"),
             client_ref=client_ref,
             owner_type=owner_type,
             owner_ref=owner_ref,
@@ -1113,17 +1073,6 @@ class SessionManager:
         if not clearing:
             if row["status"] == "closed":
                 raise PermissionError(f"Session is closed: {session_id}")
-            # A conversation with a successor has been rotated away even if its
-            # own row has not been marked closed yet: `_finalize_rotation`
-            # creates the successor and retires the predecessor two awaits
-            # later, and a rename landing in that gap would commit to the row
-            # being abandoned and report success. The successor was born
-            # carrying the old name, so the new one would simply vanish.
-            cur = await self._db.execute(
-                "SELECT id FROM sessions WHERE rotated_from = ? LIMIT 1", (session_id,)
-            )
-            if await cur.fetchone():
-                raise PermissionError(f"Session was rotated away: {session_id}")
 
         assignments, params = [], []
         if name is not None:
@@ -1198,27 +1147,7 @@ class SessionManager:
                 "UPDATE sessions SET terminal_held = 0 WHERE id = ?", (session_id,)
             )
             await self._db.commit()
-        if released and surface == "terminal":
-            await self._downgrade_staged_rotation(session_id)
         return released
-
-    async def _downgrade_staged_rotation(self, session_id: str) -> None:
-        """Hand a staged rotation back to the chat path when the pane dies.
-
-        Only a successful fire clears a staged terminal, and only the pane's
-        own hook can fire one — so a conversation adopted by Telegram, whose
-        pane is killed by that adoption, would keep ``rotation_armed = 2``
-        with nothing left able to act on it. It is over its context threshold
-        and can no longer rotate at all; it just keeps growing. Downgrading
-        to the chat value lets ``send_message`` finalize it on the next turn,
-        which is now the only turn it will get. The staged seed is left to
-        expire on its TTL: the successor session composes its own.
-        """
-        await self._db.execute(
-            "UPDATE sessions SET rotation_armed = ? WHERE id = ? AND rotation_armed = ?",
-            (ROTATION_ARMED_CHAT, session_id, ROTATION_ARMED_TERMINAL),
-        )
-        await self._db.commit()
 
     async def get_active_session(self, client_type: str, client_ref: str) -> dict | None:
         """Get the active session for a client surface, only if it's still
@@ -1837,18 +1766,16 @@ class SessionManager:
                     )
                     return {"ok": False, "error": "stale conversation",
                             "session_id": active["id"]}
-        # The row decides as well as the hook. A conversation a pane holds is
-        # also answered by chat processes — the console's message route, a
-        # model change — whose hooks arm as a chat surface. Armed as one, the
-        # next message would retire the pane's permanent row for a successor;
-        # staged, only the pane's own fire swaps it, in place.
-        if surface == "terminal" or self._pane_holds(
-            await self._get_row(active["id"]) or {}
-        ):
-            return await self._stage_terminal_rotation(active, client_ref)
+        # One UPDATE, whatever the surface. Arming composes nothing: this
+        # runs inside a mind's rotation hook on a 30-second timeout, and a
+        # composition that hangs there leaves the hook reporting failure
+        # while the gateway recorded success — the two then disagree about
+        # whether a rotation is pending, in a log file nobody reads. The seed
+        # is composed on the turn that replaces the conversation, by the one
+        # mechanism that replaces it.
         await self._db.execute(
             "UPDATE sessions SET rotation_armed = ? WHERE id = ?",
-            (ROTATION_ARMED_CHAT, active["id"]),
+            (ROTATION_ARMED, active["id"]),
         )
         await self._db.commit()
         log.info(
@@ -1856,91 +1783,35 @@ class SessionManager:
         )
         return {"ok": True, "session_id": active["id"]}
 
-    async def _stage_terminal_rotation(self, session: dict, client_ref: str) -> dict:
-        """Compose a terminal's successor without touching its pane.
-
-        The session row is the conversation's permanent identity — the tile,
-        its label, the turn ledger and every active_sessions binding are
-        keyed to it. What fills up and has to be replaced is the *harness*
-        conversation underneath. Staging mints the id that conversation will
-        run under and stores the seed composed for it, and stops there: the
-        user is still typing into the conversation they can see, and
-        replacing the pane out from under them is what the split exists to
-        avoid. ``fire_rotation`` does the swap on their next typed message.
-
-        Nothing here writes ``claude_sid``. The pane is still running the old
-        conversation, and pointing the row at an id no process holds would
-        strand the session on a conversation that was never started.
-        """
-        session_id = session["id"]
-        from comms import bootstrap_loader  # noqa: PLC0415
-        from comms import broker  # noqa: PLC0415
-
-        mind_id = session["mind_id"]
-        mind_row = await broker.get_mind_by_id(self.broker_db, mind_id)
-        mind_name = (mind_row or {}).get("name") or mind_id
-        system_prompt_blocks = await bootstrap_loader.compose_prompt_blocks(
-            mind_id=mind_id,
-            mind_name=mind_name,
-            client_ref=client_ref,
-            db=self._db,
-            max_bytes=await self._rotation_seed_budget(session_id, PANE),
-        )
-
-        new_claude_sid = str(uuid.uuid4())
-        # The seed lives on the row, keyed to the conversation it was
-        # composed for. It is composed here and delivered minutes later —
-        # however long the user takes to reply — so the row is the only thing
-        # that outlives both the composing process and a mind restart in the
-        # gap. See get_carry_forward.
-        _now = time.time()
-        await self._db.execute(
-            "UPDATE sessions SET carry_forward = ?, carry_forward_sid = ?, "
-            "carry_forward_at = ?, rotation_armed = ? WHERE id = ?",
-            (system_prompt_blocks, new_claude_sid, _now,
-             ROTATION_ARMED_TERMINAL, session_id),
-        )
-        await self._db.commit()
-        log.info(
-            "staged rotation: session=%s successor=%s", session_id, new_claude_sid
-        )
-        return {
-            "ok": True,
-            "session_id": session_id,
-            "staged": True,
-            "claude_sid": new_claude_sid,
-        }
-
     async def fire_rotation(
         self, client_type: str, client_ref: str, *,
         claude_sid: str = "", prompt: str = "",
     ) -> dict:
-        """Swap a staged terminal onto its successor, carrying the message.
+        """Replace the harness conversation under a pane, carrying the message.
 
-        The terminal's equivalent of finalize-on-user-turn, called by the
-        pane's ``UserPromptSubmit`` hook. The difference from a chat surface
-        is where the message goes: it is not re-dispatched to a successor
-        session, it rides in as the successor conversation's *opening user
-        turn*, concatenated onto the staged seed.
+        Called by the pane's ``UserPromptSubmit`` hook, which is the only
+        thing that sees a typed turn: the terminal is a raw byte bridge and
+        never reaches ``send_message``. The swap itself is
+        ``_replace_conversation`` — the same mechanism a chat turn and a
+        harness switch use — so the row, its id, its label and its ledger
+        survive, and only the conversation beneath them is new.
 
-        Failure replaces nothing. Everything stays staged — the seed, the
-        successor id and the armed flag — so the message is answered in the
-        conversation it was typed into and a later turn can fire again.
+        The difference from a chat turn is who submits the message. A chat
+        caller re-sends it after the swap; here the respawn is the
+        submission, so what the user typed rides in on the opening turn.
+
+        Failure replaces nothing and stays armed, so the next typed turn
+        tries again and this one is answered where it was typed.
         """
         active = await self.get_active_session(client_type, client_ref)
         if not active:
             return {"ok": False, "error": "no active session"}
         session_id = active["id"]
-        # The raw row, not the public dict: the armed flag and the staged
-        # seed are both stripped from anything a listing may return.
+        # The raw row, not the public dict: the armed flag and the stored
+        # handover are both stripped from anything a listing may return.
         row = await self._get_row(session_id)
-        if (row or {})["rotation_armed"] != ROTATION_ARMED_TERMINAL:
-            return {"ok": False, "error": "not staged", "session_id": session_id}
-
-        seed = (row or {})["carry_forward"]
-        new_claude_sid = (row or {})["carry_forward_sid"]
-        if not seed or not new_claude_sid:
-            return {"ok": False, "error": "no staged seed", "session_id": session_id}
+        if (row or {}).get("rotation_armed") != ROTATION_ARMED:
+            return {"ok": False, "error": "not armed", "session_id": session_id}
 
         # The hook reports the conversation the message was typed into. A
         # straggling hook process from before an earlier swap would otherwise
@@ -1950,73 +1821,35 @@ class SessionManager:
         if claude_sid and current and claude_sid not in current:
             return {"ok": False, "error": "stale conversation", "session_id": session_id}
 
-        # What the successor opens on: the seed and the typed message as one
-        # string, delivered as a *user* turn. Not both fields — a seed sent as
-        # a system prompt as well would reach the successor twice, once in a
-        # place that submits nothing.
-        delivered = f"{seed}\n\n{prompt}" if prompt else seed
-
-        # Read last, after composition: a turn typed during that window
-        # belongs in the replay, and reading it earlier would show the user
-        # an exchange older than the one they just had.
+        # Read before the swap: a turn typed during the composition belongs
+        # in the replay, and the pane's screen is gone the moment it
+        # respawns.
         last_exchange = await self._last_exchange(session_id)
         try:
-            rotated = await self._rotate_pty_on_mind(
-                session_id=session_id,
-                new_claude_sid=new_claude_sid,
-                model=active["model"],
-                mind_id=active["mind_id"],
-                user_prompt=delivered,
-                client_ref=client_ref,
-                owner_type=active.get("owner_type"),
-                owner_ref=active.get("owner_ref"),
+            await self._replace_conversation(
+                row or active,
+                model=(row or active)["model"],
+                effort=(row or active).get("effort"),
+                window=(row or active).get("context_window"),
+                threshold=(row or active).get("context_threshold"),
+                message=prompt,
+                deliver_message=True,
             )
-        except MindCallFailed as exc:
-            # Staged either way, so the next typed turn retries rather than
-            # paying another six minutes for a seed the row already holds.
-            # What changes is the account of why: the pane is fine.
-            log.error("fire-rotation: %s; staying staged", exc)
+        except (MindCallFailed, SwitchWontFit, ValueError) as exc:
+            # Armed either way, so the next typed turn retries. What changes
+            # is the account of why: the pane is fine.
+            log.error("fire-rotation: %s; staying armed", exc)
             refused = isinstance(exc, MindRefusedCredential)
             return {
                 "ok": False,
                 "error": (
                     "mind refused the gateway's credential" if refused
-                    else f"the mind did not rotate its terminal: {exc}"
+                    else f"the conversation could not be replaced: {exc}"
                 ),
                 "session_id": session_id,
             }
-        if not rotated:
-            log.warning(
-                "fire-rotation: session %s has no live terminal; staying staged",
-                session_id,
-            )
-            return {"ok": False, "error": "no live terminal", "session_id": session_id}
 
-        # What is stored is what was *delivered*, not the seed alone. The
-        # pane takes it as one opening turn and deletes it as it reads it, so
-        # until that turn completes this row is the only account of it — and
-        # a tile that dies before then reattaches asking for it. Handing back
-        # the summary without the message would lose what the user typed.
-        _now = time.time()
-        await self._db.execute(
-            "UPDATE sessions SET claude_sid = ?, harness_sid = NULL, "
-            "carry_forward = ?, carry_forward_sid = ?, carry_forward_at = ?, "
-            "rotation_armed = 0, last_active = ?, conversation_started_at = ? WHERE id = ?",
-            (new_claude_sid, delivered, new_claude_sid, _now, _now, _now, session_id),
-        )
-        await self._db.commit()
-        # The conversation under this row is a different one now. Its stored
-        # fullness belongs to a transcript that no longer exists, and the
-        # feed is holding the replaced conversation's words — both would
-        # render as a fresh conversation that is somehow already at its
-        # rotation threshold.
-        # The model is the same one, so the point it rotates at still is.
-        await self._open_conversation_size(
-            session_id, active["model"], delivered,
-            mind_id=active["mind_id"], harness=await self.conversation_harness(row or active),
-            surface=PANE, threshold=(row or {}).get("context_threshold"),
-        )
-        self.dashboard.forget(session_id)
+        new_row = await self._get_row(session_id) or {}
         # The pane was respawned, so the tile's screen and scrollback went
         # with it — the conversation it was showing is gone from the display
         # even though nothing it tracks changed. This is the only account of
@@ -2031,12 +1864,15 @@ class SessionManager:
                 "exchange": last_exchange,
             },
         )
-        log.info("rotation: session %s now on conversation %s", session_id, new_claude_sid)
+        log.info(
+            "rotation: session %s now on conversation %s",
+            session_id, new_row.get("claude_sid"),
+        )
         return {
             "ok": True,
             "session_id": session_id,
             "rotated": True,
-            "claude_sid": new_claude_sid,
+            "claude_sid": new_row.get("claude_sid"),
         }
 
     async def _last_exchange(self, session_id: str) -> dict:
@@ -2081,60 +1917,6 @@ class SessionManager:
             (session.get("owner_type") or "").split(":", 1)[0] == TERMINAL_OWNER_TYPE
         )
 
-    async def _finalize_rotation(self, session: dict) -> str | None:
-        """Swap a chat session to a fresh one, carrying the rotation forward.
-
-        Creates the replacement *before* killing the old session — so the
-        new id exists in time to be published on the kill event
-        (``rotated_to``) — then kills the old one. The new session boots with
-        the carry-forward via ``create_session`` → ``bootstrap_loader``.
-        Returns the new session id, or ``None`` when the swap can't proceed
-        (no ``client_ref`` to rebind the surface) — in which case the caller
-        falls through and delivers on the old session.
-        """
-        routing = await self._routing_for(session)
-        client_ref = routing["client_ref"]
-        old_id = session["id"]
-        if not client_ref:
-            # Without client_ref we can't rebind a new active session to the
-            # surface. Disarm and let the caller deliver normally rather than
-            # strand the conversation.
-            await self._db.execute(
-                "UPDATE sessions SET rotation_armed = 0 WHERE id = ?", (old_id,)
-            )
-            await self._db.commit()
-            log.warning(
-                "rotation: no client_ref for session=%s; disarming, delivering on old session",
-                old_id,
-            )
-            return None
-        log.info("rotation: finalizing, retiring session=%s", old_id)
-        # A rotation replaces the conversation, not the conversation's model.
-        # Naming it explicitly means a `/model` switch survives the swap, and
-        # a default changed in the console mid-conversation cannot reach in
-        # and move a live one — that default is for the *next* conversation.
-        new = await self.create_session(
-            owner_type=routing["owner_type"],
-            owner_ref=routing["owner_ref"],
-            client_ref=client_ref,
-            model=session["model"],
-            mind_id=session["mind_id"],
-            rotated_from=old_id,
-        )
-        await self.kill_session(old_id, rotated_to=new["id"])
-        return new["id"]
-
-    async def _forward_to_session(
-        self, session_id: str, content: str, images: list[dict] | None, **kwargs: Any,
-    ):
-        """Re-dispatch a turn to another session, yielding its events.
-
-        A thin seam over ``send_message`` so the armed-rotation redirect in
-        ``send_message`` is a single call (and independently testable).
-        """
-        async for event in self.send_message(session_id, content, images=images, **kwargs):
-            yield event
-
     async def stream_session_events(self, session_id: str):
         """Yield live session events to passive observers.
 
@@ -2145,10 +1927,11 @@ class SessionManager:
         event published before the observer reconnects.
         """
         session = await self._get_row(session_id)
-        if not session:
-            raise ValueError(f"Session not found: {session_id}")
-
-        if session.get("status") == "closed":
+        # A conversation that has ended is reported as ended, whether its row
+        # is gone — the ordinary shape now — or merely marked. Raising here
+        # escaped the attach endpoint as an abnormal close the browser has no
+        # case for, and the tile reattached with backoff until it gave up.
+        if not session or session.get("status") == "closed":
             yield {"type": "session_closed", "session_id": session_id}
             return
         if session.get("status") == "suspended":
@@ -2331,12 +2114,17 @@ class SessionManager:
         lock = self._locks.setdefault(sid, asyncio.Lock())
         async with lock:
             await self._db.execute(
+                # The arm survives the adoption. It used to be cleared,
+                # because an arm meant "retire this row for a successor" and
+                # a pane's row must not be retired; now it means "replace the
+                # conversation under this row", which is what the pane's own
+                # fire will do. Clearing it here left a conversation over its
+                # threshold with nothing able to rotate it — one pane ran
+                # eight days to 1834 messages that way.
                 """UPDATE sessions
-                      SET owner_type = ?, owner_ref = ?, terminal_held = 1,
-                          rotation_armed = CASE rotation_armed
-                              WHEN ? THEN 0 ELSE rotation_armed END
+                      SET owner_type = ?, owner_ref = ?, terminal_held = 1
                     WHERE id = ?""",
-                (TERMINAL_OWNER_TYPE, client_ref, ROTATION_ARMED_CHAT, sid),
+                (TERMINAL_OWNER_TYPE, client_ref, sid),
             )
             await self._db.execute(
                 "DELETE FROM active_sessions WHERE session_id = ?", (sid,)
@@ -2443,7 +2231,6 @@ class SessionManager:
                 await self._spawn(
                     session_id,
                     session["model"],
-                    autopilot=bool(session["autopilot"]),
                     resume_sid=session["claude_sid"],
                     mind_id=session["mind_id"],
                     **routing,
@@ -2532,28 +2319,43 @@ class SessionManager:
             log.info("send_message: refusing %s session=%s", status, session_id)
             raise ValueError(f"Session {session_id} is {status}")
 
-        # Pending rotation finalizes HERE, on the user's turn. The Stop
-        # hook armed this session after writing the carry-forward; swap to
-        # a fresh session now and dispatch this turn to it, so the user's
-        # message is the new session's first turn. Never fires for
-        # un-armed sessions, so normal delivery is unchanged — and never
-        # for a *staged terminal*, whose swap keeps this row. Retiring it
-        # for a successor would destroy the permanent session id, its
-        # label and its ledger binding, which is exactly what in-place
-        # rotation exists to prevent. Hence the equality test: a bare
-        # truth test would finalize a 2.
-        # Never a row a pane holds, however it came to be armed: that row is
-        # the pane's permanent session, and a successor would retire it. Its
-        # turns go on to the current conversation until the pane fires.
-        if (session.get("rotation_armed") == ROTATION_ARMED_CHAT
+        # A pending rotation happens HERE, on the user's turn. The Stop hook
+        # armed this row after writing the carry-forward; the harness
+        # conversation under it is replaced now, and this message is then
+        # delivered normally as the first turn of the new one. The row, its
+        # id, its label and its ledger are untouched — the only thing that
+        # rotates is the conversation.
+        #
+        # Never a row a pane holds. That conversation is also answered by
+        # chat processes — the console's message route, a model change — and
+        # replacing it from here would respawn the pane under somebody
+        # mid-keystroke. Its turns go on to the current conversation until
+        # the pane's own hook fires.
+        if (session.get("rotation_armed") == ROTATION_ARMED
                 and not self._pane_holds(session)):
-            new_id = await self._finalize_rotation(session)
-            if new_id and new_id != session_id:
-                async for event in self._forward_to_session(new_id, content, images):
-                    yield event
-                return
-            # new_id is None → disarmed (no client_ref); fall through and
-            # deliver on this session as usual.
+            try:
+                await self._replace_conversation(
+                    session,
+                    model=session["model"],
+                    effort=session.get("effort"),
+                    window=session.get("context_window"),
+                    threshold=session.get("context_threshold"),
+                )
+            except (MindCallFailed, SwitchWontFit, ValueError) as exc:
+                # Still armed, so the next turn tries again. This one is
+                # answered in the conversation it was typed into, which is
+                # over its threshold but intact — the alternative is
+                # refusing a message the user has already sent.
+                log.error(
+                    "rotation: could not replace the conversation of %s: %s; "
+                    "delivering on the conversation it was typed into",
+                    session_id, exc,
+                )
+            else:
+                # The row is the same row; its conversation is not. Every
+                # read below — the respawn check, the conversation id, the
+                # status — has to be of the conversation that now exists.
+                session = await self._get_row(session_id) or session
 
         mind_id = session["mind_id"]
         log.info("send_message: start session=%s mind=%s", session_id, mind_id)
@@ -2579,7 +2381,6 @@ class SessionManager:
             await self._spawn(
                 session_id,
                 session["model"],
-                autopilot=bool(session["autopilot"]),
                 resume_sid=session["claude_sid"],
                 mind_id=mind_id,
                 **routing,
@@ -2677,20 +2478,25 @@ class SessionManager:
                         timeout=aiohttp.ClientTimeout(total=None, sock_read=600),
                     ) as resp:
                         if resp.status == 404:
-                            # Session doesn't exist on mind container.
-                            # If the session was deliberately closed
-                            # (e.g. by rotation), don't resurrect it —
-                            # raising lets the caller fall through to
-                            # ensure_session and pick up the new one.
+                            # Session doesn't exist on mind container. If
+                            # the conversation was deliberately ended, don't
+                            # resurrect it — raising lets the caller fall
+                            # through to ensure_session and open a fresh one.
                             # Otherwise (idle eviction etc.) respawn once.
+                            # A row that is *gone* is the ordinary shape of
+                            # an ended conversation now, and reads as final
+                            # for the same reason a closed one did: a kill
+                            # takes no turn lock, so it lands mid-turn, and
+                            # falling through here would spawn a harness on
+                            # the transcript of the conversation just ended.
                             fresh = await self._get_row(session_id)
-                            if fresh and fresh.get("status") == "closed":
+                            if not fresh or fresh.get("status") == "closed":
                                 log.info(
-                                    "Session %s is closed; not respawning (rotation killed it)",
+                                    "Session %s has ended; not respawning",
                                     session_id,
                                 )
                                 raise ValueError(
-                                    f"Session {session_id} closed — caller should pick up the new active session"
+                                    f"Session {session_id} ended — caller should open a new session"
                                 )
                             if not retried:
                                 retried = True
@@ -2698,7 +2504,6 @@ class SessionManager:
                                 routing = await self._routing_for(session)
                                 await self._spawn(
                                     session_id, session["model"],
-                                    autopilot=bool(session["autopilot"]),
                                     resume_sid=session.get("claude_sid"),
                                     mind_id=mind_id,
                                     **routing,
@@ -2838,7 +2643,6 @@ class SessionManager:
                                 routing = await self._routing_for(session)
                                 await self._spawn(
                                     session_id, session["model"],
-                                    autopilot=bool(session["autopilot"]),
                                     resume_sid=fresh_sid,
                                     mind_id=mind_id,
                                     **routing,
@@ -3150,7 +2954,7 @@ class SessionManager:
     def _claim_turn_lock(self, session_id: str) -> asyncio.Lock:
         """Take the session's turn lock for an operation that respawns in place.
 
-        A switch or an autopilot toggle kills the harness process and starts a
+        A harness switch kills the harness process and starts a
         new one. Done while a turn is streaming, that destroys the answer being
         written and leaves the surface awaiting a stream with nothing behind
         it — on Telegram a typing indicator that never stops, indistinguishable
@@ -3250,7 +3054,6 @@ class SessionManager:
             await self._spawn(
                 session_id,
                 model,
-                autopilot=bool(session["autopilot"]),
                 resume_sid=session["claude_sid"],
                 mind_id=session["mind_id"],
                 **routing,
@@ -3395,13 +3198,18 @@ class SessionManager:
         threshold: int | None,
         note: str = "",
         message: str = "",
+        deliver_message: bool = False,
     ) -> str:
         """Start a fresh conversation under this row, carrying this one forward.
 
         The handover is the same render a harness switch uses — the mind
         reads its own transcript and cuts it to size — sized so that it, the
         soul beside it and ``message`` together sit under ``threshold``.
-        ``note`` goes on the end of it.
+        ``note`` goes on the end of it. ``deliver_message`` folds ``message``
+        into the opening turn rather than leaving it to the caller to send:
+        a pane's rotation is fired from its ``UserPromptSubmit`` hook, so the
+        respawn is what submits what the user typed, and a caller that could
+        re-send it does not exist.
 
         The row is kept, as a harness switch keeps it: its id, name and
         ledger are the conversation's identity, and only the harness
@@ -3446,6 +3254,10 @@ class SessionManager:
         if note:
             handover = f"{handover}\n\n{note}" if handover else note
 
+        # What the conversation opens on. A pane's own typed turn rides in
+        # here because the respawn is the only thing that will submit it.
+        opening = f"{handover}\n\n{message}" if (deliver_message and message) else handover
+
         new_sid = str(uuid.uuid4())
         respawned_pane = False
         if held:
@@ -3457,7 +3269,8 @@ class SessionManager:
                 await self._db.commit()
                 respawned_pane = await self._rotate_pty_on_mind(
                     session_id=session_id, new_claude_sid=new_sid, model=model,
-                    mind_id=mind_id, user_prompt=handover,
+                    mind_id=mind_id, system_prompt=system_prompt_blocks,
+                    user_prompt=opening,
                     client_ref=routing["client_ref"],
                     owner_type=session.get("owner_type"),
                     owner_ref=session.get("owner_ref"),
@@ -3483,17 +3296,18 @@ class SessionManager:
             "harness_sid = NULL, rotation_armed = 0, carry_forward = ?, "
             "carry_forward_sid = ?, carry_forward_at = ?, status = 'running', "
             "last_active = ?, conversation_started_at = ? WHERE id = ?",
-            (model, effort, new_sid, handover, new_sid, now, now, now, session_id),
+            (model, effort, new_sid, opening, new_sid, now, now, now, session_id),
         )
         await self._db.commit()
-        # A pane is handed the handover alone; a process opens on the soul
-        # beside it.
-        # The message a resend carries rides in as the first turn, so it is
-        # part of what the conversation opened on.
+        # Both surfaces open on the soul: a pane takes it as the respawn's
+        # system prompt, a process as its prompt blocks. A pane handed the
+        # handover alone would be a conversation that remembers what it was
+        # doing and not who it is.
+        # A message the caller will send itself is counted beside the
+        # opening; one delivered inside it is already in there.
         await self._open_conversation_size(
-            session_id, model,
-            *((handover,) if respawned_pane else (system_prompt_blocks, handover)),
-            message,
+            session_id, model, system_prompt_blocks, opening,
+            "" if deliver_message else message,
             mind_id=mind_id, harness=harness, surface=PANE if respawned_pane else PROCESS,
             window=window, threshold=threshold,
             prompt_cap=len(system_prompt_blocks.encode("utf-8")),
@@ -3503,7 +3317,6 @@ class SessionManager:
         if not respawned_pane:
             await self._spawn(
                 session_id, model,
-                autopilot=bool(session["autopilot"]),
                 resume_sid=new_sid,
                 mind_id=mind_id,
                 system_prompt_blocks=system_prompt_blocks,
@@ -3688,7 +3501,6 @@ class SessionManager:
                 await self._spawn(
                     session_id,
                     model,
-                    autopilot=bool(session["autopilot"]),
                     resume_sid=new_claude_sid,
                     mind_id=mind_id,
                     system_prompt_blocks=system_prompt_blocks,
@@ -3721,7 +3533,6 @@ class SessionManager:
                     await self._spawn(
                         session_id,
                         session["model"],
-                        autopilot=bool(session["autopilot"]),
                         resume_sid=session["claude_sid"],
                         harness_sid=session.get("harness_sid"),
                         # The prompt the switch composed was trimmed for the
@@ -4016,41 +3827,6 @@ class SessionManager:
             await self._spawn(
                 session_id,
                 session["model"],
-                autopilot=bool(session["autopilot"]),
-                resume_sid=session["claude_sid"],
-                mind_id=session["mind_id"],
-                **routing,
-            )
-        return await self._session_dict(session_id)
-
-    # ------------------------------------------------------------------
-    # Autopilot
-    # ------------------------------------------------------------------
-    async def toggle_autopilot(self, session_id: str) -> dict:
-        """Toggle autopilot: kill process, respawn with/without --dangerously-skip-permissions."""
-        session = await self._get_row(session_id)
-        if not session:
-            raise ValueError(f"Session not found: {session_id}")
-
-        # Same teardown-and-respawn as a model switch, and the same hole: an
-        # `/autopilot` typed while a turn was streaming destroyed the answer
-        # outright, with no race to lose — which is strictly easier to hit than
-        # the switch it was fixed alongside.
-        lock = self._claim_turn_lock(session_id)
-        async with lock:
-            new_autopilot = 0 if session["autopilot"] else 1
-            await self._kill_process(session_id)
-            await self._db.execute(
-                "UPDATE sessions SET autopilot = ?, status = 'running' WHERE id = ?",
-                (new_autopilot, session_id),
-            )
-            await self._db.commit()
-
-            routing = await self._routing_for(session)
-            await self._spawn(
-                session_id,
-                session["model"],
-                autopilot=bool(new_autopilot),
                 resume_sid=session["claude_sid"],
                 mind_id=session["mind_id"],
                 **routing,
@@ -4212,44 +3988,47 @@ class SessionManager:
         await self._db.commit()
         return await self._session_dict(session_id)
 
-    async def kill_session(
-        self,
-        session_id: str,
-        rotated_to: str | None = None,
-    ) -> dict:
-        """Kill a session: SIGTERM the subprocess, mark closed.
+    async def kill_session(self, session_id: str) -> dict:
+        """End a conversation: SIGTERM the process, then remove the row.
 
-        ``rotated_to`` carries the successor session's id, when this kill is
-        the retiring half of a chat-surface rotation swap — it rides on the
-        published ``session_closed`` event so an attached observer can follow
-        the conversation to its successor. A terminal session is never killed
-        by a rotation: its conversation turns over underneath it and the row
-        stays (see ``_rotate_conversation_in_place``).
+        A session is deleted rather than tombstoned. Nothing reads an ended
+        one — a rotation no longer leaves a predecessor behind, the console's
+        listings filter it out, and every other reader of a row concerns a
+        live conversation — so the row, its turn ledger and its surface
+        bindings all go. What was durable went to the hive's memory through
+        the Stop hook, and the harness's own transcript is still on the
+        mind's disk.
+
+        All three deletes are one transaction. ``session_turns`` and
+        ``active_sessions`` reference ``sessions(id)`` with no cascade and
+        foreign keys enforced, so a turn arriving from a mind's Stop hook
+        between the first delete and the last fails the row delete — and
+        committing the first two anyway would leave a conversation with its
+        turns and its binding gone, its row still marked running and its
+        process already killed. The next message to that row respawns it.
+        Either the conversation is entirely gone or it is entirely there.
         """
         session = await self._get_row(session_id)
         if not session:
             raise ValueError(f"Session not found: {session_id}")
 
         await self._kill_process(session_id)
-        if session.get("owner_type") == "scheduler":
-            await self._db.execute("DELETE FROM session_turns WHERE session_id = ?", (session_id,))
-            await self._db.execute("DELETE FROM active_sessions WHERE session_id = ?", (session_id,))
-            await self._db.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
-        else:
+        try:
+            await self._db.execute("BEGIN IMMEDIATE")
             await self._db.execute(
-                "UPDATE sessions SET status = 'closed', terminal_held = 0 WHERE id = ?",
-                (session_id,),
+                "DELETE FROM session_turns WHERE session_id = ?", (session_id,)
             )
             await self._db.execute(
                 "DELETE FROM active_sessions WHERE session_id = ?", (session_id,)
             )
+            await self._db.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+        except Exception:
+            await self._db.rollback()
+            raise
         await self._db.commit()
-        event: dict[str, Any] = {"type": "session_closed", "session_id": session_id}
-        if rotated_to:
-            event["rotated_to"] = rotated_to
         await self._publish_session_event(
             session_id,
-            event,
+            {"type": "session_closed", "session_id": session_id},
         )
 
         # The conversation is over, so the live view of it goes rather than
@@ -4270,7 +4049,6 @@ class SessionManager:
             "name": session.get("name"),
             "color": session.get("color"),
             "model": session["model"],
-            "autopilot": bool(session["autopilot"]),
             "uptime_seconds": uptime,
             "status": "closed",
         }
@@ -4337,14 +4115,12 @@ class SessionManager:
         self,
         session_id: str,
         model: str,
-        autopilot: bool = False,
         resume_sid: str | None = None,
         surface_prompt: str | None = None,
         allowed_directories: list[str] | None = None,
         soul_file: Path | None = None,
         *,
         mind_id: str,
-        is_group_session: bool = False,
         client_ref: str | None = None,
         owner_type: str | None = None,
         owner_ref: str | None = None,
@@ -4401,7 +4177,6 @@ class SessionManager:
                 json={
                     "session_id": session_id,
                     "model": model,
-                    "autopilot": autopilot,
                     "resume_sid": resume_sid,
                     "harness_sid": harness_sid,
                     "surface_prompt": surface_prompt,
@@ -4999,99 +4774,6 @@ class SessionManager:
         log.info("Killed RC process for session %s", session_id)
 
     # ------------------------------------------------------------------
-    # Group session management
-    # ------------------------------------------------------------------
-    async def create_group_session(self, moderator_mind_id: str) -> dict:
-        """Create a new group session."""
-        assert self._db is not None
-        group_id = str(uuid.uuid4())
-        now = time.time()
-        await self._db.execute(
-            "INSERT INTO group_sessions (id, moderator_mind_id, created_at) VALUES (?, ?, ?)",
-            (group_id, moderator_mind_id, now),
-        )
-        await self._db.commit()
-        log.info("Created group session %s (moderator=%s)", group_id, moderator_mind_id)
-        log_event(log, "group_session.created", group_session_id=group_id,
-                  moderator_mind_id=moderator_mind_id)
-        return {
-            "id": group_id,
-            "moderator_mind_id": moderator_mind_id,
-            "created_at": now,
-            "ended_at": None,
-        }
-
-    async def get_group_session(self, group_session_id: str) -> dict | None:
-        """Get group session details."""
-        assert self._db is not None
-        row = await self._db.execute(
-            "SELECT * FROM group_sessions WHERE id = ?", (group_session_id,)
-        )
-        result = await row.fetchone()
-        if not result:
-            return None
-        return dict(result)
-
-    async def delete_group_session(self, group_session_id: str) -> dict:
-        """End a group session by setting ended_at."""
-        assert self._db is not None
-        now = time.time()
-        await self._db.execute(
-            "UPDATE group_sessions SET ended_at = ? WHERE id = ?",
-            (now, group_session_id),
-        )
-        await self._db.commit()
-        row = await self._db.execute(
-            "SELECT * FROM group_sessions WHERE id = ?", (group_session_id,)
-        )
-        result = await row.fetchone()
-        if not result:
-            raise ValueError(f"Group session not found: {group_session_id}")
-        return dict(result)
-
-    async def get_or_create_group_child_session(
-        self, group_session_id: str, mind_id: str, surface_prompt: str | None = None
-    ) -> str:
-        """Find an existing child session for a mind in a group, or create one.
-
-        Returns the child session ID.
-        """
-        assert self._db is not None
-        rows = await self._db.execute(
-            "SELECT id FROM sessions WHERE group_session_id = ? AND mind_id = ? AND status != 'closed'",
-            (group_session_id, mind_id),
-        )
-        existing = await rows.fetchone()
-
-        if existing:
-            return existing["id"]
-
-        child = await self.create_session(
-            owner_type="group",
-            owner_ref=group_session_id,
-            client_ref=f"group-{group_session_id}-{mind_id}",
-            mind_id=mind_id,
-            surface_prompt=surface_prompt,
-        )
-        child_session_id = child["id"]
-        # Link to group session
-        await self._db.execute(
-            "UPDATE sessions SET group_session_id = ? WHERE id = ?",
-            (group_session_id, child_session_id),
-        )
-        await self._db.commit()
-        return child_session_id
-
-    async def get_group_transcript(self, group_session_id: str) -> list[dict]:
-        """Get unified transcript for a group session, time-ordered with mind_id attribution."""
-        assert self._db is not None
-        rows = await self._db.execute(
-            "SELECT * FROM sessions WHERE group_session_id = ? ORDER BY last_active ASC",
-            (group_session_id,),
-        )
-        return [_public_session_row(r) for r in await rows.fetchall()]
-
-    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
     async def _get_row(self, session_id: str) -> dict | None:
@@ -5225,10 +4907,8 @@ class SessionManager:
             "model": row["model"],
             "effort": row.get("effort"),
             "harness": row.get("harness"),
-            "autopilot": bool(row["autopilot"]),
             "created_at": row["created_at"],
             "last_active": row["last_active"],
             "status": row["status"],
             "mind_id": row.get("mind_id"),
-            "rotated_from": row.get("rotated_from"),
         }

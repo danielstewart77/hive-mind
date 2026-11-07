@@ -137,8 +137,9 @@ def test_a_rename_addressed_to_a_retired_conversation_is_refused_by_the_route(
 
     409 rather than 404: the name is fine and the session exists — the
     conversation it was addressed to has moved on. Breaks if the route folds
-    this into the shape that means "no such session", which sends the caller
-    looking for the wrong fault.
+    this into the shape that means "no such session" — which, since ending a
+    conversation removes its row, is now exactly what it is. A row still
+    marked closed in the store is the one that answers 409.
     """
     client.put(
         "/sessions/sess-1/name",
@@ -152,7 +153,7 @@ def test_a_rename_addressed_to_a_retired_conversation_is_refused_by_the_route(
         headers={**REACHES_EVERYTHING, "X-Rename-Token": "rename-only"},
         json={"name": "Later"},
     )
-    assert response.status_code == 409
+    assert response.status_code == 404
 
 
 def test_a_hive_with_an_admin_token_but_no_rename_token_says_renaming_is_off(

@@ -195,11 +195,9 @@ async def _spawn_proc(
     session_id: str,
     *,
     model: str,
-    autopilot: bool,
     resume_sid: str | None,
     surface_prompt: str | None,
     allowed_directories: list[str] | None,
-    is_group_session: bool,
     owner_type: str | None = None,
     system_prompt_blocks: str | None = None,
     client_ref: str = "",
@@ -237,8 +235,6 @@ async def _spawn_proc(
 
     env = os.environ.copy()
     env.update({k: str(v) for k, v in RUNTIME_ENV.items()})
-    if is_group_session:
-        env["HIVEMIND_GROUP_SESSION"] = "1"
     if owner_type == "scheduler":
         env["HIVEMIND_SCHEDULED_TASK"] = "1"
     # Per-spawn metadata for the rotation_check Stop hook. Empty values
@@ -535,8 +531,6 @@ async def start_session(body: dict) -> Any:
     resume_sid = body.get("resume_sid")
     surface_prompt = body.get("surface_prompt")
     allowed_directories = body.get("allowed_directories")
-    autopilot = bool(body.get("autopilot", False))
-    is_group_session = bool(body.get("is_group_session", False))
     owner_type = body.get("owner_type")
     system_prompt_blocks = body.get("system_prompt_blocks")
     client_ref = body.get("client_ref") or ""
@@ -545,11 +539,9 @@ async def start_session(body: dict) -> Any:
         proc = await _spawn_proc(
             sid,
             model=model,
-            autopilot=autopilot,
             resume_sid=resume_sid,
             surface_prompt=surface_prompt,
             allowed_directories=allowed_directories,
-            is_group_session=is_group_session,
             owner_type=owner_type,
             system_prompt_blocks=system_prompt_blocks,
             client_ref=client_ref,
