@@ -319,13 +319,12 @@ def _format_sessions(sessions: list[dict]) -> str:
         status_icon = {"running": "\U0001f7e2", "idle": "\U0001f4a4", "closed": "\U0001f534"}.get(
             s["status"], "\u2753"
         )
-        autopilot = " \U0001f916" if s.get("autopilot") else ""
         short_id = s["id"][:8]
         summary = s.get("summary", "Untitled")
         last = s.get("last_active", 0)
         ago = time_ago(last) if last else "?"
         lines.append(
-            f"{i}. {status_icon}{autopilot} `{short_id}` — \"{summary}\" [{s.get('model', '?')}] ({ago})"
+            f"{i}. {status_icon} `{short_id}` — \"{summary}\" [{s.get('model', '?')}] ({ago})"
         )
 
     lines.append("")
@@ -449,7 +448,7 @@ async def _stream_to_message(
 # Server commands
 # ---------------------------------------------------------------------------
 SERVER_COMMANDS = {
-    "/clear", "/model", "/effort", "/harness", "/autopilot", "/kill", "/status", "/sessions", "/switch", "/new",
+    "/clear", "/model", "/effort", "/harness", "/kill", "/status", "/sessions", "/switch", "/new",
 }
 
 
@@ -542,12 +541,6 @@ async def _handle_server_command(content: str, user_id: int, channel_id: int) ->
             lines.append(f"\n`/harness {harness} <model>` to switch")
             return "\n".join(lines)
         return harness_picker.format_switch_result(result)
-    if cmd == "/autopilot":
-        on = result.get("autopilot", False)
-        summary = result.get("summary", "this session")
-        if on:
-            return f"\U0001f916 **Autopilot ON** for \"{summary}\"\n(Claude will execute all actions without asking)"
-        return f"\U0001f512 **Autopilot OFF** for \"{summary}\"\n(Claude will ask for permission before risky actions)"
     if cmd == "/switch":
         return f"Resumed session \"{result.get('summary', '?')}\""
     if cmd == "/kill":
@@ -699,16 +692,6 @@ async def cmd_harness(interaction: discord.Interaction, name: str = None, model:
     # A model means nothing without the harness it is for.
     cmd = "/harness" if not name else f"/harness {name} {model}" if model else f"/harness {name}"
     msg = await _handle_server_command(cmd, interaction.user.id, interaction.channel_id)
-    await interaction.followup.send(msg, ephemeral=True)
-
-
-@bot.tree.command(name="autopilot", description="Toggle autopilot mode")
-async def cmd_autopilot(interaction: discord.Interaction):
-    if not await _is_allowed_user(interaction.user.id):
-        await interaction.response.send_message("Not authorized.", ephemeral=True)
-        return
-    await interaction.response.defer(ephemeral=True)
-    msg = await _handle_server_command("/autopilot", interaction.user.id, interaction.channel_id)
     await interaction.followup.send(msg, ephemeral=True)
 
 

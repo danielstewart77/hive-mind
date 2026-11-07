@@ -2,7 +2,7 @@
 
 A surface needs to know who may talk to it and which model to name in
 `/status`. It does not need — and must never acquire — the rest of a mind's
-configuration: the providers, the autopilot guards, the server port. A core
+configuration: the providers, the credentials, the server port. A core
 that read the host's whole config object would be a core that could only be
 installed into a host shaped exactly like the one it was lifted from.
 

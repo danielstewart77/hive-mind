@@ -734,12 +734,6 @@ async def _handle_server_command(content: str, user_id: int, chat_id: int) -> st
         return effort_picker.format_effort_result(result)
     if cmd == "/harness":
         return format_harness_result(result)
-    if cmd == "/autopilot":
-        on = result.get("autopilot", False)
-        summary = _conversation_caption(result)
-        if on:
-            return f"\U0001f916 Autopilot ON for \"{summary}\""
-        return f"\U0001f512 Autopilot OFF for \"{summary}\""
     if cmd == "/switch":
         return f"Resumed \"{_conversation_caption(result)}\""
     if cmd == "/kill":
@@ -1631,13 +1625,6 @@ async def cmd_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
-async def cmd_autopilot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await _auth_check(update):
-        return
-    msg = await _handle_server_command("/autopilot", update.effective_user.id, update.effective_chat.id)
-    await _reply_chunked(update, msg)
-
-
 async def cmd_switch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _auth_check(update):
         return
@@ -2267,7 +2254,6 @@ COMMANDS: tuple[tuple[str, str, object], ...] = (
     ("effort", "Pick a reasoning effort for this conversation", cmd_effort),
     ("harness", "Move this conversation to another harness", cmd_harness),
     ("models", "List the models this mind can be pointed at", cmd_models),
-    ("autopilot", "Toggle autopilot for this conversation", cmd_autopilot),
     ("switch", "Resume a conversation: /switch <id>", cmd_switch),
     ("suspend", "Put a conversation to sleep, keeping its history", cmd_suspend),
     ("kill", "End a conversation for good: /kill <id>", cmd_kill),
