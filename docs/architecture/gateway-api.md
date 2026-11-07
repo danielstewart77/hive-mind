@@ -15,7 +15,6 @@ The FastAPI gateway (`hive-comms`, built from `nervous-system/comms/server.py`, 
 | `POST` | `/sessions/{id}/message` | Send a message (SSE streaming response) |
 | `POST` | `/sessions/{id}/activate` | Activate session on a surface |
 | `POST` | `/sessions/{id}/model` | Switch model mid-session |
-| `POST` | `/sessions/{id}/autopilot` | Toggle autopilot mode |
 | `WS` | `/sessions/{id}/stream` | WebSocket bidirectional stream |
 
 ### Other
@@ -72,7 +71,6 @@ Response is an SSE stream. Each event is a JSON object with `type` and `content`
 | `/new [dir...]` | Kill active session, create a new one |
 | `/clear [dir...]` | Alias for `/new` |
 | `/model [name]` | Switch model on the active session, or list available models with no argument |
-| `/autopilot` | Toggle autopilot (no approval prompts) |
 | `/sessions` | List selectable sessions |
 | `/switch <id\|number>` | Activate a different session on this surface |
 | `/kill <id\|number>` | Kill a specific session |

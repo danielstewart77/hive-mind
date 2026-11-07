@@ -41,30 +41,17 @@ if CONFIG_FILE.exists():
 
 
 @dataclass
-class AutopilotGuards:
-    max_budget_usd: float = 5.00
-    max_turns_without_input: int = 50
-    max_minutes_without_input: int = 30
-
-
-@dataclass
 class HiveMindConfig:
     # Gateway server
     server_port: int = 8420
     max_sessions: int = 10
     default_model: str = "sonnet"
 
-    # Autopilot guard rails
-    autopilot_guards: AutopilotGuards = field(default_factory=AutopilotGuards)
-
     # Provider configs: {name: {env: {...}, api_base: "..."}}
     providers: dict = field(default_factory=dict)
 
     # Static model -> provider mappings
     models: dict[str, str] = field(default_factory=dict)
-
-    # Group chat configuration
-    group_chat: dict = field(default_factory=dict)
 
     # MCP server
     mcp_port: int = 7777
@@ -83,21 +70,12 @@ class HiveMindConfig:
     @classmethod
     def from_yaml(cls) -> "HiveMindConfig":
         """Load config from config.yaml."""
-        guards_raw = _yaml_config.get("autopilot_guards", {})
-        guards = AutopilotGuards(
-            max_budget_usd=guards_raw.get("max_budget_usd", 5.00),
-            max_turns_without_input=guards_raw.get("max_turns_without_input", 50),
-            max_minutes_without_input=guards_raw.get("max_minutes_without_input", 30),
-        )
-
         return cls(
             server_port=_yaml_config.get("server_port", 8420),
             max_sessions=_yaml_config.get("max_sessions", 10),
             default_model=_yaml_config.get("default_model", "sonnet"),
-            autopilot_guards=guards,
             providers=_yaml_config.get("providers", {}),
             models=_yaml_config.get("models", {}),
-            group_chat=_yaml_config.get("group_chat", {}),
             mcp_port=_yaml_config.get("mcp_port", 7777),
             discord_allowed_users=_yaml_config.get("discord_allowed_users", []),
             discord_allowed_channels=_yaml_config.get("discord_allowed_channels", []),

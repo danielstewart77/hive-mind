@@ -209,28 +209,13 @@ def test_a_refused_release_aborts_the_handover():
     _run(scenario())
 
 
-def test_a_chat_armed_rotation_is_cleared_on_the_way_in():
-    """Only `send_message` finalizes a chat-armed rotation and the chat will
-    never call it for this conversation again, so the flag would strand the
-    session on a rotation nothing can complete."""
-    async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            try:
-                await _seed(mgr, "armed-one", rotation_armed=sessions_mod.ROTATION_ARMED_CHAT)
-                _releasing(mgr)
-
-                await mgr.adopt_into_terminal("armed-one")
-
-                assert (await _row(mgr, "armed-one"))["rotation_armed"] == 0
-            finally:
-                await mgr.shutdown()
-
-    _run(scenario())
-
-
-def test_a_staged_terminal_rotation_survives_a_reattach():
-    """A staged rotation is the pane's own and only the pane can fire it."""
+def test_a_pending_rotation_survives_an_adoption():
+    """An arm says the conversation under this row is full, which stays true
+    whoever holds it. It used to be cleared on the way into a pane, because
+    an arm then meant "retire this row for a successor" — now it means
+    "replace the conversation", which the pane's own fire does. Clearing it
+    left a conversation over its threshold that nothing could rotate, and one
+    pane ran eight days to 1834 messages that way."""
     async def scenario():
         with tempfile.TemporaryDirectory() as tmp:
             mgr = await _make_manager(tmp)
@@ -238,7 +223,7 @@ def test_a_staged_terminal_rotation_survives_a_reattach():
                 await _seed(
                     mgr, "staged",
                     owner_type="terminal", owner_ref="terminal-staged",
-                    rotation_armed=sessions_mod.ROTATION_ARMED_TERMINAL,
+                    rotation_armed=sessions_mod.ROTATION_ARMED,
                 )
                 released = _releasing(mgr)
 
@@ -246,7 +231,7 @@ def test_a_staged_terminal_rotation_survives_a_reattach():
 
                 assert released == []  # a reattach hands over nothing
                 row = await _row(mgr, "staged")
-                assert row["rotation_armed"] == sessions_mod.ROTATION_ARMED_TERMINAL
+                assert row["rotation_armed"] == sessions_mod.ROTATION_ARMED
                 assert await _bindings(mgr, "staged") == [("terminal", "terminal-staged")]
             finally:
                 await mgr.shutdown()

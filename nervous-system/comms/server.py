@@ -698,10 +698,6 @@ async def late_turns(
 class ArmRotationRequest(BaseModel):
     client_type: str
     client_ref: str
-    # Reported by the hook, which runs inside the pane and is the only party
-    # that knows one is there. Absent means a chat surface, which is what
-    # every caller predating the staged path is.
-    surface: str = ""
     # The conversation the hook measured. An arm for one a harness switch
     # has since replaced is ignored; absent means a hook predating it.
     claude_sid: str = ""
@@ -736,33 +732,33 @@ class HarnessStateRequest(BaseModel):
 
 @app.post("/sessions/arm-rotation")
 async def arm_rotation(body: ArmRotationRequest, request: Request):
-    """Arm the active session for pending rotation (finalize-on-user-turn).
+    """Arm the active session's conversation for replacement on its next turn.
 
     Called by the ``rotation_check`` Stop hook after it writes the
-    carry-forward, in place of an inline ``/clear``. For chat surfaces the
-    actual session swap happens on the next user turn in ``send_message``;
-    for the browser terminal it happens on the next *typed* turn, via
-    ``/sessions/fire-rotation`` below. Either way this call only prepares.
-    Declared before ``/sessions/{session_id}`` so the literal path wins the
-    match.
+    carry-forward, in place of an inline ``/clear``. One flag for every
+    surface: a chat turn replaces the conversation in ``send_message``, a
+    pane's typed turn through ``/sessions/fire-rotation`` below, and both
+    keep the row. This call only prepares, and composes nothing — it runs
+    inside a hook on a timeout. Declared before ``/sessions/{session_id}`` so
+    the literal path wins the match.
     """
     await _refuse_foreign_client_ref(request, body.client_type, body.client_ref)
     return await session_mgr.arm_rotation(
-        body.client_type, body.client_ref, surface=body.surface,
+        body.client_type, body.client_ref,
         claude_sid=body.claude_sid, started_at=body.started_at,
     )
 
 
 @app.post("/sessions/fire-rotation")
 async def fire_rotation(body: FireRotationRequest, request: Request):
-    """Swap a staged terminal onto its successor, carrying the typed message.
+    """Replace a pane's conversation, carrying the typed message.
 
     Called by the pane's UserPromptSubmit hook. The terminal's raw byte
-    bridge never reaches ``send_message``, so this is the terminal's
-    equivalent of finalize-on-user-turn — with the difference that the
-    message being typed is handed to the successor as its opening turn
-    rather than re-dispatched. Declared before ``/sessions/{session_id}`` so
-    the literal path wins the match.
+    bridge never reaches ``send_message``, so this is where a typed turn
+    becomes visible — with the difference that the respawn is what submits
+    the message, so it rides in on the opening turn rather than being
+    re-sent. Declared before ``/sessions/{session_id}`` so the literal path
+    wins the match.
     """
     await _refuse_foreign_client_ref(request, body.client_type, body.client_ref)
     return await session_mgr.fire_rotation(
@@ -1047,11 +1043,9 @@ async def get_session_history(session_id: str):
 async def activate_session(session_id: str, body: ActivateRequest):
     """A conversation with nowhere to go says which kind of nowhere.
 
-    404 for an id with no row, 410 for one that has been retired — a rotated
-    conversation's predecessor is the common case, and its successor is
-    reachable by `rotated_from`. Both left as the bare 500 a `ValueError`
-    produces read as a broken gateway, so a client retried a dead id rather
-    than following the rotation.
+    404 for an id with no row. Left as the bare 500 a `ValueError` produces
+    it read as a broken gateway, and a client retried a dead id rather than
+    opening a fresh conversation.
 
     A refused release stays a 502: the mind was asked to let go of the
     conversation and did not, which is a refusal about a machine, not a
@@ -1081,17 +1075,6 @@ async def switch_model(session_id: str, body: ModelSwitchRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.post("/sessions/{session_id}/autopilot")
-async def toggle_autopilot(session_id: str):
-    try:
-        return await session_mgr.toggle_autopilot(session_id)
-    except ValueError:
-        return JSONResponse({"error": "Session not found"}, status_code=404)
-
-
-# ---------------------------------------------------------------------------
-# Rotation-memory endpoint
-# ---------------------------------------------------------------------------
 @app.post("/sessions/{session_id}/rotation-memory")
 async def write_rotation_memory(
     session_id: str, body: RotationMemoryRequest, request: Request
@@ -1296,11 +1279,14 @@ async def ws_attach(ws: WebSocket, session_id: str):
         return
 
     session = await session_mgr.get_session(session_id)
-    if not session:
-        await ws.close(code=4404, reason=f"session {session_id} not found")
-        return
-    if session.get("status") == "closed":
-        await ws.close(code=4410, reason="session closed")
+    if not session or session.get("status") == "closed":
+        # One answer for a conversation that has ended, whether its row is
+        # gone — the ordinary shape now — or merely marked. 4410 is the only
+        # code the tile treats as permanent: it drops the saved draft, says
+        # the session ended and refreshes the listings. 4404 is in neither
+        # its `permanentClose` ladder nor its `onclose` branches, so an ended
+        # conversation's tile reattached forever and kept its draft.
+        await ws.close(code=4410, reason="session ended")
         return
     if session.get("status") == "suspended":
         await ws.close(code=4411, reason="session suspended; resume first")
@@ -1422,16 +1408,10 @@ async def ws_attach(ws: WebSocket, session_id: str):
                 closed.cancel()
             if closed in done:
                 close_event = closed.result()
-                rotated_to = close_event.get("rotated_to")
                 if close_event.get("type") == "session_suspended":
                     await ws.close(code=4411, reason="session suspended")
-                elif rotated_to:
-                    # A chat-surface rotation retired this session for a
-                    # successor. The tile has to reattach, and the successor
-                    # id in the close reason spares it a poll.
-                    await ws.close(code=4412, reason=rotated_to)
                 else:
-                    await ws.close(code=4410, reason="session closed")
+                    await ws.close(code=4410, reason="session ended")
             elif pump in done:
                 upstream = pump.result()
                 if upstream is not None:
@@ -1468,7 +1448,7 @@ async def ws_attach(ws: WebSocket, session_id: str):
 # ---------------------------------------------------------------------------
 # Slash command routing (used by clients)
 # ---------------------------------------------------------------------------
-SERVER_COMMANDS = {"/clear", "/model", "/effort", "/harness", "/autopilot", "/kill", "/prune", "/status", "/sessions", "/switch", "/new", "/remember"}
+SERVER_COMMANDS = {"/clear", "/model", "/effort", "/harness", "/kill", "/prune", "/status", "/sessions", "/switch", "/new", "/remember"}
 
 
 class CommandRequest(BaseModel):
@@ -1559,11 +1539,11 @@ async def _resolve_target(
 #: of them resolved its target from the request body with nothing checking
 #: whose it was: `/new` killed the live conversation on that reference and
 #: opened a fresh one on that mind, `/model`, `/effort` and `/harness` mutated
-#: it, `/autopilot` flipped it, and the bare forms reported another mind's
+#: it, and the bare forms reported another mind's
 #: catalog back. The ownership check belongs here rather than on each branch,
 #: because a branch added later would not have one.
 _MIND_BOUND_COMMANDS = frozenset(
-    {"/new", "/clear", "/model", "/effort", "/harness", "/autopilot", "/remember"}
+    {"/new", "/clear", "/model", "/effort", "/harness", "/remember"}
 )
 
 
@@ -1680,12 +1660,6 @@ async def _handle_command(
                 "harness": harness,
             }
         return await session_mgr.switch_harness(active["id"], harness, parts[2])
-
-    if cmd == "/autopilot":
-        active = await session_mgr.get_active_session(body.owner_type, body.client_ref)
-        if not active:
-            return {"error": "No active session. Use /new first."}
-        return await session_mgr.toggle_autopilot(active["id"])
 
     if cmd == "/switch":
         if len(parts) < 2:

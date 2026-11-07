@@ -209,7 +209,6 @@ def test_every_conversation_route_is_classified_as_somebodys_conversation():
         ("GET", "/sessions/{session_id}/history"),
         ("POST", "/sessions/{session_id}/activate"),
         ("POST", "/sessions/{session_id}/model"),
-        ("POST", "/sessions/{session_id}/autopilot"),
         ("POST", "/sessions/{session_id}/interrupt"),
         ("POST", "/sessions/{session_id}/remote-control"),
         ("DELETE", "/sessions/{session_id}/remote-control"),

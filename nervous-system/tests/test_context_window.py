@@ -348,7 +348,7 @@ def test_a_terminal_handed_over_keeps_its_row_and_respawns_its_pane_on_the_hando
             await _seed(mgr)
             await _measured(mgr, tokens=150_000, window=1_000_000, threshold=500_000)
             await mgr._db.execute(
-                "UPDATE sessions SET terminal_held = 1, rotation_armed = 2, "
+                "UPDATE sessions SET terminal_held = 1, rotation_armed = 1, "
                 "carry_forward = 'stale seed', carry_forward_sid = 'conv-9' WHERE id = 'sess-1'"
             )
             await mgr._db.commit()
@@ -368,8 +368,13 @@ def test_a_terminal_handed_over_keeps_its_row_and_respawns_its_pane_on_the_hando
     assert row["carry_forward_sid"] == row["claude_sid"]
     assert row["rotation_armed"] == 0
     assert (row["context_window"], row["context_threshold"]) == (200_000, 100_000)
-    # The pane was handed the handover alone, and is sized by it.
-    assert row["context_tokens"] == len(rotated["user_prompt"]) // 4 + OVERHEAD["claude"]
+    # The pane opens on the soul as well — it has a system prompt channel and
+    # a pane handed the handover alone remembers its work and not itself — so
+    # the estimate counts both.
+    assert rotated["system_prompt"]
+    assert row["context_tokens"] == (
+        len(rotated["system_prompt"]) + len(rotated["user_prompt"])
+    ) // 4 + OVERHEAD["claude"]
     assert row["context_kind"] == "estimated"
 
 
@@ -441,9 +446,11 @@ def test_a_model_change_onto_a_model_with_no_room_for_the_harness_is_refused():
     assert mind.kills("sess-1") == []
 
 
-def test_a_chat_rotation_trims_its_carry_forward_to_the_models_threshold():
-    """The composed successor prompt — soul, recent memory and the rotation
-    summary — has to fit where the conversation will rotate next."""
+def test_a_chat_rotation_trims_its_opening_prompt_to_the_models_threshold():
+    """The composed prompt — soul, recent memory and the rotation summary —
+    has to fit where the conversation will rotate next. There is no
+    predecessor row to read that room off any more: it is the rotating row's
+    own, which is the same row."""
     async def scenario():
         with tempfile.TemporaryDirectory() as tmp:
             mgr = await _manager(tmp)
@@ -467,9 +474,10 @@ def test_a_chat_rotation_trims_its_carry_forward_to_the_models_threshold():
 
     mind = _run(scenario())
     blocks = mind.spawns()[-1]["system_prompt_blocks"]
-    # The harness's own overhead sits under the threshold beside it.
+    # The harness's own overhead sits under the threshold beside it, and the
+    # prompt takes at most half the room so the handover has the rest.
     room = (60_000 - OVERHEAD["claude"]) * 4
-    assert room - 1_000 <= len(blocks.encode()) <= room
+    assert room // 2 - 1_000 <= len(blocks.encode()) <= room // 2
     assert blocks.rstrip().endswith("LAST WORDS\n</session-memory>".rstrip())
 
 
@@ -1043,7 +1051,7 @@ def test_a_model_change_right_after_a_harness_switch_that_does_not_fit_hands_ove
     assert row["context_threshold"] == 24_000 * 50 // 100
 
 
-def test_a_chat_rotations_successor_holds_an_estimate_of_its_opening_prompt():
+def test_a_chat_rotation_leaves_the_row_holding_an_estimate_of_its_opening():
     async def scenario():
         with tempfile.TemporaryDirectory() as tmp:
             mgr = await _manager(tmp)
@@ -1063,15 +1071,20 @@ def test_a_chat_rotations_successor_holds_an_estimate_of_its_opening_prompt():
                     patch.object(bootstrap_loader, "_fetch_recent_memory", return_value=""):
                 async for _ in mgr.send_message("sess-1", "hello"):
                     pass
-            cur = await mgr._db.execute("SELECT * FROM sessions WHERE rotated_from = 'sess-1'")
-            successor = dict(await cur.fetchone())
+            # The same row: a rotation replaces the conversation under it,
+            # and nothing anywhere names a row a rotation came from.
+            cur = await mgr._db.execute("SELECT COUNT(*) AS n FROM sessions")
+            assert (await cur.fetchone())["n"] == 1
+            successor = await mgr._get_row("sess-1")
             await _close(mgr)
             return successor, mind
 
     successor, mind = _run(scenario())
-    spawned = [s for s in mind.spawns() if s["session_id"] == successor["id"]][0]
+    spawned = [s for s in mind.spawns() if s["session_id"] == successor["id"]][-1]
+    assert successor["claude_sid"] != "conv-1"
     assert successor["context_tokens"] == (
-        len(spawned["system_prompt_blocks"]) // 4 + OVERHEAD["claude"])
+        len(spawned["system_prompt_blocks"]) + len(spawned["opening_turn"])
+    ) // 4 + OVERHEAD["claude"]
     assert successor["context_kind"] == "estimated"
     assert successor["context_model"] == successor["model"]
     # The same model, so the same room to draw the estimate against.

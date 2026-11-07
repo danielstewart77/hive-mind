@@ -12,7 +12,7 @@ The nervous system — lucent (vector store + knowledge graph) and comms (the ga
 
 ```
 ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐
-│ Discord Bot │  │ Telegram Bot│  │ Group Chat  │  │  Scheduler  │
+│ Discord Bot │  │ Telegram Bot│  │  Terminal   │  │  Scheduler  │
 │  (thin)     │  │  (thin)     │  │  Bot (thin) │  │  (cron)     │
 └──────┬──────┘  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘
        │                │                │                 │
@@ -328,7 +328,6 @@ hive-mind/
 ├── bots/                          # Thin client entry points
 │   ├── discord_bot.py            # Discord bot
 │   ├── telegram_bot.py           # Telegram bot (Ada + named minds)
-│   ├── hivemind_bot.py           # Group chat Telegram bot (multi-mind sessions)
 │   └── scheduler.py              # Cron daemon
 │
 ├── voice/                         # Voice infrastructure
@@ -566,29 +565,23 @@ row is the only place either lives. `summary` sits beside them and is a
 different thing: a preview generated once from the first chat message, used
 only when there is no name. A name is given; a preview is computed.
 
-The name follows the conversation across a rotation. `create_session` copies
-it off the predecessor when `rotated_from` is set, so a successor is born
-wearing it — copied at creation rather than read through the link, because the
-predecessor is retired moments later. The in-place terminal rotation keeps its
-row, so nothing to carry.
+The name follows the conversation across a rotation because the row does. A
+rotation replaces the harness conversation under the row and nothing else, on
+every surface, so there is no successor to copy a name onto.
 
 `PUT /sessions/{id}/name` is a **partial** write: an absent field is unchanged,
 an empty one clears. A whole-record write is how a caller that only knew about
 names blanked the colour picked at a browser tile. A rename addressed to a
-closed session is refused with 409 rather than committing to a row nothing
-reads — the ids come from picker buttons and rename prompts that deliberately
-never expire.
+conversation that has ended answers 404, because ending one removes its row —
+the ids come from picker buttons and rename prompts that deliberately never
+expire. The 409 remains for the rows still marked closed in the store from
+before deletion-on-close.
 
 The route carries `X-Rename-Token` (`COMMS_RENAME_TOKEN`, or the admin token)
 on top of the service bearer, and **refuses when neither is configured**. The
 service token is held by every surface bot and every mind container on the
 hive; reading a name is not worth guarding, changing one is. Reads ride
 `GET /sessions` and `GET /sessions/names` on the service token alone.
-
-`comms/label_migration.py` is the one-time move from the browser terminal's
-old `terminal_labels` table, walking each rotation chain forward so a stranded
-name lands on the conversation that continued it. Idempotent by rule rather
-than by marker: a target already carrying a name is never written over.
 
 ## Gateway API
 
@@ -603,16 +596,11 @@ than by marker: a target already carrying a name is never written over.
 | `POST` | `/sessions/{id}/message` | Send message (SSE streaming) |
 | `POST` | `/sessions/{id}/activate` | Activate session on a surface |
 | `POST` | `/sessions/{id}/model` | Switch model mid-session |
-| `POST` | `/sessions/{id}/autopilot` | Toggle autopilot |
 | `WS` | `/sessions/{id}/stream` | WebSocket bidirectional |
 | `GET` | `/models` | List available models |
 | `POST` | `/command` | Route slash commands |
 | `POST` | `/sessions/{id}/remote-control` | Start remote observation of a session |
 | `DELETE` | `/sessions/{id}/remote-control` | Stop remote observation |
-| `POST` | `/group-sessions` | Create group session (multi-mind) |
-| `GET` | `/group-sessions/{id}` | Get group session detail |
-| `POST` | `/group-sessions/{id}/message` | Send message to group session |
-| `DELETE` | `/group-sessions/{id}` | Kill group session |
 | `POST` | `/memory/expiry-sweep` | Trigger timed-event expiry sweep |
 | `POST` | `/epilogue/sweep` | Trigger session epilogue sweep |
 | `POST` | `/hitl/request` | Submit HITL approval request |

@@ -73,9 +73,6 @@ Per-subprocess env isolation — no global env mutation.
 | DELETE | /sessions/{id}/remote-control | Stop remote observation |
 
 HITL approval is not a gateway endpoint — see [gateway-api.md](gateway-api.md#endpoints).
-Group-chat session management (`create_group_session` / `get_group_session` /
-`delete_group_session`) exists on the session manager but isn't exposed over
-HTTP yet — `config.yaml`'s `group_chat` block is read, but nothing currently
-drives it end-to-end. Memory pruning is a nightly APScheduler cron inside
+Memory pruning is a nightly APScheduler cron inside
 `hive-lucent`, not an HTTP sweep — see
 [nervous-system/README.md](../../nervous-system/README.md#pruning).

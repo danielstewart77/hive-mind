@@ -82,28 +82,39 @@ async def _model_of(mgr: SessionManager, session_id: str) -> str:
 
 
 def test_rotation_carries_the_conversations_model_forward() -> None:
-    """The mind's default moved to sonnet mid-conversation; opus survives."""
+    """The mind's default moved to sonnet mid-conversation; opus survives,
+    on the same row, because an armed turn names the conversation's own model
+    rather than re-resolving the default."""
     async def scenario() -> None:
         with tempfile.TemporaryDirectory() as tmp:
             mgr = await _make_manager(tmp)
             try:
                 spawns: list = []
-                old = await _seed_session(mgr, model="opus")
+                sid = await _seed_session(mgr, model="opus")
+                await mgr._db.execute(
+                    "UPDATE sessions SET rotation_armed = 1 WHERE id = ?", (sid,)
+                )
+                await mgr._db.commit()
+
+                async def nothing(*_a, **_kw):
+                    return None
+
+                async def handover(*_a, **_kw):
+                    return "before"
+
                 with _mind_defaulting_to("sonnet", spawns):
-                    async def _kill(session_id: str, **_kw) -> None:
-                        await mgr._db.execute(
-                            "UPDATE sessions SET status = 'closed' WHERE id = ?",
-                            (session_id,),
-                        )
-                        await mgr._db.commit()
+                    mgr._kill_process = nothing  # type: ignore[assignment]
+                    mgr._render_handover_on_mind = handover  # type: ignore[assignment]
+                    mgr._clear_rotation_marker_on_mind = nothing  # type: ignore[assignment]
+                    session = await mgr._get_row(sid)
+                    same_id = await mgr._replace_conversation(
+                        dict(session), model=session["model"],
+                        effort=session.get("effort"), window=None, threshold=None,
+                    )
 
-                    mgr.kill_session = _kill  # type: ignore[assignment]
-                    session = await mgr._get_row(old)
-                    new_id = await mgr._finalize_rotation(session)
-
-                assert new_id is not None
-                assert await _model_of(mgr, new_id) == "opus"
-                assert spawns == [(new_id, "opus")]
+                assert same_id == sid
+                assert await _model_of(mgr, sid) == "opus"
+                assert spawns == [(sid, "opus")]
             finally:
                 await mgr.shutdown()
 

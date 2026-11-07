@@ -60,7 +60,6 @@ Names are `noun.verb[.qualifier]`, past tense for completed facts. In use:
 | Broker | `broker.message.accepted`, `broker.wakeup.completed`, `broker.wakeup.timed_out`, `broker.wakeup.failed` |
 | Mind registry | `mind.registered`, `mind.updated`, `mind.deleted` |
 | Memory (lucent) | `memory.stored`, `memory.updated`, `memory.deleted` |
-| Groups | `group_session.created` |
 | Scheduler | `scheduled_skill.started`, `scheduled_skill.completed` |
 | Surfaces | `surface.command.received` |
 | Voice | `voice.stt.completed`, `voice.tts.completed` |

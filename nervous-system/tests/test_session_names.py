@@ -124,43 +124,6 @@ def test_naming_a_conversation_leaves_its_colour_alone() -> None:
     _run(scenario())
 
 
-# ---------------------------------------------------------------------------
-# R3 — a rotation successor is born wearing the name
-# ---------------------------------------------------------------------------
-def test_a_rotation_successor_inherits_the_name_it_continued() -> None:
-    """R3: the successor `create_session` mints carries the name and colour.
-
-    Breaks if the inheritance copy is dropped — which is the live bug: three
-    rotations of one conversation produced three rows and the name stayed on
-    the first.
-    """
-    async def scenario() -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            try:
-                await _seed(mgr, "sess-old")
-                await mgr.set_session_name(
-                    "sess-old", name="Fittimus Maximus", color="#3481cc"
-                )
-
-                with _a_registered_mind([]):
-                    successor = await mgr.create_session(
-                        owner_type="telegram",
-                        owner_ref="123",
-                        client_ref="123",
-                        mind_id="ada",
-                        rotated_from="sess-old",
-                    )
-
-                assert successor["id"] != "sess-old"
-                assert successor["name"] == "Fittimus Maximus"
-                assert successor["color"] == "#3481cc"
-            finally:
-                await mgr.shutdown()
-
-    _run(scenario())
-
-
 def test_a_fresh_conversation_is_not_named_by_its_neighbour() -> None:
     """R3: inheritance follows the rotation link and nothing else.
 
