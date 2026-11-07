@@ -34,6 +34,7 @@ refused before loading anything.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import re
 import shutil
@@ -586,6 +587,78 @@ async def _register_vector(conn: asyncpg.Connection) -> None:
     )
 
 
+async def inbound_keys(conn: asyncpg.Connection,
+                       loaded: set[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Keys pointing into the reloaded tables from tables not being reloaded.
+
+    `TRUNCATE` is refused outright while any such key exists, whether or not
+    the referencing table holds a row, so a staged cutover cannot reload one
+    service's tables while another service's table references them. There
+    are three in the live database today: `board.design_sessions` reaches
+    into `core.minds` and `core.sessions`, and `memory.edges` reaches into
+    `core.minds`.
+
+    Returned as (qualified child table, constraint name) with the definition
+    read back from Postgres rather than written down, so a key restored here
+    is the key that was there — including its `ON DELETE`, which is the part
+    a hand-written reconstruction loses silently.
+    """
+    rows = await conn.fetch("""
+        SELECT c.conname AS name,
+               cs.nspname AS child_schema, ct.relname AS child_table,
+               ps.nspname AS parent_schema, pt.relname AS parent_table,
+               pg_get_constraintdef(c.oid) AS definition
+        FROM pg_constraint c
+        JOIN pg_class ct ON ct.oid = c.conrelid
+        JOIN pg_namespace cs ON cs.oid = ct.relnamespace
+        JOIN pg_class pt ON pt.oid = c.confrelid
+        JOIN pg_namespace ps ON ps.oid = pt.relnamespace
+        WHERE c.contype = 'f'
+    """)
+    keys: list[tuple[str, str]] = []
+    for row in rows:
+        parent = (row["parent_schema"], row["parent_table"])
+        child = (row["child_schema"], row["child_table"])
+        if parent in loaded and child not in loaded:
+            keys.append((f'"{child[0]}"."{child[1]}"', row["name"]))
+            _DEFINITIONS[(child, row["name"])] = row["definition"]
+    return sorted(keys)
+
+
+#: Constraint definitions read off the database by `inbound_keys`, so the
+#: restore is the text Postgres gave rather than text this module composed.
+_DEFINITIONS: dict[tuple[tuple[str, str], str], str] = {}
+
+
+async def untouched(conn: asyncpg.Connection,
+                    loaded: set[tuple[str, str]]) -> dict[str, int]:
+    """How many rows stand in every table this run is not loading.
+
+    Taken before the load and again after it, inside the same transaction,
+    so a run that reaches a table it was not named for rolls back rather
+    than being reported afterwards. A count is what detects the failure this
+    exists for — a table emptied and refilled from a frozen file — and it is
+    cheap enough to take over every table in the database. It cannot see an
+    update, which the loader has no way to perform on a table outside its
+    plan.
+    """
+    rows = await conn.fetch("""
+        SELECT n.nspname AS schema, c.relname AS table
+        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relkind = 'r'
+          AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+          AND n.nspname NOT LIKE 'pg_%'
+    """)
+    counts: dict[str, int] = {}
+    for row in rows:
+        if (row["schema"], row["table"]) in loaded:
+            continue
+        qualified = f'{row["schema"]}.{row["table"]}'
+        counts[qualified] = await conn.fetchval(
+            f'SELECT count(*) FROM "{row["schema"]}"."{row["table"]}"')
+    return counts
+
+
 async def load(conn: asyncpg.Connection, snapshots: dict[str, Path],
                report: Report) -> None:
     """Empty every table this loader owns, then fill it from the snapshot.
@@ -595,15 +668,42 @@ async def load(conn: asyncpg.Connection, snapshots: dict[str, Path],
     which is how Postgres allows it despite the keys between them, and
     without `CASCADE` — a key reaching in from a table this loader does not
     own should stop the run, not be followed.
+
+    Which it cannot do once a service is already on Postgres: a key reaching
+    in from that service's table refuses the truncate outright. So those
+    keys are suspended for the load and restored before the transaction
+    ends, and restoring one revalidates it — a reload that leaves a row
+    outside the restriction pointing at a row that no longer exists takes
+    the whole load down rather than committing a dangling reference.
+
+    The counts of everything this run is *not* loading are taken on the way
+    in and compared on the way out, inside the same transaction. That is the
+    guard against the shape that made the unrestricted load destructive:
+    reading every source, truncating every placed table, refilling the three
+    already on Postgres from files frozen days ago, and reporting a clean
+    run because drift only ever compared the snapshot to the file.
     """
     targets = await plan(conn, snapshots)
     await check_columns(conn, snapshots)
+    loaded = {(t.schema, t.table) for t in targets}
+    keys = await inbound_keys(conn, loaded)
     names = ", ".join(f'"{t.schema}"."{t.table}"' for t in targets)
     # The counters move inside the same transaction as the rows. Outside it,
     # a loader killed between COMMIT and the last `setval` leaves a fully
     # committed database with counters still at 1 — which is the collision
     # this exists to prevent, arrived at by a crash rather than an omission.
-    async with conn.transaction():
+    # `repeatable_read`, so that the two counts below are a statement about
+    # this loader and not about the hive. Under the default isolation every
+    # statement takes a fresh snapshot, so a service still writing to a
+    # table outside the plan — the inference proxy metering a turn, which it
+    # did four times during the first real run of this — lands between the
+    # two counts and takes a correct load down with a refusal naming a table
+    # the loader never touched. One snapshot for the whole transaction makes
+    # the comparison see our own writes and nobody else's.
+    async with conn.transaction(isolation="repeatable_read"):
+        before = await untouched(conn, loaded)
+        for child, name in keys:
+            await conn.execute(f'ALTER TABLE {child} DROP CONSTRAINT "{name}"')
         await conn.execute(f"TRUNCATE {names} RESTART IDENTITY")
         for target in targets:
             shapes = await columns(conn, target)
@@ -611,6 +711,41 @@ async def load(conn: asyncpg.Connection, snapshots: dict[str, Path],
             await _fill(conn, target, writable, snapshots[target.source])
         for target in targets:
             await _setval(conn, target, report)
+        for child, name in keys:
+            schema, table = child.replace('"', "").split(".", 1)
+            definition = _DEFINITIONS[((schema, table), name)]
+            try:
+                await conn.execute(
+                    f'ALTER TABLE {child} ADD CONSTRAINT "{name}" '
+                    f"{definition}")
+            except asyncpg.PostgresError as exc:
+                raise LoadRefused(
+                    f"{child.replace(chr(34), '')} still references a row "
+                    f"the reload did not put back, so {name} could not be "
+                    f"restored: {exc}. Nothing was loaded. That table is "
+                    "outside this run's restriction, so the row it points "
+                    "at has to exist in the store being loaded before this "
+                    "can run.") from exc
+        if keys:
+            report.notes.append(
+                "suspended and restored for the load: "
+                + ", ".join(f"{name} on {child.replace(chr(34), '')}"
+                            for child, name in keys))
+        after = await untouched(conn, loaded)
+        moved = sorted(t for t in before if before[t] != after.get(t))
+        if moved:
+            detail = ", ".join(
+                f"{t}: {before[t]} before, {after.get(t)} after"
+                for t in moved)
+            raise LoadRefused(
+                "this run was not named for " + ", ".join(moved)
+                + f" and changed it anyway ({detail}). Nothing was loaded. "
+                "A table outside the restriction is another service's data, "
+                "and refilling it from a frozen file rewinds that service "
+                "to the day its file stopped being written.")
+        report.notes.append(
+            f"{len(after)} table(s) outside this run were counted before and "
+            "after and had not changed")
 
 
 async def _fill(conn: asyncpg.Connection, target: Target,
@@ -912,12 +1047,42 @@ def _only(only: set[str] | None) -> set[str] | None:
     return set(only)
 
 
+def _signature(con: sqlite3.Connection, table: str) -> tuple[int, str]:
+    """How many rows a table holds, and a digest of what is in them.
+
+    Read in storage order and hashed as it streams, because these stores run
+    to 126 MB and the digest is wanted on the final load of every one of
+    them. `repr` of the tuple rather than a join, so that a NULL and the
+    empty string are different bytes and two columns cannot be slid past
+    each other.
+    """
+    digest = hashlib.sha256()
+    count = 0
+    cursor = con.execute(f'SELECT * FROM "{table}"')
+    while True:
+        rows = cursor.fetchmany(BATCH)
+        if not rows:
+            break
+        for row in rows:
+            count += 1
+            digest.update(repr(row).encode("utf-8", "surrogatepass"))
+    return count, digest.hexdigest()
+
+
 def _drift(base: str, snapshots: dict[str, Path], report: Report) -> None:
     """How far the live stores have moved since the snapshot was taken.
 
     Counted per source table against the copy, not against the database:
     what the operator needs to know is whether the thing just verified is
     still the thing the hive is using.
+
+    Counted *and* read. A count alone cannot see an update, and an update is
+    most of what a running service does to these stores: a session status, a
+    surface claim refreshed, a settings row, a prune that deletes and
+    inserts at equal count. The cutover's last gate is "no drift", and with
+    a count alone that sentence means "the same number of rows", which is
+    not what it says and not what it is relied on for. So every row of every
+    placed table is hashed in storage order and the digests compared.
     """
     live = schema_map.source_paths(base)
     for source, path in sorted(snapshots.items()):
@@ -933,14 +1098,17 @@ def _drift(base: str, snapshots: dict[str, Path], report: Report) -> None:
                 for table in sorted(_tables(copy)):
                     if schema_map.placement(source, table) is None:
                         continue
-                    was = copy.execute(
-                        f'SELECT count(*) FROM "{table}"').fetchone()[0]
-                    is_now = now.execute(
-                        f'SELECT count(*) FROM "{table}"').fetchone()[0]
+                    was, was_digest = _signature(copy, table)
+                    is_now, now_digest = _signature(now, table)
                     if was != is_now:
                         report.drift.append(
                             f"{source}.{table}: {was} at snapshot, "
                             f"{is_now} now ({is_now - was:+d})")
+                    elif was_digest != now_digest:
+                        report.drift.append(
+                            f"{source}.{table}: still {was} row(s) and at "
+                            "least one of them has changed since the "
+                            "snapshot")
         except sqlite3.Error as exc:
             report.drift.append(f"{source}: could not be re-counted: {exc}")
 

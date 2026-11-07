@@ -41,6 +41,11 @@ def main(argv: list[str] | None = None) -> int:
                          "temporary directory at 0700)")
     ap.add_argument("--snapshot", default=None,
                     help="re-run against a snapshot a previous run kept")
+    ap.add_argument("--only", action="append", default=None, metavar="SOURCE",
+                    help="load this source and leave every other table as "
+                         "it is; repeatable. Required once any service is "
+                         "already on the database, because without it this "
+                         "reloads that service from a frozen file.")
     args = ap.parse_args(argv)
     if not args.dsn:
         print("REFUSED: no database named. Set HIVE_DATABASE_URL or pass "
@@ -53,7 +58,8 @@ def main(argv: list[str] | None = None) -> int:
             args.base, args.dsn,
             work=Path(args.work) if args.work else None,
             reuse=Path(args.snapshot) if args.snapshot else None,
-            keep=True))
+            keep=True,
+            only=set(args.only) if args.only else None))
     except load_data.LoadRefused as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 2
@@ -75,11 +81,15 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print("\nChecking the loaded database...")
-    checks = asyncio.run(preflight.run(args.dsn, report.snapshot_dir
-                                       or Path(".")))
+    checks = asyncio.run(preflight.run(
+        args.dsn, report.snapshot_dir or Path("."),
+        only=set(args.only) if args.only else None))
     width = max(len(a.area) for a in checks.areas)
     for a in checks.areas:
-        print(f"{'ok  ' if a.ok else 'FAIL'} {a.area:<{width}}  {a.detail}")
+        mark = "ok  " if a.ok else "FAIL"
+        if not a.checked:
+            mark = "--  "
+        print(f"{mark} {a.area:<{width}}  {a.detail}")
     if not checks.ok:
         print("\nNot ready. The database holds the right rows and does not "
               "answer the right questions.")
