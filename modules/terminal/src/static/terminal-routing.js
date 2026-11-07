@@ -10,9 +10,13 @@
  *   1. The same session, if it is still live. The pty now outlives the
  *      socket, so this is the ordinary case — a dropped connection, not a
  *      dead conversation.
- *   2. The session that rotation created to replace it, identified by
- *      recorded lineage (rotated_from) and not by proximity.
- *   3. Nothing. Waiting beats stealing.
+ *   2. Nothing. Waiting beats stealing.
+ *
+ * There used to be a rule between them, for the session a rotation created
+ * to replace this one. A rotation no longer creates one: it replaces the
+ * harness conversation under the row and leaves the row, so the id a tile
+ * reattaches to is the id it already had, and rule 1 is the rotation case
+ * as well as the dropped-socket case.
  *
  * A session another tile already has open is never a candidate.
  */
@@ -28,7 +32,7 @@
     /**
      * @param {Array} rows      session rows from /api/terminal/sessions
      * @param {Object} opts     {deadId, openIds}
-     * @returns {{action: "retry"|"successor"|"wait", session?: Object}}
+     * @returns {{action: "retry"|"wait"}}
      */
     function pickReattachTarget(rows, opts) {
         var list = Array.isArray(rows) ? rows : [];
@@ -41,16 +45,6 @@
             if (list[i] && list[i].id === deadId && isActive(list[i])) {
                 return {action: "retry"};
             }
-        }
-        for (i = 0; i < list.length; i++) {
-            var row = list[i];
-            if (!row || row.id === deadId) continue;
-            if (!row.rotated_from || row.rotated_from !== deadId) continue;
-            if (!isActive(row)) continue;
-            // Another tile is already driving this one — adopting it would
-            // put two terminals on one conversation.
-            if (openIds.indexOf(row.id) !== -1) continue;
-            return {action: "successor", session: row};
         }
         return {action: "wait"};
     }
@@ -156,10 +150,9 @@
     /**
      * Has a tile retried enough that it should stop and wait to be asked?
      *
-     * The successor hunt only ends the reattach loop when the session is
-     * gone. A session that exists but refuses to attach — a mind with no
-     * pty, a harness that closes the socket back — therefore never ends it
-     * at all, and the tile retries for as long as the tab is open. The cap
+     * A session that exists but refuses to attach — a mind with no pty, a
+     * harness that closes the socket back — ends the reattach loop by
+     * nothing, and the tile retries for as long as the tab is open. The cap
      * is what turns that into a stopped tile with a visible way back.
      *
      * @param {number} attempts     consecutive failures, including this one

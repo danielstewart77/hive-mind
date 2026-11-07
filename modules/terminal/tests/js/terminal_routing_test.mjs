@@ -67,8 +67,10 @@ const tests = {
         assert.equal(permanentClose(1008).message, "mind refused the terminal");
     },
 
-    "a rotation is not permanent — the tile hunts the successor"() {
-        assert.equal(permanentClose(4412), null);
+    "an ended or suspended conversation is answered by the tile, not the ladder"() {
+        // Both are handled in the template's own onclose branches, which drop
+        // the draft and refresh the listings. Putting them in the ladder would
+        // replace that with a bare message.
         assert.equal(permanentClose(4410), null);
         assert.equal(permanentClose(4411), null);
     },
@@ -89,16 +91,6 @@ const tests = {
         assert.equal(pickReattachTarget(rows, {deadId: "a", openIds: []}).action, "wait");
     },
 
-    "a rotation successor is adopted by lineage"() {
-        const rows = [
-            {id: "a", status: "closed"},
-            {id: "b", status: "running", rotated_from: "a"},
-        ];
-        const target = pickReattachTarget(rows, {deadId: "a", openIds: ["a"]});
-        assert.equal(target.action, "successor");
-        assert.equal(target.session.id, "b");
-    },
-
     "a sibling session on the same mind is NEVER adopted"() {
         // The exact bug: two terminals open, one drops, and it grabs the
         // other one's conversation along with its name and colour.
@@ -112,40 +104,14 @@ const tests = {
         );
     },
 
-    "a successor already open in another tile is left alone"() {
+    "a conversation that has ended is waited on, never replaced"() {
+        // Nothing replaces it: a rotation keeps the row, so another live
+        // session on this mind is somebody else's conversation.
         const rows = [
             {id: "a", status: "closed"},
-            {id: "b", status: "running", rotated_from: "a"},
-        ];
-        assert.equal(
-            pickReattachTarget(rows, {deadId: "a", openIds: ["a", "b"]}).action,
-            "wait",
-        );
-    },
-
-    "a closed successor is not adopted"() {
-        const rows = [
-            {id: "a", status: "closed"},
-            {id: "b", status: "closed", rotated_from: "a"},
+            {id: "b", status: "running"},
         ];
         assert.equal(pickReattachTarget(rows, {deadId: "a", openIds: []}).action, "wait");
-    },
-
-    "lineage pointing at a different session does not match"() {
-        const rows = [
-            {id: "a", status: "closed"},
-            {id: "b", status: "running", rotated_from: "someone-else"},
-        ];
-        assert.equal(pickReattachTarget(rows, {deadId: "a", openIds: []}).action, "wait");
-    },
-
-    "retry wins over an equally valid successor"() {
-        // If the original is still alive, the conversation never moved.
-        const rows = [
-            {id: "a", status: "running"},
-            {id: "b", status: "running", rotated_from: "a"},
-        ];
-        assert.equal(pickReattachTarget(rows, {deadId: "a", openIds: []}).action, "retry");
     },
 
     "empty and malformed inputs wait rather than guess"() {

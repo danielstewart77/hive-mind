@@ -566,9 +566,9 @@ def test_attach_ws_passes_tile_geometry_to_gateway(tmp_path, monkeypatch):
 
 
 def test_attach_ws_propagates_gateway_close_code(tmp_path, monkeypatch):
-    """4410 ("session closed") from the gateway must reach the browser —
-    it's how the tile tells a deliberate end from a rotation it should
-    hunt a successor for."""
+    """4410 ("session ended") from the gateway must reach the browser — it is
+    the one code the tile treats as permanent, dropping the saved draft and
+    refreshing the listings rather than reattaching forever."""
     from starlette.websockets import WebSocketDisconnect
 
     client = _authed_client(tmp_path, monkeypatch)

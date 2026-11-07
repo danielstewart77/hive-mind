@@ -1,14 +1,15 @@
 """Web-terminal reattach routing.
 
-Two halves of one fix: the server has to hand the browser session lineage
-(``rotated_from``), and the browser has to route on it. Without lineage a
-reconnecting terminal tile guessed at "some live session on this mind" and
-adopted whichever sibling it found — crossing two conversations and
-migrating one tile's name and colour onto the other's session.
+A reconnecting terminal tile once guessed at "some live session on this
+mind" and adopted whichever sibling it found — crossing two conversations
+and migrating one tile's name and colour onto the other's session. It now
+reattaches to the session it is on and to nothing else: a rotation replaces
+the harness conversation under that row rather than minting a successor, so
+the id a tile reattaches to is the id it already had.
 
-The browser half lives in ``src/static/terminal-routing.js`` and is
-exercised by ``tests/js/terminal_routing_test.mjs``, run here so one
-``pytest`` covers both sides.
+The routing lives in ``src/static/terminal-routing.js`` and is exercised by
+``tests/js/terminal_routing_test.mjs``, run here so one ``pytest`` covers
+both sides.
 """
 
 import os
@@ -46,32 +47,19 @@ def _fake_gateway(monkeypatch, sessions):
     monkeypatch.setattr(main_mod, "_gateway_json", _gateway_json)
 
 
-def test_session_list_carries_lineage(tmp_path, monkeypatch):
+def test_a_conversation_that_has_ended_is_not_offered(tmp_path, monkeypatch):
+    """The gateway removes an ended conversation's row, but the store still
+    holds rows a kill marked closed before it did. Either way the tile must
+    not be offered one — opening it answers 4410 straight back."""
     client = _authed_client(tmp_path, monkeypatch)
     _fake_gateway(monkeypatch, [
         {"id": "old", "mind_id": "mind-uuid", "status": "closed", "last_active": 1},
-        {"id": "new", "mind_id": "mind-uuid", "status": "running",
-         "last_active": 2, "rotated_from": "old"},
+        {"id": "new", "mind_id": "mind-uuid", "status": "running", "last_active": 2},
     ])
 
     rows = client.get("/api/terminal/sessions").json()
 
-    by_id = {r["id"]: r for r in rows}
-    assert by_id["new"]["rotated_from"] == "old"
-    assert "old" not in by_id
-
-
-def test_lineage_absent_is_empty_not_missing(tmp_path, monkeypatch):
-    """Older gateway rows have no such column; the key must still exist so
-    the browser's comparison is against "" rather than undefined."""
-    client = _authed_client(tmp_path, monkeypatch)
-    _fake_gateway(monkeypatch, [
-        {"id": "solo", "mind_id": "mind-uuid", "status": "running", "last_active": 1},
-    ])
-
-    rows = client.get("/api/terminal/sessions").json()
-
-    assert rows[0]["rotated_from"] == ""
+    assert [r["id"] for r in rows] == ["new"]
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")

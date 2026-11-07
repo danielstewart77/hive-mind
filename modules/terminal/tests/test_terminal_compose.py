@@ -532,31 +532,6 @@ def test_an_outage_never_takes_the_keyboard_away(phone):
     assert page.input_value(BOX) == "waiting to be sent and still typing"
 
 
-# 15. A rotation to a successor session carries the unsent text with it.
-def test_a_rotation_carries_the_unsent_text_to_the_successor(phone):
-    page, base = phone
-    _stub_page(page)
-    routes = []
-    _wire_sockets(page, routes=routes)
-    _open_tile(page, base)
-
-    page.fill(BOX, "mid-sentence when it rotated")
-    page.wait_for_timeout(300)
-    # 4412 retires this session for a successor whose id rides in the reason.
-    routes[0].close(code=4412, reason="sess-b")
-    page.wait_for_timeout(1200)
-
-    assert page.input_value(BOX) == "mid-sentence when it rotated"
-    assert page.evaluate(
-        "() => localStorage.getItem('term-draft:sess-b')"
-    ) == "mid-sentence when it rotated"
-    # The stored draft moved rather than being copied. Re-deriving it from the
-    # textarea would leave the retired session's key behind forever, and would
-    # be wrong whenever the box is not the freshest copy — a submit still
-    # awaiting its answer lives in storage, not on screen.
-    assert page.evaluate("() => localStorage.getItem('term-draft:sess-a')") is None
-
-
 # 16. The on-screen return key submits the box when the box has focus and
 #     holds more than whitespace.
 def test_the_key_rows_return_submits_the_focused_box(phone):

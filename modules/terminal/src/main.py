@@ -478,10 +478,6 @@ async def api_terminal_sessions(user: dict = Depends(require_auth)):
             "last_active": s.get("last_active"),
             "age": _relative_age(now, s.get("last_active")),
             "summary": (s.get("summary") or "").strip(),
-            # Lineage, so a tile whose session rotated can identify its
-            # actual replacement instead of adopting whichever sibling
-            # session happens to be live on the same mind.
-            "rotated_from": s.get("rotated_from") or "",
         })
     rows.sort(key=lambda r: -float(r.get("last_active") or 0))
     # Explicitly uncacheable, for the reason the labels route gives: with

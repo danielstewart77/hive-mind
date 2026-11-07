@@ -239,16 +239,6 @@
             else localStorage.removeItem(draftKey(id));
         } catch (e) {}
     }
-    // Rotation replaces the conversation under a live tile. The unsent text
-    // is the user's, not the conversation's — it follows, the way the label
-    // and the open-set entry already do.
-    function migrateDraft(oldId, newId) {
-        if (!oldId || !newId || oldId === newId) return;
-        const text = getDraft(oldId);
-        setDraft(oldId, "");
-        if (text) setDraft(newId, text);
-    }
-
     // A draft outlives the tile that wrote it, on purpose — but only as long
     // as the session it was written to. A session ended from Telegram or the
     // CLI closes with no tile watching, so nothing would ever drop its key,
@@ -259,7 +249,7 @@
         const live = {};
         rows.forEach(function (r) { if (r && r.id) live[r.id] = true; });
         // Any open tile's session counts as live whatever the listing says —
-        // a rotation's successor is written here before it appears there.
+        // a tile can be attached before the listing has caught up.
         openPanels.forEach(function (p, id) { live[id] = true; });
         let keys;
         try { keys = Object.keys(localStorage); } catch (e) { return; }
@@ -268,23 +258,6 @@
             if (live[k.slice("term-draft:".length)]) return;
             try { localStorage.removeItem(k); } catch (e) {}
         });
-    }
-
-    // A rotation successor is born carrying its predecessor's name: the
-    // gateway copies it when it mints the row. All this does is stop the
-    // local cache drawing the successor unnamed until the next poll.
-    //
-    // It deliberately writes nothing. It used to PUT the cached name onto the
-    // successor and clear the predecessor, which after the server took over
-    // meant a minutes-stale cache overwriting a name that was already correct
-    // — and a rename made on the phone thirty seconds earlier losing to a
-    // desktop tab that had not polled yet.
-    function migrateLabel(oldId, newId) {
-        if (!oldId || !newId || oldId === newId) return;
-        const label = labelsCache[oldId];
-        if (!label) return;
-        labelsCache[newId] = label;
-        cacheLabelsLocally();
     }
 
     // ── shared content helpers (assistant text out of console SSE) ──
@@ -1086,9 +1059,9 @@
             micPending = 0;
             micTypedAny = false;
             micStopping = false;
-            // Which conversation this is being spoken to. A rotation
-            // mid-capture repoints the tile at a successor, and words meant
-            // for the old one must not land in a freshly seeded context.
+            // Which conversation this is being spoken to. The tile can be
+            // repointed mid-capture, and words meant for the one being left
+            // must not land in another.
             micSpokenTo = sessionId;
             // start() throws in its own right — the device can disappear
             // between getUserMedia resolving and the recorder claiming it —
@@ -1298,14 +1271,14 @@
                 // submit went out and the pane never answered, those bytes
                 // were written into a socket that was already gone.
                 //
-                // Except on 4412. That is rotation, and rotation is something
-                // the conversation did in response to a turn — so the turn
-                // landed, however quiet the pane was about it. Restoring there
-                // would seed the successor with a message it has already had.
-                if (!(ev && ev.code === 4412)) restorePendingSubmit();
-                // 4410 = the gateway closed the session on purpose
-                // (end-session, /kill). Don't hunt a successor — report
-                // the ending and remove it from the terminal session lists.
+                // A rotation no longer closes this socket at all: it replaces
+                // the harness conversation under the row the tile is already
+                // attached to, and the pane is respawned in place.
+                restorePendingSubmit();
+                // 4410 = the conversation has ended on purpose (end-session,
+                // /kill), whether its row is gone — the ordinary shape — or
+                // still marked closed. Report the ending and remove it from
+                // the terminal session lists.
                 if (ev && ev.code === 4410) {
                     // The session is gone for good, so its stored draft can
                     // never be resumed — drop it rather than keep a key per
@@ -1333,17 +1306,8 @@
                     stopWith(permanent.message);
                     return;
                 }
-                // 4412 = rotation retired this session for a successor and
-                // the gateway already knows its id (carried in the close
-                // reason) — reattach straight to it instead of polling
-                // /api/terminal/sessions to rediscover what the close event
-                // already told us.
-                if (ev && ev.code === 4412 && ev.reason) {
-                    attachSuccessor({id: ev.reason, mind_id: mindId, mind_name: mindName});
-                    return;
-                }
-                // Rotation kills the pty out from under the tile; hunt for
-                // the successor session instead of sitting dead forever.
+                // Anything else is a blip over a pty that outlives the
+                // socket, so the tile reattaches to the session it is on.
                 setAttachState("disconnected");
                 beginReattachLoop();
             };
@@ -1649,9 +1613,9 @@
             );
             reattachStartedAt = Date.now();
             setAttachState("reattaching…");
-            pollForSuccessor();
+            pollForReattach();
         }
-        async function pollForSuccessor() {
+        async function pollForReattach() {
             if (destroyed) return;
             const deadId = sessionId || "";
             try {
@@ -1669,10 +1633,10 @@
                         // second and hammer the gateway.
                         cancelReattachLoop();
                         reattachAttempts += 1;
-                        // The session still exists, so the successor hunt
-                        // never ends the loop on its own — without a cap a
-                        // tile whose attach is being refused retries for as
-                        // long as the tab is open. Stop and offer the tap.
+                        // Nothing ends this loop on its own, so without a
+                        // cap a tile whose attach is being refused retries
+                        // for as long as the tab is open. Stop and offer the
+                        // tap.
                         if (TerminalRouting.attachExhausted(reattachAttempts, MAX_ATTACH_ATTEMPTS)) {
                             stopWith("can't attach");
                             return;
@@ -1682,36 +1646,14 @@
                         reattachTimer = setTimeout(attach, wait);
                         return;
                     }
-                    if (target.action === "successor") { attachSuccessor(target.session); return; }
                 }
             } catch (err) {}
             if (Date.now() - reattachStartedAt >= REATTACH_WINDOW_MS) {
                 stopWith("disconnected");
                 return;
             }
-            reattachTimer = setTimeout(pollForSuccessor, 2000);
+            reattachTimer = setTimeout(pollForReattach, 2000);
         }
-        function attachSuccessor(succ) {
-            cancelReattachLoop();
-            const oldId = sessionId;
-            sessionId = succ.id;
-            mindId = succ.mind_id || mindId;
-            mindName = succ.mind_name || mindName;
-            el.dataset.sessionId = sessionId;
-            migrateLabel(oldId, sessionId);
-            // The stored draft moves and the old key goes. Re-deriving it
-            // from the textarea instead would leave the retired session's key
-            // behind, and would be wrong the moment the box is not the
-            // freshest copy — a submit still awaiting its answer lives in
-            // storage, not on screen.
-            migrateDraft(oldId, sessionId);
-            applyLabel();
-            reKey(oldId, sessionId);
-            if (speakerOn) openTtsStream();
-            attach();
-            refreshSessions();
-        }
-
         // ── suspend / close / back ────────────────────────────────
         endBtn.addEventListener("click", async function () {
             if (!sessionId) return;
@@ -1892,16 +1834,6 @@
         requestAnimationFrame(function () {
             openPanels.forEach(function (p) { p.fit(); });
         });
-    }
-
-    function reKey(oldId, newId) {
-        if (oldId === newId) return;
-        const panel = openPanels.get(oldId);
-        if (!panel) return;
-        openPanels.delete(oldId);
-        openPanels.set(newId, panel);
-        saveOpenSet();
-        renderCards(lastRows);
     }
 
     function closePanel(panel) {
