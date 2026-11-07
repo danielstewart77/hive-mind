@@ -1,9 +1,24 @@
 """Per-class pruning dispatcher.
 
-Four pruners, one per class. Each function reads its class's entries
-directly from the lucent SQLite store (since /memory/list doesn't
-expose the anchor columns we need), applies the class-specific
-strategy, and returns a per-class outcome dict.
+Four pruners, one per class. Each reads its class's entries through
+`hive_data.graph.memories_for_class` — the anchor columns `/memory/list`
+strips are in that read — applies the class-specific strategy, deletes
+through `hive_data.memory.delete`, and returns a per-class outcome.
+
+Why the read and the delete both moved. This module used to open its own
+`sqlite3.connect(LUCENT_DB_PATH)` on a path that was not even the one lucent
+itself used, and delete over HTTP against `/memory/{id}`. Left alone after
+the store moved to Postgres, that read finds no file, logs an error, returns
+an empty list — and every pruner answers `{"deleted": [], "kept": 0,
+"errors": []}`, which is a clean nightly success report for a prune that
+read nothing. With the old file still on disk it is worse: it reads ids the
+load renumbered and deletes rows it never looked at. Both lie in the log.
+
+So every outcome now carries a `read` count beside `deleted` and `kept`. A
+pass that deleted nothing because there was nothing to delete and a pass
+that deleted nothing because it was pointed at an empty store are the same
+four dicts without it, and the scheduler in `server.py` says the second one
+out loud.
 
 Behavior per class:
 - ``ephemeral`` — no-op. Nothing is stored, nothing to prune.
@@ -25,33 +40,27 @@ Behavior per class:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import os
 import shutil
-import sqlite3
 import subprocess
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 import requests
 
+import hive_data
+from hive_data import graph
+from hive_data import memory as store
+from hive_data.schema import qualified
+
 log = logging.getLogger(__name__)
 
-LUCENT_URL = os.environ.get("LUCENT_URL_SELF", "http://127.0.0.1:8424")
-LUCENT_BEARER = os.environ.get("LUCENT_BEARER_TOKEN", "")
-_AUTH_HEADERS = {"Authorization": f"Bearer {LUCENT_BEARER}"} if LUCENT_BEARER else {}
 HIVE_TOOLS_URL = os.environ.get("HIVE_TOOLS_URL", "http://127.0.0.1:9421")
 HIVE_TOOLS_TOKEN = os.environ.get("HIVE_TOOLS_TOKEN", "")
-LUCENT_DB = Path(
-    os.environ.get(
-        "LUCENT_DB_PATH",
-        "/data/lucent.db",
-    )
-)
-REQUEST_TIMEOUT = 30
 
 # Per-class decay parameters (per the design).
 CURRENT_STATE_HALF_LIFE_DAYS = 180
@@ -72,45 +81,40 @@ def _decay_score(created_at: float, now: float, half_life_days: int) -> float:
     return math.exp(-age_seconds / half_life_seconds)
 
 
-def _read_class_entries(data_class: str, *, include_standing: bool = False) -> list[dict]:
-    """Read entries directly from sqlite so we get all anchor columns.
+async def _read_class_entries(
+    data_class: str, *, include_standing: bool = False
+) -> list[dict]:
+    """One class's entries, with the anchors, from the store it is pruned in.
 
-    ``/memory/list`` strips ``codebase_ref`` and ``expires_at`` from the
-    response; the pruners need them.
+    `/memory/list` strips `codebase_ref` and `expires_at`; the pruners need
+    both, which is why this is a named read in the access layer rather than
+    an HTTP call.
     """
-    if not LUCENT_DB.is_file():
-        log.error("lucent.db not found at %s", LUCENT_DB)
-        return []
-    cols = (
-        "id, content, data_class, tier, mind_id, source, "
-        "created_at, codebase_ref, expires_at"
-    )
-    where = "data_class = ?"
-    params: list[Any] = [data_class]
-    if not include_standing:
-        where += " AND tier != 'standing'"
-    conn = sqlite3.connect(str(LUCENT_DB))
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute(f"SELECT {cols} FROM memories WHERE {where}", params).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    return await graph.memories_for_class(
+        data_class=data_class, include_standing=include_standing)
 
 
-def _delete_entry(entry_id: int) -> bool:
+async def _delete_entry(entry_id: int) -> bool:
+    """Remove one memory, in the same store the entries were read from.
+
+    Through the access layer rather than over HTTP to this service's own
+    `/memory/{id}`: a prune that deletes over the network needs a credential,
+    a reachable port and a route guard that happens to admit it, and each of
+    those failing looks identical in the log to a row the pruner decided to
+    keep.
+    """
     try:
-        resp = requests.delete(
-            f"{LUCENT_URL}/memory/{entry_id}",
-            headers=_AUTH_HEADERS,
-            timeout=REQUEST_TIMEOUT,
-        )
-        resp.raise_for_status()
-        return True
-    except Exception:
+        result = await store.delete(entry_id)
+    except hive_data.HiveDataError:
         log.exception("delete failed for id=%s", entry_id)
         return False
+    if not result.get("rows"):
+        log.error("prune: id=%s was read and is already gone", entry_id)
+        return False
+    return True
 
 
-def _decay_pass(
+async def _decay_pass(
     entries: list[dict], *, half_life_days: int, delete_below: float, now: float
 ) -> tuple[list[int], int]:
     """Apply decay to a list of entries. Returns (deleted_ids, kept_count)."""
@@ -119,7 +123,7 @@ def _decay_pass(
     for e in entries:
         score = _decay_score(e.get("created_at") or 0, now, half_life_days)
         if score < delete_below:
-            if _delete_entry(int(e["id"])):
+            if await _delete_entry(int(e["id"])):
                 deleted.append(int(e["id"]))
         else:
             kept += 1
@@ -186,12 +190,19 @@ def _parse_iso(ts: str) -> float | None:
         return None
 
 
-def _ollama_structured(prompt: str, schema: dict) -> dict | None:
-    """POST to /ollama/structured. Returns parsed JSON, or None on error."""
+async def _ollama_structured(prompt: str, schema: dict) -> dict | None:
+    """POST to /ollama/structured. Returns parsed JSON, or None on error.
+
+    In a thread. The call is `requests` with a two-minute timeout and the
+    pruner is awaited on the scheduler's event loop now, so inline it would
+    hold that loop — and the loop is the one serving `/health` and every
+    memory route — for up to two minutes per future-state entry.
+    """
     if not HIVE_TOOLS_TOKEN:
         log.warning("HIVE_TOOLS_TOKEN not set; skipping Ollama call")
         return None
-    try:
+
+    def _ask() -> dict:
         resp = requests.post(
             f"{HIVE_TOOLS_URL}/ollama/structured",
             json={"prompt": prompt, "schema": schema},
@@ -200,6 +211,9 @@ def _ollama_structured(prompt: str, schema: dict) -> dict | None:
         )
         resp.raise_for_status()
         return resp.json()
+
+    try:
+        return await asyncio.to_thread(_ask)
     except Exception:
         log.exception("ollama/structured call failed")
         return None
@@ -209,15 +223,21 @@ def _ollama_structured(prompt: str, schema: dict) -> dict | None:
 # Per-class pruners
 # ============================================================================
 
-def prune_ephemeral() -> dict:
-    """Ephemeral is `discard` action — nothing is stored. No-op."""
-    return {"data_class": "ephemeral", "deleted": [], "updated": [], "kept": 0}
+async def prune_ephemeral() -> dict:
+    """Ephemeral is `discard` action — nothing is stored. No-op.
+
+    `read: 0` because it genuinely reads nothing, which is why the "every
+    pruner read zero rows" check in `server.py` is `any(...)` over the four
+    rather than a check on each.
+    """
+    return {"data_class": "ephemeral", "deleted": [], "updated": [],
+            "kept": 0, "read": 0, "errors": []}
 
 
-def prune_current_state(*, now: float | None = None) -> dict:
+async def prune_current_state(*, now: float | None = None) -> dict:
     """Anchor-priority dispatch over current-state entries."""
     now = now if now is not None else time.time()
-    entries = _read_class_entries("current-state")
+    entries = await _read_class_entries("current-state")
     deleted: list[int] = []
     kept = 0
     errors: list[str] = []
@@ -231,7 +251,7 @@ def prune_current_state(*, now: float | None = None) -> dict:
 
         if codebase_ref:
             if not _codebase_ref_exists(codebase_ref):
-                if _delete_entry(eid):
+                if await _delete_entry(eid):
                     deleted.append(eid)
                 else:
                     errors.append(f"delete failed: id={eid}")
@@ -240,7 +260,7 @@ def prune_current_state(*, now: float | None = None) -> dict:
         elif expires_at:
             ts = _parse_iso(expires_at)
             if ts is not None and ts < now:
-                if _delete_entry(eid):
+                if await _delete_entry(eid):
                     deleted.append(eid)
                 else:
                     errors.append(f"delete failed: id={eid}")
@@ -250,7 +270,7 @@ def prune_current_state(*, now: float | None = None) -> dict:
             # No anchor → decay
             no_anchor.append(e)
 
-    decay_deleted, decay_kept = _decay_pass(
+    decay_deleted, decay_kept = await _decay_pass(
         no_anchor,
         half_life_days=CURRENT_STATE_HALF_LIFE_DAYS,
         delete_below=CURRENT_STATE_DELETE_BELOW,
@@ -264,22 +284,24 @@ def prune_current_state(*, now: float | None = None) -> dict:
         "deleted": deleted,
         "updated": [],
         "kept": kept,
+        "read": len(entries),
         "errors": errors,
     }
 
 
-def prune_future_state(*, now: float | None = None) -> dict:
+async def prune_future_state(*, now: float | None = None) -> dict:
     """For each entry: ask Ollama if it has shipped. If yes, delete; otherwise decay."""
     now = now if now is not None else time.time()
-    entries = _read_class_entries("future-state")
+    entries = await _read_class_entries("future-state")
     if not entries:
-        return {"data_class": "future-state", "deleted": [], "updated": [], "kept": 0}
+        return {"data_class": "future-state", "deleted": [], "updated": [],
+                "kept": 0, "read": 0, "errors": []}
 
     # Pull recent current-state entries (top 30 by created_at) as context for the
     # shipped check. Caller does not need full content; a representative subset
     # is enough for Ollama to decide if the planned thing is now reality.
     current_state_pool = sorted(
-        _read_class_entries("current-state"),
+        await _read_class_entries("current-state"),
         key=lambda r: r.get("created_at") or 0,
         reverse=True,
     )[:30]
@@ -314,20 +336,20 @@ def prune_future_state(*, now: float | None = None) -> dict:
             "according to the current-state entries? Default to false unless "
             "there is clear evidence the plan has been realized."
         )
-        verdict = _ollama_structured(prompt, schema)
+        verdict = await _ollama_structured(prompt, schema)
         if verdict is None:
             errors.append(f"ollama call failed: id={eid}")
             not_shipped.append(e)
             continue
         if verdict.get("shipped") is True:
-            if _delete_entry(eid):
+            if await _delete_entry(eid):
                 deleted.append(eid)
             else:
                 errors.append(f"delete failed: id={eid}")
         else:
             not_shipped.append(e)
 
-    decay_deleted, kept = _decay_pass(
+    decay_deleted, kept = await _decay_pass(
         not_shipped,
         half_life_days=FUTURE_STATE_HALF_LIFE_DAYS,
         delete_below=FUTURE_STATE_DELETE_BELOW,
@@ -340,16 +362,17 @@ def prune_future_state(*, now: float | None = None) -> dict:
         "deleted": deleted,
         "updated": [],
         "kept": kept,
+        "read": len(entries),
         "errors": errors,
     }
 
 
-def prune_feedback(*, now: float | None = None) -> dict:
+async def prune_feedback(*, now: float | None = None) -> dict:
     """Decay-only over contextual-tier feedback. Standing tier is exempt."""
     now = now if now is not None else time.time()
     # include_standing=False means we skip standing-tier entries.
-    entries = _read_class_entries("feedback", include_standing=False)
-    deleted, kept = _decay_pass(
+    entries = await _read_class_entries("feedback", include_standing=False)
+    deleted, kept = await _decay_pass(
         entries,
         half_life_days=FEEDBACK_HALF_LIFE_DAYS,
         delete_below=FEEDBACK_DELETE_BELOW,
@@ -360,6 +383,7 @@ def prune_feedback(*, now: float | None = None) -> dict:
         "deleted": deleted,
         "updated": [],
         "kept": kept,
+        "read": len(entries),
         "errors": [],
     }
 
@@ -368,42 +392,59 @@ def prune_feedback(*, now: float | None = None) -> dict:
 # Run all
 # ============================================================================
 
-def _reset_overflow_warning_if_under_cap() -> None:
+STANDING_CAP = 10
+
+
+async def _reset_overflow_warning_if_under_cap() -> None:
     """Remove the standing-cap-warned state file when the count drops back
-    to <= 10. Symmetric with the always_remember.sh trigger that creates
-    it on cross-up. The log root is per-mind (each mind ships its own
-    auto-remember pipeline), so this only runs if AUTO_REMEMBER_LOG_DIR
-    is set in the env.
+    to at or below ``STANDING_CAP``. Symmetric with the always_remember.sh
+    trigger that creates it on cross-up. The log root is per-mind (each mind
+    ships its own auto-remember pipeline), so this only runs if
+    AUTO_REMEMBER_LOG_DIR is set in the env.
+
+    Counted in the store rather than over this service's own HTTP. The
+    request carried a bearer token read from the environment and swallowed
+    every failure into `return`, so a missing token or a port not yet
+    listening left the warning file in place for good — and the file is what
+    suppresses the next warning.
     """
     log_root = os.environ.get("AUTO_REMEMBER_LOG_DIR")
     if not log_root:
         return
+    sql = (f'SELECT count(*) AS "n" FROM {qualified("memories")} '
+           f'WHERE "tier" = $1')
     try:
-        resp = requests.get(
-            f"{LUCENT_URL}/memory/list",
-            params={"tier": "standing", "limit": 1},
-            headers=_AUTH_HEADERS,
-            timeout=10,
-        )
-        resp.raise_for_status()
-        count = int(resp.json().get("total", 0))
-    except Exception:
+        count = await hive_data.run(
+            lambda c: c.fetchval(sql, "standing"))
+    except hive_data.HiveDataError:
+        log.exception("prune: could not count standing-tier memories")
         return
     warn_file = Path(log_root) / "standing-cap-warned"
-    if count <= 10 and warn_file.exists():
+    if int(count or 0) <= STANDING_CAP and warn_file.exists():
         try:
             warn_file.unlink()
-        except Exception:
-            pass
+        except OSError:
+            log.exception("prune: could not clear %s", warn_file)
 
 
-def run_all() -> list[dict]:
-    """Dispatch all four per-class pruners and aggregate the report."""
+async def run_all() -> list[dict]:
+    """Dispatch all four per-class pruners and aggregate the report.
+
+    A coroutine, awaited by the scheduler. It cannot be a function run
+    through `asyncio.to_thread` any more: `hive_data` refuses a pool reached
+    from another event loop, and a nested `asyncio.run` gets a pool bound to
+    a loop that is already closed.
+
+    Serial rather than gathered. The pruners share one pool, two of them
+    read the same `current-state` rows, and a delete in one running
+    concurrently with a read in another would have the second deciding about
+    rows the first has already removed.
+    """
     out = [
-        prune_ephemeral(),
-        prune_current_state(),
-        prune_future_state(),
-        prune_feedback(),
+        await prune_ephemeral(),
+        await prune_current_state(),
+        await prune_future_state(),
+        await prune_feedback(),
     ]
-    _reset_overflow_warning_if_under_cap()
+    await _reset_overflow_warning_if_under_cap()
     return out

@@ -23,6 +23,13 @@ services:
     logging: *default-logging
     build:
       context: ./nervous-system
+      additional_contexts:
+        # The access layer lives in its own repository and is private, so it
+        # arrives as a second build context rather than as a git install
+        # needing a credential in the build. Defaulted rather than `:?`:
+        # compose parses this whole file for every command, so a required
+        # variable here would refuse to start every other service too.
+        hive_data: ${HIVE_DATA_DIR:-../hive-data}
     container_name: hive-lucent
     init: true
     restart: unless-stopped
@@ -38,7 +45,13 @@ services:
     environment:
       LUCENT_API_PORT: "8424"
       LUCENT_URL_SELF: "http://127.0.0.1:8424"
-      LUCENT_DB_PATH: "/data/lucent.db"
+      # Which database lucent reads and writes. Memories, graph nodes and
+      # edges, souls, the type registry and the per-holder credentials are
+      # all in the hive's one Postgres, reached only through `hive_data`.
+      # Unset is not defaulted: the process refuses to start with a sentence
+      # saying no database was named, rather than serving happily out of a
+      # store nothing else writes.
+      HIVE_DATABASE_URL: ${HIVE_DATABASE_URL:-}
       # Every /memory/retrieve and /memory/store embeds through Ollama.
       # The code default is loopback, which inside a container is the
       # container itself — set it explicitly or retrieval fails closed

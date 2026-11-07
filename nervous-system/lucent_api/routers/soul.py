@@ -13,22 +13,92 @@ operator's own review flow and by no mind — so there is no caller here to
 scope, and the one credential that reaches them is the one that exists to fix
 a wedged identity from outside. The partition's subject is a mind reaching
 another person's graph; this route is not reachable by a mind at all.
+
+Every route here now answers the store's own refusals with a status code.
+Against a file, a database error was so nearly impossible that `soul.py`
+could wrap its whole body in `except Exception` and hand back
+`internal_error` on an HTTP 200. Against a database over a socket, a busy
+pool, a statement deadline and an unreachable server are routine operating
+conditions — and a soul read that returns 200 with an empty body is how a
+caller that sends back the whole list wipes a soul while every status check
+it makes passes. See `_store_refusal`.
 """
 from __future__ import annotations
 
+import json
+import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends
+import hive_data
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from lucent_api.auth import require_soul_bearer
-from lucent_api.routers.graph import _decode
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/graph/soul",
     tags=["soul"],
     dependencies=[Depends(require_soul_bearer)],
 )
+
+
+def _decode(payload: str) -> Any:
+    """Parse the JSON-string return convention the soul functions inherited.
+
+    A local copy rather than the graph router's, which also translates the
+    soul-key refusal: that refusal belongs to the general write routes and
+    cannot arise here, and importing it would tie this router — the one door
+    a wedged identity is repaired through — to a module it has no other
+    reason to load.
+    """
+    try:
+        return json.loads(payload)
+    except json.JSONDecodeError:
+        return {"error": "invalid_json_from_underlying_function",
+                "raw": payload}
+
+
+#: What the store's own refusals mean as HTTP, and why each is not a 500.
+#:
+#: `Conflict` and `MissingReference` are the caller's row being gone or
+#: already taken — the request cannot be retried unchanged, so 409.
+#: `ValueRefused` is a value the column will not hold, which is the body's
+#: fault: 422. The last four are the store, not the request, and the right
+#: answer to all of them is "ask again shortly": 503.
+_STORE_STATUS: tuple[tuple[type[Exception], int], ...] = (
+    (hive_data.Conflict, 409),
+    (hive_data.MissingReference, 409),
+    (hive_data.ValueRefused, 422),
+    (hive_data.TimedOut, 503),
+    (hive_data.NoConnectionAvailable, 503),
+    (hive_data.Unreachable, 503),
+    (hive_data.NotInitialised, 503),
+)
+
+
+def _store_refusal(error: BaseException) -> HTTPException:
+    """One of the store's refusals, as a refusal that names the rule.
+
+    The shape this replaces returned `{"ok": false, "code":
+    "internal_error"}` at HTTP 200 for every one of these. Three of the
+    callers on this path are shell — curl piped into jq with no status check
+    — and the review skill builds its whole-list write from the read before
+    it. A refusal that returns 200 is a refusal nobody notices, and on this
+    particular route the thing nobody notices is a soul being overwritten
+    with what a failed read produced.
+    """
+    for kind, status in _STORE_STATUS:
+        if isinstance(error, kind):
+            return HTTPException(status, {
+                "ok": False,
+                "code": "store_refused",
+                "refusal": type(error).__name__,
+                "detail": str(error),
+            })
+    return HTTPException(500, {
+        "ok": False, "code": "internal_error", "detail": str(error)})
 
 
 class SoulWriteBody(BaseModel):
@@ -42,34 +112,54 @@ class SoulWriteBody(BaseModel):
 
 
 @router.get("")
-def soul_get(name: str) -> Any:
+async def soul_get(name: str) -> Any:
     """Return a mind's soul as it stands in the graph."""
     from lucent_api.soul import soul_read
 
-    return _decode(soul_read(name=name))
+    try:
+        return _decode(await soul_read(name=name))
+    except hive_data.HiveDataError as refused:
+        log.warning("soul.read.store_refused: %s: %s",
+                    type(refused).__name__, refused)
+        raise _store_refusal(refused) from refused
 
 
 @router.post("")
-def soul_post(body: SoulWriteBody) -> Any:
-    """Replace a mind's soul, recording before, after, actor and reason."""
+async def soul_post(body: SoulWriteBody) -> Any:
+    """Replace a mind's soul, recording before, after, actor and reason.
+
+    The store's refusals reach the caller as refusals. A write that did not
+    land must never answer with a 200: the caller's next read would show the
+    old soul and it has no way to tell that from "my edit was a no-op".
+    """
     from lucent_api.soul import soul_write
 
-    return _decode(
-        soul_write(
-            name=body.name,
-            soul_values=body.soul_values,
-            actor=body.actor,
-            reason=body.reason,
-            as_of=body.as_of,
-            expected_change_count=body.expected_change_count,
-            allow_shrink=body.allow_shrink,
+    try:
+        return _decode(
+            await soul_write(
+                name=body.name,
+                soul_values=body.soul_values,
+                actor=body.actor,
+                reason=body.reason,
+                as_of=body.as_of,
+                expected_change_count=body.expected_change_count,
+                allow_shrink=body.allow_shrink,
+            )
         )
-    )
+    except hive_data.HiveDataError as refused:
+        log.warning("soul.write.store_refused: %s: %s",
+                    type(refused).__name__, refused)
+        raise _store_refusal(refused) from refused
 
 
 @router.get("/history")
-def soul_history_get(name: str, limit: int = 50) -> Any:
+async def soul_history_get(name: str, limit: int = 50) -> Any:
     """Return recorded changes to a mind's soul, newest first."""
     from lucent_api.soul import soul_history
 
-    return _decode(soul_history(name=name, limit=limit))
+    try:
+        return _decode(await soul_history(name=name, limit=limit))
+    except hive_data.HiveDataError as refused:
+        log.warning("soul.history.store_refused: %s: %s",
+                    type(refused).__name__, refused)
+        raise _store_refusal(refused) from refused

@@ -12,165 +12,271 @@ Requirements under test:
   R3  a retrieve with no query is refused, not answered as an empty search
   R5  the gateway's own retrieval sends the prompt in a body, and the
       address it calls carries no query string at all
+
+What each body field did used to be asserted by wrapping the search in a
+recording spy and reading its call log. The search is ours, so the spy was a
+stub on the code under test and the assertion was on the stub rather than on
+anything the store did. Each field is now asserted on the memories that come
+back: the rows are seeded through the access layer, the filtering and the
+ranking are the database's, and the only stub left is the embedder — a
+synchronous HTTP call to Ollama, which is the point where the process stops
+being ours.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+import httpx
 import pytest
-from fastapi.testclient import TestClient
+import pytest_asyncio
 
 NS = os.path.join(os.path.dirname(__file__), "..", "..", "nervous-system")
 sys.path.insert(0, os.path.abspath(NS))
 
+pytest.importorskip("hive_data")
+
+from hive_data import memory as hd_memory  # noqa: E402
+
+from lucent_api import lucent_memory  # noqa: E402
+from lucent_api.tests.conftest import unique  # noqa: E402
 
 #: About how the query travels in the body, not about scoping, so these
 #: present the admin credential — the one value that still reaches every mind.
 ADMIN_TOKEN = "lucent-admin-for-tests"  # secret-guard: allow
 
+#: `memory.memories.embedding` is `vector(4096)`, so a stub returning
+#: anything shorter is refused by the database rather than by the test.
+DIMS = 4096
 
-@pytest.fixture
-def client(monkeypatch, tmp_path) -> TestClient:
-    import sqlite3
 
+def _fake_embed(text: str) -> list[float]:
+    """A unit vector per text, orthogonal to every other text's.
+
+    So a query identical to a stored memory scores 1.0 against it and 0.0
+    against everything else, which is what makes `k` and `min_score`
+    assertable on the answer rather than on a call log.
+    """
+    slot = int.from_bytes(hashlib.sha256(text.encode("utf-8")).digest()[:4],
+                          "big") % DIMS
+    values = [0.0] * DIMS
+    values[slot] = 1.0
+    return values
+
+
+@pytest_asyncio.fixture
+async def client(store, monkeypatch):
+    """The real app over ASGI, on this test's own event loop.
+
+    `TestClient` would run the routes in a portal thread with a loop of its
+    own, and the pool's connections belong to the loop that opened them.
+    """
     monkeypatch.setenv("LUCENT_ADMIN_BEARER_TOKEN", ADMIN_TOKEN)
-    from lucent_api import holder_access
+    monkeypatch.setattr(lucent_memory, "_embed", _fake_embed)
+
     from lucent_api.server import create_app
 
-    conn = sqlite3.connect(":memory:", check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    holder_access.init_credentials(conn)
-    monkeypatch.setattr(holder_access, "connection", lambda: conn)
-    return TestClient(
-        create_app(), headers={"Authorization": f"Bearer {ADMIN_TOKEN}"}
-    )
+    transport = httpx.ASGITransport(app=create_app())
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://lucent",
+        headers={"Authorization": f"Bearer {ADMIN_TOKEN}"},
+    ) as opened:
+        yield opened
 
 
-@pytest.fixture
-def hybrid_calls(monkeypatch) -> list[dict]:
-    """Record what the live hybrid search is handed, still running it."""
-    from lucent_api import lucent_memory
+async def _remember(mind: str, content: str, *, tags: str = "",
+                    data_class: str | None = None) -> None:
+    """One memory in the store, embedded exactly as the route would embed it.
 
-    seen: list[dict] = []
-    real = lucent_memory.memory_retrieve_hybrid
+    Written through the access layer rather than through `/memory/store` so
+    a filter and a write agreeing on the same wrong column cannot pass, and
+    so save-time dedup — which compares across every mind in a data class —
+    is not in the way of a fixture.
+    """
+    await hd_memory.store(
+        mind_id=mind, content=content, embedding=_fake_embed(content),
+        tags=tags, source="session",
+        data_class=data_class or unique("class"), tier="contextual",
+        created_at=1_700_000_000)
 
-    def spy(**kwargs):
-        seen.append(dict(kwargs))
-        return real(**kwargs)
 
-    monkeypatch.setattr(lucent_memory, "memory_retrieve_hybrid", spy)
-    return seen
-
-
-@pytest.fixture
-def vector_calls(monkeypatch) -> list[dict]:
-    from lucent_api import lucent_memory
-
-    seen: list[dict] = []
-    real = lucent_memory.memory_retrieve
-
-    def spy(**kwargs):
-        seen.append(dict(kwargs))
-        return real(**kwargs)
-
-    monkeypatch.setattr(lucent_memory, "memory_retrieve", spy)
-    return seen
+async def _retrieve(client: httpx.AsyncClient, **body) -> dict:
+    answer = await client.post("/memory/retrieve", json=body)
+    assert answer.status_code == 200, answer.text
+    return answer.json()
 
 
 # ---- R1: the body's fields reach the search ----
 
 
-def test_r1_hybrid_search_receives_the_body_fields(client, hybrid_calls):
-    client.post(
-        "/memory/retrieve",
-        json={
-            "query": "who is maurice",
-            "k": 7,
-            "min_score": 0.42,
-            "mind_id": "14cb820b-4a42-4f04-a593-54f532fd1d2f",
-            "mode": "hybrid",
-            "debug": False,
-        },
-    )
-    assert hybrid_calls, "the hybrid search was never reached"
-    call = hybrid_calls[-1]
-    assert call["query"] == "who is maurice"
-    assert call["k"] == 7
-    assert call["min_score"] == 0.42
-    # The mind a read may see is now a *set* — a mind reads its own plus the
-    # `shared` sentinel, which one value could never express. An admin naming
-    # one mind resolves to exactly that mind.
-    assert call["mind_ids"] == ["14cb820b-4a42-4f04-a593-54f532fd1d2f"]
-    assert call["debug"] is False
+@pytest.mark.asyncio
+async def test_r1_the_bodys_named_mind_is_the_only_one_read(client):
+    """The mind a read may see is a *set* — a mind reads its own plus the
+    `shared` sentinel, which one value could never express — and an admin
+    naming one mind resolves to exactly that mind."""
+    mine, theirs = unique("mind"), unique("mind")
+    ours = unique("who is maurice")
+    await _remember(mine, ours)
+    await _remember(theirs, unique("who is maurice to somebody else"))
+
+    answer = await _retrieve(client, query=ours, k=10, mind_id=mine)
+
+    contents = {m["content"] for m in answer["memories"]}
+    assert ours in contents
+    assert {m["mind_id"] for m in answer["memories"]} == {mine}
 
 
-def test_r1_vector_search_receives_the_filters_only_it_takes(client, vector_calls):
-    client.post(
-        "/memory/retrieve",
-        json={
-            "query": "cooking ingredients",
-            "k": 3,
-            "data_class": "feedback",
-            "tag_filter": "recipe",
-            "mind_id": "14cb820b-4a42-4f04-a593-54f532fd1d2f",
-            "min_score": 0.55,
-        },
-    )
-    assert vector_calls, "the vector search was never reached"
-    call = vector_calls[-1]
-    assert call["query"] == "cooking ingredients"
-    assert call["k"] == 3
-    assert call["data_class"] == "feedback"
-    assert call["tag_filter"] == "recipe"
-    # The mind a read may see is now a *set* — a mind reads its own plus the
-    # `shared` sentinel, which one value could never express. An admin naming
-    # one mind resolves to exactly that mind.
-    assert call["mind_ids"] == ["14cb820b-4a42-4f04-a593-54f532fd1d2f"]
-    assert call["min_score"] == 0.55
+@pytest.mark.asyncio
+async def test_r1_the_bodys_class_and_tag_filters_narrow_the_answer(client):
+    """The two filters only the vector search takes. They are arguments to
+    the ranking rather than a pass over its results, so a read that names
+    both has to still find a row that satisfies both."""
+    mind = unique("mind")
+    wanted = unique("cooking ingredients")
+    await _remember(mind, wanted, tags="recipe", data_class="feedback")
+    await _remember(mind, unique("cooking ingredients untagged"),
+                    data_class="feedback")
+    await _remember(mind, unique("cooking ingredients other class"),
+                    tags="recipe", data_class="current-state")
+
+    answer = await _retrieve(
+        client, query=wanted, k=10, mind_id=mind,
+        data_class="feedback", tag_filter="recipe")
+
+    assert [m["content"] for m in answer["memories"]] == [wanted]
+
+
+@pytest.mark.asyncio
+async def test_r1_the_bodys_k_bounds_how_many_come_back(client):
+    mind = unique("mind")
+    nearest = unique("the nearest memory")
+    await _remember(mind, nearest)
+    await _remember(mind, unique("another memory"))
+    await _remember(mind, unique("a third memory"))
+
+    one = await _retrieve(client, query=nearest, k=1, mind_id=mind)
+    three = await _retrieve(client, query=nearest, k=3, mind_id=mind)
+
+    assert [m["content"] for m in one["memories"]] == [nearest]
+    assert one["count"] == 1
+    assert three["count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_r1_the_bodys_min_score_drops_what_ranks_below_it(client):
+    mind = unique("mind")
+    exact = unique("who is maurice")
+    await _remember(mind, exact)
+    await _remember(mind, unique("nothing to do with it"))
+
+    answer = await _retrieve(
+        client, query=exact, k=10, mind_id=mind, min_score=0.5)
+
+    assert [m["content"] for m in answer["memories"]] == [exact]
+    assert answer["memories"][0]["score"] >= 0.5
+
+
+@pytest.mark.asyncio
+async def test_r1_hybrid_mode_answers_out_of_the_store(client):
+    """`mode` picks a different search entirely. Pinned on an answer rather
+    than on which function was called: a hybrid read that reaches the
+    keyword half and the vector half still has to return the row."""
+    mind = unique("mind")
+    wanted = unique("the proxy sits in front of the gateway")
+    await _remember(mind, wanted)
+
+    answer = await _retrieve(
+        client, query=wanted, k=5, mind_id=mind, mode="hybrid", debug=False)
+
+    assert "error" not in answer, answer
+    # The hybrid search labels its own answer, which is how a dispatch that
+    # quietly ran the vector search instead is caught.
+    assert answer["mode"] == "hybrid", answer
+    assert wanted in {m["content"] for m in answer["memories"]}
 
 
 # ---- R2: a query longer than a URL can carry ----
 
 
-def test_r2_query_longer_than_a_url_reaches_the_search(client, hybrid_calls):
+@pytest.mark.asyncio
+async def test_r2_query_longer_than_a_url_reaches_the_search(client):
     # Nginx caps a request line at 8k and Zeek truncates a logged URI well
     # before that; this is the size a real soul-plus-recent-memory prompt hit.
-    long_query = "sentinel triage context " * 400
+    mind = unique("mind")
+    long_query = "sentinel triage context " * 400 + unique("tail")
     assert len(long_query) > 8000
+    await _remember(mind, long_query)
 
-    resp = client.post(
-        "/memory/retrieve",
-        json={"query": long_query, "k": 3, "mode": "hybrid"},
-    )
+    # `min_score` deliberately: without a threshold the one row this mind
+    # holds comes back whatever the query embedded to, so an embedder handed
+    # only the head of the prompt would pass. Scored, it has to be the whole
+    # string that was embedded.
+    answer = await _retrieve(client, query=long_query, k=3, mind_id=mind,
+                             min_score=0.5)
 
-    assert resp.status_code == 200
-    assert hybrid_calls[-1]["query"] == long_query
-    # A 200 alone is not enough. The search catches its own exceptions and
-    # returns {"error": ...} with a 200, which every caller reads as "no
+    # A 200 alone is not enough. The search used to catch its own exceptions
+    # and return {"error": ...} with a 200, which every caller reads as "no
     # relevant memory" rather than as a failure — so an embedder that gives
-    # up on a long input is invisible unless the body is checked.
-    #
-    # The count is deliberately not asserted: the store this suite reaches is
-    # empty, so a non-empty assertion would fail on any clean checkout and
-    # would be measuring the fixture rather than the code.
-    body = resp.json()
-    assert "error" not in body, body
-    assert body.get("count") == 0 or body.get("memories") is not None
+    # up on a long input is invisible unless the body is checked. The memory
+    # whose text *is* the query is what proves it got through.
+    assert "error" not in answer, answer
+    assert [m["content"] for m in answer["memories"]] == [long_query]
 
 
 # ---- R3: no query is a refusal, not an empty search ----
 
 
-def test_r3_retrieve_with_no_query_is_refused(client, hybrid_calls, vector_calls):
-    resp = client.post("/memory/retrieve", json={"k": 3, "mode": "hybrid"})
+@pytest.mark.asyncio
+async def test_r3_retrieve_with_no_query_is_refused(client):
+    answer = await client.post("/memory/retrieve",
+                               json={"k": 3, "mode": "hybrid"})
 
-    assert resp.status_code == 422
-    assert not hybrid_calls and not vector_calls, "a query-less search ran anyway"
+    assert answer.status_code == 422, answer.text
+
+
+@pytest.mark.asyncio
+async def test_r3_an_empty_query_is_refused_rather_than_searched(client):
+    # Distinct from the missing-field case: the live route used to accept ""
+    # and answer 200 with {"error": "list index out of range"}, which every
+    # caller reads as "no relevant memory" rather than as a refusal.
+    answer = await client.post(
+        "/memory/retrieve", json={"query": "", "k": 3, "mode": "hybrid"})
+
+    assert answer.status_code == 422, answer.text
+
+
+# ---- R2's ceiling: refused loudly rather than held in a shared embedder ----
+
+
+@pytest.mark.asyncio
+async def test_r2_a_query_past_the_ceiling_is_refused(client):
+    from lucent_api.routers.memory import MAX_QUERY_BYTES
+
+    answer = await client.post(
+        "/memory/retrieve",
+        json={"query": "x" * (MAX_QUERY_BYTES + 1), "k": 3, "mode": "hybrid"})
+
+    assert answer.status_code == 413, answer.text
+
+
+@pytest.mark.asyncio
+async def test_r2_the_ceiling_is_counted_in_bytes_not_characters(client):
+    from lucent_api.routers.memory import MAX_QUERY_BYTES
+
+    # Box-drawing from a quoted TUI transcript is 3 bytes per character, so a
+    # string comfortably under the limit in characters is over it in bytes.
+    query = "─" * (MAX_QUERY_BYTES // 2)
+    assert len(query) < MAX_QUERY_BYTES < len(query.encode("utf-8"))
+
+    answer = await client.post(
+        "/memory/retrieve", json={"query": query, "k": 3, "mode": "hybrid"})
+
+    assert answer.status_code == 413, answer.text
 
 
 # ---- R5: the gateway sends a body and an address with no query string ----
@@ -249,42 +355,3 @@ def test_r5_gateway_retrieval_naming_no_mind_reads_nothing(lucent_stub, monkeypa
 
     assert out == ""
     assert captured == []
-
-
-# ---- R2's ceiling: refused loudly rather than held in a shared embedder ----
-
-
-def test_r2_a_query_past_the_ceiling_is_refused_before_the_search(client, hybrid_calls):
-    from lucent_api.routers.memory import MAX_QUERY_BYTES
-
-    resp = client.post(
-        "/memory/retrieve",
-        json={"query": "x" * (MAX_QUERY_BYTES + 1), "k": 3, "mode": "hybrid"},
-    )
-
-    assert resp.status_code == 413
-    assert not hybrid_calls, "an oversized query reached the embedder anyway"
-
-
-def test_r2_the_ceiling_is_counted_in_bytes_not_characters(client, hybrid_calls):
-    from lucent_api.routers.memory import MAX_QUERY_BYTES
-
-    # Box-drawing from a quoted TUI transcript is 3 bytes per character, so a
-    # string comfortably under the limit in characters is over it in bytes.
-    query = "\u2500" * (MAX_QUERY_BYTES // 2)
-    assert len(query) < MAX_QUERY_BYTES < len(query.encode("utf-8"))
-
-    resp = client.post("/memory/retrieve", json={"query": query, "k": 3, "mode": "hybrid"})
-
-    assert resp.status_code == 413
-    assert not hybrid_calls
-
-
-def test_r3_an_empty_query_is_refused_rather_than_searched(client, hybrid_calls, vector_calls):
-    # Distinct from the missing-field case: the live route used to accept ""
-    # and answer 200 with {"error": "list index out of range"}, which every
-    # caller reads as "no relevant memory" rather than as a refusal.
-    resp = client.post("/memory/retrieve", json={"query": "", "k": 3, "mode": "hybrid"})
-
-    assert resp.status_code == 422
-    assert not hybrid_calls and not vector_calls

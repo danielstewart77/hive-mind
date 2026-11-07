@@ -17,6 +17,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from hive_logging import log_event
 
+import hive_data
+
 from lucent_api.holder_access import (
     MIND,
     SERVICE,
@@ -35,6 +37,56 @@ def _decode(payload: str) -> Any:
         return json.loads(payload)
     except json.JSONDecodeError:
         return {"error": "invalid_json_from_underlying_function", "raw": payload}
+
+
+#: What each kind of refusal from the store is worth as a status code.
+#:
+#: Every one of these used to arrive as `{"error": str(e)}` at two hundred,
+#: from a `except Exception` around the whole body. Against a local file that
+#: was survivable, because the only way to get one was a bug. Against a
+#: database over a socket, `Unreachable`, `TimedOut`, `NoConnectionAvailable`,
+#: `TransactionAborted` and `Conflict` are all routine — and the callers are
+#: detached `bash + jq + curl` hooks that check nothing, so a two-hundred
+#: with an error in the body is a memory that was never written reported as a
+#: turn that was remembered.
+#:
+#: Five-oh-three rather than five hundred for the ones a retry fixes: a
+#: five-oh-three says the store is not answering *right now*, which is the
+#: difference between "try the write again" and "this write will never work".
+_REFUSALS: tuple[tuple[type[BaseException], int], ...] = (
+    (hive_data.ValueRefused, 400),
+    (hive_data.UnsettableColumn, 400),
+    (hive_data.IdentityNotWritable, 400),
+    (hive_data.Conflict, 409),
+    (hive_data.MissingReference, 409),
+    (hive_data.WriteRejected, 400),
+    (hive_data.TimedOut, 504),
+    (hive_data.NoConnectionAvailable, 503),
+    (hive_data.Unreachable, 503),
+    (hive_data.CredentialRefused, 503),
+    (hive_data.DatabaseMissing, 503),
+    (hive_data.NotInitialised, 503),
+    (hive_data.NotConfigured, 503),
+    (hive_data.TransactionAborted, 503),
+    (hive_data.SchemaMismatch, 500),
+)
+
+
+async def _answered(work: Any) -> Any:
+    """Await one memory operation, or refuse with the reason it refused.
+
+    The exception's own message is the body, because `hive_data` writes
+    refusals as sentences that name the rule and the remedy — and a hook
+    logging a status line plus that sentence is the only record anybody
+    reads when a nightly write stops landing.
+    """
+    try:
+        return await work
+    except hive_data.HiveDataError as exc:
+        for kind, code in _REFUSALS:
+            if isinstance(exc, kind):
+                raise HTTPException(code, str(exc)) from exc
+        raise HTTPException(500, str(exc)) from exc
 
 
 # ---- Request schemas ----
@@ -103,7 +155,7 @@ class UpdateBody(BaseModel):
 
 
 @router.get("/list")
-def memory_list(
+async def memory_list(
     caller: Caller = Depends(require_holder),
     mind_id: str | None = Query(None),
     offset: int = Query(0, ge=0),
@@ -124,18 +176,20 @@ def memory_list(
     from lucent_api.lucent_memory import memory_list as _memory_list
 
     return _decode(
-        _memory_list(
-            offset=offset,
-            limit=limit,
-            mind_ids=caller.minds_for_read(mind_id),
-            tier=tier,
-            data_class=data_class,
+        await _answered(
+            _memory_list(
+                offset=offset,
+                limit=limit,
+                mind_ids=caller.minds_for_read(mind_id),
+                tier=tier,
+                data_class=data_class,
+            )
         )
     )
 
 
 @router.get("/recent-decayed")
-def memory_recent_decayed(
+async def memory_recent_decayed(
     caller: Caller = Depends(require_holder),
     mind_id: str | None = Query(None),
     limit: int = Query(20, ge=1, le=100),
@@ -148,12 +202,15 @@ def memory_recent_decayed(
     from lucent_api.lucent_memory import query_decayed
 
     return _decode(
-        query_decayed(limit=limit, mind_ids=caller.minds_for_read(mind_id))
+        await _answered(
+            query_decayed(limit=limit,
+                          mind_ids=caller.minds_for_read(mind_id))
+        )
     )
 
 
 @router.post("/retrieve")
-def memory_retrieve(
+async def memory_retrieve(
     body: RetrieveBody, caller: Caller = Depends(require_holder)
 ) -> Any:
     """Semantic search — return top-k memories most relevant to the query.
@@ -182,30 +239,34 @@ def memory_retrieve(
     if body.mode == "hybrid":
         from lucent_api.lucent_memory import memory_retrieve_hybrid as _hybrid
         return _decode(
-            _hybrid(
-                query=body.query,
-                k=body.k,
-                mind_ids=caller.minds_for_read(body.mind_id),
-                min_score=body.min_score,
-                debug=body.debug,
+            await _answered(
+                _hybrid(
+                    query=body.query,
+                    k=body.k,
+                    mind_ids=caller.minds_for_read(body.mind_id),
+                    min_score=body.min_score,
+                    debug=body.debug,
+                )
             )
         )
 
     from lucent_api.lucent_memory import memory_retrieve as _memory_retrieve
 
     return _decode(
-        _memory_retrieve(
-            query=body.query,
-            k=body.k,
-            mind_ids=caller.minds_for_read(body.mind_id),
-            tag_filter=body.tag_filter,
-            data_class=body.data_class,
-            min_score=body.min_score,
+        await _answered(
+            _memory_retrieve(
+                query=body.query,
+                k=body.k,
+                mind_ids=caller.minds_for_read(body.mind_id),
+                tag_filter=body.tag_filter,
+                data_class=body.data_class,
+                min_score=body.min_score,
+            )
         )
     )
 
 
-def _refuse_unless_owned(
+async def _refuse_unless_owned(
     caller: Caller, memory_id: str, named: object = None
 ) -> None:
     """Refuse a row this caller may not change.
@@ -236,11 +297,17 @@ def _refuse_unless_owned(
             400, "a service changing a memory must name the mind it acts for"
         )
     allowed = caller.minds_for_read(named)
-    from lucent_api import holder_access
+    from hive_data import memory as store
 
-    row = holder_access.connection().execute(
-        "SELECT mind_id FROM memories WHERE id = ?", (memory_id,)
-    ).fetchone()
+    try:
+        target = int(memory_id)
+    except (TypeError, ValueError):
+        # A path segment that is not a number matched no row under SQLite
+        # either — `WHERE id = 'abc'` simply found nothing. Postgres refuses
+        # the comparison outright, so without this the same request becomes
+        # a five hundred instead of the four-oh-four it has always been.
+        raise HTTPException(404, "Memory not found") from None
+    row = await _answered(store.get(target))
     if row is None:
         raise HTTPException(404, "Memory not found")
     provenance = str(row["mind_id"] or "")
@@ -258,7 +325,7 @@ def _refuse_unless_owned(
 
 
 @router.post("/store")
-def memory_store(
+async def memory_store(
     body: StoreBody, caller: Caller = Depends(require_holder)
 ) -> Any:
     """Store a memory with semantic embedding, filed under the mind whose
@@ -267,17 +334,19 @@ def memory_store(
 
     mind_id = caller.mind_for_write(body.mind_id)
     result = _decode(
-        _memory_store(
-            content=body.content,
-            data_class=body.data_class,
-            tier=body.tier,
-            tags=body.tags,
-            source=body.source,
-            mind_id=mind_id,
-            as_of=body.as_of,
-            expires_at=body.expires_at,
-            recurring=body.recurring,
-            codebase_ref=body.codebase_ref,
+        await _answered(
+            _memory_store(
+                content=body.content,
+                data_class=body.data_class,
+                tier=body.tier,
+                tags=body.tags,
+                source=body.source,
+                mind_id=mind_id,
+                as_of=body.as_of,
+                expires_at=body.expires_at,
+                recurring=body.recurring,
+                codebase_ref=body.codebase_ref,
+            )
         )
     )
     log_event(
@@ -289,7 +358,7 @@ def memory_store(
 
 
 @router.put("/{memory_id}")
-def memory_update(
+async def memory_update(
     memory_id: str, body: UpdateBody, caller: Caller = Depends(require_holder)
 ) -> Any:
     """Update an existing memory's content, data_class, or tags.
@@ -300,15 +369,17 @@ def memory_update(
     """
     from lucent_api.lucent_memory import memory_update as _memory_update
 
-    _refuse_unless_owned(caller, memory_id, body.mind_id)
+    await _refuse_unless_owned(caller, memory_id, body.mind_id)
     mind_id = caller.mind_for_write(body.mind_id) if body.mind_id else ""
     result = _decode(
-        _memory_update(
-            memory_id=memory_id,
-            content=body.content,
-            data_class=body.data_class,
-            tags=body.tags,
-            mind_id=mind_id,
+        await _answered(
+            _memory_update(
+                memory_id=memory_id,
+                content=body.content,
+                data_class=body.data_class,
+                tags=body.tags,
+                mind_id=mind_id,
+            )
         )
     )
     log_event(log, "memory.updated", memory_id=memory_id, mind_id=mind_id or None,
@@ -317,13 +388,13 @@ def memory_update(
 
 
 @router.delete("/{memory_id}")
-def memory_delete(
+async def memory_delete(
     memory_id: str, caller: Caller = Depends(require_holder)
 ) -> Any:
     """Delete a memory by ID, if it is the caller's to delete."""
     from lucent_api.lucent_memory import memory_delete as _memory_delete
 
-    _refuse_unless_owned(caller, memory_id)
-    result = _decode(_memory_delete(memory_id=memory_id))
+    await _refuse_unless_owned(caller, memory_id)
+    result = _decode(await _answered(_memory_delete(memory_id=memory_id)))
     log_event(log, "memory.deleted", memory_id=memory_id)
     return result

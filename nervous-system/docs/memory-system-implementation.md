@@ -13,8 +13,12 @@ The memory system is a containerized service —
 
 - **lucent_api** (FastAPI): vector store + KG, all routes bearer-gated.
 - **APScheduler** (in-process): runs the daily `prune-memory` cron at 4am.
-- **lucent.db** (SQLite, mounted volume): one shared database for every
-  mind that connects.
+- **the hive's one Postgres database**, reached only through `hive_data`:
+  memories, graph nodes and edges, souls, the type and relationship
+  registry and the per-holder credentials all live in its `memory` schema,
+  shared by every mind that connects. Lucent opens no database of its own
+  and holds no file. `/data/lucent.db` is still on disk and nothing reads
+  it.
 
 Every mind talks to the container over HTTP with a bearer token. Minds
 themselves hold no lucent code — only a `.env`, a token, and the hooks
@@ -32,7 +36,7 @@ themselves hold no lucent code — only a `.env`, a token, and the hooks
             │  │  APScheduler                      │  │
             │  │  - prune-memory @ 0 4 * * *       │  │
             │  └──────────────────────────────────┘  │
-            │  └─ /data/lucent.db  (mounted volume) │
+            │  └─ hive_data ──► hive-postgres:5432  │
             └─────────────────▲──────────────────────┘
                               │
                   HTTP + Bearer (LUCENT_BEARER_TOKEN)
@@ -60,7 +64,8 @@ What it provides. Adopters consume; they don't rebuild.
 ├── comms/                     # gateway — sessions, broker, bootstrap, HITL
 ├── server.py                  # lucent container entry — starts uvicorn + APScheduler
 ├── Dockerfile                 # lucent image (comms has comms/Dockerfile)
-├── data/                      # (volume) lucent.db, broker.db, sessions.db, prune.log
+├── data/                      # (volume) broker.db, sessions.db, prune.log
+│                              #   lucent.db is retired — present, unread
 ├── scripts/migrations/        # one-shot DB migrations (archived)
 └── .env                       # LUCENT_BEARER_TOKEN, COMMS_BEARER_TOKEN
 ```
@@ -174,8 +179,13 @@ Implemented in `lucent_api/prune_memory.py`. Four functions, one per class:
 - `prune_future_state()` — Ollama shipped-check, then decay (90d).
 - `prune_feedback()` — decay only (90d). Standing-tier exempt.
 
-Reads entries directly from sqlite (the API doesn't expose all anchor
-columns). Writes via API (`DELETE /memory/{id}`).
+Reads through `hive_data.graph.memories_for_class` and deletes through
+`hive_data.memory.delete` — the same store, in-process, rather than a read
+of the file and a delete over HTTP. That split was how a prune could report
+a clean nightly run having read nothing, or delete by ids the load had
+renumbered. Each run now reports a `read` count beside `deleted` and `kept`,
+and a pass where every pruner read zero rows says so as an error rather than
+as a quiet success.
 
 ---
 
@@ -308,7 +318,8 @@ symlinked to a shared location (e.g. `/usr/src/app/minds/_shared/hooks/`)
 so a single source of truth covers all minds. Either pattern works —
 the registration file points at an absolute path inside the container.
 
-No `lucent.db` here — the shared container owns the data file.
+No database here — every mind reaches the one Postgres through the shared
+container.
 
 ### Step 4 — Hooks
 
@@ -510,9 +521,9 @@ upfront for the next adopter.
 
 - **Schema-validated.** Each request runs `validate_node` (type allow-list + property schema + enums) and, when `relation` is set, `validate_edge` (relation allow-list + endpoint-type compatibility) from `lucent_api/schema_registry.py` before the existing orphan / disambiguation guards.
 - Response envelope: `{"ok": true, ...write_result}` on success; on rejection `{"ok": false, "code": <error_code>, "detail": <reason>, ...}`. Error codes: `unknown_field`, `unknown_type`, `missing_target_type` (relation set without `target_type`), `unknown_edge`, `endpoint_mismatch`, `orphan_blocked`, `disambiguation_required` (with `similar_nodes`), `write_error`, `internal_error`. Schema rejections also carry `request_new_via: "POST /schema/request-new-type"` so the caller knows the escalation path.
-- **Full-replace** semantics on the `properties` JSON blob (`ON CONFLICT(mind_id, name) DO UPDATE SET properties = excluded.properties, ...`) — validation does not change this; anything not passed back is still wiped.
+- **Full-replace** semantics on the `properties` JSON blob — validation does not change this; anything not passed back is still wiped. The write is keyed on *(owner, type, name)*, not on the writer: every one of a person's minds reads and writes that person's graph. It is atomic and holds an advisory lock on that triple, because the old find-then-insert shape loses a caller's write behind a duplicate-key error now that the key is a real unique index, and forks an ownerless node in two where the index does not reach.
 - The `properties` field on the request body is a **string-encoded JSON**, not an object. The server `json.loads()` it.
-- The API flattens column values over inner-blob keys when reading. To preserve unrelated keys when round-tripping, prefer `POST /graph/properties/merge` (additive) or read the raw blob via direct sqlite, augment, write back the full string.
+- The API flattens column values over inner-blob keys when reading. To preserve unrelated keys when round-tripping, use `POST /graph/properties/merge` (additive). Reading the blob yourself, augmenting it and writing the whole string back is no longer an alternative: it is the lost-update race the merge route holds a row lock to prevent, and two callers doing it both report success while one set of keys silently goes.
 - **Never smoke-test with `properties: "{}"` against an existing node** — empty blob wipes everything (soul_values included). Always pass the full existing blob plus your changes.
 - `POST /graph/upsert-backup` is the legacy un-validated handler from before the cutover, parked as a temporary fallback. It returns the old `{"upserted": bool, "reason": ...}` shape. Delete once stability is confirmed.
 

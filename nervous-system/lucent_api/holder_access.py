@@ -83,11 +83,12 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
-import sqlite3
 import time
 from dataclasses import dataclass
 
 from fastapi import Header, HTTPException
+
+from hive_data import graph
 
 #: What a holder is. A mind or a service is the machinery; a person is not.
 MIND = "mind"
@@ -110,30 +111,17 @@ PRIMARY_USER_ENV = "LUCENT_PRIMARY_USER"
 def primary_user() -> str:
     return str(os.getenv(PRIMARY_USER_ENV, "")).strip().lower()
 
-CREDENTIALS_DDL = """
-CREATE TABLE IF NOT EXISTS credentials (
-    -- NOT NULL is load-bearing: SQLite permits NULL in a non-INTEGER PRIMARY
-    -- KEY column unless it is declared, so a row naming no holder would
-    -- insert cleanly and then resolve by digest exactly as a real one does.
-    holder      TEXT PRIMARY KEY NOT NULL,
-    username    TEXT NOT NULL,
-    role        TEXT NOT NULL,
-    -- The provenance this holder's rows are actually keyed by. Memory and
-    -- graph rows on disk carry a mind's UUID, because every hook sends
-    -- `$MIND_ID`; a holder minted under the readable name would otherwise
-    -- write under "skippy" and read back nothing but the hive-wide rules,
-    -- with a 200 and no error anywhere. Null means the holder string is the
-    -- provenance, which is right for a service.
-    mind_id     TEXT,
-    -- UNIQUE because two holders sharing one value is the resolver returning
-    -- whichever row SQLite yields first, i.e. one holder silently
-    -- authenticating as another.
-    token_sha   TEXT NOT NULL UNIQUE,
-    created_at  REAL NOT NULL,
-    revoked_at  REAL
-);
-CREATE INDEX IF NOT EXISTS credentials_username ON credentials (username);
-"""
+#: There is no DDL here any more, and that is the point.
+#:
+#: `init_credentials` used to run `CREATE TABLE IF NOT EXISTS credentials` on
+#: every gated request. Against Postgres that is unqualified, so it resolves
+#: against `search_path` and builds an empty `public.credentials` while the
+#: real holders sit in `memory.credentials` — a store that reads as
+#: configured while every mind gets a four-oh-one. `CREATE TABLE IF NOT
+#: EXISTS` is also not atomic, so two first requests after a restart can
+#: raise `DuplicateTable` out of a FastAPI dependency, which is a five
+#: hundred on authentication rather than a refusal. The table is applied to
+#: the database as an artifact, once, outside this process.
 
 
 @dataclass(frozen=True)
@@ -324,13 +312,7 @@ def normalize_holder(name: object) -> str:
     return str(name or "").strip().lower()
 
 
-def init_credentials(conn: sqlite3.Connection) -> None:
-    conn.executescript(CREDENTIALS_DDL)
-    conn.commit()
-
-
-def put_credential(
-    conn: sqlite3.Connection,
+async def put_credential(
     holder: str,
     username: str,
     token: str,
@@ -357,29 +339,18 @@ def put_credential(
     if role not in ROLES:
         raise ValueError(f"unknown credential role: {role!r}")
     sha = digest(token)
-    clash = conn.execute(
-        "SELECT holder FROM credentials WHERE token_sha = ? AND holder <> ?",
-        (sha, key),
-    ).fetchone()
+    clash = await graph.credential_holder_of_digest(
+        token_sha=sha, other_than=key)
     if clash:
         raise ValueError(
-            f"that value is already held by {clash[0]!r}; "
+            f"that value is already held by {clash!r}; "
             "a credential belongs to one holder"
         )
     provenance = str(mind_id or "").strip() or None
     now = time.time()
-    conn.execute(
-        "INSERT INTO credentials "
-        "(holder, username, role, mind_id, token_sha, created_at, revoked_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, NULL) "
-        "ON CONFLICT(holder) DO UPDATE SET "
-        "username=excluded.username, role=excluded.role, "
-        "mind_id=excluded.mind_id, "
-        "token_sha=excluded.token_sha, created_at=excluded.created_at, "
-        "revoked_at=NULL",
-        (key, name, role, provenance, sha, now),
-    )
-    conn.commit()
+    await graph.credential_put(
+        holder=key, username=name, role=role, token_sha=sha,
+        mind_id=provenance, created_at=now)
     return {
         "holder": key,
         "username": name,
@@ -389,18 +360,37 @@ def put_credential(
     }
 
 
-def revoke_credential(conn: sqlite3.Connection, holder: str) -> bool:
+async def revoke_credential(holder: str) -> bool:
     """Mark one holder's credential dead, and only that holder's."""
-    cursor = conn.execute(
-        "UPDATE credentials SET revoked_at = ? "
-        "WHERE holder = ? AND revoked_at IS NULL",
-        (time.time(), normalize_holder(holder)),
-    )
-    conn.commit()
-    return cursor.rowcount > 0
+    written = await graph.credential_revoke(
+        holder=normalize_holder(holder), at=time.time())
+    return int(written.get("rows", 0)) > 0
 
 
-def credential_for_token(conn: sqlite3.Connection, token: str) -> Caller | None:
+async def all_credentials() -> list[dict]:
+    """Every holder and whether it is live. Never the value.
+
+    An operator does not need the value, they need to know whether the
+    holder has one that works.
+    """
+    rows = await graph.credentials_all()
+    rows.sort(key=lambda r: (str(r.get("username") or ""),
+                             str(r.get("holder") or "")))
+    return [
+        {
+            "holder": r["holder"],
+            "username": r["username"],
+            "role": r["role"],
+            "mind_id": r["mind_id"],
+            "created_at": r["created_at"],
+            "revoked_at": r["revoked_at"],
+            "live": r["revoked_at"] is None,
+        }
+        for r in rows
+    ]
+
+
+async def credential_for_token(token: str) -> Caller | None:
     """The holder a presented value belongs to, or None.
 
     Read per call, never cached: a revocation that needs a restart to land is
@@ -409,11 +399,13 @@ def credential_for_token(conn: sqlite3.Connection, token: str) -> Caller | None:
     if not token:
         return None
     presented = digest(token)
-    rows = conn.execute(
-        "SELECT holder, username, role, mind_id, token_sha FROM credentials "
-        "WHERE revoked_at IS NULL"
-    ).fetchall()
-    for holder, username, role, mind_id, token_sha in rows:
+    rows = await graph.credentials_live()
+    for row in rows:
+        holder = row["holder"]
+        username = row["username"]
+        role = row["role"]
+        mind_id = row["mind_id"]
+        token_sha = row["token_sha"]
         # Constant-time, on bytes: `compare_digest` raises TypeError on a str
         # holding anything outside ASCII.
         if hmac.compare_digest(
@@ -441,48 +433,37 @@ def _bearer(authorization: str) -> str:
     return authorization[7:].strip()
 
 
-def resolve_caller(conn: sqlite3.Connection, token: str) -> Caller:
+async def resolve_caller(token: str) -> Caller:
     admin = os.environ.get("LUCENT_ADMIN_BEARER_TOKEN", "")
     if admin and token and hmac.compare_digest(
         token.encode("utf-8"), admin.encode("utf-8")
     ):
         return Caller(is_admin=True, role=SERVICE)
-    found = credential_for_token(conn, token)
+    found = await credential_for_token(token)
     return found or Caller()
 
 
-def _store_configured(conn: sqlite3.Connection) -> bool:
+async def _store_configured() -> bool:
+    """Whether this store can establish who anybody is.
+
+    The read is not wrapped in a broad `except`. A failure here means the
+    database did not answer, and reporting that as "no credentials
+    configured" sends the operator to the credentials page over a store
+    whose credentials are fine.
+    """
     if os.environ.get("LUCENT_ADMIN_BEARER_TOKEN"):
         return True
-    row = conn.execute(
-        "SELECT 1 FROM credentials WHERE revoked_at IS NULL LIMIT 1"
-    ).fetchone()
-    return row is not None
+    return await graph.credentials_configured()
 
 
-def connection() -> sqlite3.Connection:
-    """Where the credentials table lives.
-
-    Its own function rather than a direct call into `lucent`, so a test can
-    point the credential store at a connection without redirecting every
-    other reader of the database — which is how patching the store's one
-    connection factory took the schema tables down with it.
-    """
-    from lucent_api import lucent
-
-    return lucent._get_connection()
-
-
-def require_holder(authorization: str = Header(default="")) -> Caller:
+async def require_holder(authorization: str = Header(default="")) -> Caller:
     """The FastAPI dependency every memory and graph route is gated by.
 
     Returns the caller rather than None, because which mind is asking is the
     answer the routes need and reading it off the body is the thing this
     replaced.
     """
-    conn = connection()
-    init_credentials(conn)
-    if not _store_configured(conn):
+    if not await _store_configured():
         # Not a 401: nothing the caller presented was wrong. The store cannot
         # establish who anybody is, and serving open while it waits is how
         # every mind's memory ends up readable from the LAN.
@@ -493,7 +474,7 @@ def require_holder(authorization: str = Header(default="")) -> Caller:
     token = _bearer(authorization)
     if not token:
         raise HTTPException(401, "Missing or invalid Authorization header")
-    caller = resolve_caller(conn, token)
+    caller = await resolve_caller(token)
     if not caller.recognised:
         raise HTTPException(401, "Invalid token")
     return caller

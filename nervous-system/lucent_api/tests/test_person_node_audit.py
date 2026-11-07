@@ -1,239 +1,246 @@
-"""Tests for audit_person_nodes and update_person_names.
+"""`audit_person_nodes` and `update_person_names`, against the real store.
 
-These helpers used to live in skippy's tools/stateful/knowledge_graph.py
-(deleted in skippy Phase B3). The live versions are here in NS at
-``lucent_api/lucent_graph.py``. Tests follow the in-memory SQLite +
-patched ``_get_conn`` pattern from ``test_graph_query_mind_id.py`` —
-exercises the real SQL against the real schema, no Neo4j mocking.
+The audit is scoped to one owner's graph rather than to one mind's writes:
+keyed on the writer it answered "nothing to fix" over every Person node one
+of the owner's *other* minds had written, which reads exactly like a tidy
+graph.
 
-Run: python -m unittest lucent_api.tests.test_person_node_audit
+Every test files its rows under an owner of its own. The owner partition is
+what isolates them — `memory_nodes_owner_type_name` is a real unique index
+now, so a fixed name under a fixed owner is a collision in setup rather than
+a fresh in-memory database.
 """
 
 from __future__ import annotations
 
 import json
-import sqlite3
-import time
-import unittest
-from unittest.mock import patch
 
-from lucent_api.lucent import _init_schema
+import pytest
+from hive_data import graph as hd_graph
 
-
-def _make_test_conn() -> sqlite3.Connection:
-    """In-memory SQLite with the minimal nodes schema audit/update need."""
-    conn = sqlite3.connect(":memory:", check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    _init_schema(conn)
-    return conn
+from lucent_api.tests.conftest import unique
 
 
-def _insert_person(
-    conn: sqlite3.Connection,
-    *,
-    name: str,
-    mind_id: str,
-    owner: str = "daniel",
-    first_name: str | None,
-    last_name: str | None,
-    properties: dict | None = None,
+async def _person(
+    *, owner: str, name: str, first_name=None, last_name=None,
+    properties: dict | None = None, mind_id: str = "ada",
 ) -> int:
-    now = time.time()
-    cursor = conn.execute(
-        """
-        INSERT INTO nodes
-            (mind_id, owner, type, name, first_name, last_name, properties,
-             data_class, tier, created_at)
-        VALUES (?, ?, 'Person', ?, ?, ?, ?, 'current-state', 'contextual', ?)
-        """,
-        (
-            mind_id,
-            owner,
-            name,
-            first_name,
-            last_name,
-            json.dumps(properties or {}),
-            now,
-        ),
-    )
-    conn.commit()
-    return cursor.lastrowid
+    row = await hd_graph.node_write(
+        owner=owner, type="Person", name=name, mind_id=mind_id,
+        properties=properties or {},
+        first_name=first_name, last_name=last_name,
+        data_class="current-state", tier="contextual")
+    return int(row["id"])
 
 
-class AuditPersonNodesTests(unittest.TestCase):
-    """``audit_person_nodes`` returns Person rows missing either name part."""
-
-    def test_returns_nodes_missing_first_name(self) -> None:
-        conn = _make_test_conn()
-        _insert_person(conn, name="David Stewart", mind_id="ada",
-                       first_name=None, last_name="Stewart")
-        with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
-            from lucent_api.lucent_graph import audit_person_nodes
-            result = json.loads(audit_person_nodes(owner="daniel"))
-        self.assertTrue(result["found"])
-        self.assertEqual(result["count"], 1)
-        self.assertEqual(result["nodes"][0]["name"], "David Stewart")
-        self.assertIsNone(result["nodes"][0]["first_name"])
-
-    def test_returns_nodes_missing_last_name(self) -> None:
-        conn = _make_test_conn()
-        _insert_person(conn, name="Jane", mind_id="ada",
-                       first_name="Jane", last_name=None)
-        with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
-            from lucent_api.lucent_graph import audit_person_nodes
-            result = json.loads(audit_person_nodes(owner="daniel"))
-        self.assertTrue(result["found"])
-        self.assertEqual(result["count"], 1)
-        self.assertEqual(result["nodes"][0]["name"], "Jane")
-        self.assertIsNone(result["nodes"][0]["last_name"])
-
-    def test_excludes_complete_nodes(self) -> None:
-        conn = _make_test_conn()
-        _insert_person(conn, name="Daniel Stewart", mind_id="ada",
-                       first_name="Daniel", last_name="Stewart")
-        _insert_person(conn, name="Sloan", mind_id="ada",
-                       first_name=None, last_name=None)
-        with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
-            from lucent_api.lucent_graph import audit_person_nodes
-            result = json.loads(audit_person_nodes(owner="daniel"))
-        self.assertTrue(result["found"])
-        self.assertEqual(result["count"], 1)
-        self.assertEqual(result["nodes"][0]["name"], "Sloan")
-
-    def test_returns_empty_when_all_complete(self) -> None:
-        conn = _make_test_conn()
-        _insert_person(conn, name="Daniel Stewart", mind_id="ada",
-                       first_name="Daniel", last_name="Stewart")
-        with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
-            from lucent_api.lucent_graph import audit_person_nodes
-            result = json.loads(audit_person_nodes(owner="daniel"))
-        self.assertFalse(result["found"])
-        self.assertEqual(result["count"], 0)
-        self.assertEqual(result["nodes"], [])
-
-    def test_isolates_by_owner(self) -> None:
-        """Only the requested mind's incomplete nodes are returned."""
-        conn = _make_test_conn()
-        _insert_person(conn, name="Ada Person", mind_id="ada", owner="daniel",
-                       first_name=None, last_name="Person")
-        _insert_person(conn, name="Bob Person", mind_id="zach", owner="aiden",
-                       first_name=None, last_name="Person")
-        with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
-            from lucent_api.lucent_graph import audit_person_nodes
-            result = json.loads(audit_person_nodes(owner="daniel"))
-        self.assertEqual(result["count"], 1)
-        self.assertEqual(result["nodes"][0]["name"], "Ada Person")
-
-    def test_includes_properties_blob(self) -> None:
-        conn = _make_test_conn()
-        _insert_person(conn, name="Maurice", mind_id="ada",
-                       first_name=None, last_name="X",
-                       properties={"church": "Anchor Bend"})
-        with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
-            from lucent_api.lucent_graph import audit_person_nodes
-            result = json.loads(audit_person_nodes(owner="daniel"))
-        self.assertEqual(result["count"], 1)
-        props = result["nodes"][0]["properties"]
-        self.assertEqual(props.get("church"), "Anchor Bend")
+# ---- the audit ------------------------------------------------------------
 
 
-class UpdatePersonNamesTests(unittest.TestCase):
-    """``update_person_names`` backfills first_name and/or last_name."""
+@pytest.mark.asyncio
+async def test_a_person_with_no_first_name_is_reported(
+    store, registered_types
+) -> None:
+    owner = unique("owner")
+    await _person(owner=owner, name="David Stewart", last_name="Stewart")
 
-    def test_sets_first_and_last_name(self) -> None:
-        conn = _make_test_conn()
-        _insert_person(conn, name="David Stewart", mind_id="ada",
-                       first_name=None, last_name=None)
-        with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
-            from lucent_api.lucent_graph import update_person_names
-            result = json.loads(update_person_names(
-                name="David Stewart",
-                first_name="David",
-                last_name="Stewart",
-                owner="daniel",
-            ))
-        self.assertTrue(result["updated"])
-        self.assertEqual(result["first_name"], "David")
-        self.assertEqual(result["last_name"], "Stewart")
-        # Read back and verify SQL UPDATE actually landed.
-        row = conn.execute(
-            "SELECT first_name, last_name FROM nodes WHERE name = ?",
-            ("David Stewart",),
-        ).fetchone()
-        self.assertEqual(row["first_name"], "David")
-        self.assertEqual(row["last_name"], "Stewart")
+    from lucent_api.lucent_graph import audit_person_nodes
 
-    def test_allows_partial_update_first_name_only(self) -> None:
-        conn = _make_test_conn()
-        _insert_person(conn, name="Jane Doe", mind_id="ada",
-                       first_name=None, last_name="Doe")
-        with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
-            from lucent_api.lucent_graph import update_person_names
-            result = json.loads(update_person_names(
-                name="Jane Doe",
-                first_name="Jane",
-                owner="daniel",
-            ))
-        self.assertTrue(result["updated"])
-        self.assertEqual(result["first_name"], "Jane")
-        self.assertNotIn("last_name", result)
-        row = conn.execute(
-            "SELECT first_name, last_name FROM nodes WHERE name = ?",
-            ("Jane Doe",),
-        ).fetchone()
-        self.assertEqual(row["first_name"], "Jane")
-        self.assertEqual(row["last_name"], "Doe")  # untouched
+    answer = json.loads(await audit_person_nodes(owner=owner))
 
-    def test_requires_at_least_one_name_field(self) -> None:
-        with patch("lucent_api.lucent_graph._get_conn", return_value=_make_test_conn()):
-            from lucent_api.lucent_graph import update_person_names
-            result = json.loads(update_person_names(
-                name="X",
-                owner="daniel",
-            ))
-        self.assertIn("error", result)
-        self.assertIn("first_name", result["error"])
-        self.assertIn("last_name", result["error"])
-
-    def test_node_not_found_returns_updated_false(self) -> None:
-        conn = _make_test_conn()
-        with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
-            from lucent_api.lucent_graph import update_person_names
-            result = json.loads(update_person_names(
-                name="Nonexistent",
-                first_name="X",
-                last_name="Y",
-                owner="daniel",
-            ))
-        self.assertFalse(result["updated"])
-        self.assertIn("reason", result)
-
-    def test_isolates_by_owner_on_update(self) -> None:
-        """An update in Daniel's graph must not touch another owner's row of
-        the same name."""
-        conn = _make_test_conn()
-        _insert_person(conn, name="Twin", mind_id="ada", owner="daniel",
-                       first_name=None, last_name=None)
-        _insert_person(conn, name="Twin", mind_id="zach", owner="aiden",
-                       first_name="OriginalBob", last_name="Surname")
-        with patch("lucent_api.lucent_graph._get_conn", return_value=conn):
-            from lucent_api.lucent_graph import update_person_names
-            result = json.loads(update_person_names(
-                name="Twin",
-                first_name="UpdatedAda",
-                last_name="Smith",
-                owner="daniel",
-            ))
-        self.assertTrue(result["updated"])
-        mine = conn.execute(
-            "SELECT first_name FROM nodes WHERE name = 'Twin' AND owner = 'daniel'"
-        ).fetchone()
-        theirs = conn.execute(
-            "SELECT first_name FROM nodes WHERE name = 'Twin' AND owner = 'aiden'"
-        ).fetchone()
-        self.assertEqual(mine["first_name"], "UpdatedAda")
-        self.assertEqual(theirs["first_name"], "OriginalBob")
+    assert answer["found"] is True
+    assert answer["count"] == 1
+    assert answer["nodes"][0]["name"] == "David Stewart"
+    assert answer["nodes"][0]["first_name"] is None
 
 
-if __name__ == "__main__":
-    unittest.main()
+@pytest.mark.asyncio
+async def test_a_person_with_no_last_name_is_reported(
+    store, registered_types
+) -> None:
+    owner = unique("owner")
+    await _person(owner=owner, name="Jane", first_name="Jane")
+
+    from lucent_api.lucent_graph import audit_person_nodes
+
+    answer = json.loads(await audit_person_nodes(owner=owner))
+
+    assert answer["count"] == 1
+    assert answer["nodes"][0]["name"] == "Jane"
+    assert answer["nodes"][0]["last_name"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_person_with_both_names_is_not_reported(
+    store, registered_types
+) -> None:
+    owner = unique("owner")
+    await _person(owner=owner, name="Daniel Stewart",
+                  first_name="Daniel", last_name="Stewart")
+    await _person(owner=owner, name="Sloan")
+
+    from lucent_api.lucent_graph import audit_person_nodes
+
+    answer = json.loads(await audit_person_nodes(owner=owner))
+
+    assert answer["count"] == 1
+    assert answer["nodes"][0]["name"] == "Sloan"
+
+
+@pytest.mark.asyncio
+async def test_a_graph_with_nothing_to_fix_answers_not_found(
+    store, registered_types
+) -> None:
+    owner = unique("owner")
+    await _person(owner=owner, name="Daniel Stewart",
+                  first_name="Daniel", last_name="Stewart")
+
+    from lucent_api.lucent_graph import audit_person_nodes
+
+    answer = json.loads(await audit_person_nodes(owner=owner))
+
+    assert answer == {"found": False, "count": 0, "nodes": []}
+
+
+@pytest.mark.asyncio
+async def test_the_audit_does_not_report_another_owners_person(
+    store, registered_types
+) -> None:
+    mine = unique("owner")
+    theirs = unique("owner")
+    await _person(owner=mine, name="Ada Person", last_name="Person")
+    await _person(owner=theirs, name="Bob Person", last_name="Person",
+                  mind_id="zach")
+
+    from lucent_api.lucent_graph import audit_person_nodes
+
+    answer = json.loads(await audit_person_nodes(owner=mine))
+
+    assert answer["count"] == 1
+    assert answer["nodes"][0]["name"] == "Ada Person"
+
+
+@pytest.mark.asyncio
+async def test_the_audit_carries_the_properties_blob(
+    store, registered_types
+) -> None:
+    owner = unique("owner")
+    await _person(owner=owner, name="Maurice", last_name="X",
+                  properties={"church": "Anchor Bend"})
+
+    from lucent_api.lucent_graph import audit_person_nodes
+
+    answer = json.loads(await audit_person_nodes(owner=owner))
+
+    assert answer["nodes"][0]["properties"]["church"] == "Anchor Bend"
+
+
+@pytest.mark.asyncio
+async def test_an_owner_of_none_audits_every_owners_graph(
+    store, registered_types
+) -> None:
+    """`None` is every owner — the console and the hive's own services —
+    and is not the same thing as a caller entitled to nobody's graph."""
+    mine = unique("owner")
+    theirs = unique("owner")
+    await _person(owner=mine, name=unique("Mine"))
+    await _person(owner=theirs, name=unique("Theirs"), mind_id="zach")
+
+    from lucent_api.lucent_graph import audit_person_nodes
+
+    answer = json.loads(await audit_person_nodes(owner=None))
+
+    owners = {n["name"].rsplit("-", 1)[0] for n in answer["nodes"]}
+    assert {"Mine", "Theirs"} <= owners
+
+
+# ---- the backfill ---------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_both_name_parts_land_on_the_row(
+    store, inspector, registered_types
+) -> None:
+    owner = unique("owner")
+    node_id = await _person(owner=owner, name="David Stewart")
+
+    from lucent_api.lucent_graph import update_person_names
+
+    answer = json.loads(await update_person_names(
+        name="David Stewart", first_name="David", last_name="Stewart",
+        owner=owner))
+
+    assert answer["updated"] is True
+    row = await inspector.fetchrow(
+        'SELECT first_name, last_name FROM memory.nodes WHERE id = $1', node_id)
+    assert row["first_name"] == "David"
+    assert row["last_name"] == "Stewart"
+
+
+@pytest.mark.asyncio
+async def test_naming_only_the_first_name_leaves_the_last_one_alone(
+    store, inspector, registered_types
+) -> None:
+    owner = unique("owner")
+    node_id = await _person(owner=owner, name="Jane Doe", last_name="Doe")
+
+    from lucent_api.lucent_graph import update_person_names
+
+    answer = json.loads(await update_person_names(
+        name="Jane Doe", first_name="Jane", owner=owner))
+
+    assert answer["updated"] is True
+    assert "last_name" not in answer
+    row = await inspector.fetchrow(
+        'SELECT first_name, last_name FROM memory.nodes WHERE id = $1', node_id)
+    assert row["first_name"] == "Jane"
+    assert row["last_name"] == "Doe"
+
+
+@pytest.mark.asyncio
+async def test_naming_neither_name_is_refused(store, registered_types) -> None:
+    from lucent_api.lucent_graph import update_person_names
+
+    answer = json.loads(await update_person_names(
+        name="X", owner=unique("owner")))
+
+    assert "first_name" in answer["error"]
+    assert "last_name" in answer["error"]
+
+
+@pytest.mark.asyncio
+async def test_a_person_that_is_not_there_is_not_reported_as_updated(
+    store, registered_types
+) -> None:
+    from lucent_api.lucent_graph import update_person_names
+
+    answer = json.loads(await update_person_names(
+        name=unique("Nobody"), first_name="X", last_name="Y",
+        owner=unique("owner")))
+
+    assert answer["updated"] is False
+    assert "reason" in answer
+
+
+@pytest.mark.asyncio
+async def test_an_update_does_not_reach_another_owners_row_of_that_name(
+    store, inspector, registered_types
+) -> None:
+    mine = unique("owner")
+    theirs = unique("owner")
+    name = unique("Twin")
+    my_id = await _person(owner=mine, name=name)
+    their_id = await _person(owner=theirs, name=name, mind_id="zach",
+                             first_name="OriginalBob", last_name="Surname")
+
+    from lucent_api.lucent_graph import update_person_names
+
+    answer = json.loads(await update_person_names(
+        name=name, first_name="UpdatedAda", last_name="Smith", owner=mine))
+
+    assert answer["updated"] is True
+    assert (await inspector.fetchval(
+        'SELECT first_name FROM memory.nodes WHERE id = $1', my_id)
+    ) == "UpdatedAda"
+    assert (await inspector.fetchval(
+        'SELECT first_name FROM memory.nodes WHERE id = $1', their_id)
+    ) == "OriginalBob"

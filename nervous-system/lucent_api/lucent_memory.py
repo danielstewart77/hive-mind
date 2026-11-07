@@ -1,25 +1,63 @@
-"""Lucent memory tools -- SQLite-backed drop-in replacement for memory.py.
+"""Lucent's memory tools, over the hive's Postgres through `hive_data`.
 
-Provides identical function signatures and JSON return shapes to
-tools/stateful/memory.py, backed by the Lucent SQLite database
-with numpy-based cosine similarity instead of Neo4j vector index.
+What changed and why it matters. This module used to own its storage: a
+SQLite connection per thread, embeddings as `float32` blobs, and a cosine
+scan that pulled *every* row's 4096 floats into numpy to rank them in
+Python. That scan is the one shape that cannot cross to Postgres. The
+access layer's pgvector codec is text-format, so the same `SELECT ...
+embedding ... FROM memories` with no `LIMIT` would send hundreds of
+megabytes as text literals and parse them back one `float()` at a time,
+inside a 30-second statement deadline, on the event loop. So the reads here
+call `hive_data.memory`'s named operations — `similar`, `keyword`, `recall`
+— and the ranking runs in the database.
 
-Model: qwen3-embedding:8b via Ollama (4096-dim)
-Backend: SQLite with numpy cosine similarity
+Three behaviours deliberately changed with the move, all of them in the
+access layer and none of them to be "fixed" back here:
 
-Designed for direct FastMCP registration (no @tool() decorator).
+* A **blank** provenance matches nothing. lucent's own filter tested
+  `if mind_id:`, so the empty string an unset `MIND_ID` produces made the
+  clause vanish and the read returned every mind's memories — the kids'
+  boxes alongside the operator's.
+* A long query ranks on its first `MAX_QUERY_TERMS` words.
+* Keyword scores are `ts_rank` scaled, not FTS5 bm25, so the figures and
+  which rows land in the keyword bucket both move. `memories_fts` did not
+  exist in this install's SQLite file at all, so lucent's keyword half has
+  been silently dead inside a `try/except`; after the move it works.
+
+Nothing here returns `{"error": ...}` for a store that did not answer any
+more. `hive_data.Unreachable`, `TimedOut`, `NoConnectionAvailable`,
+`TransactionAborted` and `Conflict` are routine against a database over a
+socket, and the callers are detached `bash + jq + curl` hooks that check
+nothing — so a two-hundred with an error in the body is a write that never
+happened reported as a turn that was remembered. They propagate, and
+`lucent_api.routers.memory` turns each into a status code that names the
+rule that refused it.
+
+Model: qwen3-embedding:8b via Ollama (4096-dim).
 """
 
+from __future__ import annotations
+
+import asyncio
 import json
 import logging
+import math
 import os
 import time
 from collections.abc import Sequence
-from typing import Optional
+from typing import Any, Optional
 
-import numpy as np
 import requests
-from lucent_api.memory_schema import build_metadata, validate_source, validate_tier
+
+import hive_data
+from hive_data import memory as store
+from hive_data.schema import qualified
+
+from lucent_api.memory_schema import (
+    build_metadata,
+    validate_source,
+    validate_tier,
+)
 from lucent_api.secrets import get_credential
 
 logger = logging.getLogger(__name__)
@@ -34,23 +72,20 @@ EMBEDDING_DIM = 4096
 DEDUP_THRESHOLD = 0.92  # cosine similarity at or above which a write is deduped
 DECAY_HALF_LIFE_DAYS = 14  # half-life for the recency decay score
 
-
-def _hitl_gate(content: str) -> bool:
-    """Request HITL approval showing the exact content to be stored."""
-    try:
-        resp = requests.post(
-            f"{GATEWAY_URL}/hitl/request",
-            json={"action": "memory_store", "summary": content, "ttl": HITL_TTL},
-            timeout=HITL_TTL + 5,
-        )
-        resp.raise_for_status()
-        return resp.json().get("approved", False)
-    except Exception:
-        logger.exception("HITL gate failed -- denying memory write by default")
-        return False
+#: The memories table as a statement has to spell it. Named here because
+#: three reads below have no operation of their own in the access layer yet —
+#: a paged listing and an update are a later story — and none of them names
+#: `embedding`.
+_MEMORIES = qualified("memories")
 
 
 def _embed(text: str) -> list[float]:
+    """The embedding for a text, from Ollama. Synchronous on purpose.
+
+    Kept as the one synchronous call in the module because it is the point
+    where the process stops being ours — and it is therefore the one thing a
+    test stubs. Nothing on a route calls it directly; `_embedding_for` does.
+    """
     resp = requests.post(
         f"{OLLAMA_BASE_URL}/api/embed",
         json={"model": EMBEDDING_MODEL, "input": text},
@@ -60,94 +95,82 @@ def _embed(text: str) -> list[float]:
     return resp.json()["embeddings"][0]
 
 
-def _get_conn():
-    """Lazy import to get the Lucent SQLite connection."""
-    from lucent_api.lucent import _get_connection
-    return _get_connection()
+async def _embedding_for(text: str) -> list[float]:
+    """`_embed` off the event loop.
 
-
-def _decode_embedding(raw) -> np.ndarray | None:
-    """Decode a stored embedding to float32 ndarray.
-
-    Tolerates legacy rows where the column was written as a JSON-encoded
-    string (e.g. '[0.025, 0.013, ...]') instead of the canonical
-    np.float32 .tobytes() blob. Returns None if the value is unusable.
+    Every route in this service is `async def` now, which means uvicorn no
+    longer hands it a worker thread. A 30-second `requests.post` awaited
+    inline would block the loop itself — every other route, the connection
+    pool's own protocol handling, and `/health` with it — so the one
+    blocking call left goes to a thread.
     """
-    if raw is None:
-        return None
-    if isinstance(raw, (bytes, bytearray, memoryview)):
-        return np.frombuffer(bytes(raw), dtype=np.float32)
-    if isinstance(raw, str):
-        try:
-            return np.array(json.loads(raw), dtype=np.float32)
-        except (ValueError, TypeError):
-            return None
-    return None
+    return await asyncio.to_thread(_embed, text)
 
 
-def _nearest_neighbour(
-    embedding: np.ndarray,
-    data_class: str,
-) -> tuple[int, float] | None:
-    """Return (id, score) of the highest-cosine-similarity memory in the same data_class.
+async def _hitl_gate(content: str) -> bool:
+    """Request HITL approval showing the exact content to be stored.
 
-    Used by save-time dedup. Returns None when no rows exist in the class.
+    In a thread for the same reason as `_embedding_for`, and more so: this
+    one waits up to `HITL_TTL + 5` seconds for a human.
     """
-    conn = _get_conn()
-    rows = conn.execute(
-        "SELECT id, embedding FROM memories WHERE data_class = ?",
-        (data_class,),
-    ).fetchall()
-    if not rows:
-        return None
 
-    norm_q = float(np.linalg.norm(embedding))
-    if norm_q == 0:
-        return None
+    def _ask() -> bool:
+        resp = requests.post(
+            f"{GATEWAY_URL}/hitl/request",
+            json={"action": "memory_store", "summary": content,
+                  "ttl": HITL_TTL},
+            timeout=HITL_TTL + 5,
+        )
+        resp.raise_for_status()
+        return bool(resp.json().get("approved", False))
 
-    best_id: int | None = None
-    best_score = -1.0
-    for row in rows:
-        emb = _decode_embedding(row["embedding"])
-        if emb is None:
-            continue
-        norm_e = float(np.linalg.norm(emb))
-        if norm_e == 0:
-            continue
-        score = float(np.dot(embedding, emb) / (norm_q * norm_e))
-        if score > best_score:
-            best_score = score
-            best_id = int(row["id"])
-
-    if best_id is None:
-        return None
-    return best_id, best_score
+    try:
+        return await asyncio.to_thread(_ask)
+    except Exception:
+        logger.exception("HITL gate failed -- denying memory write by default")
+        return False
 
 
 def _mind_filter(
-    mind_id: str | None, mind_ids: Sequence[str] | None
-) -> tuple[str, list]:
-    """The provenance clause for a read, as SQL and parameters.
+    mind_id: str | None,
+    mind_ids: Sequence[str] | None,
+    start: int = 1,
+) -> tuple[str, list[Any]]:
+    """The provenance clause for a read, as SQL and arguments.
 
-    `mind_ids` is a *set* of provenances the caller may see — a mind reads its
-    own plus the `shared` sentinel the hive-wide standing rules are written
-    under, so a single value could never express it. An empty list means "no
-    provenance at all" and deliberately yields a clause that matches nothing:
-    collapsing it to "no filter" is how a scoping check turns into a scoping
-    bypass.
+    `hive_data.memory._provenance`'s rule, spelled in numbered placeholders
+    for the reads below that the access layer has no named operation for. It
+    is the access layer's rule and not lucent's old one, which is the point:
+    `if mind_id:` made the clause disappear on the empty string an unset
+    `MIND_ID` produces, and a scoping check that becomes a scoping bypass on
+    exactly that value is how one mind reads another's memories.
+
+    Blank — an empty list, or a name that is only whitespace — matches
+    nothing. `None` means no restriction at all, which is what the console's
+    own pages and the nightly pruner want.
     """
     if mind_ids is not None:
+        if isinstance(mind_ids, (str, bytes)):
+            # A `str` is a `Sequence[str]`, so no type checker catches this,
+            # and iterating one gives its characters: "skippy" becomes six
+            # one-letter minds and matches nothing, which reads as "this
+            # mind has no memories about that".
+            raise hive_data.ValueRefused(
+                f"mind_ids was given the single name {mind_ids!r} rather "
+                "than a sequence of names. Pass [name], or use mind_id.")
         names = [str(m).strip() for m in mind_ids if str(m or "").strip()]
         if not names:
             return "1 = 0", []
-        placeholders = ",".join("?" for _ in names)
-        return f"mind_id IN ({placeholders})", names
-    if mind_id:
-        return "mind_id = ?", [mind_id]
-    return "", []
+        return f'"mind_id" = ANY(${start}::text[])', [names]
+    if mind_id is None:
+        return "", []
+    named = str(mind_id).strip()
+    if not named:
+        return "1 = 0", []
+    return f'"mind_id" = ${start}', [named]
 
 
-def memory_store_direct(
+async def memory_store_direct(
     *,
     content: str,
     data_class: str,
@@ -167,89 +190,84 @@ def memory_store_direct(
     already exists with cosine similarity >= DEDUP_THRESHOLD.
     """
     try:
-        try:
-            validate_source(source)
-        except ValueError as e:
-            return json.dumps({"stored": False, "error": str(e)})
+        validate_source(source)
+    except ValueError as e:
+        return json.dumps({"stored": False, "error": str(e)})
 
-        try:
-            validate_tier(tier)
-        except ValueError as e:
-            return json.dumps({"stored": False, "error": str(e)})
+    try:
+        validate_tier(tier)
+    except ValueError as e:
+        return json.dumps({"stored": False, "error": str(e)})
 
-        # REQ-028: standing tier may only be written from /always-remember.
-        if tier == "standing" and source != "always-remember":
-            return json.dumps({
-                "stored": False,
-                "error": (
-                    "tier=standing requires source='always-remember'; "
-                    f"got source={source!r}. Use the /always-remember skill instead."
-                ),
-            })
-
-        try:
-            meta = build_metadata(
-                data_class=data_class,
-                source=source,
-                as_of=as_of,
-                expires_at=expires_at,
-                recurring=recurring,
-                content=content,
-            )
-        except ValueError as e:
-            return json.dumps({"stored": False, "error": str(e), "prompt": str(e)})
-
-        embedding = _embed(content)
-        embedding_arr = np.array(embedding, dtype=np.float32)
-
-        # REQ-049: save-time dedup against same data_class.
-        nn = _nearest_neighbour(embedding_arr, data_class)
-        if nn is not None and nn[1] >= DEDUP_THRESHOLD:
-            return json.dumps({
-                "deduped": True,
-                "existing_id": nn[0],
-                "score": round(nn[1], 4),
-            })
-
-        embedding_blob = embedding_arr.tobytes()
-
-        conn = _get_conn()
-        cursor = conn.execute(
-            """
-            INSERT INTO memories (
-                mind_id, content, embedding, tags, source,
-                data_class, tier, as_of, expires_at,
-                superseded, recurring, codebase_ref, created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                mind_id, content, embedding_blob, tags,
-                meta.get("source", source),
-                meta.get("data_class"), tier, meta.get("as_of"),
-                meta.get("expires_at"),
-                1 if meta.get("superseded") else 0,
-                1 if meta.get("recurring") else (0 if meta.get("recurring") is False else None),
-                codebase_ref,
-                int(time.time()),
-            ),
-        )
-        conn.commit()
-        memory_id = cursor.lastrowid
-
+    # REQ-028: standing tier may only be written from /always-remember.
+    if tier == "standing" and source != "always-remember":
         return json.dumps({
-            "stored": True,
-            "id": memory_id,
-            "mind_id": mind_id,
-            "data_class": meta.get("data_class"),
-            "tier": tier,
+            "stored": False,
+            "error": (
+                "tier=standing requires source='always-remember'; "
+                f"got source={source!r}. Use the /always-remember skill instead."
+            ),
         })
-    except Exception as e:
-        logger.exception("memory_store_direct failed")
-        return json.dumps({"error": str(e)})
+
+    try:
+        meta = build_metadata(
+            data_class=data_class,
+            source=source,
+            as_of=as_of,
+            expires_at=expires_at,
+            recurring=recurring,
+            content=content,
+        )
+    except ValueError as e:
+        return json.dumps({"stored": False, "error": str(e), "prompt": str(e)})
+
+    embedding = await _embedding_for(content)
+
+    # REQ-049: save-time dedup against the same data_class, and only the
+    # same data_class — which is why `data_class` is an argument to the
+    # access layer's own `similar` rather than a filter applied to its
+    # answer. The nearest row in the store overall can score over
+    # `DEDUP_THRESHOLD` while belonging to a different class entirely, and
+    # that answers `{"deduped": true}` and never writes the turn's memory
+    # while the hook records a success.
+    nearest = await store.similar(embedding, limit=1, data_class=data_class)
+    if nearest and float(nearest[0]["score"]) >= DEDUP_THRESHOLD:
+        return json.dumps({
+            "deduped": True,
+            "existing_id": int(nearest[0]["id"]),
+            "score": round(float(nearest[0]["score"]), 4),
+        })
+
+    written = await store.store(
+        mind_id=mind_id,
+        content=content,
+        embedding=embedding,
+        tags=tags,
+        source=meta.get("source", source),
+        data_class=meta.get("data_class"),
+        tier=tier,
+        as_of=meta.get("as_of"),
+        expires_at=meta.get("expires_at"),
+        superseded=1 if meta.get("superseded") else 0,
+        recurring=(
+            1 if meta.get("recurring")
+            else (0 if meta.get("recurring") is False else None)
+        ),
+        codebase_ref=codebase_ref,
+        created_at=int(time.time()),
+    )
+    row = (written or {}).get("row") or {}
+
+    return json.dumps({
+        "stored": True,
+        "id": row.get("id"),
+        "mind_id": mind_id,
+        "data_class": meta.get("data_class"),
+        "tier": tier,
+    })
 
 
-def memory_store(
+async def memory_store(
     *,
     content: str,
     data_class: str,
@@ -287,25 +305,30 @@ def memory_store(
         when an entry with cosine similarity >= 0.92 already exists in the
         same data_class.
     """
-    try:
-        return memory_store_direct(
-            content=content,
-            tier=tier,
-            tags=tags,
-            source=source,
-            mind_id=mind_id,
-            data_class=data_class,
-            as_of=as_of,
-            expires_at=expires_at,
-            recurring=recurring,
-            codebase_ref=codebase_ref,
-        )
-    except Exception as e:
-        logger.exception("memory_store failed")
-        return json.dumps({"error": str(e)})
+    return await memory_store_direct(
+        content=content,
+        tier=tier,
+        tags=tags,
+        source=source,
+        mind_id=mind_id,
+        data_class=data_class,
+        as_of=as_of,
+        expires_at=expires_at,
+        recurring=recurring,
+        codebase_ref=codebase_ref,
+    )
 
 
-def memory_list(
+#: What `/memory/list` hands back per row. Narrower than the table on
+#: purpose: the anchor columns are not in it, which is why the pruner reads
+#: through `hive_data.graph.memories_for_class` rather than through here.
+_LIST_COLUMNS = (
+    "id", "content", "tags", "source", "data_class", "tier", "mind_id",
+    "created_at",
+)
+
+
+async def memory_list(
     offset: int = 0,
     limit: int = 25,
     mind_id: str | None = None,
@@ -339,60 +362,41 @@ def memory_list(
     """
     limit = min(limit, 100)
 
-    where_parts: list[str] = []
-    params: list = []
+    conditions: list[str] = []
+    args: list[Any] = []
     if tier:
-        where_parts.append("tier = ?")
-        params.append(tier)
-    clause, clause_params = _mind_filter(mind_id, mind_ids)
-    if clause:
-        where_parts.append(clause)
-        params.extend(clause_params)
+        args.append(tier)
+        conditions.append(f'"tier" = ${len(args)}')
     if data_class:
-        where_parts.append("data_class = ?")
-        params.append(data_class)
-    where_clause = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+        args.append(data_class)
+        conditions.append(f'"data_class" = ${len(args)}')
+    clause, clause_args = _mind_filter(mind_id, mind_ids, len(args) + 1)
+    if clause:
+        conditions.append(clause)
+        args.extend(clause_args)
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
-    try:
-        conn = _get_conn()
-        total_row = conn.execute(
-            f"SELECT COUNT(*) AS total FROM memories {where_clause}",
-            params,
-        ).fetchone()
-        total = total_row["total"]
+    columns = ", ".join(f'"{c}"' for c in _LIST_COLUMNS)
+    count_sql = f'SELECT count(*) AS "total" FROM {_MEMORIES} {where}'
+    # `created_at` then `id`: epoch seconds, so a hook writing twice inside
+    # one second gives two rows the same sort key, and an order that is not
+    # total silently repeats and skips rows as the caller pages through.
+    page_sql = (f'SELECT {columns} FROM {_MEMORIES} {where} '
+                f'ORDER BY "created_at" ASC, "id" ASC '
+                f'LIMIT ${len(args) + 1} OFFSET ${len(args) + 2}')
 
-        rows = conn.execute(
-            f"""
-            SELECT id, content, tags, source, data_class, tier, mind_id, created_at
-            FROM memories
-            {where_clause}
-            ORDER BY created_at ASC
-            LIMIT ? OFFSET ?
-            """,
-            (*params, limit, offset),
-        ).fetchall()
+    async def _read(connection: Any) -> tuple[int, list[Any]]:
+        total = await connection.fetchval(count_sql, *args)
+        rows = await connection.fetch(page_sql, *args, limit, offset)
+        return int(total or 0), rows
 
-        entries = [
-            {
-                "id": row["id"],
-                "content": row["content"],
-                "tags": row["tags"],
-                "source": row["source"],
-                "data_class": row["data_class"],
-                "tier": row["tier"],
-                "mind_id": row["mind_id"],
-                "created_at": row["created_at"],
-            }
-            for row in rows
-        ]
-
-        return json.dumps({"entries": entries, "offset": offset, "limit": limit, "total": total})
-    except Exception as e:
-        logger.exception("memory_list failed")
-        return json.dumps({"error": str(e)})
+    total, rows = await hive_data.run(_read)
+    entries = [{c: row[c] for c in _LIST_COLUMNS} for row in rows]
+    return json.dumps({"entries": entries, "offset": offset,
+                       "limit": limit, "total": total})
 
 
-def memory_delete(memory_id: str) -> str:
+async def memory_delete(memory_id: str) -> str:
     """Delete a memory by its ID.
 
     Args:
@@ -402,27 +406,27 @@ def memory_delete(memory_id: str) -> str:
         JSON confirming deletion or error.
     """
     try:
-        conn = _get_conn()
-        row = conn.execute(
-            "SELECT id, content, mind_id FROM memories WHERE id = ?",
-            (int(memory_id),),
-        ).fetchone()
+        target = int(memory_id)
+    except (TypeError, ValueError):
+        return json.dumps({"deleted": False, "reason": "not found",
+                           "id": memory_id})
 
-        if not row:
-            return json.dumps({"deleted": False, "reason": "not found", "id": memory_id})
+    row = await store.get(target)
+    if row is None:
+        return json.dumps({"deleted": False, "reason": "not found",
+                           "id": memory_id})
+    result = await store.delete(target)
+    if not result.get("rows"):
+        # Read and then gone: somebody else deleted it between the two
+        # statements. Reported as not found rather than as a deletion,
+        # because the caller's next move is a retry either way.
+        return json.dumps({"deleted": False, "reason": "not found",
+                           "id": memory_id})
+    return json.dumps({"deleted": True, "id": memory_id,
+                       "content": row["content"]})
 
-        content = row["content"]
 
-        conn.execute("DELETE FROM memories WHERE id = ?", (int(memory_id),))
-        conn.commit()
-
-        return json.dumps({"deleted": True, "id": memory_id, "content": content})
-    except Exception as e:
-        logger.exception("memory_delete failed")
-        return json.dumps({"error": str(e)})
-
-
-def memory_update(
+async def memory_update(
     memory_id: str,
     content: str = "",
     data_class: str = "",
@@ -446,70 +450,75 @@ def memory_update(
     from lucent_api.memory_schema import DATA_CLASS_REGISTRY, validate_data_class
 
     try:
-        set_parts = []
-        params: list = []
+        target = int(memory_id)
+    except (TypeError, ValueError):
+        return json.dumps({"updated": False, "error": "not found",
+                           "id": memory_id})
 
-        if content:
-            embedding = _embed(content)
-            embedding_blob = np.array(embedding, dtype=np.float32).tobytes()
-            set_parts.append("content = ?")
-            params.append(content)
-            set_parts.append("embedding = ?")
-            params.append(embedding_blob)
+    assignments: list[str] = []
+    args: list[Any] = []
 
-        if data_class:
-            try:
-                validate_data_class(data_class)
-            except ValueError as e:
-                return json.dumps({"updated": False, "error": str(e)})
-            set_parts.append("data_class = ?")
-            params.append(data_class)
-            set_parts.append("tier = ?")
-            params.append(DATA_CLASS_REGISTRY[data_class].tier)
+    def _set(column: str, value: Any) -> None:
+        args.append(value)
+        assignments.append(f'"{column}" = ${len(args)}')
 
-        if tags:
-            set_parts.append("tags = ?")
-            params.append(tags)
+    if content:
+        _set("content", content)
+        _set("embedding", await _embedding_for(content))
 
-        if mind_id:
-            set_parts.append("mind_id = ?")
-            params.append(mind_id)
+    if data_class:
+        try:
+            validate_data_class(data_class)
+        except ValueError as e:
+            return json.dumps({"updated": False, "error": str(e)})
+        _set("data_class", data_class)
+        _set("tier", DATA_CLASS_REGISTRY[data_class].tier)
 
-        if not set_parts:
-            return json.dumps({"updated": False, "error": "no fields provided to update"})
+    if tags:
+        _set("tags", tags)
 
-        set_clause = ", ".join(set_parts)
-        params.append(int(memory_id))
+    if mind_id:
+        _set("mind_id", mind_id)
 
-        conn = _get_conn()
-        cursor = conn.execute(
-            f"UPDATE memories SET {set_clause} WHERE id = ?",
-            params,
-        )
-        conn.commit()
+    if not assignments:
+        return json.dumps({"updated": False,
+                           "error": "no fields provided to update"})
 
-        if cursor.rowcount == 0:
-            return json.dumps({"updated": False, "error": "not found", "id": memory_id})
+    args.append(target)
+    # One statement rather than an update followed by a read: the row it
+    # returns is the row it wrote, so a concurrent write cannot make the
+    # answer describe a different version than the one that landed. Nothing
+    # names `content_search` — it is GENERATED ALWAYS and recomputed from
+    # the new content by this same statement, so a memory stays findable by
+    # word with no window in which it is updated and unsearchable.
+    sql = (f'UPDATE {_MEMORIES} SET {", ".join(assignments)} '
+           f'WHERE "id" = ${len(args)} '
+           f'RETURNING "data_class", "mind_id", '
+           f'substr("content", 1, 80) AS "preview"')
+    row = await hive_data.run(lambda c: c.fetchrow(sql, *args))
 
-        # Get updated row details
-        row = conn.execute(
-            "SELECT data_class, mind_id, SUBSTR(content, 1, 80) AS preview FROM memories WHERE id = ?",
-            (int(memory_id),),
-        ).fetchone()
-
-        return json.dumps({
-            "updated": True,
-            "id": int(memory_id),
-            "data_class": row["data_class"] if row else data_class,
-            "mind_id": row["mind_id"] if row else mind_id,
-            "preview": row["preview"] if row else "",
-        })
-    except Exception as e:
-        logger.exception("memory_update failed")
-        return json.dumps({"error": str(e)})
+    if row is None:
+        return json.dumps({"updated": False, "error": "not found",
+                           "id": memory_id})
+    return json.dumps({
+        "updated": True,
+        "id": target,
+        "data_class": row["data_class"],
+        "mind_id": row["mind_id"],
+        "preview": row["preview"],
+    })
 
 
-def memory_retrieve(
+#: The keys a `/memory/retrieve` row carries, in lucent's own order. `id` is
+#: deliberately not among them — this route has never returned one, and a
+#: caller reading the answer by key sees exactly these.
+_RETRIEVE_KEYS = (
+    "content", "tags", "source", "mind_id", "created_at", "data_class",
+    "tier", "as_of", "expires_at", "superseded", "codebase_ref",
+)
+
+
+async def memory_retrieve(
     query: str,
     k: int = 10,
     mind_id: str | None = None,
@@ -529,7 +538,8 @@ def memory_retrieve(
             default). The contextual-retrieval hook uses this to fetch a
             mind's own behaviour-rule feedback plus the "shared" sentinel
             via two calls and union — same pattern as ``memory_list``.
-        tag_filter: Optional tag to filter results.
+        tag_filter: Optional tag to filter results. Matched
+            case-insensitively, as it was under SQLite.
         data_class: Optional data class filter — keep only entries with the
             given data_class.
         min_score: Optional cosine-similarity threshold — keep only entries
@@ -540,82 +550,34 @@ def memory_retrieve(
     """
     k = min(k, 50)
 
-    where_parts: list[str] = []
-    params: list = []
-    if tag_filter:
-        where_parts.append("tags LIKE ?")
-        params.append(f"%{tag_filter}%")
-    clause, clause_params = _mind_filter(mind_id, mind_ids)
-    if clause:
-        where_parts.append(clause)
-        params.extend(clause_params)
-    where_clause = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+    embedding = await _embedding_for(query)
+    # The class and tag filters are arguments to the ranking rather than a
+    # pass over its results: filtering afterwards is how a read with a
+    # `data_class` answers nothing while the store holds twenty matching
+    # rows that merely sat below the top k. The tag is matched
+    # case-insensitively in there, which `LIKE` was under SQLite and is not
+    # here. `min_score` is a threshold on the sort key itself, so applying
+    # it to the ranked page is the same answer as applying it to the whole
+    # store.
+    rows = await store.similar(
+        embedding, limit=k, mind_id=mind_id, mind_ids=mind_ids,
+        data_class=data_class, tag=tag_filter or None)
 
-    try:
-        query_embedding = np.array(_embed(query), dtype=np.float32)
+    memories = []
+    for row in rows:
+        score = round(float(row["score"]), 4)
+        if min_score is not None and score < min_score:
+            continue
+        out = {key: row.get(key) for key in _RETRIEVE_KEYS}
+        flag = out.get("superseded")
+        out["superseded"] = None if flag is None else bool(flag)
+        out["score"] = score
+        memories.append(out)
 
-        conn = _get_conn()
-        rows = conn.execute(
-            f"""
-            SELECT id, content, embedding, tags, source, mind_id,
-                   created_at, data_class, tier, as_of, expires_at,
-                   superseded, codebase_ref
-            FROM memories
-            {where_clause}
-            """,
-            params,
-        ).fetchall()
-
-        if not rows:
-            return json.dumps({"memories": [], "count": 0})
-
-        # Compute cosine similarity
-        scored_memories = []
-        for row in rows:
-            emb = _decode_embedding(row["embedding"])
-            if emb is None:
-                continue
-            # Cosine similarity
-            dot = np.dot(query_embedding, emb)
-            norm_q = np.linalg.norm(query_embedding)
-            norm_e = np.linalg.norm(emb)
-            if norm_q == 0 or norm_e == 0:
-                score = 0.0
-            else:
-                score = float(dot / (norm_q * norm_e))
-
-            scored_memories.append({
-                "content": row["content"],
-                "tags": row["tags"],
-                "source": row["source"],
-                "mind_id": row["mind_id"],
-                "created_at": row["created_at"],
-                "score": round(score, 4),
-                "data_class": row["data_class"],
-                "tier": row["tier"],
-                "as_of": row["as_of"],
-                "expires_at": row["expires_at"],
-                "superseded": bool(row["superseded"]) if row["superseded"] is not None else None,
-                "codebase_ref": row["codebase_ref"],
-            })
-
-        # Sort by score descending; apply post-score filters; then top-k.
-        scored_memories.sort(key=lambda m: m["score"], reverse=True)
-
-        if data_class:
-            scored_memories = [m for m in scored_memories if m.get("data_class") == data_class]
-        if min_score is not None:
-            scored_memories = [m for m in scored_memories if m["score"] >= min_score]
-
-        top_k = scored_memories[:k]
-
-        return json.dumps({"memories": top_k, "count": len(top_k)})
-    except Exception as e:
-        logger.exception("memory_retrieve failed")
-        return json.dumps({"error": str(e)})
+    return json.dumps({"memories": memories, "count": len(memories)})
 
 
-def query_decayed(
+async def query_decayed(
     limit: int = 20,
     mind_id: str | None = None,
     mind_ids: Sequence[str] | None = None,
@@ -637,88 +599,49 @@ def query_decayed(
         JSON-encoded list of dicts: id, content, data_class, score,
         created_at, mind_id.
     """
-    import math
-
-    where_parts = ["tier = 'contextual'"]
-    params: list = []
-    clause, clause_params = _mind_filter(mind_id, mind_ids)
+    conditions = ["\"tier\" = 'contextual'"]
+    args: list[Any] = []
+    clause, clause_args = _mind_filter(mind_id, mind_ids, len(args) + 1)
     if clause:
-        where_parts.append(clause)
-        params.extend(clause_params)
-    where_clause = "WHERE " + " AND ".join(where_parts)
+        conditions.append(clause)
+        args.extend(clause_args)
+    where = "WHERE " + " AND ".join(conditions)
 
-    try:
-        conn = _get_conn()
-        rows = conn.execute(
-            f"""
-            SELECT id, content, data_class, mind_id, created_at
-            FROM memories
-            {where_clause}
-            """,
-            params,
-        ).fetchall()
+    # The decay is strictly decreasing in age, so the top N by score are the
+    # N newest and the ordering can be the database's. lucent read every
+    # contextual row of every mind to find twenty of them.
+    sql = (f'SELECT "id", "content", "data_class", "mind_id", "created_at" '
+           f'FROM {_MEMORIES} {where} '
+           f'ORDER BY "created_at" DESC NULLS LAST, "id" DESC '
+           f'LIMIT ${len(args) + 1}')
+    rows = await hive_data.run(lambda c: c.fetch(sql, *args, int(limit)))
 
-        if not rows:
-            return json.dumps([])
-
-        now = time.time()
-        half_life_seconds = DECAY_HALF_LIFE_DAYS * 86400
-        scored = []
-        for row in rows:
-            created_at = row["created_at"] or 0
-            score = math.exp(-(now - float(created_at)) / half_life_seconds)
-            scored.append({
-                "id": row["id"],
-                "content": row["content"],
-                "data_class": row["data_class"],
-                "mind_id": row["mind_id"],
-                "created_at": row["created_at"],
-                "score": round(score, 4),
-            })
-        scored.sort(key=lambda r: r["score"], reverse=True)
-        return json.dumps(scored[:limit])
-    except Exception as e:
-        logger.exception("query_decayed failed")
-        return json.dumps({"error": str(e)})
+    now = time.time()
+    half_life_seconds = DECAY_HALF_LIFE_DAYS * 86400
+    scored = [
+        {
+            "id": row["id"],
+            "content": row["content"],
+            "data_class": row["data_class"],
+            "mind_id": row["mind_id"],
+            "created_at": row["created_at"],
+            "score": round(
+                math.exp(-(now - float(row["created_at"] or 0))
+                         / half_life_seconds), 4),
+        }
+        for row in rows
+    ]
+    return json.dumps(scored)
 
 
-HYBRID_RECENCY_HALF_LIFE_DAYS = 30
-HYBRID_RECENCY_FLOOR = 0.5
-HYBRID_VECTOR_POOL = 20
-HYBRID_BM25_POOL = 10
-HYBRID_DEFAULT_K = 5
+HYBRID_RECENCY_HALF_LIFE_DAYS = store.RECENCY_HALF_LIFE_DAYS
+HYBRID_RECENCY_FLOOR = store.RECENCY_FLOOR
+HYBRID_VECTOR_POOL = store.VECTOR_POOL
+HYBRID_BM25_POOL = store.KEYWORD_POOL
+HYBRID_DEFAULT_K = store.DEFAULT_K
 
 
-_FTS_STOPWORDS = {
-    "a", "an", "the", "and", "or", "but", "if", "of", "in", "on", "at",
-    "to", "for", "from", "by", "with", "as", "is", "are", "was", "were",
-    "be", "been", "being", "do", "does", "did", "have", "has", "had",
-    "this", "that", "these", "those", "it", "its", "i", "you", "we",
-    "they", "he", "she", "me", "my", "our", "your", "their", "them",
-    "us", "what", "when", "where", "why", "how", "who", "which",
-    "can", "could", "would", "should", "will", "shall", "may", "might",
-    "just", "really", "very", "so", "also", "too", "any", "some", "all",
-    "no", "not", "yes", "ok", "okay",
-}
-
-
-def _sanitize_fts_query(query: str) -> str:
-    """Strip FTS5 syntax characters and stopwords from a free-text query.
-
-    FTS5 treats characters like quotes, hyphens, parens, colons, and
-    asterisks as operators. We tokenize to alphanumerics, drop common
-    English stopwords, then OR-join the rest so any meaningful token
-    contributes to the BM25 ranking.
-    """
-    import re
-    tokens = [t.lower() for t in re.findall(r"[A-Za-z0-9_]+", query)]
-    tokens = [t for t in tokens if len(t) > 2 and t not in _FTS_STOPWORDS]
-    if not tokens:
-        return ""
-    return " OR ".join(tokens)
-
-
-def memory_retrieve_hybrid(
+async def memory_retrieve_hybrid(
     query: str,
     k: int = HYBRID_DEFAULT_K,
     mind_id: str | None = None,
@@ -726,230 +649,42 @@ def memory_retrieve_hybrid(
     min_score: float | None = None,
     debug: bool = True,
 ) -> str:
-    """Hybrid retrieval: vector + recency-weighted + BM25 keyword.
+    """Hybrid retrieval: vector + recency-weighted + keyword, in one answer.
 
-    Builds candidate pool from top-N vector neighbours unioned with top-M
-    BM25 keyword matches. For each candidate computes three signals:
-    cosine similarity, recency multiplier (exp decay, half-life
-    ``HYBRID_RECENCY_HALF_LIFE_DAYS``, floor ``HYBRID_RECENCY_FLOOR``),
-    and normalized BM25.
+    `hive_data.memory.recall` is the whole of it. The blend is lucent's own,
+    carried across with its constants and its bucket arithmetic unchanged —
+    three slots to the best ``cosine * recency``, one to the best raw
+    cosine, one to the best keyword hit, the remainder filled from a
+    combined ranking — and the only thing that moved is where the
+    arithmetic runs.
 
-    Returns up to ``k`` rows in fixed buckets:
-        - slot 1..3: top by cosine * recency  (label ``recency``)
-        - slot 4:    top remaining by raw cosine  (label ``cosine``)
-        - slot 5:    top remaining by BM25  (label ``bm25``)
+    Two differences that are the point of the move rather than regressions.
+    The candidate pool is now the top `VECTOR_POOL` by cosine from the
+    database, where lucent scored every row of every mind in Python. And the
+    keyword half works: `memories_fts` does not exist in this install's
+    SQLite file at all, so lucent's keyword lookup has been failing into a
+    `logger.exception` and answering vector-only every turn since it was
+    written.
 
-    Empty slots are filled from a unified ranking. Each returned row
-    includes a ``debug`` dict with ``bucket`` and component scores when
-    ``debug=True``.
+    There is deliberately no `try/except` around the keyword half here.
+    `hive_data` caps a query at `MAX_QUERY_TERMS` so the one failure lucent
+    was guarding against — a pasted transcript parsed as an OR of sixty
+    thousand terms — cannot arrive; and a handler here would swallow a
+    rejected write reported on a read, degrading hybrid to vector-only under
+    the same ``"mode": "hybrid"`` label, with worse answers and one log
+    line.
     """
-    import math
-    import re
-
-    k = max(1, min(k, 20))
-    now = time.time()
-    half_life_seconds = HYBRID_RECENCY_HALF_LIFE_DAYS * 86400
-
-    try:
-        query_embedding = np.array(_embed(query), dtype=np.float32)
-        qnorm = float(np.linalg.norm(query_embedding))
-        if qnorm == 0:
-            return json.dumps({"memories": [], "count": 0, "mode": "hybrid", "error": "zero_query_embedding"})
-
-        conn = _get_conn()
-
-        # ---- Step 1: pull every row's embedding (mind_id-aware) and score cosine ----
-        where_parts: list[str] = []
-        params: list = []
-        clause, clause_params = _mind_filter(mind_id, mind_ids)
-        if clause:
-            where_parts.append(clause)
-            params.extend(clause_params)
-        where_clause = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
-
-        rows = conn.execute(
-            f"""
-            SELECT id, content, embedding, tags, source, mind_id,
-                   created_at, data_class, tier, as_of, expires_at,
-                   superseded, codebase_ref
-            FROM memories
-            {where_clause}
-            """,
-            params,
-        ).fetchall()
-        if not rows:
-            return json.dumps({"memories": [], "count": 0, "mode": "hybrid"})
-
-        by_id: dict[int, dict] = {}
-        cosine_scores: dict[int, float] = {}
-        for row in rows:
-            emb = _decode_embedding(row["embedding"])
-            if emb is None:
-                continue
-            enorm = float(np.linalg.norm(emb))
-            score = 0.0 if enorm == 0 else float(np.dot(query_embedding, emb) / (qnorm * enorm))
-            rid = int(row["id"])
-            cosine_scores[rid] = score
-            by_id[rid] = {
-                "id": rid,
-                "content": row["content"],
-                "tags": row["tags"],
-                "source": row["source"],
-                "mind_id": row["mind_id"],
-                "created_at": row["created_at"],
-                "data_class": row["data_class"],
-                "tier": row["tier"],
-                "as_of": row["as_of"],
-                "expires_at": row["expires_at"],
-                "superseded": bool(row["superseded"]) if row["superseded"] is not None else None,
-                "codebase_ref": row["codebase_ref"],
-            }
-
-        # ---- Step 2: BM25 over FTS5 ----
-        bm25_scores: dict[int, float] = {}
-        fts_q = _sanitize_fts_query(query)
-        if fts_q:
-            try:
-                fts_rows = conn.execute(
-                    f"""
-                    SELECT memories_fts.rowid AS rid, bm25(memories_fts) AS bm
-                    FROM memories_fts
-                    WHERE memories_fts MATCH ?
-                    ORDER BY bm
-                    LIMIT ?
-                    """,
-                    (fts_q, HYBRID_BM25_POOL * 4),
-                ).fetchall()
-                # bm25() returns negative; smaller (more negative) is better.
-                # Normalize to a positive comparable score (higher is better).
-                for r in fts_rows:
-                    rid = int(r["rid"])
-                    if rid in by_id:
-                        bm25_scores[rid] = -float(r["bm"])
-            except Exception:
-                logger.exception("hybrid: bm25 lookup failed; continuing with vector-only")
-
-        # ---- Step 3: candidate pool = top HYBRID_VECTOR_POOL by cosine UNION top HYBRID_BM25_POOL by bm25 ----
-        top_cosine_ids = [rid for rid, _ in sorted(cosine_scores.items(), key=lambda kv: kv[1], reverse=True)[:HYBRID_VECTOR_POOL]]
-        top_bm25_ids = [rid for rid, _ in sorted(bm25_scores.items(), key=lambda kv: kv[1], reverse=True)[:HYBRID_BM25_POOL]]
-        pool_ids = list(dict.fromkeys(top_cosine_ids + top_bm25_ids))
-
-        # ---- Step 4: per-candidate combined scoring ----
-        def recency_mult(created_at) -> float:
-            try:
-                age = max(0.0, now - float(created_at or 0))
-            except (TypeError, ValueError):
-                return HYBRID_RECENCY_FLOOR
-            raw = math.exp(-age / half_life_seconds)
-            return max(HYBRID_RECENCY_FLOOR, raw)
-
-        scored = []
-        for rid in pool_ids:
-            row = by_id[rid]
-            cos = cosine_scores.get(rid, 0.0)
-            rec = recency_mult(row.get("created_at"))
-            bm = bm25_scores.get(rid, 0.0)
-            if min_score is not None and cos < min_score and bm <= 0:
-                # Skip dual-failure rows; allow BM25-positive rows through even at low cosine.
-                continue
-            scored.append({
-                "rid": rid,
-                "cos": cos,
-                "rec": rec,
-                "bm": bm,
-                "row": row,
-            })
-
-        if not scored:
-            return json.dumps({"memories": [], "count": 0, "mode": "hybrid"})
-
-        # ---- Step 5: bucket allocation ----
-        rec_slots = max(0, min(3, k - 2)) if k >= 5 else min(k, 3)
-        cos_slots = 1 if k >= 4 else 0
-        bm_slots = 1 if k >= 5 else 0
-        # Ensure totals don't exceed k
-        rec_slots = min(rec_slots, k)
-        cos_slots = min(cos_slots, k - rec_slots)
-        bm_slots = min(bm_slots, k - rec_slots - cos_slots)
-
-        used: set[int] = set()
-        picks: list[tuple[str, dict]] = []  # (bucket, scored_entry)
-
-        # recency bucket
-        rec_ranked = sorted(scored, key=lambda s: (s["cos"] * s["rec"]), reverse=True)
-        for s in rec_ranked:
-            if len(picks) >= rec_slots:
-                break
-            if s["rid"] in used:
-                continue
-            used.add(s["rid"])
-            picks.append(("recency", s))
-
-        # cosine bucket
-        cos_ranked = sorted(scored, key=lambda s: s["cos"], reverse=True)
-        cos_added = 0
-        for s in cos_ranked:
-            if cos_added >= cos_slots:
-                break
-            if s["rid"] in used:
-                continue
-            used.add(s["rid"])
-            picks.append(("cosine", s))
-            cos_added += 1
-
-        # bm25 bucket
-        bm_ranked = sorted(scored, key=lambda s: s["bm"], reverse=True)
-        bm_added = 0
-        for s in bm_ranked:
-            if bm_added >= bm_slots:
-                break
-            if s["bm"] <= 0:
-                break
-            if s["rid"] in used:
-                continue
-            used.add(s["rid"])
-            picks.append(("bm25", s))
-            bm_added += 1
-
-        # Backfill any leftover capacity from combined ranking
-        if len(picks) < k:
-            combined = sorted(
-                scored,
-                key=lambda s: (s["cos"] * s["rec"]) + (0.05 * s["bm"]),
-                reverse=True,
-            )
-            for s in combined:
-                if len(picks) >= k:
-                    break
-                if s["rid"] in used:
-                    continue
-                used.add(s["rid"])
-                picks.append(("fill", s))
-
-        # ---- Step 6: shape response ----
-        out = []
-        for bucket, s in picks:
-            row = dict(s["row"])
-            if debug:
-                row["debug"] = {
-                    "bucket": bucket,
-                    "cosine": round(s["cos"], 4),
-                    "recency_mult": round(s["rec"], 4),
-                    "combined": round(s["cos"] * s["rec"], 4),
-                    "bm25": round(s["bm"], 4),
-                }
-            row["score"] = round(s["cos"], 4)
-            out.append(row)
-
-        return json.dumps({
-            "memories": out,
-            "count": len(out),
-            "mode": "hybrid",
-            "pool_size": len(pool_ids),
-        })
-    except Exception as e:
-        logger.exception("memory_retrieve_hybrid failed")
-        return json.dumps({"error": str(e), "mode": "hybrid"})
+    embedding = await _embedding_for(query)
+    answer = await store.recall(
+        query=query,
+        embedding=embedding,
+        k=k,
+        mind_id=mind_id,
+        mind_ids=mind_ids,
+        min_score=min_score,
+        debug=debug,
+    )
+    return json.dumps(answer)
 
 
 # All memory tool functions for registration

@@ -4,7 +4,11 @@ Runs two concurrent services:
 1. lucent-api (FastAPI) — vector store + KG endpoints.
 2. APScheduler in-process — fires scheduled tasks (prune-memory daily).
 
-Both share the lucent SQLite store at $LUCENT_DB_PATH (mounted volume).
+Both reach the hive's one database through `hive_data`. The store is opened
+once here, before anything serves, and closed once at shutdown: `hive_data`
+opens no pool on demand, and a lazy open under two concurrent first calls
+builds two pools holding double the connections against a ceiling shared with
+every other service.
 """
 from __future__ import annotations
 
@@ -34,11 +38,20 @@ PRUNE_LOG_PATH = Path(
 
 
 async def _run_prune() -> None:
-    """Fire prune-memory and append the result to the daily log."""
+    """Fire prune-memory and append the result to the daily log.
+
+    Awaited rather than run through `asyncio.to_thread`. The thread was
+    there because the prune opened its own `sqlite3` connection; now that it
+    reads through the access layer, a thread is the one thing that cannot
+    work — `hive_data` raises on a pool reached from another event loop, and
+    a nested `asyncio.run` gets a pool bound to a loop that is already
+    closed. Either way it fails once a night inside the handler below, into
+    a log nobody tails.
+    """
     log.info("prune-memory: starting")
     try:
         from lucent_api.prune_memory import run_all
-        runs = await asyncio.to_thread(run_all)
+        runs = await run_all()
     except Exception:
         log.exception("prune-memory: run_all() crashed")
         return
@@ -59,6 +72,17 @@ async def _run_prune() -> None:
         for r in runs
     )
     log.info("prune-memory: done — %s", summary)
+    if runs and not any(r.get("read", 0) for r in runs):
+        # A pass that read nothing at all is the shape the cutover produces
+        # when the prune is pointed at a store nobody writes: four pruners
+        # each reporting zero deleted and zero kept, which is
+        # indistinguishable in the log from a quiet month. Said out loud
+        # once rather than inferred later.
+        log.error(
+            "prune-memory: every pruner read zero rows. That is what a "
+            "prune pointed at the wrong store looks like, not a quiet "
+            "night — check which database the access layer is opened "
+            "against.")
 
 
 # ============================================================================
