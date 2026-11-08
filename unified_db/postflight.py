@@ -369,7 +369,7 @@ async def _comms(conn: asyncpg.Connection) -> tuple[str, str]:
             "DELETE FROM core.messages WHERE conversation_id = $1",
             conversation)
         await conn.execute(
-            "DELETE FROM core.conversations WHERE conversation_id = $1",
+            "DELETE FROM core.conversations WHERE id = $1",
             conversation)
         await conn.execute(
             "DELETE FROM core.sessions WHERE mind_id = $1", probe)
