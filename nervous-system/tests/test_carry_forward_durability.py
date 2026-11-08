@@ -16,12 +16,11 @@ back only to a caller asking about *that* conversation, and cleared by the
 first completed turn — which is the only evidence the rotation actually
 took.
 """
+# ruff: noqa: F811 - pytest fixtures are imported, then named as parameters
 from __future__ import annotations
 
 import asyncio
 import contextlib
-import os
-import tempfile
 import time
 from unittest.mock import patch
 
@@ -29,6 +28,16 @@ import pytest
 from fastapi.testclient import TestClient
 
 from comms.sessions import SessionManager
+from comms_pg_fixture import (  # noqa: F401 - fixtures
+    close_manager,
+    comms_db,
+    execute,
+    fetchrow,
+    make_manager,
+    register_mind,
+    scratch_dsn,
+    seed_session,
+)
 
 SEED = "<soul>who you are</soul>\n<recent>what just happened</recent>"
 #: What the mind renders of the conversation being replaced. A pane opens on
@@ -48,38 +57,20 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-async def _make_manager(tmp: str) -> SessionManager:
-    os.environ["SESSIONS_DB_PATH"] = os.path.join(tmp, "sessions.db")
-    mgr = SessionManager()
-    await mgr.start()
-    return mgr
-
-
-async def _seed_terminal_session(mgr: SessionManager) -> str:
+async def _seed_terminal_session() -> str:
     """A running browser-terminal session on a conversation about to rotate."""
     session_id = "sess-term"
-    now = time.time()
-    await mgr._db.execute(
-        """INSERT INTO sessions (id, owner_type, owner_ref, model, claude_sid,
-                                 created_at, last_active, status, mind_id, terminal_held)
-           VALUES (?, 'web', 'terminal', 'opus', 'conv-old', ?, ?, 'running', 'ada', 1)""",
-        (session_id, now, now),
+    await register_mind("ada", model="opus")
+    await seed_session(
+        session_id, owner_type="web", owner_ref="terminal", model="opus",
+        claude_sid="conv-old", terminal_held=True, bind=("web", session_id),
     )
-    await mgr._db.execute(
-        """INSERT INTO active_sessions (client_type, client_ref, session_id)
-           VALUES ('web', ?, ?)""",
-        (session_id, session_id),
-    )
-    await mgr._db.commit()
     return session_id
 
 
 @contextlib.contextmanager
 def _a_mind_with_a_live_pane():
     """Composition and the pane respawn stubbed; the row write is the subject."""
-    async def mind_row(_db, mind_id):
-        return {"name": mind_id, "model": "opus"}
-
     async def blocks(**_kw):
         return SEED
 
@@ -89,8 +80,7 @@ def _a_mind_with_a_live_pane():
     async def handover(_self, *_a, **_kw):
         return HANDOVER
 
-    with patch("comms.broker.get_mind_by_id", mind_row), \
-            patch("comms.bootstrap_loader.compose_prompt_blocks", blocks), \
+    with patch("comms.bootstrap_loader.compose_prompt_blocks", blocks), \
             patch.object(SessionManager, "_render_handover_on_mind", handover), \
             patch.object(SessionManager, "_clear_rotation_marker_on_mind",
                          lambda *_a, **_kw: asyncio.sleep(0)), \
@@ -98,12 +88,12 @@ def _a_mind_with_a_live_pane():
         yield
 
 
-async def _row(mgr: SessionManager, session_id: str) -> dict:
-    cur = await mgr._db.execute(
-        "SELECT claude_sid, carry_forward, carry_forward_sid FROM sessions WHERE id = ?",
-        (session_id,),
+async def _row(session_id: str) -> dict:
+    return await fetchrow(
+        "SELECT conversation_id AS claude_sid, carry_forward, carry_forward_sid "
+        "FROM core.sessions WHERE id = $1",
+        session_id,
     )
-    return dict(await cur.fetchone())
 
 
 async def _rotate(mgr: SessionManager, session_id: str, prompt: str = "go on") -> dict:
@@ -127,220 +117,206 @@ def _delivered(prompt: str = "go on") -> str:
     return f"{HANDOVER}\n\n{prompt}"
 
 
-def test_rotating_a_terminal_stores_the_carry_forward_on_the_session() -> None:
+def test_rotating_a_terminal_stores_the_carry_forward_on_the_session(comms_db) -> None:
     """Requirement 5: the composed context lands on the row, keyed to the
     conversation it was composed for."""
     async def scenario() -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            try:
-                session_id = await _seed_terminal_session(mgr)
-                with _a_mind_with_a_live_pane():
-                    result = await _rotate(mgr, session_id)
+        mgr = await make_manager()
+        try:
+            session_id = await _seed_terminal_session()
+            with _a_mind_with_a_live_pane():
+                result = await _rotate(mgr, session_id)
 
-                assert result["rotated"] is True
-                row = await _row(mgr, session_id)
-                assert row["carry_forward"] == _delivered()
-                # Keyed to the *new* conversation — the seed belongs to the
-                # thing being started, not the one being left behind.
-                assert row["carry_forward_sid"] == row["claude_sid"]
-                assert row["claude_sid"] != "conv-old"
-            finally:
-                await mgr.shutdown()
+            assert result["rotated"] is True
+            row = await _row(session_id)
+            assert row["carry_forward"] == _delivered()
+            # Keyed to the *new* conversation — the seed belongs to the
+            # thing being started, not the one being left behind.
+            assert row["carry_forward_sid"] == row["claude_sid"]
+            assert row["claude_sid"] != "conv-old"
+        finally:
+            await close_manager(mgr)
 
     _run(scenario())
 
 
-def test_a_completed_turn_clears_the_stored_carry_forward() -> None:
+def test_a_completed_turn_clears_the_stored_carry_forward(comms_db) -> None:
     """Requirement 7: a recorded turn is the proof the rotation took, so the
     seed stops being replayable from that moment."""
     async def scenario() -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            try:
-                session_id = await _seed_terminal_session(mgr)
-                with _a_mind_with_a_live_pane():
-                    await _rotate(mgr, session_id)
-                sid = (await _row(mgr, session_id))["claude_sid"]
-                assert await mgr.get_carry_forward(session_id, sid) == _delivered()
+        mgr = await make_manager()
+        try:
+            session_id = await _seed_terminal_session()
+            with _a_mind_with_a_live_pane():
+                await _rotate(mgr, session_id)
+            sid = (await _row(session_id))["claude_sid"]
+            assert await mgr.get_carry_forward(session_id, sid) == _delivered()
 
-                await mgr.record_turn("web", session_id, "user", "first thing typed")
+            await mgr.record_turn("web", session_id, "user", "first thing typed")
 
-                assert await mgr.get_carry_forward(session_id, sid) is None
-                assert (await _row(mgr, session_id))["carry_forward"] is None
-            finally:
-                await mgr.shutdown()
+            assert await mgr.get_carry_forward(session_id, sid) is None
+            assert (await _row(session_id))["carry_forward"] is None
+        finally:
+            await close_manager(mgr)
 
     _run(scenario())
 
 
-def test_a_carry_forward_is_never_served_to_a_different_conversation() -> None:
+def test_a_carry_forward_is_never_served_to_a_different_conversation(comms_db) -> None:
     """Requirement 8: a stored seed belongs to one conversation id. Handing it
     to another would graft one conversation's context onto another's."""
     async def scenario() -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            try:
-                session_id = await _seed_terminal_session(mgr)
-                with _a_mind_with_a_live_pane():
-                    await _rotate(mgr, session_id)
-                sid = (await _row(mgr, session_id))["claude_sid"]
+        mgr = await make_manager()
+        try:
+            session_id = await _seed_terminal_session()
+            with _a_mind_with_a_live_pane():
+                await _rotate(mgr, session_id)
+            sid = (await _row(session_id))["claude_sid"]
 
-                assert await mgr.get_carry_forward(session_id, sid) == _delivered()
-                assert await mgr.get_carry_forward(session_id, "some-other-conv") is None
-                assert await mgr.get_carry_forward(session_id, "") is None
-            finally:
-                await mgr.shutdown()
+            assert await mgr.get_carry_forward(session_id, sid) == _delivered()
+            assert await mgr.get_carry_forward(session_id, "some-other-conv") is None
+            assert await mgr.get_carry_forward(session_id, "") is None
+        finally:
+            await close_manager(mgr)
 
     _run(scenario())
 
 
-def test_a_seed_whose_clearing_signal_was_lost_expires_on_its_own() -> None:
+def test_a_seed_whose_clearing_signal_was_lost_expires_on_its_own(comms_db) -> None:
     """Requirement 7, the failure path: every clearing signal is
     fire-and-forget, so one dropped POST is the last word. Without an expiry
     the seed stays armed forever and some reattach weeks later replays a dead
     conversation's context over a live one."""
     async def scenario() -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            try:
-                session_id = await _seed_terminal_session(mgr)
-                with _a_mind_with_a_live_pane():
-                    await _rotate(mgr, session_id)
-                sid = (await _row(mgr, session_id))["claude_sid"]
-                assert await mgr.get_carry_forward(session_id, sid) == _delivered()
+        mgr = await make_manager()
+        try:
+            session_id = await _seed_terminal_session()
+            with _a_mind_with_a_live_pane():
+                await _rotate(mgr, session_id)
+            sid = (await _row(session_id))["claude_sid"]
+            assert await mgr.get_carry_forward(session_id, sid) == _delivered()
 
-                # The turn that would have cleared it never arrives — the hook
-                # swallowed the failure and its detached child is long gone.
-                stale = time.time() - mgr.CARRY_FORWARD_TTL_SECONDS - 60
-                await mgr._db.execute(
-                    "UPDATE sessions SET carry_forward_at = ? WHERE id = ?",
-                    (stale, session_id),
-                )
-                await mgr._db.commit()
+            # The turn that would have cleared it never arrives — the hook
+            # swallowed the failure and its detached child is long gone.
+            stale = time.time() - mgr.CARRY_FORWARD_TTL_SECONDS - 60
+            await execute(
+                "UPDATE core.sessions SET carry_forward_at = $1 WHERE id = $2",
+                stale, session_id,
+            )
 
-                assert await mgr.get_carry_forward(session_id, sid) is None
-            finally:
-                await mgr.shutdown()
+            assert await mgr.get_carry_forward(session_id, sid) is None
+        finally:
+            await close_manager(mgr)
 
     _run(scenario())
 
 
-def test_a_straggling_turn_cannot_clear_a_seed_composed_after_it() -> None:
+def test_a_straggling_turn_cannot_clear_a_seed_composed_after_it(comms_db) -> None:
     """Composition runs for minutes and the user keeps typing through it, so a
     detached Stop child can still be reporting a pre-rotation turn after the
     new seed is written. Naming its conversation is what keeps it from wiping
     a seed it never saw."""
     async def scenario() -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            try:
-                session_id = await _seed_terminal_session(mgr)
-                with _a_mind_with_a_live_pane():
-                    await _rotate(mgr, session_id)
-                sid = (await _row(mgr, session_id))["claude_sid"]
+        mgr = await make_manager()
+        try:
+            session_id = await _seed_terminal_session()
+            with _a_mind_with_a_live_pane():
+                await _rotate(mgr, session_id)
+            sid = (await _row(session_id))["claude_sid"]
 
-                # The straggler belongs to 'conv-old', the conversation the
-                # rotation just replaced.
-                await mgr.record_turn("web", session_id, "user", "typed during the window",
-                                      claude_sid="conv-old")
-                assert await mgr.get_carry_forward(session_id, sid) == _delivered()
+            # The straggler belongs to 'conv-old', the conversation the
+            # rotation just replaced.
+            await mgr.record_turn("web", session_id, "user", "typed during the window",
+                                  claude_sid="conv-old")
+            assert await mgr.get_carry_forward(session_id, sid) == _delivered()
 
-                # A turn in the new conversation does clear it.
-                await mgr.record_turn("web", session_id, "user", "first thing typed",
-                                      claude_sid=sid)
-                assert await mgr.get_carry_forward(session_id, sid) is None
-            finally:
-                await mgr.shutdown()
+            # A turn in the new conversation does clear it.
+            await mgr.record_turn("web", session_id, "user", "first thing typed",
+                                  claude_sid=sid)
+            assert await mgr.get_carry_forward(session_id, sid) is None
+        finally:
+            await close_manager(mgr)
 
     _run(scenario())
 
 
-def test_a_blank_conversation_id_matches_nothing_even_when_a_row_stores_one() -> None:
+def test_a_blank_conversation_id_matches_nothing_even_when_a_row_stores_one(comms_db) -> None:
     """Requirement 8's edge: a mind that does not know what it is resuming
     must be told nothing. The SQL alone would answer a blank id from a row
     whose stored id is also blank, which is why the guard is not decorative."""
     async def scenario() -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            try:
-                session_id = await _seed_terminal_session(mgr)
-                await mgr._db.execute(
-                    "UPDATE sessions SET carry_forward = ?, carry_forward_sid = '', "
-                    "carry_forward_at = ? WHERE id = ?",
-                    (SEED, time.time(), session_id),
-                )
-                await mgr._db.commit()
+        mgr = await make_manager()
+        try:
+            session_id = await _seed_terminal_session()
+            await execute(
+                "UPDATE core.sessions SET carry_forward = $1, carry_forward_sid = '', "
+                "carry_forward_at = $2 WHERE id = $3",
+                SEED, time.time(), session_id,
+            )
 
-                assert await mgr.get_carry_forward(session_id, "") is None
-                assert await mgr.get_carry_forward(session_id, "   ") is None
-            finally:
-                await mgr.shutdown()
+            assert await mgr.get_carry_forward(session_id, "") is None
+            assert await mgr.get_carry_forward(session_id, "   ") is None
+        finally:
+            await close_manager(mgr)
 
     _run(scenario())
 
 
-def test_a_terminal_turn_marks_the_session_as_used() -> None:
+def test_a_terminal_turn_marks_the_session_as_used(comms_db) -> None:
     """Requirement 1: a turn typed in a pane is the only write a pty turn
     makes, and it is what keeps `last_active` current. Nothing else on the
     terminal path touches the row, so if this stops updating, the session's
     last-used time is frozen at whenever it was created."""
     async def scenario() -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            try:
-                session_id = await _seed_terminal_session(mgr)
+        mgr = await make_manager()
+        try:
+            session_id = await _seed_terminal_session()
 
-                before = (await _full_row(mgr, session_id))["last_active"]
-                await asyncio.sleep(0.01)
-                await mgr.record_turn("web", session_id, "user", "still here")
-                after = (await _full_row(mgr, session_id))["last_active"]
+            before = (await _full_row(session_id))["last_active"]
+            await asyncio.sleep(0.01)
+            await mgr.record_turn("web", session_id, "user", "still here")
+            after = (await _full_row(session_id))["last_active"]
 
-                assert after > before
-            finally:
-                await mgr.shutdown()
+            assert after > before
+        finally:
+            await close_manager(mgr)
 
     _run(scenario())
 
 
-def test_a_stored_carry_forward_never_rides_out_on_a_session_listing() -> None:
+def test_a_stored_carry_forward_never_rides_out_on_a_session_listing(comms_db) -> None:
     """Requirement 9: the admin guard on the read route is worth nothing if
     the same blob ships on every listing, which answers to the far weaker
     service token."""
     async def scenario() -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            try:
-                session_id = await _seed_terminal_session(mgr)
-                with _a_mind_with_a_live_pane():
-                    await _rotate(mgr, session_id)
-                assert (await _row(mgr, session_id))["carry_forward"] == _delivered()
+        mgr = await make_manager()
+        try:
+            session_id = await _seed_terminal_session()
+            with _a_mind_with_a_live_pane():
+                await _rotate(mgr, session_id)
+            assert (await _row(session_id))["carry_forward"] == _delivered()
 
-                for listing in (await mgr.list_sessions(),
-                                await mgr.list_selectable_sessions("web", "somebody-else")):
-                    assert listing, "expected the session to be listed at all"
-                    for session in listing:
-                        assert "carry_forward" not in session
-                        assert "carry_forward_sid" not in session
-                        assert "carry_forward_at" not in session
-                        assert SEED not in repr(session)
-            finally:
-                await mgr.shutdown()
+            for listing in (await mgr.list_sessions(),
+                            await mgr.list_selectable_sessions("web", "somebody-else")):
+                assert listing, "expected the session to be listed at all"
+                for session in listing:
+                    assert "carry_forward" not in session
+                    assert "carry_forward_sid" not in session
+                    assert "carry_forward_at" not in session
+                    assert SEED not in repr(session)
+        finally:
+            await close_manager(mgr)
 
     _run(scenario())
 
 
-async def _full_row(mgr: SessionManager, session_id: str) -> dict:
-    cur = await mgr._db.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
-    return dict(await cur.fetchone())
+async def _full_row(session_id: str) -> dict:
+    return await fetchrow("SELECT * FROM core.sessions WHERE id = $1", session_id)
 
 
 @pytest.fixture
-def app_client(monkeypatch, tmp_path):
+def app_client(monkeypatch, comms_db):
     """The comms app with an admin token set, so the guard is live."""
-    db_path = tmp_path / "sessions.db"
-    monkeypatch.setenv("BROKER_DB_PATH", str(tmp_path / "broker.db"))
-    monkeypatch.setenv("SESSIONS_DB_PATH", str(db_path))
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-token")
 
     import importlib
@@ -349,7 +325,6 @@ def app_client(monkeypatch, tmp_path):
 
     importlib.reload(server_module)
     with TestClient(server_module.app) as client:
-        client.sessions_db = str(db_path)
         yield client
 
 
@@ -375,18 +350,25 @@ def test_the_route_serves_the_stored_seed_to_the_conversation_it_belongs_to(
     """Requirement 6 end to end. The manager is tested directly elsewhere;
     this pins the route onto it, so the handler cannot drop the claude_sid,
     look up the wrong session, or answer without consulting the manager."""
-    import sqlite3
-
     now = time.time()
-    with sqlite3.connect(app_client.sessions_db) as db:
-        db.execute(
-            """INSERT INTO sessions (id, owner_type, owner_ref, model, claude_sid,
-                                     created_at, last_active, status, mind_id,
-                                     carry_forward, carry_forward_sid, carry_forward_at)
-               VALUES ('sess-term', 'web', 'terminal', 'opus', 'conv-new', ?, ?,
-                       'running', 'ada', ?, 'conv-new', ?)""",
-            (now, now, SEED, now),
+
+    # Plain connections only: the app's pool belongs to the client's own
+    # event loop, and this seed runs on another.
+    async def seed() -> None:
+        await execute(
+            "INSERT INTO core.minds (mind_id, name, gateway_url, model, harness, "
+            "registered_at, last_seen) VALUES ('ada', 'ada', 'http://mind.invalid', "
+            "'opus', 'claude_cli', $1, $1) ON CONFLICT (mind_id) DO NOTHING", now,
         )
+        await execute(
+            "INSERT INTO core.sessions (id, surface, surface_id, model, "
+            "conversation_id, created_at, last_active, status, mind_id, "
+            "carry_forward, carry_forward_sid, carry_forward_at) VALUES "
+            "('sess-term', 'web', 'terminal', 'opus', 'conv-new', $1, $1, "
+            "'running', 'ada', $2, 'conv-new', $1)", now, SEED,
+        )
+
+    asyncio.run(seed())
 
     admin = {"Authorization": "Bearer admin-token"}
     base = "/sessions/sess-term/carry-forward"

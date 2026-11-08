@@ -10,7 +10,8 @@ from __future__ import annotations
 import os
 import sys
 
-import aiosqlite
+import asyncio
+
 import pytest
 from fastapi import FastAPI, WebSocket
 from fastapi.testclient import TestClient
@@ -21,19 +22,18 @@ NS = os.path.join(os.path.dirname(__file__), "..", "..", "nervous-system")
 sys.path.insert(0, os.path.abspath(NS))
 
 from comms import user_access as ua
+from comms_broker_pg import (  # noqa: F401 - fixtures
+    broker_db,
+    broker_store,
+    fetch,
+    put_credential_row,
+    put_mind,
+)
 
 
 # ---------------------------------------------------------------------------
-# Fixtures: a broker db holding two users' minds
+# Fixtures: two users' minds in a scratch Postgres
 # ---------------------------------------------------------------------------
-
-MINDS_DDL = """
-CREATE TABLE minds (
-    mind_id TEXT PRIMARY KEY,
-    name    TEXT NOT NULL UNIQUE,
-    owner   TEXT
-);
-"""
 
 # Invented values, never real credentials. Named once so the guard has one
 # line to look at and the tests read as behaviour rather than as strings.
@@ -49,22 +49,16 @@ DANIEL_MIND = "14cb820b-4a42-4f04-a593-54f532fd1d2f"
 SLOAN_MIND = "9f3c1a77-0000-4000-8000-0000000000aa"
 
 
+async def _seed_minds() -> None:
+    await put_mind(DANIEL_MIND, "skippy", owner="daniel")
+    await put_mind(SLOAN_MIND, "arnold", owner="sloan")
+    await put_mind("3b0e0000-0000-4000-8000-0000000000bb", "orphan")
+
+
 @pytest.fixture()
-async def db(tmp_path):
-    conn = await aiosqlite.connect(tmp_path / "broker.db")
-    await conn.executescript(MINDS_DDL)
-    await conn.executemany(
-        "INSERT INTO minds (mind_id, name, owner) VALUES (?, ?, ?)",
-        [
-            (DANIEL_MIND, "skippy", "daniel"),
-            (SLOAN_MIND, "arnold", "sloan"),
-            ("3b0e0000-0000-4000-8000-0000000000bb", "orphan", None),
-        ],
-    )
-    await conn.commit()
-    await ua.init_credentials(conn)
-    yield conn
-    await conn.close()
+async def db(broker_store):
+    """Two users' minds and one nobody owns, in a database of this test's own."""
+    await _seed_minds()
 
 
 @pytest.fixture(autouse=True)
@@ -85,17 +79,16 @@ def clean_env(monkeypatch):
 
 
 async def test_a_minted_credential_verifies_and_an_unminted_value_does_not(db):
-    await ua.put_credential(db, "arnold", "sloan", SLOAN_TOKEN, role=ua.MIND)
+    await ua.put_credential("arnold", "sloan", SLOAN_TOKEN, role=ua.MIND)
 
-    assert await ua.user_for_token(db, SLOAN_TOKEN) == "sloan"
-    assert await ua.user_for_token(db, UNISSUED) is None
+    assert await ua.user_for_token(SLOAN_TOKEN) == "sloan"
+    assert await ua.user_for_token(UNISSUED) is None
 
 
 async def test_a_credential_is_stored_as_a_digest_and_never_in_the_clear(db):
-    await ua.put_credential(db, "arnold", "sloan", SLOAN_TOKEN, role=ua.MIND)
+    await ua.put_credential("arnold", "sloan", SLOAN_TOKEN, role=ua.MIND)
 
-    rows = await db.execute("SELECT token_sha FROM credentials")
-    stored = [r[0] for r in await rows.fetchall()]
+    stored = [r["token_sha"] for r in await fetch("SELECT token_sha FROM core.credentials")]
 
     assert stored == [ua.digest(SLOAN_TOKEN)]
     assert SLOAN_TOKEN not in stored
@@ -106,20 +99,20 @@ async def test_two_holders_of_one_person_each_get_their_own_value(db):
     on the username, issuing the second holder overwrites the first and the
     first value stops resolving — so both values are asserted, not just the
     one minted last."""
-    await ua.put_credential(db, "arnold", "sloan", SLOAN_TOKEN, role=ua.MIND)
-    await ua.put_credential(db, "zach", "sloan", "zach-value", role=ua.MIND)
+    await ua.put_credential("arnold", "sloan", SLOAN_TOKEN, role=ua.MIND)
+    await ua.put_credential("zach", "sloan", "zach-value", role=ua.MIND)
 
-    assert await ua.user_for_token(db, SLOAN_TOKEN) == "sloan"
-    assert await ua.user_for_token(db, "zach-value") == "sloan"
+    assert await ua.user_for_token(SLOAN_TOKEN) == "sloan"
+    assert await ua.user_for_token("zach-value") == "sloan"
 
-    rows = await db.execute("SELECT holder FROM credentials ORDER BY holder")
-    assert [r[0] for r in await rows.fetchall()] == ["arnold", "zach"]
+    rows = await fetch("SELECT holder FROM core.credentials ORDER BY holder")
+    assert [r["holder"] for r in rows] == ["arnold", "zach"]
 
 
 async def test_the_resolved_credential_names_the_holder_that_presented_it(db):
-    await ua.put_credential(db, "arnold", "sloan", SLOAN_TOKEN, role=ua.MIND)
+    await ua.put_credential("arnold", "sloan", SLOAN_TOKEN, role=ua.MIND)
 
-    found = await ua.credential_for_token(db, SLOAN_TOKEN)
+    found = await ua.credential_for_token(SLOAN_TOKEN)
 
     assert found.holder == "arnold"
     assert found.username == "sloan"
@@ -130,39 +123,39 @@ async def test_a_value_another_holder_already_holds_is_refused(db):
     """Two holders sharing one value is the resolver returning whichever row
     SQLite yields first — the second holder silently authenticating as the
     first one's owner."""
-    await ua.put_credential(db, "arnold", "sloan", SLOAN_TOKEN, role=ua.MIND)
+    await ua.put_credential("arnold", "sloan", SLOAN_TOKEN, role=ua.MIND)
 
     with pytest.raises(ValueError) as caught:
-        await ua.put_credential(db, "zach", "aiden", SLOAN_TOKEN, role=ua.MIND)
+        await ua.put_credential("zach", "aiden", SLOAN_TOKEN, role=ua.MIND)
 
     assert "arnold" in str(caught.value)
-    assert await ua.user_for_token(db, SLOAN_TOKEN) == "sloan"
+    assert await ua.user_for_token(SLOAN_TOKEN) == "sloan"
 
 
 async def test_a_credential_naming_no_holder_or_no_user_is_refused(db):
     with pytest.raises(ValueError):
-        await ua.put_credential(db, "", "sloan", SLOAN_TOKEN)
+        await ua.put_credential("", "sloan", SLOAN_TOKEN)
     with pytest.raises(ValueError):
-        await ua.put_credential(db, "arnold", "", SLOAN_TOKEN)
+        await ua.put_credential("arnold", "", SLOAN_TOKEN)
     with pytest.raises(ValueError):
-        await ua.put_credential(db, "arnold", "sloan", "")
+        await ua.put_credential("arnold", "sloan", "")
 
 
 async def test_an_unknown_role_is_refused(db):
     with pytest.raises(ValueError):
         await ua.put_credential(
-            db, "arnold", "sloan", SLOAN_TOKEN, role="superuser"
+            "arnold", "sloan", SLOAN_TOKEN, role="superuser"
         )
 
 
 async def test_a_holder_naming_a_registered_mind_defaults_to_the_mind_role(db):
     """Unstated, the role is derived from the `minds` table rather than
     declared twice, so a mind that is deleted stops being machinery."""
-    await ua.put_credential(db, "arnold", "sloan", SLOAN_TOKEN)
-    await ua.put_credential(db, "a-laptop", "sloan", "laptop-value")
+    await ua.put_credential("arnold", "sloan", SLOAN_TOKEN)
+    await ua.put_credential("a-laptop", "sloan", "laptop-value")
 
-    minted = await ua.credential_for_token(db, SLOAN_TOKEN)
-    other = await ua.credential_for_token(db, "laptop-value")
+    minted = await ua.credential_for_token(SLOAN_TOKEN)
+    other = await ua.credential_for_token("laptop-value")
 
     assert minted.role == ua.MIND
     assert other.role == ua.PERSON
@@ -174,14 +167,14 @@ async def test_a_holder_naming_a_registered_mind_defaults_to_the_mind_role(db):
 
 
 async def test_revoking_a_credential_stops_it_verifying_in_the_same_process(db):
-    await ua.put_credential(db, "arnold", "sloan", SLOAN_TOKEN, role=ua.MIND)
-    assert await ua.user_for_token(db, SLOAN_TOKEN) == "sloan"
+    await ua.put_credential("arnold", "sloan", SLOAN_TOKEN, role=ua.MIND)
+    assert await ua.user_for_token(SLOAN_TOKEN) == "sloan"
 
-    assert await ua.revoke_credential(db, "arnold") is True
+    assert await ua.revoke_credential("arnold") is True
 
     # Same connection, same process, no re-import: a cache anywhere in the
     # read path would leave this returning "sloan".
-    assert await ua.user_for_token(db, SLOAN_TOKEN) is None
+    assert await ua.user_for_token(SLOAN_TOKEN) is None
 
 
 async def test_revoking_one_holder_leaves_another_of_the_same_person_alone(db):
@@ -189,27 +182,27 @@ async def test_revoking_one_holder_leaves_another_of_the_same_person_alone(db):
     the failure this whole change exists to prevent: the value on a box in
     somebody's bedroom must be retirable without retiring the one running
     here."""
-    await ua.put_credential(db, "arnold", "sloan", SLOAN_TOKEN, role=ua.MIND)
-    await ua.put_credential(db, "zach", "sloan", "zach-value", role=ua.MIND)
+    await ua.put_credential("arnold", "sloan", SLOAN_TOKEN, role=ua.MIND)
+    await ua.put_credential("zach", "sloan", "zach-value", role=ua.MIND)
 
-    assert await ua.revoke_credential(db, "arnold") is True
+    assert await ua.revoke_credential("arnold") is True
 
-    assert await ua.user_for_token(db, SLOAN_TOKEN) is None
-    assert await ua.user_for_token(db, "zach-value") == "sloan"
+    assert await ua.user_for_token(SLOAN_TOKEN) is None
+    assert await ua.user_for_token("zach-value") == "sloan"
 
 
 async def test_revoking_a_credential_nobody_minted_reports_that_it_did_nothing(db):
-    assert await ua.revoke_credential(db, "nobody") is False
+    assert await ua.revoke_credential("nobody") is False
 
 
 async def test_reissuing_a_credential_clears_an_earlier_revocation(db):
-    await ua.put_credential(db, "arnold", "sloan", "first-value", role=ua.MIND)
-    await ua.revoke_credential(db, "arnold")
+    await ua.put_credential("arnold", "sloan", "first-value", role=ua.MIND)
+    await ua.revoke_credential("arnold")
 
-    await ua.put_credential(db, "arnold", "sloan", "second-value", role=ua.MIND)
+    await ua.put_credential("arnold", "sloan", "second-value", role=ua.MIND)
 
-    assert await ua.user_for_token(db, "second-value") == "sloan"
-    assert await ua.user_for_token(db, "first-value") is None
+    assert await ua.user_for_token("second-value") == "sloan"
+    assert await ua.user_for_token("first-value") is None
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +218,7 @@ async def test_the_shared_service_token_resolves_nobody(db, monkeypatch):
     monkeypatch.setenv("COMMS_BEARER_TOKEN", SHARED)
     monkeypatch.setenv("COMMS_PRIMARY_USER", "daniel")
 
-    caller = await ua.resolve_caller(db, SHARED)
+    caller = await ua.resolve_caller(SHARED)
 
     assert caller.recognised is False
     assert caller.is_machine is False
@@ -239,7 +232,7 @@ async def test_no_service_token_configured_does_not_open_the_gateway(db, monkeyp
     monkeypatch.delenv("COMMS_ADMIN_BEARER_TOKEN", raising=False)
 
     for presented in (SHARED, UNISSUED, ""):
-        caller = await ua.resolve_caller(db, presented)
+        caller = await ua.resolve_caller(presented)
         assert caller.recognised is False
         assert caller.sees_everything() is False
 
@@ -247,22 +240,22 @@ async def test_no_service_token_configured_does_not_open_the_gateway(db, monkeyp
 async def test_the_admin_token_reaches_everything(db, monkeypatch):
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", ADMIN_TOKEN)
 
-    caller = await ua.resolve_caller(db, ADMIN_TOKEN)
+    caller = await ua.resolve_caller(ADMIN_TOKEN)
 
     assert caller.is_admin is True
     assert caller.sees_everything() is True
 
 
 async def test_an_unknown_value_is_not_recognised(db):
-    caller = await ua.resolve_caller(db, UNISSUED)
+    caller = await ua.resolve_caller(UNISSUED)
 
     assert caller.recognised is False
 
 
 async def test_a_holder_credential_is_resolved_to_the_user_it_answers_for(db):
-    await ua.put_credential(db, "arnold", "sloan", SLOAN_TOKEN, role=ua.MIND)
+    await ua.put_credential("arnold", "sloan", SLOAN_TOKEN, role=ua.MIND)
 
-    caller = await ua.resolve_caller(db, SLOAN_TOKEN)
+    caller = await ua.resolve_caller(SLOAN_TOKEN)
 
     assert caller.username == "sloan"
     assert caller.holder == "arnold"
@@ -275,13 +268,13 @@ async def test_a_minds_credential_is_machinery_and_a_persons_is_not(db):
     credential admitted there reaches every conversation through the back of
     the house. A mind's own credential has to reach them or no rotation hook
     on any mind can report a turn; a person's must not."""
-    await ua.put_credential(db, "arnold", "sloan", SLOAN_TOKEN, role=ua.MIND)
-    await ua.put_credential(db, "hive-tools", "daniel", "tools-value", role=ua.SERVICE)
-    await ua.put_credential(db, "sloan-laptop", "sloan", "person-value", role=ua.PERSON)
+    await ua.put_credential("arnold", "sloan", SLOAN_TOKEN, role=ua.MIND)
+    await ua.put_credential("hive-tools", "daniel", "tools-value", role=ua.SERVICE)
+    await ua.put_credential("sloan-laptop", "sloan", "person-value", role=ua.PERSON)
 
-    assert (await ua.resolve_caller(db, SLOAN_TOKEN)).is_machine is True
-    assert (await ua.resolve_caller(db, "tools-value")).is_machine is True
-    assert (await ua.resolve_caller(db, "person-value")).is_machine is False
+    assert (await ua.resolve_caller(SLOAN_TOKEN)).is_machine is True
+    assert (await ua.resolve_caller("tools-value")).is_machine is True
+    assert (await ua.resolve_caller("person-value")).is_machine is False
 
 
 # ---------------------------------------------------------------------------
@@ -290,20 +283,20 @@ async def test_a_minds_credential_is_machinery_and_a_persons_is_not(db):
 
 
 async def test_a_mind_resolves_to_its_owner_by_uuid_and_by_name(db):
-    assert await ua.owner_of_mind(db, DANIEL_MIND) == "daniel"
-    assert await ua.owner_of_mind(db, "skippy") == "daniel"
-    assert await ua.owner_of_mind(db, SLOAN_MIND) == "sloan"
+    assert await ua.owner_of_mind(DANIEL_MIND) == "daniel"
+    assert await ua.owner_of_mind("skippy") == "daniel"
+    assert await ua.owner_of_mind(SLOAN_MIND) == "sloan"
 
 
 async def test_a_mind_with_no_owner_and_a_mind_that_is_not_registered_resolve_to_none(
     db,
 ):
-    assert await ua.owner_of_mind(db, "orphan") is None
-    assert await ua.owner_of_mind(db, "no-such-mind") is None
+    assert await ua.owner_of_mind("orphan") is None
+    assert await ua.owner_of_mind("no-such-mind") is None
 
 
 async def test_the_keys_a_caller_owns_cover_both_the_uuid_and_the_name(db):
-    keys = await ua.visible_minds(db, ua.Caller(username="daniel"))
+    keys = await ua.visible_minds(ua.Caller(username="daniel"))
 
     assert DANIEL_MIND in keys
     assert "skippy" in keys
@@ -312,7 +305,7 @@ async def test_the_keys_a_caller_owns_cover_both_the_uuid_and_the_name(db):
 
 
 async def test_a_listing_keeps_only_the_callers_own_conversations(db):
-    keys = await ua.visible_minds(db, ua.Caller(username="sloan"))
+    keys = await ua.visible_minds(ua.Caller(username="sloan"))
     rows = [
         {"id": "a", "mind_id": DANIEL_MIND},
         {"id": "b", "mind_id": SLOAN_MIND},
@@ -326,7 +319,7 @@ async def test_a_listing_keeps_only_the_callers_own_conversations(db):
 
 async def test_an_admin_listing_keeps_every_conversation(db):
     caller = ua.Caller(is_admin=True, unscoped=True)
-    keys = await ua.visible_minds(db, caller)
+    keys = await ua.visible_minds(caller)
     rows = [{"id": "a", "mind_id": DANIEL_MIND}, {"id": "b", "mind_id": SLOAN_MIND}]
 
     assert len(ua.filter_sessions(rows, caller, keys)) == 2
@@ -407,18 +400,21 @@ def _gated_app(broker_path, mind_of: dict[str, str]):
     """
     from contextlib import asynccontextmanager
 
-    state: dict[str, object] = {}
+    import hive_data
 
     @asynccontextmanager
     async def lifespan(_app):
-        # Opened on the loop the app runs on. An aiosqlite connection made on
-        # another loop is the quiet way these tests would hang.
-        state["db"] = (
-            await aiosqlite.connect(broker_path) if broker_path else None
-        )
-        yield
-        if state["db"] is not None:
-            await state["db"].close()
+        # Opened on the loop the app runs on: asyncpg ties a pool to the loop
+        # that opened it. With no database named, nothing is opened, which is
+        # the window between process start and the pool being up.
+        if broker_path is None:
+            yield
+            return
+        await hive_data.connect()
+        try:
+            yield
+        finally:
+            await hive_data.close(drain_timeout=5.0)
 
     app = FastAPI(
         lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None
@@ -469,46 +465,28 @@ def _gated_app(broker_path, mind_of: dict[str, str]):
     app.add_middleware(
         ua.UserAccess,
         table=table,
-        broker_db=lambda: state.get("db"),
         session_mind=session_mind,
     )
     return app, table
 
 
 @pytest.fixture()
-def broker_path(tmp_path):
-    """The broker db as a file, built synchronously so the app can own the
-    only async connection to it."""
-    import sqlite3
+def broker_path(broker_db):
+    """The scratch database, seeded, for an app that opens its own pool."""
 
-    path = tmp_path / "broker.db"
-    conn = sqlite3.connect(path)
-    conn.executescript(MINDS_DDL)
-    conn.executescript(ua.CREDENTIALS_DDL)
-    conn.executemany(
-        "INSERT INTO minds (mind_id, name, owner) VALUES (?, ?, ?)",
-        [
-            (DANIEL_MIND, "skippy", "daniel"),
-            (SLOAN_MIND, "arnold", "sloan"),
-        ],
-    )
-    # Constructing an input. The digest still comes from the module, so a
-    # change to how a credential is stored fails these tests rather than
-    # passing against a hash this file computed its own way.
-    conn.executemany(
-        "INSERT INTO credentials "
-        "(holder, username, role, token_sha, created_at) "
-        "VALUES (?, ?, ?, ?, 0)",
-        [
-            # Sloan himself on a surface — a person, so never machinery.
-            ("sloan-phone", "sloan", ua.PERSON, ua.digest(SLOAN_TOKEN)),
-            # One of Daniel's minds, with its own value.
-            ("skippy", "daniel", ua.MIND, ua.digest(SKIPPY_OWN)),
-        ],
-    )
-    conn.commit()
-    conn.close()
-    return path
+    async def seed():
+        await put_mind(DANIEL_MIND, "skippy", owner="daniel")
+        await put_mind(SLOAN_MIND, "arnold", owner="sloan")
+        # Constructing an input. The digest still comes from the module, so a
+        # change to how a credential is stored fails these tests rather than
+        # passing against a hash this file computed its own way.
+        # Sloan himself on a surface — a person, so never machinery.
+        await put_credential_row("sloan-phone", "sloan", ua.PERSON, ua.digest(SLOAN_TOKEN))
+        # One of Daniel's minds, with its own value.
+        await put_credential_row("skippy", "daniel", ua.MIND, ua.digest(SKIPPY_OWN))
+
+    asyncio.run(seed())
+    return broker_db
 
 
 @pytest.fixture()
@@ -629,19 +607,11 @@ def test_a_revoked_credential_is_refused_by_the_gate_on_the_very_next_request(
 ):
     """The gate consults the table per request. A cache anywhere in that read
     path leaves the second call answering 200 with nothing restarted."""
-    import asyncio
-
-    async def revoke():
-        conn = await aiosqlite.connect(broker_path)
-        try:
-            await ua.revoke_credential(conn, "sloan-phone")
-        finally:
-            await conn.close()
-
     with TestClient(gated, raise_server_exceptions=False) as client:
         headers = {"Authorization": "Bearer " + SLOAN_TOKEN}
         before = client.get("/sessions/s-session", headers=headers)
-        asyncio.run(revoke())
+        # On the app's own loop, where its pool lives.
+        client.portal.call(ua.revoke_credential, "sloan-phone")
         after = client.get("/sessions/s-session", headers=headers)
 
     assert before.status_code == 200
@@ -691,8 +661,7 @@ def test_a_websocket_to_a_callers_own_conversation_is_accepted(gated):
 
 
 def test_the_gate_refuses_rather_than_serving_with_no_database(monkeypatch):
-    """Between process start and the broker connection opening there is a
-    window. Passing a session route through it unresolved is the one thing
+    """Between process start and the pool opening there is a window. Passing a session route through it unresolved is the one thing
     this gate must never do."""
     monkeypatch.setenv("COMMS_BEARER_TOKEN", SHARED)
     app, _ = _gated_app(None, {})
@@ -705,10 +674,10 @@ def test_the_gate_refuses_rather_than_serving_with_no_database(monkeypatch):
 
 async def test_a_persons_credential_is_recognised_but_is_not_machinery(db):
     await ua.put_credential(
-        db, "sloan-phone", "sloan", SLOAN_TOKEN, role=ua.PERSON
+        "sloan-phone", "sloan", SLOAN_TOKEN, role=ua.PERSON
     )
 
-    caller = await ua.resolve_caller(db, SLOAN_TOKEN)
+    caller = await ua.resolve_caller(SLOAN_TOKEN)
 
     assert caller.recognised is True
     assert caller.is_machine is False
@@ -725,9 +694,9 @@ async def test_an_ownerless_conversation_answers_to_the_primary_user(
     the operator their own history the moment scoping is switched on."""
     monkeypatch.setenv("COMMS_PRIMARY_USER", "daniel")
 
-    assert await ua.owns_mind(db, ua.Caller(username="daniel"), "ada") is True
-    assert await ua.owns_mind(db, ua.Caller(username="daniel"), "orphan") is True
-    assert await ua.owns_mind(db, ua.Caller(username="sloan"), "ada") is False
+    assert await ua.owns_mind(ua.Caller(username="daniel"), "ada") is True
+    assert await ua.owns_mind(ua.Caller(username="daniel"), "orphan") is True
+    assert await ua.owns_mind(ua.Caller(username="sloan"), "ada") is False
 
 
 async def test_a_listing_gives_the_primary_user_ownerless_rows_and_no_others(
@@ -735,8 +704,8 @@ async def test_a_listing_gives_the_primary_user_ownerless_rows_and_no_others(
 ):
     monkeypatch.setenv("COMMS_PRIMARY_USER", "daniel")
     caller = ua.Caller(username="daniel")
-    keys = await ua.visible_minds(db, caller)
-    known = await ua.all_mind_keys(db)
+    keys = await ua.visible_minds(caller)
+    known = await ua.all_mind_keys()
     rows = [
         {"id": "mine", "mind_id": DANIEL_MIND},
         {"id": "legacy", "mind_id": "ada"},
@@ -749,31 +718,23 @@ async def test_a_listing_gives_the_primary_user_ownerless_rows_and_no_others(
 
 
 async def test_a_mind_registered_in_mixed_case_resolves_to_its_owner(db):
-    """`minds.name` is stored as registered and SQLite compares TEXT byte-wise,
-    so a mind called "Hex" was listed by its owner and refused by every route
-    beneath the listing."""
-    await db.execute(
-        "INSERT INTO minds (mind_id, name, owner) VALUES (?, ?, ?)",
-        ("7c0de000-0000-4000-8000-0000000000cc", "Hex", "daniel"),
-    )
-    await db.commit()
+    """`minds.name` is stored as registered and compared byte-wise, so a mind
+    called "Hex" was listed by its owner and refused by every route beneath
+    the listing."""
+    await put_mind("7c0de000-0000-4000-8000-0000000000cc", "Hex", owner="daniel")
 
-    assert await ua.owner_of_mind(db, "Hex") == "daniel"
-    assert await ua.owner_of_mind(db, "hex") == "daniel"
-    keys = await ua.visible_minds(db, ua.Caller(username="daniel"))
+    assert await ua.owner_of_mind("Hex") == "daniel"
+    assert await ua.owner_of_mind("hex") == "daniel"
+    keys = await ua.visible_minds(ua.Caller(username="daniel"))
     assert "hex" in keys
 
 
 async def test_a_mind_row_with_an_empty_name_contributes_no_key(db):
     """An empty key would match every session whose mind_id is null or blank,
     handing them to whoever owned the nameless row."""
-    await db.execute(
-        "INSERT INTO minds (mind_id, name, owner) VALUES (?, ?, ?)",
-        ("8d1ef000-0000-4000-8000-0000000000dd", "", "sloan"),
-    )
-    await db.commit()
+    await put_mind("8d1ef000-0000-4000-8000-0000000000dd", "", owner="sloan")
 
-    keys = await ua.visible_minds(db, ua.Caller(username="sloan"))
+    keys = await ua.visible_minds(ua.Caller(username="sloan"))
 
     assert "" not in keys
     assert ua.filter_sessions(
@@ -797,90 +758,8 @@ def test_a_mounted_sub_application_is_not_reported_as_a_websocket():
     assert ua.RouteTable().unlisted(app) == []
 
 # ---------------------------------------------------------------------------
-# The table's own constraints, and the migration off the one-per-person table
+# Values as they arrive in practice
 # ---------------------------------------------------------------------------
-
-
-async def test_a_row_naming_no_holder_cannot_be_inserted(db):
-    """SQLite admits a NULL into a non-INTEGER primary key unless NOT NULL is
-    declared, and a row naming nobody resolves by digest exactly as a real one
-    does — so every gate test would stay green against a credential that
-    belongs to no one. The fixtures that insert directly are the reason this
-    is asserted against the table rather than against `put_credential`."""
-    import sqlite3
-
-    with pytest.raises(sqlite3.IntegrityError):
-        await db.execute(
-            "INSERT INTO credentials "
-            "(holder, username, role, token_sha, created_at) "
-            "VALUES (NULL, 'sloan', ?, ?, 0)",
-            (ua.PERSON, ua.digest(SLOAN_TOKEN)),
-        )
-
-
-async def test_two_rows_cannot_share_one_value(db):
-    """The resolver walks the rows and returns the first digest that matches,
-    so a duplicate is one holder silently authenticating as another's owner."""
-    import sqlite3
-
-    await ua.put_credential(db, "arnold", "sloan", SLOAN_TOKEN, role=ua.MIND)
-
-    with pytest.raises(sqlite3.IntegrityError):
-        await db.execute(
-            "INSERT INTO credentials "
-            "(holder, username, role, token_sha, created_at) "
-            "VALUES ('zach', 'aiden', ?, ?, 0)",
-            (ua.MIND, ua.digest(SLOAN_TOKEN)),
-        )
-
-
-async def test_the_one_per_person_table_is_carried_across(db):
-    """The predecessor keyed on `username`. Its rows become holders named
-    after the person who held them, with the role `person`, which is what they
-    were — and without this every credential issued before the change stops
-    resolving on deploy with nothing saying so."""
-    await db.executescript(
-        "CREATE TABLE IF NOT EXISTS user_credentials ("
-        "username TEXT PRIMARY KEY, token_sha TEXT NOT NULL, "
-        "created_at REAL NOT NULL, revoked_at REAL);"
-    )
-    await db.execute(
-        "INSERT INTO user_credentials (username, token_sha, created_at) "
-        "VALUES ('sloan', ?, 0)",
-        (ua.digest(SLOAN_TOKEN),),
-    )
-    await db.execute("DELETE FROM credentials")
-    await db.commit()
-
-    await ua.init_credentials(db)
-
-    found = await ua.credential_for_token(db, SLOAN_TOKEN)
-    assert found is not None
-    assert (found.holder, found.username, found.role) == (
-        "sloan",
-        "sloan",
-        ua.PERSON,
-    )
-
-
-async def test_a_migrated_row_naming_no_user_is_left_behind(db):
-    """It would otherwise become a holder answering for nobody."""
-    await db.executescript(
-        "CREATE TABLE IF NOT EXISTS user_credentials ("
-        "username TEXT PRIMARY KEY, token_sha TEXT NOT NULL, "
-        "created_at REAL NOT NULL, revoked_at REAL);"
-    )
-    await db.execute(
-        "INSERT INTO user_credentials (username, token_sha, created_at) "
-        "VALUES ('   ', ?, 0)",
-        (ua.digest(UNISSUED),),
-    )
-    await db.execute("DELETE FROM credentials")
-    await db.commit()
-
-    await ua.init_credentials(db)
-
-    assert await ua.credential_for_token(db, UNISSUED) is None
 
 
 async def test_a_value_carrying_a_non_ascii_character_still_resolves(db):
@@ -890,14 +769,14 @@ async def test_a_value_carrying_a_non_ascii_character_still_resolves(db):
     websocket handshake that 500 reaches the gateway as "this mind has no
     terminal route"."""
     smart = "arnolds\u2011own\u2011value"
-    await ua.put_credential(db, "arnold", "sloan", smart, role=ua.MIND)
+    await ua.put_credential("arnold", "sloan", smart, role=ua.MIND)
 
-    assert await ua.user_for_token(db, smart) == "sloan"
-    assert await ua.user_for_token(db, "arnolds-own-value") is None
+    assert await ua.user_for_token(smart) == "sloan"
+    assert await ua.user_for_token("arnolds-own-value") is None
 
 
 async def test_the_shared_provenance_is_not_a_holder(db):
     """Lucent files hive-wide rules under it. Minting it here would let the
     two services disagree about whether it names a party."""
     with pytest.raises(ValueError):
-        await ua.put_credential(db, "shared", "daniel", "a-value")
+        await ua.put_credential("shared", "daniel", "a-value")

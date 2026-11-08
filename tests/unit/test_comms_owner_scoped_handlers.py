@@ -10,19 +10,24 @@ session manager standing in as the source of rows.
 
 from __future__ import annotations
 
+import asyncio
 import os
-import sqlite3
 import sys
 
-import aiosqlite
 import pytest
 from fastapi.testclient import TestClient
 
 NS = os.path.join(os.path.dirname(__file__), "..", "..", "nervous-system")
 sys.path.insert(0, os.path.abspath(NS))
 
-from comms import broker
 from comms import user_access as ua  # noqa: E402
+from comms_broker_pg import (  # noqa: E402,F401 - fixtures
+    broker_db,
+    execute,
+    fetch,
+    put_credential_row,
+    put_mind,
+)
 
 SHARED = "shared-token-for-tests"  # secret-guard: allow
 ADMIN_TOKEN = "admin-token-for-tests"  # secret-guard: allow
@@ -55,8 +60,8 @@ ALL_ROWS = [DANIEL_SESSION, SLOAN_SESSION]
 
 
 @pytest.fixture()
-def gateway(tmp_path, monkeypatch):
-    """The real `comms.server.app`, its broker db real, its session manager
+def gateway(broker_db, monkeypatch):
+    """The real `comms.server.app`, its database real, its session manager
     standing in for the rows it would have read.
 
     The session manager is the source of rows, not the thing under test: what
@@ -67,55 +72,37 @@ def gateway(tmp_path, monkeypatch):
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", ADMIN_TOKEN)
     monkeypatch.setenv("COMMS_PRIMARY_USER", "daniel")
 
-    path = tmp_path / "broker.db"
-    conn = sqlite3.connect(path)
-    # The broker's own schema, not a reduced copy: `register_mind` writes
-    # `registered_at` and `last_seen`, so a three-column stand-in made the
-    # self-registration routes answer 500 and would have let a test assert a
-    # refusal that was really a missing column.
-    conn.executescript(broker.MINDS_DDL)
-    conn.executescript(ua.CREDENTIALS_DDL)
-    # `/sms/inbound` reads its own enable flag out of this table before it
-    # does anything else, so the table has to be here for that route to be
-    # reachable at all.
-    conn.executescript(
-        "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, "
-        "updated_at REAL);"
-    )
-    conn.execute(
-        "INSERT INTO settings (key, value, updated_at) "
-        "VALUES ('sms_inbound_enabled', 'true', 0)"
-    )
-    conn.executemany(
-        "INSERT INTO minds (mind_id, name, owner, gateway_url, model, "
-        "harness, registered_at, last_seen) "
-        "VALUES (?, ?, ?, 'http://127.0.0.1:8433', 'claude-opus-5', "
-        "'claude', 0, 0)",
-        [
+    async def seed():
+        # `/sms/inbound` reads its own enable flag before it does anything
+        # else, so the flag has to be set for that route to be reachable.
+        await execute(
+            "INSERT INTO core.settings (key, value, updated_at) "
+            "VALUES ('sms_inbound_enabled', 'true', 0)"
+        )
+        for mind_id, name, owner in (
             (DANIEL_MIND, "skippy", "daniel"),
             (SLOAN_MIND, "arnold", "sloan"),
             (MORDECAI_MIND, "mordecai", "daniel"),
-        ],
-    )
-    conn.executemany(
-        "INSERT INTO credentials "
-        "(holder, username, role, token_sha, created_at) "
-        "VALUES (?, ?, ?, ?, 0)",
-        [
+        ):
+            await put_mind(
+                mind_id, name, owner=owner, model="claude-opus-5",
+                harness="claude", gateway_url="http://127.0.0.1:8433",
+            )
+        for holder, username, role, token in (
             # Sloan himself, on a surface — a person, so never machinery.
-            ("sloan-phone", "sloan", ua.PERSON, ua.digest(SLOAN_TOKEN)),
+            ("sloan-phone", "sloan", ua.PERSON, SLOAN_TOKEN),
             # Two minds, each with its own value, each answering for its owner.
-            ("skippy", "daniel", ua.MIND, ua.digest(SKIPPY_MIND_TOKEN)),
-            ("arnold", "sloan", ua.MIND, ua.digest(ARNOLD_MIND_TOKEN)),
+            ("skippy", "daniel", ua.MIND, SKIPPY_MIND_TOKEN),
+            ("arnold", "sloan", ua.MIND, ARNOLD_MIND_TOKEN),
             # Keyed by name, while the body it sends names its uuid: the
             # two forms both name one mind and a check on either alone
             # refuses a legitimate write.
-            ("mordecai", "daniel", ua.MIND, ua.digest(MORDECAI_MIND_TOKEN)),
-            ("telegram-bot", "daniel", ua.SERVICE, ua.digest(SERVICE_TOKEN)),
-        ],
-    )
-    conn.commit()
-    conn.close()
+            ("mordecai", "daniel", ua.MIND, MORDECAI_MIND_TOKEN),
+            ("telegram-bot", "daniel", ua.SERVICE, SERVICE_TOKEN),
+        ):
+            await put_credential_row(holder, username, role, ua.digest(token))
+
+    asyncio.run(seed())
 
     from comms import server
 
@@ -191,45 +178,20 @@ def gateway(tmp_path, monkeypatch):
     ):
         monkeypatch.setattr(server.session_mgr, name, fn)
 
-    async def open_db():
-        return await aiosqlite.connect(path)
-
-    # The gate reads `app.state.broker_db` through a lambda, so the connection
-    # has to be made on the loop the app runs on — TestClient's lifespan.
+    # The pool has to be opened on the loop the app runs on — TestClient's
+    # lifespan — because asyncpg ties a pool to the loop that opened it. The
+    # real lifespan would also start the session manager this test replaces.
     from contextlib import asynccontextmanager
 
-    sessions_path = tmp_path / "sessions.db"
-    sconn = sqlite3.connect(sessions_path)
-    sconn.executescript(
-        "CREATE TABLE session_memory ("
-        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-        "  mind_id TEXT NOT NULL,"
-        "  mind_name TEXT NOT NULL,"
-        "  client_ref TEXT NOT NULL,"
-        "  session_id TEXT NOT NULL,"
-        "  body TEXT NOT NULL,"
-        "  created_at REAL NOT NULL);"
-    )
-    sconn.commit()
-    sconn.close()
+    import hive_data
 
     @asynccontextmanager
     async def lifespan(app):
-        conn = await aiosqlite.connect(path)
-        # `broker.init_db` sets this, and `broker.get_setting` indexes its row
-        # by column name — without it the SMS route raises before it reaches
-        # the recipient lookup under test.
-        conn.row_factory = aiosqlite.Row
-        app.state.broker_db = conn
-        # The rotation-summary handler writes through the session manager's own
-        # connection. Asserting on the row it stored is the only way to tell a
-        # refusal from a write that landed under the wrong mind.
-        sessions_db = await aiosqlite.connect(sessions_path)
-        server.session_mgr._db = sessions_db
-        yield
-        await sessions_db.close()
-        server.session_mgr._db = None
-        await conn.close()
+        await hive_data.connect()
+        try:
+            yield
+        finally:
+            await hive_data.close(drain_timeout=5.0)
 
     monkeypatch.setattr(server.app.router, "lifespan_context", lifespan)
     with TestClient(server.app, raise_server_exceptions=False) as client:
@@ -237,7 +199,6 @@ def gateway(tmp_path, monkeypatch):
             "created": created,
             "recorded": recorded,
             "killed": killed,
-            "sessions_db": sessions_path,
             "published": published,
         }
 
@@ -956,15 +917,12 @@ def test_an_inbound_text_is_dropped_when_the_configured_mind_is_not_registered(
 CONVERSATION_ID = "7408e1aa-0000-4000-8000-00000000c0de"
 
 
-def _stored_summaries(paths):
-    conn = sqlite3.connect(paths["sessions_db"])
-    try:
-        return conn.execute(
-            "SELECT mind_id, mind_name, client_ref, session_id, body "
-            "FROM session_memory ORDER BY id"
-        ).fetchall()
-    finally:
-        conn.close()
+def _stored_summaries(_paths):
+    rows = asyncio.run(fetch(
+        "SELECT mind_id, mind_name, client_ref, conversation_id, body "
+        "FROM core.session_memory ORDER BY id"
+    ))
+    return [tuple(row.values()) for row in rows]
 
 
 def test_a_mind_files_its_own_rotation_summary_under_the_conversation_id(gateway):

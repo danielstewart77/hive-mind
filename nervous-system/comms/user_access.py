@@ -14,7 +14,7 @@ of its past conversations claiming the old one.
 ## The credential belongs to a holder; the authority belongs to its owner
 
 A **holder** is one box: a mind, a service, or a person. Each holds its own
-opaque random value, stored here as a SHA-256 digest in `broker.db` and held
+opaque random value, stored here as a SHA-256 digest in `core.credentials` and held
 in plaintext by nothing but the holder itself. The row names the user that
 holder answers for, and *that* is what every ownership decision is made
 against — the holder is which machine is talking, the user is whose things it
@@ -82,7 +82,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-import aiosqlite
+import hive_data
+from hive_data import broker_ops, core
 from starlette.routing import BaseRoute
 from starlette.types import Receive, Scope, Send
 
@@ -203,30 +204,6 @@ MACHINE_ROLES = (MIND, SERVICE)
 #: services cannot disagree about whether it names a party.
 SHARED_PROVENANCE = "shared"
 
-CREDENTIALS_DDL = """
-CREATE TABLE IF NOT EXISTS credentials (
-    -- NOT NULL is load-bearing: SQLite permits NULL in a non-INTEGER PRIMARY
-    -- KEY column unless it is declared, so without it a row naming no holder
-    -- at all inserts cleanly and then resolves by digest exactly as a real
-    -- one does. Every gate test would stay green against a credential that
-    -- belongs to nobody.
-    holder      TEXT PRIMARY KEY NOT NULL,
-    username    TEXT NOT NULL,
-    role        TEXT NOT NULL,
-    -- UNIQUE because "no two holders share one value" is the whole point and
-    -- is otherwise a copy-paste away: `credential_for_token` walks the rows
-    -- and returns the first digest that matches, so the second holder to be
-    -- issued a duplicate silently authenticates as the first one's owner.
-    -- One row per person made that impossible to express; one row per holder
-    -- does not.
-    token_sha   TEXT NOT NULL UNIQUE,
-    created_at  REAL NOT NULL,
-    revoked_at  REAL
-);
-CREATE INDEX IF NOT EXISTS credentials_username ON credentials (username);
-"""
-
-
 @dataclass(frozen=True)
 class Credential:
     """One holder's row, resolved from a presented value."""
@@ -247,45 +224,11 @@ def normalize_holder(name: object) -> str:
     return str(name or "").strip().lower()
 
 
-async def init_credentials(db: aiosqlite.Connection) -> None:
-    """Create the table, and carry across anything the one-per-person table
-    held.
-
-    The predecessor keyed on `username`, which is exactly the thing this
-    change stops doing: a person had one value, so lifting it off any box
-    they owned was lifting their whole identity. SQLite cannot move a primary
-    key in place, so the rows are copied — each old row becomes a holder
-    named after the person who held it, with the role `person`, which is what
-    it actually was. The old table is left on disk rather than dropped: it
-    holds digests, not values, and a rollback that found it missing would
-    leave every holder refused with nothing to restore.
-    """
-    await db.executescript(CREDENTIALS_DDL)
-    rows = await db.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='user_credentials'"
-    )
-    if await rows.fetchone():
-        await db.execute(
-            "INSERT OR IGNORE INTO credentials "
-            "(holder, username, role, token_sha, created_at, revoked_at) "
-            "SELECT username, username, ?, token_sha, created_at, revoked_at "
-            "FROM user_credentials "
-            "WHERE username IS NOT NULL AND trim(username) <> ''",
-            (PERSON,),
-        )
-    await db.commit()
-
-
-async def _is_registered_mind(db: aiosqlite.Connection, holder: str) -> bool:
-    rows = await db.execute(
-        "SELECT 1 FROM minds WHERE mind_id = ? OR lower(name) = ? LIMIT 1",
-        (holder, holder.lower()),
-    )
-    return await rows.fetchone() is not None
+async def _is_registered_mind(holder: str) -> bool:
+    return await core.get_mind_by_id_or_name(holder) is not None
 
 
 async def put_credential(
-    db: aiosqlite.Connection,
     holder: str,
     username: str,
     token: str,
@@ -310,7 +253,7 @@ async def put_credential(
     if not token:
         raise ValueError("a credential needs a value")
     if role is None:
-        role = MIND if await _is_registered_mind(db, key) else PERSON
+        role = MIND if await _is_registered_mind(key) else PERSON
     if key == SHARED_PROVENANCE:
         raise ValueError(
             "'shared' is the provenance hive-wide rules are written under, "
@@ -319,36 +262,37 @@ async def put_credential(
     if role not in ROLES:
         raise ValueError(f"unknown credential role: {role!r}")
     sha = digest(token)
-    clash = await db.execute(
-        "SELECT holder FROM credentials WHERE token_sha = ? AND holder <> ?",
-        (sha, key),
-    )
-    row = await clash.fetchone()
-    if row:
-        # Checked rather than left to the UNIQUE constraint so the console
-        # gets a sentence instead of an IntegrityError, and names the holder
-        # it collided with: the operator has almost certainly pasted one
+    clash = await broker_ops.holder_of_digest(sha)
+    if clash is not None and clash != key:
+        # Checked rather than left to the unique index so the console gets a
+        # sentence instead of a constraint violation, and names the holder it
+        # collided with: the operator has almost certainly pasted one
         # machine's value into another's field, and needs to know which.
-        raise ValueError(
-            f"that value is already held by {row[0]!r}; "
-            "a credential belongs to one holder"
-        )
+        # Revoked holders count — the digest is unique across every row.
+        raise ValueError(_held_by(clash))
     now = time.time()
-    await db.execute(
-        "INSERT INTO credentials "
-        "(holder, username, role, token_sha, created_at, revoked_at) "
-        "VALUES (?, ?, ?, ?, ?, NULL) "
-        "ON CONFLICT(holder) DO UPDATE SET "
-        "username=excluded.username, role=excluded.role, "
-        "token_sha=excluded.token_sha, created_at=excluded.created_at, "
-        "revoked_at=NULL",
-        (key, name, role, sha, now),
-    )
-    await db.commit()
+    try:
+        await core.upsert_credential(
+            holder=key, username=name, role=role, token_sha=sha,
+            created_at=now, revoked_at=None,
+        )
+    except hive_data.Conflict as exc:
+        # The same value minted for another holder between the check and the
+        # write. Still a sentence, not a 500.
+        raise ValueError(
+            _held_by(await broker_ops.holder_of_digest(sha) or "another holder")
+        ) from exc
     return {"holder": key, "username": name, "role": role, "created_at": now}
 
 
-async def revoke_credential(db: aiosqlite.Connection, holder: str) -> bool:
+def _held_by(holder: str) -> str:
+    return (
+        f"that value is already held by {holder!r}; "
+        "a credential belongs to one holder"
+    )
+
+
+async def revoke_credential(holder: str) -> bool:
     """Mark one holder's credential dead, and only that holder's.
 
     The row is kept rather than deleted so the console can say "revoked"
@@ -356,18 +300,11 @@ async def revoke_credential(db: aiosqlite.Connection, holder: str) -> bool:
     sentences with different remedies.
     """
     key = normalize_holder(holder)
-    cursor = await db.execute(
-        "UPDATE credentials SET revoked_at = ? "
-        "WHERE holder = ? AND revoked_at IS NULL",
-        (time.time(), key),
-    )
-    await db.commit()
-    return cursor.rowcount > 0
+    result = await broker_ops.revoke_live_credential(key, time.time())
+    return result["rows"] > 0
 
 
-async def credential_for_token(
-    db: aiosqlite.Connection, token: str
-) -> Credential | None:
+async def credential_for_token(token: str) -> Credential | None:
     """The holder a presented credential belongs to, or None.
 
     Read per call, never cached: requirement is that a revocation lands on the
@@ -377,33 +314,26 @@ async def credential_for_token(
     """
     if not token:
         return None
-    rows = await db.execute(
-        "SELECT holder, username, role, token_sha FROM credentials "
-        "WHERE revoked_at IS NULL"
+    # Looked up by digest. The old walk compared every live row in constant
+    # time; an indexed lookup on a SHA-256 digest of a random value leaks
+    # nothing a caller can steer, since nobody chooses the digest's prefix.
+    row = await core.credential_for_token(digest(token))
+    if row is None:
+        return None
+    return Credential(
+        holder=normalize_holder(row["holder"]),
+        username=normalize_username(row["username"]),
+        role=str(row["role"] or PERSON),
     )
-    presented = digest(token)
-    for holder, username, role, token_sha in await rows.fetchall():
-        # Constant-time, on bytes. `compare_digest` raises TypeError on a str
-        # holding anything outside ASCII, and on a websocket handshake that
-        # 500 reaches the browser as "this gateway has no such route".
-        if hmac.compare_digest(
-            presented.encode("ascii"), str(token_sha).encode("ascii")
-        ):
-            return Credential(
-                holder=normalize_holder(holder),
-                username=normalize_username(username),
-                role=str(role or PERSON),
-            )
-    return None
 
 
-async def user_for_token(db: aiosqlite.Connection, token: str) -> str | None:
+async def user_for_token(token: str) -> str | None:
     """The user a presented credential answers for, or None.
 
     Kept at this signature because ownership is still decided by user: the
     holder is which box is talking, the user is whose things it may touch.
     """
-    found = await credential_for_token(db, token)
+    found = await credential_for_token(token)
     return found.username if found else None
 
 
@@ -491,7 +421,7 @@ def bearer_of(scope: Scope) -> str:
     return ""
 
 
-async def resolve_caller(db: aiosqlite.Connection, token: str) -> Caller:
+async def resolve_caller(token: str) -> Caller:
     """Turn a presented bearer into a caller.
 
     The admin credential is checked first, because the console and the
@@ -518,7 +448,7 @@ async def resolve_caller(db: aiosqlite.Connection, token: str) -> Caller:
         return Caller()
     if admin and hmac.compare_digest(token.encode("utf-8"), admin.encode("utf-8")):
         return Caller(is_admin=True, is_service=True, unscoped=True)
-    found = await credential_for_token(db, token)
+    found = await credential_for_token(token)
     if not found:
         return Caller()
     return Caller(
@@ -531,7 +461,7 @@ async def resolve_caller(db: aiosqlite.Connection, token: str) -> Caller:
 # ---------------------------------------------------------------------------
 
 
-async def owner_of_mind(db: aiosqlite.Connection, mind_id: str) -> str | None:
+async def owner_of_mind(mind_id: str) -> str | None:
     """The user a mind belongs to, by `mind_id` or by name.
 
     By name as well, because `sessions.mind_id` carried a `DEFAULT 'ada'` for
@@ -543,29 +473,23 @@ async def owner_of_mind(db: aiosqlite.Connection, mind_id: str) -> str | None:
     key = str(mind_id or "").strip()
     if not key:
         return None
-    # `name` is stored as registered and SQLite compares TEXT byte-wise, so a
-    # mind registered as "Hex" would never match a lowered key. Comparing both
+    # `name` is stored as registered and compared byte-wise, so a mind
+    # registered as "Hex" would never match a lowered key. Comparing both
     # sides lowered is what keeps this agreeing with `visible_minds`, which
     # lowers too — disagreeing meant a picker drew names whose every route
     # then answered 404.
-    rows = await db.execute(
-        "SELECT owner FROM minds WHERE mind_id = ? OR lower(name) = ?",
-        (key, key.lower()),
-    )
-    row = await rows.fetchone()
+    row = await core.get_mind_by_id_or_name(key)
     if not row:
         return None
-    return normalize_username(row[0]) or None
+    return normalize_username(row["owner"]) or None
 
 
-async def owns_mind(
-    db: aiosqlite.Connection, caller: Caller, mind_id: str
-) -> bool:
+async def owns_mind(caller: Caller, mind_id: str) -> bool:
     if caller.sees_everything():
         return True
     if not caller.username:
         return False
-    owner = await owner_of_mind(db, mind_id)
+    owner = await owner_of_mind(mind_id)
     if owner is None:
         # A conversation whose mind is unregistered, renamed, deleted, or
         # still carrying the old `mind_id DEFAULT 'ada'` has no owner to
@@ -577,9 +501,7 @@ async def owns_mind(
     return owner == caller.username
 
 
-async def holder_keys(
-    db: aiosqlite.Connection, caller: Caller
-) -> set[str] | None:
+async def holder_keys(caller: Caller) -> set[str] | None:
     """Every key naming the one mind this caller *is*, or None for "any".
 
     `owns_mind` answers a question about a person, which is the right question
@@ -599,13 +521,9 @@ async def holder_keys(
     if caller.sees_everything() or caller.role != MIND:
         return None
     keys = {caller.holder}
-    rows = await db.execute(
-        "SELECT mind_id, name FROM minds WHERE mind_id = ? OR lower(name) = ?",
-        (caller.holder, caller.holder),
-    )
-    row = await rows.fetchone()
+    row = await core.get_mind_by_id_or_name(caller.holder)
     if row:
-        for key in (str(row[0] or ""), normalize_username(row[1])):
+        for key in (str(row["mind_id"] or ""), normalize_username(row["name"])):
             if key:
                 keys.add(key)
     return keys
@@ -618,7 +536,7 @@ def mind_is_named_in(keys: set[str] | None, mind_id: object) -> bool:
     return _named_in(mind_id, keys)
 
 
-async def all_mind_keys(db: aiosqlite.Connection) -> set[str]:
+async def all_mind_keys() -> set[str]:
     """Every key naming any registered mind, whoever owns it.
 
     `filter_sessions` needs this to tell an *ownerless* conversation from
@@ -626,30 +544,26 @@ async def all_mind_keys(db: aiosqlite.Connection) -> set[str]:
     every other user's conversation to the primary user, which is the opposite
     of the point.
     """
-    rows = await db.execute("SELECT mind_id, name FROM minds")
     keys: set[str] = set()
-    for mind_id, name in await rows.fetchall():
-        for key in (str(mind_id or ""), normalize_username(name)):
+    for row in await core.list_minds():
+        for key in (str(row["mind_id"] or ""), normalize_username(row["name"])):
             if key:
                 keys.add(key)
     return keys
 
 
-async def visible_minds(
-    db: aiosqlite.Connection, caller: Caller
-) -> set[str]:
+async def visible_minds(caller: Caller) -> set[str]:
     """Every key — uuid and name — naming a mind this caller owns.
 
     Both forms, for the same reason `owner_of_mind` accepts both: a session row
     may name its mind either way.
     """
-    rows = await db.execute("SELECT mind_id, name, owner FROM minds")
     keys: set[str] = set()
-    for mind_id, name, owner in await rows.fetchall():
-        if caller.sees_everything() or normalize_username(owner) == caller.username:
+    for row in await core.list_minds():
+        if caller.sees_everything() or normalize_username(row["owner"]) == caller.username:
             # An empty key would match every session whose `mind_id` is null
             # or blank, handing them to whoever owned the nameless row.
-            for key in (str(mind_id or ""), normalize_username(name)):
+            for key in (str(row["mind_id"] or ""), normalize_username(row["name"])):
                 if key:
                     keys.add(key)
     return keys
@@ -699,6 +613,14 @@ def _named_in(mind: object, keys: set[str]) -> bool:
 NOT_FOUND_BODY = b'{"error":"Session not found"}'
 
 
+def _store_open() -> bool:
+    try:
+        hive_data.live_pool()
+    except hive_data.NotInitialised:
+        return False
+    return True
+
+
 class UserAccess:
     """Pure-ASGI gate: resolves the caller, enforces the route's class.
 
@@ -706,9 +628,11 @@ class UserAccess:
     connections pass through it. The HTTP decorator does not see them, and the
     two websocket routes are the ones this exists for.
 
-    The database handles and the session lookup arrive as callables rather
+    The readiness test and the session lookup arrive as callables rather
     than as imports so the gate can be driven in a test without standing up
-    a gateway, and so it holds no opinion about where either lives.
+    a gateway. Readiness defaults to whether `hive_data` has a pool open,
+    which is what the gateway's lifespan opens before anything serves and
+    closes after it stops.
     """
 
     def __init__(
@@ -716,13 +640,13 @@ class UserAccess:
         app,
         table: RouteTable,
         *,
-        broker_db,
         session_mind,
+        ready=None,
     ) -> None:
         self._app = app
         self._table = table
-        #: () -> aiosqlite.Connection | None
-        self._broker_db = broker_db
+        #: () -> bool: whether the credential store can be read yet
+        self._ready = ready if ready is not None else _store_open
         #: async (session_id) -> mind_id | None, resolving short ids too
         self._session_mind = session_mind
 
@@ -745,14 +669,13 @@ class UserAccess:
         if rule.kind == PUBLIC:
             await self._app(scope, receive, send)
             return
-        db = self._broker_db()
-        if db is None:
+        if not self._ready():
             # The gateway is still starting, or shutting down. Serving a
             # session route with no way to resolve a caller is the one thing
             # this must never do, so it refuses rather than passing through.
             await self._refuse(scope, receive, send, 503, b'{"detail":"starting"}')
             return
-        caller = await resolve_caller(db, bearer_of(scope))
+        caller = await resolve_caller(bearer_of(scope))
         if rule.kind == ADMIN:
             if not os.environ.get("COMMS_ADMIN_BEARER_TOKEN", ""):
                 # The same sentence `require_admin_bearer` gives. A 401 here
@@ -784,7 +707,7 @@ class UserAccess:
             # An absent session and someone else's session answer alike. The
             # handler would 404 the first anyway; what matters is that the
             # second does not answer differently and reveal that it exists.
-            if mind_id is None or not await owns_mind(db, caller, mind_id):
+            if mind_id is None or not await owns_mind(caller, mind_id):
                 await self._refuse(scope, receive, send, 404, NOT_FOUND_BODY)
                 return
         scope[CALLER_SCOPE_KEY] = caller

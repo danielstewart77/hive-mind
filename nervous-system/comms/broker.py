@@ -1,8 +1,14 @@
 """
 Hive Mind — Message broker data layer.
 
-SQLite-backed storage for inter-mind conversations and messages.
-Pure data operations — no FastAPI dependency, no session manager dependency.
+Inter-mind conversations and messages, the mind registry, secret scopes and
+the gateway's runtime settings, in the hive's one database through
+`hive_data`. Pure data operations — no FastAPI dependency, no session manager
+dependency.
+
+Nothing here opens a database. The pool is opened once by the gateway's
+lifespan, and every function below reaches it through a named `hive_data`
+operation.
 """
 
 import asyncio
@@ -10,88 +16,13 @@ import json
 import logging
 import time
 import uuid
-from pathlib import Path
 
-import aiosqlite
+import hive_data
+from hive_data import broker_ops, core
 
-from comms import surface_claims
 from hive_logging import log_event
 
 log = logging.getLogger("hive-mind.broker")
-
-# ---------------------------------------------------------------------------
-# Schema
-# ---------------------------------------------------------------------------
-MINDS_DDL = """
-CREATE TABLE IF NOT EXISTS minds (
-    mind_id        TEXT NOT NULL UNIQUE,
-    name           TEXT PRIMARY KEY,
-    gateway_url    TEXT NOT NULL,
-    model          TEXT NOT NULL,
-    harness        TEXT NOT NULL,
-    registered_at  REAL NOT NULL,
-    last_seen      REAL NOT NULL,
-    session_token  TEXT,
-    voice          TEXT,
-    voice_engine   TEXT,
-    owner          TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_minds_mind_id ON minds(mind_id);
-"""
-
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS conversations (
-    id         TEXT PRIMARY KEY,
-    created_at REAL NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS messages (
-    id                    TEXT PRIMARY KEY,
-    conversation_id       TEXT NOT NULL REFERENCES conversations(id),
-    from_mind             TEXT NOT NULL,
-    to_mind               TEXT NOT NULL,
-    message_number        INTEGER NOT NULL,
-    content               TEXT NOT NULL,
-    rolling_summary       TEXT DEFAULT '',
-    metadata              TEXT,
-    status                TEXT NOT NULL DEFAULT 'pending',
-    recipient_session_id  TEXT,
-    response_error        TEXT,
-    timestamp             REAL NOT NULL,
-    UNIQUE(conversation_id, message_number)
-);
-
-CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id);
-CREATE INDEX IF NOT EXISTS idx_messages_status ON messages(status);
-
-CREATE TABLE IF NOT EXISTS minds (
-    mind_id        TEXT NOT NULL UNIQUE,
-    name           TEXT PRIMARY KEY,
-    gateway_url    TEXT NOT NULL,
-    model          TEXT NOT NULL,
-    harness        TEXT NOT NULL,
-    registered_at  REAL NOT NULL,
-    last_seen      REAL NOT NULL,
-    session_token  TEXT,
-    voice          TEXT,
-    voice_engine   TEXT,
-    owner          TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_minds_mind_id ON minds(mind_id);
-
-CREATE TABLE IF NOT EXISTS secret_scopes (
-    mind_name   TEXT NOT NULL,
-    secret_key  TEXT NOT NULL,
-    granted_at  REAL NOT NULL,
-    PRIMARY KEY (mind_name, secret_key)
-);
-
-CREATE TABLE IF NOT EXISTS settings (
-    key        TEXT PRIMARY KEY,
-    value      TEXT NOT NULL,
-    updated_at REAL NOT NULL
-);
-"""
 
 # ---------------------------------------------------------------------------
 # Collection backstop — 8x notification threshold per request_type
@@ -117,123 +48,81 @@ def get_backstop_seconds(request_type: str | None) -> int:
 
 
 # ---------------------------------------------------------------------------
-# DB init
-# ---------------------------------------------------------------------------
-async def init_db(db_path: str) -> aiosqlite.Connection:
-    """Connect to (or create) the broker SQLite database."""
-    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    db = await aiosqlite.connect(db_path)
-    db.row_factory = aiosqlite.Row
-    await db.executescript(_SCHEMA)
-    # `init`, not `executescript(SCHEMA)`. The create is `IF NOT EXISTS`, so
-    # against an existing table it is a no-op and every column the schema
-    # grows afterwards is silently absent — the migrations live in `init` and
-    # were reached only by the test fixture, which is why the divergence
-    # could not be seen from the suite.
-    await surface_claims.init(db)
-    await _migrate_minds(db)
-    await db.commit()
-    log.info("broker: db initialized at %s", db_path)
-    return db
-
-
-async def _migrate_minds(db: aiosqlite.Connection) -> None:
-    """Add columns the schema grew after the first deployments."""
-    cur = await db.execute("PRAGMA table_info(minds)")
-    have = {r[1] for r in await cur.fetchall()}
-    if "session_token" not in have:
-        await db.execute("ALTER TABLE minds ADD COLUMN session_token TEXT")
-    if "voice" not in have:
-        await db.execute("ALTER TABLE minds ADD COLUMN voice TEXT")
-    if "voice_engine" not in have:
-        await db.execute("ALTER TABLE minds ADD COLUMN voice_engine TEXT")
-    if "owner" not in have:
-        await db.execute("ALTER TABLE minds ADD COLUMN owner TEXT")
-
-
-# ---------------------------------------------------------------------------
 # Conversations
 # ---------------------------------------------------------------------------
-async def create_conversation(db: aiosqlite.Connection, conversation_id: str) -> None:
-    """Insert a new conversation row."""
-    await db.execute(
-        "INSERT INTO conversations (id, created_at) VALUES (?, ?)",
-        (conversation_id, time.time()),
-    )
-    await db.commit()
+async def create_conversation(conversation_id: str) -> None:
+    """Insert a new conversation row. A conversation that exists is left alone."""
+    await core.create_conversation(id=conversation_id, created_at=time.time())
 
 
 # ---------------------------------------------------------------------------
 # Messages
 # ---------------------------------------------------------------------------
 async def insert_message(
-    db: aiosqlite.Connection,
     *,
     message_id: str,
     conversation_id: str,
     from_mind: str,
     to_mind: str,
-    message_number: int,
     content: str,
     rolling_summary: str,
     metadata: dict | None,
     status: str,
+    message_number: int | None = None,
 ) -> dict:
     """Insert a message. Idempotent on message_id — returns existing row if duplicate.
 
-    Auto-creates the conversation row if it doesn't exist. Uses INSERT OR IGNORE
-    on the PK so concurrent duplicate deliveries (sms-gateway retries the same
-    webhook on any non-2xx) collapse cleanly instead of racing on the SELECT.
+    Auto-creates the conversation row if it doesn't exist. A duplicate id is
+    reported as `existing` rather than raised, because the sms-gateway
+    re-POSTs the same webhook on any non-2xx and a duplicate that raised
+    would become a 500 retried for ever.
+
+    `message_number` left unset is the next one in the conversation, decided
+    inside the same unit as the insert while the conversation is held. Read
+    beforehand by the caller, two concurrent deliveries derive the same
+    number and the second collides on (conversation_id, message_number) —
+    which SQLite's `INSERT OR IGNORE` swallowed as a silent drop reported as
+    a duplicate, and Postgres refuses outright.
     """
-    # Auto-create conversation
-    await db.execute(
-        "INSERT OR IGNORE INTO conversations (id, created_at) VALUES (?, ?)",
-        (conversation_id, time.time()),
-    )
-
     metadata_json = json.dumps(metadata) if metadata else None
-    cursor = await db.execute(
-        """INSERT OR IGNORE INTO messages
-           (id, conversation_id, from_mind, to_mind, message_number, content,
-            rolling_summary, metadata, status, timestamp)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (message_id, conversation_id, from_mind, to_mind, message_number,
-         content, rolling_summary, metadata_json, status, time.time()),
-    )
-    inserted = cursor.rowcount > 0
-    await db.commit()
-
-    row = await db.execute("SELECT * FROM messages WHERE id = ?", (message_id,))
-    fetched = await row.fetchone()
+    async with hive_data.transaction() as unit:
+        await unit.hold_conversation(conversation_id)
+        await core.create_conversation(
+            id=conversation_id, created_at=time.time(), unit=unit)
+        number = message_number
+        if number is None:
+            number = await core.next_message_number(conversation_id, unit=unit)
+        written = await core.add_message(
+            id=message_id, conversation_id=conversation_id,
+            from_mind=from_mind, to_mind=to_mind, message_number=number,
+            content=content, rolling_summary=rolling_summary,
+            metadata=metadata_json, status=status, timestamp=time.time(),
+            unit=unit)
+        fetched = await broker_ops.get_message(message_id, unit=unit)
+    inserted = written["rows"] > 0
     result = dict(fetched) if fetched else {"id": message_id}
     result["existing"] = not inserted
     log_event(
         log, "broker.message.accepted", message_id=message_id,
         conversation_id=conversation_id, from_mind=from_mind, to_mind=to_mind,
-        message_number=message_number, content_chars=len(content), status=status,
+        message_number=result.get("message_number", number),
+        content_chars=len(content), status=status,
         existing=not inserted, request_type=(metadata or {}).get("request_type"),
     )
     return result
 
 
-async def get_messages(db: aiosqlite.Connection, conversation_id: str) -> list[dict]:
+async def get_messages(conversation_id: str) -> list[dict]:
     """Get all messages for a conversation, ordered by message_number."""
-    rows = await db.execute(
-        "SELECT * FROM messages WHERE conversation_id = ? ORDER BY message_number",
-        (conversation_id,),
-    )
-    return [dict(r) for r in await rows.fetchall()]
+    return await core.list_messages(conversation_id)
 
 
-async def get_message(db: aiosqlite.Connection, message_id: str) -> dict | None:
+async def get_message(message_id: str) -> dict | None:
     """Get a single message by ID."""
-    row = await db.execute("SELECT * FROM messages WHERE id = ?", (message_id,))
-    result = await row.fetchone()
-    return dict(result) if result else None
+    return await broker_ops.get_message(message_id)
 
 
 async def update_message_status(
-    db: aiosqlite.Connection,
     message_id: str,
     status: str,
     *,
@@ -241,72 +130,48 @@ async def update_message_status(
     response_error: str | None = None,
 ) -> None:
     """Update message status and optional fields."""
-    fields = ["status = ?"]
-    params: list = [status]
+    fields: dict = {"status": status}
     if recipient_session_id is not None:
-        fields.append("recipient_session_id = ?")
-        params.append(recipient_session_id)
+        fields["recipient_session_id"] = recipient_session_id
     if response_error is not None:
-        fields.append("response_error = ?")
-        params.append(response_error)
-    params.append(message_id)
-    await db.execute(
-        f"UPDATE messages SET {', '.join(fields)} WHERE id = ?",
-        params,
-    )
-    await db.commit()
+        fields["response_error"] = response_error
+    await core.update_message(message_id, **fields)
 
 
-async def get_next_message_number(db: aiosqlite.Connection, conversation_id: str) -> int:
-    """Get the next message number for a conversation."""
-    row = await db.execute(
-        "SELECT COALESCE(MAX(message_number), 0) + 1 AS next_num FROM messages WHERE conversation_id = ?",
-        (conversation_id,),
-    )
-    result = await row.fetchone()
-    return result["next_num"] if result else 1
+async def get_next_message_number(conversation_id: str) -> int:
+    """The next message number for a conversation, read on its own.
+
+    For display only. A caller about to insert leaves `message_number` unset
+    on `insert_message`, which decides it inside the insert's own unit.
+    """
+    return await core.next_message_number(conversation_id)
 
 
 # ---------------------------------------------------------------------------
 # Restart recovery
 # ---------------------------------------------------------------------------
-async def get_stranded_messages(db: aiosqlite.Connection) -> dict:
+_RESTART_ERROR = "server_restart_during_delivery"
+
+
+async def get_stranded_messages() -> dict:
     """Find messages stranded in non-terminal status."""
-    pending_rows = await db.execute(
-        "SELECT * FROM messages WHERE status = 'pending'"
-    )
-    dispatched_rows = await db.execute(
-        "SELECT * FROM messages WHERE status = 'dispatched'"
-    )
     return {
-        "pending": [dict(r) for r in await pending_rows.fetchall()],
-        "dispatched": [dict(r) for r in await dispatched_rows.fetchall()],
+        "pending": await broker_ops.messages_with_status("pending"),
+        "dispatched": await broker_ops.messages_with_status("dispatched"),
     }
 
 
-async def recover_stranded_messages(db: aiosqlite.Connection) -> list[dict]:
+async def recover_stranded_messages() -> list[dict]:
     """Recover stranded messages on startup.
 
     - dispatched → failed (callee session is dead after restart)
     - Returns pending messages for re-dispatch by the caller.
     """
-    # Fail dispatched messages
-    await db.execute(
-        "UPDATE messages SET status = 'failed', response_error = 'server_restart_during_delivery' "
-        "WHERE status = 'dispatched'"
-    )
-    await db.commit()
-
-    # Return pending for re-dispatch
-    rows = await db.execute("SELECT * FROM messages WHERE status = 'pending'")
-    pending = [dict(r) for r in await rows.fetchall()]
-
-    count_row = await (await db.execute(
-        "SELECT COUNT(*) as cnt FROM messages WHERE status = 'failed' AND response_error = 'server_restart_during_delivery'"
-    )).fetchone()
-    dispatched_count = count_row["cnt"] if count_row else 0
-
-    log.info("broker: startup recovery pending=%d dispatched_failed=%d", len(pending), dispatched_count)
+    moved = await broker_ops.move_messages(
+        was="dispatched", now="failed", response_error=_RESTART_ERROR)
+    pending = await broker_ops.messages_with_status("pending")
+    log.info("broker: startup recovery pending=%d dispatched_failed=%d",
+             len(pending), moved["rows"])
     return pending
 
 
@@ -368,7 +233,6 @@ async def _collect_response(send_generator) -> str:
 # Wakeup and collect
 # ---------------------------------------------------------------------------
 async def wakeup_and_collect(
-    db: aiosqlite.Connection,
     session_mgr,
     *,
     message_id: str,
@@ -404,11 +268,11 @@ async def wakeup_and_collect(
 
     try:
         # 1. Dispatched
-        await update_message_status(db, message_id, "dispatched")
+        await update_message_status(message_id, "dispatched")
 
         # 2. The callee's session — use the mind's configured model
         mind_model = None
-        row = await get_mind_by_id(db, to_mind)
+        row = await get_mind_by_id(to_mind)
         if row:
             mind_model = row.get("model")
         mind_name = (row or {}).get("name") or to_mind
@@ -452,10 +316,10 @@ async def wakeup_and_collect(
                 model=mind_model,
             )
         session_id = session["id"]
-        await update_message_status(db, message_id, "dispatched", recipient_session_id=session_id)
+        await update_message_status(message_id, "dispatched", recipient_session_id=session_id)
 
         # 3. Send wakeup and collect response
-        from_row = await get_mind_by_id(db, from_mind)
+        from_row = await get_mind_by_id(from_mind)
         from_display = (from_row.get("name") if from_row else None) or from_mind
         prompt = build_wakeup_prompt(from_display, to_mind, conversation_id, content, rolling_summary, message_number)
         response_text = await asyncio.wait_for(
@@ -464,14 +328,11 @@ async def wakeup_and_collect(
         )
 
         # 4. Write response as new message
-        next_num = await get_next_message_number(db, conversation_id)
         await insert_message(
-            db,
             message_id=str(uuid.uuid4()),
             conversation_id=conversation_id,
             from_mind=to_mind,
             to_mind=from_mind,
-            message_number=next_num,
             content=response_text,
             rolling_summary="",
             metadata=None,
@@ -479,7 +340,7 @@ async def wakeup_and_collect(
         )
 
         # 5. Mark original as completed
-        await update_message_status(db, message_id, "completed")
+        await update_message_status(message_id, "completed")
         log.info("broker: wakeup complete conversation=%s from=%s to=%s", conversation_id, from_mind, to_mind)
         log_event(log, "broker.wakeup.completed", conversation_id=conversation_id,
                   message_id=message_id, from_mind=from_mind, to_mind=to_mind,
@@ -487,7 +348,7 @@ async def wakeup_and_collect(
 
     except asyncio.TimeoutError:
         await update_message_status(
-            db, message_id, "timed_out",
+            message_id, "timed_out",
             response_error=f"backstop exceeded ({backstop}s)",
         )
         log.warning("broker: backstop timeout conversation=%s message=%s backstop=%ds", conversation_id, message_id, backstop)
@@ -497,7 +358,7 @@ async def wakeup_and_collect(
 
     except Exception as e:
         await update_message_status(
-            db, message_id, "failed",
+            message_id, "failed",
             response_error=str(e),
         )
         log.error("broker: wakeup failed conversation=%s message=%s error=%s", conversation_id, message_id, e)
@@ -532,7 +393,6 @@ def normalize_owner(owner: str | None) -> str | None:
 
 
 async def register_mind(
-    db: aiosqlite.Connection,
     *,
     mind_id: str,
     name: str,
@@ -568,57 +428,51 @@ async def register_mind(
     mind between users, and refusing the whole registration would freeze a
     mind an admin had just moved until its runtime.yaml caught up. A row that
     predates ownership (owner still unset) takes the one named.
+
+    The read and the write are one unit holding the mind's identity, so two
+    registrations racing at boot cannot both find no row and both decide the
+    owner rule on a stale read.
     """
     owner = normalize_owner(owner)
     now = time.time()
-    row = await db.execute(
-        "SELECT registered_at, owner FROM minds WHERE mind_id = ?", (mind_id,)
-    )
-    existing = await row.fetchone()
+    async with hive_data.transaction() as unit:
+        await unit.hold(f"hive:mind:{mind_id}")
+        existing = await core.get_mind(mind_id, unit=unit)
 
-    if not existing and owner is None:
-        raise OwnerRequired(f"mind {mind_id} is not registered and names no owner")
-    if existing and owner and existing["owner"] and owner != existing["owner"]:
-        log_event(log, "mind.owner_ignored", level=logging.WARNING,
-                  mind_id=mind_id, stored_owner=existing["owner"], named_owner=owner)
-        owner = existing["owner"]
+        if not existing and owner is None:
+            raise OwnerRequired(f"mind {mind_id} is not registered and names no owner")
+        if existing and owner and existing["owner"] and owner != existing["owner"]:
+            log_event(log, "mind.owner_ignored", level=logging.WARNING,
+                      mind_id=mind_id, stored_owner=existing["owner"], named_owner=owner)
+            owner = existing["owner"]
 
-    if existing:
-        columns = ["name=?", "gateway_url=?", "model=?", "harness=?", "last_seen=?"]
-        values = [name, gateway_url, model, harness, now]
-        if owner and not existing["owner"]:
-            columns.append("owner=?")
-            values.append(owner)
-        if session_token:
-            columns.append("session_token=?")
-            values.append(session_token)
-        if voice:
-            columns.append("voice=?")
-            values.append(voice)
-        if voice_engine:
-            columns.append("voice_engine=?")
-            values.append(voice_engine)
-        await db.execute(
-            f"UPDATE minds SET {', '.join(columns)} WHERE mind_id=?",
-            (*values, mind_id),
-        )
-    else:
-        await db.execute(
-            "INSERT INTO minds (mind_id, name, gateway_url, model, harness, registered_at, last_seen, "
-            "session_token, voice, voice_engine, owner) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (mind_id, name, gateway_url, model, harness, now, now,
-             session_token or None, voice or None, voice_engine or None, owner),
-        )
-    await db.commit()
+        if existing:
+            fields: dict = {
+                "name": name, "gateway_url": gateway_url, "model": model,
+                "harness": harness, "last_seen": now,
+            }
+            if owner and not existing["owner"]:
+                fields["owner"] = owner
+            if session_token:
+                fields["session_token"] = session_token
+            if voice:
+                fields["voice"] = voice
+            if voice_engine:
+                fields["voice_engine"] = voice_engine
+            await broker_ops.update_mind(mind_id, unit=unit, **fields)
+        else:
+            await core.upsert_mind(
+                mind_id=mind_id, name=name, gateway_url=gateway_url,
+                model=model, harness=harness, registered_at=now, last_seen=now,
+                session_token=session_token or None, voice=voice or None,
+                voice_engine=voice_engine or None, owner=owner, unit=unit)
     log_event(log, "mind.registered" if not existing else "mind.updated",
               mind_id=mind_id, mind_name=name, gateway_url=gateway_url,
               model=model, harness=harness,
               owner=owner or (existing["owner"] if existing else None))
 
 
-async def set_mind_owner(
-    db: aiosqlite.Connection, mind_id: str, owner: str
-) -> dict | None:
+async def set_mind_owner(mind_id: str, owner: str) -> dict | None:
     """Move a mind to another user. The admin path, and the only one.
 
     Returns the updated mind, or None when no mind has that id. A blank owner
@@ -627,14 +481,11 @@ async def set_mind_owner(
     normalized = normalize_owner(owner)
     if normalized is None:
         raise ValueError("owner must name a user")
-    cursor = await db.execute(
-        "UPDATE minds SET owner = ? WHERE mind_id = ?", (normalized, mind_id)
-    )
-    await db.commit()
-    if cursor.rowcount == 0:
+    changed = await broker_ops.update_mind(mind_id, owner=normalized)
+    if changed["rows"] == 0:
         return None
     log_event(log, "mind.owner_set", mind_id=mind_id, owner=normalized)
-    return await get_mind_by_id(db, mind_id)
+    return await get_mind_by_id(mind_id)
 
 
 def _public_mind(row) -> dict:
@@ -643,7 +494,8 @@ def _public_mind(row) -> dict:
     `session_token` is the credential that authenticates the gateway to that
     mind, so it is stripped here rather than at each call site: every listing
     answers to the service token every surface bot holds, and a `SELECT *`
-    reaching one of them would hand Arnold's token to Zack's bot.
+    reaching one of them would hand Arnold's token to Zack's bot. `hive_data`
+    withholds it from every read already; the strip stays as the second lock.
     """
     d = dict(row)
     d["id"] = d.pop("mind_id")
@@ -651,83 +503,132 @@ def _public_mind(row) -> dict:
     return d
 
 
-async def get_mind_session_token(
-    db: aiosqlite.Connection, mind_id: str
-) -> str | None:
+async def get_mind_session_token(mind_id: str) -> str | None:
     """The credential this gateway must present when calling that mind.
 
     The only path that returns it. No HTTP route exposes it.
     """
-    row = await db.execute(
-        "SELECT session_token FROM minds WHERE mind_id = ?", (mind_id,)
-    )
-    result = await row.fetchone()
-    if not result:
-        return None
-    return result["session_token"] or None
+    return await core.mind_session_token(mind_id) or None
 
 
-async def get_registered_minds(db: aiosqlite.Connection) -> list[dict]:
+async def get_registered_minds() -> list[dict]:
     """Return all registered minds as a list of dicts.
 
     Response shape per the migration spec: each entry includes `id` (the
     UUID), `name` (display label), and `gateway_url` (where to dispatch).
     """
-    rows = await db.execute("SELECT * FROM minds ORDER BY name")
-    return [_public_mind(r) for r in await rows.fetchall()]
+    return [_public_mind(r) for r in await core.list_minds()]
 
 
-async def get_mind(db: aiosqlite.Connection, name: str) -> dict | None:
+async def get_mind(name: str) -> dict | None:
     """Get a single mind by display name. Returns dict or None if not found."""
-    row = await db.execute("SELECT * FROM minds WHERE name = ?", (name,))
-    result = await row.fetchone()
-    if not result:
-        return None
-    return _public_mind(result)
+    row = await core.get_mind_by_name(name)
+    return _public_mind(row) if row else None
 
 
-async def get_mind_by_id(db: aiosqlite.Connection, mind_id: str) -> dict | None:
+async def get_mind_by_id(mind_id: str) -> dict | None:
     """Get a single mind by UUID (mind_id). The canonical routing lookup —
     broker resolves mind_id → gateway_url through this function.
     """
-    row = await db.execute("SELECT * FROM minds WHERE mind_id = ?", (mind_id,))
-    result = await row.fetchone()
-    if not result:
-        return None
-    return _public_mind(result)
+    row = await core.get_mind(mind_id)
+    return _public_mind(row) if row else None
 
 
-async def update_mind(db: aiosqlite.Connection, name: str, **fields) -> dict | None:
+#: What the console's partial update may change. `last_seen` is always set.
+_UPDATABLE = frozenset({"gateway_url", "model", "harness", "voice", "voice_engine"})
+
+
+async def update_mind(name: str, **fields) -> dict | None:
     """Partially update a mind's fields. Always updates last_seen.
 
     Allowed fields: gateway_url, model, harness, voice, voice_engine.
     Returns updated dict or None if mind not found.
     """
-    existing = await get_mind(db, name)
+    existing = await core.get_mind_by_name(name)
     if existing is None:
         return None
 
-    allowed = {"gateway_url", "model", "harness", "voice", "voice_engine"}
-    updates = {k: v for k, v in fields.items() if k in allowed}
+    updates = {k: v for k, v in fields.items() if k in _UPDATABLE}
     updates["last_seen"] = time.time()
-
-    set_clause = ", ".join(f"{k} = ?" for k in updates)
-    params = list(updates.values()) + [name]
-    await db.execute(
-        f"UPDATE minds SET {set_clause} WHERE name = ?",
-        params,
-    )
-    await db.commit()
-    updated = await get_mind(db, name)
+    changed = await broker_ops.update_mind(existing["mind_id"], **updates)
+    if changed["rows"] == 0:
+        # Deleted between the read and the write.
+        return None
     log_event(log, "mind.updated", mind_name=name, changed_fields=sorted(updates))
-    return updated
+    return await get_mind(name)
 
 
-async def delete_mind(db: aiosqlite.Connection, name: str) -> bool:
-    """Delete a mind by name. Returns True if deleted, False if not found."""
-    cursor = await db.execute("DELETE FROM minds WHERE name = ?", (name,))
-    await db.commit()
-    deleted = cursor.rowcount > 0
+class MindHasConversations(RuntimeError):
+    """A mind that still has conversations, which deleting it would orphan.
+
+    `core.sessions.mind_id` is ON DELETE RESTRICT: every conversation names
+    the mind it ran on, and a delete that cascaded would take the operator's
+    history with it. So the delete is refused and says why, rather than
+    surfacing the database's foreign-key violation as a 500.
+    """
+
+    def __init__(self, name: str, sessions: int) -> None:
+        self.name = name
+        self.sessions = sessions
+        super().__init__(
+            f"mind '{name}' still has {sessions} conversation"
+            f"{'' if sessions == 1 else 's'}; it cannot be deleted while "
+            "they exist"
+        )
+
+
+class MindStillReferenced(RuntimeError):
+    """A mind something other than a conversation still points at.
+
+    Its graph edges and design sessions are RESTRICT as well. Counted
+    conversations are the common case and get their own sentence; anything
+    else the database refuses arrives here, named, rather than as a 500.
+    """
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        super().__init__(
+            f"mind '{name}' is still referenced by records that name it "
+            "(its graph or its design sessions); it cannot be deleted while "
+            "they exist"
+        )
+
+
+async def delete_mind(name: str) -> bool:
+    """Delete a mind by name. Returns True if deleted, False if not found.
+
+    One unit: the mind's secret scopes are cleared with it, because they are
+    keyed by name with nothing cascading to them, and the next mind
+    registered under the same name would otherwise inherit every secret the
+    old one could read. Its surface claims go by cascade. Its conversations
+    do not go at all: a mind that still has any is refused with
+    `MindHasConversations`, and one still referenced by anything else the
+    database protects with `MindStillReferenced`. Nothing here deletes
+    metering or audit rows.
+    """
+    try:
+        async with hive_data.transaction() as unit:
+            await unit.hold(f"hive:mind-name:{name}")
+            mind = await core.get_mind_by_name(name, unit=unit)
+            if mind is None:
+                deleted = False
+            else:
+                sessions = await broker_ops.count_mind_sessions(
+                    mind["mind_id"], unit=unit)
+                if sessions:
+                    raise MindHasConversations(name, sessions)
+                await broker_ops.revoke_all_secret_scopes(name, unit=unit)
+                result = await broker_ops.delete_mind(mind["mind_id"], unit=unit)
+                deleted = result["rows"] > 0
+    except hive_data.MissingReference as exc:
+        log_event(log, "mind.delete_refused", level=logging.WARNING,
+                  mind_name=name, reason="still_referenced")
+        raise MindStillReferenced(name) from exc
+    except MindHasConversations as exc:
+        log_event(log, "mind.delete_refused", level=logging.WARNING,
+                  mind_name=name, reason="has_conversations",
+                  sessions=exc.sessions)
+        raise
     log_event(log, "mind.deleted", mind_name=name, deleted=deleted)
     return deleted
 
@@ -735,69 +636,36 @@ async def delete_mind(db: aiosqlite.Connection, name: str) -> bool:
 # ---------------------------------------------------------------------------
 # Secret scoping policy
 # ---------------------------------------------------------------------------
-async def grant_secret_scope(
-    db: aiosqlite.Connection, mind_name: str, secret_key: str
-) -> None:
-    """Grant a mind access to a secret key. Idempotent (INSERT OR IGNORE)."""
-    await db.execute(
-        "INSERT OR IGNORE INTO secret_scopes (mind_name, secret_key, granted_at) "
-        "VALUES (?, ?, ?)",
-        (mind_name, secret_key, time.time()),
-    )
-    await db.commit()
+async def grant_secret_scope(mind_name: str, secret_key: str) -> None:
+    """Grant a mind access to a secret key. Idempotent."""
+    await core.grant_secret_scope(
+        mind_name=mind_name, secret_key=secret_key, granted_at=time.time())
 
 
-async def revoke_secret_scope(
-    db: aiosqlite.Connection, mind_name: str, secret_key: str
-) -> None:
+async def revoke_secret_scope(mind_name: str, secret_key: str) -> None:
     """Revoke a mind's access to a secret key."""
-    await db.execute(
-        "DELETE FROM secret_scopes WHERE mind_name = ? AND secret_key = ?",
-        (mind_name, secret_key),
-    )
-    await db.commit()
+    await core.revoke_secret_scope(mind_name=mind_name, secret_key=secret_key)
 
 
-async def get_secret_scopes(
-    db: aiosqlite.Connection, mind_name: str
-) -> list[str]:
+async def get_secret_scopes(mind_name: str) -> list[str]:
     """Return all secret keys a mind is allowed to access."""
-    rows = await db.execute(
-        "SELECT secret_key FROM secret_scopes WHERE mind_name = ? ORDER BY secret_key",
-        (mind_name,),
-    )
-    return [row["secret_key"] for row in await rows.fetchall()]
+    return [row["secret_key"] for row in await core.list_secret_scopes(mind_name)]
 
 
-async def check_secret_scope(
-    db: aiosqlite.Connection, mind_name: str, secret_key: str
-) -> bool:
+async def check_secret_scope(mind_name: str, secret_key: str) -> bool:
     """Check if a mind is allowed to access a specific secret key."""
-    row = await db.execute(
-        "SELECT 1 FROM secret_scopes WHERE mind_name = ? AND secret_key = ?",
-        (mind_name, secret_key),
-    )
-    return await row.fetchone() is not None
+    return secret_key in await get_secret_scopes(mind_name)
 
 
 # ---------------------------------------------------------------------------
 # Settings (small key/value store for runtime feature flags)
 # ---------------------------------------------------------------------------
-async def get_setting(
-    db: aiosqlite.Connection, key: str, default: str | None = None
-) -> str | None:
+async def get_setting(key: str, default: str | None = None) -> str | None:
     """Return the stored value for a settings key, or `default` if absent."""
-    row = await db.execute("SELECT value FROM settings WHERE key = ?", (key,))
-    fetched = await row.fetchone()
-    return fetched["value"] if fetched else default
+    row = await core.get_setting(key)
+    return row["value"] if row else default
 
 
-async def set_setting(db: aiosqlite.Connection, key: str, value: str) -> None:
+async def set_setting(key: str, value: str) -> None:
     """Upsert a settings row."""
-    await db.execute(
-        """INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
-           ON CONFLICT(key) DO UPDATE SET value = excluded.value,
-                                          updated_at = excluded.updated_at""",
-        (key, value, time.time()),
-    )
-    await db.commit()
+    await core.put_setting(key, value, time.time())

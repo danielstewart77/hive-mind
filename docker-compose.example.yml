@@ -103,8 +103,8 @@ services:
     environment:
       COMMS_PORT: "8424"
       COMMS_PROJECT_DIR: "/app"
-      BROKER_DB_PATH: "/data/broker.db"
-      SESSIONS_DB_PATH: "/data/sessions.db"
+      # The hive's one Postgres, through hive_data. Unset refuses to start.
+      HIVE_DATABASE_URL: ${HIVE_DATABASE_URL:-}
     env_file:
       - ./nervous-system/.env
     volumes:

@@ -16,6 +16,8 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from comms_pg_fixture import comms_db, execute, scratch_dsn  # noqa: F401
+
 MIND = "11111111-1111-1111-1111-111111111111"
 
 
@@ -32,9 +34,7 @@ def _run(coro):
 
 
 @pytest.fixture
-def app_client(monkeypatch, tmp_path):
-    monkeypatch.setenv("BROKER_DB_PATH", str(tmp_path / "broker.db"))
-    monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "sessions.db"))
+def app_client(comms_db, monkeypatch):  # noqa: F811 - the imported fixture
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-bearer")
 
     from comms import server as server_module
@@ -44,19 +44,30 @@ def app_client(monkeypatch, tmp_path):
         yield client, server_module
 
 
-def _seed_active(mgr, model: str) -> None:
+def _seed_active(model: str) -> None:
+    """Written on a plain connection: the gateway's pool lives on the test
+    client's own loop, not on this one."""
     now = time.time()
-    _run(mgr._db.execute(
-        """INSERT INTO sessions (id, owner_type, owner_ref, model, claude_sid,
-                                 created_at, last_active, status, mind_id)
-           VALUES ('sess-m', 'telegram', '123', ?, 'conv-1', ?, ?, 'running', ?)""",
-        (model, now, now, MIND),
-    ))
-    _run(mgr._db.execute(
-        """INSERT INTO active_sessions (client_type, client_ref, session_id)
-           VALUES ('telegram', '123', 'sess-m')""",
-    ))
-    _run(mgr._db.commit())
+
+    async def seed() -> None:
+        await execute(
+            "INSERT INTO core.minds (mind_id, name, gateway_url, model, harness, "
+            "registered_at, last_seen) VALUES ($1, 'bare-model-mind', "
+            "'http://mind.invalid:8420', 'opus', 'claude_cli', $2, $2) "
+            "ON CONFLICT (mind_id) DO NOTHING", MIND, now,
+        )
+        await execute(
+            "INSERT INTO core.sessions (id, surface, surface_id, model, "
+            "conversation_id, created_at, last_active, status, mind_id) "
+            "VALUES ('sess-m', 'telegram', '123', $1, 'conv-1', $2, $2, "
+            "'running', $3)", model, now, MIND,
+        )
+        await execute(
+            "INSERT INTO core.active_sessions (client_type, client_ref, session_id) "
+            "VALUES ('telegram', '123', 'sess-m')"
+        )
+
+    _run(seed())
 
 
 def _ask(client):
@@ -69,7 +80,7 @@ def _ask(client):
 def test_the_listing_carries_the_conversations_own_model(app_client) -> None:
     client, server_module = app_client
     mgr = server_module.session_mgr
-    _seed_active(mgr, "claude-sonnet-5-5")
+    _seed_active("claude-sonnet-5-5")
 
     with patch.object(mgr, "mind_models", new=AsyncMock(return_value=[
         {"name": "claude-opus-5-5"}, {"name": "claude-sonnet-5-5"},

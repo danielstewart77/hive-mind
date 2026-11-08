@@ -10,22 +10,19 @@ of the word "terminal" agrees on what it means.
 from __future__ import annotations
 
 import asyncio
-import os
-import tempfile
 from unittest.mock import patch
 
 import pytest
 
-from comms import broker
-from comms.sessions import SessionManager
+from comms_pg_fixture import (  # noqa: F401 - fixtures
+    close_manager,
+    comms_db,
+    make_manager,
+    register_mind,
+    scratch_dsn,
+)
 
-
-
-async def _make_manager(tmp: str) -> SessionManager:
-    os.environ["SESSIONS_DB_PATH"] = os.path.join(tmp, "sessions.db")
-    mgr = SessionManager()
-    await mgr.start()
-    return mgr
+pytestmark = pytest.mark.usefixtures("comms_db")
 
 
 def _capturing_session_class(payloads: list[dict]):
@@ -75,36 +72,26 @@ def _capturing_session_class(payloads: list[dict]):
     return _FakeClientSession
 
 
-async def _fake_mind(db, mind_id):
-    return {"name": "ada", "model": "opus", "gateway_url": "http://mind.test:8420"}
-
-
 def _spawned_payload(owner_type: str | None, harness_sid: str | None = None) -> dict:
     async def scenario() -> dict:
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            # get_mind_by_id is patched, but the spawn also reads the mind's
-            # session credential from the broker — and a read that fails now
-            # raises rather than quietly sending an uncredentialed call.
-            mgr.broker_db = await broker.init_db(os.path.join(tmp, "broker.db"))
-            await broker.register_mind(
-                mgr.broker_db, mind_id="ada", name="ada",
-                gateway_url="http://mind.test:8420", model="opus",
-                harness="claude_cli", session_token="ada-token", owner="daniel",  # secret-guard: allow
-            )
-            payloads: list[dict] = []
-            try:
-                with patch("aiohttp.ClientSession", _capturing_session_class(payloads)), \
-                     patch("comms.broker.get_mind_by_id", _fake_mind):
-                    await mgr._spawn(
-                        "sess-1", "opus", resume_sid="conv-1", mind_id="ada",
-                        owner_type=owner_type, owner_ref="123", harness_sid=harness_sid,
-                    )
-            finally:
-                await mgr.broker_db.close()
-                await mgr.shutdown()
-            assert len(payloads) == 1
-            return payloads[0]
+        mgr = await make_manager()
+        # A registered mind: the spawn reads its address and its session
+        # credential off the registration.
+        await register_mind(
+            "ada", gateway_url="http://mind.test:8420", model="opus",
+            harness="claude_cli", session_token="ada-token",  # secret-guard: allow
+        )
+        payloads: list[dict] = []
+        try:
+            with patch("aiohttp.ClientSession", _capturing_session_class(payloads)):
+                await mgr._spawn(
+                    "sess-1", "opus", resume_sid="conv-1", mind_id="ada",
+                    owner_type=owner_type, owner_ref="123", harness_sid=harness_sid,
+                )
+        finally:
+            await close_manager(mgr)
+        assert len(payloads) == 1
+        return payloads[0]
 
     return asyncio.run(scenario())
 

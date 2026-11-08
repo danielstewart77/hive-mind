@@ -23,11 +23,19 @@ Covers:
 from __future__ import annotations
 
 import asyncio
-import os
-import tempfile
 import time
 
 from comms.sessions import SessionManager
+from comms_pg_fixture import (  # noqa: F401 - fixtures
+    close_manager,
+    comms_db,
+    execute,
+    fetch,
+    fetchrow,
+    make_manager,
+    scratch_dsn,
+    seed_session,
+)
 
 TELEGRAM = "telegram:skippy-uuid"
 CHAT = "8776938611"
@@ -38,10 +46,8 @@ def _run(coro):
 
 
 
-async def _make_manager(tmp: str) -> SessionManager:
-    os.environ["SESSIONS_DB_PATH"] = os.path.join(tmp, "sessions.db")
-    mgr = SessionManager()
-    await mgr.start()
+async def _make_manager() -> SessionManager:
+    mgr = await make_manager()
     if mgr._dashboard_sweep_task:
         mgr._dashboard_sweep_task.cancel()
         mgr._dashboard_sweep_task = None
@@ -60,23 +66,26 @@ async def _seed(
     summary: str = "New session",
 ) -> None:
     now = time.time()
-    await mgr._db.execute(
-        """INSERT INTO sessions
-           (id, owner_type, owner_ref, model, claude_sid, summary, created_at, last_active, status, mind_id)
-           VALUES (?, ?, ?, 'opus', ?, ?, ?, ?, ?, ?)""",
-        (session_id, owner_type, owner_ref, claude_sid, summary, now - 60, now, status, mind_id),
+    await seed_session(
+        session_id, owner_type=owner_type, owner_ref=owner_ref, model="opus",
+        claude_sid=claude_sid, summary=summary, created_at=now - 60,
+        last_active=now, status=status, mind_id=mind_id,
     )
-    await mgr._db.commit()
 
 
-async def _row(mgr: SessionManager, session_id: str) -> dict:
-    rows = await mgr._db.execute_fetchall("SELECT * FROM sessions WHERE id = ?", (session_id,))
-    return dict(rows[0])
+async def _row(mgr, session_id: str) -> dict:
+    """The stored row, read past the manager, under the names it speaks."""
+    return await fetchrow(
+        "SELECT *, surface AS owner_type, surface_id AS owner_ref, "
+        "conversation_id AS claude_sid, opening_line AS summary "
+        "FROM core.sessions WHERE id = $1", session_id
+    )
 
 
 async def _bindings(mgr: SessionManager, session_id: str) -> list[tuple[str, str]]:
-    rows = await mgr._db.execute_fetchall(
-        "SELECT client_type, client_ref FROM active_sessions WHERE session_id = ?", (session_id,)
+    rows = await fetch(
+        "SELECT client_type, client_ref FROM core.active_sessions "
+        "WHERE session_id = $1 ORDER BY client_type, client_ref", session_id
     )
     return [(r["client_type"], r["client_ref"]) for r in rows]
 
@@ -85,89 +94,85 @@ def _selectable_ids(sessions: list[dict]) -> set[str]:
     return {s["id"] for s in sessions}
 
 
-def test_terminal_sessions_are_offered_to_another_surface():
+def test_terminal_sessions_are_offered_to_another_surface(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            try:
-                await _seed(mgr, "own-1", owner_type=TELEGRAM, owner_ref=CHAT)
-                await _seed(mgr, "term-1", summary="the thing I started at the desk")
+        mgr = await _make_manager()
+        try:
+            await _seed(mgr, "own-1", owner_type=TELEGRAM, owner_ref=CHAT)
+            await _seed(mgr, "term-1", summary="the thing I started at the desk")
 
-                sessions = await mgr.list_selectable_sessions(
-                    owner_ref=CHAT, client_type=TELEGRAM, client_ref=CHAT, mind_id="skippy-uuid"
-                )
+            sessions = await mgr.list_selectable_sessions(
+                owner_ref=CHAT, client_type=TELEGRAM, client_ref=CHAT, mind_id="skippy-uuid"
+            )
 
-                assert _selectable_ids(sessions) == {"own-1", "term-1"}
-                by_id = {s["id"]: s for s in sessions}
-                assert by_id["term-1"]["adoptable"] is True
-                assert by_id["term-1"]["surface"] == "terminal"
-                assert by_id["own-1"]["adoptable"] is False
-                assert by_id["own-1"]["surface"] == "telegram"
-            finally:
-                await mgr.shutdown()
+            assert _selectable_ids(sessions) == {"own-1", "term-1"}
+            by_id = {s["id"]: s for s in sessions}
+            assert by_id["term-1"]["adoptable"] is True
+            assert by_id["term-1"]["surface"] == "terminal"
+            assert by_id["own-1"]["adoptable"] is False
+            assert by_id["own-1"]["surface"] == "telegram"
+        finally:
+            await close_manager(mgr)
 
     _run(scenario())
 
 
-def test_machine_driven_sessions_are_never_offered():
+def test_machine_driven_sessions_are_never_offered(comms_db):
     # A broker errand or a scheduled run is nobody's conversation to take.
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            try:
-                await _seed(mgr, "broker-1", owner_type="broker", owner_ref="broker-abc")
-                await _seed(mgr, "sched-1", owner_type="scheduler", owner_ref="scheduler")
+        mgr = await _make_manager()
+        try:
+            await _seed(mgr, "broker-1", owner_type="broker", owner_ref="broker-abc")
+            await _seed(mgr, "sched-1", owner_type="scheduler", owner_ref="scheduler")
 
-                sessions = await mgr.list_selectable_sessions(
-                    owner_ref=CHAT, client_type=TELEGRAM, client_ref=CHAT, mind_id="skippy-uuid"
-                )
+            sessions = await mgr.list_selectable_sessions(
+                owner_ref=CHAT, client_type=TELEGRAM, client_ref=CHAT, mind_id="skippy-uuid"
+            )
 
-                assert sessions == []
-            finally:
-                await mgr.shutdown()
+            assert sessions == []
+        finally:
+            await close_manager(mgr)
 
     _run(scenario())
 
 
-def test_another_minds_terminal_is_not_offered():
+def test_another_minds_terminal_is_not_offered(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            try:
-                await _seed(mgr, "mine", mind_id="skippy-uuid")
-                await _seed(mgr, "bobs", mind_id="bob-uuid")
+        mgr = await _make_manager()
+        try:
+            await _seed(mgr, "mine", mind_id="skippy-uuid")
+            await _seed(mgr, "bobs", mind_id="bob-uuid")
 
-                sessions = await mgr.list_selectable_sessions(
-                    owner_ref=CHAT, client_type=TELEGRAM, client_ref=CHAT, mind_id="skippy-uuid"
-                )
+            sessions = await mgr.list_selectable_sessions(
+                owner_ref=CHAT, client_type=TELEGRAM, client_ref=CHAT, mind_id="skippy-uuid"
+            )
 
-                assert _selectable_ids(sessions) == {"mine"}
-            finally:
-                await mgr.shutdown()
+            assert _selectable_ids(sessions) == {"mine"}
+        finally:
+            await close_manager(mgr)
 
     _run(scenario())
 
 
-def test_closed_terminal_sessions_are_not_offered():
+def test_closed_terminal_sessions_are_not_offered(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            try:
-                await _seed(mgr, "live", status="idle")
-                await _seed(mgr, "done", status="closed")
+        mgr = await _make_manager()
+        try:
+            await _seed(mgr, "live", status="idle")
+            await _seed(mgr, "done", status="closed")
 
-                sessions = await mgr.list_selectable_sessions(
-                    owner_ref=CHAT, client_type=TELEGRAM, client_ref=CHAT, mind_id="skippy-uuid"
-                )
+            sessions = await mgr.list_selectable_sessions(
+                owner_ref=CHAT, client_type=TELEGRAM, client_ref=CHAT, mind_id="skippy-uuid"
+            )
 
-                assert _selectable_ids(sessions) == {"live"}
-            finally:
-                await mgr.shutdown()
+            assert _selectable_ids(sessions) == {"live"}
+        finally:
+            await close_manager(mgr)
 
     _run(scenario())
 
 
-def test_your_own_closed_sessions_are_not_offered():
+def test_your_own_closed_sessions_are_not_offered(comms_db):
     """A surface accumulates closed rows forever — this chat had 138.
 
     They have nothing to switch to (the memory is already harvested), and
@@ -175,102 +180,98 @@ def test_your_own_closed_sessions_are_not_offered():
     accept, so the reply was rejected and /sessions looked dead.
     """
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            try:
-                await _seed(mgr, "mine-live", owner_type=TELEGRAM, owner_ref=CHAT, status="idle")
-                for i in range(20):
-                    await _seed(
-                        mgr, f"mine-done-{i}",
-                        owner_type=TELEGRAM, owner_ref=CHAT, status="closed",
-                    )
-
-                sessions = await mgr.list_selectable_sessions(
-                    owner_ref=CHAT, client_type=TELEGRAM, client_ref=CHAT, mind_id="skippy-uuid"
+        mgr = await _make_manager()
+        try:
+            await _seed(mgr, "mine-live", owner_type=TELEGRAM, owner_ref=CHAT, status="idle")
+            for i in range(20):
+                await _seed(
+                    mgr, f"mine-done-{i}",
+                    owner_type=TELEGRAM, owner_ref=CHAT, status="closed",
                 )
 
-                assert [s["id"] for s in sessions] == ["mine-live"]
-            finally:
-                await mgr.shutdown()
+            sessions = await mgr.list_selectable_sessions(
+                owner_ref=CHAT, client_type=TELEGRAM, client_ref=CHAT, mind_id="skippy-uuid"
+            )
+
+            assert [s["id"] for s in sessions] == ["mine-live"]
+        finally:
+            await close_manager(mgr)
 
     _run(scenario())
 
 
-def test_adopting_releases_the_terminal_and_retargets_the_session():
+def test_adopting_releases_the_terminal_and_retargets_the_session(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            try:
-                await _seed(mgr, "term-1")
-                await mgr._db.execute(
-                    """INSERT INTO active_sessions (client_type, client_ref, session_id)
-                       VALUES ('web', 'terminal-tile-1', 'term-1')"""
-                )
-                await mgr._db.commit()
+        mgr = await _make_manager()
+        try:
+            await _seed(mgr, "term-1")
+            await execute(
+                "INSERT INTO core.active_sessions (client_type, client_ref, session_id) "
+                "VALUES ('web', 'terminal-tile-1', 'term-1')"
+            )
 
-                released: list[tuple[str, str]] = []
+            released: list[tuple[str, str]] = []
 
-                async def _release(session_id, surface):
-                    released.append((session_id, surface))
-                    return True
+            async def _release(session_id, surface):
+                released.append((session_id, surface))
+                return True
 
-                spawned: list[str] = []
+            spawned: list[str] = []
 
-                async def _spawn(session_id, *a, **kw):
-                    spawned.append(session_id)
-                    return {}
+            async def _spawn(session_id, *a, **kw):
+                spawned.append(session_id)
+                return {}
 
-                mgr.release_on_mind = _release
-                mgr._spawn = _spawn
+            mgr.release_on_mind = _release
+            mgr._spawn = _spawn
 
-                await mgr.activate_session(
-                    "term-1", TELEGRAM, CHAT, owner_type=TELEGRAM, owner_ref=CHAT
-                )
+            await mgr.activate_session(
+                "term-1", TELEGRAM, CHAT, owner_type=TELEGRAM, owner_ref=CHAT
+            )
 
-                # The outgoing process ends — one conversation, one writer.
-                assert released == [("term-1", "terminal")]
-                # ...and the incoming surface resumes the same conversation.
-                assert spawned == ["term-1"]
-                row = await _row(mgr, "term-1")
-                assert row["owner_type"] == TELEGRAM
-                assert row["owner_ref"] == CHAT
-                assert row["claude_sid"] == "conv-1"  # the thread is untouched
-                # Exactly one surface holds it now.
-                assert await _bindings(mgr, "term-1") == [(TELEGRAM, CHAT)]
-            finally:
-                await mgr.shutdown()
+            # The outgoing process ends — one conversation, one writer.
+            assert released == [("term-1", "terminal")]
+            # ...and the incoming surface resumes the same conversation.
+            assert spawned == ["term-1"]
+            row = await _row(mgr, "term-1")
+            assert row["owner_type"] == TELEGRAM
+            assert row["owner_ref"] == CHAT
+            assert row["claude_sid"] == "conv-1"  # the thread is untouched
+            # Exactly one surface holds it now.
+            assert await _bindings(mgr, "term-1") == [(TELEGRAM, CHAT)]
+        finally:
+            await close_manager(mgr)
 
     _run(scenario())
 
 
-def test_switching_between_your_own_sessions_releases_nothing():
+def test_switching_between_your_own_sessions_releases_nothing(comms_db):
     # Ordinary /switch is not a handover and must not kill anything.
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            try:
-                await _seed(mgr, "own-1", owner_type=TELEGRAM, owner_ref=CHAT)
-                released: list = []
+        mgr = await _make_manager()
+        try:
+            await _seed(mgr, "own-1", owner_type=TELEGRAM, owner_ref=CHAT)
+            released: list = []
 
-                async def _release(session_id, surface):
-                    released.append((session_id, surface))
-                    return True
+            async def _release(session_id, surface):
+                released.append((session_id, surface))
+                return True
 
-                mgr.release_on_mind = _release
+            mgr.release_on_mind = _release
 
-                await mgr.activate_session(
-                    "own-1", TELEGRAM, CHAT, owner_type=TELEGRAM, owner_ref=CHAT
-                )
+            await mgr.activate_session(
+                "own-1", TELEGRAM, CHAT, owner_type=TELEGRAM, owner_ref=CHAT
+            )
 
-                assert released == []
-                assert await _bindings(mgr, "own-1") == [(TELEGRAM, CHAT)]
-            finally:
-                await mgr.shutdown()
+            assert released == []
+            assert await _bindings(mgr, "own-1") == [(TELEGRAM, CHAT)]
+        finally:
+            await close_manager(mgr)
 
     _run(scenario())
 
 
-def test_a_refused_release_leaves_the_session_where_it_was():
+def test_a_refused_release_leaves_the_session_where_it_was(comms_db):
     """A handover that cannot end the outgoing process must not retarget.
 
     Retargeting over a terminal that is still running puts a `--resume`
@@ -278,45 +279,43 @@ def test_a_refused_release_leaves_the_session_where_it_was():
     slip no other test sees: the binding swap moved above the release.
     """
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
+        mgr = await _make_manager()
+        try:
+            await _seed(mgr, "term-1")
+            await execute(
+                "INSERT INTO core.active_sessions (client_type, client_ref, session_id) "
+                "VALUES ('web', 'terminal-tile-1', 'term-1')"
+            )
+
+            from comms import sessions as sessions_mod
+
+            async def _release(session_id, surface):
+                raise sessions_mod.MindCallFailed("the mind refused")
+
+            spawned: list[str] = []
+
+            async def _spawn(session_id, *a, **kw):
+                spawned.append(session_id)
+                return {}
+
+            mgr.release_on_mind = _release
+            mgr._spawn = _spawn
+
+            raised = False
             try:
-                await _seed(mgr, "term-1")
-                await mgr._db.execute(
-                    """INSERT INTO active_sessions (client_type, client_ref, session_id)
-                       VALUES ('web', 'terminal-tile-1', 'term-1')"""
+                await mgr.activate_session(
+                    "term-1", TELEGRAM, CHAT, owner_type=TELEGRAM, owner_ref=CHAT
                 )
-                await mgr._db.commit()
+            except sessions_mod.MindCallFailed:
+                raised = True
 
-                from comms import sessions as sessions_mod
-
-                async def _release(session_id, surface):
-                    raise sessions_mod.MindCallFailed("the mind refused")
-
-                spawned: list[str] = []
-
-                async def _spawn(session_id, *a, **kw):
-                    spawned.append(session_id)
-                    return {}
-
-                mgr.release_on_mind = _release
-                mgr._spawn = _spawn
-
-                raised = False
-                try:
-                    await mgr.activate_session(
-                        "term-1", TELEGRAM, CHAT, owner_type=TELEGRAM, owner_ref=CHAT
-                    )
-                except sessions_mod.MindCallFailed:
-                    raised = True
-
-                assert raised
-                row = await _row(mgr, "term-1")
-                assert row["owner_type"] == "web"
-                assert row["owner_ref"] == "terminal"
-                assert spawned == []
-                assert await _bindings(mgr, "term-1") == [("web", "terminal-tile-1")]
-            finally:
-                await mgr.shutdown()
+            assert raised
+            row = await _row(mgr, "term-1")
+            assert row["owner_type"] == "web"
+            assert row["owner_ref"] == "terminal"
+            assert spawned == []
+            assert await _bindings(mgr, "term-1") == [("web", "terminal-tile-1")]
+        finally:
+            await close_manager(mgr)
 
     _run(scenario())

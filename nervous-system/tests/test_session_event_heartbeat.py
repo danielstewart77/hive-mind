@@ -9,88 +9,83 @@ connection stays warm.
 from __future__ import annotations
 
 import asyncio
-import os
-import tempfile
-import time
 
 from comms.sessions import SessionManager
+from comms_pg_fixture import (  # noqa: F401 - fixtures
+    close_manager,
+    comms_db,
+    make_manager,
+    scratch_dsn,
+    seed_session,
+)
 
 
 
-async def _make_manager(tmp: str) -> SessionManager:
-    os.environ["SESSIONS_DB_PATH"] = os.path.join(tmp, "sessions.db")
-    mgr = SessionManager()
-    await mgr.start()
+async def _make_manager() -> SessionManager:
+    mgr = await make_manager()
     return mgr
 
 
 async def _seed_session(mgr: SessionManager, status: str = "running") -> str:
     session_id = "sess-hb"
-    now = time.time()
-    await mgr._db.execute(
-        """INSERT INTO sessions (id, owner_type, owner_ref, model, created_at, last_active,
-                                 status, mind_id)
-           VALUES (?, 'telegram', '123', 'opus', ?, ?, ?, 'ada')""",
-        (session_id, now, now, status),
+    await seed_session(
+        session_id, owner_type="telegram", owner_ref="123", model="opus",
+        status=status, mind_id="ada",
     )
-    await mgr._db.commit()
     return session_id
 
 
-def test_idle_stream_emits_ping() -> None:
+def test_idle_stream_emits_ping(comms_db) -> None:
     async def scenario() -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            mgr.EVENT_HEARTBEAT_SECONDS = 0.05
-            try:
-                sid = await _seed_session(mgr)
-                stream = mgr.stream_session_events(sid)
-                event = await asyncio.wait_for(stream.__anext__(), timeout=2.0)
-                assert event == {"type": "ping", "session_id": sid}
-                await stream.aclose()
-            finally:
-                await mgr.shutdown()
+        mgr = await _make_manager()
+        mgr.EVENT_HEARTBEAT_SECONDS = 0.05
+        try:
+            sid = await _seed_session(mgr)
+            stream = mgr.stream_session_events(sid)
+            event = await asyncio.wait_for(stream.__anext__(), timeout=2.0)
+            assert event == {"type": "ping", "session_id": sid}
+            await stream.aclose()
+        finally:
+            await close_manager(mgr)
 
     asyncio.run(scenario())
 
 
-def test_published_event_still_delivered_between_pings() -> None:
+def test_published_event_still_delivered_between_pings(comms_db) -> None:
     async def scenario() -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            mgr.EVENT_HEARTBEAT_SECONDS = 30.0
-            try:
-                sid = await _seed_session(mgr)
-                stream = mgr.stream_session_events(sid)
+        mgr = await _make_manager()
+        mgr.EVENT_HEARTBEAT_SECONDS = 30.0
+        try:
+            sid = await _seed_session(mgr)
+            stream = mgr.stream_session_events(sid)
 
-                async def publish_soon() -> None:
-                    # Give the stream a beat to subscribe first.
-                    await asyncio.sleep(0.05)
-                    await mgr._publish_session_event(
-                        sid, {"type": "assistant", "text": "hello"}
-                    )
+            async def publish_soon() -> None:
+                # Give the stream a beat to subscribe first.
+                await asyncio.sleep(0.05)
+                await mgr._publish_session_event(
+                    sid, {"type": "assistant", "text": "hello"}
+                )
 
-                task = asyncio.ensure_future(publish_soon())
-                event = await asyncio.wait_for(stream.__anext__(), timeout=2.0)
-                await task
-                assert event["type"] == "assistant"
-                await stream.aclose()
-            finally:
-                await mgr.shutdown()
+            task = asyncio.ensure_future(publish_soon())
+            event = await asyncio.wait_for(stream.__anext__(), timeout=2.0)
+            await task
+            assert event["type"] == "assistant"
+            await stream.aclose()
+        finally:
+            await close_manager(mgr)
 
     asyncio.run(scenario())
 
 
-def test_closed_session_yields_session_closed_immediately() -> None:
+def test_closed_session_yields_session_closed_immediately(comms_db) -> None:
     async def scenario() -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            try:
-                sid = await _seed_session(mgr, status="closed")
-                stream = mgr.stream_session_events(sid)
-                event = await asyncio.wait_for(stream.__anext__(), timeout=2.0)
-                assert event == {"type": "session_closed", "session_id": sid}
-            finally:
-                await mgr.shutdown()
+        mgr = await _make_manager()
+        try:
+            sid = await _seed_session(mgr, status="closed")
+            stream = mgr.stream_session_events(sid)
+            event = await asyncio.wait_for(stream.__anext__(), timeout=2.0)
+            assert event == {"type": "session_closed", "session_id": sid}
+        finally:
+            await close_manager(mgr)
 
     asyncio.run(scenario())

@@ -2,102 +2,80 @@
 
 Covers the sms-gateway retry case: the Android client redelivers the same
 webhook on any non-2xx, so two near-simultaneous POSTs to /sms/inbound must
-collapse to a single broker row without a UNIQUE-constraint 500.
+collapse to a single broker row without a uniqueness 500 — and the other side
+of it: two *different* messages landing at once must both be kept, each with
+its own number.
 """
 from __future__ import annotations
 
 import asyncio
-import os
-import tempfile
+
+import pytest
 
 from comms import broker
+from comms_broker_pg import broker_store, fetch, scratch_dsn  # noqa: F401 - fixtures
+
+pytestmark = pytest.mark.asyncio
+
+CONVERSATION = "sms-+15551234567"
 
 
-def _run(coro):
-    return asyncio.run(coro)
+def _message(message_id: str, **overrides) -> dict:
+    fields = {
+        "message_id": message_id,
+        "conversation_id": CONVERSATION,
+        "from_mind": "sms-gateway",
+        "to_mind": "ada",
+        "content": "hello",
+        "rolling_summary": "",
+        "metadata": {"source": "sms-inbound"},
+        "status": "pending",
+    }
+    fields.update(overrides)
+    return fields
 
 
-def test_insert_message_is_idempotent_on_duplicate_id() -> None:
-    async def scenario() -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            db = await broker.init_db(os.path.join(tmp, "broker.db"))
-            try:
-                first = await broker.insert_message(
-                    db,
-                    message_id="sms-+15551234567-236",
-                    conversation_id="sms-+15551234567",
-                    from_mind="sms-gateway",
-                    to_mind="ada",
-                    message_number=1,
-                    content="hello",
-                    rolling_summary="",
-                    metadata={"source": "sms-inbound"},
-                    status="pending",
-                )
-                assert first["existing"] is False
+async def test_insert_message_is_idempotent_on_duplicate_id(broker_store) -> None:
+    first = await broker.insert_message(**_message("sms-+15551234567-236"))
+    second = await broker.insert_message(**_message("sms-+15551234567-236"))
 
-                second = await broker.insert_message(
-                    db,
-                    message_id="sms-+15551234567-236",
-                    conversation_id="sms-+15551234567",
-                    from_mind="sms-gateway",
-                    to_mind="ada",
-                    message_number=1,
-                    content="hello",
-                    rolling_summary="",
-                    metadata={"source": "sms-inbound"},
-                    status="pending",
-                )
-                assert second["existing"] is True
-                assert second["id"] == first["id"]
-
-                rows = await broker.get_messages(db, "sms-+15551234567")
-                assert len(rows) == 1
-            finally:
-                await db.close()
-
-    _run(scenario())
+    assert first["existing"] is False
+    assert second["existing"] is True
+    assert second["id"] == first["id"]
+    rows = await fetch(
+        "SELECT id FROM core.messages WHERE conversation_id = $1", CONVERSATION
+    )
+    assert len(rows) == 1
 
 
-def test_insert_message_collapses_message_number_collision_silently() -> None:
-    """Two duplicate webhook deliveries that race past get_next_message_number
-    both compute the same message_number for the same conversation. With
-    INSERT OR IGNORE on the PK, the second collapses to existing rather than
-    raising on the (conversation_id, message_number) UNIQUE constraint.
-    """
-    async def scenario() -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            db = await broker.init_db(os.path.join(tmp, "broker.db"))
-            try:
-                await broker.insert_message(
-                    db,
-                    message_id="sms-+15551234567-236",
-                    conversation_id="sms-+15551234567",
-                    from_mind="sms-gateway",
-                    to_mind="ada",
-                    message_number=1,
-                    content="hello",
-                    rolling_summary="",
-                    metadata=None,
-                    status="pending",
-                )
-                # Duplicate webhook → same id, same conversation/number.
-                # Pre-fix, the second INSERT raised IntegrityError on the
-                # (conversation_id, message_number) UNIQUE constraint.
-                dup = await broker.insert_message(
-                    db,
-                    message_id="sms-+15551234567-236",
-                    conversation_id="sms-+15551234567",
-                    from_mind="sms-gateway",
-                    to_mind="ada",
-                    message_number=1,
-                    content="hello",
-                    rolling_summary="",
-                    metadata=None,
-                    status="pending",
-                )
-                assert dup["existing"] is True
-            finally:
-                await db.close()
+async def test_a_duplicate_racing_the_original_collapses_rather_than_raising(
+    broker_store,
+) -> None:
+    """Two deliveries of one webhook at the same instant. Both reach the
+    insert; one lands and the other is told it already exists."""
+    outcomes = await asyncio.gather(
+        broker.insert_message(**_message("sms-+15551234567-236")),
+        broker.insert_message(**_message("sms-+15551234567-236")),
+    )
 
-    _run(scenario())
+    assert sorted(o["existing"] for o in outcomes) == [False, True]
+
+
+async def test_two_different_messages_at_once_each_get_their_own_number(
+    broker_store,
+) -> None:
+    """The number is decided inside the insert while the conversation is
+    held. Read beforehand, both derived the same one and the second collided
+    on (conversation_id, message_number) — dropped in silence under SQLite's
+    `INSERT OR IGNORE`, refused outright by Postgres."""
+    outcomes = await asyncio.gather(*(
+        broker.insert_message(**_message(f"sms-+15551234567-{n}"))
+        for n in range(5)
+    ))
+
+    assert all(o["existing"] is False for o in outcomes)
+    rows = await fetch(
+        "SELECT message_number FROM core.messages WHERE conversation_id = $1 "
+        "ORDER BY message_number", CONVERSATION
+    )
+    assert [r["message_number"] for r in rows] == [1, 2, 3, 4, 5]

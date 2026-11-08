@@ -12,20 +12,23 @@ ownership is what distinguishes "nothing else is publishing this" from
 from __future__ import annotations
 
 import asyncio
-import os
-import tempfile
 
 from comms.sessions import SessionManager
+from comms_pg_fixture import (  # noqa: F401 - fixtures
+    close_manager,
+    comms_db,
+    make_manager,
+    scratch_dsn,
+    seed_session,
+)
 
 
 def _run(coro):
     return asyncio.run(coro)
 
 
-async def _make_manager(tmp: str) -> SessionManager:
-    os.environ["SESSIONS_DB_PATH"] = os.path.join(tmp, "sessions.db")
-    mgr = SessionManager()
-    await mgr.start()
+async def _make_manager() -> SessionManager:
+    mgr = await make_manager()
     return mgr
 
 
@@ -36,14 +39,11 @@ async def _session_row(mgr: SessionManager, session_id: str, owner_type: str) ->
     which spawns a harness against a mind that does not exist here. What is
     under test reads one column of it.
     """
-    await mgr._db.execute(
-        "INSERT INTO sessions (id, claude_sid, owner_type, owner_ref, model, "
-        "created_at, last_active, status, mind_id) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (session_id, "conv-1", owner_type, "ref-1", "opus",
-         1_700_000_000.0, 1_700_000_000.0, "running", "mind-1"),
+    await seed_session(
+        session_id, claude_sid="conv-1", owner_type=owner_type, owner_ref="ref-1",
+        model="opus", created_at=1_700_000_000.0, last_active=1_700_000_000.0,
+        status="running", mind_id="mind-1",
     )
-    await mgr._db.commit()
 
 
 def _capture(mgr: SessionManager) -> list[dict]:
@@ -56,7 +56,7 @@ def _capture(mgr: SessionManager) -> list[dict]:
     return events
 
 
-def test_a_terminal_pane_puts_its_prose_on_the_stream() -> None:
+def test_a_terminal_pane_puts_its_prose_on_the_stream(comms_db) -> None:
     """Requirement 1, gateway half: the block reaches the tile's stream.
 
     Marked complete, because these are whole blocks. A listener that waited
@@ -65,15 +65,14 @@ def test_a_terminal_pane_puts_its_prose_on_the_stream() -> None:
     is the behaviour this replaces.
     """
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            try:
-                await _session_row(mgr, "sess-web", "web")
-                events = _capture(mgr)
-                result = await mgr.publish_pty_text("sess-web", "the build passed")
-                return result, events
-            finally:
-                await mgr.shutdown()
+        mgr = await _make_manager()
+        try:
+            await _session_row(mgr, "sess-web", "web")
+            events = _capture(mgr)
+            result = await mgr.publish_pty_text("sess-web", "the build passed")
+            return result, events
+        finally:
+            await close_manager(mgr)
 
     result, events = _run(scenario())
     assert result["ok"] is True
@@ -83,7 +82,7 @@ def test_a_terminal_pane_puts_its_prose_on_the_stream() -> None:
     assert events[0]["block_complete"] is True
 
 
-def test_a_chat_owned_session_is_not_published_twice() -> None:
+def test_a_chat_owned_session_is_not_published_twice(comms_db) -> None:
     """Requirement 5: one turn, spoken once.
 
     While Telegram drives, ``send_message`` publishes this same prose — the
@@ -92,34 +91,32 @@ def test_a_chat_owned_session_is_not_published_twice() -> None:
     says it twice in a row.
     """
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            try:
-                await _session_row(mgr, "sess-tg", "telegram:mind-1")
-                events = _capture(mgr)
-                result = await mgr.publish_pty_text("sess-tg", "the build passed")
-                return result, events
-            finally:
-                await mgr.shutdown()
+        mgr = await _make_manager()
+        try:
+            await _session_row(mgr, "sess-tg", "telegram:mind-1")
+            events = _capture(mgr)
+            result = await mgr.publish_pty_text("sess-tg", "the build passed")
+            return result, events
+        finally:
+            await close_manager(mgr)
 
     result, events = _run(scenario())
     assert result["ok"] is False
     assert events == [], "chat-owned prose was published a second time"
 
 
-def test_whitespace_between_tool_calls_is_not_spoken() -> None:
+def test_whitespace_between_tool_calls_is_not_spoken(comms_db) -> None:
     """A blank run between two tool calls is not a sentence, and a tile that
     receives it spends a voice-server round trip rendering silence."""
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            try:
-                await _session_row(mgr, "sess-web", "web")
-                events = _capture(mgr)
-                result = await mgr.publish_pty_text("sess-web", "   \n  ")
-                return result, events
-            finally:
-                await mgr.shutdown()
+        mgr = await _make_manager()
+        try:
+            await _session_row(mgr, "sess-web", "web")
+            events = _capture(mgr)
+            result = await mgr.publish_pty_text("sess-web", "   \n  ")
+            return result, events
+        finally:
+            await close_manager(mgr)
 
     result, events = _run(scenario())
     assert result["ok"] is False

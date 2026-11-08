@@ -10,14 +10,18 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-import time
 from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
 
-from comms import broker
 from comms.sessions import MindRefusedCredential
+from comms_pg_fixture import (  # noqa: F401 - fixtures
+    comms_db,
+    fetchval,
+    scratch_dsn,
+    seed_session,
+)
 
 MIND_A = "11111111-1111-4111-8111-111111111111"
 
@@ -35,9 +39,7 @@ def _run(coro):
 
 
 @pytest.fixture
-def app_client(monkeypatch, tmp_path):
-    monkeypatch.setenv("BROKER_DB_PATH", str(tmp_path / "broker.db"))
-    monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "sessions.db"))
+def app_client(monkeypatch, comms_db):  # noqa: F811 - the imported fixture
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-bearer")
 
     from comms import server as server_module
@@ -67,7 +69,7 @@ def test_the_registration_route_persists_the_token(app_client) -> None:
     assert response.status_code == 200
 
     stored = _run(
-        broker.get_mind_session_token(server_module.session_mgr.broker_db, MIND_A)
+        fetchval("SELECT session_token FROM core.minds WHERE mind_id = $1", MIND_A)
     )
     assert stored == "alpha-token"  # secret-guard: allow
 
@@ -138,15 +140,11 @@ def test_a_command_names_the_refusal_rather_than_internal_server_error(
     useful sentence available for the one failure designed to be legible."""
     client, server_module = app_client
     mgr = server_module.session_mgr
-    now = time.time()
-    _run(mgr._db.execute(
-        """INSERT INTO sessions (id, owner_type, owner_ref, model, created_at,
-                                 last_active, status, mind_id, summary, claude_sid)
-           VALUES ('sess-sw', 'telegram', '123', 'sonnet', ?, ?, 'running', ?,
-                   'chat', 'conv-1')""",
-        (now, now, MIND_A),
+    # On the app's own loop: the pool the lifespan opened lives there.
+    client.portal.call(lambda: seed_session(
+        "sess-sw", owner_type="telegram", owner_ref="123", model="sonnet",
+        mind_id=MIND_A, summary="chat", claude_sid="conv-1",
     ))
-    _run(mgr._db.commit())
 
     with patch.object(mgr, "activate_session", _refusing):
         response = client.post(

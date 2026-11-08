@@ -12,34 +12,34 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
-import tempfile
-import time
 from unittest.mock import patch
 
 import pytest
 
 from comms.sessions import SessionManager
+from comms_pg_fixture import (  # noqa: F401 - fixtures
+    close_manager,
+    comms_db,
+    fetchval,
+    make_manager,
+    register_mind,
+    scratch_dsn,
+    seed_session,
+)
 
 
 
-async def _make_manager(tmp: str) -> SessionManager:
-    os.environ["SESSIONS_DB_PATH"] = os.path.join(tmp, "sessions.db")
-    mgr = SessionManager()
-    await mgr.start()
+async def _make_manager() -> SessionManager:
+    mgr = await make_manager()
     return mgr
 
 
 async def _seed(mgr: SessionManager, session_id: str = "sess-turn",
                 claude_sid: str = "conv-pinned") -> str:
-    now = time.time()
-    await mgr._db.execute(
-        """INSERT INTO sessions (id, owner_type, owner_ref, model, claude_sid, created_at,
-                                 last_active, status, mind_id, summary)
-           VALUES (?, 'telegram', '123', 'opus', ?, ?, ?, 'running', 'ada', 'new chat')""",
-        (session_id, claude_sid, now, now),
+    await seed_session(
+        session_id, owner_type="telegram", owner_ref="123", model="opus",
+        claude_sid=claude_sid, status="running", mind_id="ada", summary="new chat",
     )
-    await mgr._db.commit()
     mgr._procs[session_id] = {"_mind_url": "http://mind.test:8420"}
     mgr._mind_ids[session_id] = "ada"
     return session_id
@@ -99,166 +99,175 @@ def _drain(mgr, sid, response):
 
 
 async def _stored_sid(mgr: SessionManager, session_id: str) -> str | None:
-    cur = await mgr._db.execute(
-        "SELECT claude_sid FROM sessions WHERE id = ?", (session_id,)
+    return await fetchval(
+        "SELECT conversation_id FROM core.sessions WHERE id = $1", session_id
     )
-    row = await cur.fetchone()
-    return row["claude_sid"] if row else None
 
 
-def _patched_deps(mgr, spawned=None):
-    """create_session's two outbound dependencies, stubbed."""
+async def _patched_deps(mgr, spawned=None):
+    """create_session's outbound dependency stubbed, and its mind registered.
+
+    The mind declares no harness, so no harness listing is asked of it.
+    """
 
     async def fake_spawn(session_id, model, **kw):
         if spawned is not None:
             spawned.append({"session_id": session_id, **kw})
         mgr._procs[session_id] = {"_mind_url": "http://mind.test:8420"}
 
-    async def fake_mind(db, mind_id):
-        return {"name": "ada", "model": "opus", "gateway_url": "http://mind.test:8420"}
-
     async def fake_blocks(**kw):
         return ""
 
     mgr._spawn = fake_spawn  # type: ignore[assignment]
-    return patch("comms.broker.get_mind_by_id", fake_mind), \
-        patch("comms.bootstrap_loader.compose_prompt_blocks", fake_blocks)
+    await register_mind("ada", model="opus", harness="",
+                        gateway_url="http://mind.test:8420")
+    return patch("comms.bootstrap_loader.compose_prompt_blocks", fake_blocks)
 
 
-def test_a_session_owns_a_conversation_from_the_moment_it_is_created() -> None:
+def test_a_session_owns_a_conversation_from_the_moment_it_is_created(comms_db) -> None:
     """No window in which "what conversation is this?" has no answer."""
 
     async def scenario() -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            spawned: list[dict] = []
-            try:
-                p_mind, p_blocks = _patched_deps(mgr, spawned)
-                with p_mind, p_blocks:
-                    session = await mgr.create_session(
-                        owner_type="telegram", owner_ref="123", client_ref="123",
-                        model="opus", mind_id="ada",
-                    )
+        mgr = await _make_manager()
+        spawned: list[dict] = []
+        try:
+            p_blocks = await _patched_deps(mgr, spawned)
+            with p_blocks:
+                session = await mgr.create_session(
+                    owner_type="telegram", owner_ref="123", client_ref="123",
+                    model="opus", mind_id="ada",
+                )
 
-                sid = session["id"]
-                stored = await _stored_sid(mgr, sid)
-                assert stored, "conversation id minted at creation"
-                # The mind is told the same id the row already holds.
-                assert spawned[0]["resume_sid"] == stored
-            finally:
-                await mgr.shutdown()
+            sid = session["id"]
+            stored = await _stored_sid(mgr, sid)
+            assert stored, "conversation id minted at creation"
+            # The mind is told the same id the row already holds.
+            assert spawned[0]["resume_sid"] == stored
+        finally:
+            await close_manager(mgr)
 
     asyncio.run(scenario())
 
 
-def test_two_sessions_get_two_conversations() -> None:
+def test_two_sessions_get_two_conversations(comms_db) -> None:
     async def scenario() -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            try:
-                p_mind, p_blocks = _patched_deps(mgr)
-                with p_mind, p_blocks:
-                    a = await mgr.create_session(owner_type="telegram", owner_ref="1",
-                                                 client_ref="1", model="opus", mind_id="ada")
-                    b = await mgr.create_session(owner_type="telegram", owner_ref="2",
-                                                 client_ref="2", model="opus", mind_id="ada")
+        mgr = await _make_manager()
+        try:
+            p_blocks = await _patched_deps(mgr)
+            with p_blocks:
+                a = await mgr.create_session(owner_type="telegram", owner_ref="1",
+                                             client_ref="1", model="opus", mind_id="ada")
+                b = await mgr.create_session(owner_type="telegram", owner_ref="2",
+                                             client_ref="2", model="opus", mind_id="ada")
 
-                sid_a = await _stored_sid(mgr, a["id"])
-                sid_b = await _stored_sid(mgr, b["id"])
-                assert sid_a and sid_b and sid_a != sid_b
-            finally:
-                await mgr.shutdown()
+            sid_a = await _stored_sid(mgr, a["id"])
+            sid_b = await _stored_sid(mgr, b["id"])
+            assert sid_a and sid_b and sid_a != sid_b
+        finally:
+            await close_manager(mgr)
 
     asyncio.run(scenario())
 
 
-def test_a_mind_reporting_a_different_conversation_does_not_move_the_session() -> None:
+def test_a_mind_reporting_a_different_conversation_does_not_move_the_session(comms_db) -> None:
     """The harness echoes the id it was pinned to. It is not authority."""
 
     async def scenario() -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            try:
-                sid = await _seed(mgr, claude_sid="conv-pinned")
-                response = _SseResponse([
-                    {"type": "system", "subtype": "init", "session_id": "conv-invented"},
-                    {"type": "assistant", "message": {"content": "hi"}},
-                    {"type": "result", "session_id": "conv-invented"},
-                ])
-                await _drain(mgr, sid, response)
+        mgr = await _make_manager()
+        try:
+            sid = await _seed(mgr, claude_sid="conv-pinned")
+            response = _SseResponse([
+                {"type": "system", "subtype": "init", "session_id": "conv-invented"},
+                {"type": "assistant", "message": {"content": "hi"}},
+                {"type": "result", "session_id": "conv-invented"},
+            ])
+            await _drain(mgr, sid, response)
 
-                assert await _stored_sid(mgr, sid) == "conv-pinned"
-            finally:
-                await mgr.shutdown()
+            assert await _stored_sid(mgr, sid) == "conv-pinned"
+        finally:
+            await close_manager(mgr)
 
     asyncio.run(scenario())
 
 
-def test_the_id_a_terminal_is_handed_never_changes_mid_turn() -> None:
+def test_the_id_a_terminal_is_handed_never_changes_mid_turn(comms_db) -> None:
     """What a concurrent web-terminal attach would be told, event by event."""
 
     async def scenario() -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            try:
-                sid = await _seed(mgr, claude_sid="conv-stable")
-                seen: list[str | None] = []
+        mgr = await _make_manager()
+        try:
+            sid = await _seed(mgr, claude_sid="conv-stable")
+            seen: list[str | None] = []
 
-                async def after(event):
-                    seen.append(await _stored_sid(mgr, sid))
+            async def after(event):
+                seen.append(await _stored_sid(mgr, sid))
 
-                response = _SseResponse(
-                    [
-                        {"type": "system", "subtype": "init", "session_id": "conv-stable"},
-                        {"type": "assistant", "message": {"content": "working"}},
-                        {"type": "result", "session_id": "conv-stable"},
-                    ],
-                    on_event=after,
-                )
-                await _drain(mgr, sid, response)
+            response = _SseResponse(
+                [
+                    {"type": "system", "subtype": "init", "session_id": "conv-stable"},
+                    {"type": "assistant", "message": {"content": "working"}},
+                    {"type": "result", "session_id": "conv-stable"},
+                ],
+                on_event=after,
+            )
+            await _drain(mgr, sid, response)
 
-                assert seen and set(seen) == {"conv-stable"}
-            finally:
-                await mgr.shutdown()
+            assert seen and set(seen) == {"conv-stable"}
+        finally:
+            await close_manager(mgr)
 
     asyncio.run(scenario())
 
 
-def test_spawning_without_a_conversation_id_is_refused() -> None:
+def test_spawning_without_a_conversation_id_is_refused(comms_db) -> None:
     async def scenario() -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            try:
-                with pytest.raises(ValueError, match="without a conversation id"):
-                    await mgr._spawn("sess-x", "opus", mind_id="ada")
-            finally:
-                await mgr.shutdown()
+        mgr = await _make_manager()
+        try:
+            with pytest.raises(ValueError, match="without a conversation id"):
+                await mgr._spawn("sess-x", "opus", mind_id="ada")
+        finally:
+            await close_manager(mgr)
 
     asyncio.run(scenario())
 
 
-def test_legacy_rows_without_a_conversation_id_are_backfilled_on_start() -> None:
+def test_legacy_rows_without_a_conversation_id_are_backfilled_on_start(comms_db) -> None:
     """Rows created before the id was minted at creation never finished a
     turn, so there is no conversation on disk to lose — but the hole is
     exactly what an attach used to invent its way around."""
 
     async def scenario() -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            now = time.time()
-            await mgr._db.execute(
-                """INSERT INTO sessions (id, owner_type, owner_ref, model, claude_sid,
-                                         created_at, last_active, status, mind_id)
-                   VALUES ('legacy', 'telegram', '9', 'opus', NULL, ?, ?, 'idle', 'ada')""",
-                (now, now),
-            )
-            await mgr._db.commit()
-            await mgr.shutdown()
+        mgr = await _make_manager()
+        await seed_session(
+            "legacy", owner_type="telegram", owner_ref="9", model="opus",
+            claude_sid=None, status="idle", mind_id="ada",
+        )
+        await close_manager(mgr)
 
-            mgr = await _make_manager(tmp)
-            try:
-                assert await _stored_sid(mgr, "legacy")
-            finally:
-                await mgr.shutdown()
+        mgr = await _make_manager()
+        try:
+            assert await _stored_sid(mgr, "legacy")
+        finally:
+            await close_manager(mgr)
 
     asyncio.run(scenario())
+
+
+def test_a_session_goes_out_under_both_the_old_and_the_new_names(comms_db) -> None:
+    """Consumers move to the schema's names one at a time, so for now every
+    session read carries both and they agree."""
+    async def scenario():
+        mgr = await _make_manager()
+        try:
+            await _seed(mgr, "sess-names", claude_sid="conv-both")
+            session = await mgr.get_session("sess-names")
+        finally:
+            await close_manager(mgr)
+        return session
+
+    session = asyncio.run(scenario())
+
+    assert session["claude_sid"] == session["conversation_id"] == "conv-both"
+    assert session["owner_type"] == session["surface"] == "telegram"
+    assert session["owner_ref"] == session["surface_id"] == "123"
+    assert session["summary"] == session["opening_line"] == "new chat"

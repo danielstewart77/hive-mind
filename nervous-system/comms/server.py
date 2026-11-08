@@ -16,11 +16,13 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 import aiohttp
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
+import hive_data
+from hive_data import broker_ops, core
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from comms.config import PROJECT_DIR, config
+from comms.config import config
 import comms.broker as broker
 from comms.auth import require_admin_bearer, require_rename_bearer
 from comms.broker import check_secret_scope, get_secret_scopes, grant_secret_scope, revoke_secret_scope
@@ -60,26 +62,27 @@ session_mgr = SessionManager()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Broker DB init + startup recovery. broker.minds IS the mind
-    # registry — there is no in-memory cache. Every lookup queries the
-    # DB directly. Single source of truth. Wired before the session
-    # manager starts, whose migrations read each mind's registration.
-    _broker_db_path = os.environ.get("BROKER_DB_PATH", str(PROJECT_DIR / "data" / "broker.db"))
-    Path(_broker_db_path).parent.mkdir(parents=True, exist_ok=True)
-    _broker_db = await broker.init_db(_broker_db_path)
-    # Per-user credentials live beside the minds whose owners they are checked
-    # against, so resolving a caller is one database. Created before the handle
-    # is published, or a request arriving in that window resolves its caller
-    # against a table that does not exist yet.
-    await user_access.init_credentials(_broker_db)
-    app.state.broker_db = _broker_db
-    session_mgr.broker_db = app.state.broker_db
-    await session_mgr.start()
+    # The hive's one database, opened before anything serves. broker.minds
+    # IS the mind registry — there is no in-memory cache, every lookup asks
+    # the database. Opened before the session manager starts, whose
+    # migrations read each mind's registration, and before the gate can
+    # resolve a caller: until the pool is open the gate answers 503.
+    #
+    # `connect` checks the applied schema against the columns `hive_data`
+    # names, so a database that is not the one these operations were written
+    # against is a gateway that refuses to start rather than one answering
+    # every request with a missing column.
+    await hive_data.connect()
+    try:
+        await session_mgr.start()
 
-    pending = await broker.recover_stranded_messages(app.state.broker_db)
+        pending = await broker.recover_stranded_messages()
+    except BaseException:
+        await hive_data.close(drain_timeout=5.0)
+        raise
     for msg in pending:
         asyncio.create_task(broker.wakeup_and_collect(
-            app.state.broker_db, session_mgr,
+            session_mgr,
             message_id=msg["id"],
             conversation_id=msg["conversation_id"],
             from_mind=msg["from_mind"],
@@ -101,13 +104,14 @@ async def lifespan(app: FastAPI):
     finally:
         # Reverse of startup. The session manager's shutdown kills every
         # live session, and each kill reads that mind's session token off
-        # the broker row to authenticate the call — so the broker DB has
-        # to outlive it. Closing the broker first makes every kill fail
-        # with "no active connection", leaving harness processes running
-        # on the minds while the gateway reports a clean stop.
-        await session_mgr.shutdown()
-        closing, app.state.broker_db = app.state.broker_db, None
-        await closing.close()
+        # the broker row to authenticate the call — so the database has to
+        # outlive it. Closing it first makes every kill fail, leaving
+        # harness processes running on the minds while the gateway reports a
+        # clean stop.
+        try:
+            await session_mgr.shutdown()
+        finally:
+            await hive_data.close(drain_timeout=5.0)
         log_event(log, "service.stopped", component="hive-comms")
 
 
@@ -147,7 +151,6 @@ async def _session_mind(session_id: str) -> str | None:
 app.add_middleware(
     user_access.UserAccess,
     table=session_access.TABLE,
-    broker_db=lambda: getattr(app.state, "broker_db", None),
     session_mind=_session_mind,
 )
 
@@ -172,7 +175,7 @@ async def _refuse_foreign_session(request: Request, session_id: str) -> None:
     one owner is no scoping at all between them.
     """
     caller = _caller(request)
-    keys = await user_access.holder_keys(app.state.broker_db, caller)
+    keys = await user_access.holder_keys(caller)
     if keys is None:
         return
     mind_id = await _session_mind(session_id)
@@ -196,7 +199,7 @@ async def _require_own_session_mind(request: Request, session_id: str) -> None:
         return
     if caller.role != user_access.MIND:
         raise HTTPException(404, "Session not found")
-    keys = await user_access.holder_keys(app.state.broker_db, caller)
+    keys = await user_access.holder_keys(caller)
     mind_id = await _session_mind(session_id)
     if not user_access.mind_is_named_in(keys, mind_id):
         raise HTTPException(404, "Session not found")
@@ -216,7 +219,7 @@ async def _names_own_mind(caller: user_access.Caller, mind_id: object) -> bool:
     a surface bot serves every mind its owner has, and comms itself acts on
     every mind's behalf.
     """
-    keys = await user_access.holder_keys(app.state.broker_db, caller)
+    keys = await user_access.holder_keys(caller)
     return keys is None or user_access.mind_is_named_in(keys, mind_id)
 
 
@@ -239,7 +242,7 @@ async def _refuse_foreign_mind_in_body(request: Request, mind_id: str) -> None:
     comms composes and reports on every mind's behalf.
     """
     caller = _caller(request)
-    keys = await user_access.holder_keys(app.state.broker_db, caller)
+    keys = await user_access.holder_keys(caller)
     if keys is None:
         return
     if not user_access.mind_is_named_in(keys, mind_id):
@@ -263,7 +266,7 @@ async def _refuse_foreign_client_ref(
     reports on every mind's behalf. A `mind` holder is held to its own mind.
     """
     caller = _caller(request)
-    keys = await user_access.holder_keys(app.state.broker_db, caller)
+    keys = await user_access.holder_keys(caller)
     if keys is None:
         return
     active = await session_mgr.get_active_session(client_type, client_ref)
@@ -292,8 +295,8 @@ async def _owned_mind_keys(
     `owns_mind` decides, so no listing hides a row whose own routes serve it.
     """
     caller = _caller(conn)
-    keys = await user_access.visible_minds(app.state.broker_db, caller)
-    known = await user_access.all_mind_keys(app.state.broker_db)
+    keys = await user_access.visible_minds(caller)
+    known = await user_access.all_mind_keys()
     return caller, keys, known
 
 
@@ -505,7 +508,7 @@ async def create_session(body: CreateSessionRequest, request: Request):
     # conversations that already exist.
     caller = _caller(request)
     if not await user_access.owns_mind(
-        app.state.broker_db, caller, body.mind_id
+        caller, body.mind_id
     ):
         return JSONResponse(
             {"error": "Mind not found"}, status_code=404
@@ -823,7 +826,6 @@ async def put_holder_credential(holder: str, body: CredentialRequest):
     """
     try:
         return await user_access.put_credential(
-            app.state.broker_db,
             holder,
             body.username,
             body.token,
@@ -845,7 +847,7 @@ async def delete_holder_credential(holder: str):
     deleted, so the screen can say "revoked" where it would otherwise have to
     say "never had one" — different facts with different remedies.
     """
-    revoked = await user_access.revoke_credential(app.state.broker_db, holder)
+    revoked = await user_access.revoke_credential(holder)
     return {"holder": holder.strip().lower(), "revoked": revoked}
 
 
@@ -853,20 +855,16 @@ async def delete_holder_credential(holder: str):
 async def list_credentials():
     """Which holders have a credential, whose they answer for, and whether it
     is live. Never the value."""
-    rows = await app.state.broker_db.execute(
-        "SELECT holder, username, role, created_at, revoked_at FROM credentials "
-        "ORDER BY username, holder"
-    )
     return [
         {
-            "holder": holder,
-            "username": username,
-            "role": role,
-            "created_at": created_at,
-            "revoked_at": revoked_at,
-            "live": revoked_at is None,
+            "holder": row["holder"],
+            "username": row["username"],
+            "role": row["role"],
+            "created_at": row["created_at"],
+            "revoked_at": row["revoked_at"],
+            "live": row["revoked_at"] is None,
         }
-        for holder, username, role, created_at, revoked_at in await rows.fetchall()
+        for row in await broker_ops.list_credentials()
     ]
 
 
@@ -1100,19 +1098,18 @@ async def write_rotation_memory(
         return JSONResponse({"error": "mind_id required"}, status_code=400)
     if not body.body.strip():
         return JSONResponse({"error": "body required"}, status_code=400)
-    db = session_mgr._db
-    if db is None:
-        return JSONResponse({"error": "session manager not started"}, status_code=503)
     # Resolve mind_name from broker.minds for symmetry with create_session.
-    row = await broker.get_mind_by_id(app.state.broker_db, body.mind_id)
+    row = await broker.get_mind_by_id(body.mind_id)
     mind_name = (row or {}).get("name") or body.mind_id
-    cursor = await db.execute(
-        """INSERT INTO session_memory (mind_id, mind_name, client_ref, session_id, body, created_at)
-           VALUES (?, ?, ?, ?, ?, strftime('%s','now'))""",
-        (body.mind_id, mind_name, body.client_ref, session_id, body.body),
+    # `conversation_id` is the column the old `session_id` became: a
+    # provenance stamp holding the harness's id, which nothing reads back.
+    # Whole epoch seconds, as `strftime('%s','now')` wrote them.
+    written = await core.add_session_memory(
+        mind_id=body.mind_id, mind_name=mind_name, client_ref=body.client_ref,
+        conversation_id=session_id, body=body.body,
+        created_at=float(int(time.time())),
     )
-    await db.commit()
-    return {"ok": True, "id": cursor.lastrowid}
+    return {"ok": True, "id": written["row"]["id"]}
 
 
 # ---------------------------------------------------------------------------
@@ -1504,8 +1501,8 @@ async def _selectable(
         client_ref=body.client_ref,
         mind_id=body.mind_id,
     )
-    keys = await user_access.visible_minds(app.state.broker_db, caller)
-    known = await user_access.all_mind_keys(app.state.broker_db)
+    keys = await user_access.visible_minds(caller)
+    known = await user_access.all_mind_keys()
     return user_access.filter_sessions(rows, caller, keys, known)
 
 
@@ -1523,7 +1520,7 @@ async def _resolve_target(
     if not target.isdigit():
         mind_id = await _session_mind(target)
         if mind_id is None or not await user_access.owns_mind(
-            app.state.broker_db, caller, mind_id
+            caller, mind_id
         ):
             return target, {"error": "Session not found"}
         return target, None
@@ -1553,7 +1550,7 @@ async def _handle_command(
 ):
     if cmd in _MIND_BOUND_COMMANDS and not caller.sees_everything():
         if not await user_access.owns_mind(
-            app.state.broker_db, caller, body.mind_id
+            caller, body.mind_id
         ):
             return {"error": "Session not found"}
         if not await _names_own_mind(caller, body.mind_id):
@@ -1565,14 +1562,14 @@ async def _handle_command(
         # is refused in the same words an absent one gets, so the command
         # cannot be used to find out which references are live.
         if active and not await user_access.owns_mind(
-            app.state.broker_db, caller, active.get("mind_id")
+            caller, active.get("mind_id")
         ):
             return {"error": "Session not found"}
 
     if cmd == "/status":
         rows = await session_mgr.list_sessions()
-        keys = await user_access.visible_minds(app.state.broker_db, caller)
-        known = await user_access.all_mind_keys(app.state.broker_db)
+        keys = await user_access.visible_minds(caller)
+        known = await user_access.all_mind_keys()
         sessions = user_access.filter_sessions(rows, caller, keys, known)
         running = sum(1 for s in sessions if s["status"] == "running")
         return {
@@ -1684,8 +1681,8 @@ async def _handle_command(
         active = await session_mgr.get_active_session(body.owner_type, body.client_ref)
         active_id = active["id"] if active else None
         rows = await session_mgr.list_sessions(owner_ref=body.owner_ref)
-        keys = await user_access.visible_minds(app.state.broker_db, caller)
-        known = await user_access.all_mind_keys(app.state.broker_db)
+        keys = await user_access.visible_minds(caller)
+        known = await user_access.all_mind_keys()
         sessions = user_access.filter_sessions(rows, caller, keys, known)
         killed: list[str] = []
         for s in sessions:
@@ -1714,17 +1711,16 @@ async def _handle_command(
 # ---------------------------------------------------------------------------
 async def _mind_exists(mind_id: str) -> bool:
     """Check if a mind is registered in the broker."""
-    return await broker.get_mind_by_id(app.state.broker_db, mind_id) is not None
+    return await broker.get_mind_by_id(mind_id) is not None
 
 
 @app.get("/broker/minds")
 async def broker_get_minds():
     """Return all registered minds from the broker database."""
-    db = app.state.broker_db
-    return await broker.get_registered_minds(db)
+    return await broker.get_registered_minds()
 
 
-async def _refuse_foreign_registration(db, caller, body) -> None:
+async def _refuse_foreign_registration(caller, body) -> None:
     """A mind registers its own row, judged on both fields rather than either.
 
     Matching the holder against `mind_id` *or* `name` is not a check. The
@@ -1741,11 +1737,13 @@ async def _refuse_foreign_registration(db, caller, body) -> None:
     """
     asked_id = str(body.mind_id or "").strip()
     asked_name = user_access.normalize_username(body.name)
-    rows = await db.execute(
-        "SELECT mind_id, name FROM minds WHERE mind_id = ? OR lower(name) = ?",
-        (asked_id, asked_name),
-    )
-    existing = await rows.fetchall()
+    # Every row either field names — there may be two, one per field — so
+    # read the registry rather than one lookup that would stop at the first.
+    existing = [
+        (row["mind_id"], row["name"])
+        for row in await core.list_minds()
+        if row["mind_id"] == asked_id or (row["name"] or "").lower() == asked_name
+    ]
     for mind_id, name in existing:
         keys = {str(mind_id or ""), user_access.normalize_username(name)}
         if caller.holder not in keys:
@@ -1784,16 +1782,14 @@ async def broker_register_mind(request: Request, body: RegisterMindRequest):
     route.
     """
     caller = _caller(request)
-    db = app.state.broker_db
     if not caller.sees_everything():
         if caller.role != user_access.MIND:
             raise HTTPException(
                 401, "Registration needs an admin or a mind's own credential"
             )
-        await _refuse_foreign_registration(db, caller, body)
+        await _refuse_foreign_registration(caller, body)
     try:
         await broker.register_mind(
-            db,
             mind_id=body.mind_id,
             name=body.name,
             gateway_url=body.gateway_url,
@@ -1806,7 +1802,13 @@ async def broker_register_mind(request: Request, body: RegisterMindRequest):
         )
     except broker.OwnerRequired as exc:
         return JSONResponse({"error": str(exc)}, status_code=422)
-    return await broker.get_mind_by_id(db, body.mind_id)
+    except hive_data.Conflict:
+        # The name is the registry's primary key, and another mind holds it.
+        return JSONResponse(
+            {"error": f"another mind is already registered as {body.name!r}"},
+            status_code=409,
+        )
+    return await broker.get_mind_by_id(body.mind_id)
 
 
 async def _refuse_foreign_claim(request: Request, mind_id: str) -> None:
@@ -1835,7 +1837,7 @@ async def broker_get_surface_claim(
     """
     await _refuse_foreign_claim(request, mind_id)
     try:
-        state = await surface_claims.claim_state(app.state.broker_db, mind_id, surface)
+        state = await surface_claims.claim_state(mind_id, surface)
     except surface_claims.UnknownSurface as exc:
         return JSONResponse({"error": str(exc)}, status_code=422)
     return {
@@ -1861,12 +1863,15 @@ async def broker_mint_surface_claim_phrase(mind_id: str, surface: str = "telegra
     live doors open.
     """
     try:
-        phrase = await surface_claims.mint_phrase(app.state.broker_db, mind_id, surface)
+        phrase = await surface_claims.mint_phrase(mind_id, surface)
     except surface_claims.UnknownSurface as exc:
         return JSONResponse({"error": str(exc)}, status_code=422)
+    except hive_data.MissingReference:
+        # A claim row names a registered mind; the key is real now.
+        return JSONResponse({"error": f"Mind '{mind_id}' not registered"}, status_code=404)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
-    state = await surface_claims.claim_state(app.state.broker_db, mind_id, surface)
+    state = await surface_claims.claim_state(mind_id, surface)
     return {
         "phrase": phrase,
         "surface": state.surface,
@@ -1890,10 +1895,13 @@ async def broker_record_surface_claim_bot(
     """
     try:
         state = await surface_claims.record_bot(
-            app.state.broker_db, mind_id, surface, body.bot_ref
+            mind_id, surface, body.bot_ref
         )
     except surface_claims.UnknownSurface as exc:
         return JSONResponse({"error": str(exc)}, status_code=422)
+    except hive_data.MissingReference:
+        # A claim row names a registered mind; the key is real now.
+        return JSONResponse({"error": f"Mind '{mind_id}' not registered"}, status_code=404)
     return {
         "ok": True, "surface": state.surface,
         "claimed": state.claimed, "claimed_ref": state.claimed_ref,
@@ -1911,7 +1919,7 @@ async def broker_clear_surface_claim(mind_id: str, surface: str = "telegram"):
     claimable with a phrase its previous person was shown.
     """
     try:
-        state = await surface_claims.clear_claim(app.state.broker_db, mind_id, surface)
+        state = await surface_claims.clear_claim(mind_id, surface)
     except surface_claims.UnknownSurface as exc:
         return JSONResponse({"error": str(exc)}, status_code=422)
     return {"ok": True, "mind_id": state.mind_id, "surface": state.surface,
@@ -1931,7 +1939,7 @@ async def broker_attempt_surface_claim(
     await _refuse_foreign_claim(request, mind_id)
     try:
         outcome = await surface_claims.attempt_claim(
-            app.state.broker_db, mind_id, body.surface, body.sender_ref, body.text
+            mind_id, body.surface, body.sender_ref, body.text
         )
     except surface_claims.UnknownSurface as exc:
         return JSONResponse({"error": str(exc)}, status_code=422)
@@ -1958,10 +1966,13 @@ async def broker_adopt_surface_claim(
     await _refuse_foreign_claim(request, mind_id)
     try:
         outcome = await surface_claims.adopt_claim(
-            app.state.broker_db, mind_id, body.surface, body.sender_ref
+            mind_id, body.surface, body.sender_ref
         )
     except surface_claims.UnknownSurface as exc:
         return JSONResponse({"error": str(exc)}, status_code=422)
+    except hive_data.MissingReference:
+        # A claim row names a registered mind; the key is real now.
+        return JSONResponse({"error": f"Mind '{mind_id}' not registered"}, status_code=404)
     return {"claimed": outcome.claimed, "reason": outcome.reason,
             "claimed_ref": outcome.claimed_ref}
 
@@ -1970,7 +1981,7 @@ async def broker_adopt_surface_claim(
 async def broker_set_mind_owner(mind_id: str, body: SetMindOwnerRequest):
     """Move a mind to another user. Admin-only; the only way an owner changes."""
     try:
-        result = await broker.set_mind_owner(app.state.broker_db, mind_id, body.owner)
+        result = await broker.set_mind_owner(mind_id, body.owner)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=422)
     if result is None:
@@ -1981,9 +1992,8 @@ async def broker_set_mind_owner(mind_id: str, body: SetMindOwnerRequest):
 @app.put("/broker/minds/{name}", dependencies=[Depends(require_admin_bearer)])
 async def broker_update_mind(name: str, body: UpdateMindRequest):
     """Partially update a mind's fields. Admin-only."""
-    db = app.state.broker_db
     fields = {k: v for k, v in body.model_dump().items() if v is not None}
-    result = await broker.update_mind(db, name, **fields)
+    result = await broker.update_mind(name, **fields)
     if result is None:
         return JSONResponse({"error": f"Mind '{name}' not found"}, status_code=404)
     return result
@@ -1991,9 +2001,16 @@ async def broker_update_mind(name: str, body: UpdateMindRequest):
 
 @app.delete("/broker/minds/{name}", dependencies=[Depends(require_admin_bearer)])
 async def broker_delete_mind(name: str):
-    """Deregister a mind from the broker database. Admin-only."""
-    db = app.state.broker_db
-    deleted = await broker.delete_mind(db, name)
+    """Deregister a mind from the broker database. Admin-only.
+
+    A mind that still has conversations is refused with 409 and a sentence
+    saying so: every conversation names the mind it ran on, and the database
+    keeps them from being orphaned.
+    """
+    try:
+        deleted = await broker.delete_mind(name)
+    except (broker.MindHasConversations, broker.MindStillReferenced) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
     if not deleted:
         return JSONResponse({"error": f"Mind '{name}' not found"}, status_code=404)
     return {"ok": True, "name": name}
@@ -2013,18 +2030,14 @@ async def broker_post_message(body: BrokerMessageRequest, request: Request):
             status_code=404,
         )
 
-    db = app.state.broker_db
     message_id = body.message_id or str(uuid.uuid4())
-    message_number = await broker.get_next_message_number(db, body.conversation_id)
     metadata = body.metadata
 
     result = await broker.insert_message(
-        db,
         message_id=message_id,
         conversation_id=body.conversation_id,
         from_mind=body.from_mind,
         to_mind=body.to_mind,
-        message_number=message_number,
         content=body.content,
         rolling_summary=body.rolling_summary,
         metadata=metadata,
@@ -2039,14 +2052,14 @@ async def broker_post_message(body: BrokerMessageRequest, request: Request):
         )
 
     asyncio.create_task(broker.wakeup_and_collect(
-        db, session_mgr,
+        session_mgr,
         message_id=message_id,
         conversation_id=body.conversation_id,
         from_mind=body.from_mind,
         to_mind=body.to_mind,
         content=body.content,
         rolling_summary=body.rolling_summary,
-        message_number=message_number,
+        message_number=result["message_number"],
         metadata=metadata,
     ))
 
@@ -2060,16 +2073,14 @@ async def broker_post_message(body: BrokerMessageRequest, request: Request):
 @app.get("/broker/messages")
 async def broker_get_messages(conversation_id: str):
     """Get all messages for a conversation."""
-    db = app.state.broker_db
-    messages = await broker.get_messages(db, conversation_id)
+    messages = await broker.get_messages(conversation_id)
     return messages
 
 
 @app.get("/broker/conversations/{conversation_id}")
 async def broker_get_conversation(conversation_id: str):
     """Get conversation detail with all messages."""
-    db = app.state.broker_db
-    messages = await broker.get_messages(db, conversation_id)
+    messages = await broker.get_messages(conversation_id)
     if not messages:
         return JSONResponse({"error": "Conversation not found"}, status_code=404)
     return {"conversation_id": conversation_id, "messages": messages}
@@ -2100,8 +2111,7 @@ async def secrets_get(key: str, request: Request):
         return JSONResponse({"error": "forbidden"}, status_code=403)
 
     # 2. Check scope
-    db = app.state.broker_db
-    allowed = await check_secret_scope(db, mind_name, key)
+    allowed = await check_secret_scope(mind_name, key)
     if not allowed:
         return JSONResponse({"error": "forbidden"}, status_code=403)
 
@@ -2116,18 +2126,16 @@ async def secrets_get(key: str, request: Request):
 @app.post("/secrets/scopes", dependencies=[Depends(require_admin_bearer)])
 async def secrets_grant_scopes(body: SecretScopeRequest):
     """Grant a mind access to one or more secret keys. Admin-only."""
-    db = app.state.broker_db
     for key in body.secret_keys:
-        await grant_secret_scope(db, body.mind_name, key)
+        await grant_secret_scope(body.mind_name, key)
     return {"ok": True, "mind_name": body.mind_name, "granted": body.secret_keys}
 
 
 @app.delete("/secrets/scopes", dependencies=[Depends(require_admin_bearer)])
 async def secrets_revoke_scopes(body: SecretScopeRequest):
     """Revoke a mind's access to one or more secret keys. Admin-only."""
-    db = app.state.broker_db
     for key in body.secret_keys:
-        await revoke_secret_scope(db, body.mind_name, key)
+        await revoke_secret_scope(body.mind_name, key)
     return {"ok": True, "mind_name": body.mind_name, "revoked": body.secret_keys}
 
 
@@ -2158,8 +2166,7 @@ async def secrets_list_scopes(mind_name: str, request: Request):
         if caller_name != mind_name:
             return JSONResponse({"error": "unauthorized"}, status_code=401)
 
-    db = app.state.broker_db
-    keys = await get_secret_scopes(db, mind_name)
+    keys = await get_secret_scopes(mind_name)
     return {"mind_name": mind_name, "secret_keys": keys}
 
 
@@ -2277,7 +2284,7 @@ SMS_INBOUND_ENABLED_KEY = "sms_inbound_enabled"
 async def _sms_inbound_enabled() -> bool:
     """Read the toggle flag. Default False — opt-in, off by default."""
     value = await broker.get_setting(
-        app.state.broker_db, SMS_INBOUND_ENABLED_KEY, default="false"
+        SMS_INBOUND_ENABLED_KEY, default="false"
     )
     return value == "true"
 
@@ -2294,7 +2301,6 @@ async def set_sms_inbound_enabled(body: dict):
     if "enabled" not in body or not isinstance(body["enabled"], bool):
         raise HTTPException(400, "body must be {\"enabled\": bool}")
     await broker.set_setting(
-        app.state.broker_db,
         SMS_INBOUND_ENABLED_KEY,
         "true" if body["enabled"] else "false",
     )
@@ -2364,7 +2370,7 @@ async def sms_inbound(request: Request):
             "dropping"
         )
         return JSONResponse({"status": "ack-no-recipient"}, status_code=200)
-    recipient = await broker.get_mind(app.state.broker_db, recipient_name)
+    recipient = await broker.get_mind(recipient_name)
     if not recipient:
         log.error(
             "sms/inbound: SMS_INBOUND_MIND=%s is not registered in "
@@ -2378,14 +2384,11 @@ async def sms_inbound(request: Request):
     message_id = build_broker_message_id(sender, fields.get("message_id"))
     content = format_dispatch_content(sender, fields.get("text"))
 
-    message_number = await broker.get_next_message_number(app.state.broker_db, conversation_id)
     insert_result = await broker.insert_message(
-        app.state.broker_db,
         message_id=message_id,
         conversation_id=conversation_id,
         from_mind="sms-gateway",
         to_mind=recipient["id"],
-        message_number=message_number,
         content=content,
         rolling_summary="",
         metadata={
@@ -2401,14 +2404,14 @@ async def sms_inbound(request: Request):
         return {"status": "duplicate", "message_id": message_id}
 
     asyncio.create_task(broker.wakeup_and_collect(
-        app.state.broker_db, session_mgr,
+        session_mgr,
         message_id=message_id,
         conversation_id=conversation_id,
         from_mind="sms-gateway",
         to_mind=recipient["id"],
         content=content,
         rolling_summary="",
-        message_number=message_number,
+        message_number=insert_result["message_number"],
         metadata={"source": "sms-inbound", "sender": sender},
     ))
 

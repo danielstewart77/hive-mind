@@ -16,8 +16,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -27,16 +27,113 @@ from fastapi.testclient import TestClient
 from comms import bootstrap_loader
 from comms.sessions import DEFAULT_HARNESS_OVERHEAD_TOKENS as OVERHEAD
 from comms.sessions import SessionManager, SwitchWontFit
+from comms_pg_fixture import (  # noqa: F401 - comms_db and scratch_dsn are fixtures
+    close_manager,
+    comms_db,
+    execute,
+    fetchrow,
+    make_manager,
+    scratch_dsn,
+)
 from tests.test_harness_switch import (
     MIND,
     FakeMind,
     _Resp,
-    _close,
-    _manager,
-    _run,
-    _seed,
     _soul,
 )
+
+MIND_URL = "http://mind.test:8420"
+
+# ---------------------------------------------------------------------------
+# A real manager on the scratch database
+# ---------------------------------------------------------------------------
+
+_OPEN: list[SessionManager] = []
+
+
+def _run(coro):
+    async def guarded():
+        # A scenario that fails part-way still closes its manager and the
+        # pool, which is tied to this loop.
+        try:
+            return await coro
+        finally:
+            while _OPEN:
+                await _close(_OPEN[-1])
+    return asyncio.run(guarded())
+
+
+async def _register(mind_id: str = MIND, *, name: str = "ada",
+                    harness: str = "claude_cli") -> None:
+    """The mind's registration, written straight to the table.
+
+    On a plain connection, so it works on any loop — a route test's app holds
+    its pool on a loop of its own. The name is the primary key, so a row some
+    other test left under the same name is cleared first.
+    """
+    now = time.time()
+    await execute("DELETE FROM core.minds WHERE name = $1 AND mind_id <> $2", name, mind_id)
+    await execute(
+        "INSERT INTO core.minds (mind_id, name, gateway_url, model, harness, "
+        "registered_at, last_seen, owner) VALUES ($1, $2, $3, 'claude-opus-5', $4, $5, $5, "
+        "'daniel') ON CONFLICT (mind_id) DO UPDATE SET name = EXCLUDED.name, "
+        "gateway_url = EXCLUDED.gateway_url, model = EXCLUDED.model, "
+        "harness = EXCLUDED.harness, owner = EXCLUDED.owner",
+        mind_id, name, MIND_URL, harness, now,
+    )
+
+
+async def _manager(harness: str = "claude_cli") -> SessionManager:
+    mgr = await make_manager()
+    _OPEN.append(mgr)
+    await _register(harness=harness)
+    return mgr
+
+
+async def _close(mgr: SessionManager) -> None:
+    if mgr in _OPEN:
+        _OPEN.remove(mgr)
+    # Nothing outside the fake mind is reachable; shutdown must not try.
+    mgr._procs.clear()
+    await close_manager(mgr)
+
+
+async def _seed(
+    mgr: SessionManager | None = None, sid: str = "sess-1", *, harness: str = "claude",
+    model: str = "claude-opus-5", claude_sid: str = "conv-1",
+    harness_sid: str | None = None, effort: str | None = None,
+    client_ref: str = "123",
+) -> str:
+    """A running telegram session bound to its chat, on a plain connection."""
+    now = time.time()
+    await execute(
+        "INSERT INTO core.sessions (id, surface, surface_id, model, conversation_id, "
+        "harness_sid, harness, effort, created_at, last_active, status, mind_id, "
+        "opening_line) VALUES ($1, 'telegram', $2, $3, $4, $5, $6, $7, $8, $8, "
+        "'running', $9, 'chat')",
+        sid, client_ref, model, claude_sid, harness_sid, harness, effort, now, MIND,
+    )
+    await execute(
+        "INSERT INTO core.active_sessions (client_type, client_ref, session_id) "
+        "VALUES ('telegram', $1, $2)", client_ref, sid,
+    )
+    return sid
+
+
+async def _memory(body: str, created_at: float) -> None:
+    """A rotation summary filed for this mind and chat."""
+    await execute(
+        "INSERT INTO core.session_memory (mind_id, mind_name, client_ref, "
+        "conversation_id, body, created_at) VALUES ($1, 'ada', '123', 'sess-1', $2, $3)",
+        MIND, body, created_at,
+    )
+
+
+async def _set(sql_assignments: str, *args) -> None:
+    """Set columns on sess-1 directly."""
+    await execute(
+        f"UPDATE core.sessions SET {sql_assignments} WHERE id = 'sess-1'", *args
+    )
 
 PERCENT = 50
 MODELS = {
@@ -96,16 +193,15 @@ class Mind(FakeMind):
 
 async def _measured(mgr: SessionManager, sid: str = "sess-1", *, tokens=None,
                     has_images=None, window=200_000, threshold=100_000) -> None:
-    await mgr._db.execute(
-        "UPDATE sessions SET context_tokens = ?, context_window = ?, "
-        "context_threshold = ?, context_has_images = ? WHERE id = ?",
-        (tokens, window, threshold, has_images, sid),
+    await execute(
+        "UPDATE core.sessions SET context_tokens = $1, context_window = $2, "
+        "context_threshold = $3, context_has_images = $4 WHERE id = $5",
+        tokens, window, threshold, None if has_images is None else bool(has_images), sid,
     )
-    await mgr._db.execute(
-        "INSERT INTO session_turns (session_id, role, content, created_at) "
-        "VALUES (?, 'user', 'an earlier turn', ?)", (sid, time.time()),
+    await execute(
+        "INSERT INTO core.session_turns (session_id, role, content, created_at) "
+        "VALUES ($1, 'user', 'an earlier turn', $2)", sid, time.time(),
     )
-    await mgr._db.commit()
 
 
 async def _switch(mgr, mind, model, sid="sess-1"):
@@ -133,22 +229,21 @@ def _text(events) -> str:
 # T8, receiving side: a report carries everything and names its conversation
 # ---------------------------------------------------------------------------
 
-def test_a_context_report_persists_every_figure_it_carries(tmp_path, monkeypatch):
-    monkeypatch.setenv("BROKER_DB_PATH", str(tmp_path / "broker.db"))
-    monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "sessions.db"))
+def test_a_context_report_persists_every_figure_it_carries(comms_db, monkeypatch):
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", GRILL_ADMIN)
     from comms import server as server_module
     import importlib
     importlib.reload(server_module)
     with TestClient(server_module.app, headers={"Authorization": f"Bearer {GRILL_ADMIN}"}) as client:
         mgr = server_module.session_mgr
+        _run(_register())
         _run(_seed(mgr))
         answer = client.post("/sessions/context", json={
             "client_type": "telegram", "client_ref": "123", "tokens": 61_500,
             "threshold": 100_000, "window": 200_000, "kind": "estimated",
             "has_images": True, "model": "claude-sonnet-5", "conversation_id": "conv-1",
         }).json()
-        row = _run(mgr._get_row("sess-1"))
+        row = _run_in(client, mgr._get_row("sess-1"))
     assert answer["ok"] is True
     assert (row["context_tokens"], row["context_threshold"], row["context_window"]) == (
         61_500, 100_000, 200_000)
@@ -157,18 +252,17 @@ def test_a_context_report_persists_every_figure_it_carries(tmp_path, monkeypatch
     assert row["context_model"] == "claude-sonnet-5"
 
 
-def test_a_report_for_a_replaced_conversation_is_dropped():
+def test_a_report_for_a_replaced_conversation_is_dropped(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr, claude_sid="conv-2")
-            await _measured(mgr, tokens=5_000)
-            answer = await mgr.report_context_for_client(
-                "telegram", "123", tokens=190_000, conversation_id="conv-1",
-            )
-            row = await mgr._get_row("sess-1")
-            await _close(mgr)
-            return answer, row
+        mgr = await _manager()
+        await _seed(mgr, claude_sid="conv-2")
+        await _measured(mgr, tokens=5_000)
+        answer = await mgr.report_context_for_client(
+            "telegram", "123", tokens=190_000, conversation_id="conv-1",
+        )
+        row = await mgr._get_row("sess-1")
+        await _close(mgr)
+        return answer, row
 
     answer, row = _run(scenario())
     assert answer["ok"] is False
@@ -179,17 +273,16 @@ def test_a_report_for_a_replaced_conversation_is_dropped():
 # T10 / T11: a switch resumes only a conversation the new model can hold
 # ---------------------------------------------------------------------------
 
-def test_a_conversation_just_under_the_new_threshold_resumes_under_its_own_id():
+def test_a_conversation_just_under_the_new_threshold_resumes_under_its_own_id(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _measured(mgr, tokens=99_999, window=1_000_000, threshold=500_000)
-            mind = Mind()
-            result = await _switch(mgr, mind, "claude-sonnet-5")
-            row = await mgr._get_row("sess-1")
-            await _close(mgr)
-            return result, row, mind
+        mgr = await _manager()
+        await _seed(mgr)
+        await _measured(mgr, tokens=99_999, window=1_000_000, threshold=500_000)
+        mind = Mind()
+        result = await _switch(mgr, mind, "claude-sonnet-5")
+        row = await mgr._get_row("sess-1")
+        await _close(mgr)
+        return result, row, mind
 
     result, row, mind = _run(scenario())
     assert result["id"] == "sess-1"
@@ -200,53 +293,48 @@ def test_a_conversation_just_under_the_new_threshold_resumes_under_its_own_id():
     assert (row["context_window"], row["context_threshold"]) == (200_000, 200_000 * PERCENT // 100)
 
 
-def test_a_switch_takes_its_threshold_from_the_new_models_own_percent():
+def test_a_switch_takes_its_threshold_from_the_new_models_own_percent(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _measured(mgr, tokens=10_000, window=1_000_000, threshold=500_000)
-            mind = Mind(percents={"claude-opus-5": 50, "claude-sonnet-5": 40})
-            await _switch(mgr, mind, "claude-sonnet-5")
-            row = await mgr._get_row("sess-1")
-            await _close(mgr)
-            return row
+        mgr = await _manager()
+        await _seed(mgr)
+        await _measured(mgr, tokens=10_000, window=1_000_000, threshold=500_000)
+        mind = Mind(percents={"claude-opus-5": 50, "claude-sonnet-5": 40})
+        await _switch(mgr, mind, "claude-sonnet-5")
+        row = await mgr._get_row("sess-1")
+        await _close(mgr)
+        return row
 
     row = _run(scenario())
     assert (row["context_window"], row["context_threshold"]) == (200_000, 200_000 * 40 // 100)
 
 
-def test_a_model_row_with_no_percent_falls_back_to_the_conversations_own_ratio():
+def test_a_model_row_with_no_percent_falls_back_to_the_conversations_own_ratio(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _measured(mgr, tokens=10_000, window=1_000_000, threshold=300_000)
-            mind = Mind(percent=None)
-            await _switch(mgr, mind, "claude-sonnet-5")
-            row = await mgr._get_row("sess-1")
-            await _close(mgr)
-            return row
+        mgr = await _manager()
+        await _seed(mgr)
+        await _measured(mgr, tokens=10_000, window=1_000_000, threshold=300_000)
+        mind = Mind(percent=None)
+        await _switch(mgr, mind, "claude-sonnet-5")
+        row = await mgr._get_row("sess-1")
+        await _close(mgr)
+        return row
 
     row = _run(scenario())
     assert (row["context_window"], row["context_threshold"]) == (200_000, 200_000 * 30 // 100)
 
 
-def test_a_chat_over_the_new_threshold_is_handed_over_under_the_same_row():
+def test_a_chat_over_the_new_threshold_is_handed_over_under_the_same_row(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _measured(mgr, tokens=100_001, window=1_000_000, threshold=500_000)
-            await mgr._db.execute("UPDATE sessions SET rotation_armed = 1 WHERE id = 'sess-1'")
-            await mgr._db.commit()
-            mind = Mind()
-            result = await _switch(mgr, mind, "claude-sonnet-5")
-            row = await mgr._get_row("sess-1")
-            cur = await mgr._db.execute("SELECT COUNT(*) FROM sessions")
-            rows = (await cur.fetchone())[0]
-            await _close(mgr)
-            return result, row, rows, mind
+        mgr = await _manager()
+        await _seed(mgr)
+        await _measured(mgr, tokens=100_001, window=1_000_000, threshold=500_000)
+        await _set("rotation_armed = 1")
+        mind = Mind()
+        result = await _switch(mgr, mind, "claude-sonnet-5")
+        row = await mgr._get_row("sess-1")
+        rows = (await fetchrow("SELECT COUNT(*) AS n FROM core.sessions"))["n"]
+        await _close(mgr)
+        return result, row, rows, mind
 
     result, row, rows, mind = _run(scenario())
     assert result["id"] == "sess-1"
@@ -264,99 +352,92 @@ def test_a_chat_over_the_new_threshold_is_handed_over_under_the_same_row():
     assert "100,001" in result["warning"]
 
 
-def test_a_handover_asks_the_mind_to_drop_the_replaced_conversations_rotation_marker():
+def test_a_handover_asks_the_mind_to_drop_the_replaced_conversations_rotation_marker(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _measured(mgr, tokens=100_001, window=1_000_000, threshold=500_000)
-            mind = Mind()
-            await _switch(mgr, mind, "claude-sonnet-5")
-            await _close(mgr)
-            return mind
+        mgr = await _manager()
+        await _seed(mgr)
+        await _measured(mgr, tokens=100_001, window=1_000_000, threshold=500_000)
+        mind = Mind()
+        await _switch(mgr, mind, "claude-sonnet-5")
+        await _close(mgr)
+        return mind
 
     cleared = _run(scenario()).sent("DELETE", "/sessions/sess-1/rotation-marker")
     assert [c["params"].get("claude_sid") for c in cleared] == ["conv-1"]
 
 
-def test_an_unmeasured_conversation_that_has_had_turns_is_never_assumed_to_fit():
+def test_an_unmeasured_conversation_that_has_had_turns_is_never_assumed_to_fit(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _measured(mgr, tokens=None)
-            mind = Mind()
-            await _switch(mgr, mind, "claude-sonnet-5")
-            row = await mgr._get_row("sess-1")
-            await _close(mgr)
-            return row, mind
+        mgr = await _manager()
+        await _seed(mgr)
+        await _measured(mgr, tokens=None)
+        mind = Mind()
+        await _switch(mgr, mind, "claude-sonnet-5")
+        row = await mgr._get_row("sess-1")
+        await _close(mgr)
+        return row, mind
 
     row, mind = _run(scenario())
     assert row["claude_sid"] != "conv-1"
     assert len(mind.sent("POST", "/handover")) == 1
 
 
-def test_images_on_a_text_only_model_hand_over_even_when_the_size_fits():
+def test_images_on_a_text_only_model_hand_over_even_when_the_size_fits(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _measured(mgr, tokens=1_000)
-            await mgr.report_context("sess-1", has_images=True, conversation_id="conv-1")
-            await _switch(mgr, Mind(), "text-only")
-            row = await mgr._get_row("sess-1")
-            await _close(mgr)
-            return row
+        mgr = await _manager()
+        await _seed(mgr)
+        await _measured(mgr, tokens=1_000)
+        await mgr.report_context("sess-1", has_images=True, conversation_id="conv-1")
+        await _switch(mgr, Mind(), "text-only")
+        row = await mgr._get_row("sess-1")
+        await _close(mgr)
+        return row
 
     assert _run(scenario())["claude_sid"] != "conv-1"
 
 
-def test_images_on_a_model_whose_image_support_is_unknown_hand_over():
+def test_images_on_a_model_whose_image_support_is_unknown_hand_over(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _measured(mgr, tokens=1_000, has_images=1)
-            await _switch(mgr, Mind(), "unknown-eyes")
-            row = await mgr._get_row("sess-1")
-            await _close(mgr)
-            return row
+        mgr = await _manager()
+        await _seed(mgr)
+        await _measured(mgr, tokens=1_000, has_images=1)
+        await _switch(mgr, Mind(), "unknown-eyes")
+        row = await mgr._get_row("sess-1")
+        await _close(mgr)
+        return row
 
     assert _run(scenario())["claude_sid"] != "conv-1"
 
 
-def test_a_conversation_with_no_images_resumes_on_a_text_only_model():
+def test_a_conversation_with_no_images_resumes_on_a_text_only_model(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _measured(mgr, tokens=1_000, has_images=0)
-            await _switch(mgr, Mind(), "text-only")
-            row = await mgr._get_row("sess-1")
-            await _close(mgr)
-            return row
+        mgr = await _manager()
+        await _seed(mgr)
+        await _measured(mgr, tokens=1_000, has_images=0)
+        await _switch(mgr, Mind(), "text-only")
+        row = await mgr._get_row("sess-1")
+        await _close(mgr)
+        return row
 
     row = _run(scenario())
     assert row["claude_sid"] == "conv-1"
     assert row["model"] == "text-only"
 
 
-def test_a_terminal_handed_over_keeps_its_row_and_respawns_its_pane_on_the_handover():
+def test_a_terminal_handed_over_keeps_its_row_and_respawns_its_pane_on_the_handover(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _measured(mgr, tokens=150_000, window=1_000_000, threshold=500_000)
-            await mgr._db.execute(
-                "UPDATE sessions SET terminal_held = 1, rotation_armed = 1, "
-                "carry_forward = 'stale seed', carry_forward_sid = 'conv-9' WHERE id = 'sess-1'"
-            )
-            await mgr._db.commit()
-            mind = Mind()
-            result = await _switch(mgr, mind, "claude-sonnet-5")
-            row = await mgr._get_row("sess-1")
-            await _close(mgr)
-            return result, row, mind
+        mgr = await _manager()
+        await _seed(mgr)
+        await _measured(mgr, tokens=150_000, window=1_000_000, threshold=500_000)
+        await _set(
+            "terminal_held = true, rotation_armed = 1, "
+            "carry_forward = 'stale seed', carry_forward_sid = 'conv-9'"
+        )
+        mind = Mind()
+        result = await _switch(mgr, mind, "claude-sonnet-5")
+        row = await mgr._get_row("sess-1")
+        await _close(mgr)
+        return result, row, mind
 
     result, row, mind = _run(scenario())
     assert result["id"] == "sess-1"
@@ -387,36 +468,33 @@ class NoPane(Mind):
         return super()._answer(method, url, params, json_body)
 
 
-def test_a_terminal_whose_pane_is_gone_gets_a_process_on_the_new_conversation():
+def test_a_terminal_whose_pane_is_gone_gets_a_process_on_the_new_conversation(comms_db):
     """A new conversation id is written only with something running it."""
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _measured(mgr, tokens=150_000, window=1_000_000, threshold=500_000)
-            await mgr._db.execute("UPDATE sessions SET terminal_held = 1 WHERE id = 'sess-1'")
-            await mgr._db.commit()
-            mind = NoPane()
-            await _switch(mgr, mind, "claude-sonnet-5")
-            row = await mgr._get_row("sess-1")
-            await _close(mgr)
-            return row, mind
+        mgr = await _manager()
+        await _seed(mgr)
+        await _measured(mgr, tokens=150_000, window=1_000_000, threshold=500_000)
+        await _set("terminal_held = true")
+        mind = NoPane()
+        await _switch(mgr, mind, "claude-sonnet-5")
+        row = await mgr._get_row("sess-1")
+        await _close(mgr)
+        return row, mind
 
     row, mind = _run(scenario())
     assert row["claude_sid"] != "conv-1"
     assert [s["resume_sid"] for s in mind.spawns()] == [row["claude_sid"]]
 
 
-def test_a_model_handover_leaves_room_for_the_soul_and_the_harness_under_the_threshold():
+def test_a_model_handover_leaves_room_for_the_soul_and_the_harness_under_the_threshold(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _measured(mgr, tokens=80_000, window=1_000_000, threshold=300_000)
-            mind = Mind(percent=30)
-            await _switch(mgr, mind, "claude-sonnet-5")
-            await _close(mgr)
-            return mind
+        mgr = await _manager()
+        await _seed(mgr)
+        await _measured(mgr, tokens=80_000, window=1_000_000, threshold=300_000)
+        mind = Mind(percent=30)
+        await _switch(mgr, mind, "claude-sonnet-5")
+        await _close(mgr)
+        return mind
 
     mind = _run(scenario())
     budget = mind.sent("POST", "/handover")[0]["json"]["budget_bytes"]
@@ -424,19 +502,18 @@ def test_a_model_handover_leaves_room_for_the_soul_and_the_harness_under_the_thr
     assert budget == (threshold - OVERHEAD["claude"]) * 4 - len("SOUL-BLOCKS".encode())
 
 
-def test_a_model_change_onto_a_model_with_no_room_for_the_harness_is_refused():
+def test_a_model_change_onto_a_model_with_no_room_for_the_harness_is_refused(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _measured(mgr, tokens=50_000, window=1_000_000, threshold=300_000)
-            before = await mgr._get_row("sess-1")
-            mind = Mind(percent=30)
-            with pytest.raises(SwitchWontFit) as refused:
-                await _switch(mgr, mind, "bilby-32k")
-            after = await mgr._get_row("sess-1")
-            await _close(mgr)
-            return refused.value, before, after, mind
+        mgr = await _manager()
+        await _seed(mgr)
+        await _measured(mgr, tokens=50_000, window=1_000_000, threshold=300_000)
+        before = await mgr._get_row("sess-1")
+        mind = Mind(percent=30)
+        with pytest.raises(SwitchWontFit) as refused:
+            await _switch(mgr, mind, "bilby-32k")
+        after = await mgr._get_row("sess-1")
+        await _close(mgr)
+        return refused.value, before, after, mind
 
     refused, before, after, mind = _run(scenario())
     assert refused.status_code == 409
@@ -446,31 +523,25 @@ def test_a_model_change_onto_a_model_with_no_room_for_the_harness_is_refused():
     assert mind.kills("sess-1") == []
 
 
-def test_a_chat_rotation_trims_its_opening_prompt_to_the_models_threshold():
+def test_a_chat_rotation_trims_its_opening_prompt_to_the_models_threshold(comms_db):
     """The composed prompt — soul, recent memory and the rotation summary —
     has to fit where the conversation will rotate next. There is no
     predecessor row to read that room off any more: it is the rotating row's
     own, which is the same row."""
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _measured(mgr, tokens=1_000, window=200_000, threshold=60_000)
-            await mgr._db.execute(
-                "INSERT INTO session_memory (mind_id, mind_name, client_ref, session_id, body, created_at) "
-                "VALUES (?, 'ada', '123', 'sess-1', ?, ?)",
-                (MIND, json.dumps({"carry_forward": "x" * 200_000 + " LAST WORDS"}), time.time()),
-            )
-            await mgr._db.execute("UPDATE sessions SET rotation_armed = 1 WHERE id = 'sess-1'")
-            await mgr._db.commit()
-            mind = Mind()
-            with mind.wired(), \
-                    patch.object(bootstrap_loader, "_fetch_soul", return_value="<soul>me</soul>"), \
-                    patch.object(bootstrap_loader, "_fetch_recent_memory", return_value=""):
-                async for _ in mgr.send_message("sess-1", "hello"):
-                    pass
-            await _close(mgr)
-            return mind
+        mgr = await _manager()
+        await _seed(mgr)
+        await _measured(mgr, tokens=1_000, window=200_000, threshold=60_000)
+        await _memory(json.dumps({"carry_forward": "x" * 200_000 + " LAST WORDS"}), time.time())
+        await _set("rotation_armed = 1")
+        mind = Mind()
+        with mind.wired(), \
+                patch.object(bootstrap_loader, "_fetch_soul", return_value="<soul>me</soul>"), \
+                patch.object(bootstrap_loader, "_fetch_recent_memory", return_value=""):
+            async for _ in mgr.send_message("sess-1", "hello"):
+                pass
+        await _close(mgr)
+        return mind
 
     mind = _run(scenario())
     blocks = mind.spawns()[-1]["system_prompt_blocks"]
@@ -497,41 +568,36 @@ TOOL_TURN = [
 ]
 
 
-def _db_path(mgr) -> str:
-    import os
-    return os.environ["SESSIONS_DB_PATH"]
-
-
 class Watching(Mind):
-    """Reads the row, through its own connection, the moment a turn arrives."""
+    """Reads the row, through its own connection, the moment a turn arrives.
 
-    def __init__(self, *a, db_path: str = "", **k):
+    The fake answers synchronously, so the read runs to completion on a
+    thread with a loop of its own rather than on the loop it is called from.
+    """
+
+    def __init__(self, *a, **k):
         super().__init__(*a, **k)
-        self.db_path = db_path
         self.rows_at_message: list[dict] = []
 
     def _answer(self, method, url, params=None, json_body=None):
         if method == "POST" and url.endswith("/message"):
-            import sqlite3
-            with sqlite3.connect(self.db_path) as db:
-                db.row_factory = sqlite3.Row
-                row = db.execute("SELECT * FROM sessions WHERE id = 'sess-1'").fetchone()
-                self.rows_at_message.append(dict(row))
+            read = fetchrow("SELECT * FROM core.sessions WHERE id = 'sess-1'")
+            with ThreadPoolExecutor(1) as pool:
+                self.rows_at_message.append(pool.submit(asyncio.run, read).result())
         return super()._answer(method, url, params, json_body)
 
 
-def test_an_overflowed_turn_rotates_and_sends_the_same_message_once_on_the_same_row():
+def test_an_overflowed_turn_rotates_and_sends_the_same_message_once_on_the_same_row(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _measured(mgr, tokens=180_000)
-            mind = Watching(turns=[TOOL_TURN, [DONE]], db_path=_db_path(mgr))
-            events = await _turn(mgr, mind, "ship it")
-            row = await mgr._get_row("sess-1")
-            ledger = await mgr.get_session_turns("sess-1")
-            await _close(mgr)
-            return events, row, ledger, mind
+        mgr = await _manager()
+        await _seed(mgr)
+        await _measured(mgr, tokens=180_000)
+        mind = Watching(turns=[TOOL_TURN, [DONE]])
+        events = await _turn(mgr, mind, "ship it")
+        row = await mgr._get_row("sess-1")
+        ledger = await mgr.get_session_turns("sess-1")
+        await _close(mgr)
+        return events, row, ledger, mind
 
     events, row, ledger, mind = _run(scenario())
     sent = mind.messages()
@@ -549,22 +615,21 @@ def test_an_overflowed_turn_rotates_and_sends_the_same_message_once_on_the_same_
     assert events[-1] == DONE
 
 
-def test_a_message_typed_during_an_overflow_waits_behind_the_resend():
+def test_a_message_typed_during_an_overflow_waits_behind_the_resend(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _measured(mgr, tokens=180_000)
-            mind = Mind(turns=[[OVERFLOW], [DONE], [DONE]])
-            with mind.wired(), _soul():
-                async def drain(text):
-                    return [e async for e in mgr.send_message("sess-1", text)]
-                first = asyncio.create_task(drain("ship it"))
-                await asyncio.sleep(0)
-                second = asyncio.create_task(drain("and then?"))
-                results = await asyncio.gather(first, second)
-            await _close(mgr)
-            return results, mind
+        mgr = await _manager()
+        await _seed(mgr)
+        await _measured(mgr, tokens=180_000)
+        mind = Mind(turns=[[OVERFLOW], [DONE], [DONE]])
+        with mind.wired(), _soul():
+            async def drain(text):
+                return [e async for e in mgr.send_message("sess-1", text)]
+            first = asyncio.create_task(drain("ship it"))
+            await asyncio.sleep(0)
+            second = asyncio.create_task(drain("and then?"))
+            results = await asyncio.gather(first, second)
+        await _close(mgr)
+        return results, mind
 
     results, mind = _run(scenario())
     contents = [m["json"]["content"].rsplit("\n", 1)[-1] for m in mind.messages()]
@@ -572,37 +637,35 @@ def test_a_message_typed_during_an_overflow_waits_behind_the_resend():
     assert results[1][-1] == DONE
 
 
-def test_an_overflowed_turn_is_resent_with_its_images_and_goal_rounds():
+def test_an_overflowed_turn_is_resent_with_its_images_and_goal_rounds(comms_db):
     picture = [{"media_type": "image/png", "data": "AAAA"}]
 
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _measured(mgr, tokens=180_000)
-            mind = Mind(turns=[[OVERFLOW], [DONE]])
-            await _turn(mgr, mind, "look", images=picture, goal_rounds=4)
-            await _close(mgr)
-            return mind
+        mgr = await _manager()
+        await _seed(mgr)
+        await _measured(mgr, tokens=180_000)
+        mind = Mind(turns=[[OVERFLOW], [DONE]])
+        await _turn(mgr, mind, "look", images=picture, goal_rounds=4)
+        await _close(mgr)
+        return mind
 
     resent = _run(scenario()).messages()[1]["json"]
     assert resent["images"] == picture
     assert resent["goal_rounds"] == 4
 
 
-def test_a_harness_that_only_tallies_its_calls_is_not_said_to_have_run_none():
+def test_a_harness_that_only_tallies_its_calls_is_not_said_to_have_run_none(comms_db):
     tallied = {**OVERFLOW, "traffic": {"emitted": 3, "succeeded": 2, "failed": 1}}
 
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr, harness="dsh")
-            await _measured(mgr, tokens=180_000)
-            mind = Mind(turns=[[tallied], [DONE]])
-            await _turn(mgr, mind, "ship it")
-            row = await mgr._get_row("sess-1")
-            await _close(mgr)
-            return row, mind
+        mgr = await _manager()
+        await _seed(mgr, harness="dsh")
+        await _measured(mgr, tokens=180_000)
+        mind = Mind(turns=[[tallied], [DONE]])
+        await _turn(mgr, mind, "ship it")
+        row = await mgr._get_row("sess-1")
+        await _close(mgr)
+        return row, mind
 
     row, mind = _run(scenario())
     opening = [s for s in mind.spawns() if s["resume_sid"] == row["claude_sid"]][0]["opening_turn"]
@@ -610,17 +673,16 @@ def test_a_harness_that_only_tallies_its_calls_is_not_said_to_have_run_none():
     assert "no tool calls" not in opening
 
 
-def test_an_overflow_on_a_row_that_never_reported_is_sized_from_the_models_listing():
+def test_an_overflow_on_a_row_that_never_reported_is_sized_from_the_models_listing(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr, model="claude-sonnet-5")
-            await _measured(mgr, tokens=None, window=None, threshold=None)
-            mind = Mind(turns=[[OVERFLOW], [DONE]])
-            await _turn(mgr, mind, "ship it")
-            row = await mgr._get_row("sess-1")
-            await _close(mgr)
-            return row, mind
+        mgr = await _manager()
+        await _seed(mgr, model="claude-sonnet-5")
+        await _measured(mgr, tokens=None, window=None, threshold=None)
+        mind = Mind(turns=[[OVERFLOW], [DONE]])
+        await _turn(mgr, mind, "ship it")
+        row = await mgr._get_row("sess-1")
+        await _close(mgr)
+        return row, mind
 
     row, mind = _run(scenario())
     threshold = 200_000 * PERCENT // 100
@@ -629,16 +691,15 @@ def test_an_overflow_on_a_row_that_never_reported_is_sized_from_the_models_listi
     assert (row["context_window"], row["context_threshold"]) == (200_000, threshold)
 
 
-def test_a_resent_message_that_overflows_again_is_reported_and_not_rotated_again():
+def test_a_resent_message_that_overflows_again_is_reported_and_not_rotated_again(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _measured(mgr, tokens=180_000)
-            mind = Mind(turns=[[OVERFLOW], [OVERFLOW], [DONE]])
-            events = await _turn(mgr, mind, "ship it")
-            await _close(mgr)
-            return events, mind
+        mgr = await _manager()
+        await _seed(mgr)
+        await _measured(mgr, tokens=180_000)
+        mind = Mind(turns=[[OVERFLOW], [OVERFLOW], [DONE]])
+        events = await _turn(mgr, mind, "ship it")
+        await _close(mgr)
+        return events, mind
 
     events, mind = _run(scenario())
     assert len(mind.sent("POST", "/handover")) == 1
@@ -647,23 +708,20 @@ def test_a_resent_message_that_overflows_again_is_reported_and_not_rotated_again
     assert "again" in _text(events)
 
 
-def test_a_resend_interrupted_by_a_restart_goes_out_once_with_what_it_carried():
+def test_a_resend_interrupted_by_a_restart_goes_out_once_with_what_it_carried(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await mgr._db.execute(
-                "UPDATE sessions SET resend_content = 'ship it', resend_images = ?, "
-                "resend_goal_rounds = 2 WHERE id = 'sess-1'",
-                (json.dumps([{"media_type": "image/png", "data": "AAAA"}]),),
-            )
-            await mgr._db.commit()
-            mind = Mind()
-            with mind.wired(), _soul():
-                first = await mgr.resume_pending_resends()
-                second = await mgr.resume_pending_resends()
-            await _close(mgr)
-            return first, second, mind
+        mgr = await _manager()
+        await _seed(mgr)
+        await _set(
+            "resend_content = 'ship it', resend_images = $1, resend_goal_rounds = 2",
+            json.dumps([{"media_type": "image/png", "data": "AAAA"}]),
+        )
+        mind = Mind()
+        with mind.wired(), _soul():
+            first = await mgr.resume_pending_resends()
+            second = await mgr.resume_pending_resends()
+        await _close(mgr)
+        return first, second, mind
 
     first, second, mind = _run(scenario())
     assert (first, second) == (1, 0)
@@ -673,18 +731,17 @@ def test_a_resend_interrupted_by_a_restart_goes_out_once_with_what_it_carried():
     assert sent["json"]["goal_rounds"] == 2
 
 
-def test_a_resend_whose_answer_never_arrives_is_stamped_and_not_sent_again():
+def test_a_resend_whose_answer_never_arrives_is_stamped_and_not_sent_again(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _measured(mgr, tokens=180_000)
-            mind = Mind(turns=[[OVERFLOW], []])
-            await _turn(mgr, mind, "ship it")
-            row = await mgr._get_row("sess-1")
-            owed = await mgr.pending_resends()
-            await _close(mgr)
-            return row, owed
+        mgr = await _manager()
+        await _seed(mgr)
+        await _measured(mgr, tokens=180_000)
+        mind = Mind(turns=[[OVERFLOW], []])
+        await _turn(mgr, mind, "ship it")
+        row = await mgr._get_row("sess-1")
+        owed = await mgr.pending_resends()
+        await _close(mgr)
+        return row, owed
 
     row, owed = _run(scenario())
     assert row["resend_content"] == "ship it"
@@ -701,51 +758,31 @@ class Refusing(Mind):
         return super()._answer(method, url, params, json_body)
 
 
-def test_a_resend_the_mind_answers_with_an_error_is_no_longer_owed():
+def test_a_resend_the_mind_answers_with_an_error_is_no_longer_owed(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await mgr._db.execute(
-                "UPDATE sessions SET resend_content = 'ship it' WHERE id = 'sess-1'"
-            )
-            await mgr._db.commit()
-            with Refusing().wired(), _soul():
-                await mgr.resume_pending_resends()
-            row = await mgr._get_row("sess-1")
-            await _close(mgr)
-            return row
+        mgr = await _manager()
+        await _seed(mgr)
+        await _set("resend_content = 'ship it'")
+        with Refusing().wired(), _soul():
+            await mgr.resume_pending_resends()
+        row = await mgr._get_row("sess-1")
+        await _close(mgr)
+        return row
 
     row = _run(scenario())
     assert row["resend_content"] is None
     assert row["resend_dispatched_at"] is None
 
 
-def test_the_gateway_sends_an_owed_resend_when_it_starts(tmp_path, monkeypatch):
-    import os
-    from comms import broker as broker_mod
+def test_the_gateway_sends_an_owed_resend_when_it_starts(comms_db, monkeypatch):
     from comms import server as server_module
     import importlib
 
-    monkeypatch.setenv("BROKER_DB_PATH", str(tmp_path / "broker.db"))
-    monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "sessions.db"))
-
     async def before_the_restart():
-        mgr = SessionManager()
-        os.environ["SESSIONS_DB_PATH"] = str(tmp_path / "sessions.db")
-        await mgr.start()
-        mgr.broker_db = await broker_mod.init_db(str(tmp_path / "broker.db"))
-        await broker_mod.register_mind(
-            mgr.broker_db, mind_id=MIND, name="ada", gateway_url="http://mind.test:8420",
-            model="claude-opus-5", harness="claude_cli", owner="daniel",
-        )
+        mgr = await _manager()
         await _seed(mgr)
-        await mgr._db.execute(
-            "UPDATE sessions SET resend_content = 'ship it' WHERE id = 'sess-1'"
-        )
-        await mgr._db.commit()
-        await mgr.broker_db.close()
-        await mgr.shutdown()
+        await _set("resend_content = 'ship it'")
+        await _close(mgr)
 
     _run(before_the_restart())
     mind = Mind()
@@ -757,23 +794,17 @@ def test_the_gateway_sends_an_owed_resend_when_it_starts(tmp_path, monkeypatch):
     assert [m["json"]["content"].endswith("\nship it") for m in mind.messages()] == [True]
 
 
-def test_goal_rounds_reach_the_mind_through_the_message_route(tmp_path, monkeypatch):
+def test_goal_rounds_reach_the_mind_through_the_message_route(comms_db, monkeypatch):
     import importlib
     from comms import server as server_module
 
-    monkeypatch.setenv("BROKER_DB_PATH", str(tmp_path / "broker.db"))
-    monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "sessions.db"))
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", GRILL_ADMIN)
     importlib.reload(server_module)
     mind = Mind()
     with TestClient(server_module.app, headers={"Authorization": f"Bearer {GRILL_ADMIN}"}) as client:
         mgr = server_module.session_mgr
-        from comms import broker as broker_mod
-        _run_in(client, broker_mod.register_mind(
-            mgr.broker_db, mind_id=MIND, name="ada", gateway_url="http://mind.test:8420",
-            model="claude-opus-5", harness="claude_cli", owner="daniel",
-        ))
-        _run_in(client, _seed(mgr))
+        _run(_register())
+        _run(_seed(mgr))
         with mind.wired(), _soul():
             client.post("/sessions/sess-1/message",
                         json={"content": "build it", "goal_rounds": 4}).read()
@@ -789,20 +820,19 @@ def _run_in(client, coro):
 # TG2: a goal stopped at its threshold is rotated and re-dispatched once
 # ---------------------------------------------------------------------------
 
-def test_a_goal_stopped_for_rotation_is_redispatched_once_with_its_rounds_left():
+def test_a_goal_stopped_for_rotation_is_redispatched_once_with_its_rounds_left(comms_db):
     stopped = {"type": "result", "is_error": False, "stop_reason": "rotation_needed",
                "goal": {"objective": "build the widget", "roundsLeft": 3}}
 
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _measured(mgr, tokens=100_500)
-            mind = Mind(turns=[[stopped], [DONE]])
-            events = await _turn(mgr, mind, "build the widget", goal_rounds=5)
-            row = await mgr._get_row("sess-1")
-            await _close(mgr)
-            return events, row, mind
+        mgr = await _manager()
+        await _seed(mgr)
+        await _measured(mgr, tokens=100_500)
+        mind = Mind(turns=[[stopped], [DONE]])
+        events = await _turn(mgr, mind, "build the widget", goal_rounds=5)
+        row = await mgr._get_row("sess-1")
+        await _close(mgr)
+        return events, row, mind
 
     events, row, mind = _run(scenario())
     assert len(mind.sent("POST", "/handover")) == 1
@@ -821,70 +851,63 @@ def test_a_goal_stopped_for_rotation_is_redispatched_once_with_its_rounds_left()
 
 async def _just_rotated(mgr) -> float:
     began = time.time()
-    await mgr._db.execute(
-        "UPDATE sessions SET conversation_started_at = ? WHERE id = 'sess-1'", (began,)
-    )
-    await mgr._db.commit()
+    await _set("conversation_started_at = $1", began)
     return began
 
 
-def test_an_arm_naming_no_conversation_from_a_hook_older_than_the_conversation_is_refused():
+def test_an_arm_naming_no_conversation_from_a_hook_older_than_the_conversation_is_refused(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            began = await _just_rotated(mgr)
-            answer = await mgr.arm_rotation("telegram", "123", started_at=began - 60)
-            row = await mgr._get_row("sess-1")
-            await _close(mgr)
-            return answer, row
+        mgr = await _manager()
+        await _seed(mgr)
+        began = await _just_rotated(mgr)
+        answer = await mgr.arm_rotation("telegram", "123", started_at=began - 60)
+        row = await mgr._get_row("sess-1")
+        await _close(mgr)
+        return answer, row
 
     answer, row = _run(scenario())
     assert answer["ok"] is False
     assert row["rotation_armed"] == 0
 
 
-def test_an_arm_naming_neither_conversation_nor_start_is_refused_on_a_fresh_conversation():
+def test_an_arm_naming_neither_conversation_nor_start_is_refused_on_a_fresh_conversation(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _just_rotated(mgr)
-            answer = await mgr.arm_rotation("telegram", "123")
-            row = await mgr._get_row("sess-1")
-            await _close(mgr)
-            return answer, row
+        mgr = await _manager()
+        await _seed(mgr)
+        await _just_rotated(mgr)
+        answer = await mgr.arm_rotation("telegram", "123")
+        row = await mgr._get_row("sess-1")
+        await _close(mgr)
+        return answer, row
 
     answer, row = _run(scenario())
     assert answer["ok"] is False
     assert row["rotation_armed"] == 0
 
 
-def test_a_handover_dates_the_new_conversation_so_a_late_arm_is_refused():
+def test_a_handover_dates_the_new_conversation_so_a_late_arm_is_refused(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _measured(mgr, tokens=100_001, window=1_000_000, threshold=500_000)
-            hook_started = time.time() - 1
-            await _switch(mgr, Mind(), "claude-sonnet-5")
-            answer = await mgr.arm_rotation("telegram", "123", started_at=hook_started)
-            await _close(mgr)
-            return answer
+        mgr = await _manager()
+        await _seed(mgr)
+        await _measured(mgr, tokens=100_001, window=1_000_000, threshold=500_000)
+        hook_started = time.time() - 1
+        await _switch(mgr, Mind(), "claude-sonnet-5")
+        answer = await mgr.arm_rotation("telegram", "123", started_at=hook_started)
+        await _close(mgr)
+        return answer
 
     assert _run(scenario())["ok"] is False
 
 
-def test_a_report_of_a_zero_window_leaves_the_known_window_alone():
+def test_a_report_of_a_zero_window_leaves_the_known_window_alone(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _measured(mgr, tokens=1_000)
-            await mgr.report_context("sess-1", tokens=2_000, window=0, threshold=0)
-            row = await mgr._get_row("sess-1")
-            await _close(mgr)
-            return row
+        mgr = await _manager()
+        await _seed(mgr)
+        await _measured(mgr, tokens=1_000)
+        await mgr.report_context("sess-1", tokens=2_000, window=0, threshold=0)
+        row = await mgr._get_row("sess-1")
+        await _close(mgr)
+        return row
 
     row = _run(scenario())
     assert (row["context_tokens"], row["context_window"], row["context_threshold"]) == (
@@ -895,16 +918,15 @@ def test_a_report_of_a_zero_window_leaves_the_known_window_alone():
 # T13: the dashboard shows an idle conversation's figures
 # ---------------------------------------------------------------------------
 
-def test_an_idle_conversation_shows_its_size_threshold_and_window():
+def test_an_idle_conversation_shows_its_size_threshold_and_window(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await mgr.report_context("sess-1", tokens=42_000, threshold=100_000,
-                                     window=200_000, kind="usage", now=10.0)
-            board = await mgr.live_dashboard(now=40.0)
-            await _close(mgr)
-            return board
+        mgr = await _manager()
+        await _seed(mgr)
+        await mgr.report_context("sess-1", tokens=42_000, threshold=100_000,
+                                 window=200_000, kind="usage", now=10.0)
+        board = await mgr.live_dashboard(now=40.0)
+        await _close(mgr)
+        return board
 
     board = _run(scenario())
     assert board["sessions"] == []
@@ -951,30 +973,24 @@ def _big_soul():
 async def _with_history(mgr) -> None:
     """A conversation that has had turns and was measured, with a summary."""
     await _measured(mgr, tokens=6_000, window=1_000_000, threshold=500_000)
-    await mgr._db.execute(
-        "INSERT INTO session_memory (mind_id, mind_name, client_ref, session_id, body, created_at) "
-        "VALUES (?, 'ada', '123', 'sess-1', ?, ?)",
-        (MIND, json.dumps({"carry_forward": "We were fixing the boiler."}), time.time()),
-    )
-    await mgr._db.commit()
+    await _memory(json.dumps({"carry_forward": "We were fixing the boiler."}), time.time())
 
 
 @pytest.mark.parametrize("in_pane", [False, True], ids=["chat", "pane"])
-def test_a_harness_switch_leaves_the_conversation_holding_an_estimate_of_what_it_opened_on(in_pane):
+def test_a_harness_switch_leaves_the_conversation_holding_an_estimate_of_what_it_opened_on(comms_db, in_pane):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _with_history(mgr)
-            mind = _codex_mind()
-            with mind.wired(), _big_soul():
-                if in_pane:
-                    await mgr.adopt_into_terminal("sess-1")
-                await mgr.switch_harness("sess-1", "codex", "codex-200k")
-            row = await mgr._get_row("sess-1")
-            board = await mgr.live_dashboard()
-            await _close(mgr)
-            return row, board, mind
+        mgr = await _manager()
+        await _seed(mgr)
+        await _with_history(mgr)
+        mind = _codex_mind()
+        with mind.wired(), _big_soul():
+            if in_pane:
+                await mgr.adopt_into_terminal("sess-1")
+            await mgr.switch_harness("sess-1", "codex", "codex-200k")
+        row = await mgr._get_row("sess-1")
+        board = await mgr.live_dashboard()
+        await _close(mgr)
+        return row, board, mind
 
     row, board, mind = _run(scenario())
     if in_pane:
@@ -995,20 +1011,19 @@ def test_a_harness_switch_leaves_the_conversation_holding_an_estimate_of_what_it
         row["context_tokens"], "estimated", 200_000)
 
 
-def test_a_model_change_right_after_a_harness_switch_that_fits_stays_in_place():
+def test_a_model_change_right_after_a_harness_switch_that_fits_stays_in_place(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _with_history(mgr)
-            mind = _codex_mind()
-            with mind.wired(), _big_soul():
-                await mgr.switch_harness("sess-1", "codex", "codex-200k")
-                first = await mgr._get_row("sess-1")
-                result = await mgr.switch_model("sess-1", "codex-other")
-            row = await mgr._get_row("sess-1")
-            await _close(mgr)
-            return first, result, row, mind
+        mgr = await _manager()
+        await _seed(mgr)
+        await _with_history(mgr)
+        mind = _codex_mind()
+        with mind.wired(), _big_soul():
+            await mgr.switch_harness("sess-1", "codex", "codex-200k")
+            first = await mgr._get_row("sess-1")
+            result = await mgr.switch_model("sess-1", "codex-other")
+        row = await mgr._get_row("sess-1")
+        await _close(mgr)
+        return first, result, row, mind
 
     first, result, row, mind = _run(scenario())
     assert "warning" not in result
@@ -1020,21 +1035,20 @@ def test_a_model_change_right_after_a_harness_switch_that_fits_stays_in_place():
     assert mind.spawns()[-1]["opening_turn"] == first["carry_forward"]
 
 
-def test_a_model_change_right_after_a_harness_switch_that_does_not_fit_hands_over_by_size():
+def test_a_model_change_right_after_a_harness_switch_that_does_not_fit_hands_over_by_size(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _with_history(mgr)
-            mind = _codex_mind()
-            with mind.wired(), _big_soul():
-                await mgr.switch_harness("sess-1", "codex", "codex-200k")
-                first = await mgr._get_row("sess-1")
-                mind.transcripts[first["claude_sid"]] = "a newer exchange"
-                result = await mgr.switch_model("sess-1", "codex-24k")
-            row = await mgr._get_row("sess-1")
-            await _close(mgr)
-            return first, result, row, mind
+        mgr = await _manager()
+        await _seed(mgr)
+        await _with_history(mgr)
+        mind = _codex_mind()
+        with mind.wired(), _big_soul():
+            await mgr.switch_harness("sess-1", "codex", "codex-200k")
+            first = await mgr._get_row("sess-1")
+            mind.transcripts[first["claude_sid"]] = "a newer exchange"
+            result = await mgr.switch_model("sess-1", "codex-24k")
+        row = await mgr._get_row("sess-1")
+        await _close(mgr)
+        return first, result, row, mind
 
     first, result, row, mind = _run(scenario())
     assert first["context_tokens"] > 24_000 * 50 // 100
@@ -1051,33 +1065,25 @@ def test_a_model_change_right_after_a_harness_switch_that_does_not_fit_hands_ove
     assert row["context_threshold"] == 24_000 * 50 // 100
 
 
-def test_a_chat_rotation_leaves_the_row_holding_an_estimate_of_its_opening():
+def test_a_chat_rotation_leaves_the_row_holding_an_estimate_of_its_opening(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _measured(mgr, tokens=90_000)
-            await mgr._db.execute(
-                "INSERT INTO session_memory (mind_id, mind_name, client_ref, session_id, body, created_at) "
-                "VALUES (?, 'ada', '123', 'sess-1', ?, ?)",
-                (MIND, json.dumps({"carry_forward": "We were fixing the boiler. " * 300}),
-                 time.time()),
-            )
-            await mgr._db.execute("UPDATE sessions SET rotation_armed = 1 WHERE id = 'sess-1'")
-            await mgr._db.commit()
-            mind = Mind()
-            with mind.wired(), \
-                    patch.object(bootstrap_loader, "_fetch_soul", return_value=SOUL), \
-                    patch.object(bootstrap_loader, "_fetch_recent_memory", return_value=""):
-                async for _ in mgr.send_message("sess-1", "hello"):
-                    pass
-            # The same row: a rotation replaces the conversation under it,
-            # and nothing anywhere names a row a rotation came from.
-            cur = await mgr._db.execute("SELECT COUNT(*) AS n FROM sessions")
-            assert (await cur.fetchone())["n"] == 1
-            successor = await mgr._get_row("sess-1")
-            await _close(mgr)
-            return successor, mind
+        mgr = await _manager()
+        await _seed(mgr)
+        await _measured(mgr, tokens=90_000)
+        await _memory(json.dumps({"carry_forward": "We were fixing the boiler. " * 300}), time.time())
+        await _set("rotation_armed = 1")
+        mind = Mind()
+        with mind.wired(), \
+                patch.object(bootstrap_loader, "_fetch_soul", return_value=SOUL), \
+                patch.object(bootstrap_loader, "_fetch_recent_memory", return_value=""):
+            async for _ in mgr.send_message("sess-1", "hello"):
+                pass
+        # The same row: a rotation replaces the conversation under it,
+        # and nothing anywhere names a row a rotation came from.
+        assert (await fetchrow("SELECT COUNT(*) AS n FROM core.sessions"))["n"] == 1
+        successor = await mgr._get_row("sess-1")
+        await _close(mgr)
+        return successor, mind
 
     successor, mind = _run(scenario())
     spawned = [s for s in mind.spawns() if s["session_id"] == successor["id"]][-1]
@@ -1091,40 +1097,38 @@ def test_a_chat_rotation_leaves_the_row_holding_an_estimate_of_its_opening():
     assert (successor["context_window"], successor["context_threshold"]) == (200_000, 100_000)
 
 
-def test_a_report_that_measured_nothing_leaves_the_estimate_in_place():
+def test_a_report_that_measured_nothing_leaves_the_estimate_in_place(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _with_history(mgr)
-            mind = _codex_mind()
-            with mind.wired(), _big_soul():
-                await mgr.switch_harness("sess-1", "codex", "codex-200k")
-            first = await mgr._get_row("sess-1")
-            await mgr.report_context("sess-1", tokens=0, kind="none",
-                                     conversation_id=first["claude_sid"])
-            row = await mgr._get_row("sess-1")
-            await _close(mgr)
-            return first, row
+        mgr = await _manager()
+        await _seed(mgr)
+        await _with_history(mgr)
+        mind = _codex_mind()
+        with mind.wired(), _big_soul():
+            await mgr.switch_harness("sess-1", "codex", "codex-200k")
+        first = await mgr._get_row("sess-1")
+        await mgr.report_context("sess-1", tokens=0, kind="none",
+                                 conversation_id=first["claude_sid"])
+        row = await mgr._get_row("sess-1")
+        await _close(mgr)
+        return first, row
 
     first, row = _run(scenario())
     assert (row["context_tokens"], row["context_kind"]) == (first["context_tokens"], "estimated")
 
 
 @pytest.mark.parametrize("in_pane", [False, True], ids=["chat", "pane"])
-def test_a_harness_switch_onto_a_small_model_sizes_the_handover_under_its_threshold(in_pane):
+def test_a_harness_switch_onto_a_small_model_sizes_the_handover_under_its_threshold(comms_db, in_pane):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _with_history(mgr)
-            mind = _codex_mind()
-            with mind.wired(), _big_soul():
-                if in_pane:
-                    await mgr.adopt_into_terminal("sess-1")
-                await mgr.switch_harness("sess-1", "codex", "codex-40k")
-            await _close(mgr)
-            return mind
+        mgr = await _manager()
+        await _seed(mgr)
+        await _with_history(mgr)
+        mind = _codex_mind()
+        with mind.wired(), _big_soul():
+            if in_pane:
+                await mgr.adopt_into_terminal("sess-1")
+            await mgr.switch_harness("sess-1", "codex", "codex-40k")
+        await _close(mgr)
+        return mind
 
     budget = _run(scenario()).sent("POST", "/handover")[0]["json"]["budget_bytes"]
     # Sized as if the soul rides beside it, a pane's too: a pane may be gone,
@@ -1132,22 +1136,21 @@ def test_a_harness_switch_onto_a_small_model_sizes_the_handover_under_its_thresh
     assert budget == (40_000 * 30 // 100 - OVERHEAD["codex"]) * 4 - len(SOUL.encode())
 
 
-def test_the_first_real_report_replaces_the_opening_estimate():
+def test_the_first_real_report_replaces_the_opening_estimate(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _with_history(mgr)
-            mind = _codex_mind()
-            with mind.wired(), _big_soul():
-                await mgr.switch_harness("sess-1", "codex", "codex-200k")
-            first = await mgr._get_row("sess-1")
-            await mgr.report_context("sess-1", tokens=first["context_tokens"] + 7_321,
-                                     kind="usage", has_images=True, model="codex-200k",
-                                     conversation_id=first["claude_sid"])
-            row = await mgr._get_row("sess-1")
-            await _close(mgr)
-            return first, row
+        mgr = await _manager()
+        await _seed(mgr)
+        await _with_history(mgr)
+        mind = _codex_mind()
+        with mind.wired(), _big_soul():
+            await mgr.switch_harness("sess-1", "codex", "codex-200k")
+        first = await mgr._get_row("sess-1")
+        await mgr.report_context("sess-1", tokens=first["context_tokens"] + 7_321,
+                                 kind="usage", has_images=True, model="codex-200k",
+                                 conversation_id=first["claude_sid"])
+        row = await mgr._get_row("sess-1")
+        await _close(mgr)
+        return first, row
 
     first, row = _run(scenario())
     assert first["context_kind"] == "estimated"
@@ -1155,35 +1158,33 @@ def test_the_first_real_report_replaces_the_opening_estimate():
         first["context_tokens"] + 7_321, "usage", 1)
 
 
-def test_a_report_that_measured_nothing_on_a_row_with_no_size_still_records_it_as_none():
+def test_a_report_that_measured_nothing_on_a_row_with_no_size_still_records_it_as_none(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await mgr.report_context("sess-1", tokens=0, kind="none", conversation_id="conv-1")
-            row = await mgr._get_row("sess-1")
-            await _close(mgr)
-            return row
+        mgr = await _manager()
+        await _seed(mgr)
+        await mgr.report_context("sess-1", tokens=0, kind="none", conversation_id="conv-1")
+        row = await mgr._get_row("sess-1")
+        await _close(mgr)
+        return row
 
     row = _run(scenario())
     assert (row["context_tokens"], row["context_kind"]) == (0, "none")
     assert row["context_observed_at"] is not None
 
 
-def test_a_harness_switch_never_borrows_the_old_models_rotation_ratio():
+def test_a_harness_switch_never_borrows_the_old_models_rotation_ratio(comms_db):
     """A model whose own row names no percentage has no known threshold; the
     ratio the old model's reports implied belongs to the old model."""
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _measured(mgr, tokens=6_000, window=1_000_000, threshold=140_000)
-            mind = FakeMind()
-            with mind.wired(), _soul():
-                await mgr.switch_harness("sess-1", "codex", "gpt-5.6-terra")
-            row = await mgr._get_row("sess-1")
-            await _close(mgr)
-            return row, mind
+        mgr = await _manager()
+        await _seed(mgr)
+        await _measured(mgr, tokens=6_000, window=1_000_000, threshold=140_000)
+        mind = FakeMind()
+        with mind.wired(), _soul():
+            await mgr.switch_harness("sess-1", "codex", "gpt-5.6-terra")
+        row = await mgr._get_row("sess-1")
+        await _close(mgr)
+        return row, mind
 
     row, mind = _run(scenario())
     # Half the window, less the harness's own overhead and the soul.
@@ -1192,20 +1193,19 @@ def test_a_harness_switch_never_borrows_the_old_models_rotation_ratio():
     assert (row["context_window"], row["context_threshold"]) == (40_000, None)
 
 
-def test_an_empty_conversation_switched_onto_a_model_of_unknown_room_changes_model_in_place():
+def test_an_empty_conversation_switched_onto_a_model_of_unknown_room_changes_model_in_place(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            mind = FakeMind()
-            mind.transcripts = {}
-            with mind.wired(), _soul():
-                await mgr.switch_harness("sess-1", "codex", "gpt-5.6-terra")
-                first = await mgr._get_row("sess-1")
-                result = await mgr.switch_model("sess-1", "gpt-5.6-mini")
-            row = await mgr._get_row("sess-1")
-            await _close(mgr)
-            return first, result, row
+        mgr = await _manager()
+        await _seed(mgr)
+        mind = FakeMind()
+        mind.transcripts = {}
+        with mind.wired(), _soul():
+            await mgr.switch_harness("sess-1", "codex", "gpt-5.6-terra")
+            first = await mgr._get_row("sess-1")
+            result = await mgr.switch_model("sess-1", "gpt-5.6-mini")
+        row = await mgr._get_row("sess-1")
+        await _close(mgr)
+        return first, result, row
 
     first, result, row = _run(scenario())
     assert "warning" not in result
@@ -1217,81 +1217,72 @@ def test_an_empty_conversation_switched_onto_a_model_of_unknown_room_changes_mod
 # The harness's own overhead is learned and counted
 # ---------------------------------------------------------------------------
 
-def test_the_first_real_report_teaches_the_overhead_the_next_opening_counts():
+def test_the_first_real_report_teaches_the_overhead_the_next_opening_counts(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _with_history(mgr)
-            mind = _codex_mind()
-            with mind.wired(), _big_soul():
-                await mgr.switch_harness("sess-1", "codex", "codex-200k")
-                first = await mgr._get_row("sess-1")
-                spawned = mind.spawns()[-1]
-                opening = len(spawned["system_prompt_blocks"] + spawned["opening_turn"]) // 4
-                await mgr.report_context("sess-1", tokens=opening + 12_345, kind="usage",
-                                         model="codex-200k", surface="telegram",
-                                         conversation_id=first["claude_sid"])
-                # Back and over again: the next opening counts what was learned.
-                await mgr.switch_harness("sess-1", "claude", "claude-opus-5")
-                await mgr.switch_harness("sess-1", "codex", "codex-200k")
-            row = await mgr._get_row("sess-1")
+        mgr = await _manager()
+        await _seed(mgr)
+        await _with_history(mgr)
+        mind = _codex_mind()
+        with mind.wired(), _big_soul():
+            await mgr.switch_harness("sess-1", "codex", "codex-200k")
+            first = await mgr._get_row("sess-1")
             spawned = mind.spawns()[-1]
-            await _close(mgr)
-            return row, spawned
+            opening = len(spawned["system_prompt_blocks"] + spawned["opening_turn"]) // 4
+            await mgr.report_context("sess-1", tokens=opening + 12_345, kind="usage",
+                                     model="codex-200k", surface="telegram",
+                                     conversation_id=first["claude_sid"])
+            # Back and over again: the next opening counts what was learned.
+            await mgr.switch_harness("sess-1", "claude", "claude-opus-5")
+            await mgr.switch_harness("sess-1", "codex", "codex-200k")
+        row = await mgr._get_row("sess-1")
+        spawned = mind.spawns()[-1]
+        await _close(mgr)
+        return row, spawned
 
     row, spawned = _run(scenario())
     assert row["context_tokens"] == (
         len(spawned["system_prompt_blocks"] + spawned["opening_turn"]) // 4 + 12_345)
 
 
-def test_a_harness_estimate_teaches_no_overhead():
+def test_a_harness_estimate_teaches_no_overhead(comms_db):
     """A count read off the transcript leaves out what the harness sent, so it
     says nothing about the overhead."""
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _with_history(mgr)
-            mind = _codex_mind()
-            with mind.wired(), _big_soul():
-                await mgr.switch_harness("sess-1", "codex", "codex-200k")
-                first = await mgr._get_row("sess-1")
-                await mgr.report_context("sess-1", tokens=50, kind="estimated",
-                                         model="codex-200k",
-                                         conversation_id=first["claude_sid"])
-                await mgr.switch_harness("sess-1", "claude", "claude-opus-5")
-                await mgr.switch_harness("sess-1", "codex", "codex-200k")
-            row = await mgr._get_row("sess-1")
-            spawned = mind.spawns()[-1]
-            await _close(mgr)
-            return row, spawned
+        mgr = await _manager()
+        await _seed(mgr)
+        await _with_history(mgr)
+        mind = _codex_mind()
+        with mind.wired(), _big_soul():
+            await mgr.switch_harness("sess-1", "codex", "codex-200k")
+            first = await mgr._get_row("sess-1")
+            await mgr.report_context("sess-1", tokens=50, kind="estimated",
+                                     model="codex-200k",
+                                     conversation_id=first["claude_sid"])
+            await mgr.switch_harness("sess-1", "claude", "claude-opus-5")
+            await mgr.switch_harness("sess-1", "codex", "codex-200k")
+        row = await mgr._get_row("sess-1")
+        spawned = mind.spawns()[-1]
+        await _close(mgr)
+        return row, spawned
 
     row, spawned = _run(scenario())
     assert row["context_tokens"] == (
         len(spawned["system_prompt_blocks"] + spawned["opening_turn"]) // 4 + OVERHEAD["codex"])
 
 
-def test_a_composed_prompt_too_big_for_the_switch_is_trimmed_under_the_threshold():
+def test_a_composed_prompt_too_big_for_the_switch_is_trimmed_under_the_threshold(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _with_history(mgr)
-            await mgr._db.execute(
-                "INSERT INTO session_memory (mind_id, mind_name, client_ref, session_id, body, created_at) "
-                "VALUES (?, 'ada', '123', 'sess-1', ?, ?)",
-                (MIND, json.dumps({"carry_forward": "x" * 200_000 + " LAST WORDS"}),
-                 time.time() + 1),
-            )
-            await mgr._db.commit()
-            mind = _codex_mind()
-            with mind.wired(), \
-                    patch.object(bootstrap_loader, "_fetch_soul", return_value="<soul>me</soul>"), \
-                    patch.object(bootstrap_loader, "_fetch_recent_memory", return_value=""):
-                await mgr.switch_harness("sess-1", "codex", "codex-40k")
-            await _close(mgr)
-            return mind
+        mgr = await _manager()
+        await _seed(mgr)
+        await _with_history(mgr)
+        await _memory(json.dumps({"carry_forward": "x" * 200_000 + " LAST WORDS"}), time.time() + 1)
+        mind = _codex_mind()
+        with mind.wired(), \
+                patch.object(bootstrap_loader, "_fetch_soul", return_value="<soul>me</soul>"), \
+                patch.object(bootstrap_loader, "_fetch_recent_memory", return_value=""):
+            await mgr.switch_harness("sess-1", "codex", "codex-40k")
+        await _close(mgr)
+        return mind
 
     blocks = _run(scenario()).spawns()[-1]["system_prompt_blocks"]
     room = (40_000 * 30 // 100 - OVERHEAD["codex"]) * 4
@@ -1317,111 +1308,100 @@ async def _over_and_back(mgr, model="codex-200k"):
     await mgr.switch_harness("sess-1", "codex", model)
 
 
-def test_the_least_overhead_seen_stands_and_nothing_or_less_teaches_nothing():
+def test_the_least_overhead_seen_stands_and_nothing_or_less_teaches_nothing(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _with_history(mgr)
-            mind = _codex_mind()
-            seen = []
-            with mind.wired(), _big_soul():
-                await mgr.switch_harness("sess-1", "codex", "codex-200k")
-                for extra in (12_000, 20_000, 7_000, -500):
-                    await _teach(mgr, extra)
-                    seen.append(await mgr.harness_overhead(MIND, "codex", "codex-200k"))
-                    await _over_and_back(mgr)
-            await _close(mgr)
-            return seen
+        mgr = await _manager()
+        await _seed(mgr)
+        await _with_history(mgr)
+        mind = _codex_mind()
+        seen = []
+        with mind.wired(), _big_soul():
+            await mgr.switch_harness("sess-1", "codex", "codex-200k")
+            for extra in (12_000, 20_000, 7_000, -500):
+                await _teach(mgr, extra)
+                seen.append(await mgr.harness_overhead(MIND, "codex", "codex-200k"))
+                await _over_and_back(mgr)
+        await _close(mgr)
+        return seen
 
     assert _run(scenario()) == [12_000, 12_000, 7_000, 7_000]
 
 
-def test_another_models_overhead_stands_in_and_a_panes_is_kept_apart():
+def test_another_models_overhead_stands_in_and_a_panes_is_kept_apart(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _with_history(mgr)
-            mind = _codex_mind()
-            with mind.wired(), _big_soul():
-                await mgr.adopt_into_terminal("sess-1")
-                await mgr.switch_harness("sess-1", "codex", "codex-200k")
-                await _teach(mgr, 15_000, surface="terminal")
-            pane = await mgr.harness_overhead(MIND, "codex", "codex-other", "pane")
-            process = await mgr.harness_overhead(MIND, "codex", "codex-other", "process")
-            await _close(mgr)
-            return pane, process
+        mgr = await _manager()
+        await _seed(mgr)
+        await _with_history(mgr)
+        mind = _codex_mind()
+        with mind.wired(), _big_soul():
+            await mgr.adopt_into_terminal("sess-1")
+            await mgr.switch_harness("sess-1", "codex", "codex-200k")
+            await _teach(mgr, 15_000, surface="terminal")
+        pane = await mgr.harness_overhead(MIND, "codex", "codex-other", "pane")
+        process = await mgr.harness_overhead(MIND, "codex", "codex-other", "process")
+        await _close(mgr)
+        return pane, process
 
     assert _run(scenario()) == (15_000, OVERHEAD["codex"])
 
 
-def test_a_harness_estimate_first_leaves_the_opening_for_the_provider_count_after():
+def test_a_harness_estimate_first_leaves_the_opening_for_the_provider_count_after(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _with_history(mgr)
-            mind = _codex_mind()
-            with mind.wired(), _big_soul():
-                await mgr.switch_harness("sess-1", "codex", "codex-200k")
-                row = await _teach(mgr, 50, kind="estimated")
-                await mgr.report_context(
-                    "sess-1", tokens=row["context_opening_tokens"] + 11_111, kind="usage",
-                    model="codex-200k", surface="telegram", conversation_id=row["claude_sid"],
-                )
-            learned = await mgr.harness_overhead(MIND, "codex", "codex-200k")
-            await _close(mgr)
-            return learned
+        mgr = await _manager()
+        await _seed(mgr)
+        await _with_history(mgr)
+        mind = _codex_mind()
+        with mind.wired(), _big_soul():
+            await mgr.switch_harness("sess-1", "codex", "codex-200k")
+            row = await _teach(mgr, 50, kind="estimated")
+            await mgr.report_context(
+                "sess-1", tokens=row["context_opening_tokens"] + 11_111, kind="usage",
+                model="codex-200k", surface="telegram", conversation_id=row["claude_sid"],
+            )
+        learned = await mgr.harness_overhead(MIND, "codex", "codex-200k")
+        await _close(mgr)
+        return learned
 
     assert _run(scenario()) == 11_111
 
 
-def test_a_count_from_after_the_first_turn_or_naming_no_conversation_teaches_nothing():
+def test_a_count_from_after_the_first_turn_or_naming_no_conversation_teaches_nothing(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _with_history(mgr)
-            mind = _codex_mind()
-            with mind.wired(), _big_soul():
-                await mgr.switch_harness("sess-1", "codex", "codex-200k")
-                await _teach(mgr, 3_000, named=False)
-                unnamed = await mgr.harness_overhead(MIND, "codex", "codex-200k")
-                await _over_and_back(mgr)
-                for _ in range(2):
-                    await mgr._db.execute(
-                        "INSERT INTO session_turns (session_id, role, content, created_at) "
-                        "VALUES ('sess-1', 'user', 'a turn', ?)", (time.time() + 1,),
-                    )
-                await mgr._db.commit()
-                await _teach(mgr, 3_000)
-                late = await mgr.harness_overhead(MIND, "codex", "codex-200k")
-            await _close(mgr)
-            return unnamed, late
+        mgr = await _manager()
+        await _seed(mgr)
+        await _with_history(mgr)
+        mind = _codex_mind()
+        with mind.wired(), _big_soul():
+            await mgr.switch_harness("sess-1", "codex", "codex-200k")
+            await _teach(mgr, 3_000, named=False)
+            unnamed = await mgr.harness_overhead(MIND, "codex", "codex-200k")
+            await _over_and_back(mgr)
+            for _ in range(2):
+                await execute(
+                    "INSERT INTO core.session_turns (session_id, role, content, created_at) "
+                    "VALUES ('sess-1', 'user', 'a turn', $1)", time.time() + 1,
+                )
+            await _teach(mgr, 3_000)
+            late = await mgr.harness_overhead(MIND, "codex", "codex-200k")
+        await _close(mgr)
+        return unnamed, late
 
     assert _run(scenario()) == (OVERHEAD["codex"], OVERHEAD["codex"])
 
 
-def test_a_model_handover_trims_the_prompt_to_half_the_room_and_gives_the_rest_to_the_handover():
+def test_a_model_handover_trims_the_prompt_to_half_the_room_and_gives_the_rest_to_the_handover(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _measured(mgr, tokens=80_000, window=1_000_000, threshold=300_000)
-            await mgr._db.execute(
-                "INSERT INTO session_memory (mind_id, mind_name, client_ref, session_id, body, created_at) "
-                "VALUES (?, 'ada', '123', 'sess-1', ?, ?)",
-                (MIND, json.dumps({"carry_forward": "x" * 200_000 + " LAST WORDS"}), time.time()),
-            )
-            await mgr._db.commit()
-            mind = Mind(percent=30)
-            with mind.wired(), \
-                    patch.object(bootstrap_loader, "_fetch_soul", return_value="<soul>me</soul>"), \
-                    patch.object(bootstrap_loader, "_fetch_recent_memory", return_value=""):
-                await mgr.switch_model("sess-1", "claude-sonnet-5")
-            await _close(mgr)
-            return mind
+        mgr = await _manager()
+        await _seed(mgr)
+        await _measured(mgr, tokens=80_000, window=1_000_000, threshold=300_000)
+        await _memory(json.dumps({"carry_forward": "x" * 200_000 + " LAST WORDS"}), time.time())
+        mind = Mind(percent=30)
+        with mind.wired(), \
+                patch.object(bootstrap_loader, "_fetch_soul", return_value="<soul>me</soul>"), \
+                patch.object(bootstrap_loader, "_fetch_recent_memory", return_value=""):
+            await mgr.switch_model("sess-1", "claude-sonnet-5")
+        await _close(mgr)
+        return mind
 
     mind = _run(scenario())
     room = (200_000 * 30 // 100 - OVERHEAD["claude"]) * 4
@@ -1432,29 +1412,22 @@ def test_a_model_handover_trims_the_prompt_to_half_the_room_and_gives_the_rest_t
     assert budget == room - len(blocks.encode())
 
 
-def test_a_respawn_reopens_on_the_prompt_trimmed_as_the_switch_trimmed_it():
+def test_a_respawn_reopens_on_the_prompt_trimmed_as_the_switch_trimmed_it(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _with_history(mgr)
-            await mgr._db.execute(
-                "INSERT INTO session_memory (mind_id, mind_name, client_ref, session_id, body, created_at) "
-                "VALUES (?, 'ada', '123', 'sess-1', ?, ?)",
-                (MIND, json.dumps({"carry_forward": "x" * 200_000 + " LAST WORDS"}),
-                 time.time() + 1),
-            )
-            await mgr._db.commit()
-            mind = _codex_mind()
-            with mind.wired(), \
-                    patch.object(bootstrap_loader, "_fetch_soul", return_value="<soul>me</soul>"), \
-                    patch.object(bootstrap_loader, "_fetch_recent_memory", return_value=""):
-                await mgr.switch_harness("sess-1", "codex", "codex-40k")
-                switched = mind.spawns()[-1]["system_prompt_blocks"]
-                mgr._procs.pop("sess-1")
-                [e async for e in mgr.send_message("sess-1", "hello")]
-            await _close(mgr)
-            return switched, mind.spawns()[-1]
+        mgr = await _manager()
+        await _seed(mgr)
+        await _with_history(mgr)
+        await _memory(json.dumps({"carry_forward": "x" * 200_000 + " LAST WORDS"}), time.time() + 1)
+        mind = _codex_mind()
+        with mind.wired(), \
+                patch.object(bootstrap_loader, "_fetch_soul", return_value="<soul>me</soul>"), \
+                patch.object(bootstrap_loader, "_fetch_recent_memory", return_value=""):
+            await mgr.switch_harness("sess-1", "codex", "codex-40k")
+            switched = mind.spawns()[-1]["system_prompt_blocks"]
+            mgr._procs.pop("sess-1")
+            [e async for e in mgr.send_message("sess-1", "hello")]
+        await _close(mgr)
+        return switched, mind.spawns()[-1]
 
     switched, respawned = _run(scenario())
     assert respawned["opening_turn"]
@@ -1462,19 +1435,18 @@ def test_a_respawn_reopens_on_the_prompt_trimmed_as_the_switch_trimmed_it():
     assert respawned["system_prompt_blocks"] == switched
 
 
-def test_recent_memory_gives_way_once_session_memory_has_nothing_left():
+def test_recent_memory_gives_way_once_session_memory_has_nothing_left(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            recent = "<recent-memory>\n" + "".join(f"- row {i}\n" for i in range(2_000)) + "</recent-memory>"
-            with patch.object(bootstrap_loader, "_fetch_soul", return_value="<soul>me</soul>"), \
-                    patch.object(bootstrap_loader, "_fetch_recent_memory", return_value=recent):
-                blocks = await bootstrap_loader.compose_prompt_blocks(
-                    mind_id=MIND, mind_name="ada", client_ref="123", db=mgr._db,
-                    max_bytes=2_000,
-                )
-            await _close(mgr)
-            return blocks
+        mgr = await _manager()
+        recent = "<recent-memory>\n" + "".join(f"- row {i}\n" for i in range(2_000)) + "</recent-memory>"
+        with patch.object(bootstrap_loader, "_fetch_soul", return_value="<soul>me</soul>"), \
+                patch.object(bootstrap_loader, "_fetch_recent_memory", return_value=recent):
+            blocks = await bootstrap_loader.compose_prompt_blocks(
+                mind_id=MIND, mind_name="ada", client_ref="123",
+                max_bytes=2_000,
+            )
+        await _close(mgr)
+        return blocks
 
     blocks = _run(scenario())
     assert len(blocks.encode()) <= 2_000
@@ -1485,47 +1457,47 @@ def test_recent_memory_gives_way_once_session_memory_has_nothing_left():
 async def _learned(mgr, model: str, tokens: int, *, surface: str = "process",
                    harness: str = "codex", mind_id: str = MIND) -> None:
     """An overhead already on record, as earlier conversations taught it."""
-    await mgr._db.execute(
-        "INSERT INTO context_overhead (mind_id, harness, model, surface, tokens, observed_at) "
-        "VALUES (?, ?, ?, ?, ?, ?)", (mind_id, harness, model, surface, tokens, time.time()),
+    if mind_id != MIND:
+        await _register(mind_id, name=mind_id)
+    await execute(
+        "INSERT INTO core.context_overhead (mind_id, harness, model, surface, tokens, "
+        "observed_at) VALUES ($1, $2, $3, $4, $5, $6)",
+        mind_id, harness, model, surface, tokens, time.time(),
     )
-    await mgr._db.commit()
 
 
-def test_the_exact_model_answers_first_then_the_least_of_the_minds_other_models():
+def test_the_exact_model_answers_first_then_the_least_of_the_minds_other_models(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _learned(mgr, "codex-200k", 12_000)
-            await _learned(mgr, "codex-other", 7_000)
-            await _learned(mgr, "codex-40k", 30_000, mind_id="someone-else")
-            answers = (
-                await mgr.harness_overhead(MIND, "codex", "codex-200k"),
-                await mgr.harness_overhead(MIND, "codex", "codex-unseen"),
-                await mgr.harness_overhead("someone-else", "codex", "codex-200k"),
-                await mgr.harness_overhead("nobody", "codex", "codex-200k"),
-                await mgr.harness_overhead(MIND, "hermes", "gpt-6-astra"),
-            )
-            await _close(mgr)
-            return answers
+        mgr = await _manager()
+        await _learned(mgr, "codex-200k", 12_000)
+        await _learned(mgr, "codex-other", 7_000)
+        await _learned(mgr, "codex-40k", 30_000, mind_id="someone-else")
+        answers = (
+            await mgr.harness_overhead(MIND, "codex", "codex-200k"),
+            await mgr.harness_overhead(MIND, "codex", "codex-unseen"),
+            await mgr.harness_overhead("someone-else", "codex", "codex-200k"),
+            await mgr.harness_overhead("nobody", "codex", "codex-200k"),
+            await mgr.harness_overhead(MIND, "hermes", "gpt-6-astra"),
+        )
+        await _close(mgr)
+        return answers
 
     assert _run(scenario()) == (
         12_000, 7_000, 30_000, OVERHEAD["codex"], max(OVERHEAD.values()))
 
 
-def test_overhead_is_learned_under_the_rows_model_name_whatever_the_report_calls_it():
+def test_overhead_is_learned_under_the_rows_model_name_whatever_the_report_calls_it(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _with_history(mgr)
-            mind = _codex_mind()
-            with mind.wired(), _big_soul():
-                await mgr.switch_harness("sess-1", "codex", "codex-200k")
-                await _teach(mgr, 12_345, model="codex-200k-20261001")
-            learned = await mgr.harness_overhead(MIND, "codex", "codex-200k")
-            await _close(mgr)
-            return learned
+        mgr = await _manager()
+        await _seed(mgr)
+        await _with_history(mgr)
+        mind = _codex_mind()
+        with mind.wired(), _big_soul():
+            await mgr.switch_harness("sess-1", "codex", "codex-200k")
+            await _teach(mgr, 12_345, model="codex-200k-20261001")
+        learned = await mgr.harness_overhead(MIND, "codex", "codex-200k")
+        await _close(mgr)
+        return learned
 
     assert _run(scenario()) == 12_345
 
@@ -1533,87 +1505,81 @@ def test_overhead_is_learned_under_the_rows_model_name_whatever_the_report_calls
 @pytest.mark.parametrize("surface,teaches", [
     ("telegram", True), ("terminal", False), (None, False), ("local", False),
 ])
-def test_only_the_surface_that_opened_the_conversation_teaches(surface, teaches):
+def test_only_the_surface_that_opened_the_conversation_teaches(comms_db, surface, teaches):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _with_history(mgr)
-            mind = _codex_mind()
-            with mind.wired(), _big_soul():
-                await mgr.switch_harness("sess-1", "codex", "codex-200k")
-                await _teach(mgr, 12_345, surface=surface)
-            learned = await mgr.harness_overhead(MIND, "codex", "codex-200k")
-            await _close(mgr)
-            return learned
+        mgr = await _manager()
+        await _seed(mgr)
+        await _with_history(mgr)
+        mind = _codex_mind()
+        with mind.wired(), _big_soul():
+            await mgr.switch_harness("sess-1", "codex", "codex-200k")
+            await _teach(mgr, 12_345, surface=surface)
+        learned = await mgr.harness_overhead(MIND, "codex", "codex-200k")
+        await _close(mgr)
+        return learned
 
     assert _run(scenario()) == (12_345 if teaches else OVERHEAD["codex"])
 
 
-def test_a_count_naming_no_conversation_leaves_the_opening_for_the_one_that_does():
+def test_a_count_naming_no_conversation_leaves_the_opening_for_the_one_that_does(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _with_history(mgr)
-            mind = _codex_mind()
-            with mind.wired(), _big_soul():
-                await mgr.switch_harness("sess-1", "codex", "codex-200k")
-                await _teach(mgr, 3_000, named=False)
-                await _teach(mgr, 12_345)
-            learned = await mgr.harness_overhead(MIND, "codex", "codex-200k")
-            await _close(mgr)
-            return learned
+        mgr = await _manager()
+        await _seed(mgr)
+        await _with_history(mgr)
+        mind = _codex_mind()
+        with mind.wired(), _big_soul():
+            await mgr.switch_harness("sess-1", "codex", "codex-200k")
+            await _teach(mgr, 3_000, named=False)
+            await _teach(mgr, 12_345)
+        learned = await mgr.harness_overhead(MIND, "codex", "codex-200k")
+        await _close(mgr)
+        return learned
 
     assert _run(scenario()) == 12_345
 
 
-def test_the_first_turn_on_record_still_teaches_and_turns_before_the_switch_do_not_count():
+def test_the_first_turn_on_record_still_teaches_and_turns_before_the_switch_do_not_count(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _with_history(mgr)
-            for _ in range(3):
-                await mgr._db.execute(
-                    "INSERT INTO session_turns (session_id, role, content, created_at) "
-                    "VALUES ('sess-1', 'user', 'before the switch', ?)", (time.time() - 60,),
-                )
-            await mgr._db.commit()
-            mind = _codex_mind()
-            with mind.wired(), _big_soul():
-                await mgr.switch_harness("sess-1", "codex", "codex-200k")
-                await mgr._db.execute(
-                    "INSERT INTO session_turns (session_id, role, content, created_at) "
-                    "VALUES ('sess-1', 'user', 'the first turn', ?)", (time.time() + 1,),
-                )
-                await mgr._db.commit()
-                await _teach(mgr, 12_345)
-            learned = await mgr.harness_overhead(MIND, "codex", "codex-200k")
-            await _close(mgr)
-            return learned
+        mgr = await _manager()
+        await _seed(mgr)
+        await _with_history(mgr)
+        for _ in range(3):
+            await execute(
+                "INSERT INTO core.session_turns (session_id, role, content, created_at) "
+                "VALUES ('sess-1', 'user', 'before the switch', $1)", time.time() - 60,
+            )
+        mind = _codex_mind()
+        with mind.wired(), _big_soul():
+            await mgr.switch_harness("sess-1", "codex", "codex-200k")
+            await execute(
+                "INSERT INTO core.session_turns (session_id, role, content, created_at) "
+                "VALUES ('sess-1', 'user', 'the first turn', $1)", time.time() + 1,
+            )
+            await _teach(mgr, 12_345)
+        learned = await mgr.harness_overhead(MIND, "codex", "codex-200k")
+        await _close(mgr)
+        return learned
 
     assert _run(scenario()) == 12_345
 
 
 @pytest.mark.parametrize("threshold,refused", [(9_253, True), (9_300, False)])
-def test_a_switch_is_refused_only_below_the_least_handover_worth_sending(threshold, refused):
+def test_a_switch_is_refused_only_below_the_least_handover_worth_sending(comms_db, threshold, refused):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            mind = FakeMind()
-            mind.models = {**mind.models, "codex": [
-                {"name": "codex-edge", "context_window": threshold * 2,
-                 "rotation_threshold_percent": 50, "effort_levels": []}]}
-            with mind.wired(), _soul():
-                try:
-                    await mgr.switch_harness("sess-1", "codex", "codex-edge")
-                    outcome = False
-                except SwitchWontFit:
-                    outcome = True
-            await _close(mgr)
-            return outcome, mind
+        mgr = await _manager()
+        await _seed(mgr)
+        mind = FakeMind()
+        mind.models = {**mind.models, "codex": [
+            {"name": "codex-edge", "context_window": threshold * 2,
+             "rotation_threshold_percent": 50, "effort_levels": []}]}
+        with mind.wired(), _soul():
+            try:
+                await mgr.switch_harness("sess-1", "codex", "codex-edge")
+                outcome = False
+            except SwitchWontFit:
+                outcome = True
+        await _close(mgr)
+        return outcome, mind
 
     outcome, mind = _run(scenario())
     assert outcome is refused
@@ -1622,26 +1588,19 @@ def test_a_switch_is_refused_only_below_the_least_handover_worth_sending(thresho
             (threshold - OVERHEAD["codex"]) * 4 - len("SOUL-BLOCKS"))
 
 
-def test_a_model_of_unknown_threshold_trims_the_prompt_to_half_its_room():
+def test_a_model_of_unknown_threshold_trims_the_prompt_to_half_its_room(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _with_history(mgr)
-            await mgr._db.execute(
-                "INSERT INTO session_memory (mind_id, mind_name, client_ref, session_id, body, created_at) "
-                "VALUES (?, 'ada', '123', 'sess-1', ?, ?)",
-                (MIND, json.dumps({"carry_forward": "x" * 200_000 + " LAST WORDS"}),
-                 time.time() + 1),
-            )
-            await mgr._db.commit()
-            mind = FakeMind()
-            with mind.wired(), \
-                    patch.object(bootstrap_loader, "_fetch_soul", return_value="<soul>me</soul>"), \
-                    patch.object(bootstrap_loader, "_fetch_recent_memory", return_value=""):
-                await mgr.switch_harness("sess-1", "codex", "gpt-5.6-terra")
-            await _close(mgr)
-            return mind
+        mgr = await _manager()
+        await _seed(mgr)
+        await _with_history(mgr)
+        await _memory(json.dumps({"carry_forward": "x" * 200_000 + " LAST WORDS"}), time.time() + 1)
+        mind = FakeMind()
+        with mind.wired(), \
+                patch.object(bootstrap_loader, "_fetch_soul", return_value="<soul>me</soul>"), \
+                patch.object(bootstrap_loader, "_fetch_recent_memory", return_value=""):
+            await mgr.switch_harness("sess-1", "codex", "gpt-5.6-terra")
+        await _close(mgr)
+        return mind
 
     mind = _run(scenario())
     room = (40_000 // 2 - OVERHEAD["codex"]) * 4
@@ -1650,18 +1609,17 @@ def test_a_model_of_unknown_threshold_trims_the_prompt_to_half_its_room():
     assert mind.sent("POST", "/handover")[0]["json"]["budget_bytes"] == room - len(blocks.encode())
 
 
-def test_a_resent_message_is_part_of_the_room_and_of_the_opening():
+def test_a_resent_message_is_part_of_the_room_and_of_the_opening(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr, model="claude-sonnet-5")
-            await _measured(mgr, tokens=50_000, window=200_000, threshold=60_000)
-            mind = Mind(turns=[[OVERFLOW], [DONE]])
-            content = "ship it " * 2_000
-            await _turn(mgr, mind, content)
-            row = await mgr._get_row("sess-1")
-            await _close(mgr)
-            return row, mind, content
+        mgr = await _manager()
+        await _seed(mgr, model="claude-sonnet-5")
+        await _measured(mgr, tokens=50_000, window=200_000, threshold=60_000)
+        mind = Mind(turns=[[OVERFLOW], [DONE]])
+        content = "ship it " * 2_000
+        await _turn(mgr, mind, content)
+        row = await mgr._get_row("sess-1")
+        await _close(mgr)
+        return row, mind, content
 
     row, mind, content = _run(scenario())
     spawned = [s for s in mind.spawns() if s["resume_sid"] == row["claude_sid"]][0]
@@ -1676,61 +1634,48 @@ def test_a_resent_message_is_part_of_the_room_and_of_the_opening():
         len(spawned["system_prompt_blocks"]) + len(handover) + len(content)) // 4
 
 
-def test_a_rotation_seed_leaves_room_for_the_overhead_of_the_surface_it_opens_in():
+def test_a_rotation_seed_leaves_room_for_the_overhead_of_the_surface_it_opens_in(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr, harness="codex", model="codex-200k")
-            await _measured(mgr, tokens=1_000, window=40_000, threshold=20_000)
-            await _learned(mgr, "codex-200k", 12_000, surface="pane")
-            await _learned(mgr, "codex-200k", 5_000, surface="process")
-            budgets = (await mgr._rotation_seed_budget("sess-1", "pane"),
-                       await mgr._rotation_seed_budget("sess-1", "process"))
-            await _close(mgr)
-            return budgets
+        mgr = await _manager()
+        await _seed(mgr, harness="codex", model="codex-200k")
+        await _measured(mgr, tokens=1_000, window=40_000, threshold=20_000)
+        await _learned(mgr, "codex-200k", 12_000, surface="pane")
+        await _learned(mgr, "codex-200k", 5_000, surface="process")
+        budgets = (await mgr._rotation_seed_budget("sess-1", "pane"),
+                   await mgr._rotation_seed_budget("sess-1", "process"))
+        await _close(mgr)
+        return budgets
 
     assert _run(scenario()) == ((20_000 - 12_000) * 4, (20_000 - 5_000) * 4)
 
 
-def test_session_memory_gives_way_before_recent_memory():
+def test_session_memory_gives_way_before_recent_memory(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await mgr._db.execute(
-                "INSERT INTO session_memory (mind_id, mind_name, client_ref, session_id, body, created_at) "
-                "VALUES (?, 'ada', '123', 'sess-1', ?, ?)",
-                (MIND, json.dumps({"carry_forward": "y" * 5_000}), time.time()),
+        mgr = await _manager()
+        await _memory(json.dumps({"carry_forward": "y" * 5_000}), time.time())
+        recent = "<recent-memory>\n" + "".join(f"- row {i}\n" for i in range(100)) + "</recent-memory>"
+        with patch.object(bootstrap_loader, "_fetch_soul", return_value="<soul>me</soul>"), \
+                patch.object(bootstrap_loader, "_fetch_recent_memory", return_value=recent):
+            blocks = await bootstrap_loader.compose_prompt_blocks(
+                mind_id=MIND, mind_name="ada", client_ref="123",
+                max_bytes=len(recent) + 500,
             )
-            await mgr._db.commit()
-            recent = "<recent-memory>\n" + "".join(f"- row {i}\n" for i in range(100)) + "</recent-memory>"
-            with patch.object(bootstrap_loader, "_fetch_soul", return_value="<soul>me</soul>"), \
-                    patch.object(bootstrap_loader, "_fetch_recent_memory", return_value=recent):
-                blocks = await bootstrap_loader.compose_prompt_blocks(
-                    mind_id=MIND, mind_name="ada", client_ref="123", db=mgr._db,
-                    max_bytes=len(recent) + 500,
-                )
-            await _close(mgr)
-            return blocks, recent
+        await _close(mgr)
+        return blocks, recent
 
     blocks, recent = _run(scenario())
     assert recent in blocks
     assert "y" * 5_000 not in blocks
 
 
-def test_a_refused_switch_reaches_a_chat_surface_as_its_reason(tmp_path, monkeypatch):
-    monkeypatch.setenv("BROKER_DB_PATH", str(tmp_path / "broker.db"))
-    monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "sessions.db"))
+def test_a_refused_switch_reaches_a_chat_surface_as_its_reason(comms_db, monkeypatch):
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", GRILL_ADMIN)
     import importlib
-    from comms import broker
     from comms import server as server_module
     importlib.reload(server_module)
     with TestClient(server_module.app, headers={"Authorization": f"Bearer {GRILL_ADMIN}"}) as client:
         mgr = server_module.session_mgr
-        _run(broker.register_mind(
-            mgr.broker_db, mind_id=MIND, name="ada", gateway_url="http://mind.test:8420",
-            model="claude-opus-5", harness="claude_cli", owner="daniel",
-        ))
+        _run(_register())
         _run(_seed(mgr))
         mind = FakeMind()
         with mind.wired(), _soul():
@@ -1742,45 +1687,37 @@ def test_a_refused_switch_reaches_a_chat_surface_as_its_reason(tmp_path, monkeyp
     assert "gpt-5.6-nano can't take this conversation" in answer.json()["error"]
 
 
-def test_a_switch_that_fails_to_start_restores_the_old_harness_on_its_own_whole_prompt():
+def test_a_switch_that_fails_to_start_restores_the_old_harness_on_its_own_whole_prompt(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _with_history(mgr)
-            await mgr._db.execute(
-                "INSERT INTO session_memory (mind_id, mind_name, client_ref, session_id, body, created_at) "
-                "VALUES (?, 'ada', '123', 'sess-1', ?, ?)",
-                (MIND, json.dumps({"carry_forward": "x" * 200_000 + " LAST WORDS"}),
-                 time.time() + 1),
-            )
-            await mgr._db.commit()
-            mind = _codex_mind()
-            mind.failing_spawns = {"codex"}
-            with mind.wired(), \
-                    patch.object(bootstrap_loader, "_fetch_soul", return_value="<soul>me</soul>"), \
-                    patch.object(bootstrap_loader, "_fetch_recent_memory", return_value=""):
-                with pytest.raises(ValueError):
-                    await mgr.switch_harness("sess-1", "codex", "codex-40k")
-            await _close(mgr)
-            return mind
+        mgr = await _manager()
+        await _seed(mgr)
+        await _with_history(mgr)
+        await _memory(json.dumps({"carry_forward": "x" * 200_000 + " LAST WORDS"}), time.time() + 1)
+        mind = _codex_mind()
+        mind.failing_spawns = {"codex"}
+        with mind.wired(), \
+                patch.object(bootstrap_loader, "_fetch_soul", return_value="<soul>me</soul>"), \
+                patch.object(bootstrap_loader, "_fetch_recent_memory", return_value=""):
+            with pytest.raises(ValueError):
+                await mgr.switch_harness("sess-1", "codex", "codex-40k")
+        await _close(mgr)
+        return mind
 
     restored = _run(scenario()).spawns()[-1]
     assert restored["harness"] == "claude"
     assert "x" * 200_000 + " LAST WORDS" in restored["system_prompt_blocks"]
 
 
-def test_an_overflow_the_model_has_no_room_to_take_keeps_the_message_and_says_why():
+def test_an_overflow_the_model_has_no_room_to_take_keeps_the_message_and_says_why(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr, model="bilby-32k")
-            await _measured(mgr, tokens=20_000, window=32_000, threshold=16_000)
-            mind = Mind(turns=[[OVERFLOW]])
-            events = await _turn(mgr, mind, "ship it")
-            ledger = await mgr.get_session_turns("sess-1")
-            await _close(mgr)
-            return events, ledger
+        mgr = await _manager()
+        await _seed(mgr, model="bilby-32k")
+        await _measured(mgr, tokens=20_000, window=32_000, threshold=16_000)
+        mind = Mind(turns=[[OVERFLOW]])
+        events = await _turn(mgr, mind, "ship it")
+        ledger = await mgr.get_session_turns("sess-1")
+        await _close(mgr)
+        return events, ledger
 
     events, ledger = _run(scenario())
     assert "ship it" in [t["content"] for t in ledger]
@@ -1790,25 +1727,23 @@ def test_an_overflow_the_model_has_no_room_to_take_keeps_the_message_and_says_wh
 
 
 
-def test_a_pane_the_mind_refuses_to_rotate_is_left_running():
+def test_a_pane_the_mind_refuses_to_rotate_is_left_running(comms_db):
     """Only a mind saying it holds no live pane means there is none. A
     refusal is about a pane that may be running, and a model handover that
     read it as "no pane" would end that pane to start a process instead."""
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _measured(mgr, tokens=150_000, window=1_000_000, threshold=500_000)
-            await mgr._db.execute("UPDATE sessions SET terminal_held = 1 WHERE id = 'sess-1'")
-            await mgr._db.commit()
-            before = await mgr._get_row("sess-1")
-            mind = Mind()
-            mind.rotate_status = 500
-            with pytest.raises(ValueError):
-                await _switch(mgr, mind, "claude-sonnet-5")
-            after = await mgr._get_row("sess-1")
-            await _close(mgr)
-            return before, after, mind
+        mgr = await _manager()
+        await _seed(mgr)
+        await _measured(mgr, tokens=150_000, window=1_000_000, threshold=500_000)
+        await _set("terminal_held = true")
+        before = await mgr._get_row("sess-1")
+        mind = Mind()
+        mind.rotate_status = 500
+        with pytest.raises(ValueError):
+            await _switch(mgr, mind, "claude-sonnet-5")
+        after = await mgr._get_row("sess-1")
+        await _close(mgr)
+        return before, after, mind
 
     before, after, mind = _run(scenario())
     assert mind.kills("sess-1") == []
@@ -1817,23 +1752,21 @@ def test_a_pane_the_mind_refuses_to_rotate_is_left_running():
 
 
 @pytest.mark.parametrize("answer", [(200, []), (200, {}), (200, {"rotated": "false"})])
-def test_only_a_mind_saying_it_holds_no_pane_reads_as_no_pane(answer):
+def test_only_a_mind_saying_it_holds_no_pane_reads_as_no_pane(comms_db, answer):
     """An answer that says nothing about rotating leaves the pane alone rather
     than ending it to start a process in its place."""
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            await _seed(mgr)
-            await _measured(mgr, tokens=150_000, window=1_000_000, threshold=500_000)
-            await mgr._db.execute("UPDATE sessions SET terminal_held = 1 WHERE id = 'sess-1'")
-            await mgr._db.commit()
-            mind = Mind()
-            mind.rotate_status, mind.rotate_body = answer
-            with pytest.raises(ValueError):
-                await _switch(mgr, mind, "claude-sonnet-5")
-            after = await mgr._get_row("sess-1")
-            await _close(mgr)
-            return after, mind
+        mgr = await _manager()
+        await _seed(mgr)
+        await _measured(mgr, tokens=150_000, window=1_000_000, threshold=500_000)
+        await _set("terminal_held = true")
+        mind = Mind()
+        mind.rotate_status, mind.rotate_body = answer
+        with pytest.raises(ValueError):
+            await _switch(mgr, mind, "claude-sonnet-5")
+        after = await mgr._get_row("sess-1")
+        await _close(mgr)
+        return after, mind
 
     after, mind = _run(scenario())
     assert mind.kills("sess-1") == []
