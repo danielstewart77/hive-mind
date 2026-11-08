@@ -151,6 +151,17 @@ _STORE_REFUSALS: tuple[tuple[type[Exception], str, int], ...] = (
     (hive_data.NotInitialised, "store_not_open", 503),
     (hive_data.NotConfigured, "store_not_configured", 503),
     (hive_data.SchemaMismatch, "store_schema_mismatch", 503),
+    # The two floors, and they are last so every narrower kind above is
+    # matched first. `WriteRejected` is the base of the constraint kinds,
+    # and `hive_data` returns a bare one for every Postgres error it has no
+    # narrower class for: `permission denied for table memory.nodes` on a
+    # wrong database role, a read-only standby, a detected deadlock, a
+    # serialization failure, `stack depth limit exceeded`. Without a floor
+    # those fell past this table into `internal_error` at HTTP 200, which is
+    # the single outcome the table exists to prevent — and the wrong-role
+    # case is the most likely way a cutover goes wrong.
+    (hive_data.WriteRejected, "store_refused_the_write", 400),
+    (hive_data.HiveDataError, "store_error", 503),
 )
 
 
@@ -354,9 +365,17 @@ async def _check_identity_guard(
     # Postgres, so this now matches pairs of names it used to let past — a
     # Turkish dotless i against an ASCII one, say. That is the safe
     # direction: the new matches are refusals, never permissions.
+    # `ORDER BY id` is not decoration. The table is unique on (owner, type,
+    # name), so two people may each hold a Mind node called Skippy, and an
+    # unordered LIMIT 1 leaves which one answers to the planner — this guard
+    # and the write that follows it both resolve a Mind node, and the two
+    # resolving differently means the check passes on one node while the
+    # write lands on another. `hive_data.graph.node_find` orders the same
+    # way for the same reason.
     row = await _one(
         f"SELECT mind_id FROM {NODES} "
-        "WHERE LOWER(name) = LOWER($1) AND type = 'Mind' LIMIT 1",
+        "WHERE LOWER(name) = LOWER($1) AND type = 'Mind' "
+        "ORDER BY id LIMIT 1",
         name,
     )
     if row is None:
@@ -366,10 +385,22 @@ async def _check_identity_guard(
     return f"mind_id {mind_id!r} cannot edit identity node for {name!r}"
 
 
+#: What an identity-guard refusal answers with.
+#:
+#: 403 rather than 200: the callers on this path are, by the router's own
+#: docstring, fire-and-forget shell — curl piped into jq with no status
+#: check — and a refusal that returns 200 is a refusal nobody notices. It
+#: travels in the body like every other refusal here because these
+#: functions are also registered directly as tools, where the body is all
+#: there is.
+_IDENTITY_STATUS = 403
+
+
 def _identity_refusal(detail: str) -> str:
     """The identity guard's refusal, in the shape every caller reads."""
     return json.dumps({
         "ok": False, "code": "identity_guard", "detail": detail,
+        "http_status": _IDENTITY_STATUS,
     })
 
 
@@ -422,7 +453,7 @@ async def graph_upsert_direct(
             name, mind_id, owner, entity_type=label
         )
         if guard_err is not None:
-            return json.dumps({"upserted": False, "error": guard_err})
+            return _identity_refusal(guard_err)
         # The relation target is a second node this call writes to, and the
         # find-or-create below updates its columns. Unguarded, naming another
         # mind's own node as the target of any edge rewrote that node's tier
@@ -437,7 +468,7 @@ async def graph_upsert_direct(
                 target_name, mind_id, owner, entity_type=tgt_label,
             )
             if target_guard is not None:
-                return json.dumps({"upserted": False, "error": target_guard})
+                return _identity_refusal(target_guard)
         # A row is filed under one owner. `owner` is the scope a call may
         # reach, which for the console and the operator is every owner.
         _stamped = stamp if stamp is not None else owner
@@ -1304,23 +1335,24 @@ async def graph_properties_merge(
         # read-modify-write by construction, and two callers merging
         # different keys both read before either wrote — the loser's keys
         # vanish and both are told they landed. That operation holds the row.
-        await store.properties_merge(node_id=row["id"], additions=additions)
-
-        set_parts = ["updated_at = $1", "as_of = $2"]
-        params: list[Any] = [touched, now_iso]
+        #
+        # The node's own columns go into that same call rather than a second
+        # statement after it. A second statement is a second transaction: the
+        # blob merge commits, the column write is refused — a pool with
+        # nothing free, the statement deadline, a server that restarted —
+        # and the caller is handed a refusal for a merge that has already
+        # landed. This is the route the operator is told to prefer for
+        # additive updates, so it gets the same one-unit treatment as the
+        # soul write and the node delete.
+        columns: dict[str, Any] = {"updated_at": touched, "as_of": now_iso}
         if first_name is not None:
-            params.append(first_name)
-            set_parts.append(f"first_name = ${len(params)}")
+            columns["first_name"] = first_name
         if last_name is not None:
-            params.append(last_name)
-            set_parts.append(f"last_name = ${len(params)}")
+            columns["last_name"] = last_name
         if source is not None:
-            params.append(source)
-            set_parts.append(f"source = ${len(params)}")
-        params.append(row["id"])
-        await hive_data.run(lambda c: c.execute(
-            f"UPDATE {NODES} SET {', '.join(set_parts)} "
-            f"WHERE id = ${len(params)}", *params))
+            columns["source"] = source
+        await store.properties_merge(
+            node_id=row["id"], additions=additions, columns=columns)
 
         return json.dumps({"ok": True, "id": row["id"],
                            "merged_keys": sorted(new_props.keys())})
@@ -1375,32 +1407,28 @@ async def graph_properties_remove(
                                "detail": f"node not found: name={name!r} type={label!r}"})
 
         blob_keys = [k for k in keys if k not in _COLUMN_KEYS]
-        dropped = await store.properties_remove(
-            node_id=row["id"], keys=blob_keys)
-        removed: list[str] = list(dropped["removed"])
         touched = time.time()
-        await store.properties_merge(
-            node_id=row["id"], additions={"updated_at": touched})
-
-        set_parts = ["updated_at = $1"]
-        params: list[Any] = [touched]
+        # One statement, not three. This used to drop the blob keys, merge
+        # `updated_at`, and then NULL the columns in three separate
+        # transactions — and it appended the column names to `removed_keys`
+        # before the statement that clears them ran, so a refusal on the
+        # third answered with keys reported removed that were still there.
+        columns: dict[str, Any] = {"updated_at": touched}
         if "first_name" in keys:
-            set_parts.append("first_name = NULL")
-            removed.append("first_name")
+            columns["first_name"] = None
         if "last_name" in keys:
-            set_parts.append("last_name = NULL")
-            removed.append("last_name")
-        # Vector-leakage keys may also live in their dedicated column — the
-        # column NULL update here catches that. Either path counts.
+            columns["last_name"] = None
+        # A vector-leakage key may also live in its dedicated column; the
+        # column clear catches that. Either path counts as removed.
         for col in _VECTOR_LEAKAGE_COLUMNS:
             if col in keys:
-                set_parts.append(f"{col} = NULL")
-                if col not in removed:
-                    removed.append(col)
-        params.append(row["id"])
-        await hive_data.run(lambda c: c.execute(
-            f"UPDATE {NODES} SET {', '.join(set_parts)} "
-            f"WHERE id = ${len(params)}", *params))
+                columns[col] = None
+        dropped = await store.properties_remove(
+            node_id=row["id"], keys=blob_keys, columns=columns)
+        # `updated_at` is bookkeeping this call sets, not a key the caller
+        # asked to remove.
+        removed = [k for k in dict.fromkeys(dropped["removed"])
+                   if k != "updated_at"]
 
         return json.dumps({"ok": True, "id": row["id"], "removed_keys": removed})
     except Exception as e:

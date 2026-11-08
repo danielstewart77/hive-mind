@@ -35,6 +35,17 @@ services:
     restart: unless-stopped
     networks:
       - hivemind
+    depends_on:
+      # The pool is opened in the FastAPI lifespan now, so a cold
+      # `compose up` against a database still running initdb raises
+      # `Unreachable` out of the lifespan, uvicorn exits, and this container
+      # crash-loops under `restart: unless-stopped` until the database is
+      # ready. It does heal itself, which is exactly why this was easy to
+      # leave out — and it means the carefully-written healthcheck below
+      # was decorating nothing. `service_healthy`, not `service_started`:
+      # the container is up long before the server accepts a query.
+      hive-postgres:
+        condition: service_healthy
     # Embeddings come from Ollama on the host, not from inside this
     # container — resolve the host gateway so OLLAMA_BASE_URL below has
     # something to point at.

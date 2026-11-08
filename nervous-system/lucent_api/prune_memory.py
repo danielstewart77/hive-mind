@@ -130,7 +130,7 @@ async def _decay_pass(
     return deleted, kept
 
 
-def _codebase_ref_exists(codebase_ref: str) -> bool:
+async def _codebase_ref_exists(codebase_ref: str) -> bool:
     """Check that every path/symbol in the comma-separated codebase_ref still resolves.
 
     Each token is either:
@@ -143,6 +143,12 @@ def _codebase_ref_exists(codebase_ref: str) -> bool:
     case inside the lucent container, which has no source mount), the ref
     is unverifiable — treat the entry as still valid rather than deleting
     on missing evidence.
+
+    Async, and the `grep` goes behind a thread, for the same reason
+    `_ollama_structured` does: the pruner is awaited on the scheduler's
+    event loop now, so a ten-second subprocess inline is ten seconds —
+    per unresolved token, per entry — with `/health`, every memory read and
+    the pool's own protocol handling stopped dead.
     """
     if not codebase_ref:
         return True  # nothing to verify
@@ -163,7 +169,8 @@ def _codebase_ref_exists(codebase_ref: str) -> bool:
         # Try as symbol via grep (any source file)
         if shutil.which("grep"):
             try:
-                r = subprocess.run(
+                r = await asyncio.to_thread(
+                    subprocess.run,
                     ["grep", "-r", "-l", token, str(project_root),
                      "--include=*.py", "--include=*.md", "--include=*.sh",
                      "--exclude-dir=.venv", "--exclude-dir=node_modules",
@@ -250,7 +257,7 @@ async def prune_current_state(*, now: float | None = None) -> dict:
         # kg_entity is not currently a separate column; deferred.
 
         if codebase_ref:
-            if not _codebase_ref_exists(codebase_ref):
+            if not await _codebase_ref_exists(codebase_ref):
                 if await _delete_entry(eid):
                     deleted.append(eid)
                 else:

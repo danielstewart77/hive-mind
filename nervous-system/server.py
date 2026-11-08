@@ -36,6 +36,19 @@ PRUNE_LOG_PATH = Path(
     os.environ.get("PRUNE_LOG_PATH", "/data/prune.log")
 )
 
+#: How long one prune pass may take before it is abandoned.
+#:
+#: The pass classifies through Ollama over HTTP, and an inference host that
+#: accepts a connection and then never answers leaves this coroutine awaiting
+#: forever. Without a deadline that is the end of pruning on this install —
+#: APScheduler will not start a second instance of a job while the first is
+#: still running, so every night after it is skipped, and the only trace is
+#: an absence in a log nobody tails. An hour is far past any real pass and
+#: far short of a week.
+PRUNE_DEADLINE_SECONDS = float(
+    os.environ.get("PRUNE_DEADLINE_SECONDS", str(60 * 60))
+)
+
 
 async def _run_prune() -> None:
     """Fire prune-memory and append the result to the daily log.
@@ -51,7 +64,18 @@ async def _run_prune() -> None:
     log.info("prune-memory: starting")
     try:
         from lucent_api.prune_memory import run_all
-        runs = await run_all()
+        runs = await asyncio.wait_for(run_all(),
+                                      timeout=PRUNE_DEADLINE_SECONDS)
+    except asyncio.TimeoutError:
+        # Said out loud, because the alternative is silence: a pass that
+        # never returns is a job APScheduler then skips every night, and
+        # nothing else in this process notices that memory stopped being
+        # pruned.
+        log.error("prune-memory: abandoned after %.0fs — the pass did not "
+                  "finish. Rows read before the deadline are not deleted. "
+                  "Check whether the inference host is answering.",
+                  PRUNE_DEADLINE_SECONDS)
+        return
     except Exception:
         log.exception("prune-memory: run_all() crashed")
         return
@@ -109,6 +133,13 @@ async def main() -> None:
         ),
         id="prune-memory",
         replace_existing=True,
+        # One pass at a time, and a run that missed its slot is one run
+        # rather than a backlog of them. Both are APScheduler's defaults and
+        # both are stated: a prune of thousands of rows overlapping itself
+        # would have two passes reading the same rows and each deleting what
+        # the other already counted.
+        max_instances=1,
+        coalesce=True,
     )
     scheduler.start()
     log.info("scheduler started; prune-memory @ %s (%s)", prune_cron, prune_tz)

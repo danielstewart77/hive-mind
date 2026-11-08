@@ -357,7 +357,14 @@ async def test_a_mind_cannot_delete_another_minds_own_node(
         "DELETE", "/graph/nodes", headers=hive.h(hive.skippy),
         json={"entity_type": "Mind", "name": name})
 
-    assert answer.json().get("code") == "identity_guard", answer.text
+    # 403, not a 200 with a code in the body. Every caller on this path is
+    # fire-and-forget shell — curl piped into jq, no status check — so a
+    # refusal that answers 200 is a refusal nobody notices, and the delete
+    # route had no router-level guard to catch it the way merge and remove
+    # do.
+    assert answer.status_code == 403, answer.text
+    assert name in answer.json()["detail"]
+    assert hive.skippy_uuid in answer.json()["detail"]
     assert await _row(inspector, name, hive.mine) is not None
 
 

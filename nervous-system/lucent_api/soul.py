@@ -287,18 +287,6 @@ async def soul_write(
     except ValueError:
         before = []  # malformed; this write is the repair
 
-    current_count = await graph.soul_change_count(node_id=row["id"])
-    if expected_change_count is not None and expected_change_count != current_count:
-        return json.dumps({
-            "ok": False, "code": "conflict",
-            "detail": (
-                "this soul changed since you read it "
-                f"(you saw {expected_change_count} changes, there are now "
-                f"{current_count}). Read it again and re-apply your edit."
-            ),
-            "change_count": current_count,
-        })
-
     if before and not allow_shrink and len(soul_values) * 2 < len(before):
         return json.dumps({
             "ok": False, "code": "shrink_refused",
@@ -322,19 +310,37 @@ async def soul_write(
     # carries the stamp the response reports — a provenance row stamped with
     # a moment nobody sent is a small lie in the one table that exists to
     # say what happened and when.
-    await graph.soul_replace(
-        node_id=row["id"],
-        properties=props,
-        mind_name=name,
-        mind_id=row["mind_id"],
-        actor=actor,
-        reason=reason,
-        before=before,
-        after=list(soul_values),
-        at=stamp,
-        as_of=stamp,
-        updated_at=now,
-    )
+    # The compare-and-set is `soul_replace`'s, not this function's. Read
+    # here and checked here it was two transactions with nothing held
+    # between them, so two console saves both read the same count, both
+    # found it matching, and both wrote — the second over the first, with
+    # both told their line landed. The check is now inside the unit that
+    # writes, behind a lock on the node row every writer takes.
+    try:
+        written = await graph.soul_replace(
+            node_id=row["id"],
+            properties=props,
+            mind_name=name,
+            mind_id=row["mind_id"],
+            actor=actor,
+            reason=reason,
+            before=before,
+            after=list(soul_values),
+            at=stamp,
+            as_of=stamp,
+            updated_at=now,
+            expected_change_count=expected_change_count,
+        )
+    except hive_data.StaleRead as moved:
+        return json.dumps({
+            "ok": False, "code": "conflict",
+            "detail": (
+                "this soul changed since you read it "
+                f"(you saw {moved.expected} changes, there are now "
+                f"{moved.observed}). Read it again and re-apply your edit."
+            ),
+            "change_count": moved.observed,
+        })
     return json.dumps({
         "ok": True,
         "id": row["id"],
@@ -342,7 +348,7 @@ async def soul_write(
         "at": stamp,
         "before_count": len(before),
         "after_count": len(soul_values),
-        "change_count": current_count + 1,
+        "change_count": written["change_count"],
     })
 
 

@@ -44,13 +44,46 @@ async def open_store() -> None:
     `python -m lucent_api.server` runs it alone — and opening a second pool
     would hold double the connections against a ceiling shared with every
     other service, with nothing reporting that it happened.
+
+    The type and relationship registry is seeded here. It used to be seeded
+    by `_init_schema`, which this replaced — and `memory.nodes.type` is a
+    real foreign key into `memory.schema_types`, which the schema load
+    creates empty. Left unseeded, every graph write refuses with literally
+    `Must be one of: []` and `GET /graph/schema` answers an empty registry,
+    on a fresh install, on CI, on a dev box, on anything but the one
+    hand-loaded database. So the seed belongs to the service, not to the
+    load. It is idempotent and rows added later through the admin routes are
+    left alone.
     """
     try:
         hive_data.live_pool()
     except hive_data.NotInitialised:
         await hive_data.connect()
+        await _seed_registry()
         return
     log.info("lucent.store.open: a pool is already open; leaving it alone")
+    await _seed_registry()
+
+
+async def _seed_registry() -> None:
+    """Write the declared registry in, and say what it wrote.
+
+    A seed that fails must not stop the store from serving: a lucent that
+    refuses to start takes every mind's memory with it, and a registry that
+    is already loaded — the normal case on this host — needs nothing from
+    this call. It is logged loudly instead, because `Must be one of: []` on
+    every write is the symptom and it does not name this as the cause.
+    """
+    from lucent_api.schema_registry import seed_schema_tables
+
+    try:
+        written = await seed_schema_tables()
+    except Exception:
+        log.exception("lucent.registry.seed: the registry was not seeded; "
+                      "graph writes will refuse until it is")
+        return
+    log.info("lucent.registry.seed: %s types and %s relationships written",
+             written.get("types"), written.get("edges"))
 
 
 async def close_store() -> None:

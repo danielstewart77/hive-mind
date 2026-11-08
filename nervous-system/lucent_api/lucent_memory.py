@@ -666,13 +666,15 @@ async def memory_retrieve_hybrid(
     `logger.exception` and answering vector-only every turn since it was
     written.
 
-    There is deliberately no `try/except` around the keyword half here.
-    `hive_data` caps a query at `MAX_QUERY_TERMS` so the one failure lucent
-    was guarding against — a pasted transcript parsed as an OR of sixty
-    thousand terms — cannot arrive; and a handler here would swallow a
-    rejected write reported on a read, degrading hybrid to vector-only under
-    the same ``"mode": "hybrid"`` label, with worse answers and one log
-    line.
+    There is deliberately no `try/except` around the keyword half here, and
+    this docstring used to claim there was none anywhere, which was wrong:
+    `store.recall` catches a refused keyword scan and answers on similarity
+    alone. That handler is lucent's own behaviour carried across — a query
+    the keyword engine cannot parse should answer with what the vector
+    found rather than with an error — and what it must not do is call the
+    result hybrid. It does not: a recall that lost its keyword half reports
+    ``"mode": "vector"``, so the degradation is in the answer rather than
+    in one log line.
     """
     embedding = await _embedding_for(query)
     answer = await store.recall(
