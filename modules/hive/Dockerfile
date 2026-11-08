@@ -20,6 +20,14 @@ RUN apt-get update \
 COPY --from=hive_data . /tmp/hive-data
 RUN pip install --no-cache-dir --no-deps /tmp/hive-data && rm -rf /tmp/hive-data
 
+# Accounts, sessions and the data store — the modules this site shares with
+# the terminal site, installed from this repository rather than copied into
+# each. Editable, and bind-mounted in compose beside ./src, so a change to
+# the shared auth lands on a restart like a change to any other module
+# rather than on a rebuild. `--no-deps` for the same reason as above.
+COPY hive_site/ ./hive_site/
+RUN pip install --no-cache-dir --no-deps -e ./hive_site
+
 COPY src/ ./src/
 
 ENV HIVE_HOST=0.0.0.0

@@ -20,7 +20,9 @@ a wrong answer is still a failure.
 
 Skipped, cleanly, when no Postgres is named. `HIVE_DATA_TEST_ADMIN_DSN` says
 where one is, with no default, because a default would be a credential in a
-tracked file.
+tracked file. The machinery that creates and drops that scratch database
+lives in `hive_site.testing`, with the store it tests, so the terminal
+site's suite runs the same one rather than a copy.
 """
 
 from __future__ import annotations
@@ -28,108 +30,20 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
-import uuid
-from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
+from hive_site.testing import (  # noqa: F401
+    ADMIN_DSN,
+    NO_SERVER,
+    both_halves,
+    on_postgres,
+    on_sqlite,
+)
 
 import kanban_data
 import store
-
-ADMIN_DSN = os.environ.get("HIVE_DATA_TEST_ADMIN_DSN", "").strip()
-
-NO_SERVER = (
-    "HIVE_DATA_TEST_ADMIN_DSN is unset. It names a Postgres this suite may "
-    "create and drop a database on. Without it the two halves cannot be "
-    "compared and these tests are skipped rather than passing on one half."
-)
-
-#: The schemas to apply to the scratch database, as applied, vendored in the
-#: access layer. Read from the installed package rather than copied here, so
-#: a schema change arrives instead of being silently out of date.
-#:
-#: `core.sql` as well as `board.sql`, and in that order: `board` carries real
-#: foreign keys into `core.sessions` and `core.minds`, which is the first
-#: thing in this database that could not exist while each store was its own
-#: SQLite file. `memory.sql` too, for the browser — it needs the `vector`
-#: extension, which is not a trusted one, so the scratch database is created
-#: by the same credential `hive_data`'s own suite uses.
-_SCHEMA_ORDER = ("core.sql", "memory.sql", "board.sql")
-
-
-def _schemas() -> list[str]:
-    import hive_data
-
-    directory = Path(hive_data.__file__).parent / "schema"
-    return [(directory / name).read_text() for name in _SCHEMA_ORDER]
-
-
-async def _on_sqlite(sequence: Callable[[], Awaitable[Any]],
-                     db_path: Path) -> Any:
-    """Run a sequence against a temporary SQLite file."""
-    os.environ[store.DSN_VAR] = ""
-    await store.open(db_path)
-    try:
-        assert not store.on_postgres()
-        return await sequence()
-    finally:
-        await store.close()
-
-
-async def _on_postgres(sequence: Callable[[], Awaitable[Any]]) -> Any:
-    """Run the same sequence against a scratch Postgres database."""
-    import asyncpg
-
-    name = f"hive_data_parity_{uuid.uuid4().hex[:12]}"
-    admin = await asyncpg.connect(ADMIN_DSN)
-    try:
-        await admin.execute(f'CREATE DATABASE "{name}"')
-    finally:
-        await admin.close()
-    base, _, _ = ADMIN_DSN.rpartition("/")
-    dsn = f"{base}/{name}"
-    try:
-        target = await asyncpg.connect(dsn)
-        try:
-            for schema in _schemas():
-                await target.execute(schema)
-        finally:
-            await target.close()
-        os.environ[store.DSN_VAR] = dsn
-        await store.open()
-        try:
-            assert store.on_postgres()
-            return await sequence()
-        finally:
-            await store.close()
-    finally:
-        os.environ[store.DSN_VAR] = ""
-        admin = await asyncpg.connect(ADMIN_DSN)
-        try:
-            await admin.execute(
-                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                "WHERE datname = $1 AND pid <> pg_backend_pid()", name)
-            await admin.execute(f'DROP DATABASE IF EXISTS "{name}"')
-        finally:
-            await admin.close()
-
-
-def both_halves(sequence: Callable[[], Awaitable[Any]],
-                db_path: Path) -> tuple[Any, Any]:
-    """What each half answered, for the same sequence of operations.
-
-    Run in separate event loops, one after the other, because each half opens
-    and closes its own store and the Postgres pool belongs to the loop it was
-    opened on.
-    """
-    if not ADMIN_DSN:
-        pytest.skip(NO_SERVER)
-    on_file = asyncio.run(_on_sqlite(sequence, db_path))
-    on_server = asyncio.run(_on_postgres(sequence))
-    return on_file, on_server
-
 
 # ---------------------------------------------------------------------------
 # the board
@@ -552,7 +466,7 @@ def test_the_postgres_half_reads_memory_out_of_the_one_database(
                 page["rows"][0]["embedding"]]
 
     count, total, columns, contents, embedding = asyncio.run(
-        _on_postgres(sequence))
+        on_postgres(sequence))
     assert count == 1
     assert total == 1
     assert "content" in columns and "embedding" in columns
@@ -712,7 +626,7 @@ def test_a_unit_cancelled_waiting_for_the_file_lock_leaves_nothing_open(
                        for row in await kanban_data.list_epics()),
                 after["title"]]
 
-    answered = asyncio.run(_on_sqlite(sequence, db_path))
+    answered = asyncio.run(on_sqlite(sequence, db_path))
     titles, after = answered
     assert titles == ["After", "Before"]
     assert after == "After"
@@ -1051,6 +965,6 @@ def test_the_postgres_half_refuses_a_design_session_naming_no_such_mind(
         still = await design_data.get_design_session(record["id"])
         return [said, still["conversation_id"]]
 
-    said, conversation = asyncio.run(_on_postgres(sequence))
+    said, conversation = asyncio.run(on_postgres(sequence))
     assert said == [("create", True), ("attach", True)]
     assert conversation == "conv-real", "the refused attach moved the session"

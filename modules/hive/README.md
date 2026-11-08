@@ -85,8 +85,16 @@ overrides such as `hex:sentinel`.
 
 ## Accounts and who sees what
 
-Accounts live in one of two stores, behind one interface (`src/auth.py`),
-and an install uses exactly one. With no other configuration the console
+Accounts live in one of two stores, behind one interface (`auth`), and an
+install uses exactly one. That interface, the data store under it and the
+authorization middleware in front of it are the `hive_site` package in this
+repository, installed into this image and into the terminal site's from the
+same directory — one copy, not two. `src/auth.py`, `src/store.py` and
+`src/route_access.py` are three-line aliases that bind it under the bare
+name, so `import auth` here is the module the terminal runs. Each site reads
+`HIVE_DATABASE_URL` for itself, so the two can be pointed at different
+stores, and `HIVE_DB_PATH` has no default: an unnamed file is refused rather
+than invented somewhere nothing is mounted. With no other configuration the console
 signs in against its own hive.db: on first launch against an empty db,
 `HIVE_SEED_USERNAME` and `HIVE_SEED_PASSWORD` create the first admin (inert
 afterward), and `HIVE_SECRET_KEY` signs session cookies — left unset, a

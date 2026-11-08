@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hive-site"
+version = "0.1.0"
+description = "The accounts, sessions and data store the hive console and the terminal site share"
+readme = "README.md"
+requires-python = ">=3.11"
+# Deliberately none. Every dependency this package needs — fastapi,
+# itsdangerous, httpx, bcrypt — is already declared in each site's own
+# requirements.txt, where that image's resolver can see it beside everything
+# else, and both images install this with `--no-deps` for exactly that
+# reason. `hive_data` is not declared either: it is imported only on the
+# Postgres half, and it is installed from a build context of its own because
+# the repository is private.
+dependencies = []
+
+[tool.setuptools.packages.find]
+include = ["hive_site*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

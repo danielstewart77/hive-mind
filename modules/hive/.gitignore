@@ -15,3 +15,6 @@ build-state.json
 stories/
 
 backlog-import/
+
+# setuptools build metadata from the editable install of hive_site
+*.egg-info/

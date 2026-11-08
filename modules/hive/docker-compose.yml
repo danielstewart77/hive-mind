@@ -37,6 +37,9 @@ services:
       - HOST_GID=${HOST_GID:-1000}
     volumes:
       - ./src:/app/src
+      # The modules shared with the terminal site, live like ./src above.
+      # The terminal mounts this same directory from its own compose.
+      - ./hive_site:/app/hive_site
       # Auth db — shared with the terminal site.
       - ./data:/data
       # Lucent sqlite, read-only, for the /memory browser. hive_nervous_system
