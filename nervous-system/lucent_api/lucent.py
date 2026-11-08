@@ -1,289 +1,191 @@
-"""Lucent -- SQLite-backed graph and vector store.
+"""Lucent's store: the hive's one database, through the access layer.
 
-Replaces Neo4j with a single-file SQLite database for knowledge graph
-and vector memory storage. Provides connection management and schema
-initialization used by lucent_graph.py and lucent_memory.py.
+This module used to own a SQLite file — a per-thread connection, the schema
+that created itself on first use, and the migrations that brought an older
+file forward. All of that is gone. The schema is applied to Postgres as an
+artifact, `hive_data` owns the connections, and what is left here is the two
+things that are genuinely lucent's and not the database's:
 
-Schema: nodes, edges, memories tables with indexes on frequently queried columns.
-Connection: per-thread, lazy, with WAL mode. Each thread gets its own
-connection so concurrent reads and writes don't share cursor state — a
-shared sqlite3.Connection with check_same_thread=False is documented as
-"safe" only when callers serialize access themselves, and uvicorn's
-threadpool does not.
+* the store's lifecycle, opened once from the server's lifespan and closed
+  once at shutdown, because nothing in `hive_data` opens a pool on demand and
+  a lazy open under two concurrent first calls builds two pools; and
+* the ownership pass, which is self-healing on purpose and so cannot simply
+  die with the schema init it used to hang off. A `Mind` node whose
+  credential had not been minted yet was deliberately left ownerless to wait
+  for "a later pass" — and if there is no later pass, the boys' minds stay
+  ownerless for good, each able to find its own node and nothing else in its
+  graph, with no error anywhere saying so.
+
+There is no synchronous face. `hive_data` has none by design, and a bridge
+written here would be the one place in the hive that blocks an event loop on
+a database call.
 """
 
+from __future__ import annotations
+
 import logging
-import os
-import sqlite3
-import threading
+
+import hive_data
+from hive_data import graph
 
 log = logging.getLogger("lucent-api")
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "data", "lucent.db")
 
-_thread_local = threading.local()
-_schema_init_lock = threading.Lock()
-_schema_initialized = False
+async def open_store() -> None:
+    """Open the pool and check the schema, once, from the lifespan.
+
+    The schema check is `hive_data`'s and it is left on: a database that is
+    not the one these operations were written against is a process that
+    refuses to start, rather than one that answers every memory write with a
+    missing key.
+
+    Idempotent, because this process has two entry points — the
+    nervous-system container runs the app beside a scheduler, and
+    `python -m lucent_api.server` runs it alone — and opening a second pool
+    would hold double the connections against a ceiling shared with every
+    other service, with nothing reporting that it happened.
+
+    The type and relationship registry is seeded here. It used to be seeded
+    by `_init_schema`, which this replaced — and `memory.nodes.type` is a
+    real foreign key into `memory.schema_types`, which the schema load
+    creates empty. Left unseeded, every graph write refuses with literally
+    `Must be one of: []` and `GET /graph/schema` answers an empty registry,
+    on a fresh install, on CI, on a dev box, on anything but the one
+    hand-loaded database. So the seed belongs to the service, not to the
+    load. It is idempotent and rows added later through the admin routes are
+    left alone.
+    """
+    try:
+        hive_data.live_pool()
+    except hive_data.NotInitialised:
+        await hive_data.connect()
+        await _seed_registry()
+        return
+    log.info("lucent.store.open: a pool is already open; leaving it alone")
+    await _seed_registry()
 
 
-def _init_schema(conn: sqlite3.Connection) -> None:
-    """Create tables and indexes if they do not already exist."""
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS nodes (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            -- Which mind wrote the row. Still recorded, and still the whole
-            -- of the identity rule: a `Mind` node's `mind_id` is the mind it
-            -- represents, which is what lets `_check_identity_guard` refuse
-            -- every other mind. It is no longer an ownership claim.
-            mind_id    TEXT    NOT NULL,
-            -- Whose graph this node is in. The partition every read and
-            -- every write is scoped by. Null means no owner could be
-            -- established, which only a service or an admin reaches.
-            owner       TEXT,
-            type        TEXT    NOT NULL,
-            name        TEXT    NOT NULL,
-            first_name  TEXT,
-            last_name   TEXT,
-            properties  TEXT    DEFAULT '{}',
-            data_class  TEXT,
-            tier        TEXT,
-            source      TEXT,
-            as_of       TEXT,
-            created_at  REAL,
-            updated_at  REAL,
-            UNIQUE(owner, type, name)
-        );
+async def _seed_registry() -> None:
+    """Write the declared registry in, and say what it wrote.
 
-        CREATE TABLE IF NOT EXISTS edges (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            mind_id    TEXT    NOT NULL,
-            owner       TEXT,
-            source_id   INTEGER NOT NULL REFERENCES nodes(id),
-            target_id   INTEGER NOT NULL REFERENCES nodes(id),
-            type        TEXT    NOT NULL,
-            as_of       TEXT,
-            source      TEXT,
-            data_class  TEXT,
-            tier        TEXT,
-            created_at  REAL,
-            properties  TEXT    NOT NULL DEFAULT '{}',
-            UNIQUE(source_id, target_id, type)
-        );
-
-        CREATE TABLE IF NOT EXISTS memories (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            mind_id      TEXT    NOT NULL,
-            content       TEXT    NOT NULL,
-            embedding     BLOB,
-            tags          TEXT    DEFAULT '',
-            source        TEXT,
-            data_class    TEXT,
-            tier          TEXT,
-            as_of         TEXT,
-            expires_at    TEXT,
-            superseded    INTEGER DEFAULT 0,
-            recurring     INTEGER,
-            codebase_ref  TEXT,
-            created_at    INTEGER
-        );
-
-        CREATE TABLE IF NOT EXISTS schema_types (
-            name             TEXT    PRIMARY KEY,
-            kind             TEXT    NOT NULL CHECK (kind IN ('first-class','second-class')),
-            property_schema  TEXT    NOT NULL,
-            created_at       REAL    NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS schema_edges (
-            name             TEXT    PRIMARY KEY,
-            source_type      TEXT    NOT NULL,
-            target_type      TEXT    NOT NULL,
-            attr_schema      TEXT    NOT NULL,
-            symmetric        INTEGER NOT NULL DEFAULT 0,
-            created_at       REAL    NOT NULL
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_nodes_mind_id    ON nodes(mind_id);
-        CREATE INDEX IF NOT EXISTS idx_nodes_type         ON nodes(type);
-        CREATE INDEX IF NOT EXISTS idx_nodes_first_name   ON nodes(first_name);
-        CREATE INDEX IF NOT EXISTS idx_nodes_last_name    ON nodes(last_name);
-        CREATE INDEX IF NOT EXISTS idx_edges_mind_id     ON edges(mind_id);
-        CREATE INDEX IF NOT EXISTS idx_memories_mind_id  ON memories(mind_id);
-        CREATE INDEX IF NOT EXISTS idx_memories_expires_at ON memories(expires_at);
-        CREATE INDEX IF NOT EXISTS idx_memories_data_class ON memories(data_class);
-    """)
-
-    # Seed the schema tables from the hardcoded registry. Idempotent —
-    # INSERT OR IGNORE keyed on name. Rows added later via the admin
-    # endpoints are preserved.
+    A seed that fails must not stop the store from serving: a lucent that
+    refuses to start takes every mind's memory with it, and a registry that
+    is already loaded — the normal case on this host — needs nothing from
+    this call. It is logged loudly instead, because `Must be one of: []` on
+    every write is the symptom and it does not name this as the cause.
+    """
     from lucent_api.schema_registry import seed_schema_tables
 
-    seed_schema_tables(conn)
+    try:
+        written = await seed_schema_tables()
+    except Exception:
+        log.exception("lucent.registry.seed: the registry was not seeded; "
+                      "graph writes will refuse until it is")
+        return
+    log.info("lucent.registry.seed: %s types and %s relationships written",
+             written.get("types"), written.get("edges"))
 
-    _migrate_graph_owner(conn)
+
+async def close_store() -> None:
+    """Close the pool, letting work in flight finish."""
+    await hive_data.close(drain_timeout=5.0)
 
 
-def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
-    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+async def store_is_live() -> bool:
+    """Whether the store answers right now.
+
+    Asked by `/health`, which used to be a hardcoded dict. That was
+    defensible against a local file that essentially never failed; against a
+    database over a socket it makes liveness unobservable, so a restarted
+    Postgres leaves every healthcheck green while every write returns an
+    error body.
+    """
+    try:
+        await hive_data.run(lambda connection: connection.fetchval("SELECT 1"))
+    except Exception:
+        log.exception("lucent.store.health: the store did not answer")
+        return False
+    return True
 
 
-def _owner_of_writers(conn: sqlite3.Connection) -> dict[str, str]:
+async def owners_by_writer() -> dict[str, str]:
     """Each mind's owner, as lucent's own credential table records it.
 
     Lucent's credentials carry the user their holder answers for, which is
-    the only owner fact this process holds. Comms' `minds.owner` is the
-    same fact in another service's database, and reaching into it behind
-    comms' back would make two readers of one truth.
+    the only owner fact this process holds. Comms' `minds.owner` is the same
+    fact recorded by another service, and reaching into it behind comms'
+    back would make two readers of one truth.
     """
-    try:
-        rows = conn.execute(
-            "SELECT holder, username, mind_id FROM credentials WHERE revoked_at IS NULL"
-        ).fetchall()
-    except sqlite3.OperationalError:
-        # No credentials table yet — a first boot, where there is also
-        # nothing on disk to migrate.
-        return {}
     owners: dict[str, str] = {}
-    for holder, username, mind_id in ((r[0], r[1], r[2]) for r in rows):
-        user = str(username or "").strip().lower()
+    for row in await graph.credentials_all():
+        if row.get("revoked_at") is not None:
+            continue
+        user = str(row.get("username") or "").strip().lower()
         if not user:
             continue
-        for key in (str(mind_id or "").strip(), str(holder or "").strip().lower()):
+        for key in (str(row.get("mind_id") or "").strip(),
+                    str(row.get("holder") or "").strip().lower()):
             if key:
                 owners[key] = user
     return owners
 
 
-def _migrate_graph_owner(conn: sqlite3.Connection) -> None:
-    """Give every graph row an owner, once, in the same act as the code.
+async def backfill_owners() -> dict[str, int]:
+    """Give every ownerless graph row the owner of the mind that wrote it.
 
-    The column and the backfill land together because the two halves fail
-    in opposite directions on their own: code ahead of data scopes reads to
-    an owner no row carries and every lookup answers "not found", while
-    data ahead of code leaves the identity guard comparing a uuid against a
-    username and refuses every mind its own node. Both report success.
+    Run at every start, and idempotent, because it is the mechanism by which
+    a mind that was not yet known to this store becomes known: a credential
+    minted after the last boot is picked up at the next one.
 
-    A node's owner is the owner of the mind that wrote it. A row whose
-    writer this store cannot resolve — the console's own provenance-less
-    edges, a mind whose credential was never minted here — goes to the
-    primary user, and when none is named it is left null rather than
-    guessed at: a node handed to the wrong person is worse than one only a
-    service can reach.
+    A `Mind` node whose writer cannot be resolved stays ownerless rather than
+    going to the primary user. Handing it over would take one of the boys'
+    minds' souls away from them and give it to the operator, after which the
+    owner check refuses that mind sight of its own node. Everything else
+    unresolved goes to the primary user when one is named, and stays
+    ownerless when none is: a node only a service can reach is a smaller
+    harm than a node belonging to the wrong person.
+
+    Reports counts rather than logging and returning nothing, so the caller
+    can say what the pass did and a pass that claimed nothing is
+    distinguishable from one that never ran.
     """
-    owners = _owner_of_writers(conn)
     from lucent_api.holder_access import primary_user
 
-    primary = primary_user()
+    owners = await owners_by_writer()
+    primary = (primary_user() or "").strip().lower() or None
+    claimed = 0
+    collided = 0
+    left = 0
 
-    def owner_for(mind_id: object, node_type: object = None) -> str | None:
+    def owner_for(mind_id: object, node_type: object) -> str | None:
         key = str(mind_id or "").strip()
         resolved = owners.get(key) or owners.get(key.lower())
         if resolved:
             return resolved
         if str(node_type or "") == "Mind":
-            # A mind's own node is that mind's identity and holds its soul.
-            # Handing it to the primary user because this store has not been
-            # told who the mind belongs to would take two of the boys' minds'
-            # souls away from them and give them to Daniel — after which the
-            # owner check refuses each of them sight of its own node. Left
-            # ownerless, it waits for that mind's credential to be minted and
-            # a later pass picks it up.
             return None
-        return primary or None
+        return primary
 
-    # The indexes are created here rather than in the create-tables script:
-    # on a database that already has the tables, `CREATE TABLE IF NOT EXISTS`
-    # no-ops and an index naming `owner` in the same script would run before
-    # the column exists, taking the whole schema init down with it.
-    if "owner" not in _columns(conn, "nodes"):
-        conn.execute("ALTER TABLE nodes ADD COLUMN owner TEXT")
-    if "owner" not in _columns(conn, "edges"):
-        conn.execute("ALTER TABLE edges ADD COLUMN owner TEXT")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_nodes_owner ON nodes(owner)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_owner ON edges(owner)")
-
-    for table, type_col in (("nodes", "type"), ("edges", "NULL")):
-        rows = conn.execute(
-            f"SELECT id, mind_id, {type_col} FROM {table} WHERE owner IS NULL"
-        ).fetchall()
-        for row_id, mind_id, node_type in ((r[0], r[1], r[2]) for r in rows):
-            resolved = owner_for(mind_id, node_type)
-            if not resolved:
-                continue
-            try:
-                conn.execute(
-                    f"UPDATE {table} SET owner = ? WHERE id = ?", (resolved, row_id)
-                )
-            except sqlite3.IntegrityError:
-                # Claiming this row would collide with one the owner already
-                # holds under the same type and name. Left ownerless and
-                # reported: one row nobody but a service can reach is a
-                # smaller harm than a schema init that raises on every
-                # request and takes the whole store down with it.
-                log.error(
-                    "graph.owner.backfill.skipped: %s row %s would collide "
-                    "under owner %s", table, row_id, resolved,
-                )
-    conn.commit()
-    _rekey_nodes_on_owner(conn)
-
-
-def _rekey_nodes_on_owner(conn: sqlite3.Connection) -> None:
-    """Key `nodes` on (owner, type, name).
-
-    Once an owner's minds share one graph the key that mattered was never
-    the writer: two of one person's minds writing the same person is one
-    node, and keying on the writer made it two that every lookup then chose
-    between by row id. The key carries `type` as well, because a name can
-    legitimately be both a Place and an Organization.
-
-    A unique index rather than a table rebuild: it reaches an existing table
-    where SQLite's inline UNIQUE cannot be altered, and the live store's
-    `nodes` was rebuilt without an inline key by an earlier migration, so
-    there is nothing to drop.
-    """
-    clashes = conn.execute(
-        "SELECT owner, type, name, COUNT(*) c FROM nodes "
-        "GROUP BY owner, type, name HAVING c > 1"
-    ).fetchall()
-    if clashes:
-        # The index is skipped, loudly, rather than refused. Merging two rows
-        # is a judgement about which properties survive and a migration must
-        # not make it silently — but raising here runs inside `_init_schema`
-        # inside `_get_connection`, which would leave the store answering
-        # nothing at all to anybody, on every request, for the sake of a
-        # constraint it ran fine without the day before.
-        detail = ", ".join(f"{r[0]}/{r[1]}/{r[2]} x{r[3]}" for r in clashes)
-        log.error(
-            "graph.owner.rekey.skipped: rows collide on (owner, type, name): %s",
-            detail,
-        )
-        return
-    conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS nodes_owner_type_name "
-        "ON nodes(owner, type, name)"
-    )
-    conn.commit()
-
-
-def _get_connection() -> sqlite3.Connection:
-    """Return a per-thread SQLite connection, initializing schema on first call.
-
-    Each worker thread gets its own connection. WAL mode lets concurrent
-    readers and a single writer coexist at the SQLite layer. Schema
-    initialization runs exactly once across the whole process, guarded
-    by a lock so the first two threads can't race the CREATE TABLE
-    statements.
-    """
-    global _schema_initialized
-    conn = getattr(_thread_local, "conn", None)
-    if conn is None:
-        conn = sqlite3.connect(DB_PATH)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.row_factory = sqlite3.Row
-        with _schema_init_lock:
-            if not _schema_initialized:
-                _init_schema(conn)
-                _schema_initialized = True
-        _thread_local.conn = conn
-    return conn
+    for row in await graph.unowned_rows():
+        resolved = owner_for(row.get("mind_id"), row.get("type"))
+        if not resolved:
+            left += 1
+            continue
+        try:
+            await graph.claim_owner(
+                table=row["table"], row_id=row["id"], owner=resolved)
+            claimed += 1
+        except hive_data.Conflict:
+            # Claiming this row would collide with one the owner already
+            # holds under the same type and name. Left ownerless and
+            # counted: one row only a service can reach is a smaller harm
+            # than a start-up pass that raises and takes the store with it.
+            collided += 1
+            log.error(
+                "graph.owner.backfill.skipped: %s row %s would collide "
+                "under owner %s", row["table"], row["id"], resolved)
+    if claimed or collided or left:
+        log.info(
+            "graph.owner.backfill: %d claimed, %d collided, %d left "
+            "ownerless", claimed, collided, left)
+    return {"claimed": claimed, "collided": collided, "ownerless": left}

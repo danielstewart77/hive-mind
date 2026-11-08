@@ -1,85 +1,81 @@
-"""Regression test for the `data_class` filter on memory_list.
+"""The `data_class` filter on `memory_list`, against the real store.
 
-Bug: the underlying `memory_list` function silently ignored any
-`data_class` argument, so callers using it as a delete scope
-(`list filtered-rows → DELETE each id`) deleted the entire table.
-This test pins that `data_class=<x>` returns ONLY rows whose
-data_class equals `<x>`, and that omitting the argument returns
-all rows.
+Bug this guards: `memory_list` silently ignored any `data_class` argument,
+so a caller using it as a delete scope — list the filtered rows, DELETE each
+id — deleted the entire table. The filter is pinned here as the thing that
+narrows the answer, and as the thing that answers nothing when nothing
+matches.
+
+The rows are seeded with a plain driver connection and plain SQL rather than
+through the module under test, so a filter and a write agreeing on the same
+wrong column cannot pass.
 """
 
 from __future__ import annotations
 
 import json
-import os
-import sqlite3
-import tempfile
-import unittest
+
+import pytest
+import pytest_asyncio
+
+from lucent_api import lucent_memory
+from lucent_api.tests.conftest import unique
 
 
-class MemoryListDataClassFilterTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.db_path = os.path.join(self.tmp_dir.name, "lucent.db")
+@pytest_asyncio.fixture
+async def three_classes(store, inspector):
+    """One mind holding one row in each of three data classes.
 
-        from lucent_api import lucent as lucent_mod
-        from lucent_api import lucent_memory as mem_mod
-
-        self._lucent_mod = lucent_mod
-        self._mem_mod = mem_mod
-        self._orig_db_path = lucent_mod.DB_PATH
-
-        lucent_mod.DB_PATH = self.db_path
-        # Reset per-thread connection state so the test gets a fresh DB.
-        lucent_mod._thread_local = type(lucent_mod._thread_local)()
-        lucent_mod._schema_initialized = False
-
-        conn = lucent_mod._get_connection()
-        # Seed three rows across three data classes.
-        now = 1700000000
-        conn.executemany(
-            """INSERT INTO memories
-               (content, tags, source, data_class, tier, mind_id,
-                created_at, expires_at, recurring, codebase_ref, embedding)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            [
-                ("ephemeral row", "", "session", "ephemeral", "contextual",
-                 "m1", now + 1, None, 0, None, None),
-                ("feedback row", "", "session", "feedback", "contextual",
-                 "m1", now + 2, None, 0, None, None),
-                ("person row", "", "session", "person", "contextual",
-                 "m1", now + 3, None, 0, None, None),
-            ],
-        )
-        conn.commit()
-
-    def tearDown(self) -> None:
-        try:
-            conn = getattr(self._lucent_mod._thread_local, "conn", None)
-            if conn is not None:
-                conn.close()
-        finally:
-            # Reset module state so the next test starts clean.
-            self._lucent_mod._thread_local = type(self._lucent_mod._thread_local)()
-            self._lucent_mod._schema_initialized = False
-            self._lucent_mod.DB_PATH = self._orig_db_path
-            self.tmp_dir.cleanup()
-
-    def test_filter_returns_only_matching_data_class(self) -> None:
-        result = json.loads(self._mem_mod.memory_list(data_class="ephemeral"))
-        self.assertEqual(result["total"], 1, result)
-        self.assertEqual(len(result["entries"]), 1)
-        self.assertEqual(result["entries"][0]["data_class"], "ephemeral")
-
-    def test_unfiltered_returns_all_rows(self) -> None:
-        result = json.loads(self._mem_mod.memory_list())
-        self.assertEqual(result["total"], 3, result)
-
-    def test_filter_with_no_matches_returns_zero(self) -> None:
-        result = json.loads(self._mem_mod.memory_list(data_class="nope"))
-        self.assertEqual(result["total"], 0)
-        self.assertEqual(result["entries"], [])
+    Named with `unique()` because the scratch database is shared by every
+    test in the run: a fixed data class would make "how many rows are in
+    this class" depend on which other tests had already written.
+    """
+    mind = unique("mind")
+    classes = {
+        "ephemeral": unique("ephemeral"),
+        "feedback": unique("feedback"),
+        "person": unique("person"),
+    }
+    now = 1_700_000_000
+    for offset, name in enumerate(classes.values(), start=1):
+        await inspector.execute(
+            'INSERT INTO memory.memories '
+            '("mind_id", "content", "source", "data_class", "tier", '
+            ' "created_at") VALUES ($1, $2, $3, $4, $5, $6)',
+            mind, f"{name} row", "session", name, "contextual", now + offset)
+    return mind, classes
 
 
-if __name__ == "__main__":
-    unittest.main()
+@pytest.mark.asyncio
+async def test_a_data_class_filter_returns_only_that_class(three_classes):
+    mind, classes = three_classes
+
+    answer = json.loads(await lucent_memory.memory_list(
+        mind_ids=[mind], data_class=classes["ephemeral"]))
+
+    assert answer["total"] == 1, answer
+    assert [e["data_class"] for e in answer["entries"]] == [
+        classes["ephemeral"]]
+
+
+@pytest.mark.asyncio
+async def test_an_unfiltered_read_returns_every_class_the_mind_holds(
+        three_classes):
+    mind, classes = three_classes
+
+    answer = json.loads(await lucent_memory.memory_list(mind_ids=[mind]))
+
+    assert answer["total"] == 3, answer
+    assert sorted(e["data_class"] for e in answer["entries"]) == sorted(
+        classes.values())
+
+
+@pytest.mark.asyncio
+async def test_a_data_class_nothing_matches_answers_zero(three_classes):
+    mind, _ = three_classes
+
+    answer = json.loads(await lucent_memory.memory_list(
+        mind_ids=[mind], data_class=unique("nope")))
+
+    assert answer["total"] == 0
+    assert answer["entries"] == []

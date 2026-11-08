@@ -31,13 +31,12 @@ import json
 import os
 import re
 import shutil
-import sqlite3
 import subprocess
 import sys
-import time
 
+import httpx
 import pytest
-from fastapi.testclient import TestClient
+import pytest_asyncio
 
 NS = os.path.join(os.path.dirname(__file__), "..", "..", "nervous-system")
 sys.path.insert(0, os.path.abspath(NS))
@@ -58,6 +57,12 @@ pytestmark = [
     ),
 ]
 
+pytest.importorskip("hive_data")
+
+from hive_data import graph as hd_graph  # noqa: E402
+
+from lucent_api.tests.conftest import unique  # noqa: E402
+
 
 def _filter(var: str) -> str:
     """Read the jq filter the script actually runs for PERSON_COUNT / PERSON_TYPE."""
@@ -75,74 +80,80 @@ def _jq(filt: str, payload: dict) -> str:
     return out.stdout.strip()
 
 
-def _seeded_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(":memory:", check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.executescript(
-        """
-        CREATE TABLE nodes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, mind_id TEXT NOT NULL,
-            type TEXT NOT NULL, name TEXT NOT NULL, first_name TEXT,
-            last_name TEXT, properties TEXT DEFAULT '{}', data_class TEXT,
-            tier TEXT, source TEXT, as_of TEXT, created_at REAL, updated_at REAL
-        );
-        CREATE TABLE edges (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, mind_id TEXT NOT NULL,
-            source_id INTEGER NOT NULL, target_id INTEGER NOT NULL,
-            type TEXT NOT NULL, as_of TEXT, source TEXT, data_class TEXT,
-            tier TEXT, created_at REAL, properties TEXT NOT NULL DEFAULT '{}'
-        );
-        """
-    )
-    now = time.time()
-    for name, first, last in [
-        ("Maurice Westerdale", "Maurice", "Westerdale"),
-        ("Daniel Stewart", "Daniel", "Stewart"),
-        ("Sloan Stewart", "Sloan", "Stewart"),
-    ]:
-        conn.execute(
-            "INSERT INTO nodes (mind_id, type, name, first_name, last_name,"
-            " properties, data_class, tier, created_at)"
-            " VALUES (?, 'Person', ?, ?, ?, '{}', 'current-state', 'contextual', ?)",
-            ("seed-uuid", name, first, last, now),
-        )
-    conn.commit()
-    return conn
-
-
 #: About the person branch of the graph query, not about scoping, so it
 #: presents the admin credential — the one value that still reaches every
-#: mind. It used to clear the token instead and rely on the memory store
-#: serving open when unconfigured, which is gone: a store that cannot
+#: owner's graph. It used to clear the token instead and rely on the memory
+#: store serving open when unconfigured, which is gone: a store that cannot
 #: establish who is calling refuses rather than answering the LAN. Without a
 #: credential the query returns a 401 body, whose person count is zero, and
 #: the failure reads as the person branch being broken.
 ADMIN_TOKEN = "lucent-admin-for-tests"  # secret-guard: allow
 
 
-@pytest.fixture
-def client(monkeypatch) -> TestClient:
+@pytest_asyncio.fixture
+async def client(store, monkeypatch):
+    """The real app over ASGI, on this test's own event loop.
+
+    `TestClient` would run the routes in a portal thread with a loop of its
+    own, and the pool's connections belong to the loop that opened them.
+    """
     monkeypatch.setenv("LUCENT_ADMIN_BEARER_TOKEN", ADMIN_TOKEN)
-    from lucent_api import holder_access, lucent_graph
+
     from lucent_api.server import create_app
 
-    conn = _seeded_conn()
-    holder_access.init_credentials(conn)
-    monkeypatch.setattr(lucent_graph, "_get_conn", lambda: conn)
-    monkeypatch.setattr(holder_access, "connection", lambda: conn)
-    return TestClient(
-        create_app(), headers={"Authorization": f"Bearer {ADMIN_TOKEN}"}
-    )
+    transport = httpx.ASGITransport(app=create_app())
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://lucent",
+        headers={"Authorization": f"Bearer {ADMIN_TOKEN}"},
+    ) as opened:
+        yield opened
 
 
-def test_r7_the_person_branch_resolves_a_single_person(client):
-    payload = client.post("/graph/query", json={"names": ["Maurice"], "depth": 1}).json()
+@pytest_asyncio.fixture
+async def people(client, registered_types, a_mind) -> dict:
+    """One name that resolves to a person, and one shared by two of them.
+
+    Both are minted with `unique()`: the scratch database is shared by the
+    whole run, so a fixed surname would make "how many people answer to
+    Stewart" depend on which other test had already written one. Not a
+    generator — `hive_data` refuses to open a unit of work inside one, and a
+    `node_write` is a unit.
+    """
+    owner = unique("daniel")
+    surname = unique("Stewart")
+    alone = unique("Maurice")
+    for first, last in ((alone, unique("Westerdale")),
+                        (unique("Daniel"), surname),
+                        (unique("Sloan"), surname)):
+        await hd_graph.node_write(
+            owner=owner, type="Person", name=f"{first} {last}",
+            first_name=first, last_name=last, mind_id=a_mind, properties={},
+            data_class="current-state", tier="contextual",
+            created_at=1.0, updated_at=1.0)
+    return {"alone": alone, "shared": surname}
+
+
+async def _query(client: httpx.AsyncClient, name: str) -> dict:
+    answer = await client.post(
+        "/graph/query", json={"names": [name], "depth": 1})
+    assert answer.status_code == 200, answer.text
+    return answer.json()
+
+
+@pytest.mark.asyncio
+async def test_r7_the_person_branch_resolves_a_single_person(client, people):
+    payload = await _query(client, people["alone"])
+
     assert _jq(_filter("PERSON_COUNT"), payload) == "1"
     assert _jq(_filter("PERSON_TYPE"), payload) == "Person"
 
 
-def test_r3_the_person_branch_still_sees_an_ambiguous_name_as_ambiguous(client):
-    payload = client.post("/graph/query", json={"names": ["Stewart"], "depth": 1}).json()
+@pytest.mark.asyncio
+async def test_r3_the_person_branch_still_sees_an_ambiguous_name_as_ambiguous(
+    client, people
+):
+    payload = await _query(client, people["shared"])
+
     assert _jq(_filter("PERSON_COUNT"), payload) == "2"
 
 

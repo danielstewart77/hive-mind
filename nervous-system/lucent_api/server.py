@@ -11,7 +11,9 @@ Run: python -m lucent_api.server
 
 from __future__ import annotations
 
+import contextlib
 import os
+from typing import AsyncIterator
 
 import uvicorn
 from fastapi import Depends, FastAPI
@@ -26,6 +28,32 @@ from hive_logging import configure_logging, install_fastapi_logging, log_event
 log = configure_logging("lucent-api")
 
 
+@contextlib.asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Open the store before anything serves, and close it once at the end.
+
+    The app had no lifespan at all while the store was a file that opened
+    itself on first use. `hive_data` opens no pool on demand, deliberately,
+    so this is the only place the pool can be opened — and the ownership
+    pass runs here because it is how a mind whose credential was minted
+    since the last boot becomes visible in its own graph.
+    """
+    from lucent_api import lucent
+
+    await lucent.open_store()
+    try:
+        await lucent.backfill_owners()
+    except Exception:
+        # A backfill that fails must not stop the store from serving: every
+        # row it would have claimed is still readable by a service, and a
+        # lucent that refuses to start takes every mind's memory with it.
+        log.exception("lucent.owner.backfill: the pass did not complete")
+    try:
+        yield
+    finally:
+        await lucent.close_store()
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title="lucent-api",
@@ -33,12 +61,28 @@ def create_app() -> FastAPI:
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
+        lifespan=lifespan,
     )
     install_fastapi_logging(app, log, "lucent-api")
 
     @app.get("/health")
-    def health() -> dict[str, str]:
-        return {"status": "ok", "service": "lucent-api"}
+    async def health() -> JSONResponse:
+        """Whether the store answers, not whether the process is running.
+
+        This was a hardcoded dict, which was defensible against a local file
+        that essentially never failed. Against a database over a socket it
+        made liveness unobservable: a restarted Postgres left every
+        healthcheck green, comms' readiness passing, and every memory write
+        returning two hundred with an error in the body — which is how a
+        store that has been down for a month gets noticed.
+        """
+        from lucent_api import lucent
+
+        live = await lucent.store_is_live()
+        return JSONResponse(
+            {"status": "ok" if live else "degraded", "service": "lucent-api",
+             "store": "answering" if live else "not answering"},
+            status_code=200 if live else 503)
 
     from lucent_api.routers.graph import router as graph_router
     from lucent_api.routers.memory import router as memory_router
@@ -91,16 +135,18 @@ def _register_credential_routes(app: FastAPI) -> None:
     @app.put(
         "/credentials/{holder}", dependencies=[Depends(require_admin_bearer)]
     )
-    def put_credential(holder: str, body: CredentialRequest):
+    async def put_credential(holder: str, body: CredentialRequest):
+        """Mint or replace one holder's credential.
+
+        No schema creation here any more. The table is applied to the
+        database as an artifact, and the `CREATE TABLE IF NOT EXISTS` that
+        used to run on this path — and on every gated request — would
+        resolve against `search_path` and build an empty `public.credentials`
+        while the real holders sat in `memory.credentials`, which reads as
+        working while every mind gets a four-oh-one.
+        """
         try:
-            conn = holder_access.connection()
-            # The table may not exist yet: this is the first call of the
-            # rollout, on a store that has never served a gated request, and
-            # going straight to a SELECT made the documented first step answer
-            # 500 on `no such table: credentials`.
-            holder_access.init_credentials(conn)
-            return holder_access.put_credential(
-                conn,
+            return await holder_access.put_credential(
                 holder,
                 body.username,
                 body.token,
@@ -113,25 +159,18 @@ def _register_credential_routes(app: FastAPI) -> None:
     @app.delete(
         "/credentials/{holder}", dependencies=[Depends(require_admin_bearer)]
     )
-    def revoke_credential(holder: str):
+    async def revoke_credential(holder: str):
         """Lands on that holder's next request: the store reads the table per
         call, so there is nothing to restart and no cache to clear."""
-        conn = holder_access.connection()
-        holder_access.init_credentials(conn)
-        revoked = holder_access.revoke_credential(conn, holder)
+        revoked = await holder_access.revoke_credential(holder)
         return {"holder": holder.strip().lower(), "revoked": revoked}
 
     @app.get("/credentials", dependencies=[Depends(require_admin_bearer)])
-    def list_credentials():
+    async def list_credentials():
         """Which holders have a credential and whether it is live. Never the
         value: an operator does not need it, they need to know whether the
         holder has one that works."""
-        conn = holder_access.connection()
-        holder_access.init_credentials(conn)
-        rows = conn.execute(
-            "SELECT holder, username, role, mind_id, created_at, revoked_at "
-            "FROM credentials ORDER BY username, holder"
-        ).fetchall()
+        rows = await holder_access.all_credentials()
         return [
             {
                 "holder": r["holder"],
