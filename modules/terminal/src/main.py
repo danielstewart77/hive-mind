@@ -479,7 +479,7 @@ async def api_terminal_sessions(user: dict = Depends(require_auth)):
     for s in sessions:
         if (
             not isinstance(s, dict)
-            or s.get("owner_type") == "scheduler"
+            or s.get("surface") == "scheduler"
             or s.get("status") == "closed"
         ):
             continue
@@ -492,7 +492,7 @@ async def api_terminal_sessions(user: dict = Depends(require_auth)):
             "status": s.get("status"),
             "last_active": s.get("last_active"),
             "age": _relative_age(now, s.get("last_active")),
-            "summary": (s.get("summary") or "").strip(),
+            "summary": (s.get("opening_line") or "").strip(),
         })
     rows.sort(key=lambda r: -float(r.get("last_active") or 0))
     # Explicitly uncacheable, for the reason the labels route gives: with
@@ -543,8 +543,8 @@ async def _create_gateway_session(mind_id: str) -> dict:
         # mind's Telegram surface.
         data = json.dumps({
             "mind_id": mind_id,
-            "owner_type": "web",
-            "owner_ref": "terminal",
+            "surface": "web",
+            "surface_id": "terminal",
             "client_ref": client_ref,
         }).encode()
         req = urllib.request.Request(

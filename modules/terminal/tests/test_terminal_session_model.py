@@ -59,7 +59,7 @@ def test_create_session_omits_model(tmp_path, monkeypatch):
     assert resp.status_code == 200
     assert "model" not in sent["body"]
     assert sent["body"]["mind_id"] == "mind-uuid"
-    assert sent["body"]["owner_ref"] == "terminal"
+    assert sent["body"]["surface_id"] == "terminal"
 
 
 def test_create_session_requires_mind_id(tmp_path, monkeypatch):

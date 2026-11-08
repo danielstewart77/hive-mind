@@ -319,15 +319,15 @@ def test_api_terminal_sessions_returns_flat_labeled_list(tmp_path, monkeypatch):
         if path == "/sessions":
             return [
                 {"id": "sess-old12345", "mind_id": "ada-id", "status": "idle",
-                 "last_active": now - 120, "summary": "older"},
+                 "last_active": now - 120, "opening_line": "older"},
                 {"id": "sess-new12345", "mind_id": "skippy-id", "status": "running",
-                 "last_active": now - 5, "summary": "newest"},
+                 "last_active": now - 5, "opening_line": "newest"},
                 {"id": "sess-sched", "mind_id": "ada-id", "status": "running",
-                 "owner_type": "scheduler", "last_active": now - 1, "summary": "cron"},
+                 "surface": "scheduler", "last_active": now - 1, "opening_line": "cron"},
                 {"id": "sess-suspended", "mind_id": "ada-id", "status": "suspended",
-                 "last_active": now - 30, "summary": "parked"},
+                 "last_active": now - 30, "opening_line": "parked"},
                 {"id": "sess-closed", "mind_id": "ada-id", "status": "closed",
-                 "last_active": now - 10, "summary": "history"},
+                 "last_active": now - 10, "opening_line": "history"},
             ]
         return []
 
@@ -405,7 +405,7 @@ def test_terminal_session_create_uses_unique_client_ref_per_call(tmp_path, monke
     refs = [body["client_ref"] for body in captured]
     assert refs[0] != refs[1], "two calls shared one client_ref"
     assert all(ref.startswith("terminal-") for ref in refs)
-    assert all(body["owner_ref"] == "terminal" for body in captured)
+    assert all(body["surface_id"] == "terminal" for body in captured)
 
 
 def test_terminal_session_create_requires_mind_id(tmp_path, monkeypatch):
