@@ -195,7 +195,7 @@ class FakeMind:
         transcript and nothing else stands in for it."""
         if self.handover is not None:
             return _Resp(*self.handover)
-        transcript = self.transcripts.get(body.get("claude_sid"))
+        transcript = self.transcripts.get(body.get("conversation_id"))
         if (transcript is None and body.get("had_turns")
                 and not body.get("summary") and not body.get("prior_handover")):
             return _Resp(422, {"detail": "unreadable"})
@@ -272,7 +272,7 @@ async def _close(mgr: SessionManager) -> None:
 
 async def _seed(
     mgr: SessionManager, sid: str = "sess-1", *, harness: str = "claude",
-    model: str = "claude-opus-5", claude_sid: str = "conv-1",
+    model: str = "claude-opus-5", conversation_id: str = "conv-1",
     harness_sid: str | None = None, effort: str | None = None,
     client_ref: str = "123",
 ) -> str:
@@ -282,7 +282,7 @@ async def _seed(
                                       harness_sid, harness, effort, created_at,
                                       last_active, status, mind_id, opening_line)
            VALUES ($1, 'telegram', $2, $3, $4, $5, $6, $7, $8, $8, 'running', $9, 'chat')""",
-        sid, client_ref, model, claude_sid, harness_sid, harness, effort, now, MIND,
+        sid, client_ref, model, conversation_id, harness_sid, harness, effort, now, MIND,
     )
     await execute(
         "INSERT INTO core.active_sessions (client_type, client_ref, session_id) "
@@ -321,7 +321,7 @@ def test_a_new_conversation_records_the_minds_default_harness():
         mind = FakeMind()
         with mind.wired(), _soul():
             born = await mgr.create_session(
-                owner_type="telegram", owner_ref="123", client_ref="123", mind_id=MIND,
+                surface="telegram", surface_id="123", client_ref="123", mind_id=MIND,
             )
         assert born["harness"] == "claude"
         assert (await mgr._get_row(born["id"]))["harness"] == "claude"
@@ -345,18 +345,15 @@ def test_a_pane_rotation_speaks_the_schemas_names_and_the_old_ones():
         mind = FakeMind()
         with mind.wired():
             await mgr._rotate_pty_on_mind(
-                session_id="sess-1", new_claude_sid="conv-2",
+                session_id="sess-1", new_conversation_id="conv-2",
                 model="gpt-5.6-terra", mind_id=MIND, user_prompt="seed",
-                client_ref="chat-9", owner_type="telegram:m-1", owner_ref="chat-9",
+                client_ref="chat-9", surface="telegram:m-1", surface_id="chat-9",
             )
         rotated = mind.sent("POST", "/sessions/sess-1/rotate-pty")[0]["json"]
         assert rotated["surface"] == "telegram:m-1"
         assert rotated["surface_id"] == "chat-9"
         assert rotated["surface_label"] == "telegram"
         assert rotated["new_conversation_id"] == "conv-2"
-        assert rotated["owner_type"] == "telegram:m-1"
-        assert rotated["owner_ref"] == "chat-9"
-        assert rotated["new_claude_sid"] == "conv-2"
         await _close(mgr)
 
     _run(scenario())
@@ -370,7 +367,7 @@ def test_spawn_and_pane_rotation_name_the_conversations_harness():
         with mind.wired():
             await mgr._spawn("sess-1", "gpt-5.6-terra", resume_sid="conv-1", mind_id=MIND)
             await mgr._rotate_pty_on_mind(
-                session_id="sess-1", new_claude_sid="conv-2",
+                session_id="sess-1", new_conversation_id="conv-2",
                 model="gpt-5.6-terra", mind_id=MIND, user_prompt="seed",
             )
         assert mind.spawns()[0]["harness"] == "codex"
@@ -416,8 +413,8 @@ def app_client(monkeypatch):
 
 def _command(client, content: str):
     return client.post("/command", json={
-        "content": content, "owner_type": "telegram",
-        "client_ref": "123", "owner_ref": "123", "mind_id": MIND,
+        "content": content, "surface": "telegram",
+        "client_ref": "123", "surface_id": "123", "mind_id": MIND,
     }).json()
 
 
@@ -564,13 +561,13 @@ def test_a_switch_keeps_the_row_and_opens_the_new_harness_on_the_handover():
         assert result["id"] == "sess-1"
         assert row["harness"] == "codex"
         assert row["model"] == "gpt-5.6-terra"
-        assert row["claude_sid"] and row["claude_sid"] != "conv-1"
+        assert row["conversation_id"] and row["conversation_id"] != "conv-1"
         assert row["harness_sid"] is None
 
         # Rendered on the harness being left, before anything was killed.
         handover = mind.sent("POST", "/handover")[0]
         assert handover["json"]["harness"] == "claude"
-        assert handover["json"]["claude_sid"] == "conv-1"
+        assert handover["json"]["conversation_id"] == "conv-1"
         assert handover["json"]["harness_sid"] == "thread-0"
         assert handover["json"]["summary"] == "We were fixing the boiler."
         # Half the window (no threshold is known), less the harness's own
@@ -585,7 +582,7 @@ def test_a_switch_keeps_the_row_and_opens_the_new_harness_on_the_handover():
         spawned = mind.spawns()[-1]
         assert spawned["harness"] == "codex"
         assert spawned["model"] == "gpt-5.6-terra"
-        assert spawned["resume_sid"] == row["claude_sid"]
+        assert spawned["resume_sid"] == row["conversation_id"]
         assert spawned["harness_sid"] is None
         assert spawned["opening_turn"] == (
             "We were fixing the boiler.\n\nHANDOVER: the old conversation"
@@ -625,7 +622,7 @@ def test_the_handover_is_reapplied_until_a_turn_completes_without_error():
             await mgr.switch_harness("sess-1", "codex", "gpt-5.6-terra")
             row = await mgr._get_row("sess-1")
             assert row["carry_forward"] == "HANDOVER: the old conversation"
-            assert row["carry_forward_sid"] == row["claude_sid"]
+            assert row["carry_forward_sid"] == row["conversation_id"]
 
             # The process dies before any turn: the chat respawn re-applies it.
             mgr._procs.pop("sess-1")
@@ -642,7 +639,7 @@ def test_the_handover_is_reapplied_until_a_turn_completes_without_error():
 
             mgr._procs.pop("sess-1")
             await mgr._spawn(
-                "sess-1", "gpt-5.6-terra", resume_sid=row["claude_sid"], mind_id=MIND,
+                "sess-1", "gpt-5.6-terra", resume_sid=row["conversation_id"], mind_id=MIND,
             )
         assert mind.spawns()[-1]["opening_turn"] == ""
         await _close(mgr)
@@ -688,7 +685,7 @@ def test_a_new_harness_that_fails_to_start_restores_and_respawns_the_old_one():
             with pytest.raises(Exception):
                 await mgr.switch_harness("sess-1", "codex", "gpt-5.6-terra")
         row = await mgr._get_row("sess-1")
-        assert (row["harness"], row["model"], row["claude_sid"], row["harness_sid"], row["effort"]) == (
+        assert (row["harness"], row["model"], row["conversation_id"], row["harness_sid"], row["effort"]) == (
             "claude", "claude-opus-5", "conv-1", "thread-0", "max",
         )
         assert row["carry_forward"] is None
@@ -736,13 +733,13 @@ def test_an_arm_from_the_conversation_the_switch_replaced_is_ignored():
         mind = FakeMind()
         with mind.wired(), _soul():
             await mgr.switch_harness("sess-1", "codex", "gpt-5.6-terra")
-        new_sid = (await mgr._get_row("sess-1"))["claude_sid"]
+        new_sid = (await mgr._get_row("sess-1"))["conversation_id"]
 
-        stale = await mgr.arm_rotation("telegram", "123", claude_sid="conv-1")
+        stale = await mgr.arm_rotation("telegram", "123", conversation_id="conv-1")
         assert stale["ok"] is False
         assert (await mgr._get_row("sess-1"))["rotation_armed"] == 0
 
-        live = await mgr.arm_rotation("telegram", "123", claude_sid=new_sid)
+        live = await mgr.arm_rotation("telegram", "123", conversation_id=new_sid)
         assert live["ok"] is True
         assert (await mgr._get_row("sess-1"))["rotation_armed"] == 1
         await _close(mgr)
@@ -760,7 +757,7 @@ def test_a_codex_arm_measured_by_its_own_thread_id_is_honoured():
             await mgr.switch_harness("sess-1", "codex", "gpt-5.6-terra")
         await mgr.set_harness_sid("sess-1", "thread-9")
 
-        armed = await mgr.arm_rotation("telegram", "123", claude_sid="thread-9")
+        armed = await mgr.arm_rotation("telegram", "123", conversation_id="thread-9")
         assert armed["ok"] is True
         assert (await mgr._get_row("sess-1"))["rotation_armed"] == 1
         await _close(mgr)
@@ -798,13 +795,13 @@ def test_a_switch_leaves_other_conversations_and_the_minds_default_alone():
     async def scenario():
         mgr = await _manager(harness="claude_cli")
         await _seed(mgr, "sess-1", client_ref="123")
-        await _seed(mgr, "sess-2", claude_sid="conv-2", client_ref="456")
+        await _seed(mgr, "sess-2", conversation_id="conv-2", client_ref="456")
         other_before = await mgr._get_row("sess-2")
         mind = FakeMind()
         with mind.wired(), _soul():
             await mgr.switch_harness("sess-1", "codex", "gpt-5.6-terra")
             fresh = await mgr.create_session(
-                owner_type="telegram", owner_ref="789", client_ref="789", mind_id=MIND,
+                surface="telegram", surface_id="789", client_ref="789", mind_id=MIND,
             )
         assert await mgr._get_row("sess-2") == other_before
         assert mind.kills("sess-2") == []
@@ -891,7 +888,7 @@ def test_a_switch_before_any_turn_sends_the_undelivered_handover_as_prior():
     holds the turns of the conversation that handover replaced."""
     async def scenario():
         mgr = await _manager()
-        await _seed(mgr, claude_sid="conv-2")
+        await _seed(mgr, conversation_id="conv-2")
         await _turn("from the replaced conversation")
         await execute(
             "UPDATE core.sessions SET carry_forward = 'FIRST HANDOVER', "
@@ -973,7 +970,7 @@ def test_a_harness_listing_that_cannot_be_read_never_refuses_a_new_conversation(
         mind.harnesses_status = status
         with mind.wired(), _soul():
             born = await mgr.create_session(
-                owner_type="telegram", owner_ref="123", client_ref="123", mind_id=MIND,
+                surface="telegram", surface_id="123", client_ref="123", mind_id=MIND,
             )
         assert born["harness"] == "dsh"
         assert [s["harness"] for s in mind.spawns()] == ["dsh"]
@@ -1013,7 +1010,7 @@ def test_a_switch_on_a_conversation_in_a_pane_respawns_the_pane_onto_the_new_har
         row = await mgr._get_row("sess-1")
         assert row["harness"] == "codex"
         assert row["model"] == "gpt-5.6-terra"
-        assert row["claude_sid"] and row["claude_sid"] != "conv-1"
+        assert row["conversation_id"] and row["conversation_id"] != "conv-1"
         assert row["carry_forward"] == "HANDOVER: the old conversation"
 
         rotation = mind.sent("POST", "/sessions/sess-1/rotate-pty")[0]["json"]
@@ -1021,7 +1018,7 @@ def test_a_switch_on_a_conversation_in_a_pane_respawns_the_pane_onto_the_new_har
         assert rotation["switch"] is True
         assert rotation["model"] == "gpt-5.6-terra"
         assert rotation["effort"] == "high"
-        assert rotation["new_conversation_id"] == row["claude_sid"]
+        assert rotation["new_conversation_id"] == row["conversation_id"]
         # The pane opens on the handover as its first user turn.
         assert rotation["user_prompt"] == "HANDOVER: the old conversation"
         order = [(r["method"], r["path"]) for r in mind.requests]
@@ -1070,7 +1067,7 @@ def test_a_switch_on_a_held_conversation_with_no_live_pane_waits_for_the_next_at
         # The next attach opens codex on the handover; no chat process is
         # started beside the pane the conversation belongs to.
         assert row["carry_forward"] == "HANDOVER: the old conversation"
-        assert row["carry_forward_sid"] == row["claude_sid"]
+        assert row["carry_forward_sid"] == row["conversation_id"]
         assert mind.spawns() == []
         await _close(mgr)
 
@@ -1096,7 +1093,7 @@ def test_a_recorded_turn_clears_the_handover_by_either_conversation_id(reported,
         mgr = await _manager()
         await _seed(mgr)
         await _stored_handover(mgr)
-        await mgr.record_turn("telegram", "123", "user", "hi", claude_sid=reported)
+        await mgr.record_turn("telegram", "123", "user", "hi", conversation_id=reported)
         row = await mgr._get_row("sess-1")
         assert (row["carry_forward"] is None) is cleared
         await _close(mgr)
@@ -1116,10 +1113,10 @@ def test_a_fire_reported_by_codex_thread_id_is_not_taken_for_a_stale_conversatio
         mind = FakeMind()
         with mind.wired():
             fired = await mgr.fire_rotation(
-                "telegram", "123", claude_sid="thread-9", prompt="next",
+                "telegram", "123", conversation_id="thread-9", prompt="next",
             )
             stale = await mgr.fire_rotation(
-                "telegram", "123", claude_sid="conv-1", prompt="next",
+                "telegram", "123", conversation_id="conv-1", prompt="next",
             )
         assert fired["ok"] is True, fired
         assert stale["error"] in ("stale conversation", "not armed")
@@ -1135,7 +1132,7 @@ def test_a_new_conversation_is_refused_when_the_default_harness_is_unavailable()
         with mind.wired(), _soul():
             with pytest.raises(ValueError, match="dsh CLI not found"):
                 await mgr.create_session(
-                    owner_type="telegram", owner_ref="123", client_ref="123", mind_id=MIND,
+                    surface="telegram", surface_id="123", client_ref="123", mind_id=MIND,
                 )
         assert mind.spawns() == []
         assert await fetchval("SELECT COUNT(*) FROM core.sessions") == 0
@@ -1151,7 +1148,7 @@ def test_a_mind_predating_the_harness_listing_is_not_refused():
         mind.harnesses_status = 404
         with mind.wired(), _soul():
             born = await mgr.create_session(
-                owner_type="telegram", owner_ref="123", client_ref="123", mind_id=MIND,
+                surface="telegram", surface_id="123", client_ref="123", mind_id=MIND,
             )
         assert born["harness"] == "dsh"
         assert [s["harness"] for s in mind.spawns()] == ["dsh"]
@@ -1185,7 +1182,7 @@ def test_harness_on_the_current_harness_is_a_model_switch():
             await mgr.switch_harness("sess-1", "codex", "gpt-5.6-mini")
         row = await mgr._get_row("sess-1")
         assert mind.sent("POST", "/handover") == []
-        assert (row["model"], row["claude_sid"], row["harness_sid"]) == (
+        assert (row["model"], row["conversation_id"], row["harness_sid"]) == (
             "gpt-5.6-mini", "conv-1", "thread-0",
         )
         assert mind.spawns()[-1]["resume_sid"] == "conv-1"

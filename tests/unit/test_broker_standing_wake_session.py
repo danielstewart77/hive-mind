@@ -33,13 +33,13 @@ class FakeSessionManager:
         self.sent_to: list[str] = []
         self._active: dict[tuple[str, str], dict] = {}
 
-    async def create_session(self, *, owner_type=None, owner_ref=None,
+    async def create_session(self, *, surface=None, surface_id=None,
                              client_ref=None, mind_id=None, model=None,
                              **kwargs) -> dict:
         row = {"id": f"session-{len(self.created) + 1}", "client_ref": client_ref,
-               "owner_ref": owner_ref, "mind_id": mind_id}
+               "surface_id": surface_id, "mind_id": mind_id}
         self.created.append(row)
-        self._active[(owner_type, client_ref)] = row
+        self._active[(surface, client_ref)] = row
         return row
 
     async def get_active_session(self, client_type: str, client_ref: str):

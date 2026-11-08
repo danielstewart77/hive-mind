@@ -54,7 +54,7 @@ The child:
 2. If the count crosses the rotation threshold, runs three structured
    Ollama calls to produce a summary, project context, and state
    snapshot.
-3. POSTs the envelope to `POST <COMMS_URL>/sessions/{claude_sid}/rotation-memory`
+3. POSTs the envelope to `POST <COMMS_URL>/sessions/{conversation_id}/rotation-memory`
    so the next session for this `(mind_id, client_ref)` pair picks it
    up as the `<session-memory>` block.
 4. POSTs `/clear` to `POST <COMMS_URL>/command` to trigger a session

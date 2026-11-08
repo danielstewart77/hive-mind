@@ -72,8 +72,8 @@ def _seed_active(model: str) -> None:
 
 def _ask(client):
     return client.post("/command", json={
-        "content": "/model", "owner_type": "telegram",
-        "client_ref": "123", "owner_ref": "123", "mind_id": MIND,
+        "content": "/model", "surface": "telegram",
+        "client_ref": "123", "surface_id": "123", "mind_id": MIND,
     })
 
 

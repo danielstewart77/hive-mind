@@ -40,15 +40,18 @@ async def _make_manager() -> SessionManager:
 
 
 async def _session_row(
-    mgr: SessionManager, session_id: str, owner_type: str = "terminal",
+    mgr: SessionManager, session_id: str, surface: str = "terminal",
     mind_id: str = "skippy", model: str = "claude-opus-5",
 ) -> None:
     await seed_session(
-        session_id, claude_sid=f"conv-{session_id}", owner_type=owner_type,
-        owner_ref="ref-1", model=model, created_at=1_700_000_000.0,
+        session_id, conversation_id=f"conv-{session_id}", surface=surface,
+        surface_id="ref-1", model=model, created_at=1_700_000_000.0,
+        opening_line=OPENING_LINE,
         last_active=1_700_000_000.0, status="running", mind_id=mind_id,
     )
 
+
+OPENING_LINE = "what was asked first"
 
 TEXT_EVENT = {
     "type": "assistant",
@@ -348,7 +351,7 @@ def test_reporting_for_a_client_with_no_active_session_is_refused(comms_db):
     assert _run(scenario())["ok"] is False
 
 
-def test_the_live_listing_carries_the_new_names_beside_the_old(comms_db):
+def test_the_live_listing_carries_the_surface_and_the_opening_line(comms_db):
     async def scenario():
         mgr = await _make_manager()
         await _session_row(mgr, "s1")
@@ -356,6 +359,5 @@ def test_the_live_listing_carries_the_new_names_beside_the_old(comms_db):
         return await mgr.live_dashboard(now=50.0)
 
     row = _run(scenario())["sessions"][0]
-    assert row["surface"] == row["owner_type"]
-    assert row["opening_line"] == row["summary"]
-    assert row["owner_type"]
+    assert row["surface"] == "terminal"
+    assert row["opening_line"] == OPENING_LINE

@@ -82,7 +82,7 @@ def proactive_chat_id(session: dict) -> int | None:
     So the surface decides and the ref is only parsed. A session naming no
     surface is not assumed to be Telegram — that guess is the defect.
     """
-    surface = str(session.get("surface") or session.get("owner_type") or "")
+    surface = str(session.get("surface") or "")
     if surface.split(":", 1)[0] not in _TELEGRAM_SURFACES:
         return None
     try:

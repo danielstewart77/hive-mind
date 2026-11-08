@@ -480,14 +480,14 @@ async def _ensure_channel_session(
     # The mind's own Discord claim, since one bot answers one person. The
     # old reading took the first entry of a stack-wide allow-list, which is
     # whoever happened to be listed first on the whole machine.
-    owner_ref = str(
+    surface_id = str(
         await claimed_chat_id(skill.mind_id, "discord")
         or (config.discord_allowed_users[0] if config.discord_allowed_users else "")
         or "scheduler"
     )
     payload = {
         "surface": client_type,
-        "surface_id": owner_ref,
+        "surface_id": surface_id,
         "client_ref": channel_id,
         "mind_id": skill.mind_id,
         "surface_prompt": VOICE_SURFACE_PROMPT if skill.voice else DEV_SURFACE_PROMPT,

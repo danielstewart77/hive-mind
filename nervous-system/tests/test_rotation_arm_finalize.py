@@ -15,7 +15,7 @@ Covers:
 - an armed chat turn replaces the conversation under the same row rather
   than minting a successor, and leaves un-armed delivery untouched.
 - fire_rotation replaces a pane's conversation in place: same session row,
-  new claude_sid, pane respawned onto it with the typed message; a mind with
+  new conversation_id, pane respawned onto it with the typed message; a mind with
   no live pane leaves the conversation where it was.
 - record_turn appends to the session_turns ledger for the active session,
   and no-ops when there is none.
@@ -45,27 +45,27 @@ def _run(coro):
 
 async def _seed_session(
     *,
-    owner_type: str,
+    surface: str,
     client_ref: str,
-    owner_ref: str | None = None,
+    surface_id: str | None = None,
     bind_active: bool = True,
-    claude_sid: str = "conv-old",
+    conversation_id: str = "conv-old",
     terminal_held: bool = False,
 ) -> str:
     """Insert a running session; optionally bind it active. Returns session_id.
 
-    ``owner_ref`` defaults to ``client_ref`` (true for chat surfaces, where
+    ``surface_id`` defaults to ``client_ref`` (true for chat surfaces, where
     the two coincide); pass it explicitly for terminal-owned sessions, where
-    ``owner_ref`` is the fixed value ``"terminal"`` and ``client_ref`` is a
+    ``surface_id`` is the fixed value ``"terminal"`` and ``client_ref`` is a
     per-tab id. The mind it names is registered on model ``opus``.
     """
     session_id = "sess-" + client_ref
     await register_mind("ada", model="opus", gateway_url="http://mind")
     await seed_session(
-        session_id, owner_type=owner_type,
-        owner_ref=owner_ref if owner_ref is not None else client_ref,
-        model="opus", claude_sid=claude_sid, terminal_held=terminal_held,
-        bind=(owner_type, client_ref) if bind_active else None,
+        session_id, surface=surface,
+        surface_id=surface_id if surface_id is not None else client_ref,
+        model="opus", conversation_id=conversation_id, terminal_held=terminal_held,
+        bind=(surface, client_ref) if bind_active else None,
     )
     return session_id
 
@@ -131,7 +131,7 @@ def test_arm_rotation_sets_flag_on_active_session(comms_db) -> None:
     async def scenario() -> None:
         mgr = await make_manager()
         try:
-            sid = await _seed_session(owner_type="telegram", client_ref="123")
+            sid = await _seed_session(surface="telegram", client_ref="123")
             assert await _armed_flag(sid) == 0
             result = await mgr.arm_rotation("telegram", "123")
             assert result == {"ok": True, "session_id": sid}
@@ -166,7 +166,7 @@ def test_send_message_not_armed_never_finalizes(comms_db) -> None:
     async def scenario() -> None:
         mgr = await make_manager()
         try:
-            sid = await _seed_session(owner_type="telegram", client_ref="123")
+            sid = await _seed_session(surface="telegram", client_ref="123")
 
             async def fail_replace(*a, **k):  # must not be called
                 raise AssertionError(
@@ -205,7 +205,7 @@ async def _conversation_id(session_id: str) -> str | None:
 
 def test_terminal_rotation_keeps_the_session_and_swaps_the_conversation(comms_db) -> None:
     """The session row is permanent. Rotation replaces the harness
-    conversation underneath it — a new claude_sid on the same row — because
+    conversation underneath it — a new conversation_id on the same row — because
     the tile, its label, its ledger rows and its active binding are all keyed
     to the session id, and moving that id moves the user out from under a
     pane they are typing into."""
@@ -213,8 +213,8 @@ def test_terminal_rotation_keeps_the_session_and_swaps_the_conversation(comms_db
         mgr = await make_manager()
         try:
             sid = await _seed_session(
-                owner_type="web", owner_ref="terminal",
-                client_ref="terminal-abc", claude_sid="conv-full",
+                surface="web", surface_id="terminal",
+                client_ref="terminal-abc", conversation_id="conv-full",
                 terminal_held=True,
             )
             queue: asyncio.Queue = asyncio.Queue(maxsize=10)
@@ -237,7 +237,7 @@ def test_terminal_rotation_keeps_the_session_and_swaps_the_conversation(comms_db
                 await mgr.arm_rotation("web", "terminal-abc")
                 result = await mgr.fire_rotation(
                     "web", "terminal-abc",
-                    claude_sid="conv-full", prompt="carry on",
+                    conversation_id="conv-full", prompt="carry on",
                 )
 
             assert result["ok"] is True
@@ -246,7 +246,7 @@ def test_terminal_rotation_keeps_the_session_and_swaps_the_conversation(comms_db
             assert new_conv != "conv-full"
             assert await _conversation_id(sid) == new_conv
             assert calls[0]["session_id"] == sid
-            assert calls[0]["new_claude_sid"] == new_conv
+            assert calls[0]["new_conversation_id"] == new_conv
             # The pane opens on both: the handover as its user turn,
             # carrying the message that fired the rotation, and the soul
             # beside it as a system prompt. Handed the handover alone it
@@ -286,8 +286,8 @@ def test_a_rotation_whose_pane_is_gone_still_replaces_the_conversation(comms_db)
         mgr = await make_manager()
         try:
             sid = await _seed_session(
-                owner_type="web", owner_ref="terminal",
-                client_ref="terminal-xyz", claude_sid="conv-kept",
+                surface="web", surface_id="terminal",
+                client_ref="terminal-xyz", conversation_id="conv-kept",
                 terminal_held=True,
             )
 
@@ -307,7 +307,7 @@ def test_a_rotation_whose_pane_is_gone_still_replaces_the_conversation(comms_db)
                 await mgr.arm_rotation("web", "terminal-xyz")
                 result = await mgr.fire_rotation(
                     "web", "terminal-xyz",
-                    claude_sid="conv-kept", prompt="carry on",
+                    conversation_id="conv-kept", prompt="carry on",
                 )
 
             assert result["ok"] is True
@@ -335,7 +335,7 @@ def test_arm_rotation_records_the_pending_rotation_and_composes_nothing(comms_db
     async def scenario() -> None:
         mgr = await make_manager()
         try:
-            sid = await _seed_session(owner_type="telegram", client_ref="123")
+            sid = await _seed_session(surface="telegram", client_ref="123")
 
             async def fail_compose(**_kw):  # must not be called
                 raise AssertionError("arming composed a prompt")
@@ -371,7 +371,7 @@ def test_record_turn_appends_to_ledger(comms_db) -> None:
         mgr = await make_manager()
         try:
             sid = await _seed_session(
-                owner_type="web", owner_ref="terminal", client_ref="terminal-abc"
+                surface="web", surface_id="terminal", client_ref="terminal-abc"
             )
 
             result = await mgr.record_turn("web", "terminal-abc", "user", "hello from tile")

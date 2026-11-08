@@ -61,16 +61,16 @@ async def _seed(
     mgr: SessionManager,
     session_id: str,
     *,
-    owner_type: str = TELEGRAM,
-    owner_ref: str = CHAT,
+    surface: str = TELEGRAM,
+    surface_id: str = CHAT,
     status: str = "running",
-    claude_sid: str = "conv-1",
+    conversation_id: str = "conv-1",
     rotation_armed: int = 0,
 ) -> None:
     now = time.time()
     await seed_session(
-        session_id, owner_type=owner_type, owner_ref=owner_ref, model="opus",
-        claude_sid=claude_sid, summary="seeded", created_at=now - 60,
+        session_id, surface=surface, surface_id=surface_id, model="opus",
+        conversation_id=conversation_id, opening_line="seeded", created_at=now - 60,
         last_active=now, status=status, mind_id="skippy-uuid",
         rotation_armed=rotation_armed,
     )
@@ -79,8 +79,8 @@ async def _seed(
 async def _row(mgr, session_id: str) -> dict:
     """The stored row, read past the manager, under the names it speaks."""
     return await fetchrow(
-        "SELECT *, surface AS owner_type, surface_id AS owner_ref, "
-        "conversation_id AS claude_sid, opening_line AS summary "
+        "SELECT *, surface AS surface, surface_id AS surface_id, "
+        "conversation_id AS conversation_id, opening_line AS summary "
         "FROM core.sessions WHERE id = $1", session_id
     )
 
@@ -99,7 +99,7 @@ def _releasing(mgr: SessionManager) -> list[tuple[str, str]]:
 
     async def _release(session_id, surface):
         row = await _row(mgr, session_id)
-        seen.append((surface, row["owner_type"]))
+        seen.append((surface, row["surface"]))
         return True
 
     mgr.release_on_mind = _release  # type: ignore[assignment]
@@ -116,14 +116,14 @@ def test_the_terminal_takes_the_conversation_under_its_own_key(comms_db):
             routing = await mgr.adopt_into_terminal("in-the-pane")
 
             assert routing == {
-                "owner_type": "terminal",
-                "owner_ref": "terminal-in-the-pane",
+                "surface": "terminal",
+                "surface_id": "terminal-in-the-pane",
                 "client_ref": "terminal-in-the-pane",
             }
             row = await _row(mgr, "in-the-pane")
-            assert row["owner_type"] == "terminal"
-            assert row["owner_ref"] == "terminal-in-the-pane"
-            assert row["claude_sid"] == "conv-1"  # the thread is untouched
+            assert row["surface"] == "terminal"
+            assert row["surface_id"] == "terminal-in-the-pane"
+            assert row["conversation_id"] == "conv-1"  # the thread is untouched
             assert await _bindings(mgr, "in-the-pane") == [
                 ("terminal", "terminal-in-the-pane")
             ]
@@ -144,7 +144,7 @@ def test_the_chats_own_key_keeps_pointing_where_it_was(comms_db):
         mgr = await _make_manager()
         try:
             await _seed(mgr, "chatting")
-            await _seed(mgr, "in-the-pane", claude_sid="conv-2")
+            await _seed(mgr, "in-the-pane", conversation_id="conv-2")
             await execute(
                 "INSERT INTO core.active_sessions (client_type, client_ref, session_id) "
                 "VALUES ($1, $2, 'chatting')", TELEGRAM, CHAT,
@@ -200,8 +200,8 @@ def test_a_refused_release_aborts_the_handover(comms_db):
 
             assert raised
             row = await _row(mgr, "in-the-pane")
-            assert row["owner_type"] == TELEGRAM
-            assert row["owner_ref"] == CHAT
+            assert row["surface"] == TELEGRAM
+            assert row["surface_id"] == CHAT
             assert await _bindings(mgr, "in-the-pane") == []
         finally:
             await close_manager(mgr)
@@ -221,7 +221,7 @@ def test_a_pending_rotation_survives_an_adoption(comms_db):
         try:
             await _seed(
                 mgr, "staged",
-                owner_type="terminal", owner_ref="terminal-staged",
+                surface="terminal", surface_id="terminal-staged",
                 rotation_armed=sessions_mod.ROTATION_ARMED,
             )
             released = _releasing(mgr)
@@ -247,7 +247,7 @@ def test_two_conversations_owned_by_one_chat_never_share_a_key(comms_db):
         mgr = await _make_manager()
         try:
             await _seed(mgr, "pane-a")
-            await _seed(mgr, "pane-b", claude_sid="conv-2")
+            await _seed(mgr, "pane-b", conversation_id="conv-2")
             _releasing(mgr)
 
             await mgr.adopt_into_terminal("pane-a")

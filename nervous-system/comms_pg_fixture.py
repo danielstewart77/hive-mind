@@ -105,23 +105,16 @@ async def register_mind(
     return mind_id
 
 
-#: The names the session manager speaks, and the columns they are stored in.
-_COLUMN_OF = {
-    "claude_sid": "conversation_id", "owner_type": "surface",
-    "owner_ref": "surface_id", "summary": "opening_line",
-}
-
-
 async def seed_session(
-    session_id: str = "sess-1", *, owner_type: str = "telegram",
-    owner_ref: str = "123", mind_id: str = "ada", status: str = "running",
+    session_id: str = "sess-1", *, surface: str = "telegram",
+    surface_id: str = "123", mind_id: str = "ada", status: str = "running",
     bind: tuple[str, str] | None = None, **columns: Any,
 ) -> str:
-    """A session row written straight to the table, named as tests name it.
+    """A session row written straight to the table.
 
     Registers its mind if nothing has. ``bind`` adds an `active_sessions`
-    row as ``(client_type, client_ref)``. Any other column may be given
-    under either its stored name or the session manager's.
+    row as ``(client_type, client_ref)``. Any other column is given under
+    its stored name.
     """
     if await core.get_mind(mind_id) is None:
         await register_mind(mind_id)
@@ -131,13 +124,13 @@ async def seed_session(
         "model": "opus",
     }
     for name, value in columns.items():
-        values[_COLUMN_OF.get(name, name)] = value
+        values[name] = value
     if "terminal_held" in values and values["terminal_held"] is not None:
         values["terminal_held"] = bool(values["terminal_held"])
     if values.get("context_has_images") is not None:
         values["context_has_images"] = bool(values["context_has_images"])
     names = ["id", "surface", "surface_id", "mind_id", "status", *values]
-    args = [session_id, owner_type, owner_ref, mind_id, status, *values.values()]
+    args = [session_id, surface, surface_id, mind_id, status, *values.values()]
     placeholders = ", ".join(f"${i}" for i in range(1, len(args) + 1))
     await execute(
         f"INSERT INTO core.sessions ({', '.join(names)}) VALUES ({placeholders})",

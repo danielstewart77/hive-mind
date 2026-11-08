@@ -30,8 +30,8 @@ async def _make_manager() -> SessionManager:
 async def _seed_running_session(mgr: SessionManager) -> str:
     session_id = "sess-err"
     await seed_session(
-        session_id, owner_type="telegram", owner_ref="123", model="opus",
-        status="running", mind_id="ada", summary="existing chat",
+        session_id, surface="telegram", surface_id="123", model="opus",
+        status="running", mind_id="ada", opening_line="existing chat",
     )
     # Pretend the mind process is already routed; skips the respawn path.
     mgr._procs[session_id] = {"_mind_url": "http://mind.test:8420"}

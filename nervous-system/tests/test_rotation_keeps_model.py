@@ -35,8 +35,8 @@ def _run(coro):
 async def _seed_session(*, model: str) -> str:
     """A running telegram session on `model`, bound as the surface's active."""
     return await seed_session(
-        "sess-1", owner_type="telegram", owner_ref="123", model=model,
-        claude_sid="conv-old", bind=("telegram", "123"),
+        "sess-1", surface="telegram", surface_id="123", model=model,
+        conversation_id="conv-old", bind=("telegram", "123"),
     )
 
 
@@ -110,8 +110,8 @@ def test_a_fresh_session_does_take_the_minds_current_default(comms_db) -> None:
             spawns: list = []
             async with _mind_defaulting_to("sonnet", spawns):
                 created = await mgr.create_session(
-                    owner_type="telegram",
-                    owner_ref="123",
+                    surface="telegram",
+                    surface_id="123",
                     client_ref="123",
                     mind_id="ada",
                 )
@@ -129,8 +129,8 @@ def test_a_caller_specified_model_still_wins_for_a_new_session(comms_db) -> None
             spawns: list = []
             async with _mind_defaulting_to("sonnet", spawns):
                 created = await mgr.create_session(
-                    owner_type="telegram",
-                    owner_ref="123",
+                    surface="telegram",
+                    surface_id="123",
                     client_ref="123",
                     model="opus",
                     mind_id="ada",
