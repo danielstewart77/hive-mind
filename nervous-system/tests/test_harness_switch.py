@@ -335,6 +335,33 @@ def test_a_new_conversation_records_the_minds_default_harness():
 # 2. Every spawn, attach and pane rotation names the conversation's harness
 # ---------------------------------------------------------------------------
 
+def test_a_pane_rotation_speaks_the_schemas_names_and_the_old_ones():
+    """The raw surface address rides in `surface` with its reference in
+    `surface_id` and the new conversation in `new_conversation_id`; the old
+    names ride beside them for a mind that has not moved over yet."""
+    async def scenario():
+        mgr = await _manager(harness="claude_cli")
+        await _seed(mgr, harness="codex", model="gpt-5.6-terra", effort="high")
+        mind = FakeMind()
+        with mind.wired():
+            await mgr._rotate_pty_on_mind(
+                session_id="sess-1", new_claude_sid="conv-2",
+                model="gpt-5.6-terra", mind_id=MIND, user_prompt="seed",
+                client_ref="chat-9", owner_type="telegram:m-1", owner_ref="chat-9",
+            )
+        rotated = mind.sent("POST", "/sessions/sess-1/rotate-pty")[0]["json"]
+        assert rotated["surface"] == "telegram:m-1"
+        assert rotated["surface_id"] == "chat-9"
+        assert rotated["surface_label"] == "telegram"
+        assert rotated["new_conversation_id"] == "conv-2"
+        assert rotated["owner_type"] == "telegram:m-1"
+        assert rotated["owner_ref"] == "chat-9"
+        assert rotated["new_claude_sid"] == "conv-2"
+        await _close(mgr)
+
+    _run(scenario())
+
+
 def test_spawn_and_pane_rotation_name_the_conversations_harness():
     async def scenario():
         mgr = await _manager(harness="claude_cli")
@@ -994,7 +1021,7 @@ def test_a_switch_on_a_conversation_in_a_pane_respawns_the_pane_onto_the_new_har
         assert rotation["switch"] is True
         assert rotation["model"] == "gpt-5.6-terra"
         assert rotation["effort"] == "high"
-        assert rotation["new_claude_sid"] == row["claude_sid"]
+        assert rotation["new_conversation_id"] == row["claude_sid"]
         # The pane opens on the handover as its first user turn.
         assert rotation["user_prompt"] == "HANDOVER: the old conversation"
         order = [(r["method"], r["path"]) for r in mind.requests]

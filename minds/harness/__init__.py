@@ -23,8 +23,9 @@ actually in production.
 def chat_surface(body: dict) -> str:
     """The surface a chat process serves, as its ``HIVE_SURFACE``.
 
-    The gateway names it on every spawn (telegram, discord, ...); the owner
-    type's prefix stands in for a gateway that names none. The process's
+    The gateway names it on every spawn as ``surface_label`` (telegram,
+    discord, ...); the raw ``surface`` address's prefix stands in for a
+    gateway that names none. The process's
     hooks read it: the per-turn context tells the model where a message
     arrived, and the context report names it, since the gateway learns a
     harness's own overhead only from the surface a conversation opened in.
@@ -37,7 +38,7 @@ def chat_surface(body: dict) -> str:
     teaching the gateway a pane's overhead from a process. Those processes
     serve the console.
     """
-    surface = str(body.get("surface") or "").strip()
+    surface = str(body.get("surface_label") or "").strip()
     if not surface:
-        surface = str(body.get("owner_type") or "").split(":", 1)[0].strip()
+        surface = str(body.get("surface") or "").split(":", 1)[0].strip()
     return "console" if surface in ("terminal", "web") else surface

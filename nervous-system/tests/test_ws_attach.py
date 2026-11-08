@@ -235,6 +235,10 @@ class TestWsAttach:
         assert "model=opus" in _FakeHttpSession.requested_url
         # The tile takes the conversation, so the pane carries the terminal
         # surface's own key rather than whatever the chat was holding.
+        # Under the schema's names, the raw address in `surface`...
+        assert "surface=terminal&" in _FakeHttpSession.requested_url
+        assert "surface_id=terminal-sess-attach" in _FakeHttpSession.requested_url
+        # ...and the old ones beside them for a mind that has not moved yet.
         assert "owner_type=terminal" in _FakeHttpSession.requested_url
         assert "owner_ref=terminal-sess-attach" in _FakeHttpSession.requested_url
 
