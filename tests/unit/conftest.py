@@ -3,8 +3,16 @@
 Provides conditional mocks for third-party dependencies. When a real package
 is installed (the default — see requirements.txt), the mock is skipped so
 tests run against actual library behavior.
+
+The three files here that drive lucent's own routes need a database, and the
+claim machinery for one already exists in `lucent_api.tests.conftest`: one
+sweep and one allow-list across every suite that needs a scratch Postgres. Its
+fixtures are imported rather than reimplemented — a second implementation with
+its own prefixes is how one suite's sweep drops another suite's database out
+from under it.
 """
 
+import os
 import sys
 import types
 from unittest.mock import MagicMock
@@ -16,6 +24,31 @@ for _real_pkg in ("telegram", "telegram.ext", "discord", "discord.app_commands",
         __import__(_real_pkg)
     except ImportError:
         pass
+
+#: Appended rather than prepended: `tests`, `server` and `data` are names both
+#: trees carry, and putting the nervous system first changes which one every
+#: other test in this directory imports.
+_NS = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "nervous-system")
+)
+if _NS not in sys.path:
+    sys.path.append(_NS)
+
+try:
+    # Importing a fixture into a conftest is what registers it here.
+    from lucent_api.tests.conftest import (  # noqa: F401
+        a_mind,
+        inspector,
+        registered_types,
+        scratch_dsn,
+        store,
+        unique,
+    )
+except ImportError:  # pragma: no cover - a checkout without the access layer
+    # `hive_data` is installed into the image from a build context of its own,
+    # so a bare checkout has the lucent sources and not the driver. The files
+    # that need these fixtures skip; nothing else in here is affected.
+    pass
 
 
 def _create_mock_module(name: str, submodules: dict | None = None) -> MagicMock:

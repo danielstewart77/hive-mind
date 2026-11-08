@@ -28,6 +28,11 @@ by the write path — they are NOT user-supplied and NOT validated here.
 
 from __future__ import annotations
 
+import json
+import time
+from dataclasses import dataclass, field
+from typing import Mapping
+
 
 SCHEMA_TYPES: dict[str, dict] = {
     # ---- First-class ----
@@ -342,38 +347,57 @@ SCHEMA_EDGES: dict[str, dict] = {
 }
 
 
-def get_type_spec(conn, entity_type: str) -> dict | None:
-    """Look up a node type's spec from the schema_types table.
 
-    Returns the spec dict (``kind`` / ``required`` / ``optional`` / ``enums``)
-    or None if the type is not registered.
+
+@dataclass(frozen=True)
+class Registry:
+    """Every registered node type and relationship, held as one value.
+
+    The validators used to take a connection and run a SELECT per answer —
+    one to find the spec, another to list the valid names for the refusal.
+    That shape cannot survive the move off SQLite. An asyncpg connection has
+    neither ``execute(...).fetchone()`` nor ``?`` placeholders, and making
+    the validators ``async`` to reach it would make eighteen tests of pure
+    validator logic — that ``ContactMethod`` requires a ``value``, that
+    ``HAS_CONTACT`` runs Person → ContactMethod — need a database to check
+    something no database decides.
+
+    So the loading is one awaitable step, and ``validate_node`` and
+    ``validate_edge`` are synchronous and pure over its result. They carry
+    the four refusals the console renders, each with a payload (the valid
+    types, the required fields, the allowed fields, the allowed values), and
+    those are exactly the paths that must stay testable with no server.
     """
-    import json
 
-    row = conn.execute(
-        "SELECT property_schema FROM schema_types WHERE name = ?", (entity_type,)
-    ).fetchone()
-    if row is None:
-        return None
-    return json.loads(row["property_schema"])
+    types: Mapping[str, dict] = field(default_factory=dict)
+    edges: Mapping[str, dict] = field(default_factory=dict)
+
+    def type_spec(self, entity_type: str) -> dict | None:
+        return self.types.get(entity_type)
+
+    def edge_spec(self, relation: str) -> dict | None:
+        return self.edges.get(relation)
+
+    def type_names(self) -> list[str]:
+        return sorted(self.types)
+
+    def edge_names(self) -> list[str]:
+        return sorted(self.edges)
 
 
-def get_edge_spec(conn, relation: str) -> dict | None:
-    """Look up an edge type's spec from the schema_edges table.
+def hardcoded_registry() -> Registry:
+    """The registry this file declares, without reading the database.
 
-    Returns a dict shaped like the hardcoded SCHEMA_EDGES entries
-    (``source_type`` / ``target_type`` / ``required_attrs`` / ``optional_attrs``
-    / ``enums`` / ``symmetric``) or None if the edge is not registered.
+    Not the runtime source of truth — ``load_registry`` is. This is what
+    ``seed_schema_tables`` writes, and it is the same shape the loaded one
+    has, which is what makes a seed-then-load test able to prove the round
+    trip rather than just that both sides agree with themselves.
     """
-    import json
+    return Registry(types=dict(SCHEMA_TYPES), edges=dict(SCHEMA_EDGES))
 
-    row = conn.execute(
-        "SELECT source_type, target_type, attr_schema, symmetric "
-        "FROM schema_edges WHERE name = ?",
-        (relation,),
-    ).fetchone()
-    if row is None:
-        return None
+
+def _edge_row_as_spec(row) -> dict:
+    """One ``memory.schema_edges`` row in the shape ``SCHEMA_EDGES`` uses."""
     attr_schema = json.loads(row["attr_schema"])
     return {
         "source_type": row["source_type"],
@@ -385,72 +409,124 @@ def get_edge_spec(conn, relation: str) -> dict | None:
     }
 
 
-def _all_type_names(conn) -> list[str]:
-    rows = conn.execute("SELECT name FROM schema_types ORDER BY name").fetchall()
-    return [r["name"] for r in rows]
+async def load_registry() -> Registry:
+    """Read the registry the running system trusts, in two queries.
+
+    Two queries for the whole registry rather than one per refusal: the
+    strict upsert route validates a node and then an edge, and the old shape
+    spent up to six round trips doing it. Against a file that cost nothing.
+    """
+    from hive_data import graph
+
+    types = {
+        row["name"]: json.loads(row["property_schema"])
+        for row in await graph.types_all()
+    }
+    edges = {
+        row["name"]: _edge_row_as_spec(row)
+        for row in await graph.edge_types_all()
+    }
+    return Registry(types=types, edges=edges)
 
 
-def _all_edge_names(conn) -> list[str]:
-    rows = conn.execute("SELECT name FROM schema_edges ORDER BY name").fetchall()
-    return [r["name"] for r in rows]
+async def seed_schema_tables() -> dict[str, int]:
+    """Write the declared registry into the two schema tables.
+
+    Mandatory, not a first-init convenience. ``memory.nodes.type`` is a real
+    foreign key into ``memory.schema_types`` ON DELETE RESTRICT, and SQLite
+    never enforced it because lucent's connection never set the pragma — so
+    on any database that is not the final load (a fresh install, CI, a dev
+    box) an unseeded registry makes every write refuse with
+    ``Must be one of: []``.
+
+    Types before relationships: ``schema_edges.source_type`` and
+    ``target_type`` are foreign keys into ``schema_types`` too, so a
+    relationship seeded first names a type that is not there yet.
+
+    Idempotent through ``ON CONFLICT DO NOTHING``, which is what
+    ``INSERT OR IGNORE`` was and what Postgres does not have. Rows added
+    later through the admin routes are left exactly as they are.
+
+    Reports counts rather than returning nothing, so a seed that wrote
+    nothing is distinguishable from one that never ran.
+    """
+    from hive_data import graph
+
+    now = time.time()
+    types = 0
+    edges = 0
+
+    for name, spec in SCHEMA_TYPES.items():
+        written = await graph.type_put(
+            name=name, kind=spec["kind"], property_schema=spec,
+            created_at=now)
+        types += int(written.get("rows") or 0)
+
+    for name, spec in SCHEMA_EDGES.items():
+        written = await graph.edge_type_put(
+            name=name, source_type=spec["source_type"],
+            target_type=spec["target_type"], attr_schema=spec,
+            symmetric=1 if spec["symmetric"] else 0, created_at=now)
+        edges += int(written.get("rows") or 0)
+
+    return {"types": types, "edges": edges}
 
 
 def validate_node(
-    entity_type: str, properties: dict, conn=None
+    entity_type: str, properties: dict, *, registry: Registry
 ) -> tuple[bool, str | None, dict | None]:
-    """Validate a node write against the schema.
+    """Validate a node write against the registry.
 
-    Reads the schema from the schema_types DB table (single runtime source
-    of truth). The hardcoded ``SCHEMA_TYPES`` dict is bootstrap-only — used
-    by ``seed_schema_tables`` on first init, never by the validator.
+    Synchronous and pure: everything it needs is in ``registry``, which the
+    caller loaded. The hardcoded ``SCHEMA_TYPES`` dict is what
+    ``seed_schema_tables`` writes, never what this reads.
 
-    ``conn`` is optional; if omitted we fetch the lazy-singleton lucent
-    connection. Callers that already hold a connection can pass it in to
-    avoid the extra lookup.
+    ``registry`` is keyword-only and has no default. It used to default to
+    the lazy-singleton connection, and a default here would be the one thing
+    worse than a missing argument: a validator that quietly checks against
+    an empty registry refuses every type, and the refusal reads like the
+    caller's fault.
 
     Returns (ok, code, detail_dict). On failure, code is one of:
         unknown_node_type, missing_required, unknown_field, invalid_enum
     On success returns (True, None, None).
     """
-    if conn is None:
-        from lucent_api.lucent import _get_connection
-        conn = _get_connection()
-
-    spec = get_type_spec(conn, entity_type)
+    spec = registry.type_spec(entity_type)
     if spec is None:
         return False, "unknown_node_type", {
             "detail": f"entity_type {entity_type!r} is not in the schema allow-list",
-            "valid_types": _all_type_names(conn),
+            "valid_types": registry.type_names(),
         }
 
-    allowed = set(spec["required"]) | set(spec["optional"])
+    required = list(spec.get("required") or [])
+    allowed = set(required) | set(spec.get("optional") or [])
     # Identity / infrastructure fields tolerated and ignored by validation —
     # the write path owns them.
     INFRA = {"id", "mind_id", "created_at", "updated_at", "type", "name"}
 
-    for field in spec["required"]:
-        if field == "name":
+    for field_name in required:
+        if field_name == "name":
             # name is column-level on the node row; required for all types.
             continue
-        if field not in properties:
+        if field_name not in properties:
             return False, "missing_required", {
-                "detail": f"property {field!r} is required for {entity_type}",
-                "required": spec["required"],
+                "detail": f"property {field_name!r} is required for {entity_type}",
+                "required": required,
             }
 
-    for field in properties:
-        if field in INFRA:
+    for field_name in properties:
+        if field_name in INFRA:
             continue
-        if field not in allowed:
+        if field_name not in allowed:
             return False, "unknown_field", {
-                "detail": f"property {field!r} is not part of the {entity_type} schema",
+                "detail": f"property {field_name!r} is not part of the {entity_type} schema",
                 "allowed": sorted(allowed),
             }
 
-    for field, allowed_values in spec.get("enums", {}).items():
-        if field in properties and properties[field] not in allowed_values:
+    for field_name, allowed_values in (spec.get("enums") or {}).items():
+        if field_name in properties and properties[field_name] not in allowed_values:
             return False, "invalid_enum", {
-                "detail": f"{field}={properties[field]!r} not in allowed values for {entity_type}",
+                "detail": f"{field_name}={properties[field_name]!r} not in allowed values for {entity_type}",
                 "allowed_values": allowed_values,
             }
 
@@ -462,30 +538,24 @@ def validate_edge(
     source_type: str,
     target_type: str,
     attrs: dict | None = None,
-    conn=None,
+    *,
+    registry: Registry,
 ) -> tuple[bool, str | None, dict | None]:
-    """Validate an edge write against the schema.
+    """Validate an edge write against the registry.
 
-    Reads the schema from the schema_edges DB table (single runtime source
-    of truth). The hardcoded ``SCHEMA_EDGES`` dict is bootstrap-only —
-    used by ``seed_schema_tables`` on first init, never by the validator.
-
-    ``conn`` is optional; defaults to the lazy-singleton lucent connection.
+    Synchronous and pure, for the same reason ``validate_node`` is.
 
     Returns (ok, code, detail_dict). On failure, code is one of:
         unknown_edge_type, invalid_edge_direction, missing_required_attr,
         unknown_attr, invalid_enum
     """
     attrs = attrs or {}
-    if conn is None:
-        from lucent_api.lucent import _get_connection
-        conn = _get_connection()
 
-    spec = get_edge_spec(conn, relation)
+    spec = registry.edge_spec(relation)
     if spec is None:
         return False, "unknown_edge_type", {
             "detail": f"relation {relation!r} is not in the schema allow-list",
-            "valid_edges": _all_edge_names(conn),
+            "valid_edges": registry.edge_names(),
         }
 
     if source_type != spec["source_type"] or target_type != spec["target_type"]:
@@ -498,13 +568,14 @@ def validate_edge(
             "expected_target": spec["target_type"],
         }
 
-    allowed_attrs = set(spec["required_attrs"]) | set(spec["optional_attrs"])
+    required_attrs = list(spec.get("required_attrs") or [])
+    allowed_attrs = set(required_attrs) | set(spec.get("optional_attrs") or [])
 
-    for attr in spec["required_attrs"]:
+    for attr in required_attrs:
         if attr not in attrs:
             return False, "missing_required_attr", {
                 "detail": f"attr {attr!r} is required for {relation}",
-                "required_attrs": spec["required_attrs"],
+                "required_attrs": required_attrs,
             }
 
     for attr in attrs:
@@ -514,7 +585,7 @@ def validate_edge(
                 "allowed": sorted(allowed_attrs),
             }
 
-    for attr, allowed_values in spec.get("enums", {}).items():
+    for attr, allowed_values in (spec.get("enums") or {}).items():
         if attr in attrs and attrs[attr] not in allowed_values:
             return False, "invalid_enum", {
                 "detail": f"{attr}={attrs[attr]!r} not in allowed values for {relation}",
@@ -522,78 +593,3 @@ def validate_edge(
             }
 
     return True, None, None
-
-
-def seed_schema_tables(conn) -> None:
-    """Insert hardcoded schema into schema_types + schema_edges tables.
-
-    Idempotent: uses INSERT OR IGNORE keyed on `name`. Existing rows
-    (possibly added later via /schema/types or /schema/edges admin
-    endpoints) are preserved.
-    """
-    import json
-    import time
-
-    now = time.time()
-
-    for name, spec in SCHEMA_TYPES.items():
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO schema_types
-                (name, kind, property_schema, created_at)
-            VALUES (?, ?, ?, ?)
-            """,
-            (name, spec["kind"], json.dumps(spec), now),
-        )
-
-    for name, spec in SCHEMA_EDGES.items():
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO schema_edges
-                (name, source_type, target_type, attr_schema, symmetric, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                name,
-                spec["source_type"],
-                spec["target_type"],
-                json.dumps(spec),
-                1 if spec["symmetric"] else 0,
-                now,
-            ),
-        )
-
-    conn.commit()
-
-
-def all_types_from_db(conn) -> list[dict]:
-    """Read every row from schema_types. Returns parsed dicts."""
-    import json
-
-    rows = conn.execute(
-        "SELECT name, kind, property_schema FROM schema_types ORDER BY name"
-    ).fetchall()
-    return [
-        {"name": r["name"], "kind": r["kind"], "schema": json.loads(r["property_schema"])}
-        for r in rows
-    ]
-
-
-def all_edges_from_db(conn) -> list[dict]:
-    """Read every row from schema_edges. Returns parsed dicts."""
-    import json
-
-    rows = conn.execute(
-        "SELECT name, source_type, target_type, attr_schema, symmetric "
-        "FROM schema_edges ORDER BY name"
-    ).fetchall()
-    return [
-        {
-            "name": r["name"],
-            "source_type": r["source_type"],
-            "target_type": r["target_type"],
-            "schema": json.loads(r["attr_schema"]),
-            "symmetric": bool(r["symmetric"]),
-        }
-        for r in rows
-    ]

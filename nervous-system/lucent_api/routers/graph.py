@@ -1,9 +1,14 @@
 """Graph endpoints for the lucent-api nervous-system service.
 
-Wraps tools.stateful.lucent_graph public functions in FastAPI routes.
-No auth and no HITL — this service is bound to the internal Docker
-network and never exposed to the host. Returns native dicts (not the
-JSON-string convention the underlying functions inherited from MCP).
+Wraps the `lucent_api.lucent_graph` public functions in FastAPI routes.
+Every memory and graph route is gated on a per-holder credential; which
+mind a request speaks for is read off the value it presented. Returns
+native dicts (not the JSON-string convention the underlying functions
+inherited from MCP).
+
+Every route is `async def` now, because the store is. A synchronous route
+over an async access layer would need a bridge, and the bridge would be the
+one place in the hive that blocks an event loop on a database call.
 """
 
 from __future__ import annotations
@@ -14,6 +19,8 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
+
+import hive_data
 
 from lucent_api.auth import require_admin_bearer
 from lucent_api.holder_access import Caller, require_holder
@@ -33,6 +40,14 @@ def _decode(payload: str) -> Any:
     error body. Every caller of these routes is fire-and-forget shell —
     curl piped into jq, with no status check — and a refusal that returns
     200 is a refusal nobody notices.
+
+    The same reasoning now covers the database's own refusals. A conflict,
+    an absent foreign key, a value the column will not take, a statement
+    that ran out of time, an exhausted pool and an unreachable server were
+    all impossible against a local file and are all routine against a
+    socket. Each arrives carrying the status it should be answered with —
+    `http_status` in the body — and is raised rather than returned, for
+    exactly the reason the soul refusal is.
     """
     from lucent_api.soul import SOUL_KEY_REFUSED
 
@@ -42,7 +57,37 @@ def _decode(payload: str) -> Any:
         return {"error": "invalid_json_from_underlying_function", "raw": payload}
     if isinstance(body, dict) and body.get("code") == SOUL_KEY_REFUSED:
         raise HTTPException(403, body.get("detail", "soul writes are not allowed here"))
+    if isinstance(body, dict) and body.get("http_status"):
+        raise HTTPException(
+            int(body["http_status"]),
+            str(body.get("detail") or body.get("code") or "refused"))
     return body
+
+
+#: What a `hive_data` refusal is answered with when it escapes a route
+#: rather than one of the wrapped functions — the guards and the registry
+#: writes that talk to the store directly.
+_STORE_STATUS: tuple[tuple[type[Exception], int], ...] = (
+    (hive_data.Conflict, 409),
+    (hive_data.MissingReference, 409),
+    (hive_data.ValueRefused, 400),
+    (hive_data.NoConnectionAvailable, 503),
+    (hive_data.TimedOut, 503),
+    (hive_data.Unreachable, 503),
+    (hive_data.NotInitialised, 503),
+    (hive_data.NotConfigured, 503),
+    (hive_data.CredentialRefused, 503),
+    (hive_data.DatabaseMissing, 503),
+    (hive_data.SchemaMismatch, 503),
+)
+
+
+def _store_http(exc: hive_data.HiveDataError) -> HTTPException:
+    """One database refusal as the HTTP refusal that names it."""
+    for kind, status in _STORE_STATUS:
+        if isinstance(exc, kind):
+            return HTTPException(status, f"{type(exc).__name__}: {exc}")
+    return HTTPException(503, f"{type(exc).__name__}: {exc}")
 
 
 # ---- Request schemas ----
@@ -184,7 +229,7 @@ class GraphQueryBody(BaseModel):
 
 
 @router.post("/query")
-def graph_query_batch(
+async def graph_query_batch(
     body: GraphQueryBody, caller: Caller = Depends(require_holder)
 ) -> Any:
     """Resolve every name in one request, answering each independently.
@@ -223,14 +268,30 @@ def graph_query_batch(
             continue
         try:
             answer = _decode(
-                lucent_graph.graph_query(
+                await lucent_graph.graph_query(
                     entity_name=name,
                     depth=body.depth,
                     owners=caller.owners_for_read(),
                 )
             )
-        except HTTPException:
-            raise
+        except HTTPException as refused:
+            # A refusal about THIS name is this name's error. `_decode`
+            # turns a store refusal carrying `http_status` into an
+            # HTTPException, and re-raising it here answered 400 for the
+            # whole request over one token the database could not read —
+            # the exact cost this route's docstring promises not to pay. On
+            # the hot path of every prompt that is a turn with no
+            # identities resolved at all.
+            #
+            # A store that is not answering is the exception: every entry
+            # would carry the same error, and two hundred with a list of
+            # them is how an outage goes unnoticed for a month. So a 5xx
+            # still fails the request.
+            if refused.status_code >= 500:
+                raise
+            entry["error"] = str(refused.detail)
+            results.append(entry)
+            continue
         except Exception as e:
             entry["error"] = str(e)
             results.append(entry)
@@ -246,7 +307,7 @@ def graph_query_batch(
 
 
 @router.get("/search")
-def graph_search(
+async def graph_search(
     text: str = Query(...),
     limit: int = Query(25, ge=1, le=200),
     caller: Caller = Depends(require_holder),
@@ -258,12 +319,13 @@ def graph_search(
     from lucent_api.lucent_graph import graph_search as _graph_search
 
     return _decode(
-        _graph_search(text=text, limit=limit, owners=caller.owners_for_read())
+        await _graph_search(
+            text=text, limit=limit, owners=caller.owners_for_read())
     )
 
 
 @router.get("/person/search")
-def search_person(
+async def search_person(
     mind_id: str = Query(""),
     first_name: str = Query(""),
     last_name: str = Query(""),
@@ -278,7 +340,7 @@ def search_person(
     from lucent_api.lucent_graph import search_person as _search_person
 
     return _decode(
-        _search_person(
+        await _search_person(
             first_name=first_name,
             last_name=last_name,
             title=title,
@@ -293,7 +355,7 @@ def search_person(
 
 
 @router.post("/upsert-backup")
-def graph_upsert_backup(
+async def graph_upsert_backup(
     body: UpsertBody, caller: Caller = Depends(require_holder)
 ) -> Any:
     """Legacy un-validated upsert, kept as a fallback during the schema-enforcement cutover. Delete once `/graph/upsert` (now schema-validating) is proven stable.
@@ -319,7 +381,7 @@ def graph_upsert_backup(
         check_orphan_guard,
         send_disambiguation_message,
     )
-    from lucent_api.lucent_graph import graph_upsert_direct
+    from lucent_api.lucent_graph import _call, graph_upsert_direct
 
     # Ahead of the orphan and disambiguation guards, and outside the try:
     # those answer 200 with a `reason`, so a soul write that trips one is
@@ -338,14 +400,16 @@ def graph_upsert_backup(
         if not allowed:
             return {"upserted": False, "reason": orphan_msg}
 
-        disambig = check_disambiguation(
+        disambig = await _call(
+            check_disambiguation,
             body.name,
             body.entity_type,
             caller.mind_for_write(body.mind_id, required=False),
             caller.owner_for_write(body.owner),
         )
         if disambig.action == "disambiguate":
-            send_disambiguation_message(body.name, disambig.existing_nodes)
+            await _call(
+                send_disambiguation_message, body.name, disambig.existing_nodes)
             return {
                 "upserted": False,
                 "reason": "disambiguation_required",
@@ -353,7 +417,7 @@ def graph_upsert_backup(
             }
 
         return _decode(
-            graph_upsert_direct(
+            await graph_upsert_direct(
                 entity_type=body.entity_type,
                 name=body.name,
                 properties=body.properties,
@@ -374,13 +438,18 @@ def graph_upsert_backup(
         # Exception: caught below it would come back as 200 with the 403
         # in a string field, which is the shape `_decode` exists to avoid.
         raise
+    except hive_data.HiveDataError as refused:
+        # Likewise the database's refusals: reported as a 200 with a string
+        # they are a failure the caller is told nothing about.
+        log.warning("graph_upsert_backup refused by the store: %s", refused)
+        raise _store_http(refused) from refused
     except Exception as e:
         log.exception("graph_upsert_backup failed")
         return {"upserted": False, "error": str(e)}
 
 
 @router.post("/upsert")
-def graph_upsert(
+async def graph_upsert(
     body: UpsertBody, caller: Caller = Depends(require_holder)
 ) -> Any:
     """Schema-validated upsert.
@@ -398,8 +467,10 @@ def graph_upsert(
         check_orphan_guard,
         send_disambiguation_message,
     )
-    from lucent_api.lucent_graph import graph_upsert_direct
-    from lucent_api.schema_registry import validate_edge, validate_node
+    from lucent_api.lucent_graph import _call, graph_upsert_direct
+    from lucent_api.schema_registry import (
+        load_registry, validate_edge, validate_node,
+    )
 
     # The soul boundary, ahead of schema validation and outside the try:
     # the Mind schema happens not to allow `soul_values` today, so a soul
@@ -419,8 +490,14 @@ def graph_upsert(
     try:
         props = _json.loads(body.properties) if body.properties.strip() != "{}" else {}
 
-        # 1. Node validation — type allow-list, property schema, enums.
-        ok, code, detail = validate_node(body.entity_type, props)
+        # 1. Node validation — type allow-list, property schema, enums. The
+        #    registry is loaded once and both validators are pure over it:
+        #    the old shape ran a SELECT per answer and spent up to six round
+        #    trips validating one node and one edge, which cost nothing
+        #    against a file.
+        registry = await load_registry()
+        ok, code, detail = validate_node(
+            body.entity_type, props, registry=registry)
         if not ok:
             return {
                 "ok": False,
@@ -446,6 +523,7 @@ def graph_upsert(
                 body.entity_type,
                 body.target_type,
                 attrs=edge_attrs or None,
+                registry=registry,
             )
             if not ok:
                 return {
@@ -460,14 +538,16 @@ def graph_upsert(
         if not allowed:
             return {"ok": False, "code": "orphan_blocked", "detail": orphan_msg}
 
-        disambig = check_disambiguation(
+        disambig = await _call(
+            check_disambiguation,
             body.name,
             body.entity_type,
             caller.mind_for_write(body.mind_id, required=False),
             caller.owner_for_write(body.owner),
         )
         if disambig.action == "disambiguate":
-            send_disambiguation_message(body.name, disambig.existing_nodes)
+            await _call(
+                send_disambiguation_message, body.name, disambig.existing_nodes)
             return {
                 "ok": False,
                 "code": "disambiguation_required",
@@ -477,7 +557,7 @@ def graph_upsert(
 
         # 4. Delegate to the existing write path.
         write_result = _decode(
-            graph_upsert_direct(
+            await graph_upsert_direct(
                 entity_type=body.entity_type,
                 name=body.name,
                 properties=body.properties,
@@ -498,26 +578,38 @@ def graph_upsert(
         if isinstance(write_result, dict) and "error" in write_result:
             return {"ok": False, "code": "write_error", "detail": write_result["error"]}
         return {"ok": True, **(write_result if isinstance(write_result, dict) else {})}
+    except HTTPException:
+        raise
+    except hive_data.HiveDataError as refused:
+        log.warning("graph_upsert refused by the store: %s", refused)
+        raise _store_http(refused) from refused
     except Exception as e:
         log.exception("graph_upsert failed")
         return {"ok": False, "code": "internal_error", "detail": str(e)}
 
 
 @router.get("/schema")
-def get_schema() -> dict:
+async def get_schema() -> dict:
     """Return the full schema allow-list.
 
     Read by callers (typically minds) before they construct a write so they
     can choose a valid type/edge and avoid round-trips on rejection.
     """
-    from lucent_api.lucent import _get_connection
-    from lucent_api.schema_registry import all_edges_from_db, all_types_from_db
+    from hive_data import graph as store
 
-    conn = _get_connection()
-    return {
-        "types": all_types_from_db(conn),
-        "edges": all_edges_from_db(conn),
-    }
+    types = [
+        {"name": r["name"], "kind": r["kind"],
+         "schema": json.loads(r["property_schema"])}
+        for r in await store.types_all()
+    ]
+    edges = [
+        {"name": r["name"], "source_type": r["source_type"],
+         "target_type": r["target_type"],
+         "schema": json.loads(r["attr_schema"]),
+         "symmetric": bool(r["symmetric"])}
+        for r in await store.edge_types_all()
+    ]
+    return {"types": types, "edges": edges}
 
 
 # ---- Admin: schema mutation (bearer-gated, hive-tools only) ----
@@ -538,68 +630,59 @@ class SchemaEdgeBody(BaseModel):
 
 
 @router.post("/schema/types", dependencies=[Depends(require_admin_bearer)])
-def add_schema_type(body: SchemaTypeBody) -> dict:
+async def add_schema_type(body: SchemaTypeBody) -> dict:
     """Insert a new node type into the allow-list.
 
     Bearer-gated by ``LUCENT_ADMIN_BEARER_TOKEN``. Only hive-tools (which
     fronts the request-new-type HITL flow) holds this token.
     """
-    import json as _json
     import time
 
-    from lucent_api.lucent import _get_connection
+    from hive_data import graph as store
 
     if body.kind not in ("first-class", "second-class"):
         return {"ok": False, "code": "invalid_kind", "detail": "kind must be first-class or second-class"}
 
-    conn = _get_connection()
     try:
-        conn.execute(
-            """
-            INSERT INTO schema_types (name, kind, property_schema, created_at)
-            VALUES (?, ?, ?, ?)
-            """,
-            (body.name, body.kind, _json.dumps(body.property_schema), time.time()),
-        )
-        conn.commit()
-        return {"ok": True, "name": body.name}
-    except Exception as e:
-        return {"ok": False, "code": "duplicate_or_db_error", "detail": str(e)}
+        written = await store.type_put(
+            name=body.name, kind=body.kind,
+            property_schema=body.property_schema, created_at=time.time())
+    except hive_data.HiveDataError as refused:
+        return {"ok": False, "code": "duplicate_or_db_error",
+                "detail": f"{type(refused).__name__}: {refused}"}
+    if not int(written.get("rows", 0)):
+        # `ON CONFLICT DO NOTHING` wrote nothing, which here means the name
+        # is already registered. Reported rather than answered `ok`: the
+        # caller asked for a type it does not have and would otherwise write
+        # against the one that is there.
+        return {"ok": False, "code": "duplicate_or_db_error",
+                "detail": f"node type {body.name!r} is already registered"}
+    return {"ok": True, "name": body.name}
 
 
 @router.post("/schema/edges", dependencies=[Depends(require_admin_bearer)])
-def add_schema_edge(body: SchemaEdgeBody) -> dict:
+async def add_schema_edge(body: SchemaEdgeBody) -> dict:
     """Insert a new edge type into the allow-list. Bearer-gated."""
-    import json as _json
     import time
 
-    from lucent_api.lucent import _get_connection
+    from hive_data import graph as store
 
-    conn = _get_connection()
     try:
-        conn.execute(
-            """
-            INSERT INTO schema_edges
-                (name, source_type, target_type, attr_schema, symmetric, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                body.name,
-                body.source_type,
-                body.target_type,
-                _json.dumps(body.attr_schema),
-                1 if body.symmetric else 0,
-                time.time(),
-            ),
-        )
-        conn.commit()
-        return {"ok": True, "name": body.name}
-    except Exception as e:
-        return {"ok": False, "code": "duplicate_or_db_error", "detail": str(e)}
+        written = await store.edge_type_put(
+            name=body.name, source_type=body.source_type,
+            target_type=body.target_type, attr_schema=body.attr_schema,
+            symmetric=1 if body.symmetric else 0, created_at=time.time())
+    except hive_data.HiveDataError as refused:
+        return {"ok": False, "code": "duplicate_or_db_error",
+                "detail": f"{type(refused).__name__}: {refused}"}
+    if not int(written.get("rows", 0)):
+        return {"ok": False, "code": "duplicate_or_db_error",
+                "detail": f"relationship {body.name!r} is already registered"}
+    return {"ok": True, "name": body.name}
 
 
 @router.post("/upsert-direct")
-def graph_upsert_direct_endpoint(
+async def graph_upsert_direct_endpoint(
     body: UpsertBody, caller: Caller = Depends(require_holder)
 ) -> Any:
     """Bypass guards and write directly. Use only when the caller has
@@ -607,7 +690,7 @@ def graph_upsert_direct_endpoint(
     from lucent_api.lucent_graph import graph_upsert_direct
 
     return _decode(
-        graph_upsert_direct(
+        await graph_upsert_direct(
             entity_type=body.entity_type,
             name=body.name,
             properties=body.properties,
@@ -634,7 +717,7 @@ def graph_upsert_direct_endpoint(
 
 
 @router.post("/nodes")
-def graph_nodes_create(
+async def graph_nodes_create(
     body: NodeCreateBody, caller: Caller = Depends(require_holder)
 ) -> Any:
     """Create a new node. Rejects if a node with (name, type) already exists.
@@ -644,7 +727,7 @@ def graph_nodes_create(
     from lucent_api.lucent_graph import graph_node_create
 
     return _decode(
-        graph_node_create(
+        await graph_node_create(
             entity_type=body.entity_type,
             name=body.name,
             data_class=body.data_class,
@@ -658,10 +741,10 @@ def graph_nodes_create(
     )
 
 
-def _refuse_foreign_identity_node(
+async def _refuse_foreign_identity_node(
     caller: Caller, entity_type: str, name: str
 ) -> None:
-    """Refuse a property write onto another mind's own node.
+    """Refuse a property write onto another mind's own node, with a 403.
 
     A node belongs to a person, so one of Daniel's minds adding a fact to a
     node another of his minds wrote is the hive working — the authorship
@@ -670,6 +753,13 @@ def _refuse_foreign_identity_node(
     touch is the one node that *is* another mind: a `Mind` node carries that
     mind's soul, and nothing in an owner's graph is a stronger claim about
     somebody else.
+
+    The rule itself is `lucent_graph._check_identity_guard`, which these
+    routes' underlying functions also apply on their own — a direct call to
+    `graph_properties_merge`, which is how this module is registered as a
+    tool, used to have no identity guard at all. What is left here is the
+    *status*: this path answers 403 rather than 200 with a code, and it did
+    so before the move.
 
     Reach across owners is handled a layer down, by the owner filter every
     lookup carries, which answers as absence rather than as a refusal.
@@ -681,23 +771,16 @@ def _refuse_foreign_identity_node(
         return
     if entity_type != "Mind":
         return
-    from lucent_api import holder_access
+    from lucent_api.lucent_graph import _check_identity_guard
 
-    # Unscoped, for the reason `_check_identity_guard` is: a mind whose node
-    # this store cannot resolve to an owner must still be refused to every
-    # other mind, or the refusal misses and a second identity node gets
-    # minted over the top of it.
-    row = holder_access.connection().execute(
-        "SELECT mind_id FROM nodes WHERE LOWER(name) = LOWER(?) AND type = 'Mind'"
-        " LIMIT 1",
-        (name,),
-    ).fetchone()
-    if row is None:
-        # No identity node of that name in this owner's graph. Absent, or
-        # somebody else's — either way the write below will answer not-found
-        # on its own, in the same words.
-        return
-    if str(row[0] or "") in caller.own_names:
+    # Every spelling of itself this holder may use, because a mind minted
+    # under a readable name whose rows are keyed by uuid answers to both and
+    # the guard compares one string.
+    refusals = [
+        await _check_identity_guard(name, own, entity_type="Mind")
+        for own in (caller.own_names or {caller.provenance})
+    ]
+    if any(r is None for r in refusals):
         return
     raise HTTPException(
         403,
@@ -707,29 +790,31 @@ def _refuse_foreign_identity_node(
 
 
 @router.post("/properties/merge")
-def graph_properties_merge_endpoint(
+async def graph_properties_merge_endpoint(
     body: PropertiesMergeBody, caller: Caller = Depends(require_holder)
 ) -> Any:
     """Merge properties into an existing node. Keys not in the request are
     preserved — the additive counterpart to the full-replace upsert.
     """
-    _refuse_foreign_identity_node(caller, body.entity_type, body.name)
+    await _refuse_foreign_identity_node(caller, body.entity_type, body.name)
     from lucent_api.lucent_graph import graph_properties_merge
 
     return _decode(
-        graph_properties_merge(
+        await graph_properties_merge(
             entity_type=body.entity_type,
             name=body.name,
             properties=body.properties,
             owner=caller.owner_for_write(body.owner),
             as_of=body.as_of,
             source=body.source,
+            mind_id=caller.provenance,
+            unrestricted=caller.may_act_for_another_mind,
         )
     )
 
 
 @router.post("/properties/remove")
-def graph_properties_remove_endpoint(
+async def graph_properties_remove_endpoint(
     body: PropertiesRemoveBody, caller: Caller = Depends(require_holder)
 ) -> Any:
     """Remove named keys from an existing node's properties blob.
@@ -739,21 +824,23 @@ def graph_properties_remove_endpoint(
     (`data_class`, `tier`, `source`) ARE removable — they leak onto KG
     nodes from the shared write pipeline and the tidy walk strips them.
     """
-    _refuse_foreign_identity_node(caller, body.entity_type, body.name)
+    await _refuse_foreign_identity_node(caller, body.entity_type, body.name)
     from lucent_api.lucent_graph import graph_properties_remove
 
     return _decode(
-        graph_properties_remove(
+        await graph_properties_remove(
             entity_type=body.entity_type,
             name=body.name,
             keys=body.keys,
             owner=caller.owner_for_write(body.owner),
+            mind_id=caller.provenance,
+            unrestricted=caller.may_act_for_another_mind,
         )
     )
 
 
 @router.post("/edges")
-def graph_edges_create(
+async def graph_edges_create(
     body: EdgeBody, caller: Caller = Depends(require_holder)
 ) -> Any:
     """Create an edge between two existing nodes. Neither endpoint's
@@ -762,7 +849,7 @@ def graph_edges_create(
     from lucent_api.lucent_graph import graph_edge_create
 
     return _decode(
-        graph_edge_create(
+        await graph_edge_create(
             source_name=body.source_name,
             source_type=body.source_type,
             target_name=body.target_name,
@@ -780,14 +867,14 @@ def graph_edges_create(
 
 
 @router.delete("/edges")
-def graph_edges_delete(
+async def graph_edges_delete(
     body: EdgeBody, caller: Caller = Depends(require_holder)
 ) -> Any:
     """Delete edge(s) matching the (source, relation, target) tuple."""
     from lucent_api.lucent_graph import graph_edge_delete
 
     return _decode(
-        graph_edge_delete(
+        await graph_edge_delete(
             source_name=body.source_name,
             source_type=body.source_type,
             target_name=body.target_name,
@@ -799,7 +886,7 @@ def graph_edges_delete(
 
 
 @router.delete("/nodes")
-def graph_nodes_delete(
+async def graph_nodes_delete(
     body: NodeDeleteBody, caller: Caller = Depends(require_holder)
 ) -> Any:
     """Hard-delete a node and every edge touching it. Use for true
@@ -809,7 +896,7 @@ def graph_nodes_delete(
     from lucent_api.lucent_graph import graph_node_delete
 
     return _decode(
-        graph_node_delete(
+        await graph_node_delete(
             entity_type=body.entity_type,
             name=body.name,
             owner=caller.owner_for_write(body.owner),
@@ -823,24 +910,25 @@ def graph_nodes_delete(
 
 
 @router.post("/persons/audit")
-def audit_persons(
+async def audit_persons(
     body: AuditPersonsBody, caller: Caller = Depends(require_holder)
 ) -> Any:
     """Audit Person nodes for missing first/last name properties."""
     from lucent_api.lucent_graph import audit_person_nodes
 
-    return _decode(audit_person_nodes(owner=caller.owner_for_write(body.owner)))
+    return _decode(
+        await audit_person_nodes(owner=caller.owner_for_write(body.owner)))
 
 
 @router.post("/persons/update-names")
-def update_person_names(
+async def update_person_names(
     body: UpdatePersonNamesBody, caller: Caller = Depends(require_holder)
 ) -> Any:
     """Backfill first_name/last_name on a Person node."""
     from lucent_api.lucent_graph import update_person_names as _update_names
 
     return _decode(
-        _update_names(
+        await _update_names(
             name=body.name,
             first_name=body.first_name,
             last_name=body.last_name,
@@ -850,7 +938,7 @@ def update_person_names(
 
 
 @router.get("/raw-properties")
-def graph_raw_properties(
+async def graph_raw_properties(
     name: str = Query(...),
     mind_id: str = Query(""),
     caller: Caller = Depends(require_holder),
@@ -869,17 +957,16 @@ def graph_raw_properties(
       - `{"found": true, "properties": {...}, "mind_id": "..."}` — node exists.
       - `{"found": false}` — no matching node.
     """
-    from lucent_api.lucent import _get_connection
+    from lucent_api.lucent_graph import NODES, _one, _owners_scope
 
-    from lucent_api.lucent_graph import _owners_scope
-
-    own_clause, own_params = _owners_scope(caller.owners_for_read())
-    conn = _get_connection()
-    row = conn.execute(
-        "SELECT type, properties, mind_id FROM nodes WHERE LOWER(name)=LOWER(?)"
-        + own_clause + " LIMIT 1",
-        (name, *own_params),
-    ).fetchone()
+    own_clause, own_params = _owners_scope(caller.owners_for_read(), next_arg=2)
+    try:
+        row = await _one(
+            f"SELECT type, properties, mind_id FROM {NODES} "
+            "WHERE LOWER(name) = LOWER($1)" + own_clause + " LIMIT 1",
+            name, *own_params)
+    except hive_data.HiveDataError as refused:
+        raise _store_http(refused) from refused
     if row is None:
         return {"found": False}
     try:
@@ -887,14 +974,14 @@ def graph_raw_properties(
     except (TypeError, ValueError):
         blob = {}
     # mind_id is writer-provenance — surface only on Mind nodes.
-    result = {"found": True, "properties": blob}
+    result: dict[str, Any] = {"found": True, "properties": blob}
     if row["type"] == "Mind":
         result["mind_id"] = row["mind_id"]
     return result
 
 
 @router.get("/data")
-def graph_data(
+async def graph_data(
     limit: int = Query(400, ge=1, le=2000),
     caller: Caller = Depends(require_holder),
 ) -> dict:
@@ -903,20 +990,24 @@ def graph_data(
     Returns up to `limit` nodes (ordered by id) plus all edges that connect
     pairs within that node set. Used by Spark-to-Bloom's Cytoscape view.
     """
-    from lucent_api.lucent import _get_connection
+    from hive_data import graph as store
+    from lucent_api.lucent_graph import NODES, _decoded, _owners_scope, _rows
 
-    from lucent_api.lucent_graph import _owners_scope
-
-    own_clause, own_params = _owners_scope(caller.owners_for_read())
-    conn = _get_connection()  # singleton — do not close
-    node_rows = conn.execute(
-        "SELECT id, name, type, properties FROM nodes WHERE 1" + own_clause
-        + " ORDER BY id LIMIT ?",
-        (*own_params, limit),
-    ).fetchall()
+    # `WHERE 1` is SQLite's. Postgres wants a boolean, so the clause this
+    # fragment is appended to has to start from one.
+    own_clause, own_params = _owners_scope(caller.owners_for_read(), next_arg=1)
+    try:
+        node_rows = await _rows(
+            f"SELECT id, name, type, properties FROM {NODES} WHERE TRUE"
+            + own_clause + f" ORDER BY id LIMIT ${1 + len(own_params)}",
+            *own_params, limit)
+        edge_rows = await store.edges_for_nodes(
+            node_ids=[r["id"] for r in node_rows])
+    except hive_data.HiveDataError as refused:
+        raise _store_http(refused) from refused
     nodes = []
     for r in node_rows:
-        props = json.loads(r["properties"]) if r["properties"] else {}
+        props = _decoded(r["properties"])
         nodes.append(
             {
                 "id": r["id"],
@@ -926,9 +1017,6 @@ def graph_data(
             }
         )
     node_ids = {r["id"] for r in node_rows}
-    edge_rows = conn.execute(
-        "SELECT source_id, target_id, type FROM edges"
-    ).fetchall()
     edges = [
         {"source": r["source_id"], "target": r["target_id"], "type": r["type"]}
         for r in edge_rows

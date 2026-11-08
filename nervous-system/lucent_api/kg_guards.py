@@ -5,12 +5,25 @@ Provides two guards for graph_upsert:
 2. Orphan guard: reject writes without at least one edge (with grace period option).
 
 Also includes Telegram notification for disambiguation messages.
+
+The disambiguation scan is the one statement in this module, and it stays
+spelled out here rather than moving into the access layer: a fuzzy
+cross-type name match is a policy about what counts as a duplicate, and the
+owner clause on it is a security boundary the route-level tests drive. What
+changed with the store is that `LOWER()` now folds the whole of Unicode
+rather than ASCII alone, so `Bjorn` matches `BJÖRN` where it used not to.
+That widens the match, which is the safe direction: this guard's output is a
+prompt asking whether two names are the same entity, and a near-duplicate it
+fails to raise is the duplicate node nobody catches.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+
+import hive_data
+from hive_data.schema import qualified
 
 logger = logging.getLogger(__name__)
 
@@ -24,11 +37,29 @@ class DisambiguationResult:
     message: str = ""
 
 
-def _get_connection():
-    """Lazy import to get the Lucent SQLite connection."""
-    from lucent_api.lucent import _get_connection as _lucent_get_connection
+#: Nodes whose name is the same as, contains, or is contained by a proposed
+#: one, within one person's graph.
+#:
+#: `owner IS NOT DISTINCT FROM $4` rather than `= $4`: a NULL owner is a real
+#: row here — that is how a Mind node waits for its credential to be minted
+#: — and `= NULL` matches nothing, so the scan would silently stop seeing
+#: exactly the rows most likely to be duplicated.
+_SIMILAR_IN_ONE_GRAPH = (
+    f'SELECT "name", "type", "id" FROM {qualified("memory.nodes")} '
+    'WHERE (LOWER("name") = LOWER($1) '
+    '       OR LOWER("name") LIKE \'%\' || LOWER($2) || \'%\' '
+    '       OR LOWER($3) LIKE \'%\' || LOWER("name") || \'%\') '
+    'AND "owner" IS NOT DISTINCT FROM $4 ORDER BY "id"'
+)
 
-    return _lucent_get_connection()
+#: The same scan with no owner clause, which is a service or an admin.
+_SIMILAR_ANYWHERE = (
+    f'SELECT "name", "type", "id" FROM {qualified("memory.nodes")} '
+    'WHERE (LOWER("name") = LOWER($1) '
+    '       OR LOWER("name") LIKE \'%\' || LOWER($2) || \'%\' '
+    '       OR LOWER($3) LIKE \'%\' || LOWER("name") || \'%\') '
+    'ORDER BY "id"'
+)
 
 
 def _telegram_direct(message: str) -> tuple[bool, str]:
@@ -38,7 +69,7 @@ def _telegram_direct(message: str) -> tuple[bool, str]:
     return telegram_direct(message)
 
 
-def check_disambiguation(
+async def check_disambiguation(
     name: str, entity_type: str, mind_id: str, owner: object = None
 ) -> DisambiguationResult:
     """Query the knowledge graph for similar nodes before writing.
@@ -69,22 +100,18 @@ def check_disambiguation(
     # `similar_nodes` and pushed to a chat, so an unscoped scan tells a mind
     # which names exist in somebody else's graph.
     del mind_id  # intentionally unused
-    from lucent_api.lucent_graph import _owner_scope
 
-    own_clause, own_params = _owner_scope(owner)
-    conn = _get_connection()
-    cursor = conn.execute(
-        """
-        SELECT name, type, id FROM nodes
-        WHERE (LOWER(name) = LOWER(?)
-               OR LOWER(name) LIKE '%' || LOWER(?) || '%'
-               OR LOWER(?) LIKE '%' || LOWER(name) || '%')
-        """ + own_clause,
-        (name, name, name, *own_params),
-    )
+    if owner is None:
+        found = await hive_data.run(
+            lambda connection: connection.fetch(
+                _SIMILAR_ANYWHERE, name, name, name))
+    else:
+        found = await hive_data.run(
+            lambda connection: connection.fetch(
+                _SIMILAR_IN_ONE_GRAPH, name, name, name, owner))
     rows = [
         {"name": row["name"], "labels": [row["type"]], "id": row["id"]}
-        for row in cursor.fetchall()
+        for row in found
     ]
 
     if not rows:

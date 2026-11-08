@@ -6,3 +6,10 @@ requests>=2.32
 sentence-transformers>=2.7
 pydantic>=2.7
 httpx>=0.27
+
+# The driver `hive-data` reaches the one database with. Declared here, beside
+# everything else, rather than resolved by the access layer's own install:
+# the package is copied in from a build context of its own and installed
+# `--no-deps`, so this file is the only place its dependencies can be seen by
+# a resolver that can also see the rest of this image.
+asyncpg>=0.30

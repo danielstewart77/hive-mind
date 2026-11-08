@@ -1,61 +1,234 @@
-"""Lucent knowledge graph tools -- SQLite-backed drop-in replacement for knowledge_graph.py.
+"""Lucent knowledge graph tools, over the hive's one Postgres.
 
-Provides identical function signatures and JSON return shapes to
-tools/stateful/knowledge_graph.py, backed by the Lucent SQLite database
-instead of Neo4j.
+Provides the function signatures and JSON return shapes the MCP
+``knowledge_graph.py`` had, backed by `hive_data` rather than by a SQLite
+file. Every function is ``async`` now: there is no synchronous face on the
+access layer by design, and a bridge written here would be the one place in
+the hive that blocks an event loop on a database call.
 
-Node types: Person, Project, System, Concept, Preference
-Standard relationships: KNOWS_ABOUT, WORKS_ON, PREFERS, RELATED_TO, MANAGES
+Node types and relationships are the registry's, read from
+``memory.schema_types`` / ``memory.schema_edges`` at every call.
 
-Designed for direct FastMCP registration (no @tool() decorator).
+Designed for direct FastMCP registration (no @tool() decorator) — which is
+why the guards live *here* and not only in the router. A direct call to
+`graph_properties_merge` used to have no identity guard at all, because the
+only one was at the route.
+
+What the move off the file changed, and had to be written rather than ported:
+
+* ``IS NOT DISTINCT FROM`` in `_owner_scope`. SQLite's ``IS`` is Postgres'
+  ``IS NOT DISTINCT FROM``, and `= $1` is not a repair: a Mind node is
+  deliberately ownerless until its credential is minted, and `= NULL`
+  matches nothing.
+* ``AND FALSE`` in `_owners_scope`. ``AND 0`` is not a boolean here, so a
+  mechanical port turns the fail-closed branch into a type error — and
+  deleting the clause turns it into a total owner-partition bypass.
+* ``LOWER()`` on both sides of every ``LIKE``. SQLite's ``LIKE`` is
+  case-insensitive and Postgres' is not, so an unwrapped pattern reports
+  "nothing matched" over rows that do.
+* The database's own refusals. ``Conflict``, ``MissingReference``,
+  ``ValueRefused``, ``TimedOut``, ``NoConnectionAvailable`` and
+  ``Unreachable`` are routine against a socket where they were impossible
+  against a file. Each arrives as a refusal that names the rule that refused
+  it, carrying the status the router should answer with — a refusal that
+  returns 200 is a refusal nobody notices.
 """
 
+from __future__ import annotations
+
+import asyncio
+import inspect
 import json
 import logging
 import os
 import re
-import sqlite3
 import time
 from datetime import datetime, timezone
+from typing import Any
 
-import requests
+import httpx
+
+import hive_data
+from hive_data import graph as store
+from hive_data import UNSET
+
 from lucent_api.memory_schema import validate_source
 from lucent_api.soul import SOUL_KEY_REFUSED, preserve_soul, soul_key_refusal
-from lucent_api.schema_registry import get_type_spec
 
 logger = logging.getLogger(__name__)
 
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://localhost:8420")
 HITL_TTL = 180
 
-# Allow-list lives in the schema_types DB table (single runtime source of
-# truth). Register new types by POSTing /graph/schema/types — the validator
-# picks them up immediately without a restart.
+#: Allow-list lives in the `schema_types` table (single runtime source of
+#: truth). Register new types by POSTing /graph/schema/types — the validator
+#: picks them up immediately without a restart.
 _RELATION_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
+NODES = 'memory."nodes"'
+EDGES = 'memory."edges"'
 
-def _hitl_gate(summary: str) -> bool:
-    """Request HITL approval showing the exact graph operation to be written."""
+#: The node columns every read of this module names. Never ``SELECT *``: a
+#: column added to the table arrives in a properties blob the caller then
+#: round-trips back into a write.
+_NODE_FIELDS = (
+    'id, name, type, first_name, last_name, properties, mind_id, owner, '
+    'data_class, tier, source, as_of, created_at, updated_at'
+)
+
+
+async def _rows(sql: str, *args: Any) -> list[dict]:
+    """Every row a statement answers with, as plain dicts."""
+    records = await hive_data.run(lambda c: c.fetch(sql, *args))
+    return [dict(r) for r in records]
+
+
+async def _one(sql: str, *args: Any) -> dict | None:
+    """One row, or None."""
+    record = await hive_data.run(lambda c: c.fetchrow(sql, *args))
+    return None if record is None else dict(record)
+
+
+def _decoded(raw: object) -> dict:
+    """A properties blob as a dict, treating unreadable as empty.
+
+    `properties` is a `text` column, so a row written by something else — a
+    load, a hand-edit, an older schema — is a blob that will not parse. One
+    of those used to take a whole read down: `audit_person_nodes` answered
+    `{"error": ...}` over a graph whose other four hundred Person nodes were
+    fine, and the operator reads that as a broken audit rather than as one
+    bad row.
+    """
+    if not raw:
+        return {}
     try:
-        resp = requests.post(
-            f"{GATEWAY_URL}/hitl/request",
-            json={"action": "graph_upsert", "summary": summary, "ttl": HITL_TTL},
-            timeout=HITL_TTL + 5,
-        )
-        resp.raise_for_status()
-        return resp.json().get("approved", False)
+        decoded = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+async def _call(fn, *args, **kwargs):
+    """Call a collaborator that may be a coroutine function or a blocking one.
+
+    `soul.preserve_soul`, `schema_registry.validate_node` and the `kg_guards`
+    pair are all other modules' and all read the database, so all of them
+    become coroutines on this cutover. A blocking one is run off the loop
+    rather than on it: `send_disambiguation_message` posts to Telegram, and a
+    Telegram that has stopped answering would otherwise stall `/health` and
+    every other route for the length of its timeout.
+    """
+    if inspect.iscoroutinefunction(fn):
+        return await fn(*args, **kwargs)
+    result = await asyncio.to_thread(fn, *args, **kwargs)
+    if inspect.isawaitable(result):
+        return await result
+    return result
+
+
+# ---- Refusals -------------------------------------------------------------
+#
+# Over a file, `except Exception -> {"code": "internal_error"}` at HTTP 200
+# was defensible: the failures it could catch were bugs. Over a socket the
+# database refuses routinely, and each refusal has a different remedy — a
+# duplicate row, an absent parent, a value the column will not take, a
+# statement that ran out of time, a pool with nothing free, a server that is
+# not there. Folding the six into one code sends the operator to the wrong
+# problem, and answering 200 means nothing notices at all.
+
+#: Each database refusal, as the code and HTTP status it reaches a caller as.
+_STORE_REFUSALS: tuple[tuple[type[Exception], str, int], ...] = (
+    (hive_data.Conflict, "conflict", 409),
+    (hive_data.MissingReference, "missing_reference", 409),
+    (hive_data.ValueRefused, "value_refused", 400),
+    (hive_data.TransactionAborted, "store_aborted", 409),
+    (hive_data.SequenceBehind, "store_sequence_behind", 500),
+    (hive_data.NoConnectionAvailable, "store_busy", 503),
+    (hive_data.TimedOut, "store_timeout", 503),
+    (hive_data.Unreachable, "store_unreachable", 503),
+    (hive_data.CredentialRefused, "store_credential_refused", 503),
+    (hive_data.DatabaseMissing, "store_database_missing", 503),
+    (hive_data.NotInitialised, "store_not_open", 503),
+    (hive_data.NotConfigured, "store_not_configured", 503),
+    (hive_data.SchemaMismatch, "store_schema_mismatch", 503),
+    # The two floors, and they are last so every narrower kind above is
+    # matched first. `WriteRejected` is the base of the constraint kinds,
+    # and `hive_data` returns a bare one for every Postgres error it has no
+    # narrower class for: `permission denied for table memory.nodes` on a
+    # wrong database role, a read-only standby, a detected deadlock, a
+    # serialization failure, `stack depth limit exceeded`. Without a floor
+    # those fell past this table into `internal_error` at HTTP 200, which is
+    # the single outcome the table exists to prevent — and the wrong-role
+    # case is the most likely way a cutover goes wrong.
+    (hive_data.WriteRejected, "store_refused_the_write", 400),
+    (hive_data.HiveDataError, "store_error", 503),
+)
+
+
+def _store_refusal(exc: BaseException, *, doing: str,
+                   extra: dict | None = None) -> dict | None:
+    """What a database refusal is called, or None if this is not one.
+
+    ``http_status`` travels in the body because these functions return JSON
+    strings to a router that has to decide a status from them, and because
+    the same functions are registered directly as tools where the body is
+    all there is.
+    """
+    for kind, code, status in _STORE_REFUSALS:
+        if isinstance(exc, kind):
+            logger.warning("graph.%s refused by the store: %s", doing, exc)
+            return {
+                "ok": False,
+                "code": code,
+                "detail": f"{doing}: {exc}",
+                "http_status": status,
+                **(extra or {}),
+            }
+    return None
+
+
+def _failed(exc: BaseException, *, doing: str, extra: dict | None = None) -> str:
+    """The payload any exception out of one of these functions becomes."""
+    refusal = _store_refusal(exc, doing=doing, extra=extra)
+    if refusal is not None:
+        return json.dumps(refusal)
+    logger.exception("graph.%s failed", doing)
+    return json.dumps({
+        "ok": False, "code": "internal_error", "detail": str(exc),
+        **(extra or {}),
+    })
+
+
+async def _hitl_gate(summary: str) -> bool:
+    """Request HITL approval showing the exact graph operation to be written.
+
+    Awaited rather than blocking. This waits up to three minutes for a human,
+    and a `requests.post` on an event loop holding every other route and
+    `/health` hostage for that long is not a gate, it is an outage.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=HITL_TTL + 5) as client:
+            resp = await client.post(
+                f"{GATEWAY_URL}/hitl/request",
+                json={"action": "graph_upsert", "summary": summary,
+                      "ttl": HITL_TTL},
+            )
+            resp.raise_for_status()
+            return bool(resp.json().get("approved", False))
     except Exception:
         return False
 
 
-def _validate_label(entity_type: str) -> str:
-    from lucent_api.lucent import _get_connection
-    from lucent_api.schema_registry import _all_type_names
+async def all_type_names() -> list[str]:
+    """Every registered node type, by name."""
+    return [str(r["name"]) for r in await store.types_all()]
 
-    conn = _get_connection()
-    if get_type_spec(conn, entity_type) is None:
+
+async def _validate_label(entity_type: str) -> str:
+    if await store.type_spec(name=entity_type) is None:
         raise ValueError(
-            f"Invalid entity_type {entity_type!r}. Must be one of: {_all_type_names(conn)}"
+            f"Invalid entity_type {entity_type!r}. "
+            f"Must be one of: {await all_type_names()}"
         )
     return entity_type
 
@@ -68,12 +241,6 @@ def _validate_relation(relation: str) -> str:
     return relation
 
 
-def _get_conn():
-    """Lazy import to get the Lucent SQLite connection."""
-    from lucent_api.lucent import _get_connection
-    return _get_connection()
-
-
 def _identity_scope(label: str, owner: object) -> object:
     """The owner a lookup for this node type should be scoped to.
 
@@ -82,14 +249,15 @@ def _identity_scope(label: str, owner: object) -> object:
     to an owner holds it under a null owner, and a scoped lookup misses that
     row — so the mind's own next write does not find its node, inserts a
     second one, and `graph_query`, which keys its answer on the name, serves
-    the empty newcomer while the soul-bearing original sits on disk. A mind's
-    name is unique across the hive and published in the broker's own listing,
-    so looking one up unscoped reveals nothing and prevents a fork.
+    the empty newcomer while the soul-bearing original sits in the table. A
+    mind's name is unique across the hive and published in the broker's own
+    listing, so looking one up unscoped reveals nothing and prevents a fork.
     """
     return None if label == "Mind" else owner
 
 
-def _owner_scope(owner: object, column: str = "owner") -> tuple[str, list]:
+def _owner_scope(owner: object, column: str = "owner", *,
+                 next_arg: int = 1) -> tuple[str, list]:
     """A fragment scoping one statement to one person's graph.
 
     ``None`` means every owner, which is the console and the hive's own
@@ -99,29 +267,56 @@ def _owner_scope(owner: object, column: str = "owner") -> tuple[str, list]:
     by whichever id is lower. The guard and the write that follows it have
     to resolve the same way or the check passes on one row and the write
     lands on another.
+
+    ``IS NOT DISTINCT FROM``, not ``IS`` and not ``=``. SQLite spells the
+    null-safe comparison ``IS``, which is a syntax error here; and ``= $1``
+    is not the repair, because a Mind node is deliberately ownerless until
+    its credential is minted and ``= NULL`` matches nothing at all.
+
+    ``next_arg`` is which placeholder number this fragment's parameter takes.
+    Postgres numbers its parameters, so a fragment appended to a statement
+    cannot spell its own ``?`` and has to be told where it lands.
     """
     if owner is None:
         return "", []
-    return f" AND {column} IS ?", [owner]
+    return f" AND {column} IS NOT DISTINCT FROM ${next_arg}", [owner]
 
 
-def _owners_scope(owners: object, column: str = "owner") -> tuple[str, list]:
+def _owners_scope(owners: object, column: str = "owner", *,
+                  next_arg: int = 1) -> tuple[str, list]:
     """The read-side counterpart: several owners, or every one of them.
 
     An empty list is a recognised caller whose credential names no user. It
-    reaches nothing rather than everything.
+    reaches nothing rather than everything — spelled ``AND FALSE``, because
+    SQLite's ``AND 0`` is "argument of AND must be type boolean" here. The
+    tempting repair is to emit no clause at all, which is not a smaller bug
+    than the type error: it is every owner's graph served to a caller
+    entitled to none of it.
+
+    One placeholder whatever the number of owners: ``= ANY($n::text[])``
+    takes the list as a single array parameter.
     """
     if owners is None:
         return "", []
-    owners = list(owners)
-    if not owners:
-        return " AND 0", []
-    marks = ",".join("?" for _ in owners)
-    return f" AND {column} IN ({marks})", owners
+    names = [str(o) for o in owners]
+    if not names:
+        return " AND FALSE", []
+    return f" AND {column} = ANY(${next_arg}::text[])", [names]
 
 
-def _check_identity_guard(
-    conn,
+async def _find_node(*, type: str, name: str, owner: object) -> dict | None:
+    """One node by type and name, within one owner's graph or across all.
+
+    ``owner`` of ``None`` is every owner — the console and the hive's own
+    services — and is passed through to the access layer as "unset" rather
+    than as a null owner, which is a different and much smaller set of rows.
+    """
+    if owner is None:
+        return await store.node_find(type=type, name=name)
+    return await store.node_find(type=type, name=name, owner=owner)
+
+
+async def _check_identity_guard(
     name: str,
     mind_id: str,
     owner: object = None,
@@ -133,8 +328,8 @@ def _check_identity_guard(
     A node is an identity node when its ``type`` is ``Mind``, and only the
     mind that node represents may change it. Returns None when the write is
     allowed: the request is not about a Mind node, the caller is that mind,
-    no Mind node of the name exists in this owner's graph yet, or the caller
-    is the console or the operator.
+    no Mind node of the name exists yet, or the caller is the console or the
+    operator.
 
     ``entity_type`` is the type the *request* names, and it is load-bearing:
     asked about a Person called "Hex" this used to answer for the Mind node
@@ -144,6 +339,8 @@ def _check_identity_guard(
     ``unrestricted`` is the admin and service credential. The console's
     identity editor and the operator are how a wedged soul gets fixed, so
     they are not held to a rule about which mind is which.
+
+    ``owner`` is accepted and deliberately not used in the lookup; see below.
     """
     if unrestricted:
         return None
@@ -156,18 +353,31 @@ def _check_identity_guard(
     # no identity node, refuses nothing, and lets the mind mint a *second*
     # node of its own name. `graph_query` keys its answer on the name, so the
     # empty newcomer then shadows the soul-bearing original on every read
-    # while the original sits on disk untouched. A fork is a worse outcome
-    # than a refusal.
+    # while the original sits in the table untouched. A fork is a worse
+    # outcome than a refusal.
     #
     # The cost is that naming another owner's mind answers with a refusal
     # rather than with absence. Mind names are not private — every mind reads
     # the broker's own listing of them — so this leaks nothing the hive does
     # not already publish.
-    row = conn.execute(
-        "SELECT mind_id FROM nodes WHERE LOWER(name) = LOWER(?) AND type = 'Mind'"
-        " LIMIT 1",
-        (name,),
-    ).fetchone()
+    #
+    # `LOWER()` folds only ASCII in SQLite and the whole of Unicode in
+    # Postgres, so this now matches pairs of names it used to let past — a
+    # Turkish dotless i against an ASCII one, say. That is the safe
+    # direction: the new matches are refusals, never permissions.
+    # `ORDER BY id` is not decoration. The table is unique on (owner, type,
+    # name), so two people may each hold a Mind node called Skippy, and an
+    # unordered LIMIT 1 leaves which one answers to the planner — this guard
+    # and the write that follows it both resolve a Mind node, and the two
+    # resolving differently means the check passes on one node while the
+    # write lands on another. `hive_data.graph.node_find` orders the same
+    # way for the same reason.
+    row = await _one(
+        f"SELECT mind_id FROM {NODES} "
+        "WHERE LOWER(name) = LOWER($1) AND type = 'Mind' "
+        "ORDER BY id LIMIT 1",
+        name,
+    )
     if row is None:
         return None  # no identity node of that name anywhere yet
     if row["mind_id"] == mind_id:
@@ -175,7 +385,26 @@ def _check_identity_guard(
     return f"mind_id {mind_id!r} cannot edit identity node for {name!r}"
 
 
-def graph_upsert_direct(
+#: What an identity-guard refusal answers with.
+#:
+#: 403 rather than 200: the callers on this path are, by the router's own
+#: docstring, fire-and-forget shell — curl piped into jq with no status
+#: check — and a refusal that returns 200 is a refusal nobody notices. It
+#: travels in the body like every other refusal here because these
+#: functions are also registered directly as tools, where the body is all
+#: there is.
+_IDENTITY_STATUS = 403
+
+
+def _identity_refusal(detail: str) -> str:
+    """The identity guard's refusal, in the shape every caller reads."""
+    return json.dumps({
+        "ok": False, "code": "identity_guard", "detail": detail,
+        "http_status": _IDENTITY_STATUS,
+    })
+
+
+async def graph_upsert_direct(
     *,
     entity_type: str,
     name: str,
@@ -211,7 +440,7 @@ def graph_upsert_direct(
             "superseded": False,
         }
 
-        label = _validate_label(entity_type)
+        label = await _validate_label(entity_type)
         props = json.loads(properties) if properties.strip() != "{}" else {}
         refusal = soul_key_refusal(props)
         if refusal:
@@ -219,26 +448,27 @@ def graph_upsert_direct(
         props.update(meta)
         props["created_at"] = time.time()
 
-        conn = _get_conn()
-
         # REQ-008: identity-node guard. A mind can only write its own identity node.
-        guard_err = _check_identity_guard(
-            conn, name, mind_id, owner, entity_type=label
+        guard_err = await _check_identity_guard(
+            name, mind_id, owner, entity_type=label
         )
         if guard_err is not None:
-            return json.dumps({"upserted": False, "error": guard_err})
+            return _identity_refusal(guard_err)
         # The relation target is a second node this call writes to, and the
         # find-or-create below updates its columns. Unguarded, naming another
         # mind's own node as the target of any edge rewrote that node's tier
         # and data class — standing identity down to contextual, which drops
         # it out of the retrieval it exists for.
+        tgt_label = (
+            await _validate_label(target_type or entity_type)
+            if relation and target_name else ""
+        )
         if relation and target_name:
-            target_guard = _check_identity_guard(
-                conn, target_name, mind_id, owner,
-                entity_type=_validate_label(target_type or entity_type),
+            target_guard = await _check_identity_guard(
+                target_name, mind_id, owner, entity_type=tgt_label,
             )
             if target_guard is not None:
-                return json.dumps({"upserted": False, "error": target_guard})
+                return _identity_refusal(target_guard)
         # A row is filed under one owner. `owner` is the scope a call may
         # reach, which for the console and the operator is every owner.
         _stamped = stamp if stamp is not None else owner
@@ -247,124 +477,98 @@ def graph_upsert_direct(
         first_name = props.pop("first_name", None)
         last_name = props.pop("last_name", None)
 
-        # No DB-level uniqueness on name/type — disambiguation is a
-        # pre-write check (kg_guards.check_disambiguation). Find first,
-        # then UPDATE existing or INSERT new.
-        preserve_soul(
-            conn, name=name, label=label, props=props,
-            owner=_identity_scope(label, owner),
+        await _call(preserve_soul, name=name, label=label, props=props,
+                    owner=_identity_scope(label, owner))
+
+        # `memory_nodes_owner_type_name` is a real unique index now, so the
+        # old find-then-UPDATE-or-INSERT is a race that loses one caller's
+        # write behind a duplicate-key error — and under a null owner, which
+        # is how a Mind node waits for its credential, the index does not
+        # collide at all and the node simply forks in two. `node_write` holds
+        # the lock and the find and the write in one transaction.
+        existing = await _find_node(
+            type=label, name=name, owner=_identity_scope(label, owner))
+        row = await store.node_write(
+            owner=existing["owner"] if existing else _stamped,
+            type=label, name=name, mind_id=mind_id, properties=props,
+            first_name=UNSET if first_name is None else first_name,
+            last_name=UNSET if last_name is None else last_name,
+            data_class=meta.get("data_class"), tier=meta.get("tier"),
+            source=meta.get("source", source), as_of=meta.get("as_of"),
+            created_at=(existing or {}).get("created_at") or props["created_at"],
+            updated_at=props["created_at"],
         )
-        _own, _ownp = _owner_scope(_identity_scope(label, owner))
-        existing = conn.execute(
-            "SELECT id FROM nodes WHERE name = ? AND type = ?" + _own + " LIMIT 1",
-            (name, label, *_ownp),
-        ).fetchone()
-        if existing:
-            node_id = existing["id"]
-            conn.execute(
-                """
-                UPDATE nodes SET
-                    properties = ?,
-                    data_class = ?,
-                    tier = ?,
-                    source = ?,
-                    as_of = ?,
-                    updated_at = ?,
-                    first_name = COALESCE(?, first_name),
-                    last_name = COALESCE(?, last_name)
-                WHERE id = ?
-                """,
-                (
-                    json.dumps(props), meta.get("data_class"), meta.get("tier"),
-                    meta.get("source", source), meta.get("as_of"),
-                    props["created_at"], first_name, last_name, node_id,
-                ),
-            )
-        else:
-            cursor = conn.execute(
-                """
-                INSERT INTO nodes (mind_id, owner, type, name, first_name, last_name,
-                                   properties, data_class, tier, source, as_of,
-                                   created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    mind_id, _stamped, label, name, first_name, last_name,
-                    json.dumps(props), meta.get("data_class"), meta.get("tier"),
-                    meta.get("source", source), meta.get("as_of"),
-                    props["created_at"], props["created_at"],
-                ),
-            )
-            node_id = cursor.lastrowid
-        conn.commit()
+        node_id = row["id"]
 
         rel_created = False
         if relation and target_name:
             rel_type = _validate_relation(relation)
-            tgt_label = _validate_label(target_type or entity_type)
 
-            # Find-or-create the target node
-            existing_target = conn.execute(
-                "SELECT id FROM nodes WHERE name = ? AND type = ?" + _own + " LIMIT 1",
-                (target_name, tgt_label, *_ownp),
-            ).fetchone()
+            # Find-or-create the target node. Its properties are deliberately
+            # not touched when it already exists: an edge is not a reason to
+            # rewrite the node at its far end.
+            existing_target = await _find_node(
+                type=tgt_label, name=target_name,
+                owner=_identity_scope(tgt_label, owner))
             if existing_target:
                 target_id = existing_target["id"]
-                conn.execute(
-                    """
-                    UPDATE nodes SET
-                        data_class = ?,
-                        tier = ?,
-                        source = ?,
-                        as_of = ?,
-                        updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (
-                        meta.get("data_class"), meta.get("tier"),
-                        meta.get("source", source), meta.get("as_of"),
-                        props["created_at"], target_id,
-                    ),
-                )
+                await hive_data.run(lambda c: c.execute(
+                    f"UPDATE {NODES} SET data_class = $1, tier = $2, "
+                    "source = $3, as_of = $4, updated_at = $5 WHERE id = $6",
+                    meta.get("data_class"), meta.get("tier"),
+                    meta.get("source", source), meta.get("as_of"),
+                    props["created_at"], target_id))
             else:
-                tgt_cursor = conn.execute(
-                    """
-                    INSERT INTO nodes (mind_id, owner, type, name, properties, data_class, tier,
-                                       source, as_of, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        mind_id, _stamped, tgt_label, target_name, json.dumps(meta),
-                        meta.get("data_class"), meta.get("tier"),
-                        meta.get("source", source), meta.get("as_of"),
-                        props["created_at"], props["created_at"],
-                    ),
-                )
-                target_id = tgt_cursor.lastrowid
-            conn.commit()
+                target_row = await store.node_write(
+                    owner=_stamped, type=tgt_label, name=target_name,
+                    mind_id=mind_id, properties=meta,
+                    data_class=meta.get("data_class"), tier=meta.get("tier"),
+                    source=meta.get("source", source), as_of=meta.get("as_of"),
+                    created_at=props["created_at"],
+                    updated_at=props["created_at"])
+                target_id = target_row["id"]
 
-            # Upsert edge
-            edge_props_json = edge_attrs if edge_attrs.strip() else "{}"
-            conn.execute(
-                """
-                INSERT INTO edges (mind_id, owner, source_id, target_id, type,
-                                   as_of, source, data_class, tier, created_at, properties)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(source_id, target_id, type) DO UPDATE SET
-                    as_of = excluded.as_of,
-                    source = excluded.source,
-                    data_class = excluded.data_class,
-                    tier = excluded.tier,
-                    properties = excluded.properties
-                """,
-                (
-                    mind_id, _stamped, node_id, target_id, rel_type,
+            edge_props = json.loads(edge_attrs) if edge_attrs.strip() else {}
+            try:
+                await store.edge_write(
+                    mind_id=mind_id, source_id=node_id, target_id=target_id,
+                    type=rel_type, owner=_stamped, properties=edge_props,
+                    as_of=meta.get("as_of"), source=meta.get("source", source),
+                    data_class=meta.get("data_class"), tier=meta.get("tier"),
+                    created_at=props["created_at"])
+            except hive_data.Conflict:
+                # The edge is already there. Upsert is the contract on this
+                # route, so its attributes are refreshed rather than refused.
+                await hive_data.run(lambda c: c.execute(
+                    f"UPDATE {EDGES} SET as_of = $1, source = $2, "
+                    "data_class = $3, tier = $4, properties = $5 "
+                    "WHERE source_id = $6 AND target_id = $7 AND type = $8",
                     meta.get("as_of"), meta.get("source", source),
                     meta.get("data_class"), meta.get("tier"),
-                    props["created_at"], edge_props_json,
-                ),
-            )
-            conn.commit()
+                    json.dumps(edge_props, separators=(",", ":")),
+                    node_id, target_id, rel_type))
+            except hive_data.MissingReference as absent:
+                # `memory.edges.mind_id` is a real foreign key into
+                # `core.minds` and `memory.nodes.mind_id` is not, so this
+                # call's two halves fail differently: the node landed and the
+                # edge did not. Named, with the mind in it, rather than
+                # reported as `internal_error` — a mind that is not
+                # registered with the gateway is an operator action, and
+                # "internal error" does not name it.
+                return json.dumps({
+                    "ok": False,
+                    "upserted": True,
+                    "id": node_id,
+                    "entity_type": label,
+                    "name": name,
+                    "relation_created": False,
+                    "code": "missing_reference",
+                    "detail": (
+                        f"the node {name!r} landed and the {relation} edge "
+                        f"did not: {absent}"
+                    ),
+                    "http_status": 409,
+                })
             rel_created = True
 
         return json.dumps({
@@ -377,10 +581,14 @@ def graph_upsert_direct(
             "data_class": meta.get("data_class"),
         })
     except Exception as e:
+        refusal = _store_refusal(e, doing="upsert", extra={"upserted": False})
+        if refusal is not None:
+            refusal["error"] = refusal["detail"]
+            return json.dumps(refusal)
         return json.dumps({"error": str(e)})
 
 
-def graph_upsert(
+async def graph_upsert(
     *,
     entity_type: str,
     name: str,
@@ -418,9 +626,13 @@ def graph_upsert(
         JSON confirmation with node id and relationship created (if any).
     """
     try:
-        from lucent_api.kg_guards import check_disambiguation, check_orphan_guard, send_disambiguation_message
+        from lucent_api.kg_guards import (
+            check_disambiguation,
+            check_orphan_guard,
+            send_disambiguation_message,
+        )
 
-        label = _validate_label(entity_type)
+        label = await _validate_label(entity_type)
         props = json.loads(properties) if properties.strip() != "{}" else {}
         refusal = soul_key_refusal(props)
         if refusal:
@@ -430,18 +642,18 @@ def graph_upsert(
         if not allowed:
             return json.dumps({"upserted": False, "reason": orphan_msg})
 
-        disambig = check_disambiguation(name, entity_type, mind_id, owner)
+        disambig = await _call(
+            check_disambiguation, name, entity_type, mind_id, owner)
         if disambig.action == "disambiguate":
-            send_disambiguation_message(name, disambig.existing_nodes)
+            await _call(send_disambiguation_message, name, disambig.existing_nodes)
             return json.dumps({
                 "upserted": False,
                 "reason": "disambiguation_required",
                 "similar_nodes": disambig.existing_nodes,
             })
 
-        preserve_soul(
-            conn := _get_conn(), name=name, label=label, props=props, owner=owner
-        )
+        await _call(preserve_soul, name=name, label=label, props=props,
+                    owner=owner)
 
         props_str = f" {json.dumps(props)}" if props else ""
         node_repr = f"({label}:{name}{props_str})"
@@ -451,10 +663,10 @@ def graph_upsert(
         else:
             hitl_summary = node_repr
 
-        if not _hitl_gate(hitl_summary):
+        if not await _hitl_gate(hitl_summary):
             return json.dumps({"upserted": False, "reason": "denied by HITL"})
 
-        return graph_upsert_direct(
+        return await graph_upsert_direct(
             entity_type=entity_type,
             name=name,
             properties=properties,
@@ -463,15 +675,40 @@ def graph_upsert(
             target_type=target_type,
             mind_id=mind_id,
             owner=owner,
+            stamp=stamp,
             data_class=data_class,
             as_of=as_of,
             source=source,
         )
     except Exception as e:
+        refusal = _store_refusal(e, doing="upsert", extra={"upserted": False})
+        if refusal is not None:
+            refusal["error"] = refusal["detail"]
+            return json.dumps(refusal)
         return json.dumps({"error": str(e)})
 
 
-def graph_query(
+#: The alias match, as a fragment. `properties` is a `text` column rather
+#: than `jsonb`, so a cast is a statement that *raises* on a blob written by
+#: something else — where SQLite's `json_extract` quietly answered NULL and
+#: the row simply did not match. `pg_input_is_valid` inside a `CASE` is the
+#: guard, and `CASE` rather than `AND` because only `CASE` promises the
+#: planner will not reorder the cast ahead of the test.
+_ALIAS_MATCH = (
+    "LOWER(COALESCE(CASE WHEN pg_input_is_valid(properties, 'jsonb') "
+    "THEN (properties::jsonb -> 'aliases')::text END, ''))"
+)
+
+
+def _json_text(path: str) -> str:
+    """One key of the properties blob as text, guarded against a bad blob."""
+    return (
+        "LOWER(COALESCE(CASE WHEN pg_input_is_valid(properties, 'jsonb') "
+        f"THEN properties::jsonb ->> '{path}' END, ''))"
+    )
+
+
+async def graph_query(
     entity_name: str,
     mind_id: str = "",
     depth: int = 1,
@@ -504,8 +741,6 @@ def graph_query(
     if not entity_name:
         return json.dumps({"found": False, "entity": entity_name})
     try:
-        conn = _get_conn()
-
         # Identity-only match: name / first_name / last_name (exact,
         # case-insensitive), or alias-element within the JSON aliases array.
         # Scoped by owner, never by the mind that wrote the row. The four
@@ -513,27 +748,27 @@ def graph_query(
         # bare OR chain binds to the last one only, which would serve every
         # owner's node whose name matched.
         alias_pattern = f'%"{entity_name}"%'
-        own_clause, own_params = _owners_scope(owners)
-        rows = conn.execute(
-            """
-            SELECT id, name, type, first_name, last_name, properties, mind_id,
-                   data_class, tier, source, as_of, created_at, updated_at
-            FROM nodes
-            WHERE (name = ? COLLATE NOCASE
-               OR first_name = ? COLLATE NOCASE
-               OR last_name = ? COLLATE NOCASE
-               OR json_extract(properties, '$.aliases') LIKE ?)
+        own_clause, own_params = _owners_scope(owners, next_arg=3)
+        rows = await _rows(
+            f"""
+            SELECT {_NODE_FIELDS}
+            FROM {NODES}
+            WHERE (LOWER(name) = LOWER($1)
+               OR LOWER(COALESCE(first_name, '')) = LOWER($1)
+               OR LOWER(COALESCE(last_name, '')) = LOWER($1)
+               OR {_ALIAS_MATCH} LIKE LOWER($2))
             """ + own_clause,
-            (entity_name, entity_name, entity_name, alias_pattern, *own_params),
-        ).fetchall()
+            entity_name, alias_pattern, *own_params,
+        )
 
         if not rows:
             return json.dumps({"found": False, "entity": entity_name})
 
         nodes: dict[str, dict] = {}
+        walk_clause, walk_params = _owners_scope(owners, "n.owner", next_arg=2)
         for row in rows:
             node_name = row["name"]
-            props = json.loads(row["properties"]) if row["properties"] else {}
+            props = _decoded(row["properties"])
             props["name"] = node_name
             props["type"] = row["type"]
             # mind_id is writer-provenance, not a node attribute.
@@ -559,22 +794,22 @@ def graph_query(
             for _d in range(depth):
                 next_frontier = []
                 for nid in frontier:
-                    edges = conn.execute(
+                    edges = await _rows(
                         """
                         SELECT e.type AS rel_type, e.target_id, e.source_id,
                                e.properties AS edge_props,
                                n.name AS connected_name, n.type AS connected_type,
                                n.properties AS connected_props,
                                n.first_name, n.last_name
-                        FROM edges e
-                        JOIN nodes n ON (
-                            (e.target_id = n.id AND e.source_id = ?)
-                            OR (e.source_id = n.id AND e.target_id = ?)
+                        FROM """ + EDGES + """ e
+                        JOIN """ + NODES + """ n ON (
+                            (e.target_id = n.id AND e.source_id = $1)
+                            OR (e.source_id = n.id AND e.target_id = $1)
                         )
-                        WHERE (e.source_id = ? OR e.target_id = ?)
-                        """ + _owners_scope(owners, "n.owner")[0],
-                        (nid, nid, nid, nid, *_owners_scope(owners, "n.owner")[1]),
-                    ).fetchall()
+                        WHERE (e.source_id = $1 OR e.target_id = $1)
+                        """ + walk_clause,
+                        nid, *walk_params,
+                    )
 
                     for edge in edges:
                         connected_id = (
@@ -586,7 +821,7 @@ def graph_query(
                         # expansion (cycle prevention), not edge surfacing. Two
                         # nodes may have multiple edges between them (e.g. both
                         # PARENT_OF and CHILD_OF, or FRIEND_OF and COWORKER_OF).
-                        conn_props = json.loads(edge["connected_props"]) if edge["connected_props"] else {}
+                        conn_props = _decoded(edge["connected_props"])
                         conn_props["name"] = edge["connected_name"]
                         conn_props["type"] = edge["connected_type"]
                         if edge["first_name"]:
@@ -595,7 +830,7 @@ def graph_query(
                             conn_props["last_name"] = edge["last_name"]
 
                         direction = "out" if edge["source_id"] == nid else "in"
-                        edge_attrs = json.loads(edge["edge_props"]) if edge["edge_props"] else {}
+                        edge_attrs = _decoded(edge["edge_props"])
                         via_entry = {"type": edge["rel_type"], "direction": direction}
                         if edge_attrs:
                             via_entry["attrs"] = edge_attrs
@@ -616,10 +851,14 @@ def graph_query(
             "matches": matches,
         })
     except Exception as e:
+        refusal = _store_refusal(e, doing="query")
+        if refusal is not None:
+            refusal["error"] = refusal["detail"]
+            return json.dumps(refusal)
         return json.dumps({"error": str(e)})
 
 
-def graph_search(
+async def graph_search(
     text: str, limit: int = 25, owners: list[str] | None = None
 ) -> str:
     """Mention search: full-text scan across all property strings.
@@ -631,6 +870,7 @@ def graph_search(
     Args:
         text: Substring to search for. Empty string returns an empty list.
         limit: Max number of results (default 25).
+        owners: Whose graphs this read may see. None is every owner.
 
     Returns:
         JSON-encoded list of {"node_id", "node_type", "property", "snippet"}.
@@ -639,12 +879,17 @@ def graph_search(
     if not text:
         return json.dumps([])
     try:
-        conn = _get_conn()
-        rows = conn.execute(
-            "SELECT id, type, properties FROM nodes WHERE properties LIKE ?"
-            + _owners_scope(owners)[0] + " LIMIT ?",
-            (f"%{text}%", *_owners_scope(owners)[1], limit),
-        ).fetchall()
+        # `LOWER()` on both sides. `LIKE` folds case in SQLite and does not
+        # here, so the unwrapped pattern answered "no memories matched" over
+        # rows that matched perfectly well — which is a sentence a model says
+        # out loud.
+        own_clause, own_params = _owners_scope(owners, next_arg=2)
+        rows = await _rows(
+            f"SELECT id, type, properties FROM {NODES} "
+            "WHERE LOWER(COALESCE(properties, '')) LIKE LOWER($1)"
+            + own_clause + f" LIMIT ${2 + len(own_params)}",
+            f"%{text}%", *own_params, limit,
+        )
 
         results: list[dict[str, object]] = []
         lower = text.lower()
@@ -652,6 +897,8 @@ def graph_search(
             try:
                 props = json.loads(row["properties"]) if row["properties"] else {}
             except json.JSONDecodeError:
+                continue
+            if not isinstance(props, dict):
                 continue
             for k, v in props.items():
                 if isinstance(v, str) and lower in v.lower():
@@ -664,6 +911,10 @@ def graph_search(
                     break  # one hit per node — first property wins
         return json.dumps(results)
     except Exception as e:
+        refusal = _store_refusal(e, doing="search")
+        if refusal is not None:
+            refusal["error"] = refusal["detail"]
+            return json.dumps(refusal)
         return json.dumps({"error": str(e)})
 
 
@@ -679,7 +930,7 @@ def _snippet(value: str, query: str, ctx_chars: int = 40) -> str:
     return f"{prefix}{value[start:end]}{suffix}"
 
 
-def search_person(
+async def search_person(
     first_name: str = "",
     last_name: str = "",
     title: str = "",
@@ -710,35 +961,43 @@ def search_person(
         return json.dumps({"error": "At least one search parameter must be provided."})
 
     try:
-        conn = _get_conn()
-
         # Build dynamic WHERE clause. Partitioned by owner, never by the
         # mind that wrote the row.
         conditions = ["type = 'Person'"]
-        params: list[str] = []
-        own_clause, own_params = _owners_scope(owners)
+        params: list[Any] = []
+        own_clause, own_params = _owners_scope(owners, next_arg=1)
         if own_clause:
             conditions.append(own_clause.removeprefix(" AND "))
             params.extend(own_params)
 
+        def _mark() -> str:
+            return f"${len(params) + 1}"
+
         if first_name:
-            conditions.append("LOWER(COALESCE(first_name, '')) LIKE LOWER(?)")
+            conditions.append(
+                f"LOWER(COALESCE(first_name, '')) LIKE LOWER({_mark()})")
             params.append(f"%{first_name}%")
         if last_name:
-            conditions.append("LOWER(COALESCE(last_name, '')) LIKE LOWER(?)")
+            conditions.append(
+                f"LOWER(COALESCE(last_name, '')) LIKE LOWER({_mark()})")
             params.append(f"%{last_name}%")
         if title:
-            conditions.append("LOWER(COALESCE(json_extract(properties, '$.title'), '')) LIKE LOWER(?)")
+            # `COLLATE NOCASE` and `json_extract` are both SQLite's. The cast
+            # is guarded, because `properties` is `text` and a blob written by
+            # something else raises here where `json_extract` answered NULL.
+            conditions.append(f"{_json_text('title')} LIKE LOWER({_mark()})")
             params.append(f"%{title}%")
         if relationship:
             # relationship is stored as a JSON array in properties
-            conditions.append("LOWER(COALESCE(json_extract(properties, '$.relationship'), '')) LIKE LOWER(?)")
+            conditions.append(
+                f"{_json_text('relationship')} LIKE LOWER({_mark()})")
             params.append(f"%{relationship}%")
 
         where_clause = " AND ".join(conditions)
-        query = f"SELECT * FROM nodes WHERE {where_clause}"
-
-        rows = conn.execute(query, params).fetchall()
+        rows = await _rows(
+            f"SELECT {_NODE_FIELDS} FROM {NODES} WHERE {where_clause}",
+            *params,
+        )
 
         if not rows:
             return json.dumps({"found": False, "query": {
@@ -750,7 +1009,7 @@ def search_person(
 
         matches = []
         for row in rows:
-            props = json.loads(row["properties"]) if row["properties"] else {}
+            props = _decoded(row["properties"])
             props["name"] = row["name"]
             # mind_id is writer-provenance — surface only on Mind nodes.
             # search_person is Person-only, so this never returns mind_id.
@@ -768,10 +1027,14 @@ def search_person(
             "matches": matches,
         })
     except Exception as e:
+        refusal = _store_refusal(e, doing="person-search")
+        if refusal is not None:
+            refusal["error"] = refusal["detail"]
+            return json.dumps(refusal)
         return json.dumps({"error": str(e)})
 
 
-def audit_person_nodes(*, owner: object) -> str:
+async def audit_person_nodes(*, owner: object) -> str:
     """Find all Person nodes missing first_name or last_name properties.
 
     Scoped to one owner's graph rather than to one mind's writes. Keyed on
@@ -786,23 +1049,23 @@ def audit_person_nodes(*, owner: object) -> str:
         JSON with found, count, and nodes list.
     """
     try:
-        conn = _get_conn()
-        rows = conn.execute(
-            """
+        own_clause, own_params = _owner_scope(owner, next_arg=1)
+        rows = await _rows(
+            f"""
             SELECT id, name, first_name, last_name, properties
-            FROM nodes
+            FROM {NODES}
             WHERE type = 'Person'
               AND (first_name IS NULL OR last_name IS NULL)
-            """ + _owner_scope(owner)[0],
-            (*_owner_scope(owner)[1],),
-        ).fetchall()
+            """ + own_clause,
+            *own_params,
+        )
 
         if not rows:
             return json.dumps({"found": False, "count": 0, "nodes": []})
 
         nodes_list = []
         for row in rows:
-            props = json.loads(row["properties"]) if row["properties"] else {}
+            props = _decoded(row["properties"])
             props["name"] = row["name"]
             nodes_list.append({
                 "name": row["name"],
@@ -814,10 +1077,14 @@ def audit_person_nodes(*, owner: object) -> str:
 
         return json.dumps({"found": True, "count": len(nodes_list), "nodes": nodes_list})
     except Exception as e:
+        refusal = _store_refusal(e, doing="person-audit")
+        if refusal is not None:
+            refusal["error"] = refusal["detail"]
+            return json.dumps(refusal)
         return json.dumps({"error": str(e)})
 
 
-def update_person_names(
+async def update_person_names(
     *,
     name: str,
     first_name: str = "",
@@ -841,33 +1108,34 @@ def update_person_names(
         })
 
     try:
-        conn = _get_conn()
-
         set_parts = []
-        params: list[str] = []
+        params: list[Any] = []
 
         if first_name:
-            set_parts.append("first_name = ?")
             params.append(first_name)
+            set_parts.append(f"first_name = ${len(params)}")
         if last_name:
-            set_parts.append("last_name = ?")
             params.append(last_name)
+            set_parts.append(f"last_name = ${len(params)}")
 
         set_clause = ", ".join(set_parts)
-        own_clause, own_params = _owner_scope(owner)
         params.append(name)
+        name_mark = f"${len(params)}"
+        own_clause, own_params = _owner_scope(owner, next_arg=len(params) + 1)
         params.extend(own_params)
 
-        cursor = conn.execute(
-            f"""
-            UPDATE nodes SET {set_clause}
-            WHERE type = 'Person' AND name = ?{own_clause}
-            """,
-            params,
+        # `RETURNING id` rather than a row count off the command tag: the
+        # count is what decides whether the caller is told "not found", and
+        # the rows themselves are the only reading of it that cannot be out
+        # by one.
+        changed = await _rows(
+            f"UPDATE {NODES} SET {set_clause} "
+            f"WHERE type = 'Person' AND name = {name_mark}{own_clause} "
+            "RETURNING id",
+            *params,
         )
-        conn.commit()
 
-        if cursor.rowcount == 0:
+        if not changed:
             return json.dumps({
                 "updated": False,
                 "reason": f"Person node not found with name={name!r}",
@@ -881,6 +1149,10 @@ def update_person_names(
 
         return json.dumps(response)
     except Exception as e:
+        refusal = _store_refusal(e, doing="person-update")
+        if refusal is not None:
+            refusal["error"] = refusal["detail"]
+            return json.dumps(refusal)
         return json.dumps({"error": str(e)})
 
 
@@ -911,7 +1183,7 @@ _PROTECTED_METADATA_KEYS = {
 }
 
 
-def graph_node_create(
+async def graph_node_create(
     *,
     entity_type: str,
     name: str,
@@ -936,21 +1208,17 @@ def graph_node_create(
         except ValueError as e:
             return json.dumps({"error": str(e)})
 
-        label = _validate_label(entity_type)
+        label = await _validate_label(entity_type)
         props = json.loads(properties) if properties.strip() != "{}" else {}
         refusal = soul_key_refusal(props)
         if refusal:
             return refusal
 
-        conn = _get_conn()
         # A row is filed under one owner. `owner` is the scope a call may
         # reach, which for the console and the operator is every owner.
         _stamped = stamp if stamp is not None else owner
-        own_clause, own_params = _owner_scope(_identity_scope(label, owner))
-        existing = conn.execute(
-            "SELECT id FROM nodes WHERE name = ? AND type = ?" + own_clause + " LIMIT 1",
-            (name, label, *own_params),
-        ).fetchone()
+        existing = await _find_node(
+            type=label, name=name, owner=_identity_scope(label, owner))
         if existing:
             return json.dumps({
                 "ok": False,
@@ -959,11 +1227,11 @@ def graph_node_create(
                 "id": existing["id"],
             })
 
-        guard_err = _check_identity_guard(
-            conn, name, mind_id, owner, entity_type=label
+        guard_err = await _check_identity_guard(
+            name, mind_id, owner, entity_type=label
         )
         if guard_err is not None:
-            return json.dumps({"ok": False, "code": "identity_guard", "detail": guard_err})
+            return _identity_refusal(guard_err)
 
         meta = {
             "data_class": data_class or "",
@@ -977,27 +1245,35 @@ def graph_node_create(
         props.update(meta)
         props["created_at"] = time.time()
 
-        cursor = conn.execute(
-            """
-            INSERT INTO nodes (mind_id, owner, type, name, first_name, last_name,
-                               properties, data_class, tier, source, as_of,
-                               created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
+        # A real INSERT rather than `node_write`, because this route's whole
+        # contract is that it does not replace. `node_write` is the upsert,
+        # and reaching for it here would turn a lost race into a silent
+        # overwrite of whatever the winner had written.
+        try:
+            row = await _one(
+                f"INSERT INTO {NODES} (mind_id, owner, type, name, first_name, "
+                "last_name, properties, data_class, tier, source, as_of, "
+                "created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, "
+                "$8, $9, $10, $11, $12, $12) RETURNING id",
                 mind_id, _stamped, label, name, first_name, last_name,
                 json.dumps(props), meta["data_class"], meta["tier"],
-                meta["source"], meta["as_of"],
-                props["created_at"], props["created_at"],
-            ),
-        )
-        conn.commit()
-        return json.dumps({"ok": True, "id": cursor.lastrowid, "name": name, "type": label})
+                meta["source"], meta["as_of"], props["created_at"],
+            )
+        except hive_data.Conflict:
+            # `memory_nodes_owner_type_name` caught what the check above
+            # missed, which is a concurrent creator rather than a bug.
+            # Reported as the same refusal: the caller asked to create a node
+            # and one of that name is there.
+            return json.dumps({
+                "ok": False, "code": "exists",
+                "detail": f"node already exists: name={name!r} type={label!r}",
+            })
+        return json.dumps({"ok": True, "id": row["id"], "name": name, "type": label})
     except Exception as e:
-        return json.dumps({"ok": False, "code": "internal_error", "detail": str(e)})
+        return _failed(e, doing="node-create")
 
 
-def graph_properties_merge(
+async def graph_properties_merge(
     *,
     entity_type: str,
     name: str,
@@ -1005,6 +1281,8 @@ def graph_properties_merge(
     owner: str | None,
     as_of: str | None = None,
     source: str | None = None,
+    mind_id: str = "",
+    unrestricted: bool = False,
 ) -> str:
     """Merge ``properties`` into an existing node's properties blob.
 
@@ -1014,9 +1292,14 @@ def graph_properties_merge(
 
     ``first_name`` and ``last_name`` in the request map to their columns
     rather than the properties blob, matching the existing storage shape.
+
+    ``mind_id`` and ``unrestricted`` carry the identity guard. It is here
+    and not only at the route because this module is registered directly as
+    a tool: the route-level check guarded the route, and a direct call to
+    this function had no identity guard at all.
     """
     try:
-        label = _validate_label(entity_type)
+        label = await _validate_label(entity_type)
         new_props = json.loads(properties) if properties.strip() else {}
         refusal = soul_key_refusal(new_props)
         if refusal:
@@ -1025,13 +1308,13 @@ def graph_properties_merge(
             return json.dumps({"ok": False, "code": "invalid_properties",
                                "detail": "properties must be a JSON object"})
 
-        conn = _get_conn()
-        own_clause, own_params = _owner_scope(owner)
-        row = conn.execute(
-            "SELECT id, properties FROM nodes WHERE name = ? AND type = ?"
-            + own_clause + " LIMIT 1",
-            (name, label, *own_params),
-        ).fetchone()
+        guard_err = await _check_identity_guard(
+            name, mind_id, owner, entity_type=label, unrestricted=unrestricted
+        )
+        if guard_err is not None:
+            return _identity_refusal(guard_err)
+
+        row = await _find_node(type=label, name=name, owner=owner)
         if not row:
             return json.dumps({"ok": False, "code": "not_found",
                                "detail": f"node not found: name={name!r} type={label!r}"})
@@ -1040,50 +1323,63 @@ def graph_properties_merge(
         first_name = new_props.pop("first_name", None)
         last_name = new_props.pop("last_name", None)
 
-        existing = json.loads(row["properties"]) if row["properties"] else {}
-        existing.update(new_props)
         now_iso = as_of or datetime.now(timezone.utc).isoformat()
-        existing["updated_at"] = time.time()
+        touched = time.time()
+        additions = dict(new_props)
+        additions["updated_at"] = touched
         if source is not None:
-            existing["source"] = source
+            additions["source"] = source
 
-        # Build dynamic SET clause for column updates.
-        set_parts = ["properties = ?", "updated_at = ?", "as_of = ?"]
-        params: list = [json.dumps(existing), existing["updated_at"], now_iso]
+        # `properties_merge` rather than a read, a decode, an update and a
+        # write out here. `properties` is a `text` column, so the merge is
+        # read-modify-write by construction, and two callers merging
+        # different keys both read before either wrote — the loser's keys
+        # vanish and both are told they landed. That operation holds the row.
+        #
+        # The node's own columns go into that same call rather than a second
+        # statement after it. A second statement is a second transaction: the
+        # blob merge commits, the column write is refused — a pool with
+        # nothing free, the statement deadline, a server that restarted —
+        # and the caller is handed a refusal for a merge that has already
+        # landed. This is the route the operator is told to prefer for
+        # additive updates, so it gets the same one-unit treatment as the
+        # soul write and the node delete.
+        columns: dict[str, Any] = {"updated_at": touched, "as_of": now_iso}
         if first_name is not None:
-            set_parts.append("first_name = ?")
-            params.append(first_name)
+            columns["first_name"] = first_name
         if last_name is not None:
-            set_parts.append("last_name = ?")
-            params.append(last_name)
+            columns["last_name"] = last_name
         if source is not None:
-            set_parts.append("source = ?")
-            params.append(source)
-        params.append(row["id"])
+            columns["source"] = source
+        await store.properties_merge(
+            node_id=row["id"], additions=additions, columns=columns)
 
-        conn.execute(f"UPDATE nodes SET {', '.join(set_parts)} WHERE id = ?", params)
-        conn.commit()
-        return json.dumps({"ok": True, "id": row["id"], "merged_keys": sorted(new_props.keys())})
+        return json.dumps({"ok": True, "id": row["id"],
+                           "merged_keys": sorted(new_props.keys())})
     except Exception as e:
-        return json.dumps({"ok": False, "code": "internal_error", "detail": str(e)})
+        return _failed(e, doing="properties-merge")
 
 
-def graph_properties_remove(
+async def graph_properties_remove(
     *,
     entity_type: str,
     name: str,
     keys: list[str],
     owner: str | None,
+    mind_id: str = "",
+    unrestricted: bool = False,
 ) -> str:
     """Remove named keys from an existing node's properties blob.
 
-    Rejects requests to remove protected metadata keys (data_class, tier,
-    source, as_of, created_at, updated_at, superseded, name, type).
-    ``first_name`` / ``last_name`` in ``keys`` clear the corresponding
-    column.
+    Rejects requests to remove protected metadata keys (as_of, created_at,
+    updated_at, superseded, name, type). ``first_name`` / ``last_name`` in
+    ``keys`` clear the corresponding column.
+
+    ``mind_id`` and ``unrestricted`` carry the identity guard, for the same
+    reason `graph_properties_merge` does.
     """
     try:
-        label = _validate_label(entity_type)
+        label = await _validate_label(entity_type)
         if not isinstance(keys, list):
             return json.dumps({"ok": False, "code": "invalid_keys",
                                "detail": "keys must be a JSON array"})
@@ -1099,52 +1395,47 @@ def graph_properties_remove(
                 "detail": f"these keys cannot be removed: {protected_violations}",
             })
 
-        conn = _get_conn()
-        own_clause, own_params = _owner_scope(owner)
-        row = conn.execute(
-            "SELECT id, properties FROM nodes WHERE name = ? AND type = ?"
-            + own_clause + " LIMIT 1",
-            (name, label, *own_params),
-        ).fetchone()
+        guard_err = await _check_identity_guard(
+            name, mind_id, owner, entity_type=label, unrestricted=unrestricted
+        )
+        if guard_err is not None:
+            return _identity_refusal(guard_err)
+
+        row = await _find_node(type=label, name=name, owner=owner)
         if not row:
             return json.dumps({"ok": False, "code": "not_found",
                                "detail": f"node not found: name={name!r} type={label!r}"})
 
-        existing = json.loads(row["properties"]) if row["properties"] else {}
-        removed: list[str] = []
-        for k in keys:
-            if k in _COLUMN_KEYS:
-                continue  # handled by NULL on the column below
-            if k in existing:
-                existing.pop(k)
-                removed.append(k)
-            # Vector-leakage keys may also live in their dedicated column —
-            # the column NULL update below catches that. Either path counts.
-        existing["updated_at"] = time.time()
-
-        set_parts = ["properties = ?", "updated_at = ?"]
-        params: list = [json.dumps(existing), existing["updated_at"]]
+        blob_keys = [k for k in keys if k not in _COLUMN_KEYS]
+        touched = time.time()
+        # One statement, not three. This used to drop the blob keys, merge
+        # `updated_at`, and then NULL the columns in three separate
+        # transactions — and it appended the column names to `removed_keys`
+        # before the statement that clears them ran, so a refusal on the
+        # third answered with keys reported removed that were still there.
+        columns: dict[str, Any] = {"updated_at": touched}
         if "first_name" in keys:
-            set_parts.append("first_name = NULL")
-            removed.append("first_name")
+            columns["first_name"] = None
         if "last_name" in keys:
-            set_parts.append("last_name = NULL")
-            removed.append("last_name")
+            columns["last_name"] = None
+        # A vector-leakage key may also live in its dedicated column; the
+        # column clear catches that. Either path counts as removed.
         for col in _VECTOR_LEAKAGE_COLUMNS:
             if col in keys:
-                set_parts.append(f"{col} = NULL")
-                if col not in removed:
-                    removed.append(col)
-        params.append(row["id"])
+                columns[col] = None
+        dropped = await store.properties_remove(
+            node_id=row["id"], keys=blob_keys, columns=columns)
+        # `updated_at` is bookkeeping this call sets, not a key the caller
+        # asked to remove.
+        removed = [k for k in dict.fromkeys(dropped["removed"])
+                   if k != "updated_at"]
 
-        conn.execute(f"UPDATE nodes SET {', '.join(set_parts)} WHERE id = ?", params)
-        conn.commit()
         return json.dumps({"ok": True, "id": row["id"], "removed_keys": removed})
     except Exception as e:
-        return json.dumps({"ok": False, "code": "internal_error", "detail": str(e)})
+        return _failed(e, doing="properties-remove")
 
 
-def graph_edge_create(
+async def graph_edge_create(
     *,
     source_name: str,
     source_type: str,
@@ -1172,57 +1463,51 @@ def graph_edge_create(
             return json.dumps({"error": str(e)})
 
         rel_type = _validate_relation(relation)
-        src_label = _validate_label(source_type)
-        tgt_label = _validate_label(target_type)
+        src_label = await _validate_label(source_type)
+        tgt_label = await _validate_label(target_type)
         attrs = json.loads(edge_attrs) if edge_attrs.strip() != "{}" else {}
 
-        conn = _get_conn()
         # A row is filed under one owner. `owner` is the scope a call may
         # reach, which for the console and the operator is every owner.
         _stamped = stamp if stamp is not None else owner
-        own_clause, own_params = _owner_scope(owner)
-        src = conn.execute(
-            "SELECT id FROM nodes WHERE name = ? AND type = ?" + own_clause + " LIMIT 1",
-            (source_name, src_label, *own_params),
-        ).fetchone()
+        src = await _find_node(type=src_label, name=source_name, owner=owner)
         if not src:
             return json.dumps({"ok": False, "code": "source_not_found",
                                "detail": f"{src_label}:{source_name} not found"})
-        tgt = conn.execute(
-            "SELECT id FROM nodes WHERE name = ? AND type = ?" + own_clause + " LIMIT 1",
-            (target_name, tgt_label, *own_params),
-        ).fetchone()
+        tgt = await _find_node(type=tgt_label, name=target_name, owner=owner)
         if not tgt:
             return json.dumps({"ok": False, "code": "target_not_found",
                                "detail": f"{tgt_label}:{target_name} not found"})
 
-        now = time.time()
         try:
-            cursor = conn.execute(
-                """
-                INSERT INTO edges (mind_id, owner, source_id, target_id, type,
-                                   as_of, source, data_class, tier, created_at, properties)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    mind_id, _stamped, src["id"], tgt["id"], rel_type,
-                    as_of or datetime.now(timezone.utc).isoformat(),
-                    source, data_class or "", "contextual", now,
-                    json.dumps(attrs),
+            row = await store.edge_write(
+                mind_id=mind_id, source_id=src["id"], target_id=tgt["id"],
+                type=rel_type, owner=_stamped, properties=attrs,
+                as_of=as_of or datetime.now(timezone.utc).isoformat(),
+                source=source, data_class=data_class or "", tier="contextual",
+                created_at=time.time())
+        except hive_data.Conflict as clash:
+            return json.dumps({
+                "ok": False, "code": "edge_exists",
+                "detail": (
+                    f"edge already exists: {src_label}:{source_name} "
+                    f"-[{rel_type}]-> {tgt_label}:{target_name}"
                 ),
-            )
-            conn.commit()
-            return json.dumps({"ok": True, "id": cursor.lastrowid, "relation": rel_type})
-        except sqlite3.IntegrityError as e:
-            return json.dumps({"ok": False, "code": "edge_exists",
-                               "detail": f"edge already exists: {src_label}:{source_name} -[{rel_type}]-> {tgt_label}:{target_name}",
-                               "raw": str(e)})
+                "raw": str(clash),
+            })
+        # `MissingReference` is deliberately *not* caught here.
+        # `memory.edges.mind_id` is a foreign key into `core.minds` and
+        # `memory.nodes.mind_id` is not, so an edge can be refused for a
+        # mind whose nodes write perfectly well — and `edge_write` already
+        # raises with the mind in the sentence. `_failed` turns it into the
+        # named refusal with its 409. A second handler here would be one
+        # more place for that status to be lost.
+        return json.dumps({"ok": True, "id": row["id"], "relation": rel_type})
     except Exception as e:
-        return json.dumps({"ok": False, "code": "internal_error", "detail": str(e)})
+        return _failed(e, doing="edge-create")
 
 
-
-def _soul_bearing_node_refusal(
+async def _soul_bearing_node_refusal(
     entity_type: str, name: str, owner: object = None
 ) -> str | None:
     """Refuse a general-route delete of a Mind that still has a soul.
@@ -1231,18 +1516,19 @@ def _soul_bearing_node_refusal(
     changes to a node, and the node is gone. Emptying the soul through
     POST /graph/soul first makes the loss visible in the record, and only
     then can the node go.
+
+    A different set from "has soul history", deliberately: this reads the
+    `soul_values` property, and a node can carry one without the other in
+    either direction. `graph_node_delete` refuses on both.
     """
     if entity_type != "Mind":
         return None
-    try:
-        clause, params = _owner_scope(owner)
-        row = _get_conn().execute(
-            "SELECT properties FROM nodes WHERE name = ? AND type = 'Mind'"
-            + clause + " LIMIT 1",
-            (name, *params),
-        ).fetchone()
-    except Exception:
-        return None
+    # The lookup's failures are not swallowed. Over a file this read could
+    # fail only through a bug, and "could not check" quietly became "no soul
+    # to lose"; over a socket it fails when the database does, and a guard
+    # that opens on an outage is the one erasure nothing can explain
+    # afterwards. `graph_node_delete` turns the refusal into a named one.
+    row = await _find_node(type="Mind", name=name, owner=owner)
     if not row or not row["properties"]:
         return None
     try:
@@ -1261,7 +1547,7 @@ def _soul_bearing_node_refusal(
     return None
 
 
-def graph_node_delete(
+async def graph_node_delete(
     *,
     entity_type: str,
     name: str,
@@ -1279,50 +1565,54 @@ def graph_node_delete(
         # the provenance table can never explain afterwards. Blocked here
         # rather than in the router because every caller of this function has
         # the same problem.
-        refusal = _soul_bearing_node_refusal(entity_type, name, owner)
+        refusal = await _soul_bearing_node_refusal(entity_type, name, owner)
         if refusal:
             return refusal
 
-        label = _validate_label(entity_type)
-        conn = _get_conn()
+        label = await _validate_label(entity_type)
         # A mind's own node is the one row in its owner's graph that the
         # owner's other minds may read and not touch, and deleting it is the
         # loudest form of touching it.
-        guard_err = _check_identity_guard(
-            conn, name, mind_id, owner, entity_type=label,
-            unrestricted=unrestricted,
+        guard_err = await _check_identity_guard(
+            name, mind_id, owner, entity_type=label, unrestricted=unrestricted,
         )
         if guard_err is not None:
-            return json.dumps(
-                {"ok": False, "code": "identity_guard", "detail": guard_err}
-            )
-        own_clause, own_params = _owner_scope(owner)
-        row = conn.execute(
-            "SELECT id FROM nodes WHERE name = ? AND type = ?" + own_clause + " LIMIT 1",
-            (name, label, *own_params),
-        ).fetchone()
+            return _identity_refusal(guard_err)
+        row = await _find_node(type=label, name=name, owner=owner)
         if not row:
             return json.dumps({"ok": False, "code": "not_found",
                                "detail": f"node not found: name={name!r} type={label!r}"})
         node_id = row["id"]
-        edge_cursor = conn.execute(
-            "DELETE FROM edges WHERE source_id = ? OR target_id = ?",
-            (node_id, node_id),
-        )
-        edges_removed = edge_cursor.rowcount
-        node_cursor = conn.execute("DELETE FROM nodes WHERE id = ?", (node_id,))
-        conn.commit()
+        try:
+            # One unit for the edges and the node. `memory.soul_changes.node_id`
+            # is ON DELETE RESTRICT, so the node delete can be refused *after*
+            # the edges are gone — which leaves a node stripped of every
+            # relationship and a caller told the delete failed.
+            deleted = await store.node_delete(node_id)
+        except hive_data.WriteRejected as refused:
+            return json.dumps({
+                "ok": False,
+                "code": "soul_history_present",
+                "detail": (
+                    f"{name!r} has recorded soul changes, which are kept "
+                    f"against the node they changed, so the node cannot be "
+                    f"removed while they exist. Clear the soul through "
+                    f"POST /graph/soul and remove its history before "
+                    f"deleting. ({refused})"
+                ),
+                "http_status": 409,
+            })
         return json.dumps({
             "ok": True,
             "id": node_id,
-            "edges_deleted": edges_removed,
-            "node_deleted": node_cursor.rowcount,
+            "edges_deleted": deleted["edges_deleted"],
+            "node_deleted": deleted["rows"],
         })
     except Exception as e:
-        return json.dumps({"ok": False, "code": "internal_error", "detail": str(e)})
+        return _failed(e, doing="node-delete")
 
 
-def graph_edge_delete(
+async def graph_edge_delete(
     *,
     source_name: str,
     source_type: str,
@@ -1336,29 +1626,18 @@ def graph_edge_delete(
     """
     try:
         rel_type = _validate_relation(relation)
-        src_label = _validate_label(source_type)
-        tgt_label = _validate_label(target_type)
-        conn = _get_conn()
-        own_clause, own_params = _owner_scope(owner)
-        src = conn.execute(
-            "SELECT id FROM nodes WHERE name = ? AND type = ?" + own_clause + " LIMIT 1",
-            (source_name, src_label, *own_params),
-        ).fetchone()
-        tgt = conn.execute(
-            "SELECT id FROM nodes WHERE name = ? AND type = ?" + own_clause + " LIMIT 1",
-            (target_name, tgt_label, *own_params),
-        ).fetchone()
+        src_label = await _validate_label(source_type)
+        tgt_label = await _validate_label(target_type)
+        src = await _find_node(type=src_label, name=source_name, owner=owner)
+        tgt = await _find_node(type=tgt_label, name=target_name, owner=owner)
         if not src or not tgt:
             return json.dumps({"ok": False, "code": "endpoint_not_found",
                                "detail": "source or target node missing"})
-        cursor = conn.execute(
-            "DELETE FROM edges WHERE source_id = ? AND target_id = ? AND type = ?",
-            (src["id"], tgt["id"], rel_type),
-        )
-        conn.commit()
-        return json.dumps({"ok": True, "deleted": cursor.rowcount})
+        removed = await store.edge_delete(
+            source_id=src["id"], target_id=tgt["id"], type=rel_type)
+        return json.dumps({"ok": True, "deleted": removed["rows"]})
     except Exception as e:
-        return json.dumps({"ok": False, "code": "internal_error", "detail": str(e)})
+        return _failed(e, doing="edge-delete")
 
 
 # All knowledge graph tool functions for registration
