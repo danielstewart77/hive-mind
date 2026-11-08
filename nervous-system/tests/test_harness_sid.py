@@ -3,77 +3,66 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
-import tempfile
-import time
 from unittest.mock import patch
 
 from comms.sessions import SessionManager
+from comms_pg_fixture import (  # noqa: F401 - fixtures
+    close_manager,
+    comms_db,
+    make_manager,
+    scratch_dsn,
+    seed_session,
+)
 
 
 def _run(coro):
     return asyncio.run(coro)
 
 
-async def _manager(tmp: str) -> SessionManager:
-    os.environ["SESSIONS_DB_PATH"] = os.path.join(tmp, "sessions.db")
-    mgr = SessionManager()
-    await mgr.start()
+async def _manager() -> SessionManager:
+    mgr = await make_manager()
     return mgr
 
 
-def test_harness_sid_survives_manager_restart() -> None:
+def test_harness_sid_survives_manager_restart(comms_db) -> None:
     async def scenario() -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            now = time.time()
-            await mgr._db.execute(
-                """INSERT INTO sessions
-                   (id, claude_sid, owner_type, owner_ref, model, created_at,
-                    last_active, status, mind_id)
-                   VALUES ('s1', 'gateway-conversation', 'web', 'u1', 'gpt',
-                           ?, ?, 'idle', 'm1')""",
-                (now, now),
+        mgr = await _manager()
+        await seed_session(
+            "s1", claude_sid="gateway-conversation", owner_type="web",
+            owner_ref="u1", model="gpt", status="idle", mind_id="m1",
+        )
+        await mgr.set_harness_sid("s1", "codex-thread-1")
+        await close_manager(mgr)
+
+        resumed = await _manager()
+        try:
+            row = await resumed.get_session("s1")
+            assert row["claude_sid"] == "gateway-conversation"
+            assert row["harness_sid"] == "codex-thread-1"
+        finally:
+            await close_manager(resumed)
+
+    _run(scenario())
+
+
+def test_empty_harness_sid_clears_a_failed_codex_thread(comms_db) -> None:
+    async def scenario() -> None:
+        mgr = await _manager()
+        try:
+            await seed_session(
+                "failed", claude_sid="gateway", harness_sid="dirty-thread",
+                owner_type="web", owner_ref="u1", model="gpt", status="idle",
+                mind_id="m1",
             )
-            await mgr._db.commit()
-            await mgr.set_harness_sid("s1", "codex-thread-1")
-            await mgr.shutdown()
-
-            resumed = await _manager(tmp)
-            try:
-                row = await resumed.get_session("s1")
-                assert row["claude_sid"] == "gateway-conversation"
-                assert row["harness_sid"] == "codex-thread-1"
-            finally:
-                await resumed.shutdown()
+            row = await mgr.set_harness_sid("failed", "")
+            assert row["harness_sid"] is None
+        finally:
+            await close_manager(mgr)
 
     _run(scenario())
 
 
-def test_empty_harness_sid_clears_a_failed_codex_thread() -> None:
-    async def scenario() -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            try:
-                now = time.time()
-                await mgr._db.execute(
-                    """INSERT INTO sessions
-                       (id, claude_sid, harness_sid, owner_type, owner_ref, model,
-                        created_at, last_active, status, mind_id)
-                       VALUES ('failed', 'gateway', 'dirty-thread', 'web', 'u1',
-                               'gpt', ?, ?, 'idle', 'm1')""",
-                    (now, now),
-                )
-                await mgr._db.commit()
-                row = await mgr.set_harness_sid("failed", "")
-                assert row["harness_sid"] is None
-            finally:
-                await mgr.shutdown()
-
-    _run(scenario())
-
-
-def test_codex_thread_started_event_is_persisted() -> None:
+def test_codex_thread_started_event_is_persisted(comms_db) -> None:
     class Response:
         status = 200
 
@@ -113,28 +102,21 @@ def test_codex_thread_started_event_is_persisted() -> None:
             return Response()
 
     async def scenario() -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _manager(tmp)
-            try:
-                now = time.time()
-                await mgr._db.execute(
-                    """INSERT INTO sessions
-                       (id, claude_sid, owner_type, owner_ref, model, created_at,
-                        last_active, status, mind_id)
-                       VALUES ('s2', 'gateway-conversation', 'web', 'u1', 'gpt',
-                               ?, ?, 'running', 'm1')""",
-                    (now, now),
-                )
-                await mgr._db.commit()
-                mgr._procs["s2"] = {"_mind_url": "http://mind.test"}
-                mgr._mind_ids["s2"] = "m1"
-                with patch("aiohttp.ClientSession", Client):
-                    events = [event async for event in mgr.send_message("s2", "hello")]
-                assert events == [{"type": "result", "session_id": "codex-thread-2", "is_error": False}]
-                row = await mgr.get_session("s2")
-                assert row["harness_sid"] == "codex-thread-2"
-                mgr._procs.clear()
-            finally:
-                await mgr.shutdown()
+        mgr = await _manager()
+        try:
+            await seed_session(
+                "s2", claude_sid="gateway-conversation", owner_type="web",
+                owner_ref="u1", model="gpt", status="running", mind_id="m1",
+            )
+            mgr._procs["s2"] = {"_mind_url": "http://mind.test"}
+            mgr._mind_ids["s2"] = "m1"
+            with patch("aiohttp.ClientSession", Client):
+                events = [event async for event in mgr.send_message("s2", "hello")]
+            assert events == [{"type": "result", "session_id": "codex-thread-2", "is_error": False}]
+            row = await mgr.get_session("s2")
+            assert row["harness_sid"] == "codex-thread-2"
+            mgr._procs.clear()
+        finally:
+            await close_manager(mgr)
 
     _run(scenario())

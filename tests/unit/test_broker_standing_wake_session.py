@@ -66,7 +66,7 @@ def _stub_message_store(monkeypatch) -> None:
     async def noop(*args, **kwargs):
         return None
 
-    async def mind_row(_db, mind_id):
+    async def mind_row(mind_id):
         return {"name": mind_id, "model": "model-for-tests"}
 
     async def next_number(*args, **kwargs):
@@ -80,7 +80,6 @@ def _stub_message_store(monkeypatch) -> None:
 
 def _wake(session_mgr, *, from_mind, to_mind, conversation_id, message_id):
     asyncio.run(broker.wakeup_and_collect(
-        db=None,
         session_mgr=session_mgr,
         message_id=message_id,
         conversation_id=conversation_id,

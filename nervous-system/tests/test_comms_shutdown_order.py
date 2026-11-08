@@ -1,9 +1,9 @@
-"""The gateway's teardown keeps the broker DB open until sessions are killed.
+"""The gateway's teardown keeps the database open until sessions are killed.
 
 The session manager's shutdown authenticates each kill with the mind's
-session token, which it reads off the broker row. Closing the broker
-connection first makes every kill raise "no active connection", so the
-harness processes survive a gateway that reported a clean stop.
+session token, which it reads off the broker row. Closing the pool first
+makes every kill fail, so the harness processes survive a gateway that
+reported a clean stop.
 """
 
 import asyncio
@@ -13,43 +13,29 @@ import pytest
 
 
 @pytest.mark.asyncio
-async def test_session_shutdown_runs_before_broker_db_is_closed(monkeypatch, tmp_path):
-    """lifespan kills live sessions while the broker connection is still usable."""
+async def test_session_shutdown_runs_before_the_database_is_closed(monkeypatch):
+    """lifespan kills live sessions while the pool is still open."""
     from comms import server as comms_server
 
     order: list[str] = []
 
-    broker_db = MagicMock()
-    broker_db.close = AsyncMock(side_effect=lambda: order.append("broker_db.close"))
-    # The lifespan creates the credentials table on the way up, so the stand-in
-    # has to be awaitable where a real aiosqlite connection is. A bare
-    # MagicMock returns a MagicMock, which `await` rejects — and the failure
-    # reads as a shutdown-ordering bug rather than a mock that is the wrong
-    # shape.
-    broker_db.executescript = AsyncMock()
-    broker_db.commit = AsyncMock()
-    # The migration asks whether the predecessor table is there. `fetchone`
-    # answering None is "it is not", which is what a fresh broker looks like.
-    _no_rows = MagicMock()
-    _no_rows.fetchone = AsyncMock(return_value=None)
-    broker_db.execute = AsyncMock(return_value=_no_rows)
+    # The pool is the transport boundary: stood in for at `hive_data`, so what
+    # is asserted is the order the lifespan itself calls things in.
+    async def fake_connect(*_a, **_kw):
+        order.append("hive_data.connect")
 
-    async def fake_init_db(path):
-        return broker_db
+    async def fake_close(*_a, **_kw):
+        order.append("hive_data.close")
 
-    async def fake_recover(db):
+    async def fake_recover():
         return []
 
-    monkeypatch.setattr(comms_server.broker, "init_db", fake_init_db)
-    monkeypatch.setattr(comms_server.broker, "recover_stranded_messages", fake_recover)
-    monkeypatch.setenv("BROKER_DB_PATH", str(tmp_path / "broker.db"))
-
     async def fake_shutdown():
-        # What the real shutdown does: read each mind's credential off the
-        # broker row, then call the mind. A closed connection fails here.
-        broker_db.execute("SELECT session_token FROM minds WHERE mind_id = ?")
         order.append("session_mgr.shutdown")
 
+    monkeypatch.setattr(comms_server.hive_data, "connect", fake_connect)
+    monkeypatch.setattr(comms_server.hive_data, "close", fake_close)
+    monkeypatch.setattr(comms_server.broker, "recover_stranded_messages", fake_recover)
     monkeypatch.setattr(comms_server.session_mgr, "start", AsyncMock())
     monkeypatch.setattr(comms_server.session_mgr, "shutdown", fake_shutdown)
     monkeypatch.setattr(
@@ -61,4 +47,4 @@ async def test_session_shutdown_runs_before_broker_db_is_closed(monkeypatch, tmp
         pass
     await asyncio.sleep(0)
 
-    assert order == ["session_mgr.shutdown", "broker_db.close"]
+    assert order == ["hive_data.connect", "session_mgr.shutdown", "hive_data.close"]

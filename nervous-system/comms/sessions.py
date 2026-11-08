@@ -1,9 +1,10 @@
 """
 Hive Mind — Session manager.
 
-Owns the session database and dispatches over HTTP to each mind's own
-container (its `gateway_url`), which spawns and owns the actual Claude/Codex
-CLI subprocess via its harness module — this process never spawns one itself.
+Owns the gateway's sessions — the `core` schema, reached through `hive_data`
+— and dispatches over HTTP to each mind's own container (its `gateway_url`),
+which spawns and owns the actual Claude/Codex CLI subprocess via its harness
+module. This process never spawns one itself.
 """
 
 import asyncio
@@ -19,7 +20,10 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-import aiosqlite
+import hive_data
+from hive_data import core, sessions_ops
+from hive_data.errors import MissingReference
+from hive_data.rows import UNSET
 
 from comms.dashboard import LiveFeed
 from fastapi import HTTPException
@@ -145,128 +149,105 @@ if os.environ.get("HOST_SPARK_DIR"):
 
 
 # ---------------------------------------------------------------------------
-# SQLite schema
+# The rows, as this module and every caller of it speak them
 # ---------------------------------------------------------------------------
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS sessions (
-    id            TEXT PRIMARY KEY,
-    claude_sid    TEXT,
-    harness_sid   TEXT,
-    owner_type    TEXT NOT NULL,
-    owner_ref     TEXT NOT NULL,
-    summary       TEXT DEFAULT 'New session',
-    model         TEXT,
-    -- Retained, unread. `unified_db`'s DROPPED_COLUMNS names `autopilot`,
-    -- `group_session_id` and `rotated_from` as columns the unified database
-    -- does not carry, and its build refuses a drop decision naming a column
-    -- no source has — so the shape a fresh install writes has to keep
-    -- matching the live file the cutover loads. Nothing reads or writes
-    -- them; the file and these columns go together in the retirement story.
-    autopilot     INTEGER NOT NULL DEFAULT 0,
-    created_at    REAL NOT NULL,
-    last_active   REAL NOT NULL,
-    status        TEXT NOT NULL DEFAULT 'running',
-    mind_id       TEXT DEFAULT 'ada',
-    group_session_id TEXT,
-    rotation_armed INTEGER NOT NULL DEFAULT 0,
-    rotated_from  TEXT,
-    carry_forward TEXT,
-    carry_forward_sid TEXT,
-    carry_forward_at REAL,
-    carry_forward_prompt_cap INTEGER,
-    context_tokens INTEGER,
-    context_threshold INTEGER,
-    context_window INTEGER,
-    context_observed_at REAL,
-    context_kind  TEXT,
-    context_has_images INTEGER,
-    context_model TEXT,
-    context_opening_tokens INTEGER,
-    context_opening_surface TEXT,
-    resend_content TEXT,
-    resend_images TEXT,
-    resend_goal_rounds INTEGER,
-    resend_dispatched_at REAL,
-    conversation_started_at REAL,
-    effort        TEXT,
-    harness       TEXT,
-    terminal_held INTEGER NOT NULL DEFAULT 0
-);
+# The schema is `hive_data`'s `core.sql`; nothing here creates or migrates a
+# table. Four session columns were renamed when the stores were unified -
+# `claude_sid` is `conversation_id`, `owner_type`/`owner_ref` are
+# `surface`/`surface_id`, `summary` is `opening_line` - and every consumer of
+# this module (the routes, the surface bots, the console, the minds) still
+# reads the old names off the wire. The translation happens here, at the one
+# boundary, so a row means the same thing to every caller whichever store is
+# underneath it. Both names go out until every consumer reads the new ones.
+_LEGACY_NAMES = {
+    "conversation_id": "claude_sid",
+    "surface": "owner_type",
+    "surface_id": "owner_ref",
+    "opening_line": "summary",
+}
+_COLUMN_OF = {legacy: column for column, legacy in _LEGACY_NAMES.items()}
+# Real booleans in Postgres, integers on the wire since the day they were
+# SQLite columns. Handed back as 0/1 so a client comparing with 1 is unchanged.
+_FLAGS = ("terminal_held", "context_has_images")
+# A conversation nobody can type into any more.
+_RETIRED = ("closed", "suspended")
 
-CREATE TABLE IF NOT EXISTS active_sessions (
-    client_type   TEXT NOT NULL,
-    client_ref    TEXT NOT NULL,
-    session_id    TEXT NOT NULL REFERENCES sessions(id),
-    PRIMARY KEY (client_type, client_ref)
-);
 
--- Retained, unread, for the same reason as the columns above: `unified_db`
--- declares this table dropped, and that decision is checked against the
--- source. 0 rows since it was written, and nothing can write one.
-CREATE TABLE IF NOT EXISTS group_sessions (
-    id                TEXT PRIMARY KEY,
-    moderator_mind_id TEXT NOT NULL DEFAULT 'ada',
-    created_at        REAL NOT NULL,
-    ended_at          REAL
-);
+def _legacy_row(row: dict | None) -> dict | None:
+    """A `core.sessions` row under the names this module's callers read."""
+    if row is None:
+        return None
+    session = {_LEGACY_NAMES.get(k, k): v for k, v in row.items()}
+    # And under the schema's names as well, so consumers move to those one at
+    # a time - the edge minds deploy on their own hosts and cannot all switch
+    # in the same instant as comms. The old names go once nothing reads them.
+    for column, legacy in _LEGACY_NAMES.items():
+        if legacy in session:
+            session[column] = session[legacy]
+    for flag in _FLAGS:
+        if session.get(flag) is not None:
+            session[flag] = int(bool(session[flag]))
+    return session
 
-CREATE TABLE IF NOT EXISTS session_memory (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    mind_id     TEXT NOT NULL,
-    mind_name   TEXT NOT NULL,
-    client_ref  TEXT NOT NULL,
-    session_id  TEXT NOT NULL,
-    body        TEXT NOT NULL,
-    created_at  REAL NOT NULL DEFAULT (strftime('%s','now'))
-);
 
-CREATE INDEX IF NOT EXISTS idx_session_memory_lookup
-    ON session_memory (mind_id, client_ref, created_at DESC);
+def _storable(value: Any) -> Any:
+    """Text Postgres will take. A NUL character is refused by a `text`
+    column where SQLite stored it, and conversation text carries raw tool
+    output that can contain one: refused, the whole unit rolls back - a turn
+    missing from the ledger, a handover that never lands and is retried every
+    turn. Shown as the replacement character instead, so nothing is lost
+    silently and nothing is refused."""
+    if isinstance(value, str) and "\x00" in value:
+        return value.replace("\x00", "\ufffd")
+    return value
 
--- What a harness puts in front of a conversation before any of its text:
--- its own system prompt, tool definitions and project instructions. Learned
--- from each conversation's first provider count against the opening it was
--- estimated at, per mind, harness, model and surface (a pane's interactive
--- harness and a chat process ship different prompts). A first turn's own
--- work only ever adds to that difference, so the least seen stands.
-CREATE TABLE IF NOT EXISTS context_overhead (
-    mind_id     TEXT NOT NULL,
-    harness     TEXT NOT NULL,
-    model       TEXT NOT NULL,
-    surface     TEXT NOT NULL,
-    tokens      INTEGER NOT NULL,
-    observed_at REAL NOT NULL,
-    PRIMARY KEY (mind_id, harness, model, surface)
-);
 
-CREATE TABLE IF NOT EXISTS session_turns (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id  TEXT NOT NULL REFERENCES sessions(id),
-    role        TEXT NOT NULL,
-    content     TEXT NOT NULL,
-    created_at  REAL NOT NULL DEFAULT (strftime('%s','now'))
-);
+async def _update_session(session_id: str, *, unit: Any = None, **fields: Any) -> int:
+    """Set columns on one row, named as this module names them.
 
-CREATE INDEX IF NOT EXISTS idx_session_turns_lookup
-    ON session_turns (session_id, created_at ASC);
-"""
+    Returns how many rows changed, which is the answer to "is that session
+    still there".
+    """
+    columns = {}
+    for name, value in fields.items():
+        if name in _FLAGS and value is not None:
+            value = bool(value)
+        value = _storable(value)
+        columns[_COLUMN_OF.get(name, name)] = value
+    result = await core.update_session(session_id, unit=unit, **columns)
+    return result["rows"]
 
-# Columns that must never ride out on a bulk session listing. A stored
-# carry-forward is a fully composed prompt — the mind's soul, its
-# decay-weighted recent memory and the conversation's last exchange — and
-# `GET /sessions/{id}/carry-forward` guards it behind the admin credential.
-# Every listing route answers to the far weaker service token, so a
-# `SELECT *` that reached the wire would hand the same blob to any surface
-# bot or mind container that holds it.
-# `autopilot`, `group_session_id` and `rotated_from` are here for a
-# different reason: the table still carries them so that a fresh install's
-# shape matches the live file the cutover loads (see `_SCHEMA`), and a
-# listing that put them on the wire would be the one reader this story
-# exists to remove.
-_PRIVATE_SESSION_COLUMNS = (
-    "carry_forward", "carry_forward_sid", "carry_forward_at", "resend_content",
-    "resend_images", "autopilot", "group_session_id", "rotated_from",
-)
+
+async def _atomically(work: Any) -> Any:
+    """Run ``work(unit)`` inside one unit of work, on a task of its own.
+
+    A unit refuses to open with an async generator anywhere on the stack,
+    and `send_message` is one: every write it makes - the ledger, the
+    re-send stamp, a rotation - sits beneath it. The guard exists so that a
+    transaction is never held across a yield to the caller. Here it is not:
+    the unit opens, writes and commits inside the task, and the task is
+    awaited to completion before anything yields again. Cancelling the
+    awaiting coroutine cancels the task, which rolls the unit back.
+    """
+    async def _run() -> Any:
+        async with hive_data.transaction() as unit:
+            return await work(unit)
+
+    return await asyncio.create_task(_run())
+
+
+def _mind_view(row: dict | None) -> dict | None:
+    """A mind's registration as the gateway reads it: keyed ``id``.
+
+    The credential is not in it - `core` withholds `session_token` from
+    every read but the one that asks for it by name.
+    """
+    if row is None:
+        return None
+    mind = dict(row)
+    mind["id"] = mind.pop("mind_id")
+    return mind
+
 
 # The owner type a conversation carries while a browser tile hosts it. One of
 # `_ADOPTABLE_OWNER_TYPES`, so a chat's picker still offers it back.
@@ -499,14 +480,6 @@ def _notice_event(text: str) -> dict:
     }
 
 
-def _public_session_row(row) -> dict:
-    """A session row as a plain dict, minus the columns no listing may leak."""
-    session = dict(row)
-    for column in _PRIVATE_SESSION_COLUMNS:
-        session.pop(column, None)
-    return session
-
-
 class SessionManager:
     # Idle interval after which the observer event stream emits a ping.
     # Must stay under intermediary idle timeouts (Cloudflare ~100s).
@@ -526,7 +499,6 @@ class SessionManager:
     ARM_COMPOSITION_SECONDS = 15 * 60
 
     def __init__(self):
-        self._db: aiosqlite.Connection | None = None
         self._procs: dict[str, Any] = {}  # Process (Ada/CLI) or dict (Nagatha/SDK)
         self._mind_ids: dict[str, str] = {}  # session_id -> mind_id
         self._rc_procs: dict[str, asyncio.subprocess.Process] = {}  # RC subprocesses
@@ -537,224 +509,46 @@ class SessionManager:
         #: none of which the per-session observer stream provides.
         self.dashboard = LiveFeed()
         self._dashboard_sweep_task: asyncio.Task | None = None
-        self.broker_db = None  # Set by server.py lifespan; broker.minds IS the mind registry
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
     async def start(self):
-        """Initialize DB and start background tasks."""
-        db_path = os.environ.get("SESSIONS_DB_PATH", str(PROJECT_DIR / "sessions.db"))
-        # Ensure parent directory exists (for Docker named volume mounts)
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._db = await aiosqlite.connect(str(db_path))
-        self._db.row_factory = aiosqlite.Row
-        # FK enforcement is per-connection in SQLite and OFF by default.
-        # Without this, orphan active_sessions rows survive their parent
-        # sessions row's deletion — exactly the dangling-pointer class of
-        # bug that caused "two active rows for the same chat" mysteries.
-        await self._db.execute("PRAGMA foreign_keys = ON")
-        await self._db.executescript(_SCHEMA)
-        await self._db.commit()
-        # Migration: drop the legacy epilogue_status column if it survives
-        # from earlier deployments. The epilogue subsystem was removed.
-        try:
-            await self._db.execute(
-                "ALTER TABLE sessions DROP COLUMN epilogue_status"
-            )
-            await self._db.commit()
-        except Exception:
-            pass  # Column already gone (or sqlite < 3.35 — column is harmless)
-        # Migration: add mind_id column for existing databases
-        try:
-            await self._db.execute(
-                "ALTER TABLE sessions ADD COLUMN mind_id TEXT DEFAULT 'ada'"
-            )
-            await self._db.commit()
-        except Exception:
-            pass  # Column already exists
-        # Retained, unread. See the note in `_SCHEMA`: the shape a fresh
-        # install writes has to keep matching the live file the cutover
-        # loads, and these three columns are declared dropped there.
-        try:
-            await self._db.execute(
-                "ALTER TABLE sessions ADD COLUMN group_session_id TEXT"
-            )
-            await self._db.commit()
-        except Exception:
-            pass  # Column already exists
-        # Migration: add rotation_armed column for existing databases. When
-        # set, the next user turn replaces the harness conversation under
-        # this row instead of the rotation Stop hook clearing the session on
-        # the assistant's turn. See arm_rotation / send_message.
-        try:
-            await self._db.execute(
-                "ALTER TABLE sessions ADD COLUMN rotation_armed INTEGER NOT NULL DEFAULT 0"
-            )
-            await self._db.commit()
-        except Exception:
-            pass  # Column already exists
-        # Retained, unread. A rotation no longer replaces a row, so nothing
-        # has a predecessor to name. See the note in `_SCHEMA`.
-        try:
-            await self._db.execute("ALTER TABLE sessions ADD COLUMN rotated_from TEXT")
-            await self._db.commit()
-        except Exception:
-            pass  # Column already exists
-        # Provider-native conversation identity. Claude can use claude_sid
-        # directly, but Codex mints a separate thread UUID. Persisting that
-        # UUID here is what lets a different browser or a restarted mind
-        # resume the same Codex thread instead of opening a bare TUI.
-        try:
-            await self._db.execute("ALTER TABLE sessions ADD COLUMN harness_sid TEXT")
-            await self._db.commit()
-        except Exception:
-            pass  # Column already exists
-        # The operator's own name for this conversation, and the colour they
-        # picked for its tile. They live here and only here: they were kept in
-        # a `terminal_labels` table in the browser terminal's database, in a
-        # different container, keyed to `sessions.id` — so a chat rotation,
-        # which retires the row and mints a new id, left the name behind on a
-        # closed session invisible to every picker. The conversation carried
-        # on under a new id wearing the first hundred characters of its own
-        # first message, which reads exactly like a name and is not one.
-        # `summary` is that derived preview and stays separate; a name is
-        # given, a preview is computed, and merging them is what made a
-        # named conversation indistinguishable from an unnamed one.
-        for column in ("name TEXT", "color TEXT"):
-            try:
-                await self._db.execute(f"ALTER TABLE sessions ADD COLUMN {column}")
-                await self._db.commit()
-            except Exception:
-                pass  # Column already exists
-        # A terminal rotation's carry-forward, and the conversation it was
-        # composed for. It used to exist only as a system prompt on the
-        # respawned pane — deleted from disk the moment that process read it,
-        # and never written to a transcript — so any death of that pane before
-        # the user's first turn lost minutes of composed context with no way
-        # to recover it. The session row outlives every process bound to it.
-        for column in ("carry_forward TEXT", "carry_forward_sid TEXT",
-                       "carry_forward_at REAL"):
-            try:
-                await self._db.execute(f"ALTER TABLE sessions ADD COLUMN {column}")
-                await self._db.commit()
-            except Exception:
-                pass  # Column already exists
-        # How full this conversation's context is, as its own mind measured
-        # it. Nothing on this side can compute it: the count comes from the
-        # harness transcript's `message.usage` on the machine running it, and
-        # the threshold is that mind's own — read off the spawn arguments,
-        # not derivable from the model name, since an Opus conversation
-        # started without the 1M pin caps far below one that has it. All
-        # three stay null until a mind reports, and null renders as unknown:
-        # a zero here draws a conversation at 138k as having all its room
-        # left, which is the one wrong answer that looks reassuring.
-        # How the count was taken (the provider's own `usage`, or the
-        # harness's estimate), whether the transcript holds images, and the
-        # model the measured turn ran on. The image flag decides whether a
-        # switch to a text-only model can resume or has to hand over.
-        for column in ("context_tokens INTEGER", "context_threshold INTEGER",
-                       "context_window INTEGER", "context_observed_at REAL",
-                       "context_kind TEXT", "context_has_images INTEGER",
-                       "context_model TEXT", "context_opening_tokens INTEGER",
-                       "context_opening_surface TEXT", "carry_forward_prompt_cap INTEGER"):
-            try:
-                await self._db.execute(f"ALTER TABLE sessions ADD COLUMN {column}")
-                await self._db.commit()
-            except Exception:
-                pass  # Column already exists
-        # The reasoning effort this conversation runs at, or null for the
-        # model's own default. A property of the conversation like its model:
-        # every spawn reads it off the row, so a restart or a rotation cannot
-        # quietly drop it back to the default.
-        # A message owed a re-send after its turn overflowed the window, on
-        # the conversation that replaced the one it overflowed. On the row
-        # rather than in memory so a gateway restart between the rotation and
-        # the re-send does not lose the message; the dispatch stamp is what
-        # keeps a restart mid-re-send from sending it a second time.
-        for column in ("resend_content TEXT", "resend_images TEXT",
-                       "resend_goal_rounds INTEGER", "resend_dispatched_at REAL",
-                       "conversation_started_at REAL"):
-            try:
-                await self._db.execute(f"ALTER TABLE sessions ADD COLUMN {column}")
-                await self._db.commit()
-            except Exception:
-                pass  # Column already exists
-        try:
-            await self._db.execute("ALTER TABLE sessions ADD COLUMN effort TEXT")
-            await self._db.commit()
-        except Exception:
-            pass  # Column already exists
-        # The harness this conversation runs on, as a bare name. A property
-        # of the conversation like its model: written at creation from the
-        # mind's default, carried by a rotation, changed only by a switch.
-        # Rows from before the column are filled from the mind's
-        # registration right after (see _backfill_harness).
-        try:
-            await self._db.execute("ALTER TABLE sessions ADD COLUMN harness TEXT")
-            await self._db.commit()
-        except Exception:
-            pass  # Column already exists
+        """Settle what a previous process left behind, and start the sweep.
+
+        Opens nothing: the store is `hive_data`'s pool, which the process
+        opens once in its lifespan before this runs. Called with no pool
+        open, the first statement here says so.
+        """
+        # Give every row from before the harness column its mind's harness.
         await self._backfill_harness()
-        # Whether a browser pane holds this conversation's harness. Set on
-        # adoption into a terminal and cleared when that pane is released or
-        # the conversation closes — not read off `owner_type`, which a
-        # conversation adopted while keeping its chat ownership does not
-        # change, and whose pane a harness switch could not kill.
-        try:
-            await self._db.execute(
-                "ALTER TABLE sessions ADD COLUMN terminal_held INTEGER NOT NULL DEFAULT 0"
-            )
-            await self._db.commit()
-        except Exception:
-            pass  # Column already exists
         # Backfill: every session owns a conversation id. Rows created before
         # the id was minted at session creation may still be blank — those are
         # sessions that never finished a turn, so there is no conversation on
         # disk to lose. Give them one now rather than leaving a hole any
         # attach would have to invent its way around.
-        await self._db.execute(
-            "UPDATE sessions SET claude_sid = lower(hex(randomblob(4))) || '-' "
-            "|| lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))),2) "
-            "|| '-a' || substr(lower(hex(randomblob(2))),2) || '-' "
-            "|| lower(hex(randomblob(6))) "
-            "WHERE claude_sid IS NULL OR claude_sid = ''"
-        )
+        await sessions_ops.mint_missing_conversation_ids()
         # Mark any previously "running" sessions as idle (stale from crash)
-        await self._db.execute(
-            "UPDATE sessions SET status = 'idle' WHERE status = 'running'"
-        )
-        await self._db.commit()
+        await core.reconcile_session_status(was="running", now="idle")
         self._dashboard_sweep_task = asyncio.create_task(self._dashboard_sweep_loop())
-        log.info("Session manager started (db=%s)", db_path)
+        log.info("Session manager started")
 
     async def _backfill_harness(self) -> None:
         """Give every row from before the harness column its mind's harness.
 
-        Settled here, once, from each mind's registration at the time the
-        column arrived — never re-derived later from a default that may have
-        changed under a live conversation. Needs the broker wired before
-        `start`; a row whose mind is not registered stays NULL.
+        Settled from each mind's registration, never re-derived later from a
+        default that may have changed under a live conversation. A row whose
+        mind is not registered stays NULL.
         """
-        if self.broker_db is None:
-            return
-        try:
-            cur = await self.broker_db.execute("SELECT mind_id, harness FROM minds")
-            minds = await cur.fetchall()
-        except Exception:
-            log.exception("harness backfill: could not read broker minds")
-            return
-        for mind_id, harness in minds:
-            name = normalise_harness(harness)
+        for mind in await core.list_minds():
+            name = normalise_harness(mind.get("harness"))
             if name:
-                await self._db.execute(
-                    "UPDATE sessions SET harness = ? WHERE mind_id = ? AND harness IS NULL",
-                    (name, mind_id),
+                await core.backfill_session_harness(
+                    mind_id=mind["mind_id"], harness=name
                 )
-        await self._db.commit()
 
     async def shutdown(self):
-        """Kill all subprocesses and close DB."""
+        """Kill all subprocesses. The pool is the process's to close."""
         if self._dashboard_sweep_task:
             self._dashboard_sweep_task.cancel()
             self._dashboard_sweep_task = None
@@ -763,8 +557,6 @@ class SessionManager:
             await self.kill_rc_process(sid)
         for sid in list(self._procs):
             await self._kill_process(sid)
-        if self._db:
-            await self._db.close()
         log.info("Session manager shut down")
 
     async def _dashboard_sweep_loop(self):
@@ -804,24 +596,27 @@ class SessionManager:
         already exists (see ``_replace_conversation``), so nothing reaches
         here carrying a handover, an inherited name or a predecessor's id.
         """
-        # The mind's preferred model lives in broker.minds (set at registration
-        # from each mind's own config). The caller can override per-session,
-        # but absent that, the mind picks. No comms-wide silent fallback —
-        # if the mind isn't registered, broker.get_mind_by_id 404s downstream.
+        # The mind's preferred model lives in its registration (set from each
+        # mind's own config). The caller can override per-session, but absent
+        # that, the mind picks. No comms-wide silent fallback.
         from comms import bootstrap_loader  # noqa: PLC0415
-        from comms import broker  # noqa: PLC0415
-        mind_row = await broker.get_mind_by_id(self.broker_db, mind_id)
-        mind_name = (mind_row or {}).get("name") or mind_id
+        mind_row = _mind_view(await core.get_mind(mind_id))
+        if mind_row is None:
+            # Refused before anything is written. `sessions.mind_id` is a real
+            # foreign key now, and the spawn below could never have reached a
+            # mind nobody registered either.
+            raise ValueError(f"Mind '{mind_id}' not found in broker.minds")
+        mind_name = mind_row.get("name") or mind_id
         if not model:
-            model = (mind_row or {}).get("model")
+            model = mind_row.get("model")
             if not model:
                 raise ValueError(
                     f"no model: caller did not specify and mind_id={mind_id} "
-                    "is not in broker.minds (or has no model column set)"
+                    "has no model registered"
                 )
 
         await self._refuse_unavailable_harness(
-            mind_id, normalise_harness((mind_row or {}).get("harness"))
+            mind_id, normalise_harness(mind_row.get("harness"))
         )
 
         session_id = str(uuid.uuid4())
@@ -834,21 +629,25 @@ class SessionManager:
         claude_sid = str(uuid.uuid4())
         now = time.time()
 
-        harness = normalise_harness((mind_row or {}).get("harness"))
+        harness = normalise_harness(mind_row.get("harness"))
 
-        await self._db.execute(
-            """INSERT INTO sessions (id, owner_type, owner_ref, model, claude_sid, created_at, last_active, status, mind_id, harness,
-                                     conversation_started_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)""",
-            (session_id, owner_type, owner_ref, model, claude_sid, now, now, mind_id,
-             harness or None, now),
-        )
-        await self._db.execute(
-            """INSERT OR REPLACE INTO active_sessions (client_type, client_ref, session_id)
-               VALUES (?, ?, ?)""",
-            (owner_type, client_ref, session_id),
-        )
-        await self._db.commit()
+        async def _write(unit) -> None:
+            await core.create_session(
+                id=session_id, surface=owner_type, surface_id=owner_ref,
+                mind_id=mind_id, created_at=now, last_active=now,
+                status="running", conversation_id=claude_sid, model=model,
+                harness=harness or None, conversation_started_at=now, unit=unit,
+            )
+            await core.bind_surface(
+                client_type=owner_type, client_ref=client_ref,
+                session_id=session_id, unit=unit,
+            )
+
+        try:
+            await _atomically(_write)
+        except MissingReference as exc:
+            # The mind was deregistered between the read above and the write.
+            raise ValueError(f"Mind '{mind_id}' not found in broker.minds") from exc
 
         # Graph is authoritative; MIND.md soul_seed is one-time bootstrap only
         soul_file = None
@@ -857,7 +656,6 @@ class SessionManager:
             mind_id=mind_id,
             mind_name=mind_name,
             client_ref=client_ref,
-            db=self._db,
         )
 
         await self._spawn(
@@ -893,21 +691,13 @@ class SessionManager:
         client_ref: str | None = None,
     ) -> list[dict]:
         """List sessions, optionally filtered."""
-        query = "SELECT * FROM sessions WHERE 1=1"
-        params = []
-        if owner_ref:
-            query += " AND owner_ref = ?"
-            params.append(owner_ref)
-        if status:
-            query += " AND status = ?"
-            params.append(status)
-        if client_type:
-            query += " AND owner_type = ?"
-            params.append(client_type)
-        query += " ORDER BY last_active DESC"
-
-        rows = await self._db.execute(query, params)
-        sessions = [_public_session_row(r) for r in await rows.fetchall()]
+        sessions = [
+            _legacy_row(row) for row in await sessions_ops.find_sessions(
+                surface_id=owner_ref or UNSET,
+                surfaces=[client_type] if client_type else UNSET,
+                status=status or UNSET,
+            )
+        ]
 
         # If client filtering requested, also check active_sessions.
         # A session that is the current active binding but is not live is
@@ -916,16 +706,12 @@ class SessionManager:
         # the binding) and the conversation can't transition to a new
         # session. Caller should fall through to ensure_session → create.
         if client_type and client_ref:
-            active_row = await self._db.execute(
-                "SELECT session_id FROM active_sessions WHERE client_type = ? AND client_ref = ?",
-                (client_type, client_ref),
-            )
-            active = await active_row.fetchone()
+            active = await core.bound_session(client_type, client_ref)
             active_id = active["session_id"] if active else None
             for s in sessions:
                 s["is_active"] = (
                     s["id"] == active_id
-                    and s.get("status") not in ("closed", "suspended")
+                    and s.get("status") not in _RETIRED
                 )
 
         return sessions
@@ -972,25 +758,23 @@ class SessionManager:
             )
             if s.get("status") != "closed"
         ]
+        # `surface` in this listing has always been the display label, and
+        # the pickers read it as such, so the label overwrites the column's
+        # new name here. A consumer wanting the raw address reads
+        # `owner_type`; this listing's vocabulary changes once nothing reads
+        # the label under this name.
         for session in sessions:
             session["surface"] = self._surface_label(session.get("owner_type", ""))
             session["adoptable"] = False
         seen = {s["id"] for s in sessions}
 
-        placeholders = ",".join("?" for _ in self._ADOPTABLE_OWNER_TYPES)
-        query = (
-            f"SELECT * FROM sessions WHERE owner_type IN ({placeholders}) "
-            "AND status != 'closed' AND owner_ref != ?"
-        )
-        params: list = [*self._ADOPTABLE_OWNER_TYPES, owner_ref]
-        if mind_id:
-            query += " AND mind_id = ?"
-            params.append(mind_id)
-        query += " ORDER BY last_active DESC"
-
-        rows = await self._db.execute(query, params)
-        for row in await rows.fetchall():
-            session = _public_session_row(row)
+        for row in await sessions_ops.find_sessions(
+            surfaces=self._ADOPTABLE_OWNER_TYPES,
+            statuses_excluded=("closed",),
+            surface_id_not=owner_ref,
+            mind_id=mind_id or UNSET,
+        ):
+            session = _legacy_row(row)
             if session["id"] in seen:
                 continue
             session["surface"] = self._surface_label(session.get("owner_type", ""))
@@ -1009,12 +793,9 @@ class SessionManager:
         among them — would otherwise draw a named conversation as unnamed the
         moment it ended.
         """
-        rows = await self._db.execute(
-            "SELECT id, name, color FROM sessions WHERE name IS NOT NULL OR color IS NOT NULL"
-        )
         return {
             row["id"]: {"name": row["name"] or "", "color": row["color"] or ""}
-            for row in await rows.fetchall()
+            for row in await sessions_ops.session_labels()
         }
 
     async def set_session_name(
@@ -1074,18 +855,12 @@ class SessionManager:
             if row["status"] == "closed":
                 raise PermissionError(f"Session is closed: {session_id}")
 
-        assignments, params = [], []
+        fields: dict[str, Any] = {}
         if name is not None:
-            assignments.append("name = ?")
-            params.append(name.strip()[:MAX_SESSION_NAME_CHARS] or None)
+            fields["name"] = name.strip()[:MAX_SESSION_NAME_CHARS] or None
         if color is not None:
-            assignments.append("color = ?")
-            params.append(color.strip() or None)
-        params.append(session_id)
-        await self._db.execute(
-            f"UPDATE sessions SET {', '.join(assignments)} WHERE id = ?", params
-        )
-        await self._db.commit()
+            fields["color"] = color.strip() or None
+        await _update_session(session_id, **fields)
         return await self._session_dict(session_id)
 
     async def release_on_mind(self, session_id: str, surface: str) -> bool:
@@ -1143,10 +918,7 @@ class SessionManager:
         if surface == "terminal":
             # Released, or nothing there to release: either way no pane holds
             # it now.
-            await self._db.execute(
-                "UPDATE sessions SET terminal_held = 0 WHERE id = ?", (session_id,)
-            )
-            await self._db.commit()
+            await _update_session(session_id, terminal_held=False)
         return released
 
     async def get_active_session(self, client_type: str, client_ref: str) -> dict | None:
@@ -1154,20 +926,12 @@ class SessionManager:
         actually running. A closed session that the active_sessions table
         still points at is treated as no active session — caller must create
         a fresh one. Prevents zombie sessions from being resurrected."""
-        row = await self._db.execute(
-            """
-            SELECT a.session_id
-            FROM active_sessions a
-            JOIN sessions s ON s.id = a.session_id
-            WHERE a.client_type = ? AND a.client_ref = ?
-              AND s.status NOT IN ('closed', 'suspended')
-            """,
-            (client_type, client_ref),
+        session_id = await sessions_ops.active_session_id(
+            client_type, client_ref, statuses_excluded=_RETIRED
         )
-        result = await row.fetchone()
-        if not result:
+        if not session_id:
             return None
-        return await self._session_dict(result["session_id"])
+        return await self._session_dict(session_id)
 
     async def publish_pty_activity(self, session_id: str, blocks: list) -> dict:
         """Put a terminal's work on the dashboard feed, opening its column.
@@ -1304,8 +1068,6 @@ class SessionManager:
                 )
                 return {"ok": False, "error": "stale conversation",
                         "session_id": session_id}
-        updates: list[str] = []
-        params: list[Any] = []
         if kind == "none":
             # The reporter could not read the transcript, so it measured
             # nothing. A size already recorded — the estimate a fresh
@@ -1313,24 +1075,14 @@ class SessionManager:
             # model and images: a zero written over it would fit every model,
             # and a fresh timestamp would make a stale figure look current.
             # Only a row holding no size at all takes the report as before.
-            fills = (
-                "context_kind = CASE WHEN context_tokens IS NULL THEN 'none' ELSE context_kind END, "
-                "context_observed_at = CASE WHEN context_tokens IS NULL THEN ? "
-                "ELSE context_observed_at END, "
-                "context_tokens = COALESCE(context_tokens, ?)"
+            result = await sessions_ops.record_unmeasured_context(
+                session_id, observed_at=moment, tokens=int(tokens or 0),
+                threshold=threshold, window=window,
             )
-            room = [(c, int(v)) for c, v in (("context_threshold", threshold),
-                                             ("context_window", window))
-                    if v is not None and int(v) > 0]
-            sets = ", ".join([fills] + [f"{c} = ?" for c, _ in room])
-            cursor = await self._db.execute(
-                f"UPDATE sessions SET {sets} WHERE id = ?",
-                (moment, int(tokens or 0), *[v for _, v in room], session_id),
-            )
-            await self._db.commit()
-            if not cursor.rowcount:
+            if not result["rows"]:
                 return {"ok": False, "error": "session not found"}
             return {"ok": True, "session_id": session_id, "observed_at": moment}
+        fields: dict[str, Any] = {}
         for column, value in (
             ("context_tokens", tokens),
             ("context_threshold", threshold),
@@ -1343,20 +1095,16 @@ class SessionManager:
             # and draw every count as over.
             if column != "context_tokens" and int(value) <= 0:
                 continue
-            updates.append(f"{column} = ?")
-            params.append(int(value))
+            fields[column] = int(value)
         if kind:
-            updates.append("context_kind = ?")
-            params.append(str(kind))
+            fields["context_kind"] = str(kind)
         if has_images is not None:
-            updates.append("context_has_images = ?")
-            params.append(1 if has_images else 0)
+            fields["context_has_images"] = bool(has_images)
         if model:
-            updates.append("context_model = ?")
-            params.append(str(model))
-        if not updates:
+            fields["context_model"] = str(model)
+        if not fields:
             return {"ok": False, "error": "nothing to record"}
-        updates.append("context_observed_at = ?")
+        fields["context_observed_at"] = moment
         # Only a provider count naming the conversation now on the row: one
         # naming none may be a straggler from the conversation it replaced.
         teaches = tokens is not None and kind == "usage" and bool(conversation_id)
@@ -1365,13 +1113,8 @@ class SessionManager:
             # harness added to the opening; it is spent once read. A
             # harness's own estimate counts the transcript and not what the
             # harness sent, so it leaves the opening for a count that does.
-            updates.append("context_opening_tokens = NULL")
-        params.extend([moment, session_id])
-        cursor = await self._db.execute(
-            f"UPDATE sessions SET {', '.join(updates)} WHERE id = ?", params
-        )
-        await self._db.commit()
-        if not cursor.rowcount:
+            fields["context_opening_tokens"] = None
+        if not await _update_session(session_id, **fields):
             return {"ok": False, "error": "session not found"}
         if teaches and row:
             await self._learn_overhead(row, tokens, surface)
@@ -1410,16 +1153,16 @@ class SessionManager:
         other; and only then the harness's default.
         """
         harness = normalise_harness(harness)
-        for query, args in (
-            ("SELECT tokens FROM context_overhead WHERE mind_id = ? AND harness = ? "
-             "AND model = ? AND surface = ?", (mind_id, harness, model, surface)),
-            ("SELECT MIN(tokens) AS tokens FROM context_overhead WHERE mind_id = ? "
-             "AND harness = ? AND surface = ?", (mind_id, harness, surface)),
-        ):
-            cur = await self._db.execute(query, args)
-            found = await cur.fetchone()
-            if found and found["tokens"] is not None:
-                return int(found["tokens"])
+        exact = await core.get_overhead(
+            mind_id=mind_id, harness=harness, model=model, surface=surface
+        )
+        if exact is not None and exact["tokens"] is not None:
+            return int(exact["tokens"])
+        least = await sessions_ops.least_overhead_on_surface(
+            mind_id=mind_id, harness=harness, surface=surface
+        )
+        if least is not None:
+            return least
         return DEFAULT_HARNESS_OVERHEAD_TOKENS.get(
             harness, max(DEFAULT_HARNESS_OVERHEAD_TOKENS.values())
         )
@@ -1442,12 +1185,11 @@ class SessionManager:
         # answered in a pane was measured on a different prompt.
         if opening is None or measured_surface(surface) != opened_on:
             return
-        cur = await self._db.execute(
-            "SELECT COUNT(*) FROM session_turns WHERE session_id = ? "
-            "AND role IN ('user', 'human') AND created_at >= ?",
-            (row["id"], row.get("conversation_started_at") or 0),
+        asked = await core.count_turns(
+            row["id"], roles=("user", "human"),
+            since=row.get("conversation_started_at") or 0,
         )
-        if (await cur.fetchone())[0] > 1:
+        if asked > 1:
             return
         overhead = int(tokens) - int(opening)
         harness = normalise_harness(await self.conversation_harness(row))
@@ -1456,17 +1198,12 @@ class SessionManager:
         model = row.get("model") or ""
         if overhead <= 0 or not harness or not model:
             return
-        await self._db.execute(
-            "INSERT INTO context_overhead "
-            "(mind_id, harness, model, surface, tokens, observed_at) "
-            "VALUES (?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT (mind_id, harness, model, surface) DO UPDATE SET "
-            "observed_at = CASE WHEN excluded.tokens < tokens "
-            "THEN excluded.observed_at ELSE observed_at END, "
-            "tokens = MIN(tokens, excluded.tokens)",
-            (row["mind_id"], harness, model, opened_on, overhead, time.time()),
+        # The least reading stands: `record_overhead` keeps the lower of the
+        # stored and the new figure, and the moment of whichever that is.
+        await core.record_overhead(
+            mind_id=row["mind_id"], harness=harness, model=model,
+            surface=opened_on, tokens=overhead, observed_at=time.time(),
         )
-        await self._db.commit()
 
     async def _open_conversation_size(
         self, session_id: str, model: str, *opened_with: str,
@@ -1497,22 +1234,16 @@ class SessionManager:
         """
         opening = sum(len(text or "") for text in opened_with) // ESTIMATED_CHARS_PER_TOKEN
         tokens = opening + await self.harness_overhead(mind_id, harness, model, surface)
-        columns = (
-            "context_tokens = ?, context_kind = 'estimated', context_model = ?, "
-            "context_has_images = 0, context_observed_at = ?, context_threshold = ?, "
-            "context_opening_tokens = ?, context_opening_surface = ?, "
-            "carry_forward_prompt_cap = ?"
-        )
-        params: list[Any] = [
-            tokens, model, time.time(), threshold, opening, surface, prompt_cap,
-        ]
+        fields: dict[str, Any] = {
+            "context_tokens": tokens, "context_kind": "estimated",
+            "context_model": model, "context_has_images": False,
+            "context_observed_at": time.time(), "context_threshold": threshold,
+            "context_opening_tokens": opening, "context_opening_surface": surface,
+            "carry_forward_prompt_cap": prompt_cap,
+        }
         if window is not _KEEP:
-            columns += ", context_window = ?"
-            params.append(window)
-        await self._db.execute(
-            f"UPDATE sessions SET {columns} WHERE id = ?", (*params, session_id)
-        )
-        await self._db.commit()
+            fields["context_window"] = window
+        await _update_session(session_id, **fields)
 
     @staticmethod
     def _context_reading(row: Any, moment: float) -> dict:
@@ -1568,19 +1299,18 @@ class SessionManager:
                     "mind_id": entry.get("mind_id") or row["mind_id"],
                     "model": row["model"],
                     "summary": row["summary"],
+                    "opening_line": row["summary"],
                     "owner_type": row["owner_type"],
+                    "surface": row["owner_type"],
                     "context": self._context_reading(row, moment),
                 }
             )
         # Open means bound to a surface and neither closed nor suspended: a
         # retired row is a conversation nobody can type into any more.
-        cursor = await self._db.execute(
-            "SELECT s.* FROM sessions s WHERE s.status NOT IN ('closed', 'suspended') "
-            "AND EXISTS (SELECT 1 FROM active_sessions a WHERE a.session_id = s.id) "
-            "ORDER BY s.last_active DESC"
-        )
         idle = []
-        for row in await cursor.fetchall():
+        for row in map(_legacy_row, await sessions_ops.find_sessions(
+            statuses_excluded=_RETIRED, bound=True,
+        )):
             if row["id"] in live_ids:
                 continue
             idle.append(
@@ -1590,8 +1320,10 @@ class SessionManager:
                     "mind_id": row["mind_id"],
                     "model": row["model"],
                     "summary": row["summary"],
+                    "opening_line": row["summary"],
                     "name": row["name"],
                     "owner_type": row["owner_type"],
+                    "surface": row["owner_type"],
                     "last_active": row["last_active"],
                     "context": self._context_reading(row, moment),
                 }
@@ -1616,50 +1348,44 @@ class SessionManager:
         if not active:
             return {"ok": False, "error": "no active session"}
         now = time.time()
-        await self._db.execute(
-            "INSERT INTO session_turns (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-            (active["id"], role, content, now),
-        )
-        # This is the only write a browser-terminal turn ever makes, so it is
-        # also the only chance to say the session was used. `send_message`
-        # keeps `last_active` current for chat surfaces; without the same here
-        # a terminal in daily use looks untouched since the day it was created,
-        # and the stale-session sweep eventually suspends it out from under a
-        # pane that is still running.
-        await self._db.execute(
-            "UPDATE sessions SET last_active = ? WHERE id = ?", (now, active["id"]),
-        )
-        # A completed turn is the only evidence a rotation actually took: the
-        # seeded conversation has a transcript now, so `--resume` carries the
-        # context by itself and the stored copy has done its job. Leaving it
-        # would re-apply the seed on top of a conversation that already
-        # contains it.
-        #
-        # Scoped to the conversation the turn was typed into, when the caller
-        # says which. A rotation's composition runs for minutes and the user
-        # keeps typing through it — that is what the late-turn ledger exists
-        # for — so a detached Stop child can still be posting a turn from the
-        # old conversation after the new seed has been written. Unscoped, that
-        # straggler clears a seed composed after it, for a conversation it
-        # never saw, and the pane it was meant for opens bare.
-        #
-        # A codex hook knows only the thread codex minted, which the row
-        # holds as `harness_sid` beside the gateway's own id; either names
-        # the current conversation.
-        if claude_sid:
-            await self._db.execute(
-                "UPDATE sessions SET carry_forward = NULL, carry_forward_sid = NULL, carry_forward_at = NULL "
-                "WHERE id = ? AND (carry_forward_sid = ? "
-                "OR (harness_sid = ? AND carry_forward_sid = claude_sid))",
-                (active["id"], claude_sid, claude_sid),
+
+        async def _write(unit) -> None:
+            await core.record_turn(
+                session_id=active["id"], role=role, content=_storable(content),
+                created_at=now, unit=unit,
             )
-        else:
-            await self._db.execute(
-                "UPDATE sessions SET carry_forward = NULL, carry_forward_sid = NULL, carry_forward_at = NULL "
-                "WHERE id = ?",
-                (active["id"],),
+            # This is the only write a browser-terminal turn ever makes, so it
+            # is also the only chance to say the session was used.
+            # `send_message` keeps `last_active` current for chat surfaces;
+            # without the same here a terminal in daily use looks untouched
+            # since the day it was created.
+            await _update_session(active["id"], last_active=now, unit=unit)
+            # A completed turn is the only evidence a rotation actually took:
+            # the seeded conversation has a transcript now, so `--resume`
+            # carries the context by itself and the stored copy has done its
+            # job. Leaving it would re-apply the seed on top of a
+            # conversation that already contains it.
+            #
+            # Scoped to the conversation the turn was typed into, when the
+            # caller says which. A rotation's composition runs for minutes
+            # and the user keeps typing through it — that is what the
+            # late-turn ledger exists for — so a detached Stop child can still
+            # be posting a turn from the old conversation after the new seed
+            # has been written. Unscoped, that straggler clears a seed
+            # composed after it, for a conversation it never saw, and the pane
+            # it was meant for opens bare. A codex hook knows only the thread
+            # codex minted, which the row holds as `harness_sid` beside the
+            # gateway's own id; either names the current conversation.
+            await sessions_ops.clear_carry_forward(
+                active["id"], typed_into=claude_sid or None, unit=unit,
             )
-        await self._db.commit()
+
+        try:
+            await _atomically(_write)
+        except MissingReference:
+            # The session was ended between finding it and writing to it: a
+            # kill takes no turn lock. Nothing to record the turn against.
+            return {"ok": False, "error": "no active session"}
         return {"ok": True, "session_id": active["id"]}
 
     async def get_carry_forward(
@@ -1689,13 +1415,8 @@ class SessionManager:
         """
         if not (claude_sid or "").strip():
             return None
-        cur = await self._db.execute(
-            "SELECT carry_forward, carry_forward_at FROM sessions "
-            "WHERE id = ? AND carry_forward_sid = ?",
-            (session_id, claude_sid),
-        )
-        row = await cur.fetchone()
-        if not row:
+        row = await core.get_session(session_id, private=True)
+        if not row or row.get("carry_forward_sid") != claude_sid:
             return None
         stored_at = row["carry_forward_at"]
         if stored_at is not None and time.time() - stored_at > self.CARRY_FORWARD_TTL_SECONDS:
@@ -1773,11 +1494,7 @@ class SessionManager:
         # whether a rotation is pending, in a log file nobody reads. The seed
         # is composed on the turn that replaces the conversation, by the one
         # mechanism that replaces it.
-        await self._db.execute(
-            "UPDATE sessions SET rotation_armed = ? WHERE id = ?",
-            (ROTATION_ARMED, active["id"]),
-        )
-        await self._db.commit()
+        await _update_session(active["id"], rotation_armed=ROTATION_ARMED)
         log.info(
             "armed rotation: session=%s client=%s/%s", active["id"], client_type, client_ref
         )
@@ -1891,15 +1608,9 @@ class SessionManager:
         exchange. A pair that isn't adjacent isn't an exchange, and only the
         turn that is actually last is shown.
         """
-        cursor = await self._db.execute(
-            "SELECT role, content FROM session_turns WHERE session_id = ? "
-            "ORDER BY created_at DESC, rowid DESC LIMIT 2",
-            (session_id,),
-        )
-        rows = await cursor.fetchall()
         turns = [
             {"role": r["role"], "content": r["content"]}
-            for r in reversed(rows)
+            for r in await sessions_ops.last_turns(session_id, 2)
             if (r["content"] or "").strip()
         ]
         exchange: dict = {}
@@ -2111,30 +1822,36 @@ class SessionManager:
             # session this attach is for.
             await self.release_on_mind(sid, "stream")
 
+        async def _adopt(unit) -> None:
+            # Serialized across processes as well as within this one: the
+            # sequence is a delete followed by a write, and two of them
+            # interleaved leave two bindings for one conversation with no
+            # key to catch it.
+            await unit.hold(f"session:{sid}")
+            # The arm survives the adoption. It used to be cleared, because
+            # an arm meant "retire this row for a successor" and a pane's row
+            # must not be retired; now it means "replace the conversation
+            # under this row", which is what the pane's own fire will do.
+            # Clearing it here left a conversation over its threshold with
+            # nothing able to rotate it — one pane ran eight days to 1834
+            # messages that way.
+            await _update_session(
+                sid, owner_type=TERMINAL_OWNER_TYPE, owner_ref=client_ref,
+                terminal_held=True, unit=unit,
+            )
+            await core.unbind_session(sid, unit=unit)
+            await core.bind_surface(
+                client_type=TERMINAL_OWNER_TYPE, client_ref=client_ref,
+                session_id=sid, unit=unit,
+            )
+
         lock = self._locks.setdefault(sid, asyncio.Lock())
         async with lock:
-            await self._db.execute(
-                # The arm survives the adoption. It used to be cleared,
-                # because an arm meant "retire this row for a successor" and
-                # a pane's row must not be retired; now it means "replace the
-                # conversation under this row", which is what the pane's own
-                # fire will do. Clearing it here left a conversation over its
-                # threshold with nothing able to rotate it — one pane ran
-                # eight days to 1834 messages that way.
-                """UPDATE sessions
-                      SET owner_type = ?, owner_ref = ?, terminal_held = 1
-                    WHERE id = ?""",
-                (TERMINAL_OWNER_TYPE, client_ref, sid),
-            )
-            await self._db.execute(
-                "DELETE FROM active_sessions WHERE session_id = ?", (sid,)
-            )
-            await self._db.execute(
-                """INSERT OR REPLACE INTO active_sessions (client_type, client_ref, session_id)
-                   VALUES (?, ?, ?)""",
-                (TERMINAL_OWNER_TYPE, client_ref, sid),
-            )
-            await self._db.commit()
+            try:
+                await _atomically(_adopt)
+            except MissingReference as exc:
+                # Ended between the read above and the binding.
+                raise ValueError(f"Session not found: {session_id}") from exc
         if not already_here:
             log.info(
                 "Session %s adopted by terminal (was %s/%s)",
@@ -2171,15 +1888,7 @@ class SessionManager:
                 raise SessionNotFound(f"Session not found: {session_id}")
             if session["status"] == "closed":
                 raise SessionClosed(f"Session {session_id} is closed")
-            if session["status"] == "suspended":
-                await self._db.execute(
-                    "UPDATE sessions SET status = 'idle' WHERE id = ?", (session_id,)
-                )
-                await self._db.commit()
-                session = await self._get_row(session_id)
-                if session is None:  # pragma: no cover - row cannot vanish in this transaction
-                    raise ValueError(f"Session not found: {session_id}")
-
+            resuming = session["status"] == "suspended"
             adopting = bool(owner_ref) and (
                 session["owner_ref"] != owner_ref or session["owner_type"] != owner_type
             )
@@ -2188,20 +1897,38 @@ class SessionManager:
                 # handover is one live harness process per conversation, and
                 # retargeting ownership over a terminal that is still running puts
                 # a `--resume` process beside it, both appending to one transcript.
-                # Better a `/switch` that fails out loud.
+                # Better a `/switch` that fails out loud. Done before the unit:
+                # it is a call to the mind, and no transaction waits on one.
                 try:
                     await self.release_on_mind(session_id, "terminal")
                 except MindCallFailed as exc:
                     log.error("Refusing to adopt session %s: %s", session_id, exc)
                     raise
-                await self._db.execute(
-                    "UPDATE sessions SET owner_type = ?, owner_ref = ?, status = 'idle' WHERE id = ?",
-                    (owner_type, owner_ref, session_id),
+
+            # Waking, retargeting and binding are one change: a failure between
+            # them left a session re-owned but bound to nothing, or awake and
+            # bound nowhere. `resume_session` makes the same writes as one unit.
+            async def _take(unit) -> None:
+                await unit.hold(f"session:{session_id}")
+                if adopting:
+                    await _update_session(
+                        session_id, owner_type=owner_type, owner_ref=owner_ref,
+                        status="idle", unit=unit,
+                    )
+                    await core.unbind_session(session_id, unit=unit)
+                elif resuming:
+                    await _update_session(session_id, status="idle", unit=unit)
+                await core.bind_surface(
+                    client_type=client_type, client_ref=client_ref,
+                    session_id=session_id, unit=unit,
                 )
-                await self._db.execute(
-                    "DELETE FROM active_sessions WHERE session_id = ?", (session_id,)
-                )
-                await self._db.commit()
+
+            try:
+                await _atomically(_take)
+            except MissingReference as exc:
+                # Ended under the lock's nose: a kill takes no turn lock.
+                raise SessionNotFound(f"Session not found: {session_id}") from exc
+            if adopting:
                 log.info("Session %s adopted by %s/%s (was %s/%s)", session_id,
                          owner_type, owner_ref, session["owner_type"], session["owner_ref"])
                 log_event(
@@ -2209,16 +1936,9 @@ class SessionManager:
                     owner_type=owner_type, owner_ref=owner_ref,
                     previous_owner_type=session["owner_type"], previous_owner_ref=session["owner_ref"],
                 )
-                session = await self._get_row(session_id)
-                if session is None:  # pragma: no cover - row cannot vanish in this transaction
-                    raise ValueError(f"Session not found: {session_id}")
-
-            await self._db.execute(
-                """INSERT OR REPLACE INTO active_sessions (client_type, client_ref, session_id)
-                   VALUES (?, ?, ?)""",
-                (client_type, client_ref, session_id),
-            )
-            await self._db.commit()
+            session = await self._get_row(session_id)
+            if session is None:
+                raise SessionNotFound(f"Session not found: {session_id}")
 
             if session["status"] == "idle" and session_id not in self._procs:
                 # A row that never took a turn is a new conversation in all
@@ -2235,10 +1955,7 @@ class SessionManager:
                     mind_id=session["mind_id"],
                     **routing,
                 )
-                await self._db.execute(
-                    "UPDATE sessions SET status = 'running' WHERE id = ?", (session_id,)
-                )
-                await self._db.commit()
+                await _update_session(session_id, status="running")
 
             return await self._session_dict(session_id)
 
@@ -2385,11 +2102,7 @@ class SessionManager:
                 mind_id=mind_id,
                 **routing,
             )
-            await self._db.execute(
-                "UPDATE sessions SET status = 'running' WHERE id = ?",
-                (session_id,),
-            )
-            await self._db.commit()
+            await _update_session(session_id, status="running")
 
         # Prepend current datetime so Claude always has temporal context
         tz = ZoneInfo(os.environ.get("TZ", "America/Chicago"))
@@ -2397,20 +2110,11 @@ class SessionManager:
         stamped_content = f"[{now_str}]\n{content}"
 
         # Mark this conversation active and running for the duration
-        await self._db.execute(
-            "UPDATE sessions SET last_active = ?, status = 'running' WHERE id = ?",
-            (time.time(), session_id),
-        )
-        await self._db.commit()
+        await _update_session(session_id, last_active=time.time(), status="running")
 
         # Update summary + seed context on first message
         if session["summary"] == "New session":
-            summary = content[:100].strip()
-            await self._db.execute(
-                "UPDATE sessions SET summary = ? WHERE id = ?",
-                (summary, session_id),
-            )
-            await self._db.commit()
+            await _update_session(session_id, summary=content[:100].strip())
 
             # Memory-3: prepend relevant past memories to first message
             loop = asyncio.get_event_loop()
@@ -2431,19 +2135,27 @@ class SessionManager:
             },
         )
 
-        ledger = await self._db.execute(
-            "INSERT INTO session_turns (session_id, role, content, created_at) VALUES (?, 'user', ?, ?)",
-            (session_id, content, time.time()),
-        )
-        user_turn_rowid = ledger.lastrowid
-        if resend:
-            # Dispatched: from here a gateway restart must not send it
-            # again, since the mind may already be answering it.
-            await self._db.execute(
-                "UPDATE sessions SET resend_dispatched_at = ? WHERE id = ?",
-                (time.time(), session_id),
+        async def _ledger(unit) -> int:
+            turn = await core.record_turn(
+                session_id=session_id, role="user", content=_storable(content),
+                created_at=time.time(), unit=unit,
             )
-        await self._db.commit()
+            if resend:
+                # Dispatched: from here a gateway restart must not send it
+                # again, since the mind may already be answering it.
+                await _update_session(
+                    session_id, resend_dispatched_at=time.time(), unit=unit
+                )
+            return turn["row"]["id"]
+
+        try:
+            user_turn_id = await _atomically(_ledger)
+        except MissingReference as exc:
+            # Ended mid-turn: a kill takes no turn lock, so the row can go
+            # between the read at the top and this write.
+            raise ValueError(
+                f"Session {session_id} ended — caller should open a new session"
+            ) from exc
 
         # Route message to mind container via HTTP, stream SSE response
         proc_info = self._procs.get(session_id)
@@ -2597,7 +2309,7 @@ class SessionManager:
                                 replaced = {**ending, "session": session,
                                             "events": _turn_events,
                                             "goal_rounds": goal_rounds,
-                                            "user_turn_rowid": user_turn_rowid}
+                                            "user_turn_id": user_turn_id}
                                 break
 
                             # Codex cannot adopt claude_sid. Its structured
@@ -2632,12 +2344,10 @@ class SessionManager:
                                 # conversation id, not even for the width
                                 # of a respawn.
                                 fresh_sid = str(uuid.uuid4())
-                                await self._db.execute(
-                                    "UPDATE sessions SET claude_sid = ?, "
-                                    "conversation_started_at = ? WHERE id = ?",
-                                    (fresh_sid, time.time(), session_id),
+                                await _update_session(
+                                    session_id, claude_sid=fresh_sid,
+                                    conversation_started_at=time.time(),
                                 )
-                                await self._db.commit()
                                 _pinned_sid = fresh_sid
                                 _sid_warned = False
                                 routing = await self._routing_for(session)
@@ -2664,10 +2374,7 @@ class SessionManager:
                                     _assistant_buf.append(_content)
 
                             now = time.time()
-                            await self._db.execute(
-                                "UPDATE sessions SET last_active = ? WHERE id = ?",
-                                (now, session_id),
-                            )
+                            await _update_session(session_id, last_active=now)
 
                             # The harness echoes the conversation id we
                             # pinned it to. It is not news, and it is not
@@ -2691,11 +2398,6 @@ class SessionManager:
                                     # The re-send got its answer, or its
                                     # error: either way it is not owed.
                                     await self._clear_resend(session_id)
-                                if _assistant_buf:
-                                    await self._db.execute(
-                                        "INSERT INTO session_turns (session_id, role, content, created_at) VALUES (?, 'assistant', ?, ?)",
-                                        (session_id, "".join(_assistant_buf), now),
-                                    )
                                 # Same reasoning as record_turn: a completed
                                 # turn is the evidence the rotation took. The
                                 # terminal Stop hook is not the only way a
@@ -2709,15 +2411,10 @@ class SessionManager:
                                 # a handover the harness choked on has not
                                 # landed, and the next spawn must carry it
                                 # again.
-                                if _pinned_sid and not event.get("is_error"):
-                                    await self._db.execute(
-                                        "UPDATE sessions SET carry_forward = NULL, "
-                                        "carry_forward_sid = NULL, "
-                                        "carry_forward_at = NULL "
-                                        "WHERE id = ? AND carry_forward_sid = ?",
-                                        (session_id, _pinned_sid),
-                                    )
-                                await self._db.commit()
+                                await self._close_turn(
+                                    session_id, "".join(_assistant_buf), now,
+                                    landed=_pinned_sid if not event.get("is_error") else None,
+                                )
                                 elapsed = time.monotonic() - t0
                                 log.info("send_message: result session=%s elapsed=%.1fs", session_id, elapsed)
                                 log_event(
@@ -2739,18 +2436,47 @@ class SessionManager:
 
         if replaced is not None:
             if replaced["kind"] == "goal" and _assistant_buf:
-                await self._db.execute(
-                    "INSERT INTO session_turns (session_id, role, content, created_at) "
-                    "VALUES (?, 'assistant', ?, ?)",
-                    (session_id, "".join(_assistant_buf), time.time()),
+                await self._close_turn(
+                    session_id, "".join(_assistant_buf), time.time(), landed=None,
                 )
-                await self._db.commit()
             settled = await self._settle_replacing_ending(replaced, content, images)
             for notice in settled.get("notices") or []:
                 yield notice
             if settled.get("next"):
                 outcome["next"] = settled["next"]
 
+
+    async def _close_turn(
+        self, session_id: str, reply: str, at: float, *, landed: str | None,
+    ) -> None:
+        """Put a turn's reply on the ledger, and clear the seed it delivered.
+
+        ``landed`` names the conversation a turn completed on without error;
+        a carry-forward composed for it has reached a transcript and is
+        spent. One unit, so the ledger never shows the reply while the seed
+        that turn delivered is still owed. A row ended mid-turn has no
+        ledger left to write to, and that is not this turn's failure.
+        """
+        if not reply and not landed:
+            return
+
+        async def _write(unit) -> None:
+            if reply:
+                await core.record_turn(
+                    session_id=session_id, role="assistant", content=_storable(reply),
+                    created_at=at, unit=unit,
+                )
+            if landed:
+                await core.update_session_if(
+                    session_id, expected={"carry_forward_sid": landed},
+                    carry_forward=None, carry_forward_sid=None,
+                    carry_forward_at=None, unit=unit,
+                )
+
+        try:
+            await _atomically(_write)
+        except MissingReference:
+            log.info("session %s ended before its reply was recorded", session_id)
 
     @staticmethod
     def _replacing_ending(event: dict, resend: bool) -> dict | None:
@@ -2792,13 +2518,14 @@ class SessionManager:
         model = session["model"]
         kind = replaced["kind"]
         if kind == "overflow_again":
-            # Not sent again, and not answered: the turn never happened.
-            await self._db.execute(
-                "DELETE FROM session_turns WHERE rowid = ?", (replaced["user_turn_rowid"],)
-            )
-            await self._db.commit()
-        if kind == "overflow_again":
-            await self._clear_resend(session_id)
+            # Not sent again, and not answered: the turn never happened, and
+            # nothing is owed. One change, so the ledger and the debt agree.
+            async def _forget(unit) -> None:
+                await unit.hold(f"session:{session_id}")
+                await core.delete_turn(replaced["user_turn_id"], unit=unit)
+                await self._clear_resend(session_id, unit=unit)
+
+            await _atomically(_forget)
             row = await self._get_row(session_id) or {}
             size = len(content.encode("utf-8")) // 4
             threshold = row.get("context_threshold")
@@ -2859,32 +2586,36 @@ class SessionManager:
             await self._publish_session_event(session_id, notice)
             await self._publish_session_event(session_id, replaced["result"])
             return {"notices": [notice, replaced["result"]]}
-        if kind == "overflow":
-            # The failed turn never happened as far as the conversation is
-            # concerned: the message is about to be sent again, and a ledger
-            # holding it twice puts it twice into any late-turn fold. Taken
-            # out only now the fresh conversation exists; a replacement that
-            # failed leaves the message on record where it was typed.
-            await self._db.execute(
-                "DELETE FROM session_turns WHERE rowid = ?", (replaced["user_turn_rowid"],)
-            )
-            await self._db.commit()
         if kind == "goal":
             log_event(log, "session.goal_rotated", session_id=session_id,
                       mind_id=session["mind_id"], rounds_left=replaced["rounds"])
             return {"next": {"content": replaced["objective"],
                              "goal_rounds": replaced["rounds"]}}
 
-        # Recorded before anything is sent, so a gateway that dies in the gap
-        # still knows the message is owed (see resume_pending_resends) — and
-        # with everything it was sent with.
+        # The failed turn never happened as far as the conversation is
+        # concerned: the message is about to be sent again, and a ledger
+        # holding it twice puts it twice into any late-turn fold. Taken out
+        # only now the fresh conversation exists; a replacement that failed
+        # leaves the message on record where it was typed.
+        #
+        # And the debt is recorded in the same change, before anything is
+        # sent, so a gateway that dies in the gap still knows the message is
+        # owed (see resume_pending_resends) - with everything it was sent
+        # with. Two units here once lost the message from the ledger with
+        # nothing recording that it was owed.
         goal_rounds = replaced.get("goal_rounds")
-        await self._db.execute(
-            "UPDATE sessions SET resend_content = ?, resend_images = ?, "
-            "resend_goal_rounds = ?, resend_dispatched_at = NULL WHERE id = ?",
-            (content, json.dumps(images) if images else None, goal_rounds, session_id),
-        )
-        await self._db.commit()
+
+        async def _owe(unit) -> None:
+            await unit.hold(f"session:{session_id}")
+            await core.delete_turn(replaced["user_turn_id"], unit=unit)
+            await _update_session(
+                session_id, resend_content=content,
+                resend_images=json.dumps(images) if images else None,
+                resend_goal_rounds=goal_rounds, resend_dispatched_at=None,
+                unit=unit,
+            )
+
+        await _atomically(_owe)
         tokens = session.get("context_tokens")
         text = (
             f"{model} ran out of room for this conversation"
@@ -2900,24 +2631,17 @@ class SessionManager:
                 "next": {"content": content, "images": images,
                          "goal_rounds": goal_rounds, "resend": True}}
 
-    async def _clear_resend(self, session_id: str) -> None:
+    async def _clear_resend(self, session_id: str, *, unit: Any = None) -> None:
         """Nothing is owed a re-send on this row any more."""
-        await self._db.execute(
-            "UPDATE sessions SET resend_content = NULL, resend_images = NULL, "
-            "resend_goal_rounds = NULL, resend_dispatched_at = NULL WHERE id = ?",
-            (session_id,),
+        await _update_session(
+            session_id, resend_content=None, resend_images=None,
+            resend_goal_rounds=None, resend_dispatched_at=None, unit=unit,
         )
-        await self._db.commit()
 
     async def pending_resends(self) -> list[dict]:
         """Messages owed a re-send that no gateway has dispatched yet."""
-        cursor = await self._db.execute(
-            "SELECT id, resend_content, resend_images, resend_goal_rounds FROM sessions "
-            "WHERE resend_content IS NOT NULL AND resend_dispatched_at IS NULL "
-            "AND status NOT IN ('closed', 'suspended')"
-        )
         owed = []
-        for row in await cursor.fetchall():
+        for row in await core.pending_resends(statuses_excluded=_RETIRED):
             try:
                 images = json.loads(row["resend_images"]) if row["resend_images"] else None
             except ValueError:
@@ -3043,12 +2767,10 @@ class SessionManager:
                 return answer
 
             await self._kill_process(session_id)
-            await self._db.execute(
-                "UPDATE sessions SET model = ?, effort = ?, status = 'running', "
-                "context_window = ?, context_threshold = ? WHERE id = ?",
-                (model, effort, window, threshold, session_id),
+            await _update_session(
+                session_id, model=model, effort=effort, status="running",
+                context_window=window, context_threshold=threshold,
             )
-            await self._db.commit()
 
             routing = await self._routing_for(session)
             await self._spawn(
@@ -3262,11 +2984,7 @@ class SessionManager:
         respawned_pane = False
         if held:
             try:
-                await self._db.execute(
-                    "UPDATE sessions SET model = ?, effort = ? WHERE id = ?",
-                    (model, effort, session_id),
-                )
-                await self._db.commit()
+                await _update_session(session_id, model=model, effort=effort)
                 respawned_pane = await self._rotate_pty_on_mind(
                     session_id=session_id, new_claude_sid=new_sid, model=model,
                     mind_id=mind_id, system_prompt=system_prompt_blocks,
@@ -3276,11 +2994,9 @@ class SessionManager:
                     owner_ref=session.get("owner_ref"),
                 )
             except MindCallFailed as exc:
-                await self._db.execute(
-                    "UPDATE sessions SET model = ?, effort = ? WHERE id = ?",
-                    (session["model"], session.get("effort"), session_id),
+                await _update_session(
+                    session_id, model=session["model"], effort=session.get("effort")
                 )
-                await self._db.commit()
                 raise ValueError(
                     f"Couldn't move the terminal onto {model}: {exc}"
                 ) from exc
@@ -3291,14 +3007,12 @@ class SessionManager:
             await self._kill_process(session_id)
         old_sid = session.get("claude_sid") or ""
         now = time.time()
-        await self._db.execute(
-            "UPDATE sessions SET model = ?, effort = ?, claude_sid = ?, "
-            "harness_sid = NULL, rotation_armed = 0, carry_forward = ?, "
-            "carry_forward_sid = ?, carry_forward_at = ?, status = 'running', "
-            "last_active = ?, conversation_started_at = ? WHERE id = ?",
-            (model, effort, new_sid, opening, new_sid, now, now, now, session_id),
+        await _update_session(
+            session_id, model=model, effort=effort, claude_sid=new_sid,
+            harness_sid=None, rotation_armed=0, carry_forward=opening,
+            carry_forward_sid=new_sid, carry_forward_at=now, status="running",
+            last_active=now, conversation_started_at=now,
         )
-        await self._db.commit()
         # Both surfaces open on the soul: a pane takes it as the respawn's
         # system prompt, a process as its prompt blocks. A pane handed the
         # handover alone would be a conversation that remembers what it was
@@ -3486,16 +3200,13 @@ class SessionManager:
             now = time.time()
             # Any rotation armed or staged belonged to the conversation being
             # replaced; the handover is this conversation's carry-forward now.
-            await self._db.execute(
-                "UPDATE sessions SET harness = ?, model = ?, effort = ?, "
-                "claude_sid = ?, harness_sid = NULL, rotation_armed = 0, "
-                "carry_forward = ?, carry_forward_sid = ?, carry_forward_at = ?, "
-                "status = 'running', last_active = ?, conversation_started_at = ? "
-                "WHERE id = ?",
-                (target, model, effort, new_claude_sid, handover, new_claude_sid,
-                 now, now, now, session_id),
+            await _update_session(
+                session_id, harness=target, model=model, effort=effort,
+                claude_sid=new_claude_sid, harness_sid=None, rotation_armed=0,
+                carry_forward=handover, carry_forward_sid=new_claude_sid,
+                carry_forward_at=now, status="running", last_active=now,
+                conversation_started_at=now,
             )
-            await self._db.commit()
 
             try:
                 await self._spawn(
@@ -3516,19 +3227,17 @@ class SessionManager:
                 # Everything the switch wrote goes back, the rotation and an
                 # undelivered handover included — the conversation is where it
                 # was, owed what it was owed.
-                await self._db.execute(
-                    "UPDATE sessions SET harness = ?, model = ?, effort = ?, "
-                    "claude_sid = ?, harness_sid = ?, rotation_armed = ?, "
-                    "carry_forward = ?, carry_forward_sid = ?, carry_forward_at = ?, "
-                    "conversation_started_at = ? WHERE id = ?",
-                    (session.get("harness") or old_harness or None, session["model"],
-                     session.get("effort"), session["claude_sid"],
-                     session.get("harness_sid"), session.get("rotation_armed") or 0,
-                     session.get("carry_forward"), session.get("carry_forward_sid"),
-                     session.get("carry_forward_at"),
-                     session.get("conversation_started_at"), session_id),
+                await _update_session(
+                    session_id, harness=session.get("harness") or old_harness or None,
+                    model=session["model"], effort=session.get("effort"),
+                    claude_sid=session["claude_sid"],
+                    harness_sid=session.get("harness_sid"),
+                    rotation_armed=session.get("rotation_armed") or 0,
+                    carry_forward=session.get("carry_forward"),
+                    carry_forward_sid=session.get("carry_forward_sid"),
+                    carry_forward_at=session.get("carry_forward_at"),
+                    conversation_started_at=session.get("conversation_started_at"),
                 )
-                await self._db.commit()
                 try:
                     await self._spawn(
                         session_id,
@@ -3598,17 +3307,15 @@ class SessionManager:
         mind_id = session["mind_id"]
         new_claude_sid = str(uuid.uuid4())
         now = time.time()
-        await self._db.execute(
-            "UPDATE sessions SET harness = ?, model = ?, effort = ?, "
-            "claude_sid = ?, harness_sid = NULL, rotation_armed = 0, "
-            "carry_forward = ?, carry_forward_sid = ?, carry_forward_at = ?, "
-            "context_opening_tokens = NULL, "
-            "last_active = ?, conversation_started_at = ? WHERE id = ?",
-            (target, model, effort, new_claude_sid, handover or None,
-             new_claude_sid if handover else None, now if handover else None,
-             now, now, session_id),
+        await _update_session(
+            session_id, harness=target, model=model, effort=effort,
+            claude_sid=new_claude_sid, harness_sid=None, rotation_armed=0,
+            carry_forward=handover or None,
+            carry_forward_sid=new_claude_sid if handover else None,
+            carry_forward_at=now if handover else None,
+            context_opening_tokens=None, last_active=now,
+            conversation_started_at=now,
         )
-        await self._db.commit()
         try:
             await self._rotate_pty_on_mind(
                 session_id=session_id, new_claude_sid=new_claude_sid, model=model,
@@ -3619,19 +3326,17 @@ class SessionManager:
                 switch=True,
             )
         except MindCallFailed as exc:
-            await self._db.execute(
-                "UPDATE sessions SET harness = ?, model = ?, effort = ?, "
-                "claude_sid = ?, harness_sid = ?, rotation_armed = ?, "
-                "carry_forward = ?, carry_forward_sid = ?, carry_forward_at = ?, "
-                "last_active = ?, conversation_started_at = ? WHERE id = ?",
-                (session.get("harness"), session["model"], session.get("effort"),
-                 session["claude_sid"], session.get("harness_sid"),
-                 session.get("rotation_armed") or 0, session.get("carry_forward"),
-                 session.get("carry_forward_sid"), session.get("carry_forward_at"),
-                 session.get("last_active"), session.get("conversation_started_at"),
-                 session_id),
+            await _update_session(
+                session_id, harness=session.get("harness"), model=session["model"],
+                effort=session.get("effort"), claude_sid=session["claude_sid"],
+                harness_sid=session.get("harness_sid"),
+                rotation_armed=session.get("rotation_armed") or 0,
+                carry_forward=session.get("carry_forward"),
+                carry_forward_sid=session.get("carry_forward_sid"),
+                carry_forward_at=session.get("carry_forward_at"),
+                last_active=session.get("last_active"),
+                conversation_started_at=session.get("conversation_started_at"),
             )
-            await self._db.commit()
             raise ValueError(
                 f"Couldn't move the terminal onto {target}, so it stays where it "
                 f"was: {exc}"
@@ -3659,15 +3364,7 @@ class SessionManager:
             [k for k in (session.get("claude_sid"), session.get("harness_sid")) if k],
             [session["id"]],
         ):
-            if not keys:
-                continue
-            marks = ",".join("?" for _ in keys)
-            cur = await self._db.execute(
-                f"SELECT body FROM session_memory WHERE session_id IN ({marks}) "
-                "ORDER BY created_at DESC, id DESC LIMIT 1",
-                keys,
-            )
-            row = await cur.fetchone()
+            row = await sessions_ops.latest_session_memory_for(keys)
             if row:
                 break
         raw = (row["body"] if row else "") or ""
@@ -3694,16 +3391,12 @@ class SessionManager:
             mind_id=mind_id,
             mind_name=(mind_row or {}).get("name") or mind_id,
             client_ref=client_ref,
-            db=self._db,
             max_bytes=max_bytes,
         )
 
     async def _had_turns(self, session_id: str) -> bool:
         """Whether this session's ledger holds any turn at all."""
-        cur = await self._db.execute(
-            "SELECT 1 FROM session_turns WHERE session_id = ? LIMIT 1", (session_id,)
-        )
-        return await cur.fetchone() is not None
+        return await core.latest_turn(session_id) is not None
 
     async def _refuse_unavailable_harness(self, mind_id: str, harness: str) -> None:
         """Refuse a new conversation on a harness the mind reports unavailable.
@@ -3817,11 +3510,7 @@ class SessionManager:
                 )
 
             await self._kill_process(session_id)
-            await self._db.execute(
-                "UPDATE sessions SET effort = ?, status = 'running' WHERE id = ?",
-                (level, session_id),
-            )
-            await self._db.commit()
+            await _update_session(session_id, effort=level, status="running")
 
             routing = await self._routing_for(session)
             await self._spawn(
@@ -3925,14 +3614,14 @@ class SessionManager:
                         "Suspending session %s with %s possibly still running: %s",
                         session_id, surface, exc,
                     )
-        await self._db.execute(
-            "UPDATE sessions SET status = 'suspended', rotation_armed = 0 WHERE id = ?",
-            (session_id,),
-        )
-        await self._db.execute(
-            "DELETE FROM active_sessions WHERE session_id = ?", (session_id,)
-        )
-        await self._db.commit()
+        async def _retire(unit) -> None:
+            await unit.hold(f"session:{session_id}")
+            await _update_session(
+                session_id, status="suspended", rotation_armed=0, unit=unit
+            )
+            await core.unbind_session(session_id, unit=unit)
+
+        await _atomically(_retire)
         await self._publish_session_event(
             session_id,
             {"type": "session_suspended", "session_id": session_id},
@@ -3951,18 +3640,19 @@ class SessionManager:
         if session["status"] != "suspended":
             raise ValueError(f"Session {session_id} is not suspended")
 
-        await self._db.execute(
-            "DELETE FROM active_sessions WHERE session_id = ?", (session_id,)
-        )
-        await self._db.execute(
-            """INSERT OR REPLACE INTO active_sessions (client_type, client_ref, session_id)
-               VALUES (?, ?, ?)""",
-            (client_type, client_ref, session_id),
-        )
-        await self._db.execute(
-            "UPDATE sessions SET status = 'idle' WHERE id = ?", (session_id,)
-        )
-        await self._db.commit()
+        async def _rebind(unit) -> None:
+            await unit.hold(f"session:{session_id}")
+            await core.unbind_session(session_id, unit=unit)
+            await core.bind_surface(
+                client_type=client_type, client_ref=client_ref,
+                session_id=session_id, unit=unit,
+            )
+            await _update_session(session_id, status="idle", unit=unit)
+
+        try:
+            await _atomically(_rebind)
+        except MissingReference as exc:
+            raise ValueError(f"Session not found: {session_id}") from exc
         return await self._session_dict(session_id)
 
     async def set_harness_sid(self, session_id: str, harness_sid: str) -> dict:
@@ -3972,20 +3662,14 @@ class SessionManager:
             raise ValueError(f"Session not found: {session_id}")
         value = (harness_sid or "").strip()
         if not value:
-            await self._db.execute(
-                "UPDATE sessions SET harness_sid = NULL WHERE id = ?", (session_id,)
-            )
-            await self._db.commit()
+            await _update_session(session_id, harness_sid=None)
             return await self._session_dict(session_id)
         current = (session.get("harness_sid") or "").strip()
         if current and current != value:
             raise ValueError(
                 f"Session {session_id} is already bound to harness thread {current}"
             )
-        await self._db.execute(
-            "UPDATE sessions SET harness_sid = ? WHERE id = ?", (value, session_id)
-        )
-        await self._db.commit()
+        await _update_session(session_id, harness_sid=value)
         return await self._session_dict(session_id)
 
     async def kill_session(self, session_id: str) -> dict:
@@ -3999,13 +3683,14 @@ class SessionManager:
         the Stop hook, and the harness's own transcript is still on the
         mind's disk.
 
-        All three deletes are one transaction. ``session_turns`` and
-        ``active_sessions`` reference ``sessions(id)`` with no cascade and
-        foreign keys enforced, so a turn arriving from a mind's Stop hook
-        between the first delete and the last fails the row delete — and
-        committing the first two anyway would leave a conversation with its
-        turns and its binding gone, its row still marked running and its
-        process already killed. The next message to that row respawns it.
+        One statement. ``session_turns`` and ``active_sessions`` reference
+        ``sessions(id)`` ON DELETE CASCADE, so the ledger and the bindings go
+        with the row atomically, and a turn arriving from a mind's Stop hook
+        at the same moment either lands before the delete and goes with it,
+        or arrives after and is refused for want of a session — which every
+        writer of a turn reports as an ended conversation, not a fault.
+        Nothing refuses the delete itself: the one other reference into
+        ``sessions``, a design session's conversation, is ON DELETE SET NULL.
         Either the conversation is entirely gone or it is entirely there.
         """
         session = await self._get_row(session_id)
@@ -4013,19 +3698,7 @@ class SessionManager:
             raise ValueError(f"Session not found: {session_id}")
 
         await self._kill_process(session_id)
-        try:
-            await self._db.execute("BEGIN IMMEDIATE")
-            await self._db.execute(
-                "DELETE FROM session_turns WHERE session_id = ?", (session_id,)
-            )
-            await self._db.execute(
-                "DELETE FROM active_sessions WHERE session_id = ?", (session_id,)
-            )
-            await self._db.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
-        except Exception:
-            await self._db.rollback()
-            raise
-        await self._db.commit()
+        await core.delete_session(session["id"])
         await self._publish_session_event(
             session_id,
             {"type": "session_closed", "session_id": session_id},
@@ -4057,11 +3730,8 @@ class SessionManager:
     # Subprocess management
     # ------------------------------------------------------------------
     async def _get_mind_row(self, mind_id: str) -> dict:
-        """Resolve a mind_id to its broker.minds row, or raise."""
-        from comms import broker  # noqa: PLC0415
-        if self.broker_db is None:
-            raise ValueError("SessionManager.broker_db not wired; call lifespan startup first")
-        row = await broker.get_mind_by_id(self.broker_db, mind_id)
+        """Resolve a mind_id to its registration, or raise."""
+        row = _mind_view(await core.get_mind(mind_id))
         if not row:
             raise ValueError(f"Mind '{mind_id}' not found in broker.minds")
         return row
@@ -4078,11 +3748,8 @@ class SessionManager:
         """
         if not mind_id:
             return {}
-        from comms import broker  # noqa: PLC0415
-        if self.broker_db is None:
-            return {}
         try:
-            token = await broker.get_mind_session_token(self.broker_db, mind_id)
+            token = await core.mind_session_token(mind_id)
         except Exception as exc:
             # Not `{}`. An uncredentialed call gets a 401 whose handler tells
             # the operator to re-register the mind — a remedy aimed at the
@@ -4680,9 +4347,7 @@ class SessionManager:
             raise ValueError(
                 f"Session {session_id} names no mind — cannot start Remote Control"
             )
-        from comms import broker  # noqa: PLC0415
-
-        mind_row = await broker.get_mind_by_id(self.broker_db, mind_id)
+        mind_row = await core.get_mind(mind_id)
         mind_name = (mind_row or {}).get("name") or mind_id
 
         cmd = [
@@ -4777,20 +4442,17 @@ class SessionManager:
     # Helpers
     # ------------------------------------------------------------------
     async def _get_row(self, session_id: str) -> dict | None:
+        """The whole row, private columns included, by id or unique prefix."""
         # Exact match first
-        row = await self._db.execute(
-            "SELECT * FROM sessions WHERE id = ?", (session_id,)
-        )
-        result = await row.fetchone()
-        if result:
-            return dict(result)
+        row = await core.get_session(session_id, private=True)
+        if row:
+            return _legacy_row(row)
         # Prefix match for short IDs (e.g. "85d44986")
-        row = await self._db.execute(
-            "SELECT * FROM sessions WHERE id LIKE ? || '%'", (session_id,)
-        )
-        results = await row.fetchall()
-        if len(results) == 1:
-            return dict(results[0])
+        matches = await core.find_session_by_prefix(session_id)
+        if len(matches) == 1:
+            return _legacy_row(
+                await core.get_session(matches[0]["id"], private=True)
+            )
         return None
 
     async def _routing_for(self, session: dict) -> dict:
@@ -4808,25 +4470,20 @@ class SessionManager:
         owner_ref = session.get("owner_ref") or ""
         client_ref = ""
         try:
-            cursor = await self._db.execute(
-                "SELECT client_ref FROM active_sessions WHERE session_id = ? LIMIT 1",
-                (session["id"],),
-            )
-            row = await cursor.fetchone()
-            if row and row["client_ref"]:
-                client_ref = row["client_ref"]
+            for binding in await core.bindings_for_session(session["id"]):
+                if binding["client_ref"]:
+                    client_ref = binding["client_ref"]
+                    break
         except Exception:
             log.exception("client_ref lookup failed for session=%s", session.get("id"))
         return {"owner_type": owner_type, "owner_ref": owner_ref, "client_ref": client_ref}
 
     async def get_session_turns(self, session_id: str) -> list[dict]:
         """Return stored turn history for a session from the session_turns table."""
-        cursor = await self._db.execute(
-            "SELECT role, content FROM session_turns WHERE session_id = ? ORDER BY created_at ASC",
-            (session_id,),
-        )
-        rows = await cursor.fetchall()
-        return [{"role": row["role"], "content": row["content"]} for row in rows]
+        return [
+            {"role": row["role"], "content": row["content"]}
+            for row in await core.list_turns(session_id)
+        ]
 
     async def get_late_turns(
         self, client_type: str, client_ref: str, since: float
@@ -4851,19 +4508,14 @@ class SessionManager:
         if not active:
             return {"session_id": None, "turns": []}
         session_id = active["id"]
-        cursor = await self._db.execute(
-            """SELECT role, content, created_at
-                 FROM session_turns
-                WHERE session_id = ? AND created_at > ?
-                ORDER BY created_at ASC""",
-            (session_id, since),
-        )
-        rows = await cursor.fetchall()
         return {
             "session_id": session_id,
             "turns": [
                 {"role": r["role"], "content": r["content"], "created_at": r["created_at"]}
-                for r in rows
+                # Strictly after the watermark, as the hook asks it:
+                # `list_turns` reads from the watermark inclusive.
+                for r in await core.list_turns(session_id, since=since)
+                if r["created_at"] > since
             ],
         }
 
@@ -4873,13 +4525,10 @@ class SessionManager:
         Returns the path if the session has a claude_sid and the file exists on disk,
         otherwise returns None.
         """
-        row = await self._db.execute(
-            "SELECT claude_sid FROM sessions WHERE id = ?", (session_id,)
-        )
-        result = await row.fetchone()
-        if not result or not result["claude_sid"]:
+        result = await core.get_session(session_id)
+        if not result or not result["conversation_id"]:
             return None
-        path = _TRANSCRIPT_DIR / f"{result['claude_sid']}.jsonl"
+        path = _TRANSCRIPT_DIR / f"{result['conversation_id']}.jsonl"
         if path.exists():
             return path
         return None
@@ -4895,6 +4544,11 @@ class SessionManager:
             "owner_type": row["owner_type"],
             "owner_ref": row["owner_ref"],
             "summary": row["summary"],
+            # The schema's names beside the old ones; see `_legacy_row`.
+            "conversation_id": row["claude_sid"],
+            "surface": row["owner_type"],
+            "surface_id": row["owner_ref"],
+            "opening_line": row["summary"],
             # This allowlist is hand-written while the bulk listing is a
             # `SELECT *` with a denylist, so a column added to the table shows
             # up there for free and is silently absent here — and this is what

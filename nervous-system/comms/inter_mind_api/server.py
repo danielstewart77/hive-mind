@@ -16,26 +16,29 @@ from __future__ import annotations
 import os
 from contextlib import asynccontextmanager
 
-import aiosqlite
+import hive_data
 import uvicorn
 from fastapi import FastAPI
 from hive_logging import configure_logging, install_fastapi_logging, log_event
 
 log = configure_logging("inter-mind-api")
 
-BROKER_DB_PATH = os.environ.get("BROKER_DB_PATH", "/usr/src/app/data/broker.db")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    db = await aiosqlite.connect(BROKER_DB_PATH)
-    db.row_factory = aiosqlite.Row
-    app.state.broker_db = db
-    log_event(log, "service.started", component="inter-mind-api", database_path=BROKER_DB_PATH)
+    """Open the hive's one database before serving, and close it at the end.
+
+    This service used to open its own SQLite connection from a module-level
+    path of its own — a third writer that repointing the gateway did not
+    repoint. It reads through `hive_data` like everything else now, and the
+    database it reads is `HIVE_DATABASE_URL`, the same value the gateway
+    reads, so there is no second path to forget.
+    """
+    await hive_data.connect()
+    log_event(log, "service.started", component="inter-mind-api")
     try:
         yield
     finally:
-        await db.close()
+        await hive_data.close(drain_timeout=5.0)
         log_event(log, "service.stopped", component="inter-mind-api")
 
 

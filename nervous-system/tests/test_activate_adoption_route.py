@@ -14,6 +14,8 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from comms_pg_fixture import comms_db, scratch_dsn  # noqa: F401 - fixtures
+
 
 #: These tests are about their own subject, not about authorization, so they
 #: present the admin credential. They used to clear every token instead and
@@ -24,9 +26,7 @@ GRILL_ADMIN = "admin-credential-for-tests"  # secret-guard: allow
 
 
 @pytest.fixture()
-def client(monkeypatch, tmp_path):
-    monkeypatch.setenv("BROKER_DB_PATH", str(tmp_path / "broker.db"))
-    monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "sessions.db"))
+def client(monkeypatch, comms_db):  # noqa: F811 - the imported fixture
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", GRILL_ADMIN)
 
     from comms import server as server_module

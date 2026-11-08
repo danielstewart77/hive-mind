@@ -13,45 +13,39 @@ container used to hold is no longer a credential at all.
 """
 from __future__ import annotations
 
+import asyncio
 import importlib
-import sqlite3
-import time
 
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from comms_broker_pg import broker_db, execute, put_mind, scratch_dsn  # noqa: F401
+
 ADMIN = "admin-bearer"  # secret-guard: allow
 REACHES_EVERYTHING = {"Authorization": f"Bearer {ADMIN}"}
 
 
-def _seed_live_session(db_path: str, session_id: str = "sess-1") -> str:
-    """One running session to rename, written straight into the store.
-
-    The manager has already created the schema by the time this runs; a second
-    connection to the same file is the cheapest way to put a row there without
-    a broker entry and a mind container behind it.
-    """
-    now = time.time()
-    conn = sqlite3.connect(db_path)
-    try:
-        conn.execute(
-            """INSERT INTO sessions (id, owner_type, owner_ref, model, claude_sid,
-                                     created_at, last_active, status, mind_id)
-               VALUES (?, 'telegram', '123', 'opus', 'conv-1', ?, ?, 'running', 'ada')""",
-            (session_id, now, now),
+def _seed_live_session(session_id: str = "sess-1") -> str:
+    """One running session to rename, written straight into the store on a
+    connection of its own — the app's pool lives on the app's loop."""
+    async def seed():
+        await put_mind("ada")
+        await execute(
+            "INSERT INTO core.sessions (id, surface, surface_id, model, "
+            "conversation_id, created_at, last_active, status, mind_id) "
+            "VALUES ($1, 'telegram', '123', 'opus', 'conv-1', "
+            "extract(epoch from now()), extract(epoch from now()), "
+            "'running', 'ada')",
+            session_id,
         )
-        conn.commit()
-    finally:
-        conn.close()
+
+    asyncio.run(seed())
     return session_id
 
 
 @pytest.fixture
-def client(monkeypatch, tmp_path):
-    db = str(tmp_path / "sessions.db")
-    monkeypatch.setenv("BROKER_DB_PATH", str(tmp_path / "broker.db"))
-    monkeypatch.setenv("SESSIONS_DB_PATH", db)
+def client(monkeypatch, broker_db):
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", ADMIN)
     monkeypatch.setenv("COMMS_RENAME_TOKEN", "rename-only")
 
@@ -59,7 +53,7 @@ def client(monkeypatch, tmp_path):
 
     importlib.reload(server_module)
     with TestClient(server_module.app) as test_client:
-        _seed_live_session(db)
+        _seed_live_session()
         yield test_client
 
 
@@ -157,7 +151,7 @@ def test_a_rename_addressed_to_a_retired_conversation_is_refused_by_the_route(
 
 
 def test_a_hive_with_an_admin_token_but_no_rename_token_says_renaming_is_off(
-    monkeypatch, tmp_path
+    monkeypatch, broker_db
 ) -> None:
     """R8: the sentence naming the misconfiguration has to be reachable.
 
@@ -166,9 +160,6 @@ def test_a_hive_with_an_admin_token_but_no_rename_token_says_renaming_is_off(
     token answered 401 to every surface, and all three of them reported a
     network fault. Breaks if the guard goes back to requiring both to be unset.
     """
-    db = str(tmp_path / "sessions.db")
-    monkeypatch.setenv("BROKER_DB_PATH", str(tmp_path / "broker.db"))
-    monkeypatch.setenv("SESSIONS_DB_PATH", db)
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", ADMIN)
     monkeypatch.delenv("COMMS_RENAME_TOKEN", raising=False)
 
@@ -176,7 +167,7 @@ def test_a_hive_with_an_admin_token_but_no_rename_token_says_renaming_is_off(
 
     importlib.reload(server_module)
     with TestClient(server_module.app) as test_client:
-        _seed_live_session(db)
+        _seed_live_session()
         refused = test_client.put(
             "/sessions/sess-1/name",
             headers={**REACHES_EVERYTHING, "X-Rename-Token": "some-other-secret"},

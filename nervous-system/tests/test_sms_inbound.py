@@ -7,6 +7,8 @@ import hmac
 
 import pytest
 
+from comms_pg_fixture import comms_db, scratch_dsn  # noqa: F401 - fixtures
+
 from comms.sms_inbound import (
     build_broker_message_id,
     extract_message_fields,
@@ -184,14 +186,12 @@ def test_build_broker_message_id_falls_back_to_uuid_when_missing() -> None:
 # session_mgr fixtures the rest of comms doesn't have yet. First real
 # delivery from the phone covers the happy path end-to-end.
 #
-# All three booth through lifespan so app.state.broker_db is wired up, and
+# All three boot through lifespan so the database pool is open, and
 # flip the sms_inbound_enabled flag on so the route gets past the toggle
 # short-circuit and into the HMAC layer they're actually exercising.
 
 
 def _boot_client(monkeypatch: pytest.MonkeyPatch, tmp_path):
-    monkeypatch.setenv("BROKER_DB_PATH", str(tmp_path / "broker.db"))
-    monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "sessions.db"))
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", GRILL_ADMIN)
     import importlib
 
@@ -206,6 +206,7 @@ def _boot_client(monkeypatch: pytest.MonkeyPatch, tmp_path):
     return client
 
 
+@pytest.mark.usefixtures("comms_db")
 def test_route_rejects_missing_signature(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
@@ -218,6 +219,7 @@ def test_route_rejects_missing_signature(
         client.__exit__(None, None, None)
 
 
+@pytest.mark.usefixtures("comms_db")
 def test_route_rejects_bad_signature(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
@@ -234,6 +236,7 @@ def test_route_rejects_bad_signature(
         client.__exit__(None, None, None)
 
 
+@pytest.mark.usefixtures("comms_db")
 def test_route_returns_500_when_secret_unset(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:

@@ -26,12 +26,20 @@ Covers:
 from __future__ import annotations
 
 import asyncio
-import os
-import tempfile
 import time
 
 from comms import sessions as sessions_mod
 from comms.sessions import SessionManager
+from comms_pg_fixture import (  # noqa: F401 - fixtures
+    close_manager,
+    comms_db,
+    execute,
+    fetch,
+    fetchrow,
+    make_manager,
+    scratch_dsn,
+    seed_session,
+)
 
 TELEGRAM = "telegram:skippy-uuid"
 CHAT = "8776938611"
@@ -41,10 +49,8 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-async def _make_manager(tmp: str) -> SessionManager:
-    os.environ["SESSIONS_DB_PATH"] = os.path.join(tmp, "sessions.db")
-    mgr = SessionManager()
-    await mgr.start()
+async def _make_manager() -> SessionManager:
+    mgr = await make_manager()
     if mgr._dashboard_sweep_task:
         mgr._dashboard_sweep_task.cancel()
         mgr._dashboard_sweep_task = None
@@ -62,27 +68,27 @@ async def _seed(
     rotation_armed: int = 0,
 ) -> None:
     now = time.time()
-    await mgr._db.execute(
-        """INSERT INTO sessions
-           (id, owner_type, owner_ref, model, claude_sid, summary, created_at,
-            last_active, status, mind_id, rotation_armed)
-           VALUES (?, ?, ?, 'opus', ?, 'seeded', ?, ?, ?, 'skippy-uuid', ?)""",
-        (session_id, owner_type, owner_ref, claude_sid, now - 60, now, status, rotation_armed),
+    await seed_session(
+        session_id, owner_type=owner_type, owner_ref=owner_ref, model="opus",
+        claude_sid=claude_sid, summary="seeded", created_at=now - 60,
+        last_active=now, status=status, mind_id="skippy-uuid",
+        rotation_armed=rotation_armed,
     )
-    await mgr._db.commit()
 
 
-async def _row(mgr: SessionManager, session_id: str) -> dict:
-    rows = await mgr._db.execute_fetchall(
-        "SELECT * FROM sessions WHERE id = ?", (session_id,)
+async def _row(mgr, session_id: str) -> dict:
+    """The stored row, read past the manager, under the names it speaks."""
+    return await fetchrow(
+        "SELECT *, surface AS owner_type, surface_id AS owner_ref, "
+        "conversation_id AS claude_sid, opening_line AS summary "
+        "FROM core.sessions WHERE id = $1", session_id
     )
-    return dict(rows[0])
 
 
 async def _bindings(mgr: SessionManager, session_id: str) -> list[tuple[str, str]]:
-    rows = await mgr._db.execute_fetchall(
-        "SELECT client_type, client_ref FROM active_sessions WHERE session_id = ?",
-        (session_id,),
+    rows = await fetch(
+        "SELECT client_type, client_ref FROM core.active_sessions WHERE session_id = $1",
+        session_id,
     )
     return sorted((r["client_type"], r["client_ref"]) for r in rows)
 
@@ -100,35 +106,34 @@ def _releasing(mgr: SessionManager) -> list[tuple[str, str]]:
     return seen
 
 
-def test_the_terminal_takes_the_conversation_under_its_own_key():
+def test_the_terminal_takes_the_conversation_under_its_own_key(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            try:
-                await _seed(mgr, "in-the-pane")
-                _releasing(mgr)
+        mgr = await _make_manager()
+        try:
+            await _seed(mgr, "in-the-pane")
+            _releasing(mgr)
 
-                routing = await mgr.adopt_into_terminal("in-the-pane")
+            routing = await mgr.adopt_into_terminal("in-the-pane")
 
-                assert routing == {
-                    "owner_type": "terminal",
-                    "owner_ref": "terminal-in-the-pane",
-                    "client_ref": "terminal-in-the-pane",
-                }
-                row = await _row(mgr, "in-the-pane")
-                assert row["owner_type"] == "terminal"
-                assert row["owner_ref"] == "terminal-in-the-pane"
-                assert row["claude_sid"] == "conv-1"  # the thread is untouched
-                assert await _bindings(mgr, "in-the-pane") == [
-                    ("terminal", "terminal-in-the-pane")
-                ]
-            finally:
-                await mgr.shutdown()
+            assert routing == {
+                "owner_type": "terminal",
+                "owner_ref": "terminal-in-the-pane",
+                "client_ref": "terminal-in-the-pane",
+            }
+            row = await _row(mgr, "in-the-pane")
+            assert row["owner_type"] == "terminal"
+            assert row["owner_ref"] == "terminal-in-the-pane"
+            assert row["claude_sid"] == "conv-1"  # the thread is untouched
+            assert await _bindings(mgr, "in-the-pane") == [
+                ("terminal", "terminal-in-the-pane")
+            ]
+        finally:
+            await close_manager(mgr)
 
     _run(scenario())
 
 
-def test_the_chats_own_key_keeps_pointing_where_it_was():
+def test_the_chats_own_key_keeps_pointing_where_it_was(comms_db):
     """The chat must not be retargeted at a pane-hosted conversation.
 
     `send_message` reads its own process table to decide whether a harness is
@@ -136,80 +141,75 @@ def test_the_chats_own_key_keeps_pointing_where_it_was():
     `--resume` on the same transcript.
     """
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            try:
-                await _seed(mgr, "chatting")
-                await _seed(mgr, "in-the-pane", claude_sid="conv-2")
-                await mgr._db.execute(
-                    """INSERT INTO active_sessions (client_type, client_ref, session_id)
-                       VALUES (?, ?, 'chatting')""",
-                    (TELEGRAM, CHAT),
-                )
-                await mgr._db.commit()
-                _releasing(mgr)
+        mgr = await _make_manager()
+        try:
+            await _seed(mgr, "chatting")
+            await _seed(mgr, "in-the-pane", claude_sid="conv-2")
+            await execute(
+                "INSERT INTO core.active_sessions (client_type, client_ref, session_id) "
+                "VALUES ($1, $2, 'chatting')", TELEGRAM, CHAT,
+            )
+            _releasing(mgr)
 
-                await mgr.adopt_into_terminal("in-the-pane")
+            await mgr.adopt_into_terminal("in-the-pane")
 
-                assert await _bindings(mgr, "chatting") == [(TELEGRAM, CHAT)]
-                active = await mgr.get_active_session(TELEGRAM, CHAT)
-                assert active is not None and active["id"] == "chatting"
-            finally:
-                await mgr.shutdown()
+            assert await _bindings(mgr, "chatting") == [(TELEGRAM, CHAT)]
+            active = await mgr.get_active_session(TELEGRAM, CHAT)
+            assert active is not None and active["id"] == "chatting"
+        finally:
+            await close_manager(mgr)
 
     _run(scenario())
 
 
-def test_the_chat_side_harness_is_released_before_ownership_moves():
+def test_the_chat_side_harness_is_released_before_ownership_moves(comms_db):
     """Retargeting first would leave a stream-json process on the transcript
     with the row already claiming the pane owns it."""
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            try:
-                await _seed(mgr, "in-the-pane")
-                released = _releasing(mgr)
+        mgr = await _make_manager()
+        try:
+            await _seed(mgr, "in-the-pane")
+            released = _releasing(mgr)
 
-                await mgr.adopt_into_terminal("in-the-pane")
+            await mgr.adopt_into_terminal("in-the-pane")
 
-                # The chat-side process, not the pane this attach is for.
-                assert released == [("stream", TELEGRAM)]
-            finally:
-                await mgr.shutdown()
+            # The chat-side process, not the pane this attach is for.
+            assert released == [("stream", TELEGRAM)]
+        finally:
+            await close_manager(mgr)
 
     _run(scenario())
 
 
-def test_a_refused_release_aborts_the_handover():
+def test_a_refused_release_aborts_the_handover(comms_db):
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
+        mgr = await _make_manager()
+        try:
+            await _seed(mgr, "in-the-pane")
+
+            async def _release(session_id, surface):
+                raise sessions_mod.MindRefusedCredential("mind said no")
+
+            mgr.release_on_mind = _release  # type: ignore[assignment]
+
+            raised = False
             try:
-                await _seed(mgr, "in-the-pane")
+                await mgr.adopt_into_terminal("in-the-pane")
+            except sessions_mod.MindCallFailed:
+                raised = True
 
-                async def _release(session_id, surface):
-                    raise sessions_mod.MindRefusedCredential("mind said no")
-
-                mgr.release_on_mind = _release  # type: ignore[assignment]
-
-                raised = False
-                try:
-                    await mgr.adopt_into_terminal("in-the-pane")
-                except sessions_mod.MindCallFailed:
-                    raised = True
-
-                assert raised
-                row = await _row(mgr, "in-the-pane")
-                assert row["owner_type"] == TELEGRAM
-                assert row["owner_ref"] == CHAT
-                assert await _bindings(mgr, "in-the-pane") == []
-            finally:
-                await mgr.shutdown()
+            assert raised
+            row = await _row(mgr, "in-the-pane")
+            assert row["owner_type"] == TELEGRAM
+            assert row["owner_ref"] == CHAT
+            assert await _bindings(mgr, "in-the-pane") == []
+        finally:
+            await close_manager(mgr)
 
     _run(scenario())
 
 
-def test_a_pending_rotation_survives_an_adoption():
+def test_a_pending_rotation_survives_an_adoption(comms_db):
     """An arm says the conversation under this row is full, which stays true
     whoever holds it. It used to be cleared on the way into a pane, because
     an arm then meant "retire this row for a successor" — now it means
@@ -217,102 +217,97 @@ def test_a_pending_rotation_survives_an_adoption():
     left a conversation over its threshold that nothing could rotate, and one
     pane ran eight days to 1834 messages that way."""
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            try:
-                await _seed(
-                    mgr, "staged",
-                    owner_type="terminal", owner_ref="terminal-staged",
-                    rotation_armed=sessions_mod.ROTATION_ARMED,
-                )
-                released = _releasing(mgr)
+        mgr = await _make_manager()
+        try:
+            await _seed(
+                mgr, "staged",
+                owner_type="terminal", owner_ref="terminal-staged",
+                rotation_armed=sessions_mod.ROTATION_ARMED,
+            )
+            released = _releasing(mgr)
 
-                await mgr.adopt_into_terminal("staged")
+            await mgr.adopt_into_terminal("staged")
 
-                assert released == []  # a reattach hands over nothing
-                row = await _row(mgr, "staged")
-                assert row["rotation_armed"] == sessions_mod.ROTATION_ARMED
-                assert await _bindings(mgr, "staged") == [("terminal", "terminal-staged")]
-            finally:
-                await mgr.shutdown()
+            assert released == []  # a reattach hands over nothing
+            row = await _row(mgr, "staged")
+            assert row["rotation_armed"] == sessions_mod.ROTATION_ARMED
+            assert await _bindings(mgr, "staged") == [("terminal", "terminal-staged")]
+        finally:
+            await close_manager(mgr)
 
     _run(scenario())
 
 
-def test_two_conversations_owned_by_one_chat_never_share_a_key():
+def test_two_conversations_owned_by_one_chat_never_share_a_key(comms_db):
     """`active_sessions` is keyed `(client_type, client_ref)`, so a shared key
     means one attach silently unbinds the other — and then the Stop hook's
     pre-flight answers yes on somebody else's binding and the rotation stages
     onto the wrong pane."""
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            try:
-                await _seed(mgr, "pane-a")
-                await _seed(mgr, "pane-b", claude_sid="conv-2")
-                _releasing(mgr)
+        mgr = await _make_manager()
+        try:
+            await _seed(mgr, "pane-a")
+            await _seed(mgr, "pane-b", claude_sid="conv-2")
+            _releasing(mgr)
 
-                await mgr.adopt_into_terminal("pane-a")
-                await mgr.adopt_into_terminal("pane-b")
+            await mgr.adopt_into_terminal("pane-a")
+            await mgr.adopt_into_terminal("pane-b")
 
-                assert await _bindings(mgr, "pane-a") == [("terminal", "terminal-pane-a")]
-                assert await _bindings(mgr, "pane-b") == [("terminal", "terminal-pane-b")]
-            finally:
-                await mgr.shutdown()
+            assert await _bindings(mgr, "pane-a") == [("terminal", "terminal-pane-a")]
+            assert await _bindings(mgr, "pane-b") == [("terminal", "terminal-pane-b")]
+        finally:
+            await close_manager(mgr)
 
     _run(scenario())
 
 
-def test_a_prefix_id_binds_the_conversations_real_id():
+def test_a_prefix_id_binds_the_conversations_real_id(comms_db):
     """`get_session` resolves an id by prefix. Writing the prefix into
     `active_sessions` fails the foreign key, unhandled and before the
     handshake — which the tile reads as a mind with no attach route at all."""
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            try:
-                await _seed(mgr, "abcdef12-3456-7890-abcd-ef1234567890")
-                _releasing(mgr)
+        mgr = await _make_manager()
+        try:
+            await _seed(mgr, "abcdef12-3456-7890-abcd-ef1234567890")
+            _releasing(mgr)
 
-                routing = await mgr.adopt_into_terminal("abcdef12")
+            routing = await mgr.adopt_into_terminal("abcdef12")
 
-                assert routing["client_ref"] == (
-                    "terminal-abcdef12-3456-7890-abcd-ef1234567890"
-                )
-                assert await _bindings(
-                    mgr, "abcdef12-3456-7890-abcd-ef1234567890"
-                ) == [("terminal", "terminal-abcdef12-3456-7890-abcd-ef1234567890")]
-            finally:
-                await mgr.shutdown()
+            assert routing["client_ref"] == (
+                "terminal-abcdef12-3456-7890-abcd-ef1234567890"
+            )
+            assert await _bindings(
+                mgr, "abcdef12-3456-7890-abcd-ef1234567890"
+            ) == [("terminal", "terminal-abcdef12-3456-7890-abcd-ef1234567890")]
+        finally:
+            await close_manager(mgr)
 
     _run(scenario())
 
 
-def test_an_old_binding_under_another_key_is_replaced_not_joined():
+def test_an_old_binding_under_another_key_is_replaced_not_joined(comms_db):
     """The console's resume path binds under its own `web`/`terminal-<uuid>`
     key. Left in place beside the new one, `_routing_for` reads one row with
     LIMIT 1 and which `client_ref` the pane receives becomes a matter of row
     order — and the pre-flight pair the hook sends can then match neither."""
     async def scenario():
-        with tempfile.TemporaryDirectory() as tmp:
-            mgr = await _make_manager(tmp)
-            try:
-                await _seed(mgr, "resumed")
-                await mgr._db.execute(
-                    """INSERT INTO active_sessions (client_type, client_ref, session_id)
-                       VALUES ('web', 'terminal-5f3c', 'resumed')"""
-                )
-                await mgr._db.commit()
-                _releasing(mgr)
+        mgr = await _make_manager()
+        try:
+            await _seed(mgr, "resumed")
+            await execute(
+                "INSERT INTO core.active_sessions (client_type, client_ref, session_id) "
+                "VALUES ('web', 'terminal-5f3c', 'resumed')"
+            )
+            _releasing(mgr)
 
-                await mgr.adopt_into_terminal("resumed")
+            await mgr.adopt_into_terminal("resumed")
 
-                assert await _bindings(mgr, "resumed") == [
-                    ("terminal", "terminal-resumed")
-                ]
-                routing = await mgr._routing_for(await _row(mgr, "resumed"))
-                assert routing["client_ref"] == "terminal-resumed"
-            finally:
-                await mgr.shutdown()
+            assert await _bindings(mgr, "resumed") == [
+                ("terminal", "terminal-resumed")
+            ]
+            routing = await mgr._routing_for(await _row(mgr, "resumed"))
+            assert routing["client_ref"] == "terminal-resumed"
+        finally:
+            await close_manager(mgr)
 
     _run(scenario())

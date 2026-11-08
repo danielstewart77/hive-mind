@@ -17,6 +17,7 @@ NS = os.path.join(os.path.dirname(__file__), "..", "..", "nervous-system")
 sys.path.insert(0, os.path.abspath(NS))
 
 from comms import session_access, user_access  # noqa: E402
+from comms_broker_pg import broker_db  # noqa: E402,F401 - fixture
 
 # Invented values, never real credentials. Named once so the guard has one
 # line to look at and the tests read as behaviour rather than as strings.
@@ -125,43 +126,34 @@ def test_the_three_calls_a_mind_makes_about_its_own_conversation_are_machinery()
 
 
 def test_a_route_added_with_no_classification_is_refused_to_a_non_admin(
-    tmp_path, monkeypatch
+    broker_db, monkeypatch
 ):
     """Deny-by-default, driven rather than asserted about: a route the table
     has never heard of is added to a live app and answers 401 to a credential
     that is not the admin token."""
-    import sqlite3
+    import asyncio
     from contextlib import asynccontextmanager
 
-    import aiosqlite
+    import hive_data
     from fastapi.testclient import TestClient
 
-    path = tmp_path / "broker.db"
-    conn = sqlite3.connect(path)
-    conn.executescript(
-        "CREATE TABLE minds (mind_id TEXT PRIMARY KEY, name TEXT, owner TEXT);"
-    )
-    conn.executescript(user_access.CREDENTIALS_DDL)
-    conn.execute(
-        "INSERT INTO credentials "
-        "(holder, username, role, token_sha, created_at) "
-        "VALUES ('arnold', 'sloan', ?, ?, 0)",
-        (user_access.MIND, user_access.digest(SLOAN_TOKEN)),
-    )
-    conn.commit()
-    conn.close()
+    from comms_broker_pg import put_credential_row
+
+    asyncio.run(put_credential_row(
+        "arnold", "sloan", user_access.MIND, user_access.digest(SLOAN_TOKEN)
+    ))
 
     monkeypatch.setenv("COMMS_BEARER_TOKEN", SHARED)
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", ADMIN_TOKEN)
     monkeypatch.setenv("COMMS_PRIMARY_USER", "daniel")
 
-    state: dict[str, object] = {}
-
     @asynccontextmanager
     async def lifespan(_app):
-        state["db"] = await aiosqlite.connect(path)
-        yield
-        await state["db"].close()
+        await hive_data.connect()
+        try:
+            yield
+        finally:
+            await hive_data.close(drain_timeout=5.0)
 
     app = FastAPI(
         lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None
@@ -175,7 +167,6 @@ def test_a_route_added_with_no_classification_is_refused_to_a_non_admin(
     app.add_middleware(
         user_access.UserAccess,
         table=table,
-        broker_db=lambda: state.get("db"),
         session_mind=lambda _session_id: None,
     )
 
