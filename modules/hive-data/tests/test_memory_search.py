@@ -819,3 +819,73 @@ async def test_a_memory_is_deleted_and_the_deletion_is_reported(
     assert (await memory.delete(stored))["rows"] == 1
     assert await memory.get(stored) is None
     assert (await memory.delete(stored))["rows"] == 0
+
+
+async def test_a_narrowed_scan_ranks_only_inside_the_class_it_was_given(
+        connected, a_mind):
+    """Save-time dedup asks for the nearest row in one class, not the nearest.
+
+    The difference is a write. Dedup refuses at a cosine of 0.92, so a
+    global nearest filtered afterwards lets an unrelated class answer
+    "already stored" and the turn's memory is never written at all, while
+    the hook that filed it records success.
+    """
+    near = direction(0.99)
+    await memory.store(mind_id=a_mind, content="in another class",
+                       embedding=near, data_class="other-class")
+    await memory.store(mind_id=a_mind, content="in the class asked for",
+                       embedding=direction(0.80), data_class="the-class")
+
+    found = await memory.similar(
+        unit(), limit=1, data_class="the-class")
+
+    assert [row["content"] for row in found] == ["in the class asked for"]
+
+
+async def test_a_narrowed_scan_matches_a_tag_in_either_spelling(
+        connected, a_mind):
+    """`LIKE` folds case in SQLite and does not here.
+
+    A tag filter that quietly stops matching answers "no memories matched",
+    which reads as an answer rather than as a defect.
+    """
+    await memory.store(mind_id=a_mind, content="tagged in capitals",
+                       embedding=direction(0.99), tags="Deploy,Ops")
+    await memory.store(mind_id=a_mind, content="untagged",
+                       embedding=direction(0.98))
+
+    found = await memory.similar(unit(), limit=5, tag="DEPLOY")
+
+    assert [row["content"] for row in found] == ["tagged in capitals"]
+
+
+async def test_a_recall_that_lost_its_keyword_half_does_not_call_itself_hybrid(
+        connected, clock, monkeypatch):
+    """A degraded recall labelled `hybrid` is a degradation nobody sees.
+
+    The keyword half is allowed to fail. lucent's own FTS lookup was wrapped
+    the same way and the reason carries across: a query the keyword engine
+    cannot parse should still answer with what the vector found, rather than
+    answering with an error where the thing it replaces answered with
+    results.
+
+    What is not allowed is calling the result hybrid. The ranking changed
+    and the answers got worse, and the one field a caller would read to find
+    that out said `hybrid` regardless — so the only trace was a log line,
+    and lucent's own docstring claimed no handler existed at all.
+
+    The failure is injected at `keyword`, which is where this package stops
+    being the thing under test, not at `recall`, which is.
+    """
+    mind = f"mind-{uuid.uuid4().hex[:8]}"
+    await _store(mind, "a note about tendinopathy", unit(), int(clock))
+
+    async def refuses(*args, **kwargs):
+        raise hive_data.TimedOut("the keyword scan ran out of time")
+
+    monkeypatch.setattr(memory, "keyword", refuses)
+    answer = await memory.recall(query="tendinopathy", embedding=unit(), k=5)
+
+    assert answer["mode"] == "vector"
+    # And it still answered: the vector half is untouched.
+    assert answer["count"] >= 1

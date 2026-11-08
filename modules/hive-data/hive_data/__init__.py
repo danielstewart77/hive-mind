@@ -32,6 +32,7 @@ from . import core
 from .config import Settings, from_environment
 from .errors import (
     Conflict,
+    StaleRead,
     CredentialRefused,
     DatabaseMissing,
     HiveDataError,
@@ -50,6 +51,7 @@ from .errors import (
     ValueRefused,
     WriteRejected,
 )
+from . import graph
 from . import memory
 from . import tools
 from .pool import close_pool, live_pool, open_pool, run, settings_in_use
@@ -58,7 +60,7 @@ from .schema import COLUMNS
 from .unit import Unit, conversation_lock, transaction
 
 __all__ = [
-    "COLUMNS", "Conflict", "CredentialRefused", "DatabaseMissing",
+    "COLUMNS", "Conflict", "StaleRead", "CredentialRefused", "DatabaseMissing",
     "HiveDataError", "IdentityNotWritable", "MissingReference",
     "NoConnectionAvailable", "NotConfigured", "NotInitialised",
     "SchemaMismatch", "SequenceBehind", "Settings", "TimedOut",
@@ -66,7 +68,7 @@ __all__ = [
     "Unit", "Unreachable", "UnsettableColumn", "ValueRefused",
     "WriteRejected", "board", "close", "connect", "conversation_lock",
     "core",
-    "from_environment",
+    "from_environment", "graph",
     "live_pool", "memory", "run", "settings_in_use", "tools",
     "transaction",
     "verify_schema",

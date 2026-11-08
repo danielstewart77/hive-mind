@@ -104,6 +104,27 @@ COLUMNS: dict[str, tuple[str, ...]] = {
         "id", "kind", "parent_id", "title", "status", "position",
         "description", "requirements", "acceptance_criteria", "qa_tests",
         "subtype"),
+    #: Lucent's half. Qualified keys, not bare ones, and that is the point:
+    #: `credentials` exists in both `core` and `memory`, the 12 holders that
+    #: appear in both share no `token_sha`, and a bare name could only ever
+    #: mean one of them.
+    "memory.nodes": (
+        "id", "mind_id", "type", "name", "first_name", "last_name",
+        "properties", "data_class", "tier", "source", "as_of", "created_at",
+        "updated_at", "owner"),
+    "memory.edges": (
+        "id", "mind_id", "source_id", "target_id", "type", "as_of", "source",
+        "data_class", "tier", "created_at", "properties", "owner"),
+    "memory.soul_changes": (
+        "id", "node_id", "mind_name", "mind_id", "actor", "reason",
+        "before_json", "after_json", "at", "created_at"),
+    "memory.schema_types": ("name", "kind", "property_schema", "created_at"),
+    "memory.schema_edges": (
+        "name", "source_type", "target_type", "attr_schema", "symmetric",
+        "created_at"),
+    "memory.credentials": (
+        "holder", "username", "role", "mind_id", "token_sha", "created_at",
+        "revoked_at"),
 }
 
 #: The Postgres schema a declared table lives in. Absent means `core`, which
@@ -111,11 +132,11 @@ COLUMNS: dict[str, tuple[str, ...]] = {
 #:
 #: A map rather than qualified keys in `COLUMNS`, because the bare name is
 #: what every operation passes and what every error message reads better
-#: with. The one thing to know before adding to it: `credentials` exists in
-#: both `core` and `memory` and they are NOT the same registry - 12 holders
-#: appear in both and none of the 12 share a `token_sha`. A bare
-#: `"credentials"` here means the `core` one. The day an operation needs
-#: lucent's, this map stops being enough and the keys have to be qualified.
+#: with. A bare `"credentials"` here means the `core` one, and they are NOT
+#: the same registry as lucent's - 12 holders appear in both and none of the
+#: 12 share a `token_sha`. Lucent's tables are therefore declared in
+#: `COLUMNS` under qualified keys (`memory.credentials` and the rest), which
+#: `schema_of` reads directly and this map never sees.
 SCHEMAS: dict[str, str] = {
     "memories": "memory",
 }
@@ -203,6 +224,9 @@ GENERATED: dict[str, frozenset[str]] = {
     #: before the statement is built, with a sentence saying why, rather
     #: than arriving from the server as a syntax-shaped error.
     "memories": frozenset({"id", "content_search"}),
+    "memory.nodes": frozenset({"id"}),
+    "memory.edges": frozenset({"id"}),
+    "memory.soul_changes": frozenset({"id"}),
 }
 
 

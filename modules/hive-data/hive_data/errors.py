@@ -75,6 +75,26 @@ class Conflict(WriteRejected):
     """A uniqueness or primary key the row would duplicate."""
 
 
+class StaleRead(Conflict):
+    """The row moved between the caller's read and this write.
+
+    One half of a compare-and-set, and its own class because the remedy is
+    the caller's alone: read the row again and re-apply the edit. Reported
+    as a generic rejected write it reads as a retry-the-same-bytes failure,
+    which is exactly the retry that overwrites somebody else's landed
+    change.
+
+    Carries what it observed, because the caller's next read is cheaper if
+    it is told where the row actually got to.
+    """
+
+    def __init__(self, message: str, *, expected: int | None = None,
+                 observed: int | None = None) -> None:
+        super().__init__(message)
+        self.expected = expected
+        self.observed = observed
+
+
 class MissingReference(WriteRejected):
     """A foreign key naming a row that is not there."""
 
