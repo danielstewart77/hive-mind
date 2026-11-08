@@ -10,6 +10,12 @@ Reported per app, pass or fail. An app this host does not run is reported as
 absent rather than failing: a mind's workstation runs the gateway and the
 memory store, a corporate target may run neither.
 
+One check here looks at the filesystem rather than a service: the retired
+SQLite stores, compared byte for byte against what they were when the fence
+went up. It is the half of the proof that used to be asserted by nothing — a
+writer still pointing at a retired file could append to it for a month and
+every check here stayed green, because none of them looked.
+
     python -m unified_db.postflight
 
 Exit 0 only when every app present passed.
@@ -277,38 +283,126 @@ async def _lucent(conn: asyncpg.Connection) -> tuple[str, str]:
 
 
 async def _comms(conn: asyncpg.Connection) -> tuple[str, str]:
-    """Read the gateway's mind registry, with a marker only Postgres holds."""
+    """Write a real conversation turn through the gateway, find it in Postgres.
+
+    This used to stamp a marker into `core.minds.model` on the lowest-id
+    mind — a live, `NOT NULL`, load-bearing column — and read it back
+    through the registry listing. It proved the right thing by the wrong
+    means twice over. It was a *read* dressed as a write: the only new row
+    was in the probe's journal, and for the duration of an HTTP call whose
+    timeout is per-socket-operation rather than a deadline, a real mind's
+    model was the string `postflight-ab12cd34`. A mind whose model is a name
+    the proxy does not list has every spawn refused — and this fires the
+    moment the hive comes back up, with queued surface traffic and the 04:17
+    and 04:50 cron turns due.
+
+    So it writes what comms is *for* instead: a conversation and a message,
+    through the gateway's own route, found afterwards in `core.messages` by
+    content. Nothing live is marked, and a gateway still on SQLite writes
+    the turn into the file where Postgres cannot see it, which is exactly
+    the question.
+
+    Both minds are a throwaway registered for this check and deleted after
+    it. It is addressed from itself to itself, which is the hive's standing
+    wake channel, so the gateway fires a background wakeup at the
+    `gateway_url` registered here — deliberately a port nothing listens on,
+    so that task fails fast. One connection-refused line in the gateway log
+    during a cutover check is the cost of not marking a live mind, and it is
+    named here so the next person reading that log knows what put it there.
+    """
     base = os.environ.get("COMMS_URL", "").rstrip("/")
     token = os.environ.get("COMMS_ADMIN_BEARER_TOKEN") or \
         os.environ.get("COMMS_BEARER_TOKEN", "")
     if not base:
         raise Absent("no COMMS_URL in the environment")
     _reachable(f"{base}/health")
-    row = await conn.fetchrow(
-        "SELECT mind_id, name FROM core.minds ORDER BY mind_id LIMIT 1")
-    if row is None:
-        return "fail", "core.minds is empty"
-    marker = f"postflight-{uuid.uuid4().hex[:8]}"
-    async with _Probe(conn, "core.minds", "model", "mind_id",
-                      row["mind_id"], marker):
-        answer = _call("GET", f"{base}/broker/minds", token)
-    listed = _items(answer, "minds")
-    if not listed:
-        return "fail", "the gateway listed no minds"
-    # The gateway names the mind id `id` in its listing; `mind_id` is
-    # accepted too so a rename there does not read as a database fault.
-    served = {m.get("id", m.get("mind_id")): m.get("model") for m in listed
-              if isinstance(m, dict)}
-    rows = await conn.fetch("SELECT mind_id FROM core.minds")
-    if set(served) != {r["mind_id"] for r in rows}:
-        return "fail", ("the gateway lists different minds than core.minds; "
-                        "it is reading another store")
-    if served.get(row["mind_id"]) != marker:
-        return "fail", (f"{row['name']}'s model read back as "
-                        f"{served.get(row['mind_id'])!r} while core.minds "
-                        f"held {marker!r} — the gateway is still on SQLite")
-    return "ok", (f"{len(served)} mind(s); a marker written only into "
-                  "core.minds came back through the gateway")
+
+    probe = f"postflight-{uuid.uuid4().hex[:8]}"
+    turn = f"postflight turn {uuid.uuid4()}"
+    conversation = f"postflight-{uuid.uuid4()}"
+    try:
+        _call("POST", f"{base}/broker/minds", token, {
+            "mind_id": probe,
+            "name": probe,
+            # Nothing is listening here, on purpose. See the docstring.
+            "gateway_url": "http://127.0.0.1:1",
+            "model": "postflight",
+            "harness": "claude",
+            "owner": os.environ.get("HIVE_POSTFLIGHT_OWNER", "daniel"),
+        })
+        answer = _call("POST", f"{base}/broker/messages", token, {
+            "conversation_id": conversation,
+            "from": probe,
+            "to": probe,
+            "content": turn,
+            "metadata": {"request_type": "postflight"},
+        })
+        if not isinstance(answer, dict) or answer.get("status") not in (
+                "dispatched", "exists"):
+            return "fail", f"the gateway refused the turn: {answer!r}"
+        row = await conn.fetchrow(
+            "SELECT conversation_id, from_mind, to_mind FROM core.messages "
+            "WHERE content = $1", turn)
+        if row is None:
+            return "fail", (
+                "the gateway accepted a conversation turn and it is not in "
+                "core.messages — it wrote to another store")
+        if row["conversation_id"] != conversation:
+            return "fail", (
+                f"the turn landed under conversation "
+                f"{row['conversation_id']!r} rather than {conversation!r}")
+        listed = _items(_call("GET", f"{base}/broker/minds", token), "minds")
+        served = {m.get("id", m.get("mind_id")) for m in listed
+                  if isinstance(m, dict)}
+        rows = await conn.fetch("SELECT mind_id FROM core.minds")
+        if served != {r["mind_id"] for r in rows}:
+            return "fail", ("the gateway lists different minds than "
+                            "core.minds; it is reading another store")
+        return "ok", (f"a conversation turn written through the gateway was "
+                      f"found in core.messages, and the registry matches "
+                      f"core.minds at {len(served)} mind(s)")
+    finally:
+        # The probe's own rows, and only those. A check must not leave a
+        # conversation behind for a mind to pick up, or a registered mind
+        # for the console to list.
+        await conn.execute(
+            "DELETE FROM core.messages WHERE conversation_id = $1",
+            conversation)
+        await conn.execute(
+            "DELETE FROM core.conversations WHERE conversation_id = $1",
+            conversation)
+        await conn.execute(
+            "DELETE FROM core.sessions WHERE mind_id = $1", probe)
+        await conn.execute("DELETE FROM core.minds WHERE mind_id = $1", probe)
+
+
+async def _retired_stores(conn: asyncpg.Connection) -> tuple[str, str]:
+    """Whether the stores the switch retired are exactly where it left them.
+
+    Nothing asserted this. "While the old files stay frozen" was a sentence
+    in the plan and in no check: this module never looked at the files at
+    all — no path, no size, no modification time — so a writer still
+    pointing at SQLite could append to a retired store for a month while
+    every proof here stayed green, and the hive would be carrying two
+    divergent copies of its conversations.
+
+    Takes no connection work. It is here rather than in `fence` because this
+    is the report the operator reads after a switch, and a proof split
+    across two commands is a proof somebody runs half of.
+    """
+    from . import fence  # noqa: PLC0415  (only this check needs it)
+
+    try:
+        report = fence.inspect()
+    except FileNotFoundError as exc:
+        raise Absent(str(exc)) from exc
+    if not report.fenced and not report.moved:
+        return "fail", ("the fence journal names no retired store, so this "
+                        "proof is green because it looked at nothing")
+    if report.moved:
+        return "fail", "; ".join(report.moved)
+    return "ok", (f"{len(report.fenced)} retired store(s) unmoved, byte for "
+                  "byte, with a directory standing where each one was")
 
 
 #: How wide a page of the memory browser the check asks for. The marked row
@@ -477,6 +571,7 @@ async def _proxy(conn: asyncpg.Connection) -> tuple[str, str]:
 
 APPS: tuple[tuple[str, object], ...] = (
     ("hive-comms", _comms),
+    ("retired stores", _retired_stores),
     ("hive-lucent", _lucent),
     ("hive-site", _console),
     ("hive-tools", _tools),
