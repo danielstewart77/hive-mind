@@ -417,3 +417,81 @@ A service that does not answer is a failure. The console reports absent
 unless a token is configured: its board API is guarded by a signed-in admin
 session, so a check outside a browser has no credential to present, and an
 unchecked app is reported as unchecked rather than counted as working.
+
+## The write fence, and the way back
+
+`python -m unified_db.fence`
+
+The cutover leaves every SQLite file on disk, frozen, because that is the
+way back. It leaves no protection: the data directory is bind-mounted
+read-write with no `:ro`, the files are 0644 and the containers run as root,
+so any code path still pointing at SQLite writes successfully and silently.
+Three writers in comms bypass the access layer and so are caught by nothing
+the access layer refuses — `comms/broker.py`, `comms/sessions.py`, and
+`comms/inter_mind_api/server.py`, which opens its own connection from its own
+module-level path rather than the gateway's. A configuration change that
+repoints comms does not necessarily repoint all three.
+
+**Moving the file aside is not a fence.** `sqlite3.connect` on a path with no
+file there *creates* one, which is how the quiet second copies in
+`hive_mind/data/` came to exist in the first place — so a stray writer handed
+a missing path mints an empty store, answers every read with nothing, and
+reports success. Permissions are not a fence either: root ignores the mode
+bits. What holds is a *directory* standing where the file was. Both `sqlite3`
+and `aiosqlite` answer `OperationalError: unable to open database file`,
+which is loud, immediate, needs no root, and cannot be mistaken for an empty
+store.
+
+So the fence moves each store to `<name>.db.retired-<timestamp>`, takes its
+`-wal` and `-shm` with it, and leaves a directory of that name holding a
+`RETIRED.txt` naming where the file went and how to put it back.
+
+Covered: the seven sources, plus the three quiet copies in
+`hive_mind/data/` — a 122 KB `lucent.db`, a 512 KB `sessions.db` and an 82 KB
+`broker.db` sitting beside the 150 MB, 134 MB and 100 MB live files in
+`nervous-system/data/`. They are months-old copies in a directory nothing
+bind-mounts, and they matter because a revert performed from the host
+checkout rather than the container finds *those*, comes up healthy, and shows
+the operator a hive with zero conversations in it. `--only lucent` fences
+lucent's store and lucent's quiet copy, never one without the other.
+
+### The way back
+
+DECIDED 2026-11-07 by Daniel: the revert is a documented command sequence
+rather than configuration alone. A fence made of the filesystem cannot be
+undone by a restart, and pretending otherwise would have left the cutover
+claiming a revert path it did not have.
+
+    python -m unified_db.fence --revert
+
+Or, per store, by hand — exactly the lines the fence prints when it goes up,
+writes into `fence.json`, and leaves inside each placeholder:
+
+    rm -rf .../data/lucent.db && mv .../data/lucent.db.retired-20261107-190000 .../data/lucent.db
+
+Then put `LUCENT_DB_PATH`, `BROKER_DB_PATH` and `SESSIONS_DB_PATH` back in
+the environment and restart. The sequence is written in three places on
+purpose: the moment an operator needs the way back is the moment they cannot
+read the terminal that printed it.
+
+`--revert` refuses a placeholder that has grown contents of its own. A
+directory holding something this did not put there is something else now, and
+the only thing worse than a fence that will not come down is a revert that
+deletes a directory somebody has been using.
+
+### The proof
+
+`postflight` now has a `retired stores` check, and it is the half of the
+proof nothing asserted. "While the old files stay frozen" was a sentence in
+the plan and in no code: the postflight never looked at the files at all — no
+path, no size, no modification time — so a writer still pointing at SQLite
+could append to a retired store for a month while every check stayed green,
+and the hive would carry two divergent copies of its conversations with both
+looking healthy.
+
+It compares each retired file against the size and modification time recorded
+when the fence went up, and checks that the placeholder is still a directory.
+Same size and a different modification time is a failure too: something opened
+the file for writing. A host where the fence was never raised is reported
+`absent` rather than passing, and a journal naming no store is a **failure** —
+green because it looked at nothing is this story's whole failure mode.

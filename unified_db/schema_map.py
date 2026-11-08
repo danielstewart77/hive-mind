@@ -61,6 +61,31 @@ NOT_STORES: dict[str, str] = {
 }
 
 
+#: Real SQLite files that are copies of a store, in a place nothing reads.
+#:
+#: Not strays and not stores. `hive_mind/data/` is a sibling of the directory
+#: the containers actually bind-mount (`hive_mind/nervous-system/data/`), and
+#: these three are months-old copies of the live files beside them — 122 KB
+#: against 150 MB for lucent, 512 KB against 134 MB for sessions, 82 KB
+#: against 100 MB for the broker. They are listed because a revert performed
+#: from the host checkout rather than the container finds *these*, comes up
+#: healthy, and shows the operator a hive with zero conversations in it; and
+#: because `sqlite3.connect` on a missing path creates a file, which is how
+#: they came to exist in the first place. The fence covers them for the same
+#: reason the real ones are covered.
+QUIET_COPIES: dict[str, str] = {
+    "quiet:broker": "Dev/hive_mind/data/broker.db",
+    "quiet:sessions": "Dev/hive_mind/data/sessions.db",
+    "quiet:lucent": "Dev/hive_mind/data/lucent.db",
+}
+
+
+def quiet_copy_paths(base: str) -> dict[str, str]:
+    """Absolute path per quiet copy, under the given checkout root."""
+    from os.path import join
+    return {name: join(base, rel) for name, rel in QUIET_COPIES.items()}
+
+
 def source_paths(base: str) -> dict[str, str]:
     """Absolute path per source, under the given checkout root."""
     from os.path import join
