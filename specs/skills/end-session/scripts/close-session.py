@@ -56,7 +56,7 @@ def resolve_session() -> str:
     when present. Otherwise fall back to the harness's own conversation id,
     which each harness exports into the shell tool calls it runs (but not into
     hook processes, which read their identity off stdin instead): Claude's
-    ``CLAUDE_CODE_SESSION_ID`` is the session's ``claude_sid``, Codex's
+    ``CLAUDE_CODE_SESSION_ID`` is the session's ``conversation_id``, Codex's
     ``CODEX_THREAD_ID`` the ``harness_sid`` the mind reported to the gateway.
     """
     session_id = os.environ.get("HIVE_SESSION_ID", "")
@@ -64,7 +64,7 @@ def resolve_session() -> str:
         return session_id
 
     for variable, column in (
-        ("CLAUDE_CODE_SESSION_ID", "claude_sid"),
+        ("CLAUDE_CODE_SESSION_ID", "conversation_id"),
         ("CODEX_THREAD_ID", "harness_sid"),
     ):
         conversation = os.environ.get(variable, "")

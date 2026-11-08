@@ -171,7 +171,7 @@ async def test_no_token_means_no_call_to_discord():
 class _Comms:
     """A stand-in for comms' session routes, keyed the way `active_sessions`
     is: one live session per `(client_type, client_ref)`, and a created
-    session bound under its own `owner_type`."""
+    session bound under its own `surface`."""
 
     def __init__(self, bindings=None):
         self.bindings = dict(bindings or {})
@@ -187,7 +187,7 @@ class _Comms:
 
     def post(self, _url, json):
         sid = f"new-{len(self.bindings)}"
-        self.bindings[(json["owner_type"], json["client_ref"])] = sid
+        self.bindings[(json["surface"], json["client_ref"])] = sid
         created = MagicMock()
         created.json = AsyncMock(return_value={"id": sid})
         return _AsyncCtx(created)

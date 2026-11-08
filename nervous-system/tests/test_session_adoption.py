@@ -108,9 +108,15 @@ def test_terminal_sessions_are_offered_to_another_surface(comms_db):
             assert _selectable_ids(sessions) == {"own-1", "term-1"}
             by_id = {s["id"]: s for s in sessions}
             assert by_id["term-1"]["adoptable"] is True
-            assert by_id["term-1"]["surface"] == "terminal"
+            # The picker's label is `surface_label`; `surface` is the raw
+            # address, as on every other session answer.
+            assert by_id["term-1"]["surface_label"] == "terminal"
+            assert by_id["term-1"]["surface"] == "web"
             assert by_id["own-1"]["adoptable"] is False
-            assert by_id["own-1"]["surface"] == "telegram"
+            assert by_id["own-1"]["surface_label"] == "telegram"
+            assert by_id["own-1"]["surface"] == TELEGRAM
+            # The raw address under its old name too, for one deploy.
+            assert by_id["own-1"]["owner_type"] == TELEGRAM
         finally:
             await close_manager(mgr)
 

@@ -109,8 +109,9 @@ writes the first carry-forward row.
   "allowed_directories": ["…"],
   "mind_name": "<short_name>",
   "client_ref": "<surface_ref>",
-  "owner_type": "<owner_type>",
-  "owner_ref": "<owner_ref>",
+  "surface": "<raw surface address, e.g. telegram:<mind_uuid>>",
+  "surface_id": "<surface_id>",
+  "surface_label": "<display label, e.g. telegram>",
   "system_prompt_blocks": "<composed_string>"
 }
 ```

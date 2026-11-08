@@ -363,7 +363,7 @@ def test_a_handover_asks_the_mind_to_drop_the_replaced_conversations_rotation_ma
         return mind
 
     cleared = _run(scenario()).sent("DELETE", "/sessions/sess-1/rotation-marker")
-    assert [c["params"].get("claude_sid") for c in cleared] == ["conv-1"]
+    assert [c["params"].get("conversation_id") for c in cleared] == ["conv-1"]
 
 
 def test_an_unmeasured_conversation_that_has_had_turns_is_never_assumed_to_fit(comms_db):
@@ -443,7 +443,7 @@ def test_a_terminal_handed_over_keeps_its_row_and_respawns_its_pane_on_the_hando
     assert result["id"] == "sess-1"
     assert row["claude_sid"] != "conv-1"
     rotated = mind.sent("POST", "/sessions/sess-1/rotate-pty")[0]["json"]
-    assert rotated["new_claude_sid"] == row["claude_sid"]
+    assert rotated["new_conversation_id"] == row["claude_sid"]
     assert rotated["model"] == "claude-sonnet-5"
     assert rotated["user_prompt"] == row["carry_forward"]
     assert row["carry_forward_sid"] == row["claude_sid"]

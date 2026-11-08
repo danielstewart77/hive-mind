@@ -367,7 +367,7 @@ def test_a_chat_session_runs_on_the_adapter_its_harness_names(
 
 
 @pytest.mark.parametrize("harness", ["claude", "codex", "dsh"])
-@pytest.mark.parametrize("named,owner_type,expected", [
+@pytest.mark.parametrize("named,surface,expected", [
     ("telegram", "api:11111111", "telegram"),
     (None, "discord:22222222", "discord"),
     ("terminal", "terminal:33333333", "console"),
@@ -375,12 +375,13 @@ def test_a_chat_session_runs_on_the_adapter_its_harness_names(
     (None, "", None),
 ])
 def test_a_chat_process_is_told_which_surface_it_serves(
-    equipped, proxy, monkeypatch, harness, named, owner_type, expected,
+    equipped, proxy, monkeypatch, harness, named, surface, expected,
 ):
     """Its hooks read HIVE_SURFACE: the gateway learns a harness's overhead
     only from a report naming the surface the conversation was opened in, and
     the per-turn hooks tell the model where a message arrived. The gateway's
-    label wins; the owner type's prefix stands in for a gateway sending none.
+    label wins; the raw surface address's prefix stands in for a gateway
+    sending none.
     A chat process is never told it is a pane, and never keeps a value the
     container's own environment happened to carry."""
     monkeypatch.setenv("HIVE_SURFACE", "stale-inherited")
@@ -389,10 +390,10 @@ def test_a_chat_process_is_told_which_surface_it_serves(
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawner)
     client = TestClient(mind_server.app)
     body = {"session_id": "row-9", "resume_sid": "conv-9", "model": "some-model",
-            "harness": harness, "client_ref": "123", "owner_type": owner_type,
-            "owner_ref": "123"}
+            "harness": harness, "client_ref": "123", "surface": surface,
+            "surface_id": "123"}
     if named:
-        body["surface"] = named
+        body["surface_label"] = named
 
     assert client.post("/sessions", headers=SESSION, json=body).status_code == 200
     client.post("/sessions/row-9/message", headers=SESSION, json={"content": "hello"})
@@ -546,10 +547,10 @@ def test_a_codex_pane_runs_the_model_it_is_handed_not_a_cached_one(panes, monkey
     _attach(client, "p4", "codex", "gpt-new", "", monkeypatch)
 
     unnamed = client.post("/sessions/p4/rotate-pty", headers=SESSION, json={
-        "new_claude_sid": "conv-r1", "harness": "codex",
+        "new_conversation_id": "conv-r1", "harness": "codex",
     })
     named = client.post("/sessions/p4/rotate-pty", headers=SESSION, json={
-        "new_claude_sid": "conv-r2", "harness": "codex", "model": "gpt-named",
+        "new_conversation_id": "conv-r2", "harness": "codex", "model": "gpt-named",
         "effort": "high",
     })
 
@@ -566,7 +567,7 @@ def test_a_rotation_addressed_to_another_harness_leaves_the_pane_alone(panes, mo
     _attach(client, "p5", "claude", "claude-opus-5", "", monkeypatch)
 
     resp = client.post("/sessions/p5/rotate-pty", headers=SESSION, json={
-        "new_claude_sid": "conv-r3", "harness": "codex", "model": "gpt-5",
+        "new_conversation_id": "conv-r3", "harness": "codex", "model": "gpt-5",
     })
 
     assert resp.status_code == 409
@@ -587,7 +588,7 @@ def test_a_switch_respawns_the_pane_in_place_onto_the_new_harness(
     _attach(client, "p6", old, first, "", monkeypatch)
 
     resp = client.post("/sessions/p6/rotate-pty", headers=SESSION, json={
-        "new_claude_sid": "conv-s1", "harness": new, "model": model,
+        "new_conversation_id": "conv-s1", "harness": new, "model": model,
         "user_prompt": "HANDOVER TEXT", "switch": True,
     })
 
@@ -737,7 +738,7 @@ def test_a_handover_reads_the_old_harnesss_own_transcript(homes):
     target.parent.mkdir(parents=True)
     shutil.copy(FIXTURES / "claude.jsonl", target)
 
-    resp = _handover(TestClient(mind_server.app), harness="claude", claude_sid="conv-h1",
+    resp = _handover(TestClient(mind_server.app), harness="claude", conversation_id="conv-h1",
                      summary="We were removing a duplicate discord.", budget_bytes=40_000)
 
     assert resp.status_code == 200
@@ -753,7 +754,7 @@ def test_a_codex_handover_is_found_by_the_thread_the_gateway_holds(homes):
     rollouts.mkdir(parents=True)
     shutil.copy(FIXTURES / CODEX_ROLLOUT, rollouts / CODEX_ROLLOUT)
 
-    resp = _handover(TestClient(mind_server.app), harness="codex", claude_sid="conv-h2",
+    resp = _handover(TestClient(mind_server.app), harness="codex", conversation_id="conv-h2",
                      harness_sid=CODEX_THREAD)
 
     assert "Tool call (exec_command)" in resp.json()["text"]
@@ -766,8 +767,8 @@ def test_an_unreadable_transcript_with_no_summary_refuses_the_handover(homes):
     (log_dir / "session.jsonl.zstd").write_bytes(b"not a zstd frame at all")
     client = TestClient(mind_server.app)
 
-    refused = _handover(client, harness="dsh", claude_sid="conv-h3")
-    summarised = _handover(client, harness="dsh", claude_sid="conv-h3", summary="the gist")
+    refused = _handover(client, harness="dsh", conversation_id="conv-h3")
+    summarised = _handover(client, harness="dsh", conversation_id="conv-h3", summary="the gist")
 
     assert (refused.status_code, refused.json()) == (422, {"detail": "unreadable"})
     assert summarised.json() == {"text": "Summary of the conversation so far:\nthe gist"}
@@ -776,7 +777,7 @@ def test_an_unreadable_transcript_with_no_summary_refuses_the_handover(homes):
 def test_a_conversation_that_never_had_a_turn_hands_over_nothing(homes):
     """No transcript on disk is an empty conversation, not an unreadable one:
     a conversation must be switchable before its first turn."""
-    resp = _handover(TestClient(mind_server.app), harness="claude", claude_sid="conv-new")
+    resp = _handover(TestClient(mind_server.app), harness="claude", conversation_id="conv-new")
 
     assert (resp.status_code, resp.json()) == (200, {"text": ""})
 
@@ -843,7 +844,7 @@ def test_a_resumed_codex_thread_also_gets_the_held_opening_turn(equipped, proxy,
 
 
 def test_a_missing_transcript_after_turns_with_no_summary_is_unreadable(homes):
-    resp = _handover(TestClient(mind_server.app), harness="claude", claude_sid="conv-gone",
+    resp = _handover(TestClient(mind_server.app), harness="claude", conversation_id="conv-gone",
                      had_turns=True)
 
     assert (resp.status_code, resp.json()) == (422, {"detail": "unreadable"})
@@ -855,7 +856,7 @@ def test_a_codex_handover_without_a_thread_id_uses_the_minds_own_thread(homes):
     shutil.copy(FIXTURES / CODEX_ROLLOUT, rollouts / CODEX_ROLLOUT)
     codex_cli.THREADS["g3"] = CODEX_THREAD
 
-    resp = _handover(TestClient(mind_server.app), harness="codex", claude_sid="conv-g3",
+    resp = _handover(TestClient(mind_server.app), harness="codex", conversation_id="conv-g3",
                      session_id="g3", had_turns=True)
 
     assert "Tool call (exec_command)" in resp.json()["text"]
@@ -867,7 +868,7 @@ def test_a_handover_honours_the_budget_it_is_given(homes):
     log_dir.mkdir(parents=True)
     shutil.copy(FIXTURES / "dsh" / "session.jsonl.zstd", log_dir / "session.jsonl.zstd")
 
-    text = _handover(TestClient(mind_server.app), harness="dsh", claude_sid="conv-g4",
+    text = _handover(TestClient(mind_server.app), harness="dsh", conversation_id="conv-g4",
                      budget_bytes=1_500).json()["text"]
 
     assert 0 < len(text.encode("utf-8")) <= 1_500
@@ -895,10 +896,10 @@ def test_a_later_rotation_without_a_model_keeps_the_last_named_model_and_effort(
     client = TestClient(mind_server.app)
     _attach(client, "g6", "codex", "gpt-a", "", monkeypatch)
     client.post("/sessions/g6/rotate-pty", headers=SESSION, json={
-        "new_claude_sid": "r1", "harness": "codex", "model": "gpt-b", "effort": "high"})
+        "new_conversation_id": "r1", "harness": "codex", "model": "gpt-b", "effort": "high"})
 
     client.post("/sessions/g6/rotate-pty", headers=SESSION, json={
-        "new_claude_sid": "r2", "harness": "codex"})
+        "new_conversation_id": "r2", "harness": "codex"})
 
     last = " ".join(panes["codex"]["respawn"][-1]["argv"])
     assert "--model gpt-b" in last
@@ -1231,7 +1232,7 @@ def test_claude_spends_the_handover_once_it_is_written_into_the_live_process(
 
 
 def test_a_prior_handover_with_no_transcript_yet_is_handed_over_not_refused(homes):
-    resp = _handover(TestClient(mind_server.app), harness="claude", claude_sid="conv-h8",
+    resp = _handover(TestClient(mind_server.app), harness="claude", conversation_id="conv-h8",
                      had_turns=False, prior_handover="PRIOR HANDOVER TEXT",
                      budget_bytes=8_000)
 
@@ -1245,7 +1246,7 @@ def test_a_prior_handover_rides_ahead_of_whatever_transcript_exists(homes):
     target.parent.mkdir(parents=True)
     shutil.copy(FIXTURES / "claude.jsonl", target)
 
-    text = _handover(TestClient(mind_server.app), harness="claude", claude_sid="conv-h9",
+    text = _handover(TestClient(mind_server.app), harness="claude", conversation_id="conv-h9",
                      prior_handover="PRIOR HANDOVER TEXT").json()["text"]
 
     assert text.index("PRIOR HANDOVER TEXT") < text.index("User: hey, i have two versions")
@@ -1512,11 +1513,11 @@ def test_the_gateway_drops_a_replaced_conversations_rotation_marker(
         path.write_text("{}")
     client = TestClient(mind_server.app)
 
-    gone = client.delete("/sessions/row-1/rotation-marker?claude_sid=old-conv",
+    gone = client.delete("/sessions/row-1/rotation-marker?conversation_id=old-conv",
                          headers=SESSION)
-    again = client.delete("/sessions/row-1/rotation-marker?claude_sid=old-conv",
+    again = client.delete("/sessions/row-1/rotation-marker?conversation_id=old-conv",
                           headers=SESSION)
-    refused = client.delete("/sessions/row-1/rotation-marker?claude_sid=old-conv")
+    refused = client.delete("/sessions/row-1/rotation-marker?conversation_id=old-conv")
 
     assert (gone.status_code, again.status_code, refused.status_code) == (204, 204, 401)
     assert not any(p.exists() for p in _markers(tmp_path, "old-conv"))

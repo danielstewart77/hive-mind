@@ -531,10 +531,10 @@ async def start_session(body: dict) -> Any:
     resume_sid = body.get("resume_sid")
     surface_prompt = body.get("surface_prompt")
     allowed_directories = body.get("allowed_directories")
-    owner_type = body.get("owner_type")
+    owner_type = body.get("surface")
     system_prompt_blocks = body.get("system_prompt_blocks")
     client_ref = body.get("client_ref") or ""
-    owner_ref = body.get("owner_ref") or ""
+    owner_ref = body.get("surface_id") or ""
     try:
         proc = await _spawn_proc(
             sid,

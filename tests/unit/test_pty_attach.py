@@ -236,8 +236,8 @@ class TestAttachRoute:
 
         client = TestClient(_app(_spawn))
         with client.websocket_connect(
-            "/sessions/s9/attach-pty?model=opus&resume_sid=c9&owner_type=terminal"
-            "&owner_ref=daniel&harness_sid=thread-3&cols=100&rows=30"
+            "/sessions/s9/attach-pty?model=opus&resume_sid=c9&surface=terminal"
+            "&surface_id=daniel&harness_sid=thread-3&cols=100&rows=30"
         ) as ws:
             ws.send_bytes(b"y\n")
             ws.receive_bytes()
@@ -338,12 +338,12 @@ class TestRotateRoute:
             ws.send_bytes(b"x\n")
             ws.receive_bytes()
             resp = client.post("/sessions/r1/rotate-pty", json={
-                "new_claude_sid": "new-conv", "model": "sonnet",
+                "new_conversation_id": "new-conv", "model": "sonnet",
                 "system_prompt": "carry-forward", "client_ref": "r1",
             })
 
             assert resp.json() == {
-                "session_id": "r1", "rotated": True, "claude_sid": "new-conv",
+                "session_id": "r1", "rotated": True, "conversation_id": "new-conv",
             }
             assert pty_attach.PTYS["r1"].conversation_id == "new-conv"
             assert calls[0]["system_prompt"] == "carry-forward"
@@ -364,7 +364,7 @@ class TestRotateRoute:
             ws.send_bytes(b"x\n")
             ws.receive_bytes()
             client.post("/sessions/r4/rotate-pty", json={
-                "new_claude_sid": "new-conv", "model": "sonnet",
+                "new_conversation_id": "new-conv", "model": "sonnet",
                 "system_prompt": "the summary",
                 "user_prompt": "the summary\n\nand what I typed",
             })
@@ -391,7 +391,7 @@ class TestRotateRoute:
             ws.send_bytes(b"x\n")
             ws.receive_bytes()
             client.post("/sessions/r9/rotate-pty", json={
-                "new_claude_sid": "new-conv", "model": "opus",
+                "new_conversation_id": "new-conv", "model": "opus",
             })
 
         assert spawned["effort"] == "high"
@@ -400,7 +400,7 @@ class TestRotateRoute:
     def test_rotation_declines_when_no_tile_is_open(self):
         calls: list[dict] = []
         client = TestClient(self._rotating_app(calls))
-        resp = client.post("/sessions/r2/rotate-pty", json={"new_claude_sid": "new"})
+        resp = client.post("/sessions/r2/rotate-pty", json={"new_conversation_id": "new"})
         assert resp.json()["rotated"] is False
         assert calls == []
 
@@ -414,7 +414,7 @@ class TestRotateRoute:
         with client.websocket_connect("/sessions/r4/attach-pty?model=opus&resume_sid=old") as ws:
             ws.send_bytes(b"x\n")
             ws.receive_bytes()
-            resp = client.post("/sessions/r4/rotate-pty", json={"new_claude_sid": "new"})
+            resp = client.post("/sessions/r4/rotate-pty", json={"new_conversation_id": "new"})
             assert resp.json()["rotated"] is False
             assert pty_attach.PTYS["r4"].conversation_id == "old"
 

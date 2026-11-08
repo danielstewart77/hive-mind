@@ -777,8 +777,8 @@ async def start_session(body: dict) -> Any:
     # Spawn-env metadata for the rotation hook, which reads it to attribute the
     # rotation summary to the right (mind_id, client_ref) row.
     client_ref = body.get("client_ref") or ""
-    owner_type = body.get("owner_type") or ""
-    owner_ref = body.get("owner_ref") or ""
+    owner_type = body.get("surface") or ""
+    owner_ref = body.get("surface_id") or ""
     if system_prompt_blocks and surface_prompt:
         full_prompt = f"{system_prompt_blocks}\n\n{surface_prompt}"
     else:

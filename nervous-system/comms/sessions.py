@@ -758,13 +758,11 @@ class SessionManager:
             )
             if s.get("status") != "closed"
         ]
-        # `surface` in this listing has always been the display label, and
-        # the pickers read it as such, so the label overwrites the column's
-        # new name here. A consumer wanting the raw address reads
-        # `owner_type`; this listing's vocabulary changes once nothing reads
-        # the label under this name.
+        # `surface` is the raw address here as on every other session answer,
+        # and the picker's display label is `surface_label`. `owner_type`
+        # still carries the raw address for one deploy.
         for session in sessions:
-            session["surface"] = self._surface_label(session.get("owner_type", ""))
+            session["surface_label"] = self._surface_label(session.get("surface", ""))
             session["adoptable"] = False
         seen = {s["id"] for s in sessions}
 
@@ -777,7 +775,7 @@ class SessionManager:
             session = _legacy_row(row)
             if session["id"] in seen:
                 continue
-            session["surface"] = self._surface_label(session.get("owner_type", ""))
+            session["surface_label"] = self._surface_label(session.get("surface", ""))
             session["adoptable"] = True
             session["is_active"] = False
             sessions.append(session)
@@ -1589,6 +1587,7 @@ class SessionManager:
             "ok": True,
             "session_id": session_id,
             "rotated": True,
+            "conversation_id": new_row.get("claude_sid"),
             "claude_sid": new_row.get("claude_sid"),
         }
 
@@ -3059,7 +3058,7 @@ class SessionManager:
             async with aiohttp.ClientSession() as http:
                 async with http.delete(
                     f"{mind_url}/sessions/{session_id}/rotation-marker",
-                    params={"claude_sid": claude_sid},
+                    params={"conversation_id": claude_sid, "claude_sid": claude_sid},
                     headers=await self._mind_auth_headers_for_session(session_id, mind_id),
                     timeout=aiohttp.ClientTimeout(total=5),
                 ) as resp:
@@ -3712,6 +3711,7 @@ class SessionManager:
         uptime = time.time() - session["created_at"]
         return {
             "id": session_id,
+            "opening_line": session["summary"],
             "summary": session["summary"],
             # The name, so the surface reporting the kill calls the conversation
             # what the button that killed it called it. Without it every caller
@@ -3850,14 +3850,19 @@ class SessionManager:
                     "allowed_directories": allowed_directories,
                     "mind_name": mind_name,
                     "client_ref": client_ref,
+                    # The raw surface address and its reference, under the
+                    # schema's names, then the old ones for a mind that has
+                    # not moved over yet.
+                    "surface": owner_type,
+                    "surface_id": owner_ref,
                     "owner_type": owner_type,
                     "owner_ref": owner_ref,
                     # The surface this process will serve (telegram, terminal,
-                    # discord, ...). owner_type carries a mind-uuid suffix and
+                    # discord, ...). The address carries a mind-uuid suffix and
                     # a web/terminal split that are routing concerns; minds get
                     # the clean human label so they can shape behavior per
                     # surface without knowing gateway naming conventions.
-                    "surface": self._surface_label(owner_type or ""),
+                    "surface_label": self._surface_label(owner_type or ""),
                     "system_prompt_blocks": system_prompt_blocks,
                     "effort": effort,
                     "harness": harness or None,
@@ -3940,14 +3945,17 @@ class SessionManager:
                         session_id, mind_id
                     ),
                     json={
+                        "new_conversation_id": new_claude_sid,
                         "new_claude_sid": new_claude_sid,
                         "model": model,
                         "system_prompt": system_prompt,
                         "user_prompt": user_prompt,
                         "client_ref": client_ref,
+                        "surface": owner_type,
+                        "surface_id": owner_ref,
                         "owner_type": owner_type,
                         "owner_ref": owner_ref,
-                        "surface": self._surface_label(owner_type or ""),
+                        "surface_label": self._surface_label(owner_type or ""),
                         "harness": harness or None,
                         "effort": session_row.get("effort") or None,
                         "switch": switch,
@@ -4160,6 +4168,7 @@ class SessionManager:
                     f"{gateway_url}/handover",
                     json={
                         "harness": harness,
+                        "conversation_id": claude_sid,
                         "claude_sid": claude_sid,
                         "harness_sid": harness_sid,
                         "summary": summary,

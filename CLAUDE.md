@@ -179,7 +179,7 @@ refused for size as `error_code: CONTEXT_WINDOW_EXCEEDED`
 (`minds/context_overflow.py` classifies each harness's wording), and the check
 leaves such a turn to the gateway's overflow path rather than arming a
 rotation of its own. After a handover the gateway calls `DELETE
-/sessions/{id}/rotation-marker?claude_sid=` (session-guarded, on the mind
+/sessions/{id}/rotation-marker?conversation_id=` (session-guarded, on the mind
 server), which drops that conversation's marker
 files under the mind's `data/auto-remember` and answers 204. `build_catalog` relays each model's `accepts_images` as
 the proxy gives it: true, false, or null for unknown.

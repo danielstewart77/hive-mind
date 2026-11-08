@@ -242,7 +242,7 @@ def test_terminal_rotation_keeps_the_session_and_swaps_the_conversation(comms_db
 
             assert result["ok"] is True
             assert result["session_id"] == sid
-            new_conv = result["claude_sid"]
+            new_conv = result["conversation_id"]
             assert new_conv != "conv-full"
             assert await _conversation_id(sid) == new_conv
             assert calls[0]["session_id"] == sid

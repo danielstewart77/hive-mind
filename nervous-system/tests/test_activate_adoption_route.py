@@ -36,7 +36,13 @@ def client(monkeypatch, comms_db):  # noqa: F811 - the imported fixture
         yield http, server_module
 
 
-def test_the_owner_reaches_the_session_manager(client):
+@pytest.mark.parametrize(
+    "surface_key, surface_id_key",
+    [("surface", "surface_id"), ("owner_type", "owner_ref")],
+    ids=["schema-names", "old-names"],
+)
+def test_the_owner_reaches_the_session_manager(client, surface_key, surface_id_key):
+    """Under the schema's names, and under the old ones for one deploy."""
     http, server = client
     activate = AsyncMock(return_value={"ok": True})
 
@@ -49,8 +55,8 @@ def test_the_owner_reaches_the_session_manager(client):
             json={
                 "client_type": "browser",
                 "client_ref": "tab-7",
-                "owner_type": "design",
-                "owner_ref": "design-1",
+                surface_key: "design",
+                surface_id_key: "design-1",
             },
         )
 

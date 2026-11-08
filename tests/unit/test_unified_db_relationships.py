@@ -7,7 +7,9 @@ need a database build the real one and ask Postgres what it enforces.
 
 from __future__ import annotations
 
+import os
 import shutil
+from pathlib import Path
 import sqlite3
 import subprocess
 import uuid
@@ -384,6 +386,33 @@ def _psql(database: str, sql: str, *, stdin: str | None = None) -> str:
     return done.stdout.strip()
 
 
+def _build_live():
+    """The schema built from the hive's real stores, wherever they now are.
+
+    Since the cutover the live paths are fenced - a directory stands where
+    each store was, and the store itself sits beside it under the name the
+    fence journal records. The schema is still the one those files carry, so
+    it is built from where they went rather than from where they were.
+    """
+    import json
+
+    journal = Path(os.environ.get(
+        "FENCE_JOURNAL", Path(__file__).resolve().parents[2] / "fence.json"))
+    moved = {}
+    if journal.is_file():
+        for entry in json.loads(journal.read_text()).get("fenced", []):
+            moved[entry["path"]] = entry["moved_to"]
+    real_paths = schema_map.source_paths
+
+    def _where_they_are(base: str) -> dict[str, str]:
+        return {source: moved.get(path, path)
+                for source, path in real_paths(base).items()}
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(schema_map, "source_paths", _where_they_are)
+        return build_schema.build("/home/daniel/Storage")
+
+
 @pytest.fixture(scope="module")
 def built_database():
     """The real schema, applied to a throwaway database beside the live one."""
@@ -395,7 +424,7 @@ def built_database():
     if probe.returncode != 0:
         pytest.skip(f"{CONTAINER} is not accepting connections")
 
-    built = build_schema.build("/home/daniel/Storage")
+    built = _build_live()
     name = f"keys_test_{uuid.uuid4().hex[:10]}"
     _psql("postgres", f'CREATE DATABASE "{name}";')
     try:
@@ -749,7 +778,7 @@ def test_a_key_onto_a_column_that_is_not_unique_refuses_the_build(
 def test_a_key_onto_an_inline_unique_rather_than_the_primary_key_is_allowed():
     """Six of the hive's keys reference `minds.mind_id`, whose uniqueness is
     an inline UNIQUE while the primary key is `name`."""
-    built = build_schema.build("/home/daniel/Storage")
+    built = _build_live()
 
     assert any(r.parent == ("core", "minds") and r.parent_columns == ("mind_id",)
                for r in built.relationships)

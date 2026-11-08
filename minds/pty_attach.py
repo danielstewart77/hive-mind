@@ -392,7 +392,7 @@ async def fetch_carry_forward(session_id: str, claude_sid: str) -> str:
     async with aiohttp.ClientSession() as http:
         async with http.get(
             f"{comms_url}/sessions/{session_id}/carry-forward",
-            params={"claude_sid": claude_sid},
+            params={"conversation_id": claude_sid},
             headers={"Authorization": f"Bearer {token}"},
             timeout=aiohttp.ClientTimeout(total=5),
         ) as resp:
@@ -923,9 +923,9 @@ def install_pty_attach(
         is the normal answer for a conversation nobody has a tile open on.
         """
         body = await request.json()
-        new_claude_sid = (body.get("new_claude_sid") or "").strip()
+        new_claude_sid = (body.get("new_conversation_id") or "").strip()
         if not new_claude_sid:
-            return JSONResponse({"error": "new_claude_sid required"}, status_code=400)
+            return JSONResponse({"error": "new_conversation_id required"}, status_code=400)
 
         handle = PTYS.get(session_id)
         if handle is None:
@@ -974,8 +974,8 @@ def install_pty_attach(
                 # while this route reports a successful rotation.
                 user_prompt=body.get("user_prompt") or "",
                 client_ref=body.get("client_ref"),
-                owner_type=body.get("owner_type"),
-                owner_ref=body.get("owner_ref"),
+                owner_type=body.get("surface"),
+                owner_ref=body.get("surface_id"),
             )
         except Exception:
             log.exception("Rotation failed for %s session %s", mind_name, session_id)
@@ -1001,7 +1001,7 @@ def install_pty_attach(
         # on that screen is replayed by the gateway, to the browser tile, as
         # a banner beside the terminal — not from here and not into the pane,
         # which the harness owns and repaints.
-        return {"session_id": session_id, "rotated": True, "claude_sid": new_claude_sid}
+        return {"session_id": session_id, "rotated": True, "conversation_id": new_claude_sid}
 
     @app.websocket("/sessions/{session_id}/attach-pty")
     async def attach_pty(
@@ -1013,8 +1013,8 @@ def install_pty_attach(
         cols: int = 80,
         rows: int = 24,
         client_ref: str | None = None,
-        owner_type: str | None = None,
-        owner_ref: str | None = None,
+        surface: str | None = None,
+        surface_id: str | None = None,
         effort: str | None = None,
         harness: str = "",
     ) -> None:
@@ -1133,7 +1133,7 @@ def install_pty_attach(
                 session_id, adapter.spawn, terminals, harness=name, model=model,
                 conversation_id=resume_sid,
                 harness_sid=harness_sid, cols=cols, rows=rows,
-                client_ref=client_ref, owner_type=owner_type, owner_ref=owner_ref,
+                client_ref=client_ref, owner_type=surface, owner_ref=surface_id,
                 system_prompt=carry_forward, effort=effort or None, **spawn_kwargs,
             )
         except PtyUnavailable as exc:

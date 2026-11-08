@@ -554,7 +554,7 @@ async def handover(request: Request) -> Any:
     def read() -> list[dict]:
         # Off the event loop: a rollout search walks CODEX_HOME and a dsh log
         # is decompressed, and this loop serves every session on the mind.
-        path = adapter.transcript_path(str(body.get("claude_sid") or ""),
+        path = adapter.transcript_path(str(body.get("conversation_id") or ""),
                                        str(body.get("harness_sid") or "") or None,
                                        session_id=str(body.get("session_id") or ""))
         if path is None:

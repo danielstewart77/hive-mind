@@ -255,7 +255,7 @@ def test_the_names_listing_is_whole_for_an_admin(gateway):
 
 def _create_body(mind_id):
     return {
-        "owner_type": "telegram", "owner_ref": "222",
+        "surface": "telegram", "surface_id": "222",
         "client_ref": "222", "mind_id": mind_id,
     }
 
@@ -355,7 +355,7 @@ def test_a_mind_cannot_open_a_conversation_on_another_mind_by_command(gateway):
     answer = client.post(
         "/command",
         json={
-            "content": "/new", "owner_type": "telegram", "owner_ref": "111",
+            "content": "/new", "surface": "telegram", "surface_id": "111",
             "client_ref": "111", "mind_id": MORDECAI_MIND,
         },
         headers=_auth(SKIPPY_MIND_TOKEN),
@@ -499,8 +499,8 @@ def test_a_mind_reads_its_own_late_turns(gateway):
 
 def _command(content, mind_id=SLOAN_MIND, client_ref="222"):
     return {
-        "content": content, "owner_type": "telegram",
-        "owner_ref": client_ref, "client_ref": client_ref, "mind_id": mind_id,
+        "content": content, "surface": "telegram",
+        "surface_id": client_ref, "client_ref": client_ref, "mind_id": mind_id,
     }
 
 
@@ -1039,7 +1039,7 @@ def test_a_mind_cannot_read_another_minds_carry_forward(gateway):
     client, _ = gateway
 
     answer = client.get(
-        "/sessions/d-session/carry-forward?claude_sid=conv-1",
+        "/sessions/d-session/carry-forward?conversation_id=conv-1",
         headers=_auth(ARNOLD_MIND_TOKEN),
     )
 
@@ -1053,7 +1053,7 @@ def test_a_surface_credential_cannot_read_a_carry_forward(gateway):
     client, _ = gateway
 
     answer = client.get(
-        "/sessions/d-session/carry-forward?claude_sid=conv-1",
+        "/sessions/d-session/carry-forward?conversation_id=conv-1",
         headers=_auth(SERVICE_TOKEN),
     )
 
@@ -1064,7 +1064,7 @@ def test_a_mind_reads_the_carry_forward_it_is_owed(gateway):
     client, _ = gateway
 
     answer = client.get(
-        "/sessions/d-session/carry-forward?claude_sid=conv-1",
+        "/sessions/d-session/carry-forward?conversation_id=conv-1",
         headers=_auth(SKIPPY_MIND_TOKEN),
     )
 

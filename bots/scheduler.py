@@ -429,8 +429,8 @@ async def _create_session(http: aiohttp.ClientSession, skill: ScheduledSkill, su
     """Create a fresh session for this fire. Returns session id."""
     client_ref = f"scheduler-{skill.mind_name}-{skill.skill_name}-{uuid.uuid4().hex[:8]}"
     payload = {
-        "owner_type": "scheduler",
-        "owner_ref": str(await owner_chat_for(skill.mind_id) or "scheduler"),
+        "surface": "scheduler",
+        "surface_id": str(await owner_chat_for(skill.mind_id) or "scheduler"),
         "client_ref": client_ref,
         "mind_id": skill.mind_id,
         "surface_prompt": surface_prompt,
@@ -486,8 +486,8 @@ async def _ensure_channel_session(
         or "scheduler"
     )
     payload = {
-        "owner_type": client_type,
-        "owner_ref": owner_ref,
+        "surface": client_type,
+        "surface_id": owner_ref,
         "client_ref": channel_id,
         "mind_id": skill.mind_id,
         "surface_prompt": VOICE_SURFACE_PROMPT if skill.voice else DEV_SURFACE_PROMPT,
