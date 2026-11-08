@@ -9,6 +9,8 @@ keeps the two copies of the store honest against each other.
 import re
 
 import pytest
+
+from hive_site import testing as accounts
 from starlette.routing import Mount
 from starlette.websockets import WebSocketDisconnect
 
@@ -89,7 +91,7 @@ def test_a_disabled_user_is_refused_at_terminal_sign_in_and_turned_away_mid_sess
     sloan = terminal.settled_user("sloan", "sloans-own-pass")
     assert sloan.get("/terminal", follow_redirects=False).status_code == 200
 
-    terminal.store().update_user("sloan", disabled=True)
+    accounts.run(terminal.store().update_user("sloan", disabled=True))
 
     page = sloan.get("/terminal", follow_redirects=False)
     assert page.status_code == 303

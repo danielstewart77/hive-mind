@@ -9,6 +9,8 @@ registered before owners existed.
 import re
 
 import pytest
+
+from hive_site import testing as accounts
 from fastapi import Depends, WebSocket
 from starlette.routing import Mount
 from starlette.testclient import TestClient
@@ -190,10 +192,12 @@ def test_a_terminal_route_added_with_no_authorization_code_is_refused_to_a_non_a
 
 
 def test_a_microsoft_or_windows_session_from_the_console_opens_the_owners_terminal_and_no_one_elses(builtin_terminal):
-    store = builtin_terminal.store()
+    account_store = builtin_terminal.store()
     builtin_terminal.create_user("sloan", "sloan-temp-pass")
     sloan = builtin_terminal.client()
-    sloan.cookies.set(auth.SSO_COOKIE_NAME, auth.issue_sso_token(store, "sloan", "microsoft"))
+    sloan.cookies.set(
+        auth.SSO_COOKIE_NAME,
+        accounts.run(auth.issue_sso_token(account_store, "sloan", "microsoft")))
 
     with _socket(sloan, "/api/terminal/attach/s-arnold") as ws:
         assert ws.receive_bytes() == b"attached s-arnold"
@@ -201,7 +205,7 @@ def test_a_microsoft_or_windows_session_from_the_console_opens_the_owners_termin
         ws.receive_bytes()
     assert closed.value.code == route_access.CLOSE_REFUSED
 
-    store.update_user("sloan", disabled=True)
+    accounts.run(account_store.update_user("sloan", disabled=True))
     assert sloan.get("/api/terminal/sessions").status_code == 401
 
 
@@ -286,7 +290,8 @@ def test_an_open_attach_is_closed_once_its_user_may_no_longer_hold_it(
     with _socket(sloan, "/api/terminal/attach/s-arnold") as ws:
         assert ws.receive_bytes() == b"attached s-arnold"
         if change == "disabled":
-            builtin_terminal.store().update_user("sloan", disabled=True)
+            accounts.run(
+                builtin_terminal.store().update_user("sloan", disabled=True))
         else:
             arnold = next(m for m in MINDS if m["id"] == "m-arnold")
             monkeypatch.setitem(arnold, "owner", "aiden")
@@ -309,7 +314,7 @@ def test_an_open_session_stream_ends_once_its_user_is_disabled(
 
     threading.Thread(target=read_stream, daemon=True).start()
     assert not finished.wait(1.0)  # streaming, as it should while she may
-    builtin_terminal.store().update_user("sloan", disabled=True)
+    accounts.run(builtin_terminal.store().update_user("sloan", disabled=True))
     assert finished.wait(5.0)
 
 
@@ -326,11 +331,18 @@ def test_a_non_admin_speaks_only_in_the_voices_of_their_own_minds(people, fake_c
 
 
 @pytest.mark.parametrize("path", ["/", "/login"])
-def test_a_public_route_asks_the_sign_in_service_who_is_signed_in_off_the_event_loop(
+def test_a_public_route_asks_the_sign_in_service_without_blocking_the_event_loop(
     monkeypatch, fake_comms, path
 ):
-    """A call to auth-service made on the event loop stalls every terminal
-    the site is serving until it answers."""
+    """A blocking call to auth-service stalls every terminal the site serves.
+
+    It used to be kept off the loop by hand, with a synchronous `httpx`
+    client pushed through `run_in_threadpool`. The shared store awaits an
+    `httpx.AsyncClient` instead, so what this guards now is that the request
+    is awaited on the loop rather than issued by a blocking client that
+    would hold it — the transport records where it was called from, and a
+    sign-in store put back on a synchronous client fails here.
+    """
     import asyncio
 
     import httpx
@@ -343,16 +355,19 @@ def test_a_public_route_asks_the_sign_in_service_who_is_signed_in_off_the_event_
     def answer(request: httpx.Request) -> httpx.Response:
         try:
             asyncio.get_running_loop()
-            asked_from.append("the event loop")
+            asked_from.append("the event loop, awaited")
         except RuntimeError:
-            asked_from.append("a worker thread")
+            asked_from.append("a blocking client")
         return httpx.Response(401, json={"detail": "expired"})
 
-    store = auth.get_store()
-    monkeypatch.setattr(store, "_client", httpx.Client(transport=httpx.MockTransport(answer)))
+    account_store = auth.get_store()
+    monkeypatch.setattr(
+        account_store, "_loop_client",
+        lambda: httpx.AsyncClient(transport=httpx.MockTransport(answer)))
     client = _anonymous()
     client.cookies.set("auth_session", "a-token")
 
     client.get(path, follow_redirects=False)
+
     assert asked_from
-    assert set(asked_from) == {"a worker thread"}
+    assert set(asked_from) == {"the event loop, awaited"}

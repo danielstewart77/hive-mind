@@ -8,6 +8,7 @@ Serving the real app over a real port rather than TestClient: the page has to
 load its own templates, static files and xterm bundle the way a browser does.
 """
 
+import asyncio
 import os
 import socket
 import sys
@@ -26,18 +27,22 @@ playwright_api = pytest.importorskip(
 
 import auth  # noqa: E402
 import main as main_mod  # noqa: E402
+import store  # noqa: E402
+from hive_site import testing as accounts  # noqa: E402
 
 
 @pytest.fixture(scope="module")
 def live_app():
     tmp = tempfile.mkdtemp()
     os.environ["HIVE_DB_PATH"] = os.path.join(tmp, "stb.db")
+    os.environ["HIVE_DATABASE_URL"] = ""
     os.environ["HIVE_SECRET_KEY"] = "browser-test-secret"
+    asyncio.run(store.open())
 
     import uvicorn
 
-    user = auth.create_user("browser-test", "browser-pass", is_admin=True, replace=True)
-    token = auth.create_session_token(user)
+    user = accounts.make_user("browser-test", "browser-pass", is_admin=True, replace=True)
+    token = accounts.session_token(user)
 
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
@@ -47,7 +52,8 @@ def live_app():
     server = uvicorn.Server(
         uvicorn.Config(main_mod.app, host="127.0.0.1", port=port, log_level="error")
     )
-    threading.Thread(target=server.run, daemon=True).start()
+    serving = threading.Thread(target=server.run, daemon=True)
+    serving.start()
     for _ in range(100):
         try:
             socket.create_connection(("127.0.0.1", port), 0.2).close()
@@ -59,6 +65,13 @@ def live_app():
 
     yield f"http://127.0.0.1:{port}", token
     server.should_exit = True
+    # Waited for, not fired and forgotten. The app's own lifespan owns the
+    # store now, and its shutdown closes it — on the server's thread. Left
+    # unjoined, that close lands after the next module has opened its own
+    # store and every test in it then fails on a closed one.
+    serving.join(timeout=10)
+    if store.is_open():
+        asyncio.run(store.close())
 
 
 @pytest.fixture()
@@ -101,14 +114,41 @@ from multiuser_support import (  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _isolated_hive_db(request, tmp_path, monkeypatch):
-    """Every test on a db of its own, never the repo's data/hive.db.
+    """Every test on a db of its own, on the SQLite half, with it open.
+
+    The path first: the default is now a refusal rather than the repo's own
+    data/hive.db, but a test that named nothing would fail on the refusal
+    instead of running.
+
+    The half second. `store.open` picks its backend from
+    `HIVE_DATABASE_URL`, and on the machine that runs the hive that variable
+    is exported, so without this the whole suite would run against the
+    hive's live Postgres. The Postgres half is covered on purpose, in
+    `test_shared_account_store.py` and in the console's own parity suite.
+
+    And the open. Nothing opens the store on demand, so a test reaching a
+    route without this gets the refusal that says the lifespan never ran.
 
     The browser suites are the exception: their server and its signed-in
-    user live for the module, on the db `live_app` chose.
+    user live for the module, on the db `live_app` chose and opened.
     """
     if "live_app" in request.fixturenames or "page" in request.fixturenames:
+        yield
+        return
+    if store.is_open():
+        # A module-scoped live server in this file owns the store, and some
+        # of that module's tests do not ask for the browser. Opening a
+        # second store over the top would point every later statement at a
+        # different file while that server is still serving the first.
+        yield
         return
     monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
+    monkeypatch.setenv("HIVE_DATABASE_URL", "")
+    asyncio.run(store.open())
+    try:
+        yield
+    finally:
+        asyncio.run(store.close())
 
 
 @pytest.fixture(scope="session")
@@ -160,7 +200,8 @@ class Terminal:
         return auth.get_store()
 
     def create_user(self, username: str, temp_password: str):
-        return self.store().create_user(username, temp_password=temp_password)
+        return accounts.run(
+            self.store().create_user(username, temp_password=temp_password))
 
     def settled_user(self, username: str, password: str):
         """A user who has signed in with their temporary password and changed it."""
@@ -189,7 +230,7 @@ def terminal(request, tmp_path, monkeypatch, fake_comms):
         monkeypatch.setenv("HIVE_AUTH_BACKEND", "builtin")
         monkeypatch.setenv("HIVE_SEED_USERNAME", SEED_USERNAME)
         monkeypatch.setenv("HIVE_SEED_PASSWORD", SEED_PASSWORD)
-        auth.seed_first_user()
+        accounts.seed_first_user()
         yield Terminal("builtin")
         return
     source = request.getfixturevalue("auth_service_source")
@@ -209,5 +250,28 @@ def builtin_terminal(monkeypatch, fake_comms):
     monkeypatch.setenv("HIVE_AUTH_BACKEND", "builtin")
     monkeypatch.setenv("HIVE_SEED_USERNAME", SEED_USERNAME)
     monkeypatch.setenv("HIVE_SEED_PASSWORD", SEED_PASSWORD)
-    auth.seed_first_user()
+    accounts.seed_first_user()
     return Terminal("builtin")
+
+
+def pytest_pyfunc_call(pyfuncitem):
+    """Run coroutine tests without pulling in a plugin for it.
+
+    Most of this suite is synchronous and drives the site through its own
+    HTTP surface or a real browser. The tests that call the shared store
+    directly are coroutines now that it is one, and one plugin's default
+    event-loop scoping would then apply to every test in the repo. The same
+    hook, for the same reason, is in the console's suite.
+    """
+    import inspect
+
+    func = pyfuncitem.obj
+    if not inspect.iscoroutinefunction(func):
+        return None
+    kwargs = {
+        name: pyfuncitem.funcargs[name]
+        for name in pyfuncitem._fixtureinfo.argnames
+        if name in pyfuncitem.funcargs
+    }
+    asyncio.run(func(**kwargs))
+    return True

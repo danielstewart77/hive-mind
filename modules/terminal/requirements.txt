@@ -6,3 +6,7 @@ python-multipart>=0.0.9
 jinja2>=3.1
 itsdangerous>=2.2
 bcrypt>=4.1
+# The shared store's Postgres half runs on hive_data, which is installed
+# from a build context with `--no-deps` — so its one dependency is declared
+# here, where this image's resolver sees it beside everything else.
+asyncpg>=0.29

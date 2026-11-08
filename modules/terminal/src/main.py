@@ -1,11 +1,13 @@
 """Standalone web terminal: browser xterm.js attached to a live mind session.
 
 Split out of spark_to_bloom's /terminal page so the terminal has its own
-origin (terminal.sparktobloom.com). Auth is not reimplemented: auth.py and
-route_access.py are verbatim copies of the console's, signing in against the
-same store (hive.db or auth-service), so a session issued by either site
-verifies on both. Who may reach which route is terminal_access.TABLE,
-enforced in front of every route and websocket.
+origin (terminal.sparktobloom.com). Auth is not reimplemented and no longer
+copied either: `auth` and `store` here are the console's own modules,
+installed from the `hive_site` package, so a session issued by either site
+verifies on both and neither can drift from the other. Which store answers
+is this site's own `HIVE_DATABASE_URL` — the two sites are pointed
+independently. Who may reach which route is terminal_access.TABLE, enforced
+in front of every route and websocket.
 """
 
 import asyncio
@@ -37,15 +39,14 @@ from fastapi import (
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from starlette.concurrency import run_in_threadpool
 
 import auth
 import route_access
 import terminal_access
+import store
 from auth import (
     clear_session_cookie,
     get_current_user_from_request,
-    init_auth_db,
     require_auth,
     seed_first_user,
     set_session_cookie,
@@ -56,9 +57,13 @@ from config import BASE_DIR
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     del app
-    init_auth_db()
-    # In the hive deployment the auth db is shared with, and owned by, the
-    # hive site, so users already exist by the time this starts and the
+    # Opened here rather than on first use, for the reason the console's
+    # lifespan gives: a lazy open under two concurrent first requests builds
+    # two connection pools and holds double the connections against a
+    # ceiling shared with every other service in the hive.
+    await store.open()
+    # In the hive deployment the account store is shared with, and owned by,
+    # the hive site, so users already exist by the time this starts and the
     # seed variables are unset — making this call a no-op there.
     #
     # A standalone deployment has no sibling site to have created an
@@ -66,8 +71,11 @@ async def lifespan(app: FastAPI):
     # working login page, and no way in: every attempt renders "invalid
     # username or password", which is a truthful-looking message for
     # entirely the wrong reason.
-    seed_first_user()
-    yield
+    await seed_first_user()
+    try:
+        yield
+    finally:
+        await store.close()
 
 
 app = FastAPI(
@@ -112,8 +120,10 @@ def _asset_versions() -> dict[str, int]:
     }
 
 
-def _render_template(request: Request, template_name: str, **context) -> HTMLResponse:
-    context.setdefault("current_user", get_current_user_from_request(request))
+async def _render_template(request: Request, template_name: str,
+                           **context) -> HTMLResponse:
+    context.setdefault("current_user",
+                       await get_current_user_from_request(request))
     context.setdefault("asset_versions", _asset_versions())
     context["request"] = request
     return templates.TemplateResponse(request, template_name, context)
@@ -173,8 +183,9 @@ async def _proxy_session_events(session_id: str):
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     # Public routes are not resolved by the route table, so the lookup — a
-    # call to auth-service at home — happens here, off the event loop.
-    user = await run_in_threadpool(get_current_user_from_request, request)
+    # call to auth-service, or a read of this site's own store — happens
+    # here rather than in the middleware.
+    user = await get_current_user_from_request(request)
     if not user:
         return _login_redirect_for(request)
     if user.get("must_change"):
@@ -184,14 +195,15 @@ async def home(request: Request):
 
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request, next: str = "/terminal"):
-    current_user = await run_in_threadpool(get_current_user_from_request, request)
+    current_user = await get_current_user_from_request(request)
     if current_user:
         return RedirectResponse(url=_safe_next_path(next), status_code=303)
-    return _login_page(request, next_path=_safe_next_path(next))
+    return await _login_page(request, next_path=_safe_next_path(next))
 
 
-def _login_page(request: Request, *, status_code: int = 200, **context) -> HTMLResponse:
-    response = _render_template(
+async def _login_page(request: Request, *, status_code: int = 200,
+                      **context) -> HTMLResponse:
+    response = await _render_template(
         request,
         "login.html",
         current_user=None,
@@ -209,12 +221,13 @@ async def login_submit(
     password: str = Form(...),
     next: str = Form("/terminal"),
 ):
-    store = auth.get_store()
+    account_store = auth.get_store()
     try:
-        user, token = await run_in_threadpool(store.sign_in, username, password)
+        user, token = await account_store.sign_in(username, password)
     except auth.AuthError as exc:
-        return _login_page(
-            request, status_code=exc.status, error=exc.message, next_path=_safe_next_path(next)
+        return await _login_page(
+            request, status_code=exc.status, error=exc.message,
+            next_path=_safe_next_path(next),
         )
     target = "/password" if user.get("must_change") else _safe_next_path(next)
     response = RedirectResponse(url=target, status_code=303)
@@ -224,22 +237,23 @@ async def login_submit(
 
 @app.post("/logout")
 async def logout(request: Request):
-    store = auth.get_store()
-    token = auth.session_token(request, store)
+    account_store = auth.get_store()
+    token = auth.session_token(request, account_store)
     if token:
         with suppress(auth.ServiceUnavailable):
-            await run_in_threadpool(store.sign_out, token)
+            await account_store.sign_out(token)
     response = RedirectResponse(url="/login", status_code=303)
     clear_session_cookie(response)
     return response
 
 
-def _password_page(request: Request, *, status_code: int = 200, **context) -> HTMLResponse:
-    response = _render_template(
+async def _password_page(request: Request, *, status_code: int = 200,
+                         **context) -> HTMLResponse:
+    response = await _render_template(
         request,
         "password.html",
         current_user=None,
-        account=get_current_user_from_request(request),
+        account=await get_current_user_from_request(request),
         **context,
     )
     response.status_code = status_code
@@ -249,7 +263,7 @@ def _password_page(request: Request, *, status_code: int = 200, **context) -> HT
 
 @app.get("/password", response_class=HTMLResponse)
 async def password_page(request: Request):
-    return _password_page(request)
+    return await _password_page(request)
 
 
 @app.post("/password")
@@ -262,17 +276,18 @@ async def password_submit(
     """A signed-in user sets their own password — the only page a user who
     must change theirs can reach."""
     if new_password != confirm_password:
-        return _password_page(request, status_code=400, error="The new passwords do not match.")
-    store = auth.get_store()
+        return await _password_page(
+            request, status_code=400, error="The new passwords do not match.")
+    account_store = auth.get_store()
     try:
-        token = await run_in_threadpool(
-            store.change_password,
-            auth.session_token(request, store),
+        token = await account_store.change_password(
+            auth.session_token(request, account_store),
             current_password,
             new_password,
         )
     except auth.AuthError as exc:
-        return _password_page(request, status_code=exc.status, error=exc.message)
+        return await _password_page(request, status_code=exc.status,
+                                    error=exc.message)
     response = RedirectResponse(url="/terminal", status_code=303)
     set_session_cookie(response, token)
     return response
@@ -280,9 +295,9 @@ async def password_submit(
 
 @app.get("/terminal", response_class=HTMLResponse)
 async def terminal(request: Request):
-    if not get_current_user_from_request(request):
+    if not await get_current_user_from_request(request):
         return _login_redirect_for(request)
-    return _render_template(request, "terminal.html")
+    return await _render_template(request, "terminal.html")
 
 
 def _relative_age(now: int, last_active) -> str:
@@ -575,7 +590,7 @@ def _rename_headers() -> dict:
     return headers
 
 
-def require_auth_or_label_writer(request: Request) -> dict:
+async def require_auth_or_label_writer(request: Request) -> dict:
     """A logged-in person, or whoever holds the label token.
 
     Labels are the operator's, and the mind edits them on their behalf
@@ -590,7 +605,7 @@ def require_auth_or_label_writer(request: Request) -> dict:
     """
     if route_access.bearer_of(request) == terminal_access.LABELS:
         return {"username": "label-writer", "service": True}
-    return require_auth(request)
+    return await require_auth(request)
 
 
 @app.get("/api/terminal/labels")

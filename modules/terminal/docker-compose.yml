@@ -1,6 +1,15 @@
 services:
   terminal:
-    build: .
+    build:
+      context: .
+      additional_contexts:
+        # The modules this site shares with the console — accounts,
+        # sessions, the store and the authorization middleware — and the
+        # access layer underneath them. Both are private repositories, so
+        # each arrives as a build context rather than as a git install
+        # needing a credential in the build.
+        hive_site: ${HIVE_SITE_DIR:-/home/daniel/Storage/Dev/hive/hive_site}
+        hive_data: ${HIVE_DATA_DIR:-/home/daniel/Storage/Dev/hive-data}
     container_name: terminal-site
     restart: unless-stopped
     ports:
@@ -8,6 +17,12 @@ services:
     env_file: .env
     environment:
       - TERMINAL_HOST=0.0.0.0
+      # Which store answers, read by this site independently of the
+      # console's: set means the hive's one Postgres through `hive_data`,
+      # unset means the hive.db mounted below. That unset is the revert —
+      # one value in .env and a restart — and it can be done here while the
+      # console stays on Postgres.
+      - HIVE_DATABASE_URL=${HIVE_DATABASE_URL:-}
       - HIVE_DB_PATH=/data/hive.db
       # Parent domain so the session cookie is shared with the hive site,
       # which owns the same auth db and secret.

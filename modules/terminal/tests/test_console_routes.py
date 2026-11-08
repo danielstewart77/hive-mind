@@ -13,6 +13,7 @@ from starlette.testclient import TestClient
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import auth
+from hive_site import testing as accounts
 import main as main_mod
 
 
@@ -71,16 +72,16 @@ class _FakeAsyncClient:
 def _authed_client(tmp_path, monkeypatch):
     monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "stb.db"))
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
-    user = auth.create_user("daniel", "secret-pass", is_admin=True, replace=True)
+    user = accounts.make_user("daniel", "secret-pass", is_admin=True, replace=True)
     client = TestClient(main_mod.app)
-    client.cookies.set(auth.SESSION_COOKIE_NAME, auth.create_session_token(user))
+    client.cookies.set(auth.SESSION_COOKIE_NAME, accounts.session_token(user))
     return client
 
 
 def test_login_sets_cookie_and_redirects(tmp_path, monkeypatch):
     monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "stb.db"))
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
-    auth.create_user("daniel", "secret-pass", is_admin=True, replace=True)
+    accounts.make_user("daniel", "secret-pass", is_admin=True, replace=True)
     client = TestClient(main_mod.app)
 
     response = client.post(

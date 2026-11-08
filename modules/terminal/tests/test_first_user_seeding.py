@@ -13,6 +13,8 @@ import importlib
 import pytest
 from fastapi.testclient import TestClient
 
+from hive_site import testing as accounts
+
 
 @pytest.fixture
 def standalone(tmp_path, monkeypatch):
@@ -61,7 +63,7 @@ def test_the_seeded_account_is_an_administrator(standalone, monkeypatch):
     with TestClient(main.app):
         import auth
 
-        user = auth.BuiltinStore().get_user("daniel")
+        user = accounts.run(auth.BuiltinStore().get_user("daniel"))
 
     assert user is not None
     assert user["is_admin"]
@@ -76,13 +78,11 @@ def test_startup_creates_nothing_when_no_credentials_are_configured(
     main = load_app()
 
     with TestClient(main.app):
-        import auth
+        import store
 
-        conn = auth._connect()
-        try:
-            count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-        finally:
-            conn.close()
+        # Counted through the store rather than with a statement of this
+        # site's own: there is no SQL on this side of the wall any more.
+        count = accounts.run(store.count_users())
 
     assert count == 0
 

@@ -17,13 +17,25 @@ which renderer a tile is on; `window.screenText()` reads a tile's visible
 rows out of the buffer, which is the only way to read a canvas-painted
 tile without selecting it.
 
-Auth is not its own. `src/auth.py` (the account store) and
-`src/route_access.py` (the route table's enforcement) are verbatim copies of
-the hive console's, so the terminal signs in against the same store the
-console does — hive.db (`HIVE_DB_PATH`, the console's own db, mounted from
-the hive repo's `data/` directory) or auth-service, chosen by the same
-variables — and a session issued by either site verifies on both, scoped to
-the `sparktobloom.com` cookie domain. Accounts are managed on the console;
+Auth is not its own, and no longer a copy of the console's either. `auth`
+(the account store), `store` (the database under it) and `route_access` (the
+route table's enforcement) are the console's own modules, installed from the
+`hive_site` package in the hive repository as a second build context — the
+same way `hive_data` arrives. `src/auth.py`, `src/store.py` and
+`src/route_access.py` are three-line aliases binding them under the bare
+name. They were verbatim copies for a year and the copies drifted: this one
+still opened `hive.db` by hand and minted its own signing key into it while
+the console moved onto a store named by `HIVE_DATABASE_URL`, so a password
+change made in the console moved `session_version` in one store while this
+site read the old value out of the other — which from a chair is being
+signed out of the terminal and nowhere else.
+
+Which store answers is this site's own `HIVE_DATABASE_URL`: set means the
+hive's Postgres, unset means the `hive.db` at `HIVE_DB_PATH` (which has no
+default — an unnamed file is refused rather than invented). The two sites
+read it independently, so the terminal can be put back on the file while the
+console stays on Postgres. Either way a session issued by either site
+verifies on both, scoped to the `sparktobloom.com` cookie domain. Accounts are managed on the console;
 the terminal has no user pages of its own beyond changing your password, and
 a user holding a temporary password reaches nothing else until they do.
 
@@ -53,14 +65,19 @@ docker compose up -d --build
 Runs as container `terminal-site` on :8711, on the `hivemind` docker
 network (to reach `hive-comms` and the voice server). The hive site's
 `data/` directory is mounted directly, not copied, so both containers
-read and write the same `hive.db`. `src/` is bind-mounted, so template
-and static edits deploy live; route changes need a container restart.
+read and write the same `hive.db` when neither is on Postgres. `src/` is
+bind-mounted; the shared `hive_site` package is installed into the image,
+so a change to it reaches this site by a rebuild; route changes need a
+container restart.
 
-`.env` keys: `COMMS_BEARER_TOKEN`; `HIVE_SECRET_KEY` only if the console sets
-one (left unset on both, the key is generated once and kept in the shared
-db); and, when the console signs in through auth-service, the same
-`AUTH_SERVICE_URL` and `AUTH_SERVICE_ADMIN_TOKEN` (or `HIVE_AUTH_BACKEND`)
-the console holds. The two sites must use the same store.
+`.env` keys: `COMMS_BEARER_TOKEN`; `HIVE_DATA_DIR` and, if the hive checkout
+is not at the default path, `HIVE_SITE_DIR` — the two build contexts;
+`HIVE_DATABASE_URL` when this site is on Postgres; `HIVE_SECRET_KEY` only if
+the console sets one (left unset on both, the key is generated once and kept
+in the shared store); and, when the console signs in through auth-service,
+the same `AUTH_SERVICE_URL` and `AUTH_SERVICE_ADMIN_TOKEN` (or
+`HIVE_AUTH_BACKEND`) the console holds. The two sites must use the same
+store to share a session.
 
 ## Test
 

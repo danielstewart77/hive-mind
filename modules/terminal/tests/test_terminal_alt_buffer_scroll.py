@@ -14,6 +14,7 @@ socket.
 """
 
 import json
+import asyncio
 import os
 import re
 import socket
@@ -31,7 +32,9 @@ playwright_api = pytest.importorskip(
 )
 
 import auth  # noqa: E402
-import main as main_mod  # noqa: E402
+from hive_site import testing as accounts  # noqa: E402
+import main as main_mod
+import store  # noqa: E402
 
 PHONE = {"width": 412, "height": 780}
 SESSIONS = [
@@ -55,12 +58,16 @@ def live_app():
     """The real app on a real port — the page has to load its own assets."""
     tmp = tempfile.mkdtemp()
     os.environ["HIVE_DB_PATH"] = os.path.join(tmp, "stb.db")
+    os.environ["HIVE_DATABASE_URL"] = ""
     os.environ["HIVE_SECRET_KEY"] = "browser-test-secret"
+    # The module's own server, so the module's own open: the store is not
+    # opened on demand, and this fixture does not run the app's lifespan.
+    asyncio.run(store.open())
 
     import uvicorn
 
-    user = auth.create_user("browser-test", "browser-pass", is_admin=True, replace=True)
-    token = auth.create_session_token(user)
+    user = accounts.make_user("browser-test", "browser-pass", is_admin=True, replace=True)
+    token = accounts.session_token(user)
 
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
@@ -70,7 +77,8 @@ def live_app():
     server = uvicorn.Server(
         uvicorn.Config(main_mod.app, host="127.0.0.1", port=port, log_level="error")
     )
-    threading.Thread(target=server.run, daemon=True).start()
+    serving = threading.Thread(target=server.run, daemon=True)
+    serving.start()
     for _ in range(100):
         try:
             socket.create_connection(("127.0.0.1", port), 0.2).close()
@@ -82,6 +90,13 @@ def live_app():
 
     yield f"http://127.0.0.1:{port}", token
     server.should_exit = True
+    # Waited for, not fired and forgotten. The app's own lifespan owns the
+    # store now, and its shutdown closes it — on the server's thread. Left
+    # unjoined, that close lands after the next module has opened its own
+    # store and every test in it then fails on a closed one.
+    serving.join(timeout=10)
+    if store.is_open():
+        asyncio.run(store.close())
 
 
 def _open_tile(page, base, greeting):
