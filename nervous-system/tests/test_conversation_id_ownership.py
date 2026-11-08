@@ -261,13 +261,17 @@ def test_a_session_goes_out_under_both_the_old_and_the_new_names(comms_db) -> No
         try:
             await _seed(mgr, "sess-names", claude_sid="conv-both")
             session = await mgr.get_session("sess-names")
+            listed = [s for s in await mgr.list_sessions()
+                      if s["id"] == "sess-names"]
         finally:
             await close_manager(mgr)
-        return session
+        return session, listed
 
-    session = asyncio.run(scenario())
+    session, listed = asyncio.run(scenario())
 
-    assert session["claude_sid"] == session["conversation_id"] == "conv-both"
-    assert session["owner_type"] == session["surface"] == "telegram"
-    assert session["owner_ref"] == session["surface_id"] == "123"
-    assert session["summary"] == session["opening_line"] == "new chat"
+    assert len(listed) == 1
+    for read in (session, listed[0]):
+        assert read["claude_sid"] == read["conversation_id"] == "conv-both"
+        assert read["owner_type"] == read["surface"] == "telegram"
+        assert read["owner_ref"] == read["surface_id"] == "123"
+        assert read["summary"] == read["opening_line"] == "new chat"

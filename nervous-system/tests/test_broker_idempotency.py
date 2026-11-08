@@ -10,10 +10,16 @@ from __future__ import annotations
 
 import asyncio
 
+import hive_data
 import pytest
 
 from comms import broker
-from comms_broker_pg import broker_store, fetch, scratch_dsn  # noqa: F401 - fixtures
+from comms_broker_pg import (  # noqa: F401 - fixtures
+    broker_store,
+    fetch,
+    fetchval,
+    scratch_dsn,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -52,13 +58,58 @@ async def test_a_duplicate_racing_the_original_collapses_rather_than_raising(
     broker_store,
 ) -> None:
     """Two deliveries of one webhook at the same instant. Both reach the
-    insert; one lands and the other is told it already exists."""
-    outcomes = await asyncio.gather(
-        broker.insert_message(**_message("sms-+15551234567-236")),
-        broker.insert_message(**_message("sms-+15551234567-236")),
-    )
+    insert; one lands and the other is told it already exists.
+
+    The overlap is forced rather than hoped for: the conversation is held
+    from a unit of this test's own, both deliveries are started, and they
+    are released only once both are parked on that hold. Each therefore
+    starts before either has written anything — so a delivery that decided
+    "existing" from a read taken before its unit sees nothing and calls
+    itself new, and one that never takes the hold is not parked at all."""
+    release = asyncio.Event()
+    holding = asyncio.Event()
+
+    async def hold_the_conversation() -> None:
+        async with hive_data.transaction() as unit:
+            await unit.hold_conversation(CONVERSATION)
+            holding.set()
+            await release.wait()
+
+    holder = asyncio.create_task(hold_the_conversation())
+    await holding.wait()
+    deliveries = [
+        asyncio.create_task(
+            broker.insert_message(**_message("sms-+15551234567-236")))
+        for _ in range(2)
+    ]
+    try:
+        parked = await _advisory_waiters(want=2)
+        assert parked == 2, "both deliveries must wait on the conversation"
+        assert not any(d.done() for d in deliveries)
+    finally:
+        release.set()
+        await holder
+    outcomes = await asyncio.gather(*deliveries)
 
     assert sorted(o["existing"] for o in outcomes) == [False, True]
+    rows = await fetch(
+        "SELECT id FROM core.messages WHERE conversation_id = $1", CONVERSATION
+    )
+    assert len(rows) == 1
+
+
+async def _advisory_waiters(want: int, timeout: float = 5.0) -> int:
+    """How many sessions are queued on an advisory lock, polled until
+    `want` are or the timeout passes."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
+        waiting = await fetchval(
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' "
+            "AND NOT granted AND database = "
+            "(SELECT oid FROM pg_database WHERE datname = current_database())")
+        if waiting >= want or asyncio.get_running_loop().time() > deadline:
+            return waiting
+        await asyncio.sleep(0.02)
 
 
 async def test_two_different_messages_at_once_each_get_their_own_number(
@@ -79,3 +130,4 @@ async def test_two_different_messages_at_once_each_get_their_own_number(
         "ORDER BY message_number", CONVERSATION
     )
     assert [r["message_number"] for r in rows] == [1, 2, 3, 4, 5]
+

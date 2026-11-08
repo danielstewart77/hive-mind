@@ -33,6 +33,7 @@ import time
 import unicodedata
 from dataclasses import dataclass
 
+import hive_data
 from hive_data import broker_ops, core
 
 log = logging.getLogger(__name__)
@@ -276,18 +277,32 @@ async def attempt_claim(
         # Counted in the statement that reads it. Read-modify-write counts
         # rounds rather than guesses: parallel attempts all read one number
         # and all write the next, and the lockout never arrives.
-        counted = await core.count_phrase_attempt(mind_id=mind_id, surface=key)
-        attempts = int((counted.get("row") or {}).get("phrase_attempts") or 0)
+        #
+        # The count that reaches the limit and the phrase's retirement are one
+        # change: apart, a correct guess landing between them still claimed
+        # the bot past its own lockout.
+        async def _count_and_maybe_retire(unit) -> int:
+            await unit.hold(f"claim:{mind_id}:{key}")
+            counted = await core.count_phrase_attempt(
+                mind_id=mind_id, surface=key, unit=unit)
+            attempts = int((counted.get("row") or {}).get("phrase_attempts") or 0)
+            if attempts >= MAX_PHRASE_ATTEMPTS:
+                # Marked released as well as emptied. Without it the row reads
+                # as undecided, so the next container restart hands the bot to
+                # the configured adoption reference — a bot changing hands in
+                # silence, triggered by anybody who can message an unclaimed
+                # bot and guess wrong eight times. The operator mints again
+                # deliberately.
+                await broker_ops.update_claim(
+                    mind_id, key, phrase_hash=None, phrase_issued_at=None,
+                    phrase_expires_at=None, phrase_attempts=0,
+                    released_at=moment, unit=unit,
+                )
+            return attempts
+
+        async with hive_data.transaction() as unit:
+            attempts = await _count_and_maybe_retire(unit)
         if attempts >= MAX_PHRASE_ATTEMPTS:
-            # Marked released as well as emptied. Without it the row reads as
-            # undecided, so the next container restart hands the bot to the
-            # configured adoption reference — a bot changing hands in silence,
-            # triggered by anybody who can message an unclaimed bot and guess
-            # wrong eight times. The operator mints again deliberately.
-            await broker_ops.update_claim(
-                mind_id, key, phrase_hash=None, phrase_issued_at=None,
-                phrase_expires_at=None, phrase_attempts=0, released_at=moment,
-            )
             log.warning(
                 "surface_claims: phrase retired after %d wrong guesses mind=%s surface=%s",
                 attempts, mind_id, key,
@@ -295,7 +310,10 @@ async def attempt_claim(
             return ClaimOutcome(False, "too_many_attempts")
         return ClaimOutcome(False, "mismatch")
     won = await core.claim_if(
-        mind_id=mind_id, surface=key, expected={"claimed_ref": None},
+        # Only while the phrase that matched is still the one on offer: one
+        # retired by the lockout, or replaced by a fresh mint, claims nothing.
+        mind_id=mind_id, surface=key,
+        expected={"claimed_ref": None, "phrase_hash": row["phrase_hash"]},
         claimed_ref=ref, claimed_at=moment, phrase_hash=None,
         phrase_issued_at=None, phrase_expires_at=None, phrase_attempts=0,
         released_at=None,

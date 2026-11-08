@@ -190,6 +190,18 @@ def _legacy_row(row: dict | None) -> dict | None:
     return session
 
 
+def _storable(value: Any) -> Any:
+    """Text Postgres will take. A NUL character is refused by a `text`
+    column where SQLite stored it, and conversation text carries raw tool
+    output that can contain one: refused, the whole unit rolls back - a turn
+    missing from the ledger, a handover that never lands and is retried every
+    turn. Shown as the replacement character instead, so nothing is lost
+    silently and nothing is refused."""
+    if isinstance(value, str) and "\x00" in value:
+        return value.replace("\x00", "\ufffd")
+    return value
+
+
 async def _update_session(session_id: str, *, unit: Any = None, **fields: Any) -> int:
     """Set columns on one row, named as this module names them.
 
@@ -200,6 +212,7 @@ async def _update_session(session_id: str, *, unit: Any = None, **fields: Any) -
     for name, value in fields.items():
         if name in _FLAGS and value is not None:
             value = bool(value)
+        value = _storable(value)
         columns[_COLUMN_OF.get(name, name)] = value
     result = await core.update_session(session_id, unit=unit, **columns)
     return result["rows"]
@@ -745,6 +758,11 @@ class SessionManager:
             )
             if s.get("status") != "closed"
         ]
+        # `surface` in this listing has always been the display label, and
+        # the pickers read it as such, so the label overwrites the column's
+        # new name here. A consumer wanting the raw address reads
+        # `owner_type`; this listing's vocabulary changes once nothing reads
+        # the label under this name.
         for session in sessions:
             session["surface"] = self._surface_label(session.get("owner_type", ""))
             session["adoptable"] = False
@@ -1281,7 +1299,9 @@ class SessionManager:
                     "mind_id": entry.get("mind_id") or row["mind_id"],
                     "model": row["model"],
                     "summary": row["summary"],
+                    "opening_line": row["summary"],
                     "owner_type": row["owner_type"],
+                    "surface": row["owner_type"],
                     "context": self._context_reading(row, moment),
                 }
             )
@@ -1300,8 +1320,10 @@ class SessionManager:
                     "mind_id": row["mind_id"],
                     "model": row["model"],
                     "summary": row["summary"],
+                    "opening_line": row["summary"],
                     "name": row["name"],
                     "owner_type": row["owner_type"],
+                    "surface": row["owner_type"],
                     "last_active": row["last_active"],
                     "context": self._context_reading(row, moment),
                 }
@@ -1329,7 +1351,7 @@ class SessionManager:
 
         async def _write(unit) -> None:
             await core.record_turn(
-                session_id=active["id"], role=role, content=content,
+                session_id=active["id"], role=role, content=_storable(content),
                 created_at=now, unit=unit,
             )
             # This is the only write a browser-terminal turn ever makes, so it
@@ -1866,12 +1888,7 @@ class SessionManager:
                 raise SessionNotFound(f"Session not found: {session_id}")
             if session["status"] == "closed":
                 raise SessionClosed(f"Session {session_id} is closed")
-            if session["status"] == "suspended":
-                await _update_session(session_id, status="idle")
-                session = await self._get_row(session_id)
-                if session is None:  # pragma: no cover - row cannot vanish in this transaction
-                    raise ValueError(f"Session not found: {session_id}")
-
+            resuming = session["status"] == "suspended"
             adopting = bool(owner_ref) and (
                 session["owner_ref"] != owner_ref or session["owner_type"] != owner_type
             )
@@ -1880,21 +1897,38 @@ class SessionManager:
                 # handover is one live harness process per conversation, and
                 # retargeting ownership over a terminal that is still running puts
                 # a `--resume` process beside it, both appending to one transcript.
-                # Better a `/switch` that fails out loud.
+                # Better a `/switch` that fails out loud. Done before the unit:
+                # it is a call to the mind, and no transaction waits on one.
                 try:
                     await self.release_on_mind(session_id, "terminal")
                 except MindCallFailed as exc:
                     log.error("Refusing to adopt session %s: %s", session_id, exc)
                     raise
-                async def _retarget(unit) -> None:
-                    await unit.hold(f"session:{session_id}")
+
+            # Waking, retargeting and binding are one change: a failure between
+            # them left a session re-owned but bound to nothing, or awake and
+            # bound nowhere. `resume_session` makes the same writes as one unit.
+            async def _take(unit) -> None:
+                await unit.hold(f"session:{session_id}")
+                if adopting:
                     await _update_session(
                         session_id, owner_type=owner_type, owner_ref=owner_ref,
                         status="idle", unit=unit,
                     )
                     await core.unbind_session(session_id, unit=unit)
+                elif resuming:
+                    await _update_session(session_id, status="idle", unit=unit)
+                await core.bind_surface(
+                    client_type=client_type, client_ref=client_ref,
+                    session_id=session_id, unit=unit,
+                )
 
-                await _atomically(_retarget)
+            try:
+                await _atomically(_take)
+            except MissingReference as exc:
+                # Ended under the lock's nose: a kill takes no turn lock.
+                raise SessionNotFound(f"Session not found: {session_id}") from exc
+            if adopting:
                 log.info("Session %s adopted by %s/%s (was %s/%s)", session_id,
                          owner_type, owner_ref, session["owner_type"], session["owner_ref"])
                 log_event(
@@ -1902,18 +1936,9 @@ class SessionManager:
                     owner_type=owner_type, owner_ref=owner_ref,
                     previous_owner_type=session["owner_type"], previous_owner_ref=session["owner_ref"],
                 )
-                session = await self._get_row(session_id)
-                if session is None:  # pragma: no cover - row cannot vanish in this transaction
-                    raise ValueError(f"Session not found: {session_id}")
-
-            try:
-                await core.bind_surface(
-                    client_type=client_type, client_ref=client_ref,
-                    session_id=session_id,
-                )
-            except MissingReference as exc:
-                # Ended under the lock's nose: a kill takes no turn lock.
-                raise SessionNotFound(f"Session not found: {session_id}") from exc
+            session = await self._get_row(session_id)
+            if session is None:
+                raise SessionNotFound(f"Session not found: {session_id}")
 
             if session["status"] == "idle" and session_id not in self._procs:
                 # A row that never took a turn is a new conversation in all
@@ -2112,7 +2137,7 @@ class SessionManager:
 
         async def _ledger(unit) -> int:
             turn = await core.record_turn(
-                session_id=session_id, role="user", content=content,
+                session_id=session_id, role="user", content=_storable(content),
                 created_at=time.time(), unit=unit,
             )
             if resend:
@@ -2438,7 +2463,7 @@ class SessionManager:
         async def _write(unit) -> None:
             if reply:
                 await core.record_turn(
-                    session_id=session_id, role="assistant", content=reply,
+                    session_id=session_id, role="assistant", content=_storable(reply),
                     created_at=at, unit=unit,
                 )
             if landed:
@@ -2493,10 +2518,14 @@ class SessionManager:
         model = session["model"]
         kind = replaced["kind"]
         if kind == "overflow_again":
-            # Not sent again, and not answered: the turn never happened.
-            await core.delete_turn(replaced["user_turn_id"])
-        if kind == "overflow_again":
-            await self._clear_resend(session_id)
+            # Not sent again, and not answered: the turn never happened, and
+            # nothing is owed. One change, so the ledger and the debt agree.
+            async def _forget(unit) -> None:
+                await unit.hold(f"session:{session_id}")
+                await core.delete_turn(replaced["user_turn_id"], unit=unit)
+                await self._clear_resend(session_id, unit=unit)
+
+            await _atomically(_forget)
             row = await self._get_row(session_id) or {}
             size = len(content.encode("utf-8")) // 4
             threshold = row.get("context_threshold")
@@ -2557,28 +2586,36 @@ class SessionManager:
             await self._publish_session_event(session_id, notice)
             await self._publish_session_event(session_id, replaced["result"])
             return {"notices": [notice, replaced["result"]]}
-        if kind == "overflow":
-            # The failed turn never happened as far as the conversation is
-            # concerned: the message is about to be sent again, and a ledger
-            # holding it twice puts it twice into any late-turn fold. Taken
-            # out only now the fresh conversation exists; a replacement that
-            # failed leaves the message on record where it was typed.
-            await core.delete_turn(replaced["user_turn_id"])
         if kind == "goal":
             log_event(log, "session.goal_rotated", session_id=session_id,
                       mind_id=session["mind_id"], rounds_left=replaced["rounds"])
             return {"next": {"content": replaced["objective"],
                              "goal_rounds": replaced["rounds"]}}
 
-        # Recorded before anything is sent, so a gateway that dies in the gap
-        # still knows the message is owed (see resume_pending_resends) — and
-        # with everything it was sent with.
+        # The failed turn never happened as far as the conversation is
+        # concerned: the message is about to be sent again, and a ledger
+        # holding it twice puts it twice into any late-turn fold. Taken out
+        # only now the fresh conversation exists; a replacement that failed
+        # leaves the message on record where it was typed.
+        #
+        # And the debt is recorded in the same change, before anything is
+        # sent, so a gateway that dies in the gap still knows the message is
+        # owed (see resume_pending_resends) - with everything it was sent
+        # with. Two units here once lost the message from the ledger with
+        # nothing recording that it was owed.
         goal_rounds = replaced.get("goal_rounds")
-        await _update_session(
-            session_id, resend_content=content,
-            resend_images=json.dumps(images) if images else None,
-            resend_goal_rounds=goal_rounds, resend_dispatched_at=None,
-        )
+
+        async def _owe(unit) -> None:
+            await unit.hold(f"session:{session_id}")
+            await core.delete_turn(replaced["user_turn_id"], unit=unit)
+            await _update_session(
+                session_id, resend_content=content,
+                resend_images=json.dumps(images) if images else None,
+                resend_goal_rounds=goal_rounds, resend_dispatched_at=None,
+                unit=unit,
+            )
+
+        await _atomically(_owe)
         tokens = session.get("context_tokens")
         text = (
             f"{model} ran out of room for this conversation"
@@ -2594,11 +2631,11 @@ class SessionManager:
                 "next": {"content": content, "images": images,
                          "goal_rounds": goal_rounds, "resend": True}}
 
-    async def _clear_resend(self, session_id: str) -> None:
+    async def _clear_resend(self, session_id: str, *, unit: Any = None) -> None:
         """Nothing is owed a re-send on this row any more."""
         await _update_session(
             session_id, resend_content=None, resend_images=None,
-            resend_goal_rounds=None, resend_dispatched_at=None,
+            resend_goal_rounds=None, resend_dispatched_at=None, unit=unit,
         )
 
     async def pending_resends(self) -> list[dict]:

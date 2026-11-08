@@ -780,3 +780,38 @@ async def test_the_shared_provenance_is_not_a_holder(db):
     two services disagree about whether it names a party."""
     with pytest.raises(ValueError):
         await ua.put_credential("shared", "daniel", "a-value")
+
+
+def test_a_database_that_does_not_answer_is_503_not_500_or_401(
+        broker_path, monkeypatch):
+    """Postgres restarting is neither a bad credential nor a server bug.
+    SQLite almost never raised here; a pool can, and every authenticated
+    request and websocket handshake answered 500 while it did."""
+    import hive_data
+
+    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", ADMIN_TOKEN)
+    app, _ = _gated_app(broker_path, {})
+    real_resolve = ua.resolve_caller
+
+    async def store_down(_bearer):
+        raise hive_data.errors.Unreachable("connection refused")
+
+    monkeypatch.setattr(ua, "resolve_caller", store_down)
+    assert _get(app, "/sessions", token=SLOAN_TOKEN).status_code == 503
+    monkeypatch.setattr(ua, "resolve_caller", real_resolve)
+
+
+def test_a_conversation_lookup_that_times_out_is_503_not_404(
+        broker_path, monkeypatch):
+    """A failed read is not an absent row: a 404 tells the user their
+    conversation does not exist because a lock timed out."""
+    import hive_data
+
+    app, _ = _gated_app(broker_path, {})
+    for layer in app.user_middleware:
+        if layer.cls is ua.UserAccess:
+            async def timed_out(_session_id):
+                raise hive_data.errors.TimedOut("statement deadline")
+            layer.kwargs["session_mind"] = timed_out
+
+    assert _get(app, "/sessions/s-session", token=SLOAN_TOKEN).status_code == 503

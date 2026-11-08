@@ -2009,7 +2009,9 @@ async def broker_delete_mind(name: str):
     """
     try:
         deleted = await broker.delete_mind(name)
-    except (broker.MindHasConversations, broker.MindStillReferenced) as exc:
+    except (broker.MindHasConversations, broker.MindStillReferenced,
+            hive_data.errors.Conflict) as exc:
+        # The last: the name moved to another mind while this ran.
         return JSONResponse({"error": str(exc)}, status_code=409)
     if not deleted:
         return JSONResponse({"error": f"Mind '{name}' not found"}, status_code=404)

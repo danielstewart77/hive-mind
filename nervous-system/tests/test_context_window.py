@@ -1772,3 +1772,38 @@ def test_only_a_mind_saying_it_holds_no_pane_reads_as_no_pane(comms_db, answer):
     assert mind.kills("sess-1") == []
     assert mind.spawns() == []
     assert after["claude_sid"] == "conv-1"
+
+
+def test_an_overflow_whose_debt_cannot_be_recorded_keeps_the_message_in_the_ledger(
+        comms_db, monkeypatch):
+    """Taking the turn out and recording that it is owed a re-send are one
+    change. Two units lost the message from the ledger with nothing saying it
+    was owed when the second write failed."""
+    from comms import sessions as sessions_module
+    real_update = sessions_module._update_session
+
+    async def _fails_on_the_debt(session_id, *, unit=None, **fields):
+        if fields.get("resend_content"):
+            await real_update(session_id, unit=unit, **fields)
+            raise RuntimeError("connection lost recording the re-send")
+        return await real_update(session_id, unit=unit, **fields)
+
+    async def scenario():
+        mgr = await _manager()
+        await _seed(mgr)
+        await _measured(mgr, tokens=180_000)
+        monkeypatch.setattr(sessions_module, "_update_session", _fails_on_the_debt)
+        mind = Mind(turns=[TOOL_TURN, [DONE]])
+        try:
+            await _turn(mgr, mind, "ship it")
+        except RuntimeError:
+            pass
+        monkeypatch.setattr(sessions_module, "_update_session", real_update)
+        ledger = await mgr.get_session_turns("sess-1")
+        row = await mgr._get_row("sess-1")
+        await _close(mgr)
+        return ledger, row
+
+    ledger, row = _run(scenario())
+    assert "ship it" in [t["content"] for t in ledger]
+    assert row["resend_content"] is None

@@ -4,7 +4,12 @@
 # Run detached, because the restart in the middle of it ends every live
 # conversation — including the one that started it:
 #
-#     setsid nohup scripts/cutover-comms-lucent.sh >/dev/null 2>&1 &
+#     PRE_SHA=711e0ef setsid nohup scripts/cutover-comms-lucent.sh >/dev/null 2>&1 &
+#
+# PRE_SHA is the hive_mind commit whose comms and lucent source the running
+# containers loaded; the way back checks that source out under the old images.
+# The build installs whatever branch the hive-data checkout has out, so that
+# checkout must be on main with the comms operations merged.
 #
 # Everything it does is written to $LOG, and the outcome to $LOG.result as one
 # word (switched, refused, reverted, failed-check) so whoever reads it next does
@@ -68,12 +73,18 @@ back_to_the_files() {
   # is dirty on purpose after this, and the log says so.
   docker tag hive_mind-comms:pre-cutover hive_mind-comms:latest
   docker tag hive_mind-lucent:pre-cutover hive_mind-lucent:latest
-  git -C "$ROOT" checkout -q "$PRE_SHA" -- nervous-system/comms nervous-system/lucent_api docker-compose.yml
-  docker compose up -d --no-build --force-recreate comms lucent
+  # Only the tracked source: docker-compose.yml is per-host and untracked, and
+  # one unmatched pathspec makes git restore nothing at all. The compose the
+  # old services ran under is the frozen copy beside it.
+  if ! git -C "$ROOT" checkout -q "$PRE_SHA" -- nervous-system/comms nervous-system/lucent_api; then
+    say "COULD NOT RESTORE THE OLD SOURCE — operator needed"
+    return 1
+  fi
+  docker compose -f "$PRE_COMPOSE" up -d --no-build --force-recreate comms lucent
   wait_healthy http://127.0.0.1:8426/health 120 && wait_healthy http://127.0.0.1:8425/health 120 \
     && say "the services answer on the files again" \
     || say "THE SERVICES DO NOT ANSWER ON THE FILES EITHER — operator needed"
-  say "working tree holds $PRE_SHA for nervous-system/comms, lucent_api and docker-compose.yml, deliberately"
+  say "working tree holds $PRE_SHA for nervous-system/comms and lucent_api, and the services run under $PRE_COMPOSE, deliberately"
 }
 
 revert() {
@@ -85,6 +96,9 @@ revert() {
 say "cutover of comms and lucent, log $LOG"
 [[ -n "$CONTAINER_DSN" ]] || finish refused 2
 PRE_SHA=${PRE_SHA:?set PRE_SHA to the hive_mind commit the running services were built from}
+PRE_COMPOSE="$ROOT/docker-compose.pre-cutover.yml"
+[[ -f "$PRE_COMPOSE" ]] || { say "no $PRE_COMPOSE, so no way back"; finish refused 2; }
+git -C "$ROOT" cat-file -e "$PRE_SHA^{commit}" || { say "$PRE_SHA is not a commit"; finish refused 2; }
 say "running services were built from $PRE_SHA; switching to $(git rev-parse --short HEAD)"
 
 say "1. tagging the images the running containers were started from as pre-cutover"
@@ -94,6 +108,9 @@ say "1. tagging the images the running containers were started from as pre-cutov
 # that has never served.
 docker tag "$(docker inspect -f '{{.Image}}' hive-comms)" hive_mind-comms:pre-cutover || finish refused 2
 docker tag "$(docker inspect -f '{{.Image}}' hive-lucent)" hive_mind-lucent:pre-cutover || finish refused 2
+
+git -C /home/daniel/Storage/Dev/hive-data cat-file -e HEAD:hive_data/broker_ops.py 2>/dev/null \
+  || { say "the hive-data checkout has no broker_ops; the new comms would not start"; finish refused 2; }
 
 say "2. building the new images while the old ones serve"
 docker compose build comms lucent || finish refused 2
@@ -113,9 +130,19 @@ say "5. raising the write fence"
 "$PY" -m unified_db.fence --only broker --only sessions --only lucent || { revert; finish reverted 1; }
 
 say "6. starting comms and lucent on Postgres"
-docker compose up -d --no-build --force-recreate comms lucent
-if ! wait_healthy http://127.0.0.1:8425/health 180 || ! wait_healthy http://127.0.0.1:8426/health 180; then
-  docker compose logs --tail 80 comms lucent
+# Comms first, lucent only once comms answers: every turn's Stop hook writes a
+# memory to lucent, so a lucent that came up on Postgres while comms failed
+# would take writes the revert then strands in a database nothing reads.
+docker compose up -d --no-build --force-recreate comms
+if ! wait_healthy http://127.0.0.1:8426/health 180; then
+  docker compose logs --tail 80 comms
+  revert
+  finish reverted 1
+fi
+docker compose up -d --no-build --force-recreate lucent
+if ! wait_healthy http://127.0.0.1:8425/health 180; then
+  docker compose logs --tail 80 lucent
+  say "comms was up on Postgres for the lucent wait; anything it wrote in that window stays in Postgres"
   revert
   finish reverted 1
 fi

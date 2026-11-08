@@ -346,3 +346,16 @@ def test_reporting_for_a_client_with_no_active_session_is_refused(comms_db):
         return await mgr.report_context_for_client("terminal", "nobody", tokens=1)
 
     assert _run(scenario())["ok"] is False
+
+
+def test_the_live_listing_carries_the_new_names_beside_the_old(comms_db):
+    async def scenario():
+        mgr = await _make_manager()
+        await _session_row(mgr, "s1")
+        await mgr._publish_session_event("s1", TEXT_EVENT)
+        return await mgr.live_dashboard(now=50.0)
+
+    row = _run(scenario())["sessions"][0]
+    assert row["surface"] == row["owner_type"]
+    assert row["opening_line"] == row["summary"]
+    assert row["owner_type"]

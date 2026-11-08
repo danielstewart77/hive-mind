@@ -89,11 +89,18 @@ services:
     build:
       context: ./nervous-system
       dockerfile: comms/Dockerfile
+      additional_contexts:
+        # The access layer, from its own checkout; comms installs it at build.
+        hive_data: ${HIVE_DATA_DIR:-../hive-data}
     container_name: hive-comms
     init: true
     restart: unless-stopped
     networks:
       - hivemind
+    depends_on:
+      # The pool opens in the lifespan; wait for the database to answer.
+      hive-postgres:
+        condition: service_healthy
     # Resolve host.docker.internal to the host gateway on Linux so comms
     # can dispatch HTTP to bare-metal minds.
     extra_hosts:

@@ -16,6 +16,7 @@ import time
 
 import httpx
 import pytest
+import pytest_asyncio
 
 from comms import broker
 from comms_broker_pg import (  # noqa: F401 - fixtures
@@ -33,14 +34,39 @@ OTHER = "5e1f0000-0000-4000-8000-0000000000aa"
 ADMIN = "admin-credential-for-tests"  # secret-guard: allow
 
 
-async def _with_a_conversation(mind_id: str) -> None:
+async def _with_conversations(mind_id: str, count: int = 2) -> None:
     now = time.time()
+    for n in range(count):
+        await execute(
+            "INSERT INTO core.sessions "
+            "(id, surface, surface_id, mind_id, status, created_at, last_active) "
+            "VALUES ($1, 'telegram', '1', $2, 'running', $3, $3)",
+            f"session-{n}-of-{mind_id}", mind_id, now,
+        )
+
+
+@pytest_asyncio.fixture
+async def graph_rows():
+    """Removes the graph rows a test seeds with explicit ids. The wipe
+    leaves `memory` alone, and rows left behind there put the identity
+    sequence behind the table, which the next pool open refuses."""
+    yield
+    await execute("DELETE FROM memory.edges WHERE id = 9101")
+    await execute("DELETE FROM memory.nodes WHERE id IN (9001, 9002)")
+
+
+async def _named_by_the_memory_graph(mind_id: str) -> None:
+    """Two nodes and an edge between them, all stamped with the mind."""
     await execute(
-        "INSERT INTO core.sessions "
-        "(id, surface, surface_id, mind_id, status, created_at, last_active) "
-        "VALUES ($1, 'telegram', '1', $2, 'running', $3, $3)",
-        f"session-of-{mind_id}", mind_id, now,
-    )
+        "INSERT INTO memory.schema_types (name, kind, property_schema, created_at) "
+        "VALUES ('Concept', 'first-class', '{}', 0) ON CONFLICT DO NOTHING")
+    for node in (9001, 9002):
+        await execute(
+            "INSERT INTO memory.nodes (id, mind_id, type, name) "
+            "VALUES ($1, $2, 'Concept', $3)", node, mind_id, f"n{node}")
+    await execute(
+        "INSERT INTO memory.edges (id, mind_id, source_id, target_id, type) "
+        "VALUES (9101, $1, 9001, 9002, 'RELATES_TO')", mind_id)
 
 
 async def _grant(mind_name: str, key: str) -> None:
@@ -54,14 +80,14 @@ async def test_a_mind_with_conversations_is_refused_by_name_and_left_whole(
     broker_store,
 ) -> None:
     await put_mind(MIND, "doomed")
-    await _with_a_conversation(MIND)
+    await _with_conversations(MIND, 2)
     await _grant("doomed", "GITHUB_TOKEN")
 
     with pytest.raises(broker.MindHasConversations) as refused:
         await broker.delete_mind("doomed")
 
     assert "conversation" in str(refused.value)
-    assert refused.value.sessions == 1
+    assert refused.value.sessions == 2
     assert await fetchval(
         "SELECT count(*) FROM core.minds WHERE mind_id = $1", MIND) == 1
     # The refusal is the whole unit's: the grants are not half-cleared.
@@ -106,7 +132,7 @@ async def test_the_console_is_told_the_mind_still_has_conversations(
     from comms import server
 
     await put_mind(MIND, "doomed")
-    await _with_a_conversation(MIND)
+    await _with_conversations(MIND, 2)
 
     transport = httpx.ASGITransport(app=server.app)
     async with httpx.AsyncClient(
@@ -116,27 +142,18 @@ async def test_the_console_is_told_the_mind_still_has_conversations(
         answer = await client.delete("/broker/minds/doomed")
 
     assert answer.status_code == 409
-    assert "still has 1 conversation" in answer.json()["error"]
+    assert "still has 2 conversations" in answer.json()["error"]
 
 
 async def test_a_mind_the_memory_graph_still_names_is_refused_and_left_whole(
-    broker_store,
+    broker_store, graph_rows,
 ) -> None:
     """`memory.edges.mind_id` is RESTRICT too: a mind with no conversations
     but with knowledge-graph edges is refused by name, not with a 500, and
     the refusal undoes the grant clearing that ran before it."""
     await put_mind(MIND, "remembered")
     await _grant("remembered", "GITHUB_TOKEN")
-    await execute(
-        "INSERT INTO memory.schema_types (name, kind, property_schema, created_at) "
-        "VALUES ('Concept', 'first-class', '{}', 0) ON CONFLICT DO NOTHING")
-    for node in (9001, 9002):
-        await execute(
-            "INSERT INTO memory.nodes (id, mind_id, type, name) "
-            "VALUES ($1, $2, 'Concept', $3)", node, MIND, f"n{node}")
-    await execute(
-        "INSERT INTO memory.edges (id, mind_id, source_id, target_id, type) "
-        "VALUES (9101, $1, 9001, 9002, 'RELATES_TO')", MIND)
+    await _named_by_the_memory_graph(MIND)
 
     with pytest.raises(broker.MindStillReferenced):
         await broker.delete_mind("remembered")
@@ -146,3 +163,27 @@ async def test_a_mind_the_memory_graph_still_names_is_refused_and_left_whole(
     assert await fetchval(
         "SELECT count(*) FROM core.secret_scopes WHERE mind_name = 'remembered'"
     ) == 1
+
+
+async def test_the_console_is_told_the_memory_graph_still_names_the_mind(
+    broker_store, graph_rows, monkeypatch,
+) -> None:
+    """The graph refusal reaches the console as a 409 with its sentence,
+    not as the database's foreign-key violation surfacing as a 500."""
+    monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", ADMIN)
+    from comms import server
+
+    await put_mind(MIND, "remembered")
+    await _named_by_the_memory_graph(MIND)
+
+    transport = httpx.ASGITransport(app=server.app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://comms.test",
+        headers={"Authorization": f"Bearer {ADMIN}"},
+    ) as client:
+        answer = await client.delete("/broker/minds/remembered")
+
+    assert answer.status_code == 409
+    assert "still referenced" in answer.json()["error"]
+    assert await fetchval(
+        "SELECT count(*) FROM core.minds WHERE mind_id = $1", MIND) == 1

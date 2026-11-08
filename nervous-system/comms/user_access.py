@@ -87,6 +87,13 @@ from hive_data import broker_ops, core
 from starlette.routing import BaseRoute
 from starlette.types import Receive, Scope, Send
 
+# The store not answering, as opposed to answering no.
+_STORE_DOWN = (
+    hive_data.errors.Unreachable, hive_data.errors.TimedOut,
+    hive_data.errors.NoConnectionAvailable, hive_data.errors.NotInitialised,
+)
+STORE_DOWN_BODY = b'{"detail":"the hive database is not answering"}'
+
 # ---------------------------------------------------------------------------
 # Route classes
 # ---------------------------------------------------------------------------
@@ -675,7 +682,14 @@ class UserAccess:
             # this must never do, so it refuses rather than passing through.
             await self._refuse(scope, receive, send, 503, b'{"detail":"starting"}')
             return
-        caller = await resolve_caller(bearer_of(scope))
+        try:
+            caller = await resolve_caller(bearer_of(scope))
+        except _STORE_DOWN:
+            # A database that did not answer is not a bad credential and not
+            # a server bug: every authenticated request and websocket
+            # handshake would otherwise come back 500 while Postgres restarts.
+            await self._refuse(scope, receive, send, 503, STORE_DOWN_BODY)
+            return
         if rule.kind == ADMIN:
             if not os.environ.get("COMMS_ADMIN_BEARER_TOKEN", ""):
                 # The same sentence `require_admin_bearer` gives. A 401 here
@@ -703,7 +717,13 @@ class UserAccess:
             return
         if rule.kind == OWNER and not caller.sees_everything():
             session_id = params.get(rule.param or "") or ""
-            mind_id = await self._session_mind(session_id)
+            try:
+                mind_id = await self._session_mind(session_id)
+            except _STORE_DOWN:
+                # A read that failed is not an absent row: answering 404 would
+                # tell the user their conversation does not exist.
+                await self._refuse(scope, receive, send, 503, STORE_DOWN_BODY)
+                return
             # An absent session and someone else's session answer alike. The
             # handler would 404 the first anyway; what matters is that the
             # second does not answer differently and reveal that it exists.

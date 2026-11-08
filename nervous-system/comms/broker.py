@@ -58,6 +58,15 @@ async def create_conversation(conversation_id: str) -> None:
 # ---------------------------------------------------------------------------
 # Messages
 # ---------------------------------------------------------------------------
+def _storable(value):
+    """A NUL character is refused by a Postgres `text` column where SQLite
+    stored it; one in a message must not fail the write. Same rule as the
+    session manager's."""
+    if isinstance(value, str) and "\x00" in value:
+        return value.replace("\x00", "\ufffd")
+    return value
+
+
 async def insert_message(
     *,
     message_id: str,
@@ -95,7 +104,7 @@ async def insert_message(
         written = await core.add_message(
             id=message_id, conversation_id=conversation_id,
             from_mind=from_mind, to_mind=to_mind, message_number=number,
-            content=content, rolling_summary=rolling_summary,
+            content=_storable(content), rolling_summary=_storable(rolling_summary),
             metadata=metadata_json, status=status, timestamp=time.time(),
             unit=unit)
         fetched = await broker_ops.get_message(message_id, unit=unit)
@@ -134,7 +143,7 @@ async def update_message_status(
     if recipient_session_id is not None:
         fields["recipient_session_id"] = recipient_session_id
     if response_error is not None:
-        fields["response_error"] = response_error
+        fields["response_error"] = _storable(response_error)
     await core.update_message(message_id, **fields)
 
 
@@ -459,7 +468,9 @@ async def register_mind(
                 fields["voice"] = voice
             if voice_engine:
                 fields["voice_engine"] = voice_engine
-            await broker_ops.update_mind(mind_id, unit=unit, **fields)
+            changed = await broker_ops.update_mind(mind_id, unit=unit, **fields)
+            if changed["rows"] == 0:  # pragma: no cover - the hold rules it out
+                raise RuntimeError(f"mind {mind_id} vanished under its own hold")
         else:
             await core.upsert_mind(
                 mind_id=mind_id, name=name, gateway_url=gateway_url,
@@ -607,9 +618,21 @@ async def delete_mind(name: str) -> bool:
     metering or audit rows.
     """
     try:
+        # The identity's hold - the one `register_mind` takes - rather than
+        # the name's. Under a name hold a mind re-registering at boot read
+        # itself, this deleted it, and the registration's update changed
+        # nothing and answered as though it had. A unit takes one hold and
+        # takes it before any read, so the identity is looked up first and
+        # confirmed under the hold.
+        named = await core.get_mind_by_name(name)
+        if named is None:
+            return False
         async with hive_data.transaction() as unit:
-            await unit.hold(f"hive:mind-name:{name}")
+            await unit.hold(f"hive:mind:{named['mind_id']}")
             mind = await core.get_mind_by_name(name, unit=unit)
+            if mind is not None and mind["mind_id"] != named["mind_id"]:
+                raise hive_data.errors.Conflict(
+                    f"the mind named {name} changed while it was being deleted")
             if mind is None:
                 deleted = False
             else:

@@ -319,3 +319,47 @@ def test_a_refused_release_leaves_the_session_where_it_was(comms_db):
             await close_manager(mgr)
 
     _run(scenario())
+
+
+def test_an_adoption_whose_binding_fails_leaves_the_session_where_it_was(
+        comms_db, monkeypatch):
+    """Retargeting and binding are one change. A failure binding the new
+    surface used to leave the row re-owned by it and bound to nothing - the
+    old surface had lost it and the new one never got it."""
+    from comms import sessions as sessions_module
+
+    async def scenario():
+        mgr = await _make_manager()
+        try:
+            await _seed(mgr, "term-1")
+            await execute(
+                "INSERT INTO core.active_sessions (client_type, client_ref, session_id) "
+                "VALUES ('web', 'terminal-tile-1', 'term-1')"
+            )
+
+            async def _release(session_id, surface):
+                return True
+
+            mgr.release_on_mind = _release
+            real_bind = sessions_module.core.bind_surface
+
+            async def _bind_fails(**kw):
+                await real_bind(**kw)
+                raise RuntimeError("connection lost after the bind")
+
+            monkeypatch.setattr(sessions_module.core, "bind_surface", _bind_fails)
+
+            try:
+                await mgr.activate_session(
+                    "term-1", TELEGRAM, CHAT, owner_type=TELEGRAM, owner_ref=CHAT
+                )
+            except RuntimeError:
+                pass
+
+            row = await _row(mgr, "term-1")
+            assert (row["owner_type"], row["owner_ref"]) == ("web", "terminal")
+            assert await _bindings(mgr, "term-1") == [("web", "terminal-tile-1")]
+        finally:
+            await close_manager(mgr)
+
+    _run(scenario())
