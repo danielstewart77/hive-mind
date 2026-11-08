@@ -16,6 +16,8 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
+from comms_pg_fixture import comms_db, execute, fetch, scratch_dsn  # noqa: F401 - fixtures
+
 
 #: These tests are about their own subject, not about authorization, so they
 #: present the admin credential. They used to clear every token instead and
@@ -120,9 +122,7 @@ class _FakeReleaseResponse:
 
 
 @pytest.fixture
-def app_client(monkeypatch, tmp_path):
-    monkeypatch.setenv("BROKER_DB_PATH", str(tmp_path / "broker.db"))
-    monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "sessions.db"))
+def app_client(monkeypatch, comms_db):  # noqa: F811 - the imported fixture
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", GRILL_ADMIN)
 
     import importlib
@@ -134,31 +134,41 @@ def app_client(monkeypatch, tmp_path):
         yield client, server_module
 
 
+async def _register_mind(mind_id="ada", session_token=None):
+    """A registration, written on a plain connection.
+
+    Plain SQL rather than the pool: the pool belongs to the app's own loop,
+    and these helpers run under `asyncio.run` beside it.
+    """
+    now = time.time()
+    await execute(
+        "INSERT INTO core.minds (mind_id, name, gateway_url, model, harness,"
+        " registered_at, last_seen, session_token)"
+        " VALUES ($1, $1, 'http://mind.test:8420', 'opus', 'claude', $2, $2, $3)"
+        " ON CONFLICT (mind_id) DO UPDATE SET session_token = EXCLUDED.session_token",
+        mind_id, now, session_token,
+    )
+
+
 async def _seed_session_and_mind(
     server_module, session_id="sess-attach", mind_id="ada", claude_sid="claude-abc",
     client_ref=None, harness_sid=None,
 ):
-    from comms import broker
-
-    mgr = server_module.session_mgr
+    await _register_mind(mind_id)
     now = time.time()
-    await mgr._db.execute(
-        """INSERT INTO sessions (id, claude_sid, harness_sid, owner_type, owner_ref, model, created_at,
-                                  last_active, status, mind_id, summary)
-           VALUES (?, ?, ?, 'web', 'u1', 'opus', ?, ?, 'running', ?, 'terminal attach')""",
-        (session_id, claude_sid, harness_sid, now, now, mind_id),
+    await execute(
+        """INSERT INTO core.sessions (id, conversation_id, harness_sid, surface, surface_id,
+                                      model, created_at, last_active, status, mind_id,
+                                      opening_line)
+           VALUES ($1, $2, $3, 'web', 'u1', 'opus', $4, $4, 'running', $5, 'terminal attach')""",
+        session_id, claude_sid, harness_sid, now, mind_id,
     )
     if client_ref:
-        await mgr._db.execute(
-            """INSERT INTO active_sessions (client_type, client_ref, session_id)
-               VALUES ('web', ?, ?)""",
-            (client_ref, session_id),
+        await execute(
+            """INSERT INTO core.active_sessions (client_type, client_ref, session_id)
+               VALUES ('web', $1, $2)""",
+            client_ref, session_id,
         )
-    await mgr._db.commit()
-    await broker.register_mind(
-        mgr.broker_db, mind_id=mind_id, name=mind_id, gateway_url="http://mind.test:8420",
-        model="opus", harness="claude", owner="daniel",
-    )
 
 
 class TestWsAttach:
@@ -181,16 +191,17 @@ class TestWsAttach:
                 ws.receive_bytes()
 
     def test_unregistered_mind_closes_4404(self, app_client):
+        """A row naming no registered mind. `sessions.mind_id` is a real
+        foreign key now, so the one such row left is one naming no mind."""
         client, server_module = app_client
-        mgr = server_module.session_mgr
         now = time.time()
-        _run(mgr._db.execute(
-            """INSERT INTO sessions (id, claude_sid, owner_type, owner_ref, model, created_at,
-                                      last_active, status, mind_id, summary)
-               VALUES ('sess-orphan', 'x', 'web', 'u1', 'opus', ?, ?, 'running', 'ghost', 's')""",
-            (now, now),
+        _run(execute(
+            """INSERT INTO core.sessions (id, conversation_id, surface, surface_id, model,
+                                          created_at, last_active, status, mind_id,
+                                          opening_line)
+               VALUES ('sess-orphan', 'x', 'web', 'u1', 'opus', $1, $1, 'running', NULL, 's')""",
+            now,
         ))
-        _run(mgr._db.commit())
 
         with pytest.raises(Exception):
             with client.websocket_connect("/sessions/sess-orphan/attach") as ws:
@@ -248,10 +259,9 @@ class TestWsAttach:
             ws.receive_bytes()
 
         assert "client_ref=terminal-sess-attach" in _FakeHttpSession.requested_url
-        mgr = server_module.session_mgr
-        bound = _run(mgr._db.execute_fetchall(
-            "SELECT client_type, client_ref FROM active_sessions WHERE session_id = ?",
-            ("sess-attach",),
+        bound = _run(fetch(
+            "SELECT client_type, client_ref FROM core.active_sessions WHERE session_id = $1",
+            "sess-attach",
         ))
         assert [(r["client_type"], r["client_ref"]) for r in bound] == [
             ("terminal", "terminal-sess-attach")
@@ -275,9 +285,7 @@ class TestWsAttach:
         """A pane opened on a conversation set to `/effort high` runs at high."""
         client, server_module = app_client
         _run(_seed_session_and_mind(server_module))
-        mgr = server_module.session_mgr
-        _run(mgr._db.execute("UPDATE sessions SET effort = 'high' WHERE id = 'sess-attach'"))
-        _run(mgr._db.commit())
+        _run(execute("UPDATE core.sessions SET effort = 'high' WHERE id = 'sess-attach'"))
 
         fake_ws = _FakeMindWS(incoming=[b"hi\r\n"])
         _FakeHttpSession.ws_to_return = fake_ws
@@ -294,9 +302,7 @@ class TestWsAttach:
         need not be the mind's default."""
         client, server_module = app_client
         _run(_seed_session_and_mind(server_module))
-        mgr = server_module.session_mgr
-        _run(mgr._db.execute("UPDATE sessions SET harness = 'codex' WHERE id = 'sess-attach'"))
-        _run(mgr._db.commit())
+        _run(execute("UPDATE core.sessions SET harness = 'codex' WHERE id = 'sess-attach'"))
 
         fake_ws = _FakeMindWS(incoming=[b"hi\r\n"])
         _FakeHttpSession.ws_to_return = fake_ws
@@ -367,15 +373,9 @@ class TestWsAttach:
     def test_proxy_carries_the_mind_s_session_token(self, app_client, monkeypatch):
         """The thing knocking on the mind's door is this gateway, not the
         browser, so the credential on the handshake is the mind's own."""
-        from comms import broker
-
         client, server_module = app_client
         _run(_seed_session_and_mind(server_module, session_id="sess-tok"))
-        _run(broker.register_mind(
-            server_module.session_mgr.broker_db, mind_id="ada", name="ada",
-            gateway_url="http://mind.test:8420", model="opus", harness="claude",
-            session_token="ada-session-token", owner="daniel",  # secret-guard: allow
-        ))
+        _run(_register_mind("ada", session_token="ada-session-token"))  # secret-guard: allow
 
         fake_ws = _FakeMindWS(incoming=[b"up\r\n"])
         _FakeHttpSession.ws_to_return = fake_ws
@@ -492,11 +492,9 @@ class TestWsAttach:
     def test_attach_requires_live_session(self, app_client, status, code):
         client, server_module = app_client
         _run(_seed_session_and_mind(server_module, session_id="sess-inactive"))
-        mgr = server_module.session_mgr
-        _run(mgr._db.execute(
-            "UPDATE sessions SET status = ? WHERE id = 'sess-inactive'", (status,)
+        _run(execute(
+            "UPDATE core.sessions SET status = $1 WHERE id = 'sess-inactive'", status
         ))
-        _run(mgr._db.commit())
 
         with (
             pytest.raises(WebSocketDisconnect) as excinfo,
@@ -546,21 +544,20 @@ class TestRotationReachesTheTile:
             # A terminal-owned row: it is the pane's rotation that wipes a
             # screen, and only a terminal's rotation stages rather than
             # retiring the session.
-            await mgr._db.execute(
-                "UPDATE sessions SET owner_type = 'terminal', "
-                "owner_ref = 'terminal-sess-rot' WHERE id = 'sess-rot'"
+            await execute(
+                "UPDATE core.sessions SET surface = 'terminal', "
+                "surface_id = 'terminal-sess-rot' WHERE id = 'sess-rot'"
             )
             now = time.time()
             for i, (role, content) in enumerate(
                 [("user", "why did it go blank?"),
                  ("assistant", "the pane was respawned")]
             ):
-                await mgr._db.execute(
-                    "INSERT INTO session_turns (session_id, role, content, created_at) "
-                    "VALUES (?, ?, ?, ?)",
-                    ("sess-rot", role, content, now + i),
+                await execute(
+                    "INSERT INTO core.session_turns (session_id, role, content, created_at) "
+                    "VALUES ($1, $2, $3, $4)",
+                    "sess-rot", role, content, now + i,
                 )
-            await mgr._db.commit()
         _run(_seed_turns())
 
         async def fake_rotate(**_kw):
@@ -592,8 +589,10 @@ class TestRotationReachesTheTile:
 
             # Armed at the threshold, fired by the pane's own typed turn —
             # which is the moment the screen is actually replaced.
-            _run(mgr.arm_rotation("terminal", "terminal-sess-rot"))
-            _run(mgr.fire_rotation(
+            # On the app's own loop, where the pool and the tile's event
+            # queue both live.
+            client.portal.call(mgr.arm_rotation, "terminal", "terminal-sess-rot")
+            client.portal.call(lambda: mgr.fire_rotation(
                 "terminal", "terminal-sess-rot",
                 claude_sid="claude-abc", prompt="why did it go blank?",
             ))

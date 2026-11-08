@@ -430,7 +430,9 @@ Three writers in comms bypass the access layer and so are caught by nothing
 the access layer refuses — `comms/broker.py`, `comms/sessions.py`, and
 `comms/inter_mind_api/server.py`, which opens its own connection from its own
 module-level path rather than the gateway's. A configuration change that
-repoints comms does not necessarily repoint all three.
+repoints comms does not necessarily repoint all three. (All three go through
+`hive_data` since the comms port — story 1.2.19 — so the fence now guards
+against a stale image or a stray tool, not against comms itself.)
 
 **Moving the file aside is not a fence.** `sqlite3.connect` on a path with no
 file there *creates* one, which is how the quiet second copies in

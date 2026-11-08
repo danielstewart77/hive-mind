@@ -4,25 +4,37 @@ The claim is the whole of a bot's authorization now, so every one of these
 drives `comms.surface_claims` itself rather than a fixture standing in for
 it: the window is asserted from inside and outside with an injected clock,
 the race is run concurrently against the real conditional update, and the
-survival case reopens the database rather than trusting the object.
+survival case reopens the pool rather than trusting the object. The database
+is a scratch Postgres of this run's own, never the live one.
 """
 from __future__ import annotations
 
 import asyncio
-import os
-import tempfile
 
-import aiosqlite
+import hive_data
 import pytest
 
 from comms import surface_claims
+from comms_broker_pg import broker_db, put_mind, scratch_dsn  # noqa: F401 - fixtures
 
 
-async def _open(path: str) -> aiosqlite.Connection:
-    db = await aiosqlite.connect(path)
-    db.row_factory = aiosqlite.Row
-    await surface_claims.init(db)
-    return db
+class _Pool:
+    """What a test holds while the pool is open on its loop."""
+
+    async def close(self) -> None:
+        await hive_data.close(drain_timeout=5.0)
+
+
+async def _open(_dsn: str) -> _Pool:
+    """Open the pool on this test's loop, with the mind every claim names.
+
+    A claim row is keyed to a registered mind now — `surface_claims.mind_id`
+    is a real foreign key — so the mind is registered first, once.
+    """
+    await hive_data.connect()
+    if await hive_data.core.get_mind("m1") is None:
+        await put_mind("m1")
+    return _Pool()
 
 
 def _run(coro):
@@ -30,20 +42,20 @@ def _run(coro):
 
 
 @pytest.fixture()
-def db_path():
-    with tempfile.TemporaryDirectory() as root:
-        yield os.path.join(root, "broker.db")
+def db_path(broker_db):
+    """The scratch database, emptied and named in the environment."""
+    return broker_db
 
 
 def test_the_phrase_claims_the_bot_for_whoever_sent_it(db_path):
     async def go():
         db = await _open(db_path)
         try:
-            phrase = await surface_claims.mint_phrase(db, "m1", "telegram", now=1000.0)
+            phrase = await surface_claims.mint_phrase("m1", "telegram", now=1000.0)
             outcome = await surface_claims.attempt_claim(
-                db, "m1", "telegram", "8776938611", phrase, now=1060.0
+                "m1", "telegram", "8776938611", phrase, now=1060.0
             )
-            state = await surface_claims.claim_state(db, "m1", "telegram", now=1060.0)
+            state = await surface_claims.claim_state("m1", "telegram", now=1060.0)
             return outcome, state
         finally:
             await db.close()
@@ -59,15 +71,15 @@ def test_a_claim_is_still_there_when_the_database_is_reopened(db_path):
     async def go():
         db = await _open(db_path)
         try:
-            phrase = await surface_claims.mint_phrase(db, "m1", "telegram", now=1000.0)
+            phrase = await surface_claims.mint_phrase("m1", "telegram", now=1000.0)
             await surface_claims.attempt_claim(
-                db, "m1", "telegram", "777", phrase, now=1001.0
+                "m1", "telegram", "777", phrase, now=1001.0
             )
         finally:
             await db.close()
         again = await _open(db_path)
         try:
-            return await surface_claims.claim_state(again, "m1", "telegram", now=2000.0)
+            return await surface_claims.claim_state("m1", "telegram", now=2000.0)
         finally:
             await again.close()
 
@@ -78,11 +90,11 @@ def test_a_message_that_is_not_the_phrase_leaves_the_bot_unclaimed(db_path):
     async def go():
         db = await _open(db_path)
         try:
-            await surface_claims.mint_phrase(db, "m1", "telegram", now=1000.0)
+            await surface_claims.mint_phrase("m1", "telegram", now=1000.0)
             outcome = await surface_claims.attempt_claim(
-                db, "m1", "telegram", "777", "let me in", now=1001.0
+                "m1", "telegram", "777", "let me in", now=1001.0
             )
-            state = await surface_claims.claim_state(db, "m1", "telegram", now=1001.0)
+            state = await surface_claims.claim_state("m1", "telegram", now=1001.0)
             return outcome, state
         finally:
             await db.close()
@@ -97,12 +109,12 @@ def test_a_second_account_sending_the_phrase_afterwards_is_refused(db_path):
     async def go():
         db = await _open(db_path)
         try:
-            phrase = await surface_claims.mint_phrase(db, "m1", "telegram", now=1000.0)
-            await surface_claims.attempt_claim(db, "m1", "telegram", "111", phrase, now=1001.0)
+            phrase = await surface_claims.mint_phrase("m1", "telegram", now=1000.0)
+            await surface_claims.attempt_claim("m1", "telegram", "111", phrase, now=1001.0)
             outcome = await surface_claims.attempt_claim(
-                db, "m1", "telegram", "222", phrase, now=1002.0
+                "m1", "telegram", "222", phrase, now=1002.0
             )
-            state = await surface_claims.claim_state(db, "m1", "telegram", now=1002.0)
+            state = await surface_claims.claim_state("m1", "telegram", now=1002.0)
             return outcome, state
         finally:
             await db.close()
@@ -116,9 +128,9 @@ def test_the_phrase_still_claims_just_inside_the_window(db_path):
     async def go():
         db = await _open(db_path)
         try:
-            phrase = await surface_claims.mint_phrase(db, "m1", "telegram", now=1000.0)
+            phrase = await surface_claims.mint_phrase("m1", "telegram", now=1000.0)
             return await surface_claims.attempt_claim(
-                db, "m1", "telegram", "777", phrase, now=1000.0 + 29 * 60
+                "m1", "telegram", "777", phrase, now=1000.0 + 29 * 60
             )
         finally:
             await db.close()
@@ -130,12 +142,12 @@ def test_the_phrase_stops_claiming_once_thirty_minutes_have_passed(db_path):
     async def go():
         db = await _open(db_path)
         try:
-            phrase = await surface_claims.mint_phrase(db, "m1", "telegram", now=1000.0)
+            phrase = await surface_claims.mint_phrase("m1", "telegram", now=1000.0)
             outcome = await surface_claims.attempt_claim(
-                db, "m1", "telegram", "777", phrase, now=1000.0 + 30 * 60 + 1
+                "m1", "telegram", "777", phrase, now=1000.0 + 30 * 60 + 1
             )
             state = await surface_claims.claim_state(
-                db, "m1", "telegram", now=1000.0 + 30 * 60 + 1
+                "m1", "telegram", now=1000.0 + 30 * 60 + 1
             )
             return outcome, state
         finally:
@@ -153,16 +165,16 @@ def test_minting_again_retires_the_previous_phrase_and_the_new_one_works(db_path
         db = await _open(db_path)
         try:
             first = await surface_claims.mint_phrase(
-                db, "m1", "telegram", now=1000.0, phrase="anchor basalt cinder"
+                "m1", "telegram", now=1000.0, phrase="anchor basalt cinder"
             )
             second = await surface_claims.mint_phrase(
-                db, "m1", "telegram", now=1100.0, phrase="willow zephyr umber"
+                "m1", "telegram", now=1100.0, phrase="willow zephyr umber"
             )
             stale = await surface_claims.attempt_claim(
-                db, "m1", "telegram", "777", first, now=1200.0
+                "m1", "telegram", "777", first, now=1200.0
             )
             fresh = await surface_claims.attempt_claim(
-                db, "m1", "telegram", "777", second, now=1201.0
+                "m1", "telegram", "777", second, now=1201.0
             )
             return stale, fresh
         finally:
@@ -178,12 +190,12 @@ def test_a_cleared_bot_can_be_claimed_by_somebody_else(db_path):
     async def go():
         db = await _open(db_path)
         try:
-            phrase = await surface_claims.mint_phrase(db, "m1", "telegram", now=1000.0)
-            await surface_claims.attempt_claim(db, "m1", "telegram", "111", phrase, now=1001.0)
-            cleared = await surface_claims.clear_claim(db, "m1", "telegram")
-            second = await surface_claims.mint_phrase(db, "m1", "telegram", now=1100.0)
+            phrase = await surface_claims.mint_phrase("m1", "telegram", now=1000.0)
+            await surface_claims.attempt_claim("m1", "telegram", "111", phrase, now=1001.0)
+            cleared = await surface_claims.clear_claim("m1", "telegram")
+            second = await surface_claims.mint_phrase("m1", "telegram", now=1100.0)
             outcome = await surface_claims.attempt_claim(
-                db, "m1", "telegram", "222", second, now=1101.0
+                "m1", "telegram", "222", second, now=1101.0
             )
             return cleared, outcome
         finally:
@@ -199,11 +211,11 @@ def test_a_claimed_bot_refuses_to_put_a_phrase_back_on_offer(db_path):
     async def go():
         db = await _open(db_path)
         try:
-            phrase = await surface_claims.mint_phrase(db, "m1", "telegram", now=1000.0)
-            await surface_claims.attempt_claim(db, "m1", "telegram", "111", phrase, now=1001.0)
+            phrase = await surface_claims.mint_phrase("m1", "telegram", now=1000.0)
+            await surface_claims.attempt_claim("m1", "telegram", "111", phrase, now=1001.0)
             with pytest.raises(ValueError):
-                await surface_claims.mint_phrase(db, "m1", "telegram", now=1100.0)
-            return await surface_claims.claim_state(db, "m1", "telegram", now=1100.0)
+                await surface_claims.mint_phrase("m1", "telegram", now=1100.0)
+            return await surface_claims.claim_state("m1", "telegram", now=1100.0)
         finally:
             await db.close()
 
@@ -214,12 +226,12 @@ def test_two_people_sending_the_phrase_at_once_produce_one_claim(db_path):
     async def go():
         db = await _open(db_path)
         try:
-            phrase = await surface_claims.mint_phrase(db, "m1", "telegram", now=1000.0)
+            phrase = await surface_claims.mint_phrase("m1", "telegram", now=1000.0)
             outcomes = await asyncio.gather(
-                surface_claims.attempt_claim(db, "m1", "telegram", "111", phrase, now=1001.0),
-                surface_claims.attempt_claim(db, "m1", "telegram", "222", phrase, now=1001.0),
+                surface_claims.attempt_claim("m1", "telegram", "111", phrase, now=1001.0),
+                surface_claims.attempt_claim("m1", "telegram", "222", phrase, now=1001.0),
             )
-            state = await surface_claims.claim_state(db, "m1", "telegram", now=1002.0)
+            state = await surface_claims.claim_state("m1", "telegram", now=1002.0)
             return outcomes, state
         finally:
             await db.close()
@@ -234,10 +246,10 @@ def test_a_phrase_typed_by_a_phone_keyboard_still_claims(db_path):
         db = await _open(db_path)
         try:
             await surface_claims.mint_phrase(
-                db, "m1", "telegram", now=1000.0, phrase="anchor basalt cinder"
+                "m1", "telegram", now=1000.0, phrase="anchor basalt cinder"
             )
             return await surface_claims.attempt_claim(
-                db, "m1", "telegram", "777", "  Anchor  Basalt Cinder.  ", now=1001.0
+                "m1", "telegram", "777", "  Anchor  Basalt Cinder.  ", now=1001.0
             )
         finally:
             await db.close()
@@ -254,20 +266,20 @@ def test_a_phrase_is_retired_after_eight_wrong_guesses(db_path):
         db = await _open(db_path)
         try:
             phrase = await surface_claims.mint_phrase(
-                db, "m1", "telegram", now=1000.0, phrase="anchor basalt cinder"
+                "m1", "telegram", now=1000.0, phrase="anchor basalt cinder"
             )
             for attempt in range(surface_claims.MAX_PHRASE_ATTEMPTS - 1):
                 outcome = await surface_claims.attempt_claim(
-                    db, "m1", "telegram", "666", f"guess {attempt}", now=1001.0
+                    "m1", "telegram", "666", f"guess {attempt}", now=1001.0
                 )
                 assert outcome.reason == "mismatch", attempt
             last = await surface_claims.attempt_claim(
-                db, "m1", "telegram", "666", "one more", now=1002.0
+                "m1", "telegram", "666", "one more", now=1002.0
             )
             # The real phrase no longer works either: the door is shut, not
             # merely shut to that guesser.
             after = await surface_claims.attempt_claim(
-                db, "m1", "telegram", "777", phrase, now=1003.0
+                "m1", "telegram", "777", phrase, now=1003.0
             )
             return last, after
         finally:
@@ -284,20 +296,20 @@ def test_a_fresh_phrase_resets_the_guess_count(db_path):
         db = await _open(db_path)
         try:
             await surface_claims.mint_phrase(
-                db, "m1", "telegram", now=1000.0, phrase="anchor basalt cinder"
+                "m1", "telegram", now=1000.0, phrase="anchor basalt cinder"
             )
             for attempt in range(surface_claims.MAX_PHRASE_ATTEMPTS - 1):
                 await surface_claims.attempt_claim(
-                    db, "m1", "telegram", "666", f"guess {attempt}", now=1001.0
+                    "m1", "telegram", "666", f"guess {attempt}", now=1001.0
                 )
             second = await surface_claims.mint_phrase(
-                db, "m1", "telegram", now=1100.0, phrase="willow zephyr umber"
+                "m1", "telegram", now=1100.0, phrase="willow zephyr umber"
             )
             wrong = await surface_claims.attempt_claim(
-                db, "m1", "telegram", "666", "still wrong", now=1101.0
+                "m1", "telegram", "666", "still wrong", now=1101.0
             )
             right = await surface_claims.attempt_claim(
-                db, "m1", "telegram", "777", second, now=1102.0
+                "m1", "telegram", "777", second, now=1102.0
             )
             return wrong, right
         finally:
@@ -315,13 +327,13 @@ def test_adoption_never_takes_a_bot_back_after_it_was_released(db_path):
     async def go():
         db = await _open(db_path)
         try:
-            phrase = await surface_claims.mint_phrase(db, "m1", "telegram", now=1000.0)
-            await surface_claims.attempt_claim(db, "m1", "telegram", "111", phrase, now=1001.0)
-            await surface_claims.clear_claim(db, "m1", "telegram")
+            phrase = await surface_claims.mint_phrase("m1", "telegram", now=1000.0)
+            await surface_claims.attempt_claim("m1", "telegram", "111", phrase, now=1001.0)
+            await surface_claims.clear_claim("m1", "telegram")
             outcome = await surface_claims.adopt_claim(
-                db, "m1", "telegram", "111", now=1002.0
+                "m1", "telegram", "111", now=1002.0
             )
-            state = await surface_claims.claim_state(db, "m1", "telegram", now=1002.0)
+            state = await surface_claims.claim_state("m1", "telegram", now=1002.0)
             return outcome, state
         finally:
             await db.close()
@@ -338,14 +350,14 @@ def test_a_new_bot_on_the_same_mind_is_not_the_claimed_bot(db_path):
     async def go():
         db = await _open(db_path)
         try:
-            await surface_claims.record_bot(db, "m1", "telegram", "old_bot", now=900.0)
-            phrase = await surface_claims.mint_phrase(db, "m1", "telegram", now=1000.0)
-            await surface_claims.attempt_claim(db, "m1", "telegram", "111", phrase, now=1001.0)
+            await surface_claims.record_bot("m1", "telegram", "old_bot", now=900.0)
+            phrase = await surface_claims.mint_phrase("m1", "telegram", now=1000.0)
+            await surface_claims.attempt_claim("m1", "telegram", "111", phrase, now=1001.0)
             same = await surface_claims.record_bot(
-                db, "m1", "telegram", "old_bot", now=1002.0
+                "m1", "telegram", "old_bot", now=1002.0
             )
             replaced = await surface_claims.record_bot(
-                db, "m1", "telegram", "new_bot", now=1003.0
+                "m1", "telegram", "new_bot", now=1003.0
             )
             return same, replaced
         finally:
@@ -362,13 +374,13 @@ def test_a_claimed_bot_never_has_a_phrase_on_offer(db_path):
     async def go():
         db = await _open(db_path)
         try:
-            phrase = await surface_claims.mint_phrase(db, "m1", "telegram", now=1000.0)
-            await surface_claims.attempt_claim(db, "m1", "telegram", "111", phrase, now=1001.0)
+            phrase = await surface_claims.mint_phrase("m1", "telegram", now=1000.0)
+            await surface_claims.attempt_claim("m1", "telegram", "111", phrase, now=1001.0)
             try:
-                await surface_claims.mint_phrase(db, "m1", "telegram", now=1002.0)
+                await surface_claims.mint_phrase("m1", "telegram", now=1002.0)
             except ValueError:
                 pass
-            return await surface_claims.claim_state(db, "m1", "telegram", now=1003.0)
+            return await surface_claims.claim_state("m1", "telegram", now=1003.0)
         finally:
             await db.close()
 
@@ -382,9 +394,9 @@ def test_an_installs_single_allow_list_entry_becomes_its_claim(db_path):
         db = await _open(db_path)
         try:
             outcome = await surface_claims.adopt_claim(
-                db, "m1", "telegram", "8776938611", now=1000.0
+                "m1", "telegram", "8776938611", now=1000.0
             )
-            state = await surface_claims.claim_state(db, "m1", "telegram", now=1000.0)
+            state = await surface_claims.claim_state("m1", "telegram", now=1000.0)
             return outcome, state
         finally:
             await db.close()
@@ -399,12 +411,12 @@ def test_adoption_never_moves_a_bot_that_is_already_claimed(db_path):
     async def go():
         db = await _open(db_path)
         try:
-            phrase = await surface_claims.mint_phrase(db, "m1", "telegram", now=1000.0)
-            await surface_claims.attempt_claim(db, "m1", "telegram", "111", phrase, now=1001.0)
+            phrase = await surface_claims.mint_phrase("m1", "telegram", now=1000.0)
+            await surface_claims.attempt_claim("m1", "telegram", "111", phrase, now=1001.0)
             outcome = await surface_claims.adopt_claim(
-                db, "m1", "telegram", "222", now=1002.0
+                "m1", "telegram", "222", now=1002.0
             )
-            state = await surface_claims.claim_state(db, "m1", "telegram", now=1002.0)
+            state = await surface_claims.claim_state("m1", "telegram", now=1002.0)
             return outcome, state
         finally:
             await db.close()
@@ -418,9 +430,9 @@ def test_a_claim_on_one_surface_leaves_the_other_surface_alone(db_path):
     async def go():
         db = await _open(db_path)
         try:
-            phrase = await surface_claims.mint_phrase(db, "m1", "telegram", now=1000.0)
-            await surface_claims.attempt_claim(db, "m1", "telegram", "111", phrase, now=1001.0)
-            return await surface_claims.claim_state(db, "m1", "discord", now=1001.0)
+            phrase = await surface_claims.mint_phrase("m1", "telegram", now=1000.0)
+            await surface_claims.attempt_claim("m1", "telegram", "111", phrase, now=1001.0)
+            return await surface_claims.claim_state("m1", "discord", now=1001.0)
         finally:
             await db.close()
 
@@ -435,12 +447,12 @@ def test_a_registered_bot_that_was_never_claimed_still_adopts(db_path):
         db = await _open(db_path)
         try:
             await surface_claims.record_bot(
-                db, "m1", "telegram", "hive_m1_bot", now=1000.0
+                "m1", "telegram", "hive_m1_bot", now=1000.0
             )
             outcome = await surface_claims.adopt_claim(
-                db, "m1", "telegram", "8776938611", now=1001.0
+                "m1", "telegram", "8776938611", now=1001.0
             )
-            state = await surface_claims.claim_state(db, "m1", "telegram", now=1001.0)
+            state = await surface_claims.claim_state("m1", "telegram", now=1001.0)
             return outcome, state
         finally:
             await db.close()
@@ -458,16 +470,16 @@ def test_replacing_the_token_leaves_the_new_bot_unadoptable(db_path):
     async def go():
         db = await _open(db_path)
         try:
-            await surface_claims.record_bot(db, "m1", "telegram", "first_bot", now=1000.0)
-            phrase = await surface_claims.mint_phrase(db, "m1", "telegram", now=1000.0)
+            await surface_claims.record_bot("m1", "telegram", "first_bot", now=1000.0)
+            phrase = await surface_claims.mint_phrase("m1", "telegram", now=1000.0)
             await surface_claims.attempt_claim(
-                db, "m1", "telegram", "111", phrase, now=1001.0
+                "m1", "telegram", "111", phrase, now=1001.0
             )
-            await surface_claims.record_bot(db, "m1", "telegram", "second_bot", now=1002.0)
+            await surface_claims.record_bot("m1", "telegram", "second_bot", now=1002.0)
             outcome = await surface_claims.adopt_claim(
-                db, "m1", "telegram", "8776938611", now=1003.0
+                "m1", "telegram", "8776938611", now=1003.0
             )
-            state = await surface_claims.claim_state(db, "m1", "telegram", now=1003.0)
+            state = await surface_claims.claim_state("m1", "telegram", now=1003.0)
             return outcome, state
         finally:
             await db.close()
@@ -485,12 +497,12 @@ def test_a_phrase_nobody_sent_stops_blocking_adoption_once_it_expires(db_path):
     async def go():
         db = await _open(db_path)
         try:
-            await surface_claims.mint_phrase(db, "m1", "telegram", now=1000.0)
+            await surface_claims.mint_phrase("m1", "telegram", now=1000.0)
             expired = 1000.0 + surface_claims.PHRASE_TTL_SECONDS + 1.0
             outcome = await surface_claims.adopt_claim(
-                db, "m1", "telegram", "8776938611", now=expired
+                "m1", "telegram", "8776938611", now=expired
             )
-            state = await surface_claims.claim_state(db, "m1", "telegram", now=expired)
+            state = await surface_claims.claim_state("m1", "telegram", now=expired)
             return outcome, state
         finally:
             await db.close()
@@ -506,93 +518,15 @@ def test_a_phrase_still_within_its_window_does_block_adoption(db_path):
     async def go():
         db = await _open(db_path)
         try:
-            await surface_claims.mint_phrase(db, "m1", "telegram", now=1000.0)
+            await surface_claims.mint_phrase("m1", "telegram", now=1000.0)
             outcome = await surface_claims.adopt_claim(
-                db, "m1", "telegram", "8776938611", now=1001.0
+                "m1", "telegram", "8776938611", now=1001.0
             )
-            state = await surface_claims.claim_state(db, "m1", "telegram", now=1001.0)
+            state = await surface_claims.claim_state("m1", "telegram", now=1001.0)
             return outcome, state
         finally:
             await db.close()
 
     outcome, state = _run(go())
     assert outcome.claimed is False
-    assert state.claimed_ref == ""
-
-
-def test_an_unclaimed_row_written_before_the_marker_existed_is_treated_as_released(
-    db_path,
-):
-    """On the old schema a release, a swapped bot account and a merely
-    registered token all left `claimed_ref` NULL and nothing else. The two
-    readings fail in opposite directions, and only one of them hands
-    somebody else's bot over in silence."""
-    async def go():
-        db = await aiosqlite.connect(db_path)
-        db.row_factory = aiosqlite.Row
-        try:
-            await db.execute(
-                "CREATE TABLE surface_claims ("
-                "mind_id TEXT NOT NULL, surface TEXT NOT NULL, claimed_ref TEXT, "
-                "claimed_at REAL, phrase_hash TEXT, phrase_issued_at REAL, "
-                "phrase_expires_at REAL, PRIMARY KEY (mind_id, surface))"
-            )
-            await db.execute(
-                "INSERT INTO surface_claims (mind_id, surface, claimed_ref) "
-                "VALUES ('m1', 'telegram', NULL)"
-            )
-            await db.commit()
-            await surface_claims.init(db)
-            outcome = await surface_claims.adopt_claim(
-                db, "m1", "telegram", "8776938611", now=1000.0
-            )
-            state = await surface_claims.claim_state(db, "m1", "telegram", now=1000.0)
-            return outcome, state
-        finally:
-            await db.close()
-
-    outcome, state = _run(go())
-    assert outcome.claimed is False
-    assert state.claimed_ref == ""
-
-
-def test_the_gateway_s_own_startup_applies_the_claim_migrations(db_path):
-    """The column this module grew has to exist on the database production
-    actually opens. `CREATE TABLE IF NOT EXISTS` is a no-op against a table
-    that is already there, so a schema change alone reaches nothing — and
-    with the fixture calling `init` while the gateway called `executescript`,
-    the whole suite stayed green over a column no live row had."""
-    async def go():
-        from comms import broker
-
-        db = await aiosqlite.connect(db_path)
-        try:
-            # A table as it stood before this column, with a row in it.
-            await db.execute(
-                "CREATE TABLE surface_claims ("
-                "mind_id TEXT NOT NULL, surface TEXT NOT NULL, claimed_ref TEXT, "
-                "claimed_at REAL, phrase_hash TEXT, phrase_issued_at REAL, "
-                "phrase_expires_at REAL, PRIMARY KEY (mind_id, surface))"
-            )
-            await db.execute(
-                "INSERT INTO surface_claims (mind_id, surface, claimed_ref) "
-                "VALUES ('m1', 'telegram', '111')"
-            )
-            await db.commit()
-        finally:
-            await db.close()
-
-        live = await broker.init_db(db_path)
-        try:
-            cur = await live.execute("PRAGMA table_info(surface_claims)")
-            columns = {row[1] for row in await cur.fetchall()}
-            # And the route the console presses still works against it.
-            state = await surface_claims.clear_claim(live, "m1", "telegram")
-            return columns, state
-        finally:
-            await live.close()
-
-    columns, state = _run(go())
-    assert "released_at" in columns
-    assert "phrase_attempts" in columns
     assert state.claimed_ref == ""

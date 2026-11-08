@@ -10,12 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-import sqlite3
 
 import pytest
 from fastapi.testclient import TestClient
 
-from comms import broker
+from comms_broker_pg import broker_db, put_mind, scratch_dsn  # noqa: F401 - fixtures
 
 MIND_A = "11111111-1111-4111-8111-111111111111"
 ADMIN = {"Authorization": "Bearer admin-bearer"}
@@ -44,9 +43,7 @@ def _listed(client) -> dict:
 
 
 @pytest.fixture
-def app_client(monkeypatch, tmp_path):
-    monkeypatch.setenv("BROKER_DB_PATH", str(tmp_path / "broker.db"))
-    monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "sessions.db"))
+def app_client(monkeypatch, broker_db):
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-bearer")
 
     from comms import server as server_module
@@ -159,68 +156,20 @@ def test_the_owner_route_refuses_a_blank_owner(app_client) -> None:
     assert _listed(app_client)[MIND_A]["owner"] == "sloan"
 
 
-_PRE_OWNER_SCHEMA = """
-CREATE TABLE minds (
-    mind_id        TEXT NOT NULL UNIQUE,
-    name           TEXT PRIMARY KEY,
-    gateway_url    TEXT NOT NULL,
-    model          TEXT NOT NULL,
-    harness        TEXT NOT NULL,
-    registered_at  REAL NOT NULL,
-    last_seen      REAL NOT NULL,
-    session_token  TEXT,
-    voice          TEXT,
-    voice_engine   TEXT
-);
-"""
-
-
-def _legacy_db(path) -> None:
-    con = sqlite3.connect(path)
-    con.executescript(_PRE_OWNER_SCHEMA)
-    con.execute(
-        "INSERT INTO minds VALUES (?, 'alpha', 'http://alpha:8420', 'sonnet', "
-        "'claude_cli', 1.0, 1.0, 'alpha-token', 'af_heart', 'kokoro')",
-        (MIND_A,),
-    )
-    con.commit()
-    con.close()
-
-
-def test_startup_adds_the_owner_column_without_losing_rows(tmp_path) -> None:
-    path = tmp_path / "broker.db"
-    _legacy_db(path)
-
-    async def scenario():
-        db = await broker.init_db(str(path))
-        try:
-            return await broker.get_registered_minds(db)
-        finally:
-            await db.close()
-
-    rows = asyncio.run(scenario())
-    assert len(rows) == 1
-    assert rows[0]["id"] == MIND_A
-    assert rows[0]["voice_engine"] == "kokoro"
-    assert rows[0]["owner"] is None
-    assert asyncio.run(_session_token(path)) == "alpha-token"  # secret-guard: allow
-
-
-async def _session_token(path):
-    db = await broker.init_db(str(path))
-    try:
-        return await broker.get_mind_session_token(db, MIND_A)
-    finally:
-        await db.close()
+def _pre_owner_row() -> None:
+    """A mind registered before ownership existed: its owner is still unset."""
+    asyncio.run(put_mind(
+        MIND_A, "alpha", gateway_url="http://alpha:8420", model="sonnet",
+        harness="claude_cli", session_token="alpha-token",  # secret-guard: allow
+        voice="af_heart", voice_engine="kokoro",
+    ))
 
 
 def test_a_pre_owner_mind_still_registers_unchanged_after_the_upgrade(
-    monkeypatch, tmp_path
+    monkeypatch, broker_db
 ) -> None:
     """Rollout in any order: new comms, old mind, no owner stamped yet."""
-    _legacy_db(tmp_path / "broker.db")
-    monkeypatch.setenv("BROKER_DB_PATH", str(tmp_path / "broker.db"))
-    monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "sessions.db"))
+    _pre_owner_row()
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-bearer")
     from comms import server as server_module
 
@@ -236,11 +185,9 @@ def test_a_pre_owner_mind_still_registers_unchanged_after_the_upgrade(
 
 
 def test_a_pre_owner_row_registering_with_an_owner_is_listed_under_it(
-    monkeypatch, tmp_path
+    monkeypatch, broker_db
 ) -> None:
-    _legacy_db(tmp_path / "broker.db")
-    monkeypatch.setenv("BROKER_DB_PATH", str(tmp_path / "broker.db"))
-    monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "sessions.db"))
+    _pre_owner_row()
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-bearer")
     from comms import server as server_module
 

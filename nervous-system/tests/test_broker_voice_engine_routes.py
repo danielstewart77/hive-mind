@@ -14,6 +14,8 @@ import importlib
 import pytest
 from fastapi.testclient import TestClient
 
+from comms_broker_pg import broker_db, scratch_dsn  # noqa: F401 - fixtures
+
 MIND_A = "11111111-1111-4111-8111-111111111111"
 
 
@@ -26,9 +28,7 @@ GRILL_ADMIN = "admin-bearer"  # secret-guard: allow
 
 
 @pytest.fixture
-def app_client(monkeypatch, tmp_path):
-    monkeypatch.setenv("BROKER_DB_PATH", str(tmp_path / "broker.db"))
-    monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "sessions.db"))
+def app_client(monkeypatch, broker_db):
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", "admin-bearer")
 
     from comms import server as server_module

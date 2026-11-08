@@ -26,7 +26,7 @@ The nervous system — lucent (vector store + knowledge graph) and comms (the ga
               ┌──────────▼──────────┐
               │   Session Manager   │  ← nervous-system/comms/sessions.py
               │   (process pool +   │
-              │    SQLite DB)       │
+              │    Postgres)         │
               └──────────┬──────────┘
                          │  mind_id routing
          ┌───────────────┼───────────────┬──────────────┐

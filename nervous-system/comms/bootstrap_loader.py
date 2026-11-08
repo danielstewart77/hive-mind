@@ -7,7 +7,7 @@ system-prompt content from per-mind data:
 1. ``<soul>`` — from lucent KG, per-mind UUID
 2. ``<recent-memory>`` — from lucent vector store, decay-weighted
    contextual entries, per-mind
-3. ``<session-memory>`` — from comms's own ``session_memory`` table,
+3. ``<session-memory>`` — from the ``core.session_memory`` table,
    the latest rotation carry-forward for this ``(mind_id, client_ref)``
 
 Standing rules are no longer composed here — they are injected per-turn
@@ -26,8 +26,8 @@ import logging
 import os
 from typing import Any
 
-import aiosqlite
 import requests
+from hive_data import core
 
 log = logging.getLogger(__name__)
 
@@ -119,25 +119,12 @@ def _fetch_recent_memory(mind_id: str) -> str:
     return f"<recent-memory>\n{body}\n</recent-memory>"
 
 
-async def _fetch_session_memory(
-    db: aiosqlite.Connection, *, mind_id: str, client_ref: str | None
-) -> str:
+async def _fetch_session_memory(*, mind_id: str, client_ref: str | None) -> str:
     """Latest rotation carry-forward row for (mind_id, client_ref)."""
     if not client_ref:
         return ""
     try:
-        cursor = await db.execute(
-            """
-            SELECT body
-              FROM session_memory
-             WHERE mind_id = ? AND client_ref = ?
-             ORDER BY created_at DESC, id DESC
-             LIMIT 1
-            """,
-            (mind_id, client_ref),
-        )
-        row = await cursor.fetchone()
-        await cursor.close()
+        row = await core.latest_session_memory(mind_id=mind_id, client_ref=client_ref)
     except Exception:
         log.exception("session_memory read failed (mind_id=%s, client_ref=%s)", mind_id, client_ref)
         return ""
@@ -203,7 +190,6 @@ async def compose_prompt_blocks(
     mind_id: str,
     mind_name: str,
     client_ref: str | None,
-    db: aiosqlite.Connection,
     max_bytes: int | None = None,
 ) -> str:
     """Build the full system-prompt content for a new session.
@@ -233,7 +219,7 @@ async def compose_prompt_blocks(
     if recent:
         blocks.append(recent)
 
-    session_memory = await _fetch_session_memory(db, mind_id=mind_id, client_ref=client_ref)
+    session_memory = await _fetch_session_memory(mind_id=mind_id, client_ref=client_ref)
     if session_memory and max_bytes is not None:
         fixed = len("\n\n".join(blocks + [""]).encode("utf-8"))
         session_memory = _keep_tail(session_memory, max_bytes - fixed)

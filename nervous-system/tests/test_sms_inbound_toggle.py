@@ -15,13 +15,13 @@ import asyncio
 import hashlib
 import hmac
 import json
-import os
-import tempfile
 
+import hive_data
 import pytest
 from fastapi.testclient import TestClient
 
 from comms import broker
+from comms_broker_pg import broker_db, scratch_dsn  # noqa: F401 - fixtures
 
 
 #: These tests are about their own subject, not about authorization, so they
@@ -39,32 +39,28 @@ def _run(coro):
 # --- broker.get_setting / set_setting --------------------------------------
 
 
-def test_get_setting_returns_default_when_missing() -> None:
+def test_get_setting_returns_default_when_missing(broker_db) -> None:
     async def scenario() -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            db = await broker.init_db(os.path.join(tmp, "broker.db"))
-            try:
-                assert await broker.get_setting(db, "missing") is None
-                assert (
-                    await broker.get_setting(db, "missing", default="x") == "x"
-                )
-            finally:
-                await db.close()
+        await hive_data.connect()
+        try:
+            assert await broker.get_setting("missing") is None
+            assert await broker.get_setting("missing", default="x") == "x"
+        finally:
+            await hive_data.close(drain_timeout=5.0)
 
     _run(scenario())
 
 
-def test_set_setting_upserts() -> None:
+def test_set_setting_upserts(broker_db) -> None:
     async def scenario() -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            db = await broker.init_db(os.path.join(tmp, "broker.db"))
-            try:
-                await broker.set_setting(db, "k", "v1")
-                assert await broker.get_setting(db, "k") == "v1"
-                await broker.set_setting(db, "k", "v2")
-                assert await broker.get_setting(db, "k") == "v2"
-            finally:
-                await db.close()
+        await hive_data.connect()
+        try:
+            await broker.set_setting("k", "v1")
+            assert await broker.get_setting("k") == "v1"
+            await broker.set_setting("k", "v2")
+            assert await broker.get_setting("k") == "v2"
+        finally:
+            await hive_data.close(drain_timeout=5.0)
 
     _run(scenario())
 
@@ -73,15 +69,12 @@ def test_set_setting_upserts() -> None:
 
 
 @pytest.fixture
-def app_client(monkeypatch, tmp_path):
-    """Boot the comms FastAPI app with an isolated broker DB.
+def app_client(monkeypatch, broker_db):
+    """Boot the comms FastAPI app against a scratch database of its own.
 
-    We monkey-patch BROKER_DB_PATH before importing the app, disable bearer
-    auth by leaving the token unset, and skip the session-manager loop hooks
-    that aren't relevant here.
+    The lifespan opens the pool on the app's own loop; `broker_db` has
+    already emptied the database and named it in the environment.
     """
-    monkeypatch.setenv("BROKER_DB_PATH", str(tmp_path / "broker.db"))
-    monkeypatch.setenv("SESSIONS_DB_PATH", str(tmp_path / "sessions.db"))
     monkeypatch.setenv("COMMS_ADMIN_BEARER_TOKEN", GRILL_ADMIN)
     monkeypatch.setenv("SMS_INBOUND_HMAC_SECRET", "test-secret")
 
