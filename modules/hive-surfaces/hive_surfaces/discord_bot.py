@@ -320,11 +320,11 @@ def _format_sessions(sessions: list[dict]) -> str:
             s["status"], "\u2753"
         )
         short_id = s["id"][:8]
-        summary = s.get("summary", "Untitled")
+        opening = s.get("opening_line", "Untitled")
         last = s.get("last_active", 0)
         ago = time_ago(last) if last else "?"
         lines.append(
-            f"{i}. {status_icon} `{short_id}` — \"{summary}\" [{s.get('model', '?')}] ({ago})"
+            f"{i}. {status_icon} `{short_id}` — \"{opening}\" [{s.get('model', '?')}] ({ago})"
         )
 
     lines.append("")
@@ -542,9 +542,9 @@ async def _handle_server_command(content: str, user_id: int, channel_id: int) ->
             return "\n".join(lines)
         return harness_picker.format_switch_result(result)
     if cmd == "/switch":
-        return f"Resumed session \"{result.get('summary', '?')}\""
+        return f"Resumed session \"{result.get('opening_line', '?')}\""
     if cmd == "/kill":
-        return f"Killed session \"{result.get('summary', '?')}\" (status: {result.get('status')})"
+        return f"Killed session \"{result.get('opening_line', '?')}\" (status: {result.get('status')})"
 
     return "Done."
 

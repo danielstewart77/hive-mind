@@ -124,8 +124,8 @@ class GatewayClient:
                     return s["id"]
 
         payload: dict = {
-            "owner_type": self.owner_type,
-            "owner_ref": str(user_id),
+            "surface": self.owner_type,
+            "surface_id": str(user_id),
             "client_ref": str(client_ref),
             "mind_id": self.mind_id,
         }
@@ -160,8 +160,8 @@ class GatewayClient:
             f"{self.server_url}/command",
             json={
                 "content": content,
-                "owner_type": self.owner_type,
-                "owner_ref": str(user_id),
+                "surface": self.owner_type,
+                "surface_id": str(user_id),
                 "client_ref": str(client_ref),
                 "mind_id": self.mind_id,
             },

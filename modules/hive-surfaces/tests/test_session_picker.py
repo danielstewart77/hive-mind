@@ -36,9 +36,9 @@ import hive_surfaces.telegram_bot as bot  # noqa: E402
 def test_one_switch_button_per_conversation_in_gateway_order():
     """Breaks if anyone re-sorts, collapses, or drops the id from the payload."""
     sessions = [
-        {"id": "11111111-aaaa", "summary": "Taxes"},
-        {"id": "22222222-bbbb", "summary": "Roof quote"},
-        {"id": "33333333-cccc", "summary": "Laptop build"},
+        {"id": "11111111-aaaa", "opening_line": "Taxes"},
+        {"id": "22222222-bbbb", "opening_line": "Roof quote"},
+        {"id": "33333333-cccc", "opening_line": "Laptop build"},
     ]
 
     rows = picker.build_session_rows(sessions)
@@ -50,8 +50,8 @@ def test_one_switch_button_per_conversation_in_gateway_order():
     assert switch_payloads == [
         "sw:11111111-aaaa", "sw:22222222-bbbb", "sw:33333333-cccc",
     ]
-    # The operator's label beats the gateway's summary on the face of the
-    # button; an unlabelled conversation keeps the summary.
+    # The operator's label beats the gateway's opening line on the face of the
+    # button; an unlabelled conversation keeps the opening line.
     named = picker.build_session_rows([
         sessions[0],
         {**sessions[1], "name": "New roof", "color": "#3481cc"},
@@ -178,7 +178,7 @@ async def test_switching_reports_the_name_the_button_showed(monkeypatch):
     """
     monkeypatch.setattr(bot, "_is_allowed_user", AsyncMock(return_value=True))
     monkeypatch.setattr(bot, "gateway", MagicMock(server_command=AsyncMock(
-        return_value={"id": "77777777-eeee", "summary": "New session",
+        return_value={"id": "77777777-eeee", "opening_line": "New session",
                       "name": "dragoman"})))
 
     named = await bot._handle_server_command("/switch 77777777-eeee", 4242, 99)
@@ -186,7 +186,7 @@ async def test_switching_reports_the_name_the_button_showed(monkeypatch):
     assert named == 'Resumed "dragoman"'
 
     monkeypatch.setattr(bot, "gateway", MagicMock(server_command=AsyncMock(
-        return_value={"id": "77777777-eeee", "summary": "New session"})))
+        return_value={"id": "77777777-eeee", "opening_line": "New session"})))
     unnamed = await bot._handle_server_command("/switch 77777777-eeee", 4242, 99)
 
     assert unnamed == 'Resumed "New session"'
@@ -200,9 +200,9 @@ def test_the_button_and_the_reply_read_the_same_name():
     itself, and breaks if the name stops being read off the row — which is the
     failure that used to hide behind a `labels` parameter nobody populated.
     """
-    named = {"id": "77777777-eeee", "summary": "New session",
+    named = {"id": "77777777-eeee", "opening_line": "New session",
              "status": "running", "name": "dragoman"}
-    bare = {"id": "77777777-eeee", "summary": "New session", "status": "running"}
+    bare = {"id": "77777777-eeee", "opening_line": "New session", "status": "running"}
 
     assert picker.caption_for(named) == "dragoman"
     assert "dragoman" in picker.button_text(named)
@@ -218,10 +218,10 @@ def test_a_suspended_conversation_is_not_in_the_picker():
     """Breaks if the filter is dropped, or if it starts eating idle rows —
     idle is a live conversation between turns, not a sleeping one."""
     sessions = [
-        {"id": "11111111-aaaa", "summary": "Taxes", "status": "running"},
-        {"id": "22222222-bbbb", "summary": "Roof", "status": "suspended"},
-        {"id": "33333333-cccc", "summary": "Laptop", "status": "idle"},
-        {"id": "44444444-dddd", "summary": "Shouty", "status": "SUSPENDED"},
+        {"id": "11111111-aaaa", "opening_line": "Taxes", "status": "running"},
+        {"id": "22222222-bbbb", "opening_line": "Roof", "status": "suspended"},
+        {"id": "33333333-cccc", "opening_line": "Laptop", "status": "idle"},
+        {"id": "44444444-dddd", "opening_line": "Shouty", "status": "SUSPENDED"},
     ]
 
     assert [s["id"] for s in picker.visible_sessions(sessions)] == [
@@ -242,11 +242,11 @@ def test_an_ended_conversation_is_not_in_the_picker():
     grows an appetite for `idle`, which is a live conversation between turns.
     """
     sessions = [
-        {"id": "11111111-aaaa", "summary": "Taxes", "status": "running"},
-        {"id": "22222222-bbbb", "summary": "Roof", "status": "closed"},
-        {"id": "33333333-cccc", "summary": "Laptop", "status": "idle"},
-        {"id": "44444444-dddd", "summary": "Shouty", "status": "CLOSED"},
-        {"id": "55555555-eeee", "summary": "Asleep", "status": "suspended"},
+        {"id": "11111111-aaaa", "opening_line": "Taxes", "status": "running"},
+        {"id": "22222222-bbbb", "opening_line": "Roof", "status": "closed"},
+        {"id": "33333333-cccc", "opening_line": "Laptop", "status": "idle"},
+        {"id": "44444444-dddd", "opening_line": "Shouty", "status": "CLOSED"},
+        {"id": "55555555-eeee", "opening_line": "Asleep", "status": "suspended"},
     ]
 
     assert [s["id"] for s in picker.visible_sessions(sessions)] == [
@@ -260,10 +260,10 @@ async def test_the_sessions_command_neither_draws_nor_counts_an_ended_one(monkey
     what fetches the list and writes the count. Breaks if the filter lands
     after the count, which would report a total the keyboard does not show."""
     sessions = [
-        {"id": f"{i:08d}-dead", "summary": str(i), "status": "closed", "last_active": 0}
+        {"id": f"{i:08d}-dead", "opening_line": str(i), "status": "closed", "last_active": 0}
         for i in range(20)
     ] + [
-        {"id": "99999999-live", "summary": "awake", "status": "running", "last_active": 0},
+        {"id": "99999999-live", "opening_line": "awake", "status": "running", "last_active": 0},
     ]
     recorder = _Recorder()
     update, ctx = _chat_update(recorder)
@@ -283,10 +283,10 @@ async def test_the_sessions_command_neither_draws_nor_counts_a_suspended_one(mon
     the list and writes the count. Breaks if the filter lands after the
     count, which would report a total the keyboard does not show."""
     sessions = [
-        {"id": f"{i:08d}-xxxx", "summary": str(i), "status": "suspended", "last_active": 0}
+        {"id": f"{i:08d}-xxxx", "opening_line": str(i), "status": "suspended", "last_active": 0}
         for i in range(20)
     ] + [
-        {"id": "99999999-live", "summary": "awake", "status": "running", "last_active": 0},
+        {"id": "99999999-live", "opening_line": "awake", "status": "running", "last_active": 0},
     ]
     recorder = _Recorder()
     update, ctx = _chat_update(recorder)
@@ -372,10 +372,10 @@ async def test_a_bare_suspend_with_nothing_to_suspend_suspends_nothing(monkeypat
 @pytest.mark.parametrize(
     "session, expected",
     [
-        ({"id": "a", "summary": "mine", "adoptable": False, "surface": "telegram"}, ""),
-        ({"id": "a", "summary": "mine", "adoptable": True, "surface": "terminal"},
+        ({"id": "a", "opening_line": "mine", "adoptable": False, "surface_label": "telegram"}, ""),
+        ({"id": "a", "opening_line": "mine", "adoptable": True, "surface_label": "terminal"},
          "— on terminal"),
-        ({"id": "a", "summary": "mine", "adoptable": True}, "— on another surface"),
+        ({"id": "a", "opening_line": "mine", "adoptable": True}, "— on another surface"),
     ],
     ids=["own", "held-elsewhere", "held-elsewhere-unnamed"],
 )
@@ -458,8 +458,8 @@ async def test_the_sessions_command_sends_a_keyboard_not_a_list(monkeypatch):
     """Breaks if `/sessions` stops attaching the markup, which the renderer's
     own tests cannot see: they never run the command."""
     sessions = [
-        {"id": "11111111-aaaa", "summary": "Taxes", "status": "running", "last_active": 0},
-        {"id": "22222222-bbbb", "summary": "Roof", "status": "idle", "last_active": 0},
+        {"id": "11111111-aaaa", "opening_line": "Taxes", "status": "running", "last_active": 0},
+        {"id": "22222222-bbbb", "opening_line": "Roof", "status": "idle", "last_active": 0},
     ]
     recorder = _Recorder()
     update, ctx = _chat_update(recorder)
@@ -480,7 +480,7 @@ async def test_a_long_session_list_is_capped_and_says_so(monkeypatch):
     it, so the operator sees nothing. Breaks if the cap is removed or the
     count stops being reported."""
     sessions = [
-        {"id": f"{i:08d}-xxxx", "summary": str(i), "status": "running", "last_active": 0}
+        {"id": f"{i:08d}-xxxx", "opening_line": str(i), "status": "running", "last_active": 0}
         for i in range(30)
     ]
     recorder = _Recorder()
@@ -503,7 +503,7 @@ def test_the_new_button_carries_a_payload_with_no_target_in_it():
     """The original assertion decoded a module constant, which proved nothing
     about the button. Breaks if `encode` ever emits a separator for it."""
     rows = picker.build_session_rows(
-        [{"id": "11111111-aaaa", "summary": "x", "status": "running"}]
+        [{"id": "11111111-aaaa", "opening_line": "x", "status": "running"}]
     )
     new_payload = rows[-1][0].callback_data
 
@@ -679,9 +679,9 @@ def test_one_unsendable_row_does_not_take_the_whole_picker_with_it():
     nothing. Breaks if the per-row limit is dropped.
     """
     sessions = [
-        {"id": "11111111-aaaa", "summary": "fine", "status": "running"},
-        {"id": "x" * 200, "summary": "far too long", "status": "running"},
-        {"id": "22222222-bbbb", "summary": "also fine", "status": "running"},
+        {"id": "11111111-aaaa", "opening_line": "fine", "status": "running"},
+        {"id": "x" * 200, "opening_line": "far too long", "status": "running"},
+        {"id": "22222222-bbbb", "opening_line": "also fine", "status": "running"},
     ]
 
     payloads = [
@@ -771,9 +771,9 @@ def test_a_conversations_colour_mark_comes_off_its_session_row():
     """
     # A mark whose nearest dot is not the one the running-status icon already
     # uses, so the assertion is about the colour and not about the status.
-    marked = {"id": "11111111-aaaa", "summary": "Roof", "status": "running",
+    marked = {"id": "11111111-aaaa", "opening_line": "Roof", "status": "running",
               "color": "#8859a3"}
-    bare = {"id": "11111111-aaaa", "summary": "Roof", "status": "running"}
+    bare = {"id": "11111111-aaaa", "opening_line": "Roof", "status": "running"}
 
     dot = picker.dot_for_color("#8859a3")
     assert dot in picker.button_text(marked)

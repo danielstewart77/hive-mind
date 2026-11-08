@@ -120,12 +120,12 @@ def dot_for_color(color: object) -> str:
 def caption_for(session: dict) -> str:
     """What a conversation is called whenever it is named to the operator.
 
-    The operator's own name wins over the gateway's generated summary — they
+    The operator's own name wins over the gateway's opening line — they
     named it, and a name they chose is the only thing they can predict. One
     function because the button and the reply that follows tapping it have to
     agree: a picker row reading "dragoman" whose tap answers "Resumed New
     session" reads as having resumed something else entirely. The gateway
-    writes a summary only on a chat turn, so every conversation the browser
+    writes an opening line only on a chat turn, so every conversation the browser
     terminal holds is called "New session" forever, which is exactly the
     population most likely to carry a name.
 
@@ -136,7 +136,7 @@ def caption_for(session: dict) -> str:
     kept for compatibility.
     """
     name = (str(session.get("name") or "")).strip()
-    return name or (str(session.get("summary") or "")).strip() or "Untitled"
+    return name or (str(session.get("opening_line") or "")).strip() or "Untitled"
 
 
 def button_text(session: dict) -> str:
@@ -159,8 +159,8 @@ def button_text(session: dict) -> str:
     # row whose surface the gateway did not name still says so, because the
     # move happens either way.
     if session.get("adoptable"):
-        where = f" — on {session.get('surface') or 'another surface'}"
-    # The gateway writes a summary only on a chat turn, so every conversation
+        where = f" — on {session.get('surface_label') or 'another surface'}"
+    # The gateway writes an opening line only on a chat turn, so every conversation
     # the browser terminal is holding is called "New session" forever. Without
     # the id and the age those rows are indistinguishable from each other, and
     # a picker you cannot read is worse than the numbered list it replaced.

@@ -192,3 +192,40 @@ class TestGatewayClientSkillDiscovery:
                 "argument_hint": "<arg>",
             }
         ]
+
+
+@pytest.mark.asyncio
+async def test_a_new_session_names_its_surface_in_the_schemas_words():
+    """The gateway speaks the schema: a session is opened on a ``surface`` (the
+    raw address) for a ``surface_id``. Breaks if ensure_session goes back to the
+    retired ``owner_type``/``owner_ref`` keys, which comms stops accepting."""
+    posted = []
+
+    class _Resp:
+        def __init__(self, data, status=200):
+            self._data, self.status = data, status
+
+        async def json(self):
+            return self._data
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _Http:
+        def get(self, url, **kwargs):
+            return _Resp([])
+
+        def post(self, url, **kwargs):
+            posted.append(kwargs.get("json"))
+            return _Resp({"id": "sess-new"})
+
+    client = GatewayClient(_Http(), "http://gw.test", "telegram:ada", mind_id="ada")
+
+    assert await client.ensure_session(42, 777) == "sess-new"
+    body = posted[0]
+    assert body["surface"] == "telegram:ada"
+    assert body["surface_id"] == "42"
+    assert "owner_type" not in body and "owner_ref" not in body
