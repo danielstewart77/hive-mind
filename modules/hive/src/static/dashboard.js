@@ -290,7 +290,7 @@
             (context.over ? " (over)" : "");
       [
         session.mind_name || session.mind_id || "unknown mind",
-        session.name || session.summary || session.session_id,
+        session.name || session.opening_line || session.session_id,
         session.model || "",
         size,
         tokens(context.threshold) + percentOf(context),

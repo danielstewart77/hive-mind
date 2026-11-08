@@ -92,8 +92,8 @@ async def test_the_conversation_is_adopted_before_it_is_spoken_to(store, gateway
         "/sessions/conv-1/message",
     ]
     activate = gateway.calls[0]["body"]
-    assert activate["owner_type"] == "design"
-    assert activate["owner_ref"] == record["id"]
+    assert activate["surface"] == "design"
+    assert activate["surface_id"] == record["id"]
     assert gateway.calls[0]["authorization"] == "Bearer service-token"
 
 

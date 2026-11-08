@@ -169,8 +169,8 @@ async def adopt_conversation(design_id: str, conversation_id: str) -> None:
         {
             "client_type": SURFACE,
             "client_ref": design_id,
-            "owner_type": SURFACE,
-            "owner_ref": design_id,
+            "surface": SURFACE,
+            "surface_id": design_id,
         },
         headers=_service_headers(),
         stream=False,

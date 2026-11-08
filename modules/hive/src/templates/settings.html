@@ -88,7 +88,7 @@ window.addEventListener("DOMContentLoaded", function () {
         const list = document.getElementById("settings-sessions");
         try {
             const sessions = (await h.requestJson("/api/settings/hive-comms/sessions")).sessions || [];
-            list.innerHTML = sessions.length ? sessions.map(function (item) { return '<li class="activity-row"><span class="activity-icon"><i data-lucide="message-circle"></i></span><span class="activity-copy"><strong>' + h.escapeHtml(item.mind_name || "Unknown mind") + '</strong><small>' + h.escapeHtml(item.summary || (item.id || "").slice(0, 8)) + '</small></span><button class="button button-danger" type="button" data-delete-session="' + h.escapeHtml(item.id) + '">Delete</button></li>'; }).join("") : '<li class="empty-state"><h3>No sessions</h3><p>There are no sessions to manage.</p></li>';
+            list.innerHTML = sessions.length ? sessions.map(function (item) { return '<li class="activity-row"><span class="activity-icon"><i data-lucide="message-circle"></i></span><span class="activity-copy"><strong>' + h.escapeHtml(item.mind_name || "Unknown mind") + '</strong><small>' + h.escapeHtml(item.opening_line || (item.id || "").slice(0, 8)) + '</small></span><button class="button button-danger" type="button" data-delete-session="' + h.escapeHtml(item.id) + '">Delete</button></li>'; }).join("") : '<li class="empty-state"><h3>No sessions</h3><p>There are no sessions to manage.</p></li>';
             refreshIcons();
         } catch (error) { list.innerHTML = '<li><div class="error-state">' + h.escapeHtml(error.message) + '</div></li>'; }
     }

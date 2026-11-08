@@ -66,7 +66,7 @@ window.addEventListener("DOMContentLoaded", async function () {
 
         const sessions = data.sessions || [];
         document.getElementById("overview-sessions").innerHTML = sessions.length ? sessions.slice(0, 5).map(function (session) {
-            return '<li class="activity-row"><span class="activity-icon"><i data-lucide="message-circle"></i></span><span class="activity-copy"><strong>' + h.escapeHtml(session.mind_name || "Unknown mind") + '</strong><small>' + h.escapeHtml(session.summary || session.status || "Session") + '</small></span></li>';
+            return '<li class="activity-row"><span class="activity-icon"><i data-lucide="message-circle"></i></span><span class="activity-copy"><strong>' + h.escapeHtml(session.mind_name || "Unknown mind") + '</strong><small>' + h.escapeHtml(session.opening_line || session.status || "Session") + '</small></span></li>';
         }).join("") : '<li class="empty-state"><h3>No active sessions</h3><p>New conversations will appear here.</p></li>';
         if (window.lucide) window.lucide.createIcons({attrs: {"stroke-width": 1.8}});
     } catch (error) {
