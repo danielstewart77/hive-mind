@@ -20,7 +20,7 @@ import hive_data
 from hive_data import broker_ops, core
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from comms.config import config
 import comms.broker as broker
@@ -315,9 +315,18 @@ async def health() -> dict[str, str]:
 # ---------------------------------------------------------------------------
 # Request / response models
 # ---------------------------------------------------------------------------
+# The wire speaks the schema's names (`core.sql`): `surface`, `surface_id`,
+# `conversation_id`. The old names are still taken for one deploy, so a
+# consumer still sending them is not refused while the rest move over; the
+# attribute keeps its old name so nothing behind the route changes.
+_SURFACE = AliasChoices("surface", "owner_type")
+_SURFACE_ID = AliasChoices("surface_id", "owner_ref")
+_CONVERSATION_ID = AliasChoices("conversation_id", "claude_sid")
+
+
 class CreateSessionRequest(BaseModel):
-    owner_type: str
-    owner_ref: str
+    owner_type: str = Field(validation_alias=_SURFACE)
+    owner_ref: str = Field(validation_alias=_SURFACE_ID)
     client_ref: str
     model: str | None = None
     surface_prompt: str | None = None
@@ -351,8 +360,8 @@ class ActivateRequest(BaseModel):
     # these forwarded, a surface reaching a conversation that lives in a
     # tmux pane spawns a second `--resume` process beside it, both
     # appending to one transcript.
-    owner_type: str | None = None
-    owner_ref: str | None = None
+    owner_type: str | None = Field(default=None, validation_alias=_SURFACE)
+    owner_ref: str | None = Field(default=None, validation_alias=_SURFACE_ID)
 
 
 class RemoteControlResponse(BaseModel):
@@ -552,13 +561,15 @@ async def create_session(body: CreateSessionRequest, request: Request):
 @app.get("/sessions")
 async def list_sessions(
     request: Request,
+    surface_id: str | None = None,
     owner_ref: str | None = None,
     status: str | None = None,
     client_type: str | None = None,
     client_ref: str | None = None,
 ):
+    # `surface_id` is the schema's name; `owner_ref` is taken for one deploy.
     rows = await session_mgr.list_sessions(
-        owner_ref=owner_ref,
+        owner_ref=surface_id or owner_ref,
         status=status,
         client_type=client_type,
         client_ref=client_ref,
@@ -703,7 +714,7 @@ class ArmRotationRequest(BaseModel):
     client_ref: str
     # The conversation the hook measured. An arm for one a harness switch
     # has since replaced is ignored; absent means a hook predating it.
-    claude_sid: str = ""
+    claude_sid: str = Field(default="", validation_alias=_CONVERSATION_ID)
     # When the hook began, as epoch seconds. Lets an arm that names no
     # conversation be checked against a conversation replaced since.
     started_at: float | None = None
@@ -712,7 +723,7 @@ class ArmRotationRequest(BaseModel):
 class FireRotationRequest(BaseModel):
     client_type: str
     client_ref: str
-    claude_sid: str = ""
+    claude_sid: str = Field(default="", validation_alias=_CONVERSATION_ID)
     prompt: str = ""
 
 
@@ -726,7 +737,7 @@ class RecordTurnRequest(BaseModel):
     # only cleared if it was composed for this same conversation, so a turn
     # still in flight from before a rotation cannot clear the seed the
     # rotation just wrote.
-    claude_sid: str | None = None
+    claude_sid: str | None = Field(default=None, validation_alias=_CONVERSATION_ID)
 
 
 class HarnessStateRequest(BaseModel):
@@ -914,7 +925,8 @@ async def publish_pty_text(
     "/sessions/{session_id}/carry-forward",
 )
 async def get_carry_forward(
-    session_id: str, request: Request, claude_sid: str = ""
+    session_id: str, request: Request, conversation_id: str = "",
+    claude_sid: str = "",
 ):
     """The rotation carry-forward a mind still owes this conversation.
 
@@ -933,7 +945,11 @@ async def get_carry_forward(
     await _require_own_session_mind(request, session_id)
     return {
         "session_id": session_id,
-        "carry_forward": await session_mgr.get_carry_forward(session_id, claude_sid),
+        # `conversation_id` is the schema's name; `claude_sid` is taken for
+        # one deploy.
+        "carry_forward": await session_mgr.get_carry_forward(
+            session_id, conversation_id or claude_sid
+        ),
     }
 
 
@@ -1348,6 +1364,9 @@ async def ws_attach(ws: WebSocket, session_id: str):
         "cols": ws.query_params.get("cols") or "80",
         "rows": ws.query_params.get("rows") or "24",
         "client_ref": routing["client_ref"],
+        "surface": routing["owner_type"],
+        "surface_id": routing["owner_ref"],
+        # The old names, for a mind that has not moved to the schema's yet.
         "owner_type": routing["owner_type"],
         "owner_ref": routing["owner_ref"],
     })
@@ -1450,8 +1469,8 @@ SERVER_COMMANDS = {"/clear", "/model", "/effort", "/harness", "/kill", "/prune",
 
 class CommandRequest(BaseModel):
     content: str
-    owner_type: str = "terminal"
-    owner_ref: str = ""
+    owner_type: str = Field(default="terminal", validation_alias=_SURFACE)
+    owner_ref: str = Field(default="", validation_alias=_SURFACE_ID)
     client_ref: str = ""
     mind_id: str
 

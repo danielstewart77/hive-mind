@@ -38,7 +38,7 @@ not close the session.
 The mind stamps the gateway's own session id on the harness process as
 `HIVE_SESSION_ID`; failing that, the gateway holds the harness's own
 conversation id — Claude's `CLAUDE_CODE_SESSION_ID` as the session's
-`claude_sid`, Codex's `CODEX_THREAD_ID` as its `harness_sid`. Use the bundled
+`conversation_id`, Codex's `CODEX_THREAD_ID` as its `harness_sid`. Use the bundled
 helper, which prefers the former and falls back to an exact match on the
 latter. It never guesses by recency, mind, or owner:
 

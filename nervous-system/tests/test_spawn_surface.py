@@ -3,7 +3,7 @@
 Minds shape behavior per surface (TTS prose for Telegram, full terminal
 rendering for a tty), but ``owner_type`` is a routing key — it carries a
 mind-uuid suffix and a web/terminal split that are the gateway's business.
-``_spawn`` therefore ships the clean human label under ``surface``, derived
+``_spawn`` therefore ships the clean human label under ``surface_label``, derived
 by the same ``_surface_label`` the session picker uses, so every consumer
 of the word "terminal" agrees on what it means.
 """
@@ -98,28 +98,32 @@ def _spawned_payload(owner_type: str | None, harness_sid: str | None = None) -> 
 
 def test_telegram_owner_type_ships_as_telegram() -> None:
     payload = _spawned_payload("telegram:14cb820b-4a42")
-    assert payload["surface"] == "telegram"
+    assert payload["surface_label"] == "telegram"
 
 
 def test_web_owner_type_ships_as_terminal() -> None:
     """The browser tile registers as ``web`` but everyone calls it the
     terminal — same collapse the session picker's surface label does."""
     payload = _spawned_payload("web:14cb820b-4a42")
-    assert payload["surface"] == "terminal"
+    assert payload["surface_label"] == "terminal"
 
 
 def test_missing_owner_type_ships_an_empty_surface() -> None:
     """No invented default: a mind that sees "" knows the gateway didn't
     know, which is different from being told "local" and believing it."""
     payload = _spawned_payload(None)
-    assert payload["surface"] == ""
+    assert payload["surface_label"] == ""
 
 
-def test_surface_rides_beside_owner_type_not_instead_of_it() -> None:
-    """owner_type keeps flowing for env routing (rotation hook reads it)."""
+def test_the_label_rides_beside_the_raw_address_not_instead_of_it() -> None:
+    """The raw address keeps flowing for env routing (rotation hook reads it)
+    under the schema's names, and under the old ones for one deploy."""
     payload = _spawned_payload("discord:abc")
+    assert payload["surface"] == "discord:abc"
+    assert payload["surface_id"] == "123"
+    assert payload["surface_label"] == "discord"
     assert payload["owner_type"] == "discord:abc"
-    assert payload["surface"] == "discord"
+    assert payload["owner_ref"] == "123"
 
 
 def test_provider_thread_id_is_shipped_to_the_mind() -> None:

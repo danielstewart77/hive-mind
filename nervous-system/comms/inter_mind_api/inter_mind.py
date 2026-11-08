@@ -81,8 +81,8 @@ def delegate_to_mind(
         create_resp = requests.post(
             f"{GATEWAY_URL}/sessions",
             json={
-                "owner_type": "inter_mind",
-                "owner_ref": f"delegate-{mind_id}",
+                "surface": "inter_mind",
+                "surface_id": f"delegate-{mind_id}",
                 "client_ref": f"delegate-{mind_id}",
                 "mind_id": mind_id,
             },

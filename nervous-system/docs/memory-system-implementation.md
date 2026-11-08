@@ -545,7 +545,7 @@ upfront for the next adopter.
 
 ### Rotation
 
-- Gateway endpoint: `POST /sessions` needs `owner_type, owner_ref, client_ref, mind_id` (+ optional `model`). `DELETE /sessions/{id}` kills.
+- Gateway endpoint: `POST /sessions` needs `surface, surface_id, client_ref, mind_id` (+ optional `model`). `DELETE /sessions/{id}` kills.
 - `client_ref` lives in `active_sessions` (separate from `sessions`). To get full session metadata: `JOIN sessions s ON ... LEFT JOIN active_sessions a ON s.id = a.session_id`.
 - The Claude Code SessionStart event does NOT pass `prior_transcript_path` on a fresh-spawned session. The carry-forward layer is wired via a one-shot hint file at `data/auto-remember/rotation-prior-<client_ref>.path` written by `rotation_check.sh` and consumed by `session_start_bootstrap.sh` (≤60s old; deleted after read).
 - Threshold defaults: `ROTATION_TOKEN_THRESHOLD=300000` (30% of 1M context for Opus 4.7 / Sonnet 4.6), `CHARS_PER_TOKEN=4`.

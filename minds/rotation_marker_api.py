@@ -42,19 +42,19 @@ def drop_markers(mind_dir: Path, claude_sid: str) -> None:
 
 
 def install_rotation_marker_route(app: FastAPI, *, mind_dir: Path) -> None:
-    """``DELETE /sessions/{id}/rotation-marker?claude_sid=`` — 204 when gone.
+    """``DELETE /sessions/{id}/rotation-marker?conversation_id=`` — 204 when gone.
 
     Under ``/sessions``, so the session guard every such route answers to
     covers it too.
     """
 
     @app.delete("/sessions/{sid}/rotation-marker")
-    async def delete_rotation_marker(sid: str, claude_sid: str = "") -> Response:
+    async def delete_rotation_marker(sid: str, conversation_id: str = "") -> Response:
         del sid
-        if not _SID_RE.fullmatch(claude_sid):
-            return JSONResponse({"error": "claude_sid required"}, status_code=400)
+        if not _SID_RE.fullmatch(conversation_id):
+            return JSONResponse({"error": "conversation_id required"}, status_code=400)
         try:
-            drop_markers(mind_dir, claude_sid)
+            drop_markers(mind_dir, conversation_id)
         except OSError as exc:
             return JSONResponse({"error": f"could not drop the marker: {exc}"},
                                 status_code=500)
