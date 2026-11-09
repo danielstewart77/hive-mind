@@ -5,7 +5,6 @@ multiuser_support): Arnold is sloan's, zack is aiden's, skippy is daniel's,
 and `orphan` registered before owners existed.
 """
 
-import asyncio
 import json
 import re
 
@@ -18,6 +17,7 @@ import auth
 import console_access
 import main
 import route_access
+from hive_site.testing import run
 
 REFUSED = route_access.REFUSAL_HEADER
 
@@ -63,11 +63,10 @@ def people(builtin_console):
     admin = builtin_console.admin()
     sloan = builtin_console.settled_user(admin, "sloan", "sloans-own-pass")
     builtin_console.create_user(admin, "aiden", "aiden-temp-pass")
-    # Recorded through the real operation, on a loop of its own: the store
-    # is one SQLite connection on one worker thread, so a write made here is
-    # a write the next request sees.
-    asyncio.run(console_access.record_operation("op-sloan", "sloan"))
-    asyncio.run(console_access.record_operation("op-aiden", "aiden"))
+    # Recorded through the real operation, on the suite's loop, which the
+    # store's pool and every request share.
+    run(console_access.record_operation("op-sloan", "sloan"))
+    run(console_access.record_operation("op-aiden", "aiden"))
     return admin, sloan
 
 

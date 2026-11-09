@@ -26,9 +26,7 @@ carry no feedback of their own — enforcing it there would freeze a stale
 page with no way back.
 
 No SQL lives here. Every read and write goes through `store`, which answers
-from the hive's Postgres or from this host's own file depending on one
-environment variable, so the three rules below are decided once and both
-stores obey them.
+from the hive's Postgres, so the three rules below are decided once, here.
 
 **A refusal is loud.** A publish that tries to rewrite a protected item, or
 a save carrying a revision that has since moved, fails and says which items

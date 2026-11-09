@@ -18,6 +18,7 @@ import auth
 import capability_install
 import main as main_mod
 import accounts
+from hive_site.testing import run
 
 
 def _render_installation_controls(node: dict) -> str:
@@ -58,12 +59,11 @@ async def _hive_tools_node() -> dict:
     )
 
 
-async def _authed_client(tmp_path, monkeypatch) -> TestClient:
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
+def _authed_client(tmp_path, monkeypatch) -> TestClient:
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
-    user = await auth.create_user("daniel", "secret-pass", is_admin=True, replace=True)
+    user = run(auth.create_user("daniel", "secret-pass", is_admin=True, replace=True))
     client = TestClient(main_mod.app)
-    client.cookies.set(auth.SESSION_COOKIE_NAME, await auth.create_session_token(user))
+    client.cookies.set(auth.SESSION_COOKIE_NAME, run(auth.create_session_token(user)))
     return client
 
 
@@ -73,8 +73,8 @@ INSTALL_ROUTE = "/api/capability-nodes/hive-tools/install"
 # Requirement 1 — the button exists to be clicked, and clicking it is what
 # runs the install. Without this the whole route could be deleted, or replaced
 # with a hardcoded success, and every other test would still pass.
-async def test_clicking_clone_runs_the_install_and_reports_the_result(tmp_path, monkeypatch):
-    client = await _authed_client(tmp_path, monkeypatch)
+def test_clicking_clone_runs_the_install_and_reports_the_result(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
     with patch.object(
         main_mod,
         "clone_hive_tools",
@@ -90,7 +90,6 @@ async def test_clicking_clone_runs_the_install_and_reports_the_result(tmp_path, 
 # Requirement 1 — cloning to disk is an operator action, so an anonymous
 # caller cannot trigger it.
 def test_the_install_route_refuses_an_unauthenticated_caller(tmp_path, monkeypatch):
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
     client = TestClient(main_mod.app)
 
@@ -107,8 +106,8 @@ async def test_the_hive_tools_card_offers_the_install_action():
 
 # Requirement 1 — a failure reaches the operator as the reason it failed, and
 # a second concurrent click is distinguishable from a blocked destination.
-async def test_install_failures_reach_the_card_with_their_own_status(tmp_path, monkeypatch):
-    client = await _authed_client(tmp_path, monkeypatch)
+def test_install_failures_reach_the_card_with_their_own_status(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
 
     with patch.object(
         main_mod, "clone_hive_tools", side_effect=RuntimeError("could not resolve host")

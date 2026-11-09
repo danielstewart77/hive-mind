@@ -24,8 +24,8 @@ claim, ignoring case, and binds that account to the token's object id
 (`oid`). Every later sign-in matches on the object id alone, so an email
 the tenant later reports differently does not lock the owner out, and a
 different person who later holds that email address in the tenant is refused
-rather than handed the account. The binding is kept in the console's own db
-(`sso_bindings` in hive.db) on both account stores, because auth-service has
+rather than handed the account. The binding is kept in the console's own store
+(`core.sso_bindings` in the hive's Postgres) on both account stores, because auth-service has
 no field for it.
 
 An admin can unbind an account (Settings, Users and groups, "Unbind
@@ -34,7 +34,8 @@ account's email unbinds it, since the binding was made on the old address.
 Either way the account's next Microsoft sign-in selects it by email again. A token that says its email is unverified (`email_verified`
 or `xms_edov` false) matches no account by email.
 
-Works with either account store (hive.db, or auth-service at home). At home
+Works with either account store (the built-in accounts, or auth-service at
+home). At home
 an account signs in only if auth-service grants it the `hive` site, and an
 admin counts as granted, as with `/verify`.
 
@@ -86,7 +87,8 @@ by accident. A principal with an instance (`user/admin@REALM`) never signs
 in.
 
 Domain accounts are held only by the console's own account store, so this
-method is available only on an install that signs in against hive.db; at
+method is available only on an install that signs in against the built-in
+accounts; at
 home, behind auth-service, it stays off whatever is configured.
 
 ### What IT provides

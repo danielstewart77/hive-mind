@@ -15,16 +15,11 @@ services:
     environment:
       - HIVE_HOST=0.0.0.0
       - HIVE_LOG_FORMAT=json
-      # Which store answers. Set means the hive's one Postgres through
-      # `hive_data`; unset means this host's own hive.db as before, which is
-      # the revert: one value in .env and a restart, with the file left on
-      # disk and reachable. The two paths below are that file and lucent's,
-      # and they are read only on the SQLite half.
-      - HIVE_DATABASE_URL=${HIVE_DATABASE_URL:-}
-      - HIVE_DB_PATH=/data/hive.db
-      - LUCENT_DB_PATH=/lucent/lucent.db
+      # The hive's one Postgres, through `hive_data`. Required: the console
+      # refuses to start without it.
+      - HIVE_DATABASE_URL=${HIVE_DATABASE_URL:?set HIVE_DATABASE_URL in .env}
       # Parent domain so the session cookie is shared with the terminal
-      # site, which mounts the same auth db and secret.
+      # site, which reads the same accounts and secret.
       - HIVE_COOKIE_DOMAIN=sparktobloom.com
       # Who the Capability Nodes clone action hands its checkout to. This
       # container runs as root, so without it every cloned file lands
@@ -40,11 +35,8 @@ services:
       # The modules shared with the terminal site, live like ./src above.
       # The terminal mounts this same directory from its own compose.
       - ./hive_site:/app/hive_site
-      # Auth db — shared with the terminal site.
+      # Canvas state, harness runs and .env backups.
       - ./data:/data
-      # Lucent sqlite, read-only, for the /memory browser. hive_nervous_system
-      # retired 2026-07-24 — lucent now lives in hive_mind's own nervous-system/.
-      - ${LUCENT_DB_HOST_DIR:-/home/daniel/Storage/Dev/hive_mind/nervous-system/data}:/lucent:ro
       # Per-mind config files for the /settings mind registry and the
       # per-Mind default-model editor. Containerized minds
       # (ada/bob/bilby/nagatha/hex-bot) keep runtime.yaml under hive_mind's

@@ -11,7 +11,6 @@ import configuration_data
 
 
 async def test_capability_endpoint_round_trip_normalizes_url(tmp_path, monkeypatch):
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
 
     saved = await configuration_data.set_capability_endpoint(
         "ollama", " http://192.168.4.64:11434/ "
@@ -22,7 +21,6 @@ async def test_capability_endpoint_round_trip_normalizes_url(tmp_path, monkeypat
 
 
 async def test_inference_proxy_endpoint_is_configurable(tmp_path, monkeypatch):
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
 
     saved = await configuration_data.set_capability_endpoint(
         "inference-proxy", "http://inference-proxy:8888"
@@ -43,14 +41,12 @@ async def test_inference_proxy_endpoint_is_configurable(tmp_path, monkeypatch):
 async def test_capability_endpoint_rejects_unsafe_values(
     tmp_path, monkeypatch, node_id, endpoint
 ):
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
 
     with pytest.raises(ValueError):
         await configuration_data.set_capability_endpoint(node_id, endpoint)
 
 
 async def test_edge_mind_metadata_round_trip(tmp_path, monkeypatch):
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
 
     await configuration_data.set_edge_mind_metadata(
         "sentinel-one",

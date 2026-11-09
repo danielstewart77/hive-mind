@@ -6,9 +6,8 @@ image from this directory as a build context — the same way both take
 `hive_data`.
 
 - `hive_site.store` — every operation either site performs on the hive's
-  database, as one async surface with two backends: the hive's Postgres
-  through `hive_data` when `HIVE_DATABASE_URL` is set, this host's own
-  `hive.db` when it is not.
+  database, as one async surface over the hive's Postgres through
+  `hive_data`, at `HIVE_DATABASE_URL`. Unset, a site refuses to start.
 - `hive_site.auth` — accounts and sessions on top of it: the `builtin` store
   and the `auth-service` store, the session cookie, and the request
   resolution both sites' routes depend on.
@@ -16,13 +15,11 @@ image from this directory as a build context — the same way both take
 ## Why the whole store moved and not just its accounts half
 
 The terminal needs twenty-two account operations and none of the board,
-design or memory ones. Moving only those twenty-two would have meant either
-a second copy of the connection and unit-of-work plumbing underneath them,
-or a second SQLite connection on one file: an account write issued inside a
-board transaction would then sit outside that transaction, and on SQLite it
-would wait on the transaction's own `BEGIN IMMEDIATE` for ten seconds and
-then fail with "database is locked". A unit of work has to be one
-connection, so the operations that share one have to be one module.
+design or memory ones. Moving only those twenty-two would have meant a
+second copy of the connection and unit-of-work plumbing underneath them, and
+an account write issued inside a board transaction would then sit outside
+that transaction. A unit of work has to be one connection, so the operations
+that share one have to be one module.
 
 So the terminal installs operations it never calls. That is the cost, and it
 is the cheap half of the trade: the expensive half was two drifting copies

@@ -2,14 +2,10 @@
 happen to insert it themselves. Without this, a single test file can only be
 collected when another module has already run its own sys.path insert.
 
-Also point HIVE_DB_PATH at a per-test temporary file for every test in the
-suite. The default resolves to the repo's own data/hive.db, which on a
-developer's machine is the live console database holding the real board and
-the real logins — a test that forgets to redirect it does not fail, it
-quietly edits production and reports green.
+And put every test on a scratch Postgres, on the suite's one event loop —
+see `hive_site.testing` for why both.
 """
 
-import asyncio
 import os
 import sys
 
@@ -18,43 +14,49 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 sys.path.insert(0, os.path.dirname(__file__))
 
+from hive_site import testing  # noqa: E402
+
+
+@pytest.fixture(scope="session")
+def scratch_database():
+    """One scratch database for the run, claimed, with the schemas applied.
+
+    Fails rather than skips without a server: a suite that skipped every
+    test would read as green while testing nothing.
+    """
+    if not testing.ADMIN_DSN:
+        pytest.fail(testing.NO_SERVER)
+    with testing.testclients_on_the_suite_loop():
+        scratch = testing.run(testing.ScratchDatabase.create())
+        try:
+            yield scratch
+        finally:
+            testing.run(scratch.close())
+            testing.stop_suite_portal()
+
 
 @pytest.fixture(autouse=True)
-def _isolated_hive_db(tmp_path, monkeypatch):
-    """Every test on its own file, on the SQLite half, with the store open.
+def _isolated_hive_db(scratch_database, monkeypatch):
+    """Every test on an emptied scratch database, with the store open.
 
-    The path first: the default resolves to the repo's own data/hive.db,
-    which on a developer's machine is the live console database holding the
-    real board and the real logins — a test that forgets to redirect it does
-    not fail, it quietly edits production and reports green.
-
-    The half second. `store.open` picks its backend from
-    `HIVE_DATABASE_URL`, and on the machine that runs the console that
-    variable is exported, so without this the whole suite would silently run
-    against the hive's live Postgres. The Postgres half is covered on
-    purpose elsewhere: `hive_data`'s own suite exercises every operation
-    against a real Postgres, and `tests/test_store_parity.py` here runs the
-    two halves side by side and compares what they answer.
+    `HIVE_DATABASE_URL` is pointed at the scratch database here, whatever
+    the machine exports: on the host that runs the console that variable
+    names the live database, and a suite that inherited it would edit
+    production and report green.
 
     And the open. Nothing opens the store on demand, so a test reaching a
     route without this gets the refusal that says the application's lifespan
-    never ran. Opened here rather than by entering the `TestClient` as a
-    context manager, because the SQLite half is a connection on its own
-    worker thread and so is reachable from whichever loop each request
-    happens to run on, while every test in the suite builds its client
-    without a `with`.
+    never ran.
     """
-    import asyncio
-
     import store
 
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
-    monkeypatch.setenv("HIVE_DATABASE_URL", "")
-    asyncio.run(store.open())
+    monkeypatch.setenv("HIVE_DATABASE_URL", scratch_database.dsn)
+    testing.run(scratch_database.reset())
+    testing.run(store.open())
     try:
         yield
     finally:
-        asyncio.run(store.close())
+        testing.run(store.close())
 
 
 # ── multi-user: one console, either account store ─────────────────────
@@ -158,7 +160,7 @@ def console(request, tmp_path, monkeypatch, fake_comms):
         monkeypatch.setenv("HIVE_AUTH_BACKEND", "builtin")
         monkeypatch.setenv("HIVE_SEED_USERNAME", SEED_USERNAME)
         monkeypatch.setenv("HIVE_SEED_PASSWORD", SEED_PASSWORD)
-        asyncio.run(auth.seed_first_user())
+        testing.run(auth.seed_first_user())
         yield Console("builtin")
         return
     source = request.getfixturevalue("auth_service_source")
@@ -182,20 +184,17 @@ def builtin_console(tmp_path, monkeypatch, fake_comms):
     monkeypatch.setenv("HIVE_AUTH_BACKEND", "builtin")
     monkeypatch.setenv("HIVE_SEED_USERNAME", SEED_USERNAME)
     monkeypatch.setenv("HIVE_SEED_PASSWORD", SEED_PASSWORD)
-    asyncio.run(auth.seed_first_user())
+    testing.run(auth.seed_first_user())
     return Console("builtin")
 
 
 def pytest_pyfunc_call(pyfuncitem):
-    """Run coroutine tests without pulling in a plugin for it.
+    """Run coroutine tests on the suite's loop, without a plugin for it.
 
     Most of the suite is synchronous and drives the console through its own
-    HTTP surface, which `TestClient` runs on a loop of its own. The tests
-    that call a data module directly are coroutines now that those modules
-    are, and one plugin's default event-loop scoping would then apply to
-    every test in the repo.
+    HTTP surface. The tests that call a data module directly are coroutines,
+    and they run on the loop the store's pool belongs to.
     """
-    import asyncio
     import inspect
 
     func = pyfuncitem.obj
@@ -206,5 +205,5 @@ def pytest_pyfunc_call(pyfuncitem):
         for name in pyfuncitem._fixtureinfo.argnames
         if name in pyfuncitem.funcargs
     }
-    asyncio.run(func(**kwargs))
+    testing.run(func(**kwargs))
     return True

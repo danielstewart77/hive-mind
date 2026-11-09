@@ -1,46 +1,19 @@
-"""Do the two halves of the console's store answer the same thing?
-
-`store.py` has two backends and the whole claim made for keeping both is that
-unsetting one environment variable returns the console to the behaviour it
-had. Nothing else in this suite tests that: `conftest._isolated_hive_db`
-pins every other test to the SQLite half on purpose, so without this module
-the entire Postgres branch of `store.py` could be deleted and the suite would
-stay green.
+"""What the console's store operations answer, on the hive's Postgres.
 
 `hive_data`'s own suite guards each operation against a real Postgres. What
-no suite guards is the *wiring*: which `hive_data` function each store
-operation calls, with which argument order, and which key it reads off the
-result (`["rows"]`, `["row"]`). That rested on reading `store.py`.
-
-So every test here runs one sequence twice — once against a temporary SQLite
-file, once against a scratch Postgres database this module creates and drops
-— and compares what came back. A difference is the finding; the value itself
-is secondary, and each test asserts on it too so that two halves agreeing on
-a wrong answer is still a failure.
-
-Skipped, cleanly, when no Postgres is named. `HIVE_DATA_TEST_ADMIN_DSN` says
-where one is, with no default, because a default would be a credential in a
-tracked file. The machinery that creates and drops that scratch database
-lives in `hive_site.testing`, with the store it tests, so the terminal
-site's suite runs the same one rather than a copy.
+these guard is the *wiring*: which `hive_data` function each store operation
+calls, with which argument order, and which key it reads off the result
+(`["rows"]`, `["row"]`). Each test runs one sequence of operations against the
+suite's scratch database and asserts on what came back.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import os
-from pathlib import Path
 from typing import Any
 
-import pytest
-from hive_site.testing import (  # noqa: F401
-    ADMIN_DSN,
-    NO_SERVER,
-    both_halves,
-    on_postgres,
-    on_sqlite,
-)
+from hive_site.testing import make_conversations, run
 
 import kanban_data
 import store
@@ -49,10 +22,10 @@ import store
 # the board
 
 
-def test_the_two_halves_build_and_number_the_same_board(tmp_path: Path) -> None:
+def test_the_board_is_built_and_numbered() -> None:
     """The numbering is the risk the whole cutover carries: every story's
     number appears in conversations, commit messages and the lucent graph, so
-    two halves numbering differently is a port that renames work."""
+    numbering that drifts is a port that renames work."""
     async def sequence() -> list[Any]:
         epic = await kanban_data.create_epic("An epic", description="why")
         feature = await kanban_data.create_feature(epic["id"], "A feature")
@@ -74,9 +47,8 @@ def test_the_two_halves_build_and_number_the_same_board(tmp_path: Path) -> None:
             (await kanban_data.find_item(second["id"]))["backlog_number"],
         ]
 
-    on_file, on_server = both_halves(sequence, tmp_path / "parity.db")
-    assert on_file == on_server
-    epics, features, stories, numbers, one_number = on_file
+    answered = run(sequence())
+    epics, features, stories, numbers, one_number = answered
     assert epics == ["An epic"]
     assert features == ["A feature"]
     assert stories == ["First story", "Second story", "Under the epic"]
@@ -84,10 +56,8 @@ def test_the_two_halves_build_and_number_the_same_board(tmp_path: Path) -> None:
     assert one_number == "1.1.2"
 
 
-def test_the_two_halves_reorder_a_sibling_list_the_same_way(
-        tmp_path: Path) -> None:
-    """A drop renumbers the whole sibling list. Two halves writing a
-    different order is a board that looks different in two browsers."""
+def test_a_drop_reorders_the_sibling_list() -> None:
+    """A drop renumbers the whole sibling list."""
     async def sequence() -> list[Any]:
         epic = await kanban_data.create_epic("Epic")
         feature = await kanban_data.create_feature(epic["id"], "Feature")
@@ -103,18 +73,14 @@ def test_the_two_halves_reorder_a_sibling_list_the_same_way(
         return [after,
                 [row["title"] for row in await kanban_data.list_stories()]]
 
-    on_file, on_server = both_halves(sequence, tmp_path / "parity.db")
-    assert on_file == on_server
-    first, second = on_file
+    answered = run(sequence())
+    first, second = answered
     assert first == ["Story 2", "Story 0", "Story 1"]
     assert second == ["Story 2", "Story 1", "Story 0"]
 
 
-def test_the_two_halves_delete_a_subtree_and_count_it_the_same(
-        tmp_path: Path) -> None:
-    """What went, not what the page predicted. The count is rendered, and
-    the cascade is the database's on one half and a recursive statement on
-    the other."""
+def test_a_deleted_subtree_is_counted_as_what_went() -> None:
+    """What went, not what the page predicted. The count is rendered."""
     async def sequence() -> list[Any]:
         epic = await kanban_data.create_epic("Doomed")
         survivor = await kanban_data.create_epic("Survivor")
@@ -128,15 +94,14 @@ def test_the_two_halves_delete_a_subtree_and_count_it_the_same(
                 sorted(row["title"]
                        for row in await kanban_data.list_stories())]
 
-    on_file, on_server = both_halves(sequence, tmp_path / "parity.db")
-    assert on_file == on_server
-    predicted, removed, left = on_file
+    answered = run(sequence())
+    predicted, removed, left = answered
     assert predicted == {"features": 1, "stories": 2}
     assert removed == {"features": 1, "stories": 2}
     assert left == ["Elsewhere"]
 
 
-def test_the_two_halves_retype_an_item_the_same_way(tmp_path: Path) -> None:
+def test_a_retype_changes_every_column_it_implies() -> None:
     """A retype is five columns at once, and the console reads the board
     between any two writes: a feature holding a story's status, or a row at a
     duplicate number, is what writing them one at a time looks like."""
@@ -153,9 +118,8 @@ def test_the_two_halves_retype_an_item_the_same_way(tmp_path: Path) -> None:
         return [as_bug.get("subtype"), as_bug.get("status"), kind_now,
                 sorted(as_epic), await kanban_data.kind_of(feature["id"])]
 
-    on_file, on_server = both_halves(sequence, tmp_path / "parity.db")
-    assert on_file == on_server
-    subtype, status, kind_now, epic_keys, kind = on_file
+    answered = run(sequence())
+    subtype, status, kind_now, epic_keys, kind = answered
     assert subtype == "bug"
     assert status == "backlog"
     assert kind_now == "bug"
@@ -166,35 +130,17 @@ def test_the_two_halves_retype_an_item_the_same_way(tmp_path: Path) -> None:
 
 
 async def _conversations(*ids: str) -> None:
-    """Session rows for the conversations a design session will point at.
-
-    A no-op on the SQLite half, which has no `core` tables and no key to
-    satisfy: the console's own file never held the gateway's sessions.
-    """
-    if not store.on_postgres():
-        return
-    from hive_data import core
-
-    mind_id = "parity-mind"
-    await core.upsert_mind(mind_id=mind_id, name="parity",
-                           gateway_url="http://parity:8421",
-                           model="a-model", harness="claude",
-                           registered_at=1.0, last_seen=1.0, owner="daniel")
-    for conversation_id in ids:
-        await core.create_session(
-            id=conversation_id, conversation_id=conversation_id,
-            surface="console", surface_id="tile", model="a-model",
-            created_at=1.0, last_active=1.0, mind_id=mind_id)
+    """Session rows for the conversations a design session will point at."""
+    await make_conversations(*ids)
 
 
 # ---------------------------------------------------------------------------
 # design sessions and their notices
 
 
-def test_the_two_halves_guard_a_page_write_on_its_revision_the_same_way(
-        tmp_path: Path) -> None:
+def test_a_page_write_is_guarded_on_its_revision() -> None:
     """The revision is in the statement, so the row count *is* the
-    arbitration: two halves disagreeing about it is one browser tab's work
+    arbitration: getting it wrong is one browser tab's work
     silently replaced by another's with both told they succeeded."""
     async def sequence() -> list[Any]:
         await store.create_design_session("d-1", "A design", 1.0, 1.0)
@@ -206,15 +152,14 @@ def test_the_two_halves_guard_a_page_write_on_its_revision_the_same_way(
         row = await store.design_session("d-1")
         return [first, stale, row["revision"], row["requirements"]]
 
-    on_file, on_server = both_halves(sequence, tmp_path / "parity.db")
-    assert on_file == on_server
-    first, stale, revision, requirements = on_file
+    answered = run(sequence())
+    first, stale, revision, requirements = answered
     assert [first, stale] == [1, 0]
     assert revision == 2
     assert requirements == '{"r1": {}}'
 
 
-def test_the_two_halves_claim_a_notice_once(tmp_path: Path) -> None:
+def test_a_notice_is_claimed_once() -> None:
     """Build is the one press that starts a harness writing code. Delivered
     twice is two processes editing one working tree, so the loser has to be
     told it lost rather than handed a second copy."""
@@ -228,7 +173,7 @@ def test_the_two_halves_claim_a_notice_once(tmp_path: Path) -> None:
         again = await store.claim_notice(notice_id, 5.0)
         delivered = await store.mark_notice_delivered(notice_id, 6.0)
         twice = await store.mark_notice_delivered(notice_id, 7.0)
-        # Released *after* delivery, which is the guard the other half of
+        # Released *after* delivery, which is the guard the other side of
         # this pair exists for: an acknowledgement racing a failure report
         # must not un-deliver a notice that actually landed, and a released
         # notice is one the next sweep sends again.
@@ -241,10 +186,9 @@ def test_the_two_halves_claim_a_notice_once(tmp_path: Path) -> None:
             [row["kind"] for row in await store.pending_notices("d-1")],
         ]
 
-    on_file, on_server = both_halves(sequence, tmp_path / "parity.db")
-    assert on_file == on_server
+    answered = run(sequence())
     (body, lost, released, again, delivered, twice, un_delivered,
-     still_claimed, pending) = on_file
+     still_claimed, pending) = answered
     assert body == "go"
     assert lost is None
     assert [released, again, delivered, twice] == [1, True, 1, 0]
@@ -253,17 +197,13 @@ def test_the_two_halves_claim_a_notice_once(tmp_path: Path) -> None:
     assert pending == []
 
 
-def test_the_two_halves_keep_what_an_attach_was_not_told_about(
-        tmp_path: Path) -> None:
+def test_an_attach_keeps_what_it_was_not_told_about() -> None:
     """A mind re-claims a session on every turn that touches it, knowing the
     conversation and nothing else. An attach that wrote null instead would
     blank the mind the page was published by, every turn."""
     async def sequence() -> list[Any]:
-        # The conversations exist first. `design_sessions.conversation_id` is
-        # a real foreign key into `core.sessions` on the one database, which
-        # it could never be while each store was its own SQLite file — so a
-        # sequence attaching to an id nothing minted is refused there and
-        # accepted here, and would read as a difference in this operation.
+        # The conversations exist first: `design_sessions.conversation_id`
+        # is a real foreign key into `core.sessions`.
         await _conversations("conv-1", "conv-2")
         await store.create_design_session("d-1", "A design", 1.0, 1.0,
                                           surface="console")
@@ -275,13 +215,11 @@ def test_the_two_halves_keep_what_an_attach_was_not_told_about(
         return [kept["conversation_id"], kept["surface"],
                 moved["conversation_id"], moved["surface"]]
 
-    on_file, on_server = both_halves(sequence, tmp_path / "parity.db")
-    assert on_file == on_server
-    assert on_file == ["conv-1", "console", "conv-2", "telegram"]
+    answered = run(sequence())
+    assert answered == ["conv-1", "console", "conv-2", "telegram"]
 
 
-def test_the_two_halves_take_a_session_s_notices_with_it(
-        tmp_path: Path) -> None:
+def test_deleting_a_session_takes_its_notices_with_it() -> None:
     """`design_notices.design_id` carries no foreign key, so nothing in the
     database removes a session's notices when the session goes — and left
     behind they are undelivered rows the delivery path keeps picking up and
@@ -294,17 +232,15 @@ def test_the_two_halves_take_a_session_s_notices_with_it(
         return [removed, absent, await store.pending_notices(),
                 await store.design_session("d-1")]
 
-    on_file, on_server = both_halves(sequence, tmp_path / "parity.db")
-    assert on_file == on_server
-    assert on_file == [1, 0, [], None]
+    answered = run(sequence())
+    assert answered == [1, 0, [], None]
 
 
 # ---------------------------------------------------------------------------
 # settings, operations and people
 
 
-def test_the_two_halves_replace_a_capability_endpoint_the_same_way(
-        tmp_path: Path) -> None:
+def test_a_capability_endpoint_and_an_edge_mind_are_replaced_not_duplicated() -> None:
     """An upsert on both. A write that inserted twice would leave two rows
     for one node, and a read would answer whichever the planner reached."""
     async def sequence() -> list[Any]:
@@ -322,9 +258,8 @@ def test_the_two_halves_replace_a_capability_endpoint_the_same_way(
                 [(m["name"], m["profile"], m["role"], m["deployment"])
                  for m in await store.edge_minds()]]
 
-    on_file, on_server = both_halves(sequence, tmp_path / "parity.db")
-    assert on_file == on_server
-    endpoint, updated, cleared, absent, gone, minds = on_file
+    answered = run(sequence())
+    endpoint, updated, cleared, absent, gone, minds = answered
     assert endpoint == "http://two:11434"
     assert updated == 2
     assert [cleared, absent] == [1, 0]
@@ -332,26 +267,22 @@ def test_the_two_halves_replace_a_capability_endpoint_the_same_way(
     assert minds == [("skippy", "standard", "sandboxed", "container")]
 
 
-def test_the_two_halves_record_the_same_operation_requester(
-        tmp_path: Path) -> None:
+def test_the_last_recorded_operation_requester_is_the_one_answered() -> None:
     """The console scopes an operation's status to whoever started it, so a
-    half that lost the record answers "not yours" to the person who asked."""
+    lost record answers "not yours" to the person who asked."""
     async def sequence() -> list[Any]:
         await store.record_operation_requester("req-1", "daniel", 1)
         await store.record_operation_requester("req-1", "sloan", 2)
         return [await store.operation_requester("req-1"),
                 await store.operation_requester("never-recorded")]
 
-    on_file, on_server = both_halves(sequence, tmp_path / "parity.db")
-    assert on_file == on_server
-    assert on_file == ["sloan", None]
+    answered = run(sequence())
+    assert answered == ["sloan", None]
 
 
-def test_the_two_halves_guard_the_last_admin_the_same_way(
-        tmp_path: Path) -> None:
+def test_the_last_enabled_admin_is_guarded() -> None:
     """The console refuses a change that would leave nobody able to
-    administer the hive. The count is a statement on both halves, so a half
-    that counted differently locks the operator out of their own console."""
+    administer the hive. The count is one statement, and counting wrong locks the operator out of their own console."""
     import auth
 
     async def sequence() -> list[Any]:
@@ -379,9 +310,8 @@ def test_the_two_halves_guard_the_last_admin_the_same_way(
                        for group in await account_store.list_groups()),
                 second["username"]]
 
-    on_file, on_server = both_halves(sequence, tmp_path / "parity.db")
-    assert on_file == on_server
-    both, alone, refused, is_admin, groups, created = on_file
+    answered = run(sequence())
+    both, alone, refused, is_admin, groups, created = answered
     assert [both, alone] == [1, 0]
     assert refused == "The hive must keep at least one enabled admin."
     assert is_admin is True
@@ -389,8 +319,7 @@ def test_the_two_halves_guard_the_last_admin_the_same_way(
     assert created == "sloan"
 
 
-def test_the_two_halves_sign_a_cookie_with_the_same_stored_key(
-        tmp_path: Path) -> None:
+def test_the_stored_signing_key_is_never_replaced() -> None:
     """The signing key is minted on first use and kept. Two reads handing
     back different keys is every cookie the console issued becoming
     invalid, which presents as the whole install being signed out."""
@@ -406,52 +335,30 @@ def test_the_two_halves_sign_a_cookie_with_the_same_stored_key(
 
     environment = os.environ.pop("HIVE_SECRET_KEY", None)
     try:
-        on_file, on_server = both_halves(sequence, tmp_path / "parity.db")
+        answered = run(sequence())
     finally:
         if environment is not None:
             os.environ["HIVE_SECRET_KEY"] = environment
-    assert on_file == on_server
-    assert on_file == ["mine", "mine", "mine", None]
+    assert answered == ["mine", "mine", "mine", None]
 
 
 # ---------------------------------------------------------------------------
 # the memory browser
 
 
-def test_the_two_halves_report_a_table_that_is_not_there_the_same_way(
-        tmp_path: Path) -> None:
-    """None is what the console turns into a 404. A half that raised instead
-    would answer 500 to a typo in a URL, which reads as an outage."""
+def test_a_memory_table_that_is_not_there_is_reported_as_none() -> None:
+    """None is what the console turns into a 404. Raising instead would
+    answer 500 to a typo in a URL, which reads as an outage."""
     async def sequence() -> list[Any]:
         return [await store.memory_rows("no_such_table_anywhere")]
 
-    lucent = tmp_path / "lucent.db"
-    import sqlite3
-
-    connection = sqlite3.connect(lucent)
-    connection.execute("CREATE TABLE memories (id INTEGER PRIMARY KEY)")
-    connection.commit()
-    connection.close()
-    os.environ["LUCENT_DB_PATH"] = str(lucent)
-    try:
-        on_file, on_server = both_halves(sequence, tmp_path / "parity.db")
-    finally:
-        os.environ.pop("LUCENT_DB_PATH", None)
-    assert on_file == on_server
-    assert on_file == [None]
+    answered = run(sequence())
+    assert answered == [None]
 
 
-def test_the_postgres_half_reads_memory_out_of_the_one_database(
-        tmp_path: Path) -> None:
-    """Requirement three, and the window this cutover closes: a console on
-    Postgres whose memory pages still read a file would answer correctly
-    from a store nothing writes to any more.
-
-    One half only, because the two read two different *databases* here —
-    which is the whole point. What is compared is the shape they answer in.
-    """
-    if not ADMIN_DSN:
-        pytest.skip(NO_SERVER)
+def test_the_memory_browser_reads_memory_out_of_the_one_database() -> None:
+    """A console whose memory pages read anywhere else would answer from a
+    store nothing writes to any more."""
 
     async def sequence() -> list[Any]:
         from hive_data import memory
@@ -465,8 +372,7 @@ def test_the_postgres_half_reads_memory_out_of_the_one_database(
                 [row["content"] for row in page["rows"]],
                 page["rows"][0]["embedding"]]
 
-    count, total, columns, contents, embedding = asyncio.run(
-        on_postgres(sequence))
+    count, total, columns, contents, embedding = run(sequence())
     assert count == 1
     assert total == 1
     assert "content" in columns and "embedding" in columns
@@ -478,15 +384,10 @@ def test_the_postgres_half_reads_memory_out_of_the_one_database(
 # what one request's transaction may do to another's
 
 
-def test_two_board_mutations_at_once_both_land(tmp_path: Path) -> None:
-    """They take turns rather than one of them answering 500.
-
-    On one shared connection the second `BEGIN IMMEDIATE` is an error rather
-    than a wait, so two tabs dragging cards — or one double-tapped drop — is
-    a refusal nobody can explain. Each unit holds its own connection, so the
-    second waits out the file's write lock the way every caller did before
-    this module existed.
-    """
+def test_two_board_mutations_at_once_both_land() -> None:
+    """They take turns rather than one of them answering 500: two tabs
+    dragging cards, or one double-tapped drop, must not be a refusal nobody
+    can explain."""
     async def sequence() -> list[Any]:
         async def create(name: str) -> str:
             return (await kanban_data.create_epic(name))["id"]
@@ -499,23 +400,18 @@ def test_two_board_mutations_at_once_both_land(tmp_path: Path) -> None:
             row["position"] for row in await store.work_items("epic"))
         return [titles, len({first, second, third}), len(set(positions))]
 
-    on_file, on_server = both_halves(sequence, tmp_path / "parity.db")
-    assert on_file == on_server
-    titles, distinct_ids, distinct_positions = on_file
+    answered = run(sequence())
+    titles, distinct_ids, distinct_positions = answered
     assert titles == ["One", "Three", "Two"]
     assert distinct_ids == 3
     assert distinct_positions == 3, "two epics landed on one position"
 
 
-def test_a_unit_refuses_a_second_task_reaching_into_it(
-        tmp_path: Path) -> None:
+def test_a_unit_refuses_a_second_task_reaching_into_it() -> None:
     """A task created inside a unit inherits it, and must not use it.
 
     A transaction is one connection: two tasks writing through it can each
-    roll back the other's committed-looking work. `hive_data`'s unit refuses
-    this outright, and the SQLite half has to refuse it too — otherwise the
-    same code silently works on one half and raises on the other, which is
-    the one thing the revert lever must not do.
+    roll back the other's committed-looking work.
     """
     async def sequence() -> list[Any]:
         refusals: list[str] = []
@@ -534,27 +430,24 @@ def test_a_unit_refuses_a_second_task_reaching_into_it(
                 sorted(row["title"]
                        for row in await kanban_data.list_epics())]
 
-    on_file, on_server = both_halves(sequence, tmp_path / "parity.db")
-    assert on_file == on_server
-    refused, titles = on_file
+    answered = run(sequence())
+    refused, titles = answered
     assert refused is True, "a child task wrote through its parent's unit"
     assert titles == ["outer"]
 
 
-def test_the_two_reasons_there_is_no_store_are_told_apart(
-        tmp_path: Path) -> None:
+def test_the_two_reasons_there_is_no_store_are_told_apart() -> None:
     """A straggling background task and a route outside the app are different
     sentences, and each sends somebody somewhere else.
 
-    Both halves of the distinction, from a module in each state rather than
+    Both sides of the distinction, from a module in each state rather than
     from private globals set by hand: a reimported module has genuinely never
     opened, and a closed one genuinely has.
     """
     import importlib
 
     async def after_closing(module: Any) -> str:
-        os.environ[module.DSN_VAR] = ""
-        await module.open(tmp_path / "closed.db")
+        await module.open()
         await module.close()
         try:
             await module.release_notice(1)
@@ -570,8 +463,8 @@ def test_the_two_reasons_there_is_no_store_are_told_apart(
         return "no refusal"
 
     fresh = importlib.reload(importlib.import_module("store"))
-    never = asyncio.run(before_opening(fresh))
-    closed = asyncio.run(after_closing(fresh))
+    never = run(before_opening(fresh))
+    closed = run(after_closing(fresh))
     # Every other test in this suite holds the module the rest of the console
     # imported, so it is put back as it was.
     importlib.reload(fresh)
@@ -581,67 +474,8 @@ def test_the_two_reasons_there_is_no_store_are_told_apart(
     assert "never opened" not in closed, closed
 
 
-def test_a_unit_cancelled_waiting_for_the_file_lock_leaves_nothing_open(
-        tmp_path: Path) -> None:
-    """The SQLite half only, because the scenario is the file's write lock.
-
-    A rival writer holds it — the terminal site runs this same module against
-    this same file — so the unit blocks inside `BEGIN IMMEDIATE`, and the
-    request is cancelled there. A browser tab closing does that now: the
-    handlers are native coroutines, so there is no threadpool bridge left to
-    absorb it.
-
-    Shared, the connection was left inside a transaction with nobody to end
-    it. The console then read back everything it wrote and lost all of it
-    when the store closed, with only the next board mutation saying anything
-    at all. The unit's connection is its own and is closed on the way out, so
-    what follows is an ordinary store.
-    """
-    if not ADMIN_DSN:
-        pytest.skip(NO_SERVER)
-
-    db_path = tmp_path / "cancelled.db"
-
-    async def sequence() -> list[Any]:
-        import sqlite3
-
-        await kanban_data.create_epic("Before")
-
-        rival = sqlite3.connect(str(db_path), isolation_level=None)
-        rival.execute("BEGIN IMMEDIATE")
-        try:
-            blocked = asyncio.ensure_future(_opens_a_unit())
-            # Long enough to be inside the blocking BEGIN, short enough that
-            # the ten-second busy timeout has not expired.
-            await asyncio.sleep(0.2)
-            blocked.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await blocked
-        finally:
-            rival.execute("ROLLBACK")
-            rival.close()
-
-        after = await kanban_data.create_epic("After")
-        return [sorted(row["title"]
-                       for row in await kanban_data.list_epics()),
-                after["title"]]
-
-    answered = asyncio.run(on_sqlite(sequence, db_path))
-    titles, after = answered
-    assert titles == ["After", "Before"]
-    assert after == "After"
-
-
-async def _opens_a_unit() -> None:
-    """A board mutation, for the cancellation test to interrupt."""
-    async with store.board_transaction():
-        await store.create_work_item("e-never", "epic", "never", 5)
-
-
-def test_the_group_admin_is_exists_on_a_store_that_has_no_admin_yet(
-        tmp_path: Path) -> None:
-    """Both halves seed it as the store opens, as the console's own schema
-    creation did on every open.
+def test_the_group_admin_is_exists_on_a_store_that_has_no_admin_yet() -> None:
+    """The store seeds it as it opens.
 
     Left to the first `create_user(is_admin=True)`, a store holding people
     and no admin yet has no such group: the groups page omits it, and adding
@@ -659,21 +493,17 @@ def test_the_group_admin_is_exists_on_a_store_that_has_no_admin_yet(
         await account_store.add_member("admins", "somebody")
         return [before, (await account_store.get_user("somebody"))["groups"]]
 
-    on_file, on_server = both_halves(sequence, tmp_path / "parity.db")
-    assert on_file == on_server
-    before, groups = on_file
+    answered = run(sequence())
+    before, groups = answered
     assert before == ["admins"]
     assert groups == ["admins"]
 
 
-def test_a_nul_byte_in_a_board_field_is_refused_rather_than_stored(
-        tmp_path: Path) -> None:
-    """One paste, one answer, on both halves.
+def test_a_nul_byte_in_a_board_field_is_refused_rather_than_stored() -> None:
+    """One paste, one answer.
 
-    SQLite holds a NUL byte in a text column quite happily and Postgres
-    cannot encode one at all, so left to the engines the same paste is a
-    stored row on one half and an unhandled error on the other. Refused
-    rather than stripped: a requirement quietly altered on its way in is a
+    Postgres cannot encode a NUL byte at all, so left to the engine the
+    paste is an unhandled error. Refused rather than stripped: a requirement quietly altered on its way in is a
     document that does not say what was typed, with nothing on the page
     saying so.
     """
@@ -700,9 +530,8 @@ def test_a_nul_byte_in_a_board_field_is_refused_rather_than_stored(
         return [updates, creates, after["title"], after["description"],
                 len(await kanban_data.list_epics())]
 
-    on_file, on_server = both_halves(sequence, tmp_path / "parity.db")
-    assert on_file == on_server
-    updates, creates, title, description, epics = on_file
+    answered = run(sequence())
+    updates, creates, title, description, epics = answered
     expected = [(field, True) for field in
                 ("title", "description", "requirements",
                  "acceptance_criteria", "qa_tests")]
@@ -713,8 +542,7 @@ def test_a_nul_byte_in_a_board_field_is_refused_rather_than_stored(
     assert epics == 1, "a refused creation left a row behind"
 
 
-def test_a_unit_that_raises_leaves_none_of_its_writes_behind(
-        tmp_path: Path) -> None:
+def test_a_unit_that_raises_leaves_none_of_its_writes_behind() -> None:
     """The whole reason the construct exists.
 
     Several writes, all of them or none: a unit that committed what it had
@@ -738,17 +566,15 @@ def test_a_unit_that_raises_leaves_none_of_its_writes_behind(
                 await store.work_item("e-one"),
                 await store.work_item("e-two")]
 
-    on_file, on_server = both_halves(sequence, tmp_path / "parity.db")
-    assert on_file == on_server
-    titles, one, two = on_file
+    answered = run(sequence())
+    titles, one, two = answered
     assert titles == ["Survivor"]
     assert one is None and two is None
 
 
-def test_a_unit_inside_a_unit_is_refused(tmp_path: Path) -> None:
-    """SQLite has no savepoint here, so the inner block would commit the
-    outer one's work on its way out and a failure after it would roll back
-    nothing. Refused on both halves rather than on one."""
+def test_a_unit_inside_a_unit_is_refused() -> None:
+    """The inner block would end the outer one's work on its way out, and a
+    failure after it would roll back nothing."""
     async def sequence() -> list[Any]:
         refused = None
         async with store.board_transaction():
@@ -763,26 +589,22 @@ def test_a_unit_inside_a_unit_is_refused(tmp_path: Path) -> None:
                 sorted(row["title"]
                        for row in await kanban_data.list_epics())]
 
-    on_file, on_server = both_halves(sequence, tmp_path / "parity.db")
-    assert on_file == on_server
-    refused, titles = on_file
+    answered = run(sequence())
+    refused, titles = answered
     assert refused is True
     assert titles == ["outer"], "the refused inner unit wrote anyway"
 
 
 # ---------------------------------------------------------------------------
-# the Postgres branches nothing else reaches
+# the reads and writes nothing else reaches
 
 
-def test_the_two_halves_answer_the_same_about_a_person_and_their_groups(
-        tmp_path: Path) -> None:
+def test_a_person_and_their_groups_read_back_as_written() -> None:
     """Every read of a person, including the ones the console reaches on the
     accounts page and on every request that carries a cookie.
 
     Each of these is a `hive_data` call with its own argument order and its
-    own result key, and the console's own suite runs on the SQLite half, so
-    nothing else here would notice the Postgres branch of any of them calling
-    the wrong function or reading the wrong key.
+    own result key.
     """
     import auth
 
@@ -815,10 +637,9 @@ def test_the_two_halves_answer_the_same_about_a_person_and_their_groups(
             await store.get_group("no-such-group"),
         ]
 
-    on_file, on_server = both_halves(sequence, tmp_path / "parity.db")
-    assert on_file == on_server
+    answered = run(sequence())
     (by_name, by_id, hash_in_plain, hash_in_private, found, missing, listed,
-     counted, before, members, after, group, absent) = on_file
+     counted, before, members, after, group, absent) = answered
     assert by_name == "daniel" and by_id == "daniel"
     assert hash_in_plain is False and hash_in_private is True
     assert found == "daniel"
@@ -832,9 +653,8 @@ def test_the_two_halves_answer_the_same_about_a_person_and_their_groups(
     assert absent is None
 
 
-def test_the_two_halves_bind_and_unbind_an_outside_identity_the_same_way(
-        tmp_path: Path) -> None:
-    """Microsoft sign-in, which had no coverage on the Postgres half at all.
+def test_an_outside_identity_binds_moves_and_unbinds() -> None:
+    """Microsoft sign-in.
 
     A binding read by the wrong key signs the wrong person in, and a binding
     that is written and then not found is a tenant where everybody's first
@@ -872,10 +692,9 @@ def test_the_two_halves_bind_and_unbind_an_outside_identity_the_same_way(
                 unknown_provider, removed, again,
                 sorted(await store.sso_usernames("microsoft"))]
 
-    on_file, on_server = both_halves(sequence, tmp_path / "parity.db")
-    assert on_file == on_server
+    answered = run(sequence())
     (absent, bound, subject, moved, bound_now, other, unknown, removed,
-     again, left) = on_file
+     again, left) = answered
     assert absent is None
     assert bound == "daniel" and subject == "oid-1"
     assert moved == "sloan"
@@ -886,13 +705,12 @@ def test_the_two_halves_bind_and_unbind_an_outside_identity_the_same_way(
     assert left == ["aiden"]
 
 
-def test_the_two_halves_answer_the_same_about_the_rest_of_the_board(
-        tmp_path: Path) -> None:
+def test_the_remaining_board_and_design_reads_answer_what_was_written() -> None:
     """The four board and design reads the other parity tests do not reach.
 
     `update_work_item` above all: it is the write behind every edit on the
-    item page, and its Postgres branch returning zero without writing would
-    be a page that saves nothing and says it saved.
+    item page, and returning zero without writing would be a page that saves
+    nothing and says it saved.
     """
     async def sequence() -> list[Any]:
         epic = await kanban_data.create_epic("An epic")
@@ -917,10 +735,9 @@ def test_the_two_halves_answer_the_same_about_the_rest_of_the_board(
                 listed, one["body"], one["delivered_at"],
                 named["deployment"], unknown]
 
-    on_file, on_server = both_halves(sequence, tmp_path / "parity.db")
-    assert on_file == on_server
+    answered = run(sequence())
     (changed, nothing, missing, title, description, listed, body, delivered,
-     deployment, unknown) = on_file
+     deployment, unknown) = answered
     assert changed == 1
     assert nothing == 0
     assert missing == 0, "an update named a row that is not there and wrote"
@@ -932,18 +749,13 @@ def test_the_two_halves_answer_the_same_about_the_rest_of_the_board(
     assert unknown is None
 
 
-def test_the_postgres_half_refuses_a_design_session_naming_no_such_mind(
-        tmp_path: Path) -> None:
-    """One half only, because the refusal is the one database's own.
-
-    `design_sessions.mind_id` and `conversation_id` are real foreign keys
+def test_a_design_session_naming_no_such_mind_is_refused() -> None:
+    """`design_sessions.mind_id` and `conversation_id` are real foreign keys
     where the split files could not have them, and a mind re-claims a session
     on every turn that touches it. A Mind naming its short name where its
     UUID belongs used to store a row pointing nowhere; it has to come back as
     a bad reference rather than as a fault in the console.
     """
-    if not ADMIN_DSN:
-        pytest.skip(NO_SERVER)
     import design_data
 
     async def sequence() -> list[Any]:
@@ -965,6 +777,6 @@ def test_the_postgres_half_refuses_a_design_session_naming_no_such_mind(
         still = await design_data.get_design_session(record["id"])
         return [said, still["conversation_id"]]
 
-    said, conversation = asyncio.run(on_postgres(sequence))
+    said, conversation = run(sequence())
     assert said == [("create", True), ("attach", True)]
     assert conversation == "conv-real", "the refused attach moved the session"

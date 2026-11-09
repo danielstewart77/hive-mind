@@ -10,15 +10,15 @@ import auth
 import main as main_mod
 import kanban_data as store
 import accounts
+from hive_site.testing import run
 
 
-async def test_the_back_to_backlog_nav_does_not_use_the_bare_fixed_nav_style(tmp_path, monkeypatch):
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
+def test_the_back_to_backlog_nav_does_not_use_the_bare_fixed_nav_style(tmp_path, monkeypatch):
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
-    epic = await store.create_epic("Desktop")
-    user = await auth.create_user("navlayout", "secret-pass", is_admin=True, replace=True)
+    epic = run(store.create_epic("Desktop"))
+    user = run(auth.create_user("navlayout", "secret-pass", is_admin=True, replace=True))
     client = TestClient(main_mod.app)
-    client.cookies.set(auth.SESSION_COOKIE_NAME, await auth.create_session_token(user))
+    client.cookies.set(auth.SESSION_COOKIE_NAME, run(auth.create_session_token(user)))
     html = client.get(f"/kanban/item/{epic['id']}").text
     assert "<nav><a" not in html
     assert '<nav class="item-back-nav">' in html

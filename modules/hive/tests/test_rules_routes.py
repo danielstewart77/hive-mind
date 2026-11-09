@@ -13,19 +13,18 @@ import pytest
 import auth
 import main as main_mod
 import accounts
+from hive_site.testing import run
 
 
-async def _authed_client(tmp_path, monkeypatch):
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
+def _authed_client(tmp_path, monkeypatch):
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
-    user = await auth.create_user("daniel", "secret-pass", is_admin=True, replace=True)
+    user = run(auth.create_user("daniel", "secret-pass", is_admin=True, replace=True))
     client = TestClient(main_mod.app)
-    client.cookies.set(auth.SESSION_COOKIE_NAME, await auth.create_session_token(user))
+    client.cookies.set(auth.SESSION_COOKIE_NAME, run(auth.create_session_token(user)))
     return client
 
 
 def test_rules_page_redirects_when_unauthenticated(tmp_path, monkeypatch):
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
     client = TestClient(main_mod.app)
 
@@ -35,23 +34,22 @@ def test_rules_page_redirects_when_unauthenticated(tmp_path, monkeypatch):
     assert response.headers["location"].startswith("/login?next=/rules")
 
 
-async def test_rules_page_renders_for_authed_user(tmp_path, monkeypatch):
-    client = await _authed_client(tmp_path, monkeypatch)
+def test_rules_page_renders_for_authed_user(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
     with patch.object(main_mod, "_broker_minds_safe", new=AsyncMock(return_value=[])):
         response = client.get("/rules")
     assert response.status_code == 200
 
 
 def test_api_rules_requires_auth(tmp_path, monkeypatch):
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
     client = TestClient(main_mod.app)
 
     assert client.get("/api/rules").status_code == 401
 
 
-async def test_api_rules_list_merges_tiers(tmp_path, monkeypatch):
-    client = await _authed_client(tmp_path, monkeypatch)
+def test_api_rules_list_merges_tiers(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
     standing = [
         {"id": 1, "content": "rule one", "mind_id": "shared", "tier": "standing",
          "source": "always-remember", "data_class": "feedback", "tags": "", "created_at": 100}
@@ -78,8 +76,8 @@ async def test_api_rules_list_merges_tiers(tmp_path, monkeypatch):
     assert data["rules"][0]["tier"] == "standing"
 
 
-async def test_api_rules_create_validates(tmp_path, monkeypatch):
-    client = await _authed_client(tmp_path, monkeypatch)
+def test_api_rules_create_validates(tmp_path, monkeypatch):
+    client = _authed_client(tmp_path, monkeypatch)
     response = client.post("/api/rules", json={"content": "", "mind_id": "shared", "tier": "standing"})
     assert response.status_code == 400
 

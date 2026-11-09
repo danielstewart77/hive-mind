@@ -13,50 +13,26 @@ the same store, secret and cookie domain, so one login covers both.
 ## Where the data is
 
 Nothing in `src/` opens a database or writes SQL. Every page and every route
-calls a named operation in `store.py`, and which store answers is one value
-in the environment: `HIVE_DATABASE_URL` set means the hive's one Postgres
-through [`hive-data`](https://github.com/danielstewart77/hive-data), unset
-means this host's own `data/hive.db` as before. Unsetting it and restarting
-is the revert — the file stays on disk and reachable, and retiring it is its
-own story rather than part of this one.
+calls a named operation in `store.py`, answered by the hive's one Postgres
+through [`hive-data`](https://github.com/danielstewart77/hive-data) at
+`HIVE_DATABASE_URL`. There is no other store: with `HIVE_DATABASE_URL` unset
+the console refuses to start. The SQLite file it used before the cutover is
+retired and nothing reads it.
 
-Two things follow from that and are worth knowing before reading `store.py`.
+The composite rules are not in `store.py`. Which parents an item may be
+given, what a board drop does to two sibling lists, when a design page may
+advance, whether a change would leave the hive with no enabled admin — those
+live in `kanban_data`, `design_data` and `auth`, once, on top of the store's
+operations. The store is async, which is why the console is async all the way
+down to `require_auth`.
 
-The composite rules are not in it. Which parents an item may be given, what a
-board drop does to two sibling lists, when a design page may advance, whether
-a change would leave the hive with no enabled admin — those live in
-`kanban_data`, `design_data` and `auth`, once, on top of the store's
-operations, so the two backends cannot disagree about them.
+The memory pages read the `memory` schema of the same database.
+`HIVE_SITE_ADMIN_TOKEN` is the bearer the one-database check reads the board
+and the memory pages with; unset, those routes admit no bearer and only a
+signed-in admin session reaches them.
 
-And the store is async on both halves, which is why the console is async all
-the way down to `require_auth`. `hive_data` is async only; the SQLite half
-runs its statements off the event loop, each on a connection of its own,
-created and closed inside the one thread that uses it — which is the shape
-the synchronous code had and the bar that half has to clear, since its whole
-point is to be the revert lever.
-
-Sharing one connection is not an option, and not for the obvious reason. A
-`sqlite3.Connection` is unsafe across threads whatever `check_same_thread`
-says, but the worse failure is a transaction: a connection inside one
-request's `BEGIN IMMEDIATE` is a connection every other request's write
-lands in, and those writes are discarded when the first request rolls back.
-A design notice claimed, sent and acknowledged goes back to pending because
-somebody else's board drag answered 404, and the next sweep sends it again —
-two harnesses in one working tree. A second `BEGIN IMMEDIATE` on one
-connection is also an error rather than a wait, so two tabs dragging cards
-answer 500 where they used to take turns. A unit of work therefore owns a
-connection and a thread for its whole life; two of them serialise through
-SQLite's own file lock, each waiting on its own thread rather than on the one
-thread that has to do the committing.
-
-The memory pages are the one operation whose two halves read two different
-*databases*: lucent's own file, mounted read-only, or the `memory` schema of
-the one database. That was the window this cutover had to close — both stores
-were loaded and equal, so a console reading the file answered correctly while
-writing nowhere. `HIVE_SITE_ADMIN_TOKEN` is the bearer the one-database check
-(`unified_db.postflight`) reads the board and the memory pages with; unset,
-those routes admit no bearer and only a signed-in admin session reaches them,
-which is where an install that is not mid-cutover sits.
+The suite runs on a scratch Postgres: set `HIVE_DATA_TEST_ADMIN_DSN` to a
+server it may create and drop a database on (see `hive_site/testing.py`).
 
 ## Run
 
@@ -65,8 +41,8 @@ docker compose up -d --build
 ```
 
 Runs as container `hive-site` on :8710, on the `hivemind` docker network
-(for hive-lucent and hive-comms), with the lucent sqlite mounted
-read-only for the memory browser. `src/` is bind-mounted, so template
+(for hive-lucent, hive-comms and the hive's Postgres). `src/` is
+bind-mounted, so template
 and static edits deploy live; route changes need a container restart.
 
 Copy `.env.example` to `.env`. `LUCENT_BEARER_TOKEN` and
@@ -91,20 +67,19 @@ authorization middleware in front of it are the `hive_site` package in this
 repository, installed into this image and into the terminal site's from the
 same directory — one copy, not two. `src/auth.py`, `src/store.py` and
 `src/route_access.py` are three-line aliases that bind it under the bare
-name, so `import auth` here is the module the terminal runs. Each site reads
-`HIVE_DATABASE_URL` for itself, so the two can be pointed at different
-stores, and `HIVE_DB_PATH` has no default: an unnamed file is refused rather
-than invented somewhere nothing is mounted. With no other configuration the console
-signs in against its own hive.db: on first launch against an empty db,
+name, so `import auth` here is the module the terminal runs. Both sites read
+their accounts from the hive's Postgres at `HIVE_DATABASE_URL`. With no other
+configuration the console signs in against those built-in accounts: on first
+launch against an empty store,
 `HIVE_SEED_USERNAME` and `HIVE_SEED_PASSWORD` create the first admin (inert
 afterward), and `HIVE_SECRET_KEY` signs session cookies — left unset, a
-random key is generated once and kept in the db, which the terminal site
+random key is generated once and kept in the store, which the terminal site
 shares. With `AUTH_SERVICE_URL` set (or the backend named `auth-service` in
 `HIVE_AUTH_BACKEND`) the console signs in through auth-service instead, as site `hive`
 (`AUTH_SERVICE_SITE`), managing users over its admin API with
 `AUTH_SERVICE_ADMIN_TOKEN`; a `hive_session` cookie is then no session, and
 an unreachable auth-service is "sign-in service unavailable", never a fall
-back to hive.db.
+back to the built-in accounts.
 
 Admin is membership of the `admins` group, managed under Settings, Users
 and groups. A new user signs in with the temporary password an admin set and

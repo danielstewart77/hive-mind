@@ -10,10 +10,9 @@ being signed out of the terminal and nowhere else.
 
 One interface, two backings, chosen by configuration:
 
-- `builtin` — the console's own account rows, reached through `store`:
-  the hive's Postgres or this host's own file, whichever that module is
-  pointed at. No SQL lives here. A cloned hive
-  signs in with no other service. Sessions are signed cookies carrying the
+- `builtin` — the console's own account rows in the hive's Postgres,
+  reached through `store`. No SQL lives here. A cloned hive signs in with no
+  other service. Sessions are signed cookies carrying the
   user's session version, so a password change, reset or disable ends every
   other live session at once. A group change does not touch it: membership,
   and with it admin, is read afresh on every request, so it lands on the
@@ -23,7 +22,7 @@ One interface, two backings, chosen by configuration:
   request with `/verify?site=hive` and never cached, so a disable lands on
   the very next request. Admin operations go to its `/admin` API behind
   `AUTH_SERVICE_ADMIN_TOKEN`. When it cannot be reached the console says
-  "sign-in service unavailable"; it never falls back to hive.db.
+  "sign-in service unavailable"; it never falls back to the built-in store.
 
 `HIVE_AUTH_BACKEND` names the backing; left unset, auth-service is used
 exactly when `AUTH_SERVICE_URL` is set. One backing is active per install,
@@ -33,12 +32,8 @@ the switch to auth-service is not a session.
 Admin is membership of the `admins` group and nothing else. Users are never
 deleted. The last enabled admin cannot be disabled or leave `admins`.
 
-The accounts live wherever `store` is pointed — the hive's one Postgres or
-this host's own file. The terminal site ran a verbatim copy of this module
-against the same file and cannot any longer: this one is async and reads a
-store the terminal does not have. Moving it is its own story, and until it
-runs the two sites share accounts only on an install where both are pointed
-at the same store.
+The accounts live in the hive's one Postgres, through `store`, and the
+console and the terminal share them there.
 """
 
 from __future__ import annotations
@@ -591,20 +586,12 @@ class BuiltinStore:
 def _is_duplicate(exc: BaseException) -> bool:
     """Whether a failed write was a uniqueness conflict.
 
-    Told apart by class rather than by message, and asked of both stores
-    here rather than at each call site: a username, an email and a domain
-    account are each unique, and the console answers 409 for all three. The
-    import is local so a console on the SQLite half, in an install with no
-    `hive_data` on its path, still refuses a duplicate as a conflict.
+    Told apart by class rather than by message, and asked here rather than
+    at each call site: a username, an email and a domain account are each
+    unique, and the console answers 409 for all three.
     """
-    import sqlite3
+    from hive_data.errors import Conflict as DataConflict
 
-    if isinstance(exc, sqlite3.IntegrityError):
-        return True
-    try:
-        from hive_data.errors import Conflict as DataConflict
-    except ImportError:  # pragma: no cover - the SQLite-only install
-        return False
     return isinstance(exc, DataConflict)
 
 

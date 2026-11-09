@@ -121,7 +121,7 @@ async def lifespan(app: FastAPI):
     del app
     await store.open()
     log_event(log, "store.opened", component="hive-control-plane",
-              engine="postgres" if store.on_postgres() else "sqlite")
+              engine="postgres")
     await seed_first_user()
     global _canvas_elements
     _canvas_elements = _load_canvas_state()
@@ -846,11 +846,8 @@ async def _kanban_body(request: Request, allowed: set[str], required: set[str] =
 async def _kanban_call(function, *args, **kwargs):
     """Run a board operation and map its refusals to the wire.
 
-    Awaited rather than run off the loop. The store is async on both halves
-    now: on Postgres a statement is a pooled round trip, and on SQLite the
-    store runs it on its own single worker thread — so neither blocks the
-    loop, and the bridge that used to be here would be a second thread hop
-    over a connection only one thread may touch.
+    Awaited rather than run off the loop: the store is async, and a
+    statement is a pooled round trip that does not block the loop.
     """
     try:
         return await function(*args, **kwargs)
@@ -2163,18 +2160,10 @@ async def memory_page(request: Request):
 @app.get("/api/memory/tables")
 async def api_memory_tables(
         user: dict = Depends(require_admin_or_cutover_check)):
-    """The memory store's tables, with a row count each.
-
-    Which store that is follows the one the console is pointed at: the
-    `memory` schema of the hive's database, or lucent's own file on a console
-    still on SQLite. Reading one while writing the other is the window this
-    cutover closes.
-    """
+    """The memory store's tables — the `memory` schema of the hive's
+    database — with a row count each."""
     del user
-    try:
-        return {"tables": await store.memory_tables()}
-    except store.MemoryUnavailable as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"tables": await store.memory_tables()}
 
 
 @app.get("/api/memory/rows")
@@ -2185,10 +2174,7 @@ async def api_memory_rows(
     user: dict = Depends(require_admin_or_cutover_check),
 ):
     del user
-    try:
-        page = await store.memory_rows(table, limit=limit, offset=offset)
-    except store.MemoryUnavailable as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    page = await store.memory_rows(table, limit=limit, offset=offset)
     if page is None:
         raise HTTPException(status_code=404, detail="table not found")
     return page
@@ -4947,8 +4933,8 @@ async def api_mind_owner_set(name: str, request: Request, user: dict = Depends(r
 # Users and groups (admin)
 # ---------------------------------------------------------------------------
 # Every route here is admin-only in console_access.TABLE. The store does the
-# work — hive.db or auth-service, whichever this install signs in against —
-# and its refusals (unknown user, duplicate, the last admin) come back as
+# work — the built-in store or auth-service, whichever this install signs
+# in against — and its refusals (unknown user, duplicate, the last admin) come back as
 # the status the store named.
 
 

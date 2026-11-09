@@ -26,7 +26,6 @@ SENSOR = "http://192.168.4.16:8431"
 
 
 def _authed_client(tmp_path, monkeypatch):
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
     user = accounts.make_user("daniel", "secret-pass", is_admin=True, replace=True)
     client = TestClient(main_mod.app)
@@ -160,7 +159,6 @@ def test_an_unreachable_sensor_is_reported_as_unreachable(tmp_path, monkeypatch)
 
 
 def test_the_review_page_is_behind_the_login(tmp_path, monkeypatch, sensor):
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
     accounts.make_user("daniel", "secret-pass", is_admin=True, replace=True)
     anonymous = TestClient(main_mod.app, follow_redirects=False)

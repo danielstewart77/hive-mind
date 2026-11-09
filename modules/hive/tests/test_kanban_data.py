@@ -1,34 +1,22 @@
-"""The kanban store, against its own SQLite file."""
+"""The kanban store, against the suite's scratch database."""
 import os
-import sqlite3
 
+import asyncpg
 import pytest
 
 import kanban_data as store
 import store as data_store
+from hive_site.testing import refuse_unless_scratch
 
 
-def _db():
-    return sqlite3.connect(os.environ["HIVE_DB_PATH"])
-
-
-async def test_existing_board_database_without_metadata_columns_is_upgraded(tmp_path):
-    """A board file predating the prose columns reads, rather than refusing.
-
-    The store adds them as it opens, so the rows that were there come back
-    with the new columns empty instead of the page failing on a missing key.
-    """
-    legacy_path = tmp_path / "legacy.db"
-    connection = sqlite3.connect(legacy_path)
-    connection.execute("CREATE TABLE work_items (id TEXT PRIMARY KEY, kind TEXT NOT NULL, parent_id TEXT REFERENCES work_items(id), title TEXT NOT NULL, status TEXT, position INTEGER NOT NULL)")
-    connection.execute("INSERT INTO work_items VALUES ('e-old', 'epic', NULL, 'Existing epic', NULL, 1)")
-    connection.commit()
-    connection.close()
-
-    await data_store.close()
-    await data_store.open(legacy_path)
-
-    assert (await store.get_data())["epics"] == [{"id": "e-old", "title": "Existing epic", "description": "", "requirements": "", "acceptance_criteria": "", "qa_tests": ""}]
+async def _execute(sql, *args):
+    """A write made behind the store's back, as another writer would."""
+    connection = await asyncpg.connect(
+        refuse_unless_scratch(os.environ["HIVE_DATABASE_URL"]))
+    try:
+        await connection.execute(sql, *args)
+    finally:
+        await connection.close()
 
 
 async def test_a_new_board_holds_nothing_and_each_list_holds_only_its_own_kind():
@@ -42,9 +30,9 @@ async def test_a_new_board_holds_nothing_and_each_list_holds_only_its_own_kind()
 
 
 async def test_written_work_is_read_back_by_a_process_that_never_saw_the_write():
-    """The board is on disk, not in this process.
+    """The board is in the database, not in this process.
 
-    Proved by closing the store and opening it again on the same file, which
+    Proved by closing the store and opening it again, which
     is as near as a test gets to the next request arriving at a worker that
     has never seen the write.
     """
@@ -61,11 +49,8 @@ async def test_written_work_is_read_back_by_a_process_that_never_saw_the_write()
 async def test_the_stored_position_decides_the_order_not_the_insertion_order():
     first = await store.create_epic("First")
     second = await store.create_epic("Second")
-    with _db() as connection:
-        connection.execute(
-            "UPDATE work_items SET position = ? WHERE id = ?",
-            (data_store.MIN_POSITION + 99, first["id"]),
-        )
+    await _execute("UPDATE board.work_items SET position = $1 WHERE id = $2",
+                   data_store.MIN_POSITION + 99, first["id"])
     assert [e["id"] for e in await store.list_epics()] == [second["id"], first["id"]]
 
 
@@ -192,8 +177,7 @@ async def test_a_story_cannot_be_left_with_no_parent_or_moved_onto_two():
 
 async def test_acting_on_a_row_another_writer_already_deleted_is_refused():
     epic = await store.create_epic("Epic")
-    with _db() as connection:
-        connection.execute("DELETE FROM work_items WHERE id = ?", (epic["id"],))
+    await _execute("DELETE FROM board.work_items WHERE id = $1", epic["id"])
 
     with pytest.raises(KeyError, match="Epic not found"):
         await store.update_epic(epic["id"], title="New title")

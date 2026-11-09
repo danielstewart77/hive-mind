@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import main as main_mod
 import accounts
+from hive_site.testing import run
 
 
 def _client(tmp_path, monkeypatch, token="draw-token"):
@@ -192,24 +193,22 @@ class _FakeClient:
         return _FakeResp()
 
 
-async def _authed_submit_client(tmp_path, monkeypatch):
+def _authed_submit_client(tmp_path, monkeypatch):
     import auth
 
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "stb.db"))
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
     monkeypatch.setenv("COMMS_BEARER_TOKEN", "house-token")
     monkeypatch.setenv("MIND_NAME", "skippy")
     monkeypatch.setattr(main_mod, "_canvas_elements", [{"type": "path", "id": "p1", "d": "M0,0 L5,5"}])
     monkeypatch.setattr(main_mod.httpx, "AsyncClient", _FakeClient)
     _FakeClient.last = None
-    user = await auth.create_user("daniel", "secret-pass", is_admin=True, replace=True)
+    user = run(auth.create_user("daniel", "secret-pass", is_admin=True, replace=True))
     client = TestClient(main_mod.app)
-    client.cookies.set(auth.SESSION_COOKIE_NAME, await auth.create_session_token(user))
+    client.cookies.set(auth.SESSION_COOKIE_NAME, run(auth.create_session_token(user)))
     return client
 
 
 def test_canvas_submit_requires_auth(tmp_path, monkeypatch):
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "stb.db"))
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
     client = TestClient(main_mod.app)
 
@@ -218,8 +217,8 @@ def test_canvas_submit_requires_auth(tmp_path, monkeypatch):
     assert response.status_code == 401
 
 
-async def test_canvas_submit_dispatches_broker_message(tmp_path, monkeypatch):
-    client = await _authed_submit_client(tmp_path, monkeypatch)
+def test_canvas_submit_dispatches_broker_message(tmp_path, monkeypatch):
+    client = _authed_submit_client(tmp_path, monkeypatch)
 
     response = client.post("/canvas/submit", json={"note": "look at the capture flow"})
 

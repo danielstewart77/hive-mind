@@ -66,7 +66,6 @@ def client(tmp_path, monkeypatch):
     (tmp_path / "outside" / "anything").mkdir(parents=True)
     (dev / "escape").symlink_to(tmp_path / "outside")
 
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
     monkeypatch.setenv("HIVE_MIND_PROJECT_PATH", "/host/hive_mind")
     env_file = tmp_path / "hive_mind.env"

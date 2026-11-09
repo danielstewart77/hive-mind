@@ -16,7 +16,6 @@ import accounts
 
 
 def _authed_client(tmp_path, monkeypatch):
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
     user = accounts.make_user("daniel", "secret-pass", is_admin=True, replace=True)
     client = TestClient(main_mod.app)
@@ -33,7 +32,6 @@ def tools_call():
 
 
 def test_training_page_requires_authentication(tmp_path, monkeypatch):
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
     response = TestClient(main_mod.app).get("/training", follow_redirects=False)
     assert response.status_code in (302, 303, 307)
@@ -129,7 +127,6 @@ def test_runs_clamps_the_limit(tmp_path, monkeypatch, tools_call):
 
 
 def test_training_endpoints_require_authentication(tmp_path, monkeypatch):
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
     client = TestClient(main_mod.app)
 
@@ -159,7 +156,6 @@ def test_base_models_proxies_to_hive_tools(tmp_path, monkeypatch, tools_call):
 
 
 def test_base_models_requires_authentication(tmp_path, monkeypatch):
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
     response = TestClient(main_mod.app).get(
         "/api/training/base-models", follow_redirects=False

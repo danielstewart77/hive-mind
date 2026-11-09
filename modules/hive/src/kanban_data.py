@@ -6,9 +6,7 @@ same cascade. `parent_id` points at the row above: NULL for an epic, an epic
 for a feature, and either for a story.
 
 No SQL lives here. Every read and write goes through `store`, which answers
-from the hive's Postgres or from this host's own file depending on one
-environment variable — so the rules below are decided once and both stores
-obey them rather than each carrying its own copy.
+from the hive's Postgres, so the rules below are decided once, here.
 
 `position` is global and monotonic rather than a count of what is there.
 `store.next_position` is `MAX(position) + 1` over the whole table, so a
@@ -23,13 +21,10 @@ decides a new numbering against it and writes the whole list back, so two
 interleaved is one tab's rename silently replaced by the other tab's drag,
 with both reporting success and two siblings left holding one position.
 
-The cascade is the store's. On Postgres the foreign key is real, deferred,
-and the delete is one recursive statement; on SQLite it is the same recursive
-statement, because that engine's `foreign_keys` pragma is off by default and
-per connection, so a declared cascade was decorative on any connection that
-forgot it — and the orphans it left still rendered on the board labelled
-"Unassigned" while being unreachable from the tree that holds the only delete
-button.
+The cascade is the store's: the foreign key is real, deferred, and the
+delete is one recursive statement, so no orphan is left rendering on the
+board labelled "Unassigned" while being unreachable from the tree that holds
+the only delete button.
 """
 from __future__ import annotations
 
@@ -60,10 +55,9 @@ def _new_id(kind: str) -> str:
     return _PREFIX[kind] + secrets.token_hex(_ID_BYTES)
 
 
-#: What a text column will not take. Refused here rather than at the store,
-#: so both stores refuse it: SQLite holds a NUL byte in a text column quite
-#: happily, and Postgres cannot encode one at all. Left to the engines, the
-#: same paste is a stored row on one and an unhandled error on the other.
+#: What a text column will not take. Refused here rather than at the store:
+#: Postgres cannot encode a NUL byte at all, and left to the engine the paste
+#: is an unhandled error rather than a refusal that says what was wrong.
 #:
 #: Refused rather than stripped, for the reason the hive refuses it
 #: elsewhere: a title or a requirement quietly altered on its way in is a

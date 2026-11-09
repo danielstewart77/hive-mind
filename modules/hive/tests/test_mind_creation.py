@@ -31,7 +31,6 @@ _PAIRS = [
 
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
     minds_dir = tmp_path / "minds"
     minds_dir.mkdir()

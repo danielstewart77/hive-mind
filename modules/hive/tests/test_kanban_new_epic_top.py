@@ -3,7 +3,6 @@ import kanban_data as store
 
 
 async def test_a_new_epic_is_listed_above_the_existing_ones(tmp_path, monkeypatch):
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
     first = await store.create_epic("First")
     second = await store.create_epic("Second")
     added = await store.create_epic("Added")

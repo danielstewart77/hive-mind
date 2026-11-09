@@ -14,11 +14,22 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import design_data
+from hive_site import testing as suite
+
+
+
+@pytest.fixture(autouse=True)
+def _conversations():
+    """The conversations these tests point a design session at.
+
+    `design_sessions.conversation_id` is a real foreign key into the
+    gateway's `core.sessions`, so each one is a row first.
+    """
+    suite.run(suite.make_conversations("conv-a", "conv-b", "conv-gone", "conv-new", "conv-old"))
 
 
 @pytest.fixture()
 def store(tmp_path, monkeypatch):
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
     return design_data
 
 

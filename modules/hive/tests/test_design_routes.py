@@ -19,12 +19,12 @@ import auth
 import design_data
 import main as main_mod
 import accounts
+from hive_site import testing as suite
 
 PUSH_TOKEN = "design-push-token"  # secret-guard: allow
 
 
 def _env(tmp_path, monkeypatch):
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
     monkeypatch.setenv("DESIGN_PUSH_TOKEN", PUSH_TOKEN)
     # The house tokens are removed, not left to the invoking shell. Every
@@ -33,6 +33,17 @@ def _env(tmp_path, monkeypatch):
     # they are exported, which would let that fallback pass unnoticed.
     monkeypatch.delenv("COMMS_ADMIN_BEARER_TOKEN", raising=False)
     monkeypatch.delenv("COMMS_BEARER_TOKEN", raising=False)
+
+
+
+@pytest.fixture(autouse=True)
+def _conversations():
+    """The conversations these tests point a design session at.
+
+    `design_sessions.conversation_id` is a real foreign key into the
+    gateway's `core.sessions`, so each one is a row first.
+    """
+    suite.run(suite.make_conversations("conv-1"))
 
 
 @pytest.fixture()
