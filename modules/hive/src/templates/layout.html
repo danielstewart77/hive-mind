@@ -78,7 +78,7 @@
             <a href="/canvas" class="console-nav-link {% if path == '/canvas' %}is-active{% endif %}"><i data-lucide="pencil-ruler"></i><span>Canvas</span></a>
             <a href="/design" class="console-nav-link {% if path.startswith('/design') %}is-active{% endif %}"><i data-lucide="drafting-compass"></i><span>Design</span></a>
             {% endif %}
-            <a href="https://terminal.sparktobloom.com" target="_blank" rel="noopener noreferrer" class="console-nav-link"><i data-lucide="square-terminal"></i><span>Terminal</span><i class="nav-external" data-lucide="external-link"></i></a>
+            {% if terminal_url %}<a href="{{ terminal_url }}" target="_blank" rel="noopener noreferrer" class="console-nav-link"><i data-lucide="square-terminal"></i><span>Terminal</span><i class="nav-external" data-lucide="external-link"></i></a>{% endif %}
         </div>
 
         <div class="console-sidebar-footer">

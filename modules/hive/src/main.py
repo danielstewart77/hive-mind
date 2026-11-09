@@ -188,6 +188,10 @@ install_fastapi_logging(app, log, "hive-control-plane")
 
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
+# Where the terminal site lives, for the console's links to it. From the
+# environment because the address is each hive's own; unset, the links are
+# not drawn rather than pointing at somebody else's terminal.
+templates.env.globals["terminal_url"] = os.getenv("HIVE_TERMINAL_URL", "")
 
 
 def _canvas_state_path() -> Path:
@@ -506,7 +510,7 @@ async def login_submit(
 
     target = "/password" if user.get("must_change") else _safe_next_path(next)
     response = RedirectResponse(url=target, status_code=303)
-    set_session_cookie(response, token)
+    set_session_cookie(request, response, token)
     log_event(log, "auth.login.succeeded", **_actor_fields(user))
     return response
 
@@ -533,7 +537,7 @@ async def _sso_signed_in(request: Request, account_store, user: dict,
     """A console session for an account an outside identity matched."""
     token = await sso.start_session(account_store, user, via)
     response = RedirectResponse(url=_safe_next_path(next_path), status_code=303)
-    auth.set_sso_cookie(response, token)
+    auth.set_sso_cookie(request, response, token)
     log_event(log, "auth.login.succeeded", **_actor_fields(user), via=via)
     return response
 
@@ -564,7 +568,7 @@ async def login_microsoft(request: Request, next: str = "/overview"):
     response = RedirectResponse(url=location, status_code=303)
     response.set_cookie(
         sso.FLOW_COOKIE_NAME, flow, max_age=sso.FLOW_MAX_AGE, path=sso.MICROSOFT_PATH,
-        httponly=True, secure=True, samesite="lax",
+        httponly=True, secure=auth.request_is_https(request), samesite="lax",
     )
     return response
 
@@ -690,7 +694,7 @@ async def password_submit(
     except auth.AuthError as exc:
         return await _password_page(request, status_code=exc.status, error=exc.message)
     response = RedirectResponse(url="/overview", status_code=303)
-    set_session_cookie(response, token)
+    set_session_cookie(request, response, token)
     log_event(log, "auth.password.changed", **_actor_fields(user))
     return response
 

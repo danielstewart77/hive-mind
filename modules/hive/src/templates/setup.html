@@ -17,7 +17,7 @@
                     <div class="field"><label for="setup-mind-name">Proposed name</label><input id="setup-mind-name" type="text" placeholder="atlas"><small id="setup-name-result">Check the name before starting identity setup.</small></div>
                     <button class="button" id="setup-check-name" type="button"><i data-lucide="scan-search"></i>Check availability</button>
                     <small>A name check does not reserve the name or install a runtime.</small>
-                    <div class="form-actions"><a class="button" href="https://terminal.sparktobloom.com" target="_blank" rel="noopener noreferrer"><i data-lucide="messages-square"></i>Open identity workshop</a><a class="button button-primary" href="/minds/new"><i data-lucide="plus"></i>Add a Mind</a></div>
+                    <div class="form-actions">{% if terminal_url %}<a class="button" href="{{ terminal_url }}" target="_blank" rel="noopener noreferrer"><i data-lucide="messages-square"></i>Open identity workshop</a>{% endif %}<a class="button button-primary" href="/minds/new"><i data-lucide="plus"></i>Add a Mind</a></div>
                 </div>
             </section>
             <section class="surface">

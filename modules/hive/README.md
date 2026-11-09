@@ -81,6 +81,13 @@ shares. With `AUTH_SERVICE_URL` set (or the backend named `auth-service` in
 an unreachable auth-service is "sign-in service unavailable", never a fall
 back to the built-in accounts.
 
+The session cookie is marked Secure only when the browser came over https —
+the request's own scheme, or `X-Forwarded-Proto` from a TLS-terminating
+proxy — so sign-in works over plain http at an IP address. It is host-only
+unless `HIVE_COOKIE_DOMAIN` names a parent domain shared with the terminal.
+`HIVE_TERMINAL_URL` is the terminal's address for the console's links to it;
+unset, those links are not drawn.
+
 Admin is membership of the `admins` group, managed under Settings, Users
 and groups. A new user signs in with the temporary password an admin set and
 must choose their own before any other page opens; a reset does the same

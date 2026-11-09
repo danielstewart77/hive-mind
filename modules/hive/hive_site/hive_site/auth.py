@@ -1002,12 +1002,27 @@ async def require_auth(request: Request) -> dict[str, Any]:
     return user
 
 
-def _cookie_kwargs() -> dict[str, Any]:
+def request_is_https(request: HTTPConnection) -> bool:
+    """Whether the browser reached this site over https.
+
+    A TLS-terminating reverse proxy hands the site plain http and says what
+    the browser used in `X-Forwarded-Proto`, so that header decides when it
+    is present. A cookie marked Secure on a plain-http answer is dropped by
+    the browser at any address but localhost, and sign-in by IP address
+    then loops back to the login page without a word.
+    """
+    forwarded = request.headers.get("x-forwarded-proto", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip().lower() == "https"
+    return request.url.scheme == "https"
+
+
+def _cookie_kwargs(request: HTTPConnection) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "max_age": SESSION_MAX_AGE,
         "httponly": True,
         "samesite": "lax",
-        "secure": True,
+        "secure": request_is_https(request),
     }
     domain = _cookie_domain()
     if domain:
@@ -1023,17 +1038,18 @@ def _delete_cookie(response, name: str) -> None:
         response.delete_cookie(name)
 
 
-def set_session_cookie(response, token: str) -> None:
+def set_session_cookie(request: HTTPConnection, response, token: str) -> None:
     """A password session; any Microsoft or Windows session is ended, so the
     browser holds exactly one identity."""
     _delete_cookie(response, SSO_COOKIE_NAME)
-    response.set_cookie(get_store().cookie_name, token, **_cookie_kwargs())
+    response.set_cookie(get_store().cookie_name, token,
+                        **_cookie_kwargs(request))
 
 
-def set_sso_cookie(response, token: str) -> None:
+def set_sso_cookie(request: HTTPConnection, response, token: str) -> None:
     """A Microsoft or Windows session; any password session is ended."""
     _delete_cookie(response, get_store().cookie_name)
-    response.set_cookie(SSO_COOKIE_NAME, token, **_cookie_kwargs())
+    response.set_cookie(SSO_COOKIE_NAME, token, **_cookie_kwargs(request))
 
 
 def clear_session_cookie(response) -> None:
