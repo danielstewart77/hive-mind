@@ -19,7 +19,7 @@ def gateway():
     return GatewayClient(
         http=mock_http,
         server_url="http://localhost:8420",
-        owner_type="telegram:ada",
+        surface="telegram:ada",
         mind_id="ada",
     )
 
@@ -197,8 +197,8 @@ class TestGatewayClientSkillDiscovery:
 @pytest.mark.asyncio
 async def test_a_new_session_names_its_surface_in_the_schemas_words():
     """The gateway speaks the schema: a session is opened on a ``surface`` (the
-    raw address) for a ``surface_id``. Breaks if ensure_session goes back to the
-    retired ``owner_type``/``owner_ref`` keys, which comms stops accepting."""
+    raw address) for a ``surface_id``. Breaks if ensure_session stops sending
+    the client's surface or the user's id under those keys."""
     posted = []
 
     class _Resp:
@@ -228,4 +228,3 @@ async def test_a_new_session_names_its_surface_in_the_schemas_words():
     body = posted[0]
     assert body["surface"] == "telegram:ada"
     assert body["surface_id"] == "42"
-    assert "owner_type" not in body and "owner_ref" not in body

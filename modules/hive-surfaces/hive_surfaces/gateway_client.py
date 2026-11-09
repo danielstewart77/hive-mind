@@ -64,7 +64,7 @@ class GatewayClient:
         self,
         http: aiohttp.ClientSession,
         server_url: str,
-        owner_type: str,
+        surface: str,
         surface_prompt: str | None = None,
         *,
         mind_id: str,
@@ -73,7 +73,7 @@ class GatewayClient:
     ):
         self.http = http
         self.server_url = server_url
-        self.owner_type = owner_type
+        self.surface = surface
         self.surface_prompt = surface_prompt
         self.mind_id = mind_id
         self._bearer_token = bearer_token
@@ -97,7 +97,7 @@ class GatewayClient:
         """
         async with self.http.get(
             f"{self.server_url}/sessions",
-            params={"client_type": self.owner_type, "client_ref": str(client_ref)},
+            params={"client_type": self.surface, "client_ref": str(client_ref)},
             headers=self._auth_headers,
         ) as resp:
             data = await resp.json()
@@ -110,7 +110,7 @@ class GatewayClient:
         """Get active session for this client, or create one."""
         async with self.http.get(
             f"{self.server_url}/sessions",
-            params={"client_type": self.owner_type, "client_ref": str(client_ref)},
+            params={"client_type": self.surface, "client_ref": str(client_ref)},
             headers=self._auth_headers,
         ) as resp:
             data = await resp.json()
@@ -119,12 +119,12 @@ class GatewayClient:
                     log_event(
                         log, "gateway.session.reused", level=logging.DEBUG,
                         session_id=s["id"], mind_id=self.mind_id,
-                        owner_type=self.owner_type, client_ref=str(client_ref),
+                        surface=self.surface, client_ref=str(client_ref),
                     )
                     return s["id"]
 
         payload: dict = {
-            "surface": self.owner_type,
+            "surface": self.surface,
             "surface_id": str(user_id),
             "client_ref": str(client_ref),
             "mind_id": self.mind_id,
@@ -139,13 +139,13 @@ class GatewayClient:
                 log_event(
                     log, "gateway.session.create.failed", level=logging.ERROR,
                     status_code=resp.status, mind_id=self.mind_id,
-                    owner_type=self.owner_type, client_ref=str(client_ref),
+                    surface=self.surface, client_ref=str(client_ref),
                 )
                 raise RuntimeError(f"Gateway session creation failed: HTTP {resp.status}")
             session_id = data["id"]
             log_event(
                 log, "gateway.session.created", session_id=session_id,
-                mind_id=self.mind_id, owner_type=self.owner_type,
+                mind_id=self.mind_id, surface=self.surface,
                 client_ref=str(client_ref), user_id=user_id,
             )
             return session_id
@@ -160,7 +160,7 @@ class GatewayClient:
             f"{self.server_url}/command",
             json={
                 "content": content,
-                "surface": self.owner_type,
+                "surface": self.surface,
                 "surface_id": str(user_id),
                 "client_ref": str(client_ref),
                 "mind_id": self.mind_id,
@@ -172,7 +172,7 @@ class GatewayClient:
                 log, "gateway.command.completed" if resp.status < 400 else "gateway.command.failed",
                 level=logging.INFO if resp.status < 400 else logging.ERROR,
                 command=command, status_code=resp.status, mind_id=self.mind_id,
-                owner_type=self.owner_type, client_ref=str(client_ref), user_id=user_id,
+                surface=self.surface, client_ref=str(client_ref), user_id=user_id,
                 elapsed_ms=round((time.monotonic() - started) * 1000, 1),
             )
             return result
@@ -269,7 +269,7 @@ class GatewayClient:
         started = time.monotonic()
         log_event(
             log, "gateway.turn.started", session_id=session_id, mind_id=self.mind_id,
-            owner_type=self.owner_type, client_ref=str(client_ref), user_id=user_id,
+            surface=self.surface, client_ref=str(client_ref), user_id=user_id,
             content_chars=len(prompt), image_count=len(images or []),
         )
         yielded_any = False

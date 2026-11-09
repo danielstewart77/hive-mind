@@ -65,7 +65,7 @@ def gateway(monkeypatch):
     client = GatewayClient(
         http=MagicMock(),
         server_url="http://localhost:8420",
-        owner_type="discord:skippy",
+        surface="discord:skippy",
         mind_id="skippy",
     )
     client.ensure_session = AsyncMock(return_value="sess-1")
