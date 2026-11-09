@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Install the hive</title>
+<style>
+  body { font: 15px/1.45 system-ui, sans-serif; max-width: 52rem; margin: 2rem auto; padding: 0 1rem; color: #1d2330; }
+  h1 { font-size: 1.4rem; } h2 { font-size: 1.1rem; margin-top: 1.6rem; }
+  fieldset { border: 1px solid #d5d9e2; border-radius: 6px; margin: .8rem 0; padding: .6rem 1rem; }
+  label { display: block; margin: .35rem 0; }
+  input[type=text], input[type=password], input[type=number], select { width: 100%; max-width: 30rem; padding: .3rem; }
+  .req { color: #6a7284; font-size: .85rem; }
+  .steps li { margin: .2rem 0; }
+  .done { color: #1b7a3a; } .failed { color: #b3261e; } .running { color: #a15c00; } .waiting { color: #1f5fbf; }
+  .pending { color: #6a7284; }
+  .err { color: #b3261e; white-space: pre-wrap; }
+  button { padding: .45rem 1rem; font-size: 1rem; }
+</style>
+</head>
+<body>
+<h1>Install the hive</h1>
+<div id="setup">
+  <h2>Pieces</h2>
+  <div id="pieces"></div>
+  <h2>Details</h2>
+  <div id="questions"></div>
+  <p class="err" id="problems"></p>
+  <button id="go">Install</button>
+</div>
+<div id="progress" hidden>
+  <h2>Progress</h2>
+  <ol class="steps" id="steps"></ol>
+  <div id="ask"></div>
+  <div id="final"></div>
+</div>
+<script>
+const code = new URLSearchParams(location.search).get("code") || "";
+const api = (path, body) => fetch(path, {
+  method: body ? "POST" : "GET",
+  headers: {"X-Setup-Code": code, "Content-Type": "application/json"},
+  body: body ? JSON.stringify(body) : undefined,
+}).then(r => r.json().then(j => ({status: r.status, body: j})));
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+let view = null;
+
+function selection() {
+  const pieces = [...document.querySelectorAll("input[data-piece]:checked")].map(i => i.dataset.piece);
+  const modes = {};
+  document.querySelectorAll("select[data-mode]").forEach(s => modes[s.dataset.mode] = s.value);
+  const out = {pieces, modes};
+  document.querySelectorAll("[data-q]").forEach(i => out[i.dataset.q] = i.value);
+  return out;
+}
+
+function drawPlan(v) {
+  view = v;
+  $("pieces").innerHTML = v.pieces.map(p => `
+    <label><input type="checkbox" data-piece="${p.name}" ${p.selected ? "checked" : ""}
+      ${p.required ? "disabled" : ""}> ${esc(p.label)}
+      ${p.required ? '<span class="req">(always)</span>' : ""}
+      ${p.modes.length ? `<select data-mode="${p.name}">${p.modes.map(m =>
+        `<option ${v.modes[p.name] === m ? "selected" : ""}>${m}</option>`).join("")}</select>` : ""}
+    </label>`).join("");
+  const kept = Object.fromEntries(v.questions.map(q => [q.key, q.kept]));
+  $("questions").innerHTML = v.questions.map(q => {
+    const val = esc(v.answers[q.key] ?? q.default ?? "");
+    const hint = q.kept ? ' <span class="req">(blank keeps the current value)</span>' :
+                 q.optional ? ' <span class="req">(optional)</span>' : "";
+    if (q.kind === "choice") return `<label>${esc(q.label)}<select data-q="${q.key}">${
+      q.choices.map(c => `<option ${c === v.answers[q.key] ? "selected" : ""}>${esc(c)}</option>`).join("")}</select></label>`;
+    const type = q.kind === "secret" ? "password" : q.kind === "int" ? "number" : "text";
+    return `<label>${esc(q.label)}${hint}<input type="${type}" data-q="${q.key}"
+      value="${q.kind === "secret" ? "" : val}" autocomplete="off"></label>`;
+  }).join("");
+  document.querySelectorAll("#setup input[data-piece], #setup select").forEach(el =>
+    el.addEventListener("change", replan));
+}
+
+async function replan() {
+  const r = await api("/api/plan", selection());
+  if (r.status === 200) {
+    const typed = selection();
+    drawPlan(r.body);
+    document.querySelectorAll("[data-q]").forEach(i => { if (typed[i.dataset.q]) i.value = typed[i.dataset.q]; });
+  }
+}
+
+$("go").onclick = async () => {
+  const r = await api("/api/start", selection());
+  if (r.status !== 200) { $("problems").textContent = (r.body.problems || [r.body.error]).join("\n"); return; }
+  showProgress();
+};
+
+function showProgress() { $("setup").hidden = true; $("progress").hidden = false; poll(); }
+
+async function poll() {
+  const r = await api("/api/state");
+  const s = r.body;
+  $("steps").innerHTML = (s.steps || []).map(st => `<li class="${st.status}">
+    <b>${esc(st.label)}</b> — ${st.status}${st.detail && typeof st.detail === "string" ? ": " + esc(st.detail) : ""}
+    ${st.error ? `<div class="err">${esc(st.error)}</div>` : ""}</li>`).join("");
+  const waiting = (s.steps || []).find(st => st.status === "waiting");
+  if (waiting && waiting.question && !$("ask").dataset.key) {
+    const q = waiting.question;
+    $("ask").dataset.key = q.key;
+    $("ask").innerHTML = `<label>${esc(q.label)}<select id="answer">${q.choices.map(c =>
+      `<option>${esc(c)}</option>`).join("")}</select></label><button id="send">Continue</button>`;
+    $("send").onclick = async () => {
+      await api("/api/answer", {key: q.key, value: $("answer").value});
+      $("ask").innerHTML = ""; delete $("ask").dataset.key;
+    };
+  }
+  if (s.finished) {
+    const links = (s.outputs || {}).links || {};
+    $("final").innerHTML = `<h2>Done</h2><ul>${Object.entries(links).map(([k, u]) =>
+      `<li>${esc(k)}: <a href="${esc(u)}">${esc(u)}</a></li>`).join("")}</ul>
+      <p>dsh: ${esc((s.outputs || {}).dsh || "unknown")}. Sign in with the admin account you gave.
+      A Telegram or Discord bot is claimed from the console. This page closes shortly.</p>`;
+    return;
+  }
+  if (s.failed_step && !s.running) {
+    $("final").innerHTML = `<p class="err">Stopped at “${esc(s.failed_step)}”. Fix what it says and run
+      the install command again; every step is safe to repeat.</p>`;
+    return;
+  }
+  setTimeout(poll, 2000);
+}
+
+(async () => {
+  const st = await api("/api/state");
+  if (st.status === 403) { document.body.innerHTML = "<p>This page needs the link the installer printed.</p>"; return; }
+  if (st.body.running || st.body.finished) { showProgress(); return; }
+  const r = await api("/api/plan");
+  drawPlan(r.body);
+})();
+</script>
+</body>
+</html>
