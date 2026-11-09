@@ -94,6 +94,10 @@ app.add_middleware(route_access.AccessMiddleware, table=terminal_access.TABLE)
 
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
+# Where the console lives, for the brand link back to it. From the
+# environment because the address is each hive's own; unset, the brand
+# links to this site's own front page.
+templates.env.globals["console_url"] = os.getenv("HIVE_CONSOLE_URL", "")
 
 
 def _gateway_base_url() -> str:
@@ -231,7 +235,7 @@ async def login_submit(
         )
     target = "/password" if user.get("must_change") else _safe_next_path(next)
     response = RedirectResponse(url=target, status_code=303)
-    set_session_cookie(response, token)
+    set_session_cookie(request, response, token)
     return response
 
 
@@ -289,7 +293,7 @@ async def password_submit(
         return await _password_page(request, status_code=exc.status,
                                     error=exc.message)
     response = RedirectResponse(url="/terminal", status_code=303)
-    set_session_cookie(response, token)
+    set_session_cookie(request, response, token)
     return response
 
 

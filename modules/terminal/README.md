@@ -71,8 +71,9 @@ is not at the default path, `HIVE_SITE_DIR` — the two build contexts;
 the console sets one (left unset on both, the key is generated once and kept
 in the shared store); and, when the console signs in through auth-service,
 the same `AUTH_SERVICE_URL` and `AUTH_SERVICE_ADMIN_TOKEN` (or
-`HIVE_AUTH_BACKEND`) the console holds. The two sites must use the same
-store to share a session.
+`HIVE_AUTH_BACKEND`) the console holds; `HIVE_CONSOLE_URL`, the console's
+address for the brand link (unset, it links to this site's front page). The
+two sites must use the same store to share a session.
 
 ## Test
 

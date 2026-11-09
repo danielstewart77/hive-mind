@@ -41,7 +41,7 @@
     <nav>
         <div class="nav-inner">
             <span class="nav-brand-group">
-                <a href="https://hive.sparktobloom.com" class="nav-brand glow">
+                <a href="{{ console_url or "/" }}" class="nav-brand glow">
                     <img src="{{ request.url_for('static', path='hive-icon.svg') }}?v={{ asset_versions['hive-icon.svg'] }}" alt="" class="nav-brand-icon">
                     hive
                 </a>
