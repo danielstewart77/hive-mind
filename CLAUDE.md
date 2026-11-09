@@ -196,7 +196,7 @@ mind's `runtime_config_dir` is read only by the harness it was written for.
 ### What a dsh mind needs that the other two do not
 
 `minds/harness/dsh_cli.py` drives our fork of the DeepSeek harness
-(`github.com/danielstewart77/dsh`), which is not an npm install: the tree is a
+(`github.com/danielstewart77/hive-harness-dsh`), which is not an npm install: the tree is a
 built working copy, bind-mounted into the mind's container, and `dsh_bin` in
 `runtime.yaml` names the launcher inside it. Two container requirements follow
 from that and are easy to get wrong, because each fails as something else.
