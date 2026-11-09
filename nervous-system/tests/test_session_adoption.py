@@ -2,7 +2,7 @@
 
 A conversation started in the browser terminal was invisible from Telegram:
 the surfaces already share the conversation id and the transcript, but the
-session row is scoped by owner_ref, so a chat could only see what the chat
+session row is scoped by surface_id, so a chat could only see what the chat
 had started. You had to walk back to a browser to continue what you started
 at the desk.
 
@@ -58,17 +58,17 @@ async def _seed(
     mgr: SessionManager,
     session_id: str,
     *,
-    owner_type: str = "web",
-    owner_ref: str = "terminal",
+    surface: str = "web",
+    surface_id: str = "terminal",
     status: str = "running",
     mind_id: str = "skippy-uuid",
-    claude_sid: str = "conv-1",
-    summary: str = "New session",
+    conversation_id: str = "conv-1",
+    opening_line: str = "New session",
 ) -> None:
     now = time.time()
     await seed_session(
-        session_id, owner_type=owner_type, owner_ref=owner_ref, model="opus",
-        claude_sid=claude_sid, summary=summary, created_at=now - 60,
+        session_id, surface=surface, surface_id=surface_id, model="opus",
+        conversation_id=conversation_id, opening_line=opening_line, created_at=now - 60,
         last_active=now, status=status, mind_id=mind_id,
     )
 
@@ -76,8 +76,8 @@ async def _seed(
 async def _row(mgr, session_id: str) -> dict:
     """The stored row, read past the manager, under the names it speaks."""
     return await fetchrow(
-        "SELECT *, surface AS owner_type, surface_id AS owner_ref, "
-        "conversation_id AS claude_sid, opening_line AS summary "
+        "SELECT *, surface AS surface, surface_id AS surface_id, "
+        "conversation_id AS conversation_id, opening_line AS summary "
         "FROM core.sessions WHERE id = $1", session_id
     )
 
@@ -98,11 +98,11 @@ def test_terminal_sessions_are_offered_to_another_surface(comms_db):
     async def scenario():
         mgr = await _make_manager()
         try:
-            await _seed(mgr, "own-1", owner_type=TELEGRAM, owner_ref=CHAT)
-            await _seed(mgr, "term-1", summary="the thing I started at the desk")
+            await _seed(mgr, "own-1", surface=TELEGRAM, surface_id=CHAT)
+            await _seed(mgr, "term-1", opening_line="the thing I started at the desk")
 
             sessions = await mgr.list_selectable_sessions(
-                owner_ref=CHAT, client_type=TELEGRAM, client_ref=CHAT, mind_id="skippy-uuid"
+                surface_id=CHAT, client_type=TELEGRAM, client_ref=CHAT, mind_id="skippy-uuid"
             )
 
             assert _selectable_ids(sessions) == {"own-1", "term-1"}
@@ -115,8 +115,6 @@ def test_terminal_sessions_are_offered_to_another_surface(comms_db):
             assert by_id["own-1"]["adoptable"] is False
             assert by_id["own-1"]["surface_label"] == "telegram"
             assert by_id["own-1"]["surface"] == TELEGRAM
-            # The raw address under its old name too, for one deploy.
-            assert by_id["own-1"]["owner_type"] == TELEGRAM
         finally:
             await close_manager(mgr)
 
@@ -128,11 +126,11 @@ def test_machine_driven_sessions_are_never_offered(comms_db):
     async def scenario():
         mgr = await _make_manager()
         try:
-            await _seed(mgr, "broker-1", owner_type="broker", owner_ref="broker-abc")
-            await _seed(mgr, "sched-1", owner_type="scheduler", owner_ref="scheduler")
+            await _seed(mgr, "broker-1", surface="broker", surface_id="broker-abc")
+            await _seed(mgr, "sched-1", surface="scheduler", surface_id="scheduler")
 
             sessions = await mgr.list_selectable_sessions(
-                owner_ref=CHAT, client_type=TELEGRAM, client_ref=CHAT, mind_id="skippy-uuid"
+                surface_id=CHAT, client_type=TELEGRAM, client_ref=CHAT, mind_id="skippy-uuid"
             )
 
             assert sessions == []
@@ -150,7 +148,7 @@ def test_another_minds_terminal_is_not_offered(comms_db):
             await _seed(mgr, "bobs", mind_id="bob-uuid")
 
             sessions = await mgr.list_selectable_sessions(
-                owner_ref=CHAT, client_type=TELEGRAM, client_ref=CHAT, mind_id="skippy-uuid"
+                surface_id=CHAT, client_type=TELEGRAM, client_ref=CHAT, mind_id="skippy-uuid"
             )
 
             assert _selectable_ids(sessions) == {"mine"}
@@ -168,7 +166,7 @@ def test_closed_terminal_sessions_are_not_offered(comms_db):
             await _seed(mgr, "done", status="closed")
 
             sessions = await mgr.list_selectable_sessions(
-                owner_ref=CHAT, client_type=TELEGRAM, client_ref=CHAT, mind_id="skippy-uuid"
+                surface_id=CHAT, client_type=TELEGRAM, client_ref=CHAT, mind_id="skippy-uuid"
             )
 
             assert _selectable_ids(sessions) == {"live"}
@@ -188,15 +186,15 @@ def test_your_own_closed_sessions_are_not_offered(comms_db):
     async def scenario():
         mgr = await _make_manager()
         try:
-            await _seed(mgr, "mine-live", owner_type=TELEGRAM, owner_ref=CHAT, status="idle")
+            await _seed(mgr, "mine-live", surface=TELEGRAM, surface_id=CHAT, status="idle")
             for i in range(20):
                 await _seed(
                     mgr, f"mine-done-{i}",
-                    owner_type=TELEGRAM, owner_ref=CHAT, status="closed",
+                    surface=TELEGRAM, surface_id=CHAT, status="closed",
                 )
 
             sessions = await mgr.list_selectable_sessions(
-                owner_ref=CHAT, client_type=TELEGRAM, client_ref=CHAT, mind_id="skippy-uuid"
+                surface_id=CHAT, client_type=TELEGRAM, client_ref=CHAT, mind_id="skippy-uuid"
             )
 
             assert [s["id"] for s in sessions] == ["mine-live"]
@@ -232,7 +230,7 @@ def test_adopting_releases_the_terminal_and_retargets_the_session(comms_db):
             mgr._spawn = _spawn
 
             await mgr.activate_session(
-                "term-1", TELEGRAM, CHAT, owner_type=TELEGRAM, owner_ref=CHAT
+                "term-1", TELEGRAM, CHAT, surface=TELEGRAM, surface_id=CHAT
             )
 
             # The outgoing process ends — one conversation, one writer.
@@ -240,9 +238,9 @@ def test_adopting_releases_the_terminal_and_retargets_the_session(comms_db):
             # ...and the incoming surface resumes the same conversation.
             assert spawned == ["term-1"]
             row = await _row(mgr, "term-1")
-            assert row["owner_type"] == TELEGRAM
-            assert row["owner_ref"] == CHAT
-            assert row["claude_sid"] == "conv-1"  # the thread is untouched
+            assert row["surface"] == TELEGRAM
+            assert row["surface_id"] == CHAT
+            assert row["conversation_id"] == "conv-1"  # the thread is untouched
             # Exactly one surface holds it now.
             assert await _bindings(mgr, "term-1") == [(TELEGRAM, CHAT)]
         finally:
@@ -256,7 +254,7 @@ def test_switching_between_your_own_sessions_releases_nothing(comms_db):
     async def scenario():
         mgr = await _make_manager()
         try:
-            await _seed(mgr, "own-1", owner_type=TELEGRAM, owner_ref=CHAT)
+            await _seed(mgr, "own-1", surface=TELEGRAM, surface_id=CHAT)
             released: list = []
 
             async def _release(session_id, surface):
@@ -266,7 +264,7 @@ def test_switching_between_your_own_sessions_releases_nothing(comms_db):
             mgr.release_on_mind = _release
 
             await mgr.activate_session(
-                "own-1", TELEGRAM, CHAT, owner_type=TELEGRAM, owner_ref=CHAT
+                "own-1", TELEGRAM, CHAT, surface=TELEGRAM, surface_id=CHAT
             )
 
             assert released == []
@@ -310,15 +308,15 @@ def test_a_refused_release_leaves_the_session_where_it_was(comms_db):
             raised = False
             try:
                 await mgr.activate_session(
-                    "term-1", TELEGRAM, CHAT, owner_type=TELEGRAM, owner_ref=CHAT
+                    "term-1", TELEGRAM, CHAT, surface=TELEGRAM, surface_id=CHAT
                 )
             except sessions_mod.MindCallFailed:
                 raised = True
 
             assert raised
             row = await _row(mgr, "term-1")
-            assert row["owner_type"] == "web"
-            assert row["owner_ref"] == "terminal"
+            assert row["surface"] == "web"
+            assert row["surface_id"] == "terminal"
             assert spawned == []
             assert await _bindings(mgr, "term-1") == [("web", "terminal-tile-1")]
         finally:
@@ -357,13 +355,13 @@ def test_an_adoption_whose_binding_fails_leaves_the_session_where_it_was(
 
             try:
                 await mgr.activate_session(
-                    "term-1", TELEGRAM, CHAT, owner_type=TELEGRAM, owner_ref=CHAT
+                    "term-1", TELEGRAM, CHAT, surface=TELEGRAM, surface_id=CHAT
                 )
             except RuntimeError:
                 pass
 
             row = await _row(mgr, "term-1")
-            assert (row["owner_type"], row["owner_ref"]) == ("web", "terminal")
+            assert (row["surface"], row["surface_id"]) == ("web", "terminal")
             assert await _bindings(mgr, "term-1") == [("web", "terminal-tile-1")]
         finally:
             await close_manager(mgr)

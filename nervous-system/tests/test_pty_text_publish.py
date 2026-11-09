@@ -32,7 +32,7 @@ async def _make_manager() -> SessionManager:
     return mgr
 
 
-async def _session_row(mgr: SessionManager, session_id: str, owner_type: str) -> None:
+async def _session_row(mgr: SessionManager, session_id: str, surface: str) -> None:
     """A session row and nothing else.
 
     Written straight to the table rather than through ``create_session``,
@@ -40,7 +40,7 @@ async def _session_row(mgr: SessionManager, session_id: str, owner_type: str) ->
     under test reads one column of it.
     """
     await seed_session(
-        session_id, claude_sid="conv-1", owner_type=owner_type, owner_ref="ref-1",
+        session_id, conversation_id="conv-1", surface=surface, surface_id="ref-1",
         model="opus", created_at=1_700_000_000.0, last_active=1_700_000_000.0,
         status="running", mind_id="mind-1",
     )

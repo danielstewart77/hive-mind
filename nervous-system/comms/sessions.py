@@ -152,20 +152,9 @@ if os.environ.get("HOST_SPARK_DIR"):
 # The rows, as this module and every caller of it speak them
 # ---------------------------------------------------------------------------
 # The schema is `hive_data`'s `core.sql`; nothing here creates or migrates a
-# table. Four session columns were renamed when the stores were unified -
-# `claude_sid` is `conversation_id`, `owner_type`/`owner_ref` are
-# `surface`/`surface_id`, `summary` is `opening_line` - and every consumer of
-# this module (the routes, the surface bots, the console, the minds) still
-# reads the old names off the wire. The translation happens here, at the one
-# boundary, so a row means the same thing to every caller whichever store is
-# underneath it. Both names go out until every consumer reads the new ones.
-_LEGACY_NAMES = {
-    "conversation_id": "claude_sid",
-    "surface": "owner_type",
-    "surface_id": "owner_ref",
-    "opening_line": "summary",
-}
-_COLUMN_OF = {legacy: column for column, legacy in _LEGACY_NAMES.items()}
+# table. A row is handed to every caller under the schema's own column names
+# (`conversation_id`, `surface`, `surface_id`, `opening_line`), which are the
+# names the wire speaks too.
 # Real booleans in Postgres, integers on the wire since the day they were
 # SQLite columns. Handed back as 0/1 so a client comparing with 1 is unchanged.
 _FLAGS = ("terminal_held", "context_has_images")
@@ -173,17 +162,11 @@ _FLAGS = ("terminal_held", "context_has_images")
 _RETIRED = ("closed", "suspended")
 
 
-def _legacy_row(row: dict | None) -> dict | None:
-    """A `core.sessions` row under the names this module's callers read."""
+def _session_row(row: dict | None) -> dict | None:
+    """A `core.sessions` row as this module's callers read it."""
     if row is None:
         return None
-    session = {_LEGACY_NAMES.get(k, k): v for k, v in row.items()}
-    # And under the schema's names as well, so consumers move to those one at
-    # a time - the edge minds deploy on their own hosts and cannot all switch
-    # in the same instant as comms. The old names go once nothing reads them.
-    for column, legacy in _LEGACY_NAMES.items():
-        if legacy in session:
-            session[column] = session[legacy]
+    session = dict(row)
     for flag in _FLAGS:
         if session.get(flag) is not None:
             session[flag] = int(bool(session[flag]))
@@ -213,7 +196,7 @@ async def _update_session(session_id: str, *, unit: Any = None, **fields: Any) -
         if name in _FLAGS and value is not None:
             value = bool(value)
         value = _storable(value)
-        columns[_COLUMN_OF.get(name, name)] = value
+        columns[name] = value
     result = await core.update_session(session_id, unit=unit, **columns)
     return result["rows"]
 
@@ -250,8 +233,8 @@ def _mind_view(row: dict | None) -> dict | None:
 
 
 # The owner type a conversation carries while a browser tile hosts it. One of
-# `_ADOPTABLE_OWNER_TYPES`, so a chat's picker still offers it back.
-TERMINAL_OWNER_TYPE = "terminal"
+# `_ADOPTABLE_SURFACES`, so a chat's picker still offers it back.
+TERMINAL_SURFACE = "terminal"
 
 # Armed is armed. The flag once had two values because a chat rotation
 # retired the row for a successor while a terminal rotation kept it, and a
@@ -580,8 +563,8 @@ class SessionManager:
     # ------------------------------------------------------------------
     async def create_session(
         self,
-        owner_type: str,
-        owner_ref: str,
+        surface: str,
+        surface_id: str,
         client_ref: str,
         model: str | None = None,
         surface_prompt: str | None = None,
@@ -626,20 +609,20 @@ class SessionManager:
         # for the web terminal, for a session that has never taken a turn.
         # Minds are handed this id and pin the harness to it; they never mint
         # one of their own, and nothing downstream ever overwrites it.
-        claude_sid = str(uuid.uuid4())
+        conversation_id = str(uuid.uuid4())
         now = time.time()
 
         harness = normalise_harness(mind_row.get("harness"))
 
         async def _write(unit) -> None:
             await core.create_session(
-                id=session_id, surface=owner_type, surface_id=owner_ref,
+                id=session_id, surface=surface, surface_id=surface_id,
                 mind_id=mind_id, created_at=now, last_active=now,
-                status="running", conversation_id=claude_sid, model=model,
+                status="running", conversation_id=conversation_id, model=model,
                 harness=harness or None, conversation_started_at=now, unit=unit,
             )
             await core.bind_surface(
-                client_type=owner_type, client_ref=client_ref,
+                client_type=surface, client_ref=client_ref,
                 session_id=session_id, unit=unit,
             )
 
@@ -661,20 +644,20 @@ class SessionManager:
         await self._spawn(
             session_id,
             model,
-            resume_sid=claude_sid,
+            resume_sid=conversation_id,
             surface_prompt=surface_prompt,
             allowed_directories=allowed_directories,
             soul_file=soul_file,
             mind_id=mind_id,
             client_ref=client_ref,
-            owner_type=owner_type,
-            owner_ref=owner_ref,
+            surface=surface,
+            surface_id=surface_id,
             system_prompt_blocks=system_prompt_blocks,
         )
-        log.info("Created session %s (model=%s, mind=%s, owner=%s)", session_id, model, mind_id, owner_ref)
+        log.info("Created session %s (model=%s, mind=%s, owner=%s)", session_id, model, mind_id, surface_id)
         log_event(
-            log, "session.created", session_id=session_id, conversation_id=claude_sid,
-            mind_id=mind_id, model=model, owner_type=owner_type, owner_ref=owner_ref,
+            log, "session.created", session_id=session_id, conversation_id=conversation_id,
+            mind_id=mind_id, model=model, surface=surface, surface_id=surface_id,
             client_ref=client_ref,
         )
         return await self._session_dict(session_id)
@@ -685,15 +668,15 @@ class SessionManager:
 
     async def list_sessions(
         self,
-        owner_ref: str | None = None,
+        surface_id: str | None = None,
         status: str | None = None,
         client_type: str | None = None,
         client_ref: str | None = None,
     ) -> list[dict]:
         """List sessions, optionally filtered."""
         sessions = [
-            _legacy_row(row) for row in await sessions_ops.find_sessions(
-                surface_id=owner_ref or UNSET,
+            _session_row(row) for row in await sessions_ops.find_sessions(
+                surface_id=surface_id or UNSET,
                 surfaces=[client_type] if client_type else UNSET,
                 status=status or UNSET,
             )
@@ -719,17 +702,17 @@ class SessionManager:
     # Surfaces whose sessions a person can pick up somewhere else. A broker
     # or scheduler session is machine-driven — nobody is holding it, and
     # offering it in a chat picker is offering to hijack an errand.
-    _ADOPTABLE_OWNER_TYPES = ("web", "terminal")
+    _ADOPTABLE_SURFACES = ("web", "terminal")
 
     @staticmethod
-    def _surface_label(owner_type: str) -> str:
+    def _surface_label(surface: str) -> str:
         """The human name of a surface, without its mind-uuid suffix."""
-        base = (owner_type or "").split(":", 1)[0]
-        return "terminal" if base in SessionManager._ADOPTABLE_OWNER_TYPES else base
+        base = (surface or "").split(":", 1)[0]
+        return "terminal" if base in SessionManager._ADOPTABLE_SURFACES else base
 
     async def list_selectable_sessions(
         self,
-        owner_ref: str,
+        surface_id: str,
         client_type: str | None = None,
         client_ref: str | None = None,
         mind_id: str | None = None,
@@ -739,7 +722,7 @@ class SessionManager:
 
         A conversation started in the browser terminal used to be invisible
         from Telegram: the surfaces share the conversation id and the
-        transcript, but the session row is scoped by ``owner_ref``, so a
+        transcript, but the session row is scoped by ``surface_id``, so a
         chat could only ever see what the chat had started. That is the
         whole gap — you had to be back at a browser to continue what you
         started at the desk. Adoptable rows carry ``adoptable: True`` so a
@@ -754,25 +737,24 @@ class SessionManager:
         sessions = [
             s
             for s in await self.list_sessions(
-                owner_ref=owner_ref, client_type=client_type, client_ref=client_ref
+                surface_id=surface_id, client_type=client_type, client_ref=client_ref
             )
             if s.get("status") != "closed"
         ]
         # `surface` is the raw address here as on every other session answer,
-        # and the picker's display label is `surface_label`. `owner_type`
-        # still carries the raw address for one deploy.
+        # and the picker's display label is `surface_label`.
         for session in sessions:
             session["surface_label"] = self._surface_label(session.get("surface", ""))
             session["adoptable"] = False
         seen = {s["id"] for s in sessions}
 
         for row in await sessions_ops.find_sessions(
-            surfaces=self._ADOPTABLE_OWNER_TYPES,
+            surfaces=self._ADOPTABLE_SURFACES,
             statuses_excluded=("closed",),
-            surface_id_not=owner_ref,
+            surface_id_not=surface_id,
             mind_id=mind_id or UNSET,
         ):
-            session = _legacy_row(row)
+            session = _session_row(row)
             if session["id"] in seen:
                 continue
             session["surface_label"] = self._surface_label(session.get("surface", ""))
@@ -953,7 +935,7 @@ class SessionManager:
             row = await self._get_row(session_id)
             if not row:
                 return {"ok": False, "error": "session not found"}
-            conversation_id = row["claude_sid"]
+            conversation_id = row["conversation_id"]
         except Exception:  # noqa: BLE001 — a view, never the conversation
             log.debug("activity feed could not read %s", session_id, exc_info=True)
             row = None
@@ -966,8 +948,8 @@ class SessionManager:
         # with valid sequence numbers that nothing downstream can tell apart
         # from the mind repeating itself.
         if row is not None:
-            owner_type = (row["owner_type"] or "").split(":", 1)[0]
-            if owner_type not in self._ADOPTABLE_OWNER_TYPES:
+            surface = (row["surface"] or "").split(":", 1)[0]
+            if surface not in self._ADOPTABLE_SURFACES:
                 return {"ok": False, "error": "not a terminal-owned session"}
         self.dashboard.begin(
             session_id, mind_id=mind_id, conversation_id=conversation_id
@@ -1001,8 +983,8 @@ class SessionManager:
         session = await self._get_row(session_id)
         if not session:
             return {"ok": False, "error": "session not found"}
-        owner_type = (session["owner_type"] or "").split(":", 1)[0]
-        if owner_type not in self._ADOPTABLE_OWNER_TYPES:
+        surface = (session["surface"] or "").split(":", 1)[0]
+        if surface not in self._ADOPTABLE_SURFACES:
             return {"ok": False, "error": "not a terminal-owned session"}
         await self._publish_session_event(
             session_id,
@@ -1058,7 +1040,7 @@ class SessionManager:
         if conversation_id:
             if not row:
                 return {"ok": False, "error": "session not found"}
-            current = {row.get("claude_sid"), row.get("harness_sid")} - {None, ""}
+            current = {row.get("conversation_id"), row.get("harness_sid")} - {None, ""}
             if current and conversation_id not in current:
                 log.info(
                     "dropping context report for replaced conversation %s on session %s",
@@ -1296,17 +1278,15 @@ class SessionManager:
                     **entry,
                     "mind_id": entry.get("mind_id") or row["mind_id"],
                     "model": row["model"],
-                    "summary": row["summary"],
-                    "opening_line": row["summary"],
-                    "owner_type": row["owner_type"],
-                    "surface": row["owner_type"],
+                    "opening_line": row["opening_line"],
+                    "surface": row["surface"],
                     "context": self._context_reading(row, moment),
                 }
             )
         # Open means bound to a surface and neither closed nor suspended: a
         # retired row is a conversation nobody can type into any more.
         idle = []
-        for row in map(_legacy_row, await sessions_ops.find_sessions(
+        for row in map(_session_row, await sessions_ops.find_sessions(
             statuses_excluded=_RETIRED, bound=True,
         )):
             if row["id"] in live_ids:
@@ -1317,11 +1297,9 @@ class SessionManager:
                     "generating": False,
                     "mind_id": row["mind_id"],
                     "model": row["model"],
-                    "summary": row["summary"],
-                    "opening_line": row["summary"],
+                    "opening_line": row["opening_line"],
                     "name": row["name"],
-                    "owner_type": row["owner_type"],
-                    "surface": row["owner_type"],
+                    "surface": row["surface"],
                     "last_active": row["last_active"],
                     "context": self._context_reading(row, moment),
                 }
@@ -1330,7 +1308,7 @@ class SessionManager:
 
     async def record_turn(
         self, client_type: str, client_ref: str, role: str, content: str,
-        claude_sid: str | None = None,
+        conversation_id: str | None = None,
     ) -> dict:
         """Append one turn to the active session's ``session_turns`` ledger.
 
@@ -1375,7 +1353,7 @@ class SessionManager:
             # codex minted, which the row holds as `harness_sid` beside the
             # gateway's own id; either names the current conversation.
             await sessions_ops.clear_carry_forward(
-                active["id"], typed_into=claude_sid or None, unit=unit,
+                active["id"], typed_into=conversation_id or None, unit=unit,
             )
 
         try:
@@ -1387,15 +1365,15 @@ class SessionManager:
         return {"ok": True, "session_id": active["id"]}
 
     async def get_carry_forward(
-        self, session_id: str, claude_sid: str
+        self, session_id: str, conversation_id: str
     ) -> str | None:
-        """The stored carry-forward for ``claude_sid``, if it is still owed one.
+        """The stored carry-forward for ``conversation_id``, if it is still owed one.
 
         Answers only for the conversation the seed was composed for. A mind
         reattaching asks about the id it is about to resume, and a stored seed
         belonging to some earlier conversation is not an answer to that
         question — replaying it would graft one conversation's context onto
-        another's. A blank ``claude_sid`` matches nothing for the same reason.
+        another's. A blank ``conversation_id`` matches nothing for the same reason.
 
         None means "nothing to apply", which is the ordinary case: either no
         rotation is outstanding, or its first turn already landed and
@@ -1411,10 +1389,10 @@ class SessionManager:
         conversation's context over a live one. Re-applying a seed the user
         genuinely never used is worth minutes; it is not worth months.
         """
-        if not (claude_sid or "").strip():
+        if not (conversation_id or "").strip():
             return None
         row = await core.get_session(session_id, private=True)
-        if not row or row.get("carry_forward_sid") != claude_sid:
+        if not row or row.get("carry_forward_sid") != conversation_id:
             return None
         stored_at = row["carry_forward_at"]
         if stored_at is not None and time.time() - stored_at > self.CARRY_FORWARD_TTL_SECONDS:
@@ -1428,7 +1406,7 @@ class SessionManager:
     # ------------------------------------------------------------------
     async def arm_rotation(
         self, client_type: str, client_ref: str, surface: str = "",
-        claude_sid: str = "", started_at: float | None = None,
+        conversation_id: str = "", started_at: float | None = None,
     ) -> dict:
         """Prepare the active session for (client_type, client_ref) to rotate.
 
@@ -1442,12 +1420,12 @@ class SessionManager:
         fired by the pane's own hook through ``fire_rotation``.
 
         ``surface`` is reported by the hook, which runs inside the pane and
-        is the only party that knows one is there. ``owner_ref`` cannot
+        is the only party that knows one is there. ``surface_id`` cannot
         answer this: a Telegram session adopted into a terminal keeps its
         chat ownership while living in a pane, and keying on it would arm
         that conversation for a successor row while a pane holds it.
 
-        ``claude_sid`` is the conversation the hook measured. A harness
+        ``conversation_id`` is the conversation the hook measured. A harness
         switch replaces the conversation under the row while that hook's
         composition can still be running, and its arm would rotate a
         conversation that has only just begun — so an arm for any
@@ -1465,14 +1443,14 @@ class SessionManager:
         if not active:
             return {"ok": False, "error": "no active session"}
         # A codex hook measures the thread codex minted, not the gateway's id.
-        current = {active.get("claude_sid"), active.get("harness_sid")} - {None, ""}
-        if claude_sid and current and claude_sid not in current:
+        current = {active.get("conversation_id"), active.get("harness_sid")} - {None, ""}
+        if conversation_id and current and conversation_id not in current:
             log.info(
                 "ignoring rotation arm for replaced conversation %s on session %s",
-                claude_sid, active["id"],
+                conversation_id, active["id"],
             )
             return {"ok": False, "error": "stale conversation", "session_id": active["id"]}
-        if not claude_sid:
+        if not conversation_id:
             began = (await self._get_row(active["id"]) or {}).get("conversation_started_at")
             if began is not None:
                 cutoff = started_at if started_at is not None else (
@@ -1500,7 +1478,7 @@ class SessionManager:
 
     async def fire_rotation(
         self, client_type: str, client_ref: str, *,
-        claude_sid: str = "", prompt: str = "",
+        conversation_id: str = "", prompt: str = "",
     ) -> dict:
         """Replace the harness conversation under a pane, carrying the message.
 
@@ -1532,8 +1510,8 @@ class SessionManager:
         # straggling hook process from before an earlier swap would otherwise
         # fire this one's rotation against a pane that has already moved on.
         # A codex hook reports codex's thread id rather than the gateway's.
-        current = {active.get("claude_sid"), active.get("harness_sid")} - {None, ""}
-        if claude_sid and current and claude_sid not in current:
+        current = {active.get("conversation_id"), active.get("harness_sid")} - {None, ""}
+        if conversation_id and current and conversation_id not in current:
             return {"ok": False, "error": "stale conversation", "session_id": session_id}
 
         # Read before the swap: a turn typed during the composition belongs
@@ -1581,14 +1559,13 @@ class SessionManager:
         )
         log.info(
             "rotation: session %s now on conversation %s",
-            session_id, new_row.get("claude_sid"),
+            session_id, new_row.get("conversation_id"),
         )
         return {
             "ok": True,
             "session_id": session_id,
             "rotated": True,
-            "conversation_id": new_row.get("claude_sid"),
-            "claude_sid": new_row.get("claude_sid"),
+            "conversation_id": new_row.get("conversation_id"),
         }
 
     async def _last_exchange(self, session_id: str) -> dict:
@@ -1624,7 +1601,7 @@ class SessionManager:
     def _pane_holds(session: dict) -> bool:
         """Whether a browser pane holds this conversation's row."""
         return bool(session.get("terminal_held")) or (
-            (session.get("owner_type") or "").split(":", 1)[0] == TERMINAL_OWNER_TYPE
+            (session.get("surface") or "").split(":", 1)[0] == TERMINAL_SURFACE
         )
 
     async def stream_session_events(self, session_id: str):
@@ -1707,7 +1684,7 @@ class SessionManager:
         try:
             row = await self._get_row(session_id)
             if row:
-                conversation_id = row["claude_sid"]
+                conversation_id = row["conversation_id"]
         except Exception:  # noqa: BLE001 — a view, never the conversation
             log.debug("dashboard feed could not read %s", session_id, exc_info=True)
         self.dashboard.begin(
@@ -1806,14 +1783,14 @@ class SessionManager:
         sid = session["id"]
         client_ref = self.terminal_client_ref(sid)
         routing = {
-            "owner_type": TERMINAL_OWNER_TYPE,
-            "owner_ref": client_ref,
+            "surface": TERMINAL_SURFACE,
+            "surface_id": client_ref,
             "client_ref": client_ref,
         }
 
         already_here = (
-            session.get("owner_type") == TERMINAL_OWNER_TYPE
-            and session.get("owner_ref") == client_ref
+            session.get("surface") == TERMINAL_SURFACE
+            and session.get("surface_id") == client_ref
         )
         if not already_here:
             # Ends the chat-side harness only. The pane being attached to is
@@ -1835,12 +1812,12 @@ class SessionManager:
             # nothing able to rotate it — one pane ran eight days to 1834
             # messages that way.
             await _update_session(
-                sid, owner_type=TERMINAL_OWNER_TYPE, owner_ref=client_ref,
+                sid, surface=TERMINAL_SURFACE, surface_id=client_ref,
                 terminal_held=True, unit=unit,
             )
             await core.unbind_session(sid, unit=unit)
             await core.bind_surface(
-                client_type=TERMINAL_OWNER_TYPE, client_ref=client_ref,
+                client_type=TERMINAL_SURFACE, client_ref=client_ref,
                 session_id=sid, unit=unit,
             )
 
@@ -1854,23 +1831,23 @@ class SessionManager:
         if not already_here:
             log.info(
                 "Session %s adopted by terminal (was %s/%s)",
-                sid, session.get("owner_type"), session.get("owner_ref"),
+                sid, session.get("surface"), session.get("surface_id"),
             )
             log_event(
                 log, "session.adopted", session_id=sid,
-                owner_type=TERMINAL_OWNER_TYPE, owner_ref=client_ref,
-                previous_owner_type=session.get("owner_type"),
-                previous_owner_ref=session.get("owner_ref"),
+                surface=TERMINAL_SURFACE, surface_id=client_ref,
+                previous_surface=session.get("surface"),
+                previous_surface_id=session.get("surface_id"),
             )
         return routing
 
     async def activate_session(
         self, session_id: str, client_type: str, client_ref: str,
-        owner_type: str | None = None, owner_ref: str | None = None,
+        surface: str | None = None, surface_id: str | None = None,
     ) -> dict:
         """Set a session as active on a client surface. Respawn if idle.
 
-        Passing ``owner_type``/``owner_ref`` makes this an *adoption*: a
+        Passing ``surface``/``surface_id`` makes this an *adoption*: a
         session another surface holds moves here. That means ending the
         outgoing process — two harness processes on one conversation each
         hold it in memory, neither sees the other's turns, and both append
@@ -1888,8 +1865,8 @@ class SessionManager:
             if session["status"] == "closed":
                 raise SessionClosed(f"Session {session_id} is closed")
             resuming = session["status"] == "suspended"
-            adopting = bool(owner_ref) and (
-                session["owner_ref"] != owner_ref or session["owner_type"] != owner_type
+            adopting = bool(surface_id) and (
+                session["surface_id"] != surface_id or session["surface"] != surface
             )
             if adopting:
                 # A refusal here must stop the adoption. The rule underneath every
@@ -1911,7 +1888,7 @@ class SessionManager:
                 await unit.hold(f"session:{session_id}")
                 if adopting:
                     await _update_session(
-                        session_id, owner_type=owner_type, owner_ref=owner_ref,
+                        session_id, surface=surface, surface_id=surface_id,
                         status="idle", unit=unit,
                     )
                     await core.unbind_session(session_id, unit=unit)
@@ -1929,11 +1906,11 @@ class SessionManager:
                 raise SessionNotFound(f"Session not found: {session_id}") from exc
             if adopting:
                 log.info("Session %s adopted by %s/%s (was %s/%s)", session_id,
-                         owner_type, owner_ref, session["owner_type"], session["owner_ref"])
+                         surface, surface_id, session["surface"], session["surface_id"])
                 log_event(
                     log, "session.adopted", session_id=session_id,
-                    owner_type=owner_type, owner_ref=owner_ref,
-                    previous_owner_type=session["owner_type"], previous_owner_ref=session["owner_ref"],
+                    surface=surface, surface_id=surface_id,
+                    previous_surface=session["surface"], previous_surface_id=session["surface_id"],
                 )
             session = await self._get_row(session_id)
             if session is None:
@@ -1950,7 +1927,7 @@ class SessionManager:
                 await self._spawn(
                     session_id,
                     session["model"],
-                    resume_sid=session["claude_sid"],
+                    resume_sid=session["conversation_id"],
                     mind_id=session["mind_id"],
                     **routing,
                 )
@@ -2028,7 +2005,7 @@ class SessionManager:
 
         # Refuse to send to deliberately-closed sessions. Without this
         # guard, the respawn path below would resurrect the session
-        # (with its old claude_sid as --resume) and the rotation cycle
+        # (with its old conversation_id as --resume) and the rotation cycle
         # never actually transitions the conversation to a fresh one.
         if session.get("status") in ("closed", "suspended"):
             status = session["status"]
@@ -2097,7 +2074,7 @@ class SessionManager:
             await self._spawn(
                 session_id,
                 session["model"],
-                resume_sid=session["claude_sid"],
+                resume_sid=session["conversation_id"],
                 mind_id=mind_id,
                 **routing,
             )
@@ -2112,8 +2089,8 @@ class SessionManager:
         await _update_session(session_id, last_active=time.time(), status="running")
 
         # Update summary + seed context on first message
-        if session["summary"] == "New session":
-            await _update_session(session_id, summary=content[:100].strip())
+        if session["opening_line"] == "New session":
+            await _update_session(session_id, opening_line=content[:100].strip())
 
             # Memory-3: prepend relevant past memories to first message
             loop = asyncio.get_event_loop()
@@ -2166,7 +2143,7 @@ class SessionManager:
         import aiohttp
         retried = False
         _assistant_buf: list[str] = []
-        _pinned_sid = session.get("claude_sid") or None
+        _pinned_sid = session.get("conversation_id") or None
         _harness_sid = session.get("harness_sid") or None
         _sid_warned = False
         _turn_events: list[dict] = []
@@ -2215,7 +2192,7 @@ class SessionManager:
                                 routing = await self._routing_for(session)
                                 await self._spawn(
                                     session_id, session["model"],
-                                    resume_sid=session.get("claude_sid"),
+                                    resume_sid=session.get("conversation_id"),
                                     mind_id=mind_id,
                                     **routing,
                                 )
@@ -2311,7 +2288,7 @@ class SessionManager:
                                             "user_turn_id": user_turn_id}
                                 break
 
-                            # Codex cannot adopt claude_sid. Its structured
+                            # Codex cannot adopt conversation_id. Its structured
                             # observer event is the authoritative moment a
                             # provider thread is minted; retain that second
                             # identity before hiding the observer-only event
@@ -2344,7 +2321,7 @@ class SessionManager:
                                 # of a respawn.
                                 fresh_sid = str(uuid.uuid4())
                                 await _update_session(
-                                    session_id, claude_sid=fresh_sid,
+                                    session_id, conversation_id=fresh_sid,
                                     conversation_started_at=time.time(),
                                 )
                                 _pinned_sid = fresh_sid
@@ -2775,7 +2752,7 @@ class SessionManager:
             await self._spawn(
                 session_id,
                 model,
-                resume_sid=session["claude_sid"],
+                resume_sid=session["conversation_id"],
                 mind_id=session["mind_id"],
                 **routing,
             )
@@ -2947,7 +2924,7 @@ class SessionManager:
         harness = await self.conversation_harness(session)
         routing = await self._routing_for(session)
         held = bool(session.get("terminal_held")) or (
-            (session.get("owner_type") or "").split(":", 1)[0] == TERMINAL_OWNER_TYPE
+            (session.get("surface") or "").split(":", 1)[0] == TERMINAL_SURFACE
         )
         system_prompt_blocks, budget = await self._plan_opening(
             mind_id=mind_id, client_ref=routing["client_ref"], harness=harness,
@@ -2955,16 +2932,16 @@ class SessionManager:
             message=f"{note}\n\n{message}" if note else message,
         )
         prior = await self.get_carry_forward(
-            session_id, session.get("claude_sid") or ""
+            session_id, session.get("conversation_id") or ""
         ) or ""
         undelivered = (
             session.get("carry_forward_sid")
-            and session.get("carry_forward_sid") == session.get("claude_sid")
+            and session.get("carry_forward_sid") == session.get("conversation_id")
         )
         handover = await self._render_handover_on_mind(
             mind_id,
             harness=harness,
-            claude_sid=session.get("claude_sid") or "",
+            conversation_id=session.get("conversation_id") or "",
             harness_sid=session.get("harness_sid") or "",
             summary=await self._latest_session_memory(session),
             budget_bytes=budget,
@@ -2985,12 +2962,12 @@ class SessionManager:
             try:
                 await _update_session(session_id, model=model, effort=effort)
                 respawned_pane = await self._rotate_pty_on_mind(
-                    session_id=session_id, new_claude_sid=new_sid, model=model,
+                    session_id=session_id, new_conversation_id=new_sid, model=model,
                     mind_id=mind_id, system_prompt=system_prompt_blocks,
                     user_prompt=opening,
                     client_ref=routing["client_ref"],
-                    owner_type=session.get("owner_type"),
-                    owner_ref=session.get("owner_ref"),
+                    surface=session.get("surface"),
+                    surface_id=session.get("surface_id"),
                 )
             except MindCallFailed as exc:
                 await _update_session(
@@ -3004,10 +2981,10 @@ class SessionManager:
             # id with nothing behind it would strand the row on a
             # conversation that was never started.
             await self._kill_process(session_id)
-        old_sid = session.get("claude_sid") or ""
+        old_sid = session.get("conversation_id") or ""
         now = time.time()
         await _update_session(
-            session_id, model=model, effort=effort, claude_sid=new_sid,
+            session_id, model=model, effort=effort, conversation_id=new_sid,
             harness_sid=None, rotation_armed=0, carry_forward=opening,
             carry_forward_sid=new_sid, carry_forward_at=now, status="running",
             last_active=now, conversation_started_at=now,
@@ -3038,7 +3015,7 @@ class SessionManager:
         return session_id
 
     async def _clear_rotation_marker_on_mind(
-        self, session_id: str, mind_id: str, claude_sid: str,
+        self, session_id: str, mind_id: str, conversation_id: str,
     ) -> None:
         """Have the mind drop a staged rotation's marker for a replaced conversation.
 
@@ -3048,7 +3025,7 @@ class SessionManager:
         mind predating the route answers 404, and the marker then expires on
         its own.
         """
-        if not claude_sid:
+        if not conversation_id:
             return
         mind_url = await self._mind_url_for_session(session_id, mind_id)
         if not mind_url:
@@ -3058,7 +3035,7 @@ class SessionManager:
             async with aiohttp.ClientSession() as http:
                 async with http.delete(
                     f"{mind_url}/sessions/{session_id}/rotation-marker",
-                    params={"conversation_id": claude_sid, "claude_sid": claude_sid},
+                    params={"conversation_id": conversation_id},
                     headers=await self._mind_auth_headers_for_session(session_id, mind_id),
                     timeout=aiohttp.ClientTimeout(total=5),
                 ) as resp:
@@ -3101,7 +3078,7 @@ class SessionManager:
         # conversation a pane holds is moved by respawning that pane in place
         # onto the new harness's CLI rather than by a kill and a chat spawn.
         held = bool(session.get("terminal_held")) or (
-            (session.get("owner_type") or "").split(":", 1)[0] == TERMINAL_OWNER_TYPE
+            (session.get("surface") or "").split(":", 1)[0] == TERMINAL_SURFACE
         )
         # The same harness is not a handover: its own transcript resumes.
         if target == await self.conversation_harness(session):
@@ -3157,16 +3134,16 @@ class SessionManager:
             # conversation has had no turns of its own — the row's ledger
             # holds those of the conversation that handover replaced.
             prior = await self.get_carry_forward(
-                session_id, session.get("claude_sid") or ""
+                session_id, session.get("conversation_id") or ""
             ) or ""
             undelivered = (
                 session.get("carry_forward_sid")
-                and session.get("carry_forward_sid") == session.get("claude_sid")
+                and session.get("carry_forward_sid") == session.get("conversation_id")
             )
             handover = await self._render_handover_on_mind(
                 mind_id,
                 harness=old_harness,
-                claude_sid=session.get("claude_sid") or "",
+                conversation_id=session.get("conversation_id") or "",
                 harness_sid=session.get("harness_sid") or "",
                 summary=await self._latest_session_memory(session),
                 budget_bytes=budget,
@@ -3176,7 +3153,7 @@ class SessionManager:
             )
 
             if held:
-                new_claude_sid = await self._switch_pane(
+                new_conversation_id = await self._switch_pane(
                     session, target=target, model=model, effort=effort,
                     handover=handover, routing=routing,
                 )
@@ -3188,21 +3165,21 @@ class SessionManager:
                 self.dashboard.forget(session_id)
                 log_event(
                     log, "session.harness_switched", session_id=session_id,
-                    conversation_id=new_claude_sid, mind_id=mind_id,
+                    conversation_id=new_conversation_id, mind_id=mind_id,
                     harness=target, previous_harness=old_harness, model=model,
-                    surface=TERMINAL_OWNER_TYPE,
+                    surface=TERMINAL_SURFACE,
                 )
                 return await self._session_dict(session_id)
 
             await self._kill_process(session_id, forget_thread=True)
-            new_claude_sid = str(uuid.uuid4())
+            new_conversation_id = str(uuid.uuid4())
             now = time.time()
             # Any rotation armed or staged belonged to the conversation being
             # replaced; the handover is this conversation's carry-forward now.
             await _update_session(
                 session_id, harness=target, model=model, effort=effort,
-                claude_sid=new_claude_sid, harness_sid=None, rotation_armed=0,
-                carry_forward=handover, carry_forward_sid=new_claude_sid,
+                conversation_id=new_conversation_id, harness_sid=None, rotation_armed=0,
+                carry_forward=handover, carry_forward_sid=new_conversation_id,
                 carry_forward_at=now, status="running", last_active=now,
                 conversation_started_at=now,
             )
@@ -3211,7 +3188,7 @@ class SessionManager:
                 await self._spawn(
                     session_id,
                     model,
-                    resume_sid=new_claude_sid,
+                    resume_sid=new_conversation_id,
                     mind_id=mind_id,
                     system_prompt_blocks=system_prompt_blocks,
                     **routing,
@@ -3229,7 +3206,7 @@ class SessionManager:
                 await _update_session(
                     session_id, harness=session.get("harness") or old_harness or None,
                     model=session["model"], effort=session.get("effort"),
-                    claude_sid=session["claude_sid"],
+                    conversation_id=session["conversation_id"],
                     harness_sid=session.get("harness_sid"),
                     rotation_armed=session.get("rotation_armed") or 0,
                     carry_forward=session.get("carry_forward"),
@@ -3241,7 +3218,7 @@ class SessionManager:
                     await self._spawn(
                         session_id,
                         session["model"],
-                        resume_sid=session["claude_sid"],
+                        resume_sid=session["conversation_id"],
                         harness_sid=session.get("harness_sid"),
                         # The prompt the switch composed was trimmed for the
                         # new model; the old one takes its own.
@@ -3275,11 +3252,11 @@ class SessionManager:
         self.dashboard.forget(session_id)
         log.info(
             "harness switch: session %s now on %s/%s as conversation %s",
-            session_id, target, model, new_claude_sid,
+            session_id, target, model, new_conversation_id,
         )
         log_event(
             log, "session.harness_switched", session_id=session_id,
-            conversation_id=new_claude_sid, mind_id=mind_id,
+            conversation_id=new_conversation_id, mind_id=mind_id,
             harness=target, previous_harness=old_harness, model=model,
         )
         return await self._session_dict(session_id)
@@ -3304,30 +3281,30 @@ class SessionManager:
         """
         session_id = session["id"]
         mind_id = session["mind_id"]
-        new_claude_sid = str(uuid.uuid4())
+        new_conversation_id = str(uuid.uuid4())
         now = time.time()
         await _update_session(
             session_id, harness=target, model=model, effort=effort,
-            claude_sid=new_claude_sid, harness_sid=None, rotation_armed=0,
+            conversation_id=new_conversation_id, harness_sid=None, rotation_armed=0,
             carry_forward=handover or None,
-            carry_forward_sid=new_claude_sid if handover else None,
+            carry_forward_sid=new_conversation_id if handover else None,
             carry_forward_at=now if handover else None,
             context_opening_tokens=None, last_active=now,
             conversation_started_at=now,
         )
         try:
             await self._rotate_pty_on_mind(
-                session_id=session_id, new_claude_sid=new_claude_sid, model=model,
+                session_id=session_id, new_conversation_id=new_conversation_id, model=model,
                 mind_id=mind_id, user_prompt=handover,
                 client_ref=routing["client_ref"],
-                owner_type=session.get("owner_type"),
-                owner_ref=session.get("owner_ref"),
+                surface=session.get("surface"),
+                surface_id=session.get("surface_id"),
                 switch=True,
             )
         except MindCallFailed as exc:
             await _update_session(
                 session_id, harness=session.get("harness"), model=session["model"],
-                effort=session.get("effort"), claude_sid=session["claude_sid"],
+                effort=session.get("effort"), conversation_id=session["conversation_id"],
                 harness_sid=session.get("harness_sid"),
                 rotation_armed=session.get("rotation_armed") or 0,
                 carry_forward=session.get("carry_forward"),
@@ -3341,26 +3318,26 @@ class SessionManager:
                 f"was: {exc}"
             ) from exc
         await self._clear_rotation_marker_on_mind(
-            session_id, mind_id, session.get("claude_sid") or ""
+            session_id, mind_id, session.get("conversation_id") or ""
         )
         log.info(
             "harness switch: session %s's terminal now on %s/%s as conversation %s",
-            session_id, target, model, new_claude_sid,
+            session_id, target, model, new_conversation_id,
         )
-        return new_claude_sid
+        return new_conversation_id
 
     async def _latest_session_memory(self, session: dict) -> str:
         """The latest rotation summary written for this conversation, as text.
 
         The rotation hook files its summary under the conversation id it
-        knows — the gateway's ``claude_sid``, or codex's own thread id — so
+        knows — the gateway's ``conversation_id``, or codex's own thread id — so
         those are asked first, newest wins; a summary filed under the row's
         id is the fallback. Rows are a JSON envelope whose ``carry_forward``
         is the rendered summary; older rows are the summary itself.
         """
         row = None
         for keys in (
-            [k for k in (session.get("claude_sid"), session.get("harness_sid")) if k],
+            [k for k in (session.get("conversation_id"), session.get("harness_sid")) if k],
             [session["id"]],
         ):
             row = await sessions_ops.latest_session_memory_for(keys)
@@ -3515,7 +3492,7 @@ class SessionManager:
             await self._spawn(
                 session_id,
                 session["model"],
-                resume_sid=session["claude_sid"],
+                resume_sid=session["conversation_id"],
                 mind_id=session["mind_id"],
                 **routing,
             )
@@ -3529,7 +3506,7 @@ class SessionManager:
 
         This approximates an interactive escape keypress: stop the current
         request, discard the stale subprocess, but keep the logical session
-        active so the next message can respawn with ``claude_sid``.
+        active so the next message can respawn with ``conversation_id``.
 
         Raises:
             LookupError: If session_id does not exist in the database.
@@ -3546,7 +3523,7 @@ class SessionManager:
                 "ok": True,
                 "session_id": session_id,
                 "message": "nothing_running",
-                "resume_ready": bool(session.get("claude_sid")),
+                "resume_ready": bool(session.get("conversation_id")),
             }
 
         mind_url = proc_info.get("_mind_url")
@@ -3584,7 +3561,7 @@ class SessionManager:
         if not isinstance(result, dict):
             result = {"ok": True}
         result.setdefault("session_id", session_id)
-        result["resume_ready"] = bool(session.get("claude_sid"))
+        result["resume_ready"] = bool(session.get("conversation_id"))
         return result
 
     # ------------------------------------------------------------------
@@ -3711,8 +3688,7 @@ class SessionManager:
         uptime = time.time() - session["created_at"]
         return {
             "id": session_id,
-            "opening_line": session["summary"],
-            "summary": session["summary"],
+            "opening_line": session["opening_line"],
             # The name, so the surface reporting the kill calls the conversation
             # what the button that killed it called it. Without it every caller
             # falls back to the summary, which for a browser-terminal
@@ -3789,8 +3765,8 @@ class SessionManager:
         *,
         mind_id: str,
         client_ref: str | None = None,
-        owner_type: str | None = None,
-        owner_ref: str | None = None,
+        surface: str | None = None,
+        surface_id: str | None = None,
         system_prompt_blocks: str = "",
         harness_sid: str | None = None,
     ) -> Any:
@@ -3850,19 +3826,15 @@ class SessionManager:
                     "allowed_directories": allowed_directories,
                     "mind_name": mind_name,
                     "client_ref": client_ref,
-                    # The raw surface address and its reference, under the
-                    # schema's names, then the old ones for a mind that has
-                    # not moved over yet.
-                    "surface": owner_type,
-                    "surface_id": owner_ref,
-                    "owner_type": owner_type,
-                    "owner_ref": owner_ref,
+                    # The raw surface address and its reference.
+                    "surface": surface,
+                    "surface_id": surface_id,
                     # The surface this process will serve (telegram, terminal,
                     # discord, ...). The address carries a mind-uuid suffix and
                     # a web/terminal split that are routing concerns; minds get
                     # the clean human label so they can shape behavior per
                     # surface without knowing gateway naming conventions.
-                    "surface_label": self._surface_label(owner_type or ""),
+                    "surface_label": self._surface_label(surface or ""),
                     "system_prompt_blocks": system_prompt_blocks,
                     "effort": effort,
                     "harness": harness or None,
@@ -3893,14 +3865,14 @@ class SessionManager:
         self,
         *,
         session_id: str,
-        new_claude_sid: str,
+        new_conversation_id: str,
         model: str,
         mind_id: str,
         system_prompt: str = "",
         user_prompt: str = "",
         client_ref: str | None = None,
-        owner_type: str | None = None,
-        owner_ref: str | None = None,
+        surface: str | None = None,
+        surface_id: str | None = None,
         switch: bool = False,
     ) -> bool:
         """Ask a mind to start a fresh conversation in a live terminal.
@@ -3945,17 +3917,14 @@ class SessionManager:
                         session_id, mind_id
                     ),
                     json={
-                        "new_conversation_id": new_claude_sid,
-                        "new_claude_sid": new_claude_sid,
+                        "new_conversation_id": new_conversation_id,
                         "model": model,
                         "system_prompt": system_prompt,
                         "user_prompt": user_prompt,
                         "client_ref": client_ref,
-                        "surface": owner_type,
-                        "surface_id": owner_ref,
-                        "owner_type": owner_type,
-                        "owner_ref": owner_ref,
-                        "surface_label": self._surface_label(owner_type or ""),
+                        "surface": surface,
+                        "surface_id": surface_id,
+                        "surface_label": self._surface_label(surface or ""),
                         "harness": harness or None,
                         "effort": session_row.get("effort") or None,
                         "switch": switch,
@@ -4144,7 +4113,7 @@ class SessionManager:
         mind_id: str,
         *,
         harness: str,
-        claude_sid: str,
+        conversation_id: str,
         harness_sid: str,
         summary: str,
         budget_bytes: int,
@@ -4168,8 +4137,7 @@ class SessionManager:
                     f"{gateway_url}/handover",
                     json={
                         "harness": harness,
-                        "conversation_id": claude_sid,
-                        "claude_sid": claude_sid,
+                        "conversation_id": conversation_id,
                         "harness_sid": harness_sid,
                         "summary": summary,
                         "budget_bytes": budget_bytes,
@@ -4318,8 +4286,8 @@ class SessionManager:
     async def spawn_rc_process(self, session_id: str, timeout: float = 10.0) -> dict:
         """Spawn a Remote Control subprocess for an existing session.
 
-        Reads the session's claude_sid from the database, spawns
-        ``claude --remote-control --resume <claude_sid> --name <Mind>``,
+        Reads the session's conversation_id from the database, spawns
+        ``claude --remote-control --resume <conversation_id> --name <Mind>``,
         parses the session URL from stdout, and returns it.
 
         Args:
@@ -4331,7 +4299,7 @@ class SessionManager:
 
         Raises:
             LookupError: If the session does not exist.
-            ValueError: If the session has no ``claude_sid``.
+            ValueError: If the session has no ``conversation_id``.
             RuntimeError: If the URL cannot be parsed within *timeout*.
         """
         # If there is already an RC process running for this session, kill it first
@@ -4342,9 +4310,9 @@ class SessionManager:
         if not row:
             raise LookupError(f"Session not found: {session_id}")
 
-        claude_sid = row.get("claude_sid")
-        if not claude_sid:
-            raise ValueError(f"Session {session_id} has no claude_sid — cannot start Remote Control")
+        conversation_id = row.get("conversation_id")
+        if not conversation_id:
+            raise ValueError(f"Session {session_id} has no conversation_id — cannot start Remote Control")
 
         # The name the mind is registered under, which is what the operator
         # sees in the Remote Control list. Capitalising the `mind_id` named a
@@ -4362,7 +4330,7 @@ class SessionManager:
         cmd = [
             "claude",
             "--remote-control",
-            "--resume", claude_sid,
+            "--resume", conversation_id,
             "--name", mind_name,
         ]
 
@@ -4455,28 +4423,28 @@ class SessionManager:
         # Exact match first
         row = await core.get_session(session_id, private=True)
         if row:
-            return _legacy_row(row)
+            return _session_row(row)
         # Prefix match for short IDs (e.g. "85d44986")
         matches = await core.find_session_by_prefix(session_id)
         if len(matches) == 1:
-            return _legacy_row(
+            return _session_row(
                 await core.get_session(matches[0]["id"], private=True)
             )
         return None
 
     async def _routing_for(self, session: dict) -> dict:
-        """Resolve (owner_type, owner_ref, client_ref) for an existing session
+        """Resolve (surface, surface_id, client_ref) for an existing session
         so respawn paths inject the same env into the subprocess that the
         original create_session call did. The rotation Stop hook reads
-        CLIENT_REF/OWNER_TYPE/OWNER_REF from env; if respawn loses any of
+        CLIENT_REF/SURFACE/SURFACE_ID from env; if respawn loses any of
         them, the hook bails on every Stop with "missing client_ref" and
         rotation silently breaks.
 
-        owner_type / owner_ref live on the sessions row. client_ref lives
+        surface / surface_id live on the sessions row. client_ref lives
         on active_sessions, keyed by session_id.
         """
-        owner_type = session.get("owner_type") or ""
-        owner_ref = session.get("owner_ref") or ""
+        surface = session.get("surface") or ""
+        surface_id = session.get("surface_id") or ""
         client_ref = ""
         try:
             for binding in await core.bindings_for_session(session["id"]):
@@ -4485,7 +4453,7 @@ class SessionManager:
                     break
         except Exception:
             log.exception("client_ref lookup failed for session=%s", session.get("id"))
-        return {"owner_type": owner_type, "owner_ref": owner_ref, "client_ref": client_ref}
+        return {"surface": surface, "surface_id": surface_id, "client_ref": client_ref}
 
     async def get_session_turns(self, session_id: str) -> list[dict]:
         """Return stored turn history for a session from the session_turns table."""
@@ -4508,7 +4476,7 @@ class SessionManager:
         hook queries before clearing: every turn with
         ``created_at > since`` for the surface's currently-active session.
 
-        ``client_type`` is the session's ``owner_type`` (the
+        ``client_type`` is the session's ``surface`` (the
         ``active_sessions`` table keys on it). Returns
         ``{"session_id": <id|None>, "turns": [{role, content, created_at}]}``;
         an empty turn list when there is no active session.
@@ -4531,7 +4499,7 @@ class SessionManager:
     async def get_transcript_path(self, session_id: str) -> Path | None:
         """Get the path to a session's Claude transcript JSONL file.
 
-        Returns the path if the session has a claude_sid and the file exists on disk,
+        Returns the path if the session has a conversation_id and the file exists on disk,
         otherwise returns None.
         """
         result = await core.get_session(session_id)
@@ -4548,16 +4516,11 @@ class SessionManager:
             return None
         return {
             "id": row["id"],
-            "claude_sid": row["claude_sid"],
+            "conversation_id": row["conversation_id"],
             "harness_sid": row.get("harness_sid"),
-            "owner_type": row["owner_type"],
-            "owner_ref": row["owner_ref"],
-            "summary": row["summary"],
-            # The schema's names beside the old ones; see `_legacy_row`.
-            "conversation_id": row["claude_sid"],
-            "surface": row["owner_type"],
-            "surface_id": row["owner_ref"],
-            "opening_line": row["summary"],
+            "surface": row["surface"],
+            "surface_id": row["surface_id"],
+            "opening_line": row["opening_line"],
             # This allowlist is hand-written while the bulk listing is a
             # `SELECT *` with a denylist, so a column added to the table shows
             # up there for free and is silently absent here — and this is what

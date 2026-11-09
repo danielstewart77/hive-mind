@@ -75,8 +75,8 @@ async def _manager() -> SessionManager:
 async def _seed_session(mgr: SessionManager, mind_id: str = MIND_A) -> str:
     session_id = "sess-auth"
     await seed_session(
-        session_id, owner_type="telegram", owner_ref="123", model="sonnet",
-        mind_id=mind_id, summary="chat", claude_sid="conv-1",
+        session_id, surface="telegram", surface_id="123", model="sonnet",
+        mind_id=mind_id, opening_line="chat", conversation_id="conv-1",
     )
     mgr._procs[session_id] = {"_mind_url": "http://alpha:8420"}
     mgr._mind_ids[session_id] = mind_id
@@ -206,7 +206,7 @@ def test_kill_carries_the_mind_s_token() -> None:
 def test_rotate_pty_carries_the_mind_s_token() -> None:
     async def body(mgr, sid):
         await mgr._rotate_pty_on_mind(
-            session_id=sid, new_claude_sid="conv-2", model="sonnet",
+            session_id=sid, new_conversation_id="conv-2", model="sonnet",
             mind_id=MIND_A, system_prompt="carry forward",
         )
 
@@ -425,13 +425,13 @@ def test_an_adoption_stops_rather_than_running_two_harnesses() -> None:
         with pytest.raises(MindRefusedCredential):
             await mgr.activate_session(
                 sid, "telegram", "555",
-                owner_type="telegram", owner_ref="555",
+                surface="telegram", surface_id="555",
             )
         row = await mgr._get_row(sid)
-        return row["owner_type"], row["owner_ref"]
+        return row["surface"], row["surface_id"]
 
-    owner_type, owner_ref = _with_refusing_mind(body)
-    assert (owner_type, owner_ref) == ("telegram", "123"), (
+    surface, surface_id = _with_refusing_mind(body)
+    assert (surface, surface_id) == ("telegram", "123"), (
         "ownership was retargeted over a terminal that was never released"
     )
 
@@ -467,7 +467,7 @@ def test_a_refused_rotation_does_not_blame_the_pane() -> None:
     async def body(mgr, sid):
         with pytest.raises(MindRefusedCredential):
             await mgr._rotate_pty_on_mind(
-                session_id=sid, new_claude_sid="conv-2", model="sonnet",
+                session_id=sid, new_conversation_id="conv-2", model="sonnet",
                 mind_id=MIND_A, system_prompt="carry forward",
             )
         return True
@@ -533,10 +533,10 @@ def test_an_unreachable_mind_stops_an_adoption_too() -> None:
         with pytest.raises(MindCallFailed):
             await mgr.activate_session(
                 sid, "telegram", "555",
-                owner_type="telegram", owner_ref="555",
+                surface="telegram", surface_id="555",
             )
         row = await mgr._get_row(sid)
-        return row["owner_type"], row["owner_ref"]
+        return row["surface"], row["surface_id"]
 
     assert _with_unreachable_mind(body) == ("telegram", "123")
 
@@ -567,7 +567,7 @@ def test_an_unreachable_rotation_does_not_report_an_absent_terminal() -> None:
     async def body(mgr, sid):
         with pytest.raises(MindCallFailed):
             await mgr._rotate_pty_on_mind(
-                session_id=sid, new_claude_sid="conv-2", model="sonnet",
+                session_id=sid, new_conversation_id="conv-2", model="sonnet",
                 mind_id=MIND_A, system_prompt="carry forward",
             )
         return True

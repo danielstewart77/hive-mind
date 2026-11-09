@@ -243,8 +243,8 @@ class TestAttachRoute:
             ws.receive_bytes()
 
         assert captured["client_ref"] == "s9"   # falls back to the session id
-        assert captured["owner_type"] == "terminal"
-        assert captured["owner_ref"] == "daniel"
+        assert captured["surface"] == "terminal"
+        assert captured["surface_id"] == "daniel"
         assert captured["harness_sid"] == "thread-3"
         assert (captured["cols"], captured["rows"]) == (100, 30)
 
@@ -440,8 +440,8 @@ class TestCarryForwardOnAttach:
     def test_a_stored_carry_forward_is_applied_to_the_new_terminal(self, monkeypatch):
         seen: list = []
 
-        async def fetch(session_id, claude_sid):
-            assert (session_id, claude_sid) == ("s-cf", "conv-rotated")
+        async def fetch(session_id, conversation_id):
+            assert (session_id, conversation_id) == ("s-cf", "conv-rotated")
             return "<soul>carried forward</soul>"
 
         monkeypatch.setattr(pty_attach, "fetch_carry_forward", fetch)
@@ -459,7 +459,7 @@ class TestCarryForwardOnAttach:
         already landed and the transcript carries the context by itself."""
         seen: list = []
 
-        async def fetch(session_id, claude_sid):
+        async def fetch(session_id, conversation_id):
             return ""
 
         monkeypatch.setattr(pty_attach, "fetch_carry_forward", fetch)
@@ -480,7 +480,7 @@ class TestCarryForwardOnAttach:
         """
         asked: list = []
 
-        async def fetch(session_id, claude_sid):
+        async def fetch(session_id, conversation_id):
             asked.append(session_id)
             return "<soul>should never be applied</soul>"
 
@@ -504,7 +504,7 @@ class TestCarryForwardOnAttach:
         """
         seen: list = []
 
-        async def fetch(session_id, claude_sid):
+        async def fetch(session_id, conversation_id):
             raise OSError("comms is down")
 
         monkeypatch.setattr(pty_attach, "fetch_carry_forward", fetch)
@@ -673,8 +673,8 @@ class TestClaudeCliWiring:
     def test_the_pane_carries_the_session_metadata_the_hooks_need(self, claude):
         env = claude._pane_env("chat-7", "telegram", "daniel")
         assert env["HIVEMIND_CLIENT_REF"] == "chat-7"
-        assert env["HIVEMIND_OWNER_TYPE"] == "telegram"
-        assert env["HIVEMIND_OWNER_REF"] == "daniel"
+        assert env["HIVEMIND_SURFACE"] == "telegram"
+        assert env["HIVEMIND_SURFACE_ID"] == "daniel"
         assert env["HIVE_SURFACE"] == "terminal"
         # The agent view is a second session picker inside a surface that
         # already has one, re-hosting the conversation at the wrong geometry.
@@ -731,7 +731,7 @@ class TestClaudeCliWiring:
 
     def test_rotation_declines_when_there_is_no_live_terminal(self, claude, monkeypatch):
         monkeypatch.setattr(claude.TERMINALS, "alive", lambda sid: False)
-        assert claude._rotate_pty(session_id="a2", new_claude_sid="conv-3") is False
+        assert claude._rotate_pty(session_id="a2", new_conversation_id="conv-3") is False
 
     def test_rotation_respawns_the_pane_with_the_carry_forward(self, claude, monkeypatch, tmp_path):
         monkeypatch.setattr(claude, "CONFIG_DIR", tmp_path)
@@ -743,7 +743,7 @@ class TestClaudeCliWiring:
         )
 
         assert claude._rotate_pty(
-            session_id="a3", new_claude_sid="conv-4", model="sonnet",
+            session_id="a3", new_conversation_id="conv-4", model="sonnet",
             system_prompt="the summary", client_ref="a3",
         ) is True
 
@@ -763,7 +763,7 @@ class TestClaudeCliWiring:
         monkeypatch.setattr(claude.TERMINALS, "respawn", lambda sid, argv, **kw: None)
 
         assert claude._rotate_pty(
-            session_id="a5", new_claude_sid="conv-6", model="sonnet",
+            session_id="a5", new_conversation_id="conv-6", model="sonnet",
             user_prompt="the handover",
         ) is True
 
@@ -790,7 +790,7 @@ class TestClaudeCliWiring:
         )
 
         assert claude._rotate_pty(
-            session_id="a4", new_claude_sid="conv-5", model="sonnet",
+            session_id="a4", new_conversation_id="conv-5", model="sonnet",
             system_prompt="the summary",
             user_prompt="the summary\n\nand what I typed",
         ) is True
@@ -960,7 +960,7 @@ class TestCodexCliThreads:
         monkeypatch.setattr(codex.TERMINALS, "respawn", lambda sid, argv, **kw: None)
 
         assert codex._rotate_pty(
-            session_id="n8", new_claude_sid="conv-10", model="gpt-5",
+            session_id="n8", new_conversation_id="conv-10", model="gpt-5",
             system_prompt="the summary",
             user_prompt="the summary\n\nand what I typed",
         ) is True
@@ -1019,8 +1019,8 @@ class TestCodexCliThreads:
     def test_the_pane_carries_the_session_metadata_the_hooks_need(self, codex):
         env = codex._pane_env("chat-7", "telegram", "daniel")
         assert env["CLIENT_REF"] == "chat-7"
-        assert env["OWNER_TYPE"] == "telegram"
-        assert env["OWNER_REF"] == "daniel"
+        assert env["SURFACE"] == "telegram"
+        assert env["SURFACE_ID"] == "daniel"
         assert env["HIVE_SURFACE"] == "terminal"
         assert env["CODEX_HOME"] == str(codex.CODEX_HOME)
 
@@ -1038,7 +1038,7 @@ class TestCodexCliThreads:
         monkeypatch.setattr(codex.TERMINALS, "respawn",
                             lambda sid, argv, **kw: respawned.update(argv=argv))
 
-        assert codex._rotate_pty(session_id="n7", new_claude_sid="conv-9",
+        assert codex._rotate_pty(session_id="n7", new_conversation_id="conv-9",
                                  model="gpt-5", system_prompt="the summary") is True
 
         # The old thread must go: a reattach that resumed it would undo the
@@ -1248,7 +1248,7 @@ def test_a_pane_and_its_rotation_run_at_the_conversations_effort(
 
     harness._spawn_pty(session_id="e1", model="opus", conversation_id="conv-1",
                        cols=80, rows=24, effort="max")
-    harness._rotate_pty(session_id="e1", new_claude_sid="conv-2", model="opus",
+    harness._rotate_pty(session_id="e1", new_conversation_id="conv-2", model="opus",
                         system_prompt="seed", effort="max")
     assert flag in seen["start"]
     assert flag in seen["respawn"]

@@ -25,7 +25,7 @@ The routing Daniel described is already the system's shape, not new work:
   adoption and the turn ledger attached.
 
 What does not exist is the scheduler using it. `bots/scheduler.py` hardcodes
-`owner_type: "scheduler"` and `owner_ref: telegram_owner_chat_id`, creates a
+`surface: "scheduler"` and `surface_id: telegram_owner_chat_id`, creates a
 fresh session per fire, and kills it in a `finally` block. Delivery is a
 direct Telegram send, not a session-surface send.
 
@@ -260,7 +260,7 @@ Bitcoin alerts follow, one at a time, once it has run for a week.
   loser. The same applies if two skills ever share a channel.
 
 - **Adoption detaches the channel.** A `/switch` that picks the
-  conversation up in Telegram or the browser terminal rewrites `owner_type`
+  conversation up in Telegram or the browser terminal rewrites `surface`
   and drops the discord binding, so the next fire creates a fresh session
   and the thread's history is stranded.
 

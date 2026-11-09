@@ -45,8 +45,8 @@ async def _seed(
     color: str | None = None,
 ) -> str:
     await seed_session(
-        session_id, owner_type="telegram", owner_ref="123", model="opus",
-        claude_sid=f"conv-{session_id}", status=status, mind_id="ada",
+        session_id, surface="telegram", surface_id="123", model="opus",
+        conversation_id=f"conv-{session_id}", status=status, mind_id="ada",
         name=name, color=color,
     )
     return session_id
@@ -139,8 +139,8 @@ def test_a_fresh_conversation_is_not_named_by_its_neighbour(comms_db) -> None:
             await register_mind("ada", model="opus", harness="")
             with _a_registered_mind([]):
                 fresh = await mgr.create_session(
-                    owner_type="telegram",
-                    owner_ref="123",
+                    surface="telegram",
+                    surface_id="123",
                     client_ref="456",
                     mind_id="ada",
                 )

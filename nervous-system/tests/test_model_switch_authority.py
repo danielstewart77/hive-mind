@@ -31,8 +31,8 @@ def _run(coro):
 
 async def _seed(mgr, model: str) -> str:
     await seed_session(
-        "sess-1", owner_type="telegram", owner_ref="123", model=model,
-        claude_sid="conv-1",
+        "sess-1", surface="telegram", surface_id="123", model=model,
+        conversation_id="conv-1",
     )
     return "sess-1"
 
@@ -455,7 +455,7 @@ def test_a_rotation_keeps_the_conversations_effort(comms_db):
         assert same_id == "sess-1"
         row = await mgr._get_row("sess-1")
         assert row["effort"] == "high"
-        assert row["claude_sid"] != "conv-1"
+        assert row["conversation_id"] != "conv-1"
         assert posted[-1]["effort"] == "high"
         await close_manager(mgr)
 

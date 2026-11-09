@@ -95,7 +95,7 @@ def test_registering_a_mind_is_machinery_rather_than_admin_only():
 
 def test_filing_a_rotation_summary_is_machinery_rather_than_an_owned_conversation():
     """The second deliberate widening, and a repair. The rotation hook
-    addresses this route by the id the harness gave it — a `claude_sid` —
+    addresses this route by the id the harness gave it — a `conversation_id` —
     which is not a `sessions.id` and which the gate's owner check cannot
     resolve, so classifying it `OWNER` refused every mind on the hive and
     took rotation itself down with it: the hook returns before it arms, so a

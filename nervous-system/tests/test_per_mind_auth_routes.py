@@ -142,16 +142,16 @@ def test_a_command_names_the_refusal_rather_than_internal_server_error(
     mgr = server_module.session_mgr
     # On the app's own loop: the pool the lifespan opened lives there.
     client.portal.call(lambda: seed_session(
-        "sess-sw", owner_type="telegram", owner_ref="123", model="sonnet",
-        mind_id=MIND_A, summary="chat", claude_sid="conv-1",
+        "sess-sw", surface="telegram", surface_id="123", model="sonnet",
+        mind_id=MIND_A, opening_line="chat", conversation_id="conv-1",
     ))
 
     with patch.object(mgr, "activate_session", _refusing):
         response = client.post(
             "/command",
             json={
-                "content": "/switch sess-sw", "owner_type": "telegram",
-                "client_ref": "123", "owner_ref": "123", "mind_id": MIND_A,
+                "content": "/switch sess-sw", "surface": "telegram",
+                "client_ref": "123", "surface_id": "123", "mind_id": MIND_A,
             },
         )
     assert response.status_code == 200

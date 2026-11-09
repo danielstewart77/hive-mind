@@ -198,13 +198,13 @@ async def _spawn_proc(
     resume_sid: str | None,
     surface_prompt: str | None,
     allowed_directories: list[str] | None,
-    owner_type: str | None = None,
+    surface: str | None = None,
     system_prompt_blocks: str | None = None,
     client_ref: str = "",
-    owner_ref: str = "",
+    surface_id: str = "",
     effort: str | None = None,
     extra_env: dict[str, str] | None = None,
-    surface: str = "",
+    surface_label: str = "",
 ) -> asyncio.subprocess.Process:
     blocks = system_prompt_blocks or ""
     if blocks and surface_prompt:
@@ -235,21 +235,21 @@ async def _spawn_proc(
 
     env = os.environ.copy()
     env.update({k: str(v) for k, v in RUNTIME_ENV.items()})
-    if owner_type == "scheduler":
+    if surface == "scheduler":
         env["HIVEMIND_SCHEDULED_TASK"] = "1"
     # Per-spawn metadata for the rotation_check Stop hook. Empty values
     # stay unset so the hook can detect the no-op case instead of
     # writing under a fake key.
     if client_ref:
         env["HIVEMIND_CLIENT_REF"] = client_ref
-    if owner_type:
-        env["HIVEMIND_OWNER_TYPE"] = owner_type
-    if owner_ref:
-        env["HIVEMIND_OWNER_REF"] = owner_ref
+    if surface:
+        env["HIVEMIND_SURFACE"] = surface
+    if surface_id:
+        env["HIVEMIND_SURFACE_ID"] = surface_id
     # Set, or cleared: never one inherited from the container's own env.
     env.pop("HIVE_SURFACE", None)
-    if surface:
-        env["HIVE_SURFACE"] = surface
+    if surface_label:
+        env["HIVE_SURFACE"] = surface_label
     env.update(extra_env or {})
 
     proc = await asyncio.create_subprocess_exec(
@@ -305,7 +305,7 @@ def _terminal_argv(model: str, conversation_id: str, effort: str | None = None) 
     return cmd
 
 
-def _rotation_argv(model: str, new_claude_sid: str, effort: str | None = None) -> list[str]:
+def _rotation_argv(model: str, new_conversation_id: str, effort: str | None = None) -> list[str]:
     """The interactive `claude` a rotation respawns the pane onto.
 
     A rotation starts a fresh harness conversation under the same hive
@@ -330,12 +330,12 @@ def _rotation_argv(model: str, new_claude_sid: str, effort: str | None = None) -
     ]
     if MCP_CONFIG:
         cmd.extend(["--mcp-config", MCP_CONFIG])
-    cmd.extend(claude_conversation_flags(new_claude_sid, PROJECT_DIR))
+    cmd.extend(claude_conversation_flags(new_conversation_id, PROJECT_DIR))
     return cmd
 
 
 def _pane_env(
-    client_ref: str | None, owner_type: str | None, owner_ref: str | None
+    client_ref: str | None, surface: str | None, surface_id: str | None
 ) -> dict[str, str]:
     """Environment the pane needs that the tmux server can't have inherited.
 
@@ -356,17 +356,17 @@ def _pane_env(
     env["HIVE_SURFACE"] = "terminal"
     if client_ref:
         env["HIVEMIND_CLIENT_REF"] = client_ref
-    if owner_type:
-        env["HIVEMIND_OWNER_TYPE"] = owner_type
-    if owner_ref:
-        env["HIVEMIND_OWNER_REF"] = owner_ref
+    if surface:
+        env["HIVEMIND_SURFACE"] = surface
+    if surface_id:
+        env["HIVEMIND_SURFACE_ID"] = surface_id
     return env
 
 
 def _spawn_pty(
     *, session_id: str, model: str, conversation_id: str, cols: int, rows: int,
     harness_sid: str | None = None, client_ref: str | None = None,
-    owner_type: str | None = None, owner_ref: str | None = None,
+    surface: str | None = None, surface_id: str | None = None,
     system_prompt: str = "", effort: str | None = None,
     extra_env: dict[str, str] | None = None,
 ) -> tuple[Any, int]:
@@ -385,7 +385,7 @@ def _spawn_pty(
     """
     del harness_sid  # claude adopts the gateway's id; nothing else to track
     ensure_tui_first_run_flags(CONFIG_DIR, str(PROJECT_DIR))
-    pane_env = {**_pane_env(client_ref, owner_type, owner_ref), **(extra_env or {})}
+    pane_env = {**_pane_env(client_ref, surface, surface_id), **(extra_env or {})}
     # ``system_prompt`` is a carry-forward comms is still holding: a switch's
     # handover or a rotation's seed, with no turn landed on it yet, so it has
     # to be applied again or the context composed for it is gone. It opens the
@@ -416,9 +416,9 @@ def _spawn_pty(
 
 
 def _rotate_pty(
-    *, session_id: str, new_claude_sid: str, model: str = "", system_prompt: str = "",
+    *, session_id: str, new_conversation_id: str, model: str = "", system_prompt: str = "",
     user_prompt: str = "", client_ref: str | None = None,
-    owner_type: str | None = None, owner_ref: str | None = None,
+    surface: str | None = None, surface_id: str | None = None,
     effort: str | None = None,
 ) -> bool:
     """Start a fresh harness conversation in a live terminal, in place.
@@ -450,25 +450,25 @@ def _rotate_pty(
     # pane would come up at an empty prompt with what they typed gone.
     seed = user_prompt or system_prompt
     argv = seeded_pane_command(
-        _rotation_argv(model, new_claude_sid, effort),
+        _rotation_argv(model, new_conversation_id, effort),
         seed,
-        CONFIG_DIR / "rotation-seeds" / f"{new_claude_sid}.txt",
+        CONFIG_DIR / "rotation-seeds" / f"{new_conversation_id}.txt",
         seed_flag="--append-system-prompt",
         as_user_turn=bool(user_prompt),
     )
     TERMINALS.respawn(
         session_id, argv,
-        env_overrides=_pane_env(client_ref, owner_type, owner_ref),
+        env_overrides=_pane_env(client_ref, surface, surface_id),
     )
     log.info("Rotated the conversation in terminal %s onto %s (seed=%d chars)",
-             TERMINALS.session_name(session_id), new_claude_sid, len(seed))
+             TERMINALS.session_name(session_id), new_conversation_id, len(seed))
     log_event(log, "session.pty.rotated", mind_id=MIND_ID, mind_name=NAME,
-              session_id=session_id, conversation_id=new_claude_sid)
+              session_id=session_id, conversation_id=new_conversation_id)
     return True
 
 
 def transcript_path(
-    claude_sid: str, harness_sid: str | None = None, session_id: str = "",
+    conversation_id: str, harness_sid: str | None = None, session_id: str = "",
 ) -> Path | None:
     """Where this conversation's transcript is, for a handover to read.
 
@@ -477,9 +477,9 @@ def transcript_path(
     ``claude_conversation_flags`` uses to declare the id fresh.
     """
     del harness_sid, session_id
-    if not claude_sid:
+    if not conversation_id:
         return None
-    path = claude_transcript_path(claude_sid, PROJECT_DIR, CONFIG_DIR)
+    path = claude_transcript_path(conversation_id, PROJECT_DIR, CONFIG_DIR)
     return path if path.exists() else None
 
 
@@ -531,10 +531,10 @@ async def start_session(body: dict) -> Any:
     resume_sid = body.get("resume_sid")
     surface_prompt = body.get("surface_prompt")
     allowed_directories = body.get("allowed_directories")
-    owner_type = body.get("surface")
+    surface = body.get("surface")
     system_prompt_blocks = body.get("system_prompt_blocks")
     client_ref = body.get("client_ref") or ""
-    owner_ref = body.get("surface_id") or ""
+    surface_id = body.get("surface_id") or ""
     try:
         proc = await _spawn_proc(
             sid,
@@ -542,13 +542,13 @@ async def start_session(body: dict) -> Any:
             resume_sid=resume_sid,
             surface_prompt=surface_prompt,
             allowed_directories=allowed_directories,
-            owner_type=owner_type,
+            surface=surface,
             system_prompt_blocks=system_prompt_blocks,
             client_ref=client_ref,
-            owner_ref=owner_ref,
+            surface_id=surface_id,
             effort=body.get("effort") or None,
             extra_env=body.get("conversation_env") or None,
-            surface=chat_surface(body),
+            surface_label=chat_surface(body),
         )
         session = {
             "proc": proc,

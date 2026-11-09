@@ -48,8 +48,8 @@ async def _make_manager():
 
 async def _seed(session_id: str = "sess-1") -> str:
     await seed_session(
-        session_id, owner_type="telegram", owner_ref="123", claude_sid="conv-1",
-        name="Fittimus Maximus", color="#3481cc", summary="talking",
+        session_id, surface="telegram", surface_id="123", conversation_id="conv-1",
+        name="Fittimus Maximus", color="#3481cc", opening_line="talking",
         bind=("telegram", "123"),
     )
     await add_turn(session_id, "user", "something said")

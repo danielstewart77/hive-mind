@@ -54,8 +54,8 @@ async def _manager() -> SessionManager:
 async def _seed(mgr: SessionManager, session_id: str, status: str) -> None:
     now = time.time()
     await seed_session(
-        session_id, owner_type="health", owner_ref="daniel", model="opus",
-        claude_sid=f"conv-{session_id}", summary="New session",
+        session_id, surface="health", surface_id="daniel", model="opus",
+        conversation_id=f"conv-{session_id}", opening_line="New session",
         created_at=now - 60, last_active=now, status=status, mind_id="skippy-uuid",
     )
 
@@ -107,7 +107,7 @@ def _activate(http, server, exc):
         return http.post(
             "/sessions/sess-1/activate",
             json={"client_type": "health", "client_ref": "health",
-                  "owner_type": "health", "owner_ref": "daniel"},
+                  "surface": "health", "surface_id": "daniel"},
         )
 
 

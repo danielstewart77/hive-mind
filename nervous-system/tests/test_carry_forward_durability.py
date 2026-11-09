@@ -62,8 +62,8 @@ async def _seed_terminal_session() -> str:
     session_id = "sess-term"
     await register_mind("ada", model="opus")
     await seed_session(
-        session_id, owner_type="web", owner_ref="terminal", model="opus",
-        claude_sid="conv-old", terminal_held=True, bind=("web", session_id),
+        session_id, surface="web", surface_id="terminal", model="opus",
+        conversation_id="conv-old", terminal_held=True, bind=("web", session_id),
     )
     return session_id
 
@@ -90,7 +90,7 @@ def _a_mind_with_a_live_pane():
 
 async def _row(session_id: str) -> dict:
     return await fetchrow(
-        "SELECT conversation_id AS claude_sid, carry_forward, carry_forward_sid "
+        "SELECT conversation_id AS conversation_id, carry_forward, carry_forward_sid "
         "FROM core.sessions WHERE id = $1",
         session_id,
     )
@@ -105,7 +105,7 @@ async def _rotate(mgr: SessionManager, session_id: str, prompt: str = "go on") -
     """
     await mgr.arm_rotation("web", session_id)
     return await mgr.fire_rotation(
-        "web", session_id, claude_sid="conv-old", prompt=prompt,
+        "web", session_id, conversation_id="conv-old", prompt=prompt,
     )
 
 
@@ -132,8 +132,8 @@ def test_rotating_a_terminal_stores_the_carry_forward_on_the_session(comms_db) -
             assert row["carry_forward"] == _delivered()
             # Keyed to the *new* conversation — the seed belongs to the
             # thing being started, not the one being left behind.
-            assert row["carry_forward_sid"] == row["claude_sid"]
-            assert row["claude_sid"] != "conv-old"
+            assert row["carry_forward_sid"] == row["conversation_id"]
+            assert row["conversation_id"] != "conv-old"
         finally:
             await close_manager(mgr)
 
@@ -149,7 +149,7 @@ def test_a_completed_turn_clears_the_stored_carry_forward(comms_db) -> None:
             session_id = await _seed_terminal_session()
             with _a_mind_with_a_live_pane():
                 await _rotate(mgr, session_id)
-            sid = (await _row(session_id))["claude_sid"]
+            sid = (await _row(session_id))["conversation_id"]
             assert await mgr.get_carry_forward(session_id, sid) == _delivered()
 
             await mgr.record_turn("web", session_id, "user", "first thing typed")
@@ -171,7 +171,7 @@ def test_a_carry_forward_is_never_served_to_a_different_conversation(comms_db) -
             session_id = await _seed_terminal_session()
             with _a_mind_with_a_live_pane():
                 await _rotate(mgr, session_id)
-            sid = (await _row(session_id))["claude_sid"]
+            sid = (await _row(session_id))["conversation_id"]
 
             assert await mgr.get_carry_forward(session_id, sid) == _delivered()
             assert await mgr.get_carry_forward(session_id, "some-other-conv") is None
@@ -193,7 +193,7 @@ def test_a_seed_whose_clearing_signal_was_lost_expires_on_its_own(comms_db) -> N
             session_id = await _seed_terminal_session()
             with _a_mind_with_a_live_pane():
                 await _rotate(mgr, session_id)
-            sid = (await _row(session_id))["claude_sid"]
+            sid = (await _row(session_id))["conversation_id"]
             assert await mgr.get_carry_forward(session_id, sid) == _delivered()
 
             # The turn that would have cleared it never arrives — the hook
@@ -222,17 +222,17 @@ def test_a_straggling_turn_cannot_clear_a_seed_composed_after_it(comms_db) -> No
             session_id = await _seed_terminal_session()
             with _a_mind_with_a_live_pane():
                 await _rotate(mgr, session_id)
-            sid = (await _row(session_id))["claude_sid"]
+            sid = (await _row(session_id))["conversation_id"]
 
             # The straggler belongs to 'conv-old', the conversation the
             # rotation just replaced.
             await mgr.record_turn("web", session_id, "user", "typed during the window",
-                                  claude_sid="conv-old")
+                                  conversation_id="conv-old")
             assert await mgr.get_carry_forward(session_id, sid) == _delivered()
 
             # A turn in the new conversation does clear it.
             await mgr.record_turn("web", session_id, "user", "first thing typed",
-                                  claude_sid=sid)
+                                  conversation_id=sid)
             assert await mgr.get_carry_forward(session_id, sid) is None
         finally:
             await close_manager(mgr)
@@ -348,7 +348,7 @@ def test_the_route_serves_the_stored_seed_to_the_conversation_it_belongs_to(
     app_client,
 ) -> None:
     """Requirement 6 end to end. The manager is tested directly elsewhere;
-    this pins the route onto it, so the handler cannot drop the claude_sid,
+    this pins the route onto it, so the handler cannot drop the conversation_id,
     look up the wrong session, or answer without consulting the manager."""
     now = time.time()
 
@@ -373,11 +373,11 @@ def test_the_route_serves_the_stored_seed_to_the_conversation_it_belongs_to(
     admin = {"Authorization": "Bearer admin-token"}
     base = "/sessions/sess-term/carry-forward"
 
-    owed = app_client.get(f"{base}?claude_sid=conv-new", headers=admin)
+    owed = app_client.get(f"{base}?conversation_id=conv-new", headers=admin)
     assert owed.status_code == 200
     assert owed.json()["carry_forward"] == SEED
 
     # The route must carry the conversation id through, not ignore it.
-    wrong = app_client.get(f"{base}?claude_sid=conv-other", headers=admin)
+    wrong = app_client.get(f"{base}?conversation_id=conv-other", headers=admin)
     assert wrong.status_code == 200
     assert wrong.json()["carry_forward"] is None

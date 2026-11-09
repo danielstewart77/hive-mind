@@ -29,7 +29,7 @@ async def _make_manager() -> SessionManager:
 async def _seed_session(mgr: SessionManager, status: str = "running") -> str:
     session_id = "sess-hb"
     await seed_session(
-        session_id, owner_type="telegram", owner_ref="123", model="opus",
+        session_id, surface="telegram", surface_id="123", model="opus",
         status=status, mind_id="ada",
     )
     return session_id

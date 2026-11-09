@@ -50,11 +50,11 @@ MORDECAI_MIND = "aa526b2b-0000-4000-8000-0000000000bb"
 
 DANIEL_SESSION = {
     "id": "d-session", "mind_id": DANIEL_MIND, "status": "running",
-    "owner_type": "telegram", "owner_ref": "111",
+    "surface": "telegram", "surface_id": "111",
 }
 SLOAN_SESSION = {
     "id": "s-session", "mind_id": SLOAN_MIND, "status": "running",
-    "owner_type": "telegram", "owner_ref": "222",
+    "surface": "telegram", "surface_id": "222",
 }
 ALL_ROWS = [DANIEL_SESSION, SLOAN_SESSION]
 
@@ -132,7 +132,7 @@ def gateway(broker_db, monkeypatch):
 
     async def get_active_session(_client_type, client_ref):
         for row in ALL_ROWS:
-            if row["owner_ref"] == client_ref:
+            if row["surface_id"] == client_ref:
                 return row
         return None
 
@@ -153,7 +153,7 @@ def gateway(broker_db, monkeypatch):
         published.append({"session": session_id, "blocks": blocks})
         return {"ok": True}
 
-    async def get_carry_forward(session_id, claude_sid=""):
+    async def get_carry_forward(session_id, conversation_id=""):
         return "the composed prompt"
 
     async def _get_row(session_id):
@@ -909,7 +909,7 @@ def test_an_inbound_text_is_dropped_when_the_configured_mind_is_not_registered(
 
 
 # --- the rotation summary -------------------------------------------------
-# Addressed by the conversation id the hook holds, which is a `claude_sid`
+# Addressed by the conversation id the hook holds, which is a `conversation_id`
 # and not a `sessions.id`. Nothing here can resolve one to the other, so the
 # mind a summary is filed under travels in the body and the body is what is
 # held to the caller's own holder.

@@ -38,8 +38,8 @@ POST /sessions
 Content-Type: application/json
 
 {
-  "owner_type": "terminal",
-  "owner_ref": "alice",
+  "surface": "terminal",
+  "surface_id": "alice",
   "client_ref": "terminal-1",
   "model": "sonnet",
   "surface_prompt": "Optional context prepended to the session",

@@ -298,8 +298,8 @@ async def wakeup_and_collect(
                 session = existing
             else:
                 session = await session_mgr.create_session(
-                    owner_type="broker",
-                    owner_ref=client_ref,
+                    surface="broker",
+                    surface_id=client_ref,
                     client_ref=client_ref,
                     mind_id=to_mind,
                     model=mind_model,
@@ -318,8 +318,8 @@ async def wakeup_and_collect(
                     )
         else:
             session = await session_mgr.create_session(
-                owner_type="broker",
-                owner_ref=f"broker-{conversation_id}",
+                surface="broker",
+                surface_id=f"broker-{conversation_id}",
                 client_ref=client_ref,
                 mind_id=to_mind,
                 model=mind_model,

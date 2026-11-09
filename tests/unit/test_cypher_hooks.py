@@ -289,7 +289,7 @@ def mind(tmp_path, monkeypatch):
     monkeypatch.setenv("MIND_NAME", "cypher")
     monkeypatch.setenv("INFERENCE_PROXY_URL", "http://proxy.test")
     monkeypatch.setenv("MIND_PROXY_KEY", "hmp-cypher")
-    monkeypatch.setenv("OWNER_TYPE", "telegram")
+    monkeypatch.setenv("SURFACE", "telegram")
     monkeypatch.setenv("CLIENT_REF", "chat-1")
     monkeypatch.setenv("HIVE_HARNESS", "dsh")
     monkeypatch.setenv("HIVE_ROTATION_THRESHOLD_TOKENS", "80000")
@@ -623,7 +623,7 @@ class TestArmStartedAt:
         monkeypatch.setattr(check.urllib.request, "urlopen", urlopen)
 
         check._comms_arm_rotation(check._cfg(), client_type="telegram", client_ref="chat-1",
-                                  claude_sid="conv-1",
+                                  conversation_id="conv-1",
                                   started_at=check._transcript_started_at(log))
 
         assert armed[0]["started_at"] == 1_791_042_190_658 / 1000

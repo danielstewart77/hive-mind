@@ -1,10 +1,13 @@
-"""The comms wire takes the schema's names, and the old ones for one deploy.
+"""The comms wire speaks the schema's names, and refuses the old ones.
 
 `core.sql` calls them `surface`, `surface_id` and `conversation_id`; the wire
-called them `owner_type`, `owner_ref` and `claude_sid`. Consumers move to the
-schema's names one at a time — the edge minds deploy on their own hosts — so
-for one deploy comms honours both. A request under either name must reach the
-session manager with the value it carried, not with a default.
+once called them `owner_type`, `owner_ref` and `claude_sid`. Every consumer
+has moved, so a request still carrying an old name is refused with the name
+that replaced it - a model ignores a key it does not declare, and a consumer
+left on old code would otherwise have its value dropped without a word.
+
+The routes that read a schema name are checked against what the real
+session manager stored or answered, on the scratch database.
 """
 
 import importlib
@@ -13,16 +16,18 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from comms_pg_fixture import comms_db, scratch_dsn  # noqa: F401 - fixtures
+from comms_pg_fixture import (  # noqa: F401 - fixtures
+    comms_db, fetchval, scratch_dsn, seed_session,
+)
 
 
 GRILL_ADMIN = "admin-credential-for-tests"  # secret-guard: allow
 
-SCHEMA = {"surface": "surface", "surface_id": "surface_id",
-          "conversation_id": "conversation_id"}
-OLD = {"surface": "owner_type", "surface_id": "owner_ref",
-       "conversation_id": "claude_sid"}
-NAMES = pytest.mark.parametrize("names", [SCHEMA, OLD], ids=["schema-names", "old-names"])
+MIND = "ada"
+SESSION = "sess-1"
+CONVERSATION = "conv-1"
+CHAT = "chat-9"
+PANE = ("terminal", "terminal-sess-1")
 
 
 @pytest.fixture()
@@ -36,113 +41,132 @@ def client(monkeypatch, comms_db):  # noqa: F811 - the imported fixture
         yield http, server_module
 
 
-@NAMES
-def test_creating_a_session_takes_the_surface_under_either_name(client, names):
+def _seed(http, session_id: str = SESSION, **columns) -> None:
+    """On the app's own loop: the pool the lifespan opened lives there."""
+    columns.setdefault("surface", "telegram")
+    columns.setdefault("surface_id", CHAT)
+    columns.setdefault("conversation_id", CONVERSATION)
+    http.portal.call(lambda: seed_session(session_id, mind_id=MIND, **columns))
+
+
+# Every route that once took an old name, a request it would otherwise
+# accept under the schema's names, and the old name added beside them.
+_PANE_BODY = {"client_type": PANE[0], "client_ref": PANE[1], "conversation_id": CONVERSATION}
+REFUSED = [
+    ("POST", "/sessions", {"surface": "telegram", "surface_id": CHAT,
+                           "client_ref": CHAT, "mind_id": MIND}, "owner_type", "surface"),
+    ("POST", "/sessions", {"surface": "telegram", "surface_id": CHAT,
+                           "client_ref": CHAT, "mind_id": MIND}, "owner_ref", "surface_id"),
+    ("POST", f"/sessions/{SESSION}/activate", {"client_type": "telegram", "client_ref": CHAT,
+                                               "surface": "telegram", "surface_id": CHAT},
+     "owner_type", "surface"),
+    ("POST", f"/sessions/{SESSION}/activate", {"client_type": "telegram", "client_ref": CHAT,
+                                               "surface": "telegram", "surface_id": CHAT},
+     "owner_ref", "surface_id"),
+    ("POST", "/command", {"content": "/sessions", "surface": "telegram", "surface_id": CHAT,
+                          "client_ref": CHAT, "mind_id": MIND}, "owner_type", "surface"),
+    ("POST", "/command", {"content": "/sessions", "surface": "telegram", "surface_id": CHAT,
+                          "client_ref": CHAT, "mind_id": MIND}, "owner_ref", "surface_id"),
+    ("POST", "/sessions/arm-rotation", _PANE_BODY, "claude_sid", "conversation_id"),
+    ("POST", "/sessions/fire-rotation", {**_PANE_BODY, "prompt": "go on"},
+     "claude_sid", "conversation_id"),
+    ("POST", "/sessions/record-turn", {**_PANE_BODY, "role": "user", "content": "hi"},
+     "claude_sid", "conversation_id"),
+    ("GET", "/sessions", {"surface_id": CHAT}, "owner_ref", "surface_id"),
+    ("GET", f"/sessions/{SESSION}/carry-forward", {"conversation_id": CONVERSATION},
+     "claude_sid", "conversation_id"),
+]
+
+
+@pytest.mark.parametrize(
+    "method, path, valid, old, new", REFUSED,
+    ids=[f"{m} {p} {o}" for m, p, _, o, _ in REFUSED],
+)
+def test_a_request_carrying_an_old_name_is_refused_with_the_new_one(
+    client, method, path, valid, old, new,
+):
     http, server = client
-    create = AsyncMock(return_value={"id": "sess-1"})
+    _seed(http, bind=PANE)
+    # Carried beside the schema's name, with the same value, as a consumer
+    # still on the stage-one code sends it: the old key is the only thing
+    # wrong with the request.
+    carried = {**valid, old: valid.get(new, CHAT)}
 
-    with patch.object(server.session_mgr, "create_session", create), \
-            patch.object(server, "_names_own_mind", AsyncMock(return_value=True)):
-        response = http.post("/sessions", json={
-            names["surface"]: "telegram:mind-1",
-            names["surface_id"]: "chat-9",
-            "client_ref": "chat-9",
-            "mind_id": "mind-1",
-        })
-
-    assert response.status_code == 200, response.text
-    assert create.await_args.kwargs["owner_type"] == "telegram:mind-1"
-    assert create.await_args.kwargs["owner_ref"] == "chat-9"
-
-
-@NAMES
-def test_arming_a_rotation_takes_the_conversation_under_either_name(client, names):
-    http, server = client
-    arm = AsyncMock(return_value={"ok": True})
-
-    with patch.object(server.session_mgr, "arm_rotation", arm), \
-            patch.object(server, "_refuse_foreign_client_ref", AsyncMock(return_value=None)):
-        response = http.post("/sessions/arm-rotation", json={
-            "client_type": "terminal", "client_ref": "terminal-sess-1",
-            names["conversation_id"]: "conv-7",
-        })
-
-    assert response.status_code == 200, response.text
-    assert arm.await_args.kwargs["claude_sid"] == "conv-7"
-
-
-@NAMES
-def test_listing_sessions_filters_on_the_surface_id_under_either_name(client, names):
-    http, server = client
-    listing = AsyncMock(return_value=[])
-
-    with patch.object(server.session_mgr, "list_sessions", listing):
-        response = http.get("/sessions", params={names["surface_id"]: "chat-9"})
-
-    assert response.status_code == 200, response.text
-    assert listing.await_args.kwargs["owner_ref"] == "chat-9"
-
-
-@NAMES
-def test_the_carry_forward_is_looked_up_by_the_conversation_under_either_name(client, names):
-    http, server = client
-    lookup = AsyncMock(return_value="seed")
-
-    with patch.object(server.session_mgr, "get_carry_forward", lookup), \
+    with patch.object(server, "_names_own_mind", AsyncMock(return_value=True)), \
+            patch.object(server, "_refuse_foreign_client_ref", AsyncMock(return_value=None)), \
             patch.object(server, "_require_own_session_mind", AsyncMock(return_value=None)):
-        response = http.get(
-            "/sessions/sess-1/carry-forward",
-            params={names["conversation_id"]: "conv-7"},
-        )
+        if method == "GET":
+            response = http.get(path, params=carried)
+        else:
+            response = http.post(path, json=carried)
 
-    assert response.status_code == 200, response.text
-    assert lookup.await_args.args == ("sess-1", "conv-7")
+    assert response.status_code == 422, response.text
+    assert response.json()["renamed"] == {old: new}
+    assert response.json()["error"] == f"{old} was renamed to {new}"
 
 
-@NAMES
-def test_recording_a_turn_takes_the_conversation_under_either_name(client, names):
+def test_an_arm_is_stored_only_for_the_conversation_it_names(client):
+    """A route dropping `conversation_id` arms whatever conversation is there."""
     http, server = client
-    record = AsyncMock(return_value={"ok": True})
+    _seed(http, bind=PANE)
+    armed = "SELECT rotation_armed FROM core.sessions WHERE id = $1"
 
-    with patch.object(server.session_mgr, "record_turn", record), \
-            patch.object(server, "_refuse_foreign_client_ref", AsyncMock(return_value=None)):
-        response = http.post("/sessions/record-turn", json={
-            "client_type": "terminal", "client_ref": "terminal-sess-1",
-            "role": "user", "content": "hi",
-            names["conversation_id"]: "conv-7",
-        })
+    stale = http.post("/sessions/arm-rotation", json={**_PANE_BODY, "conversation_id": "conv-0"})
+    assert stale.status_code == 200, stale.text
+    assert http.portal.call(fetchval, armed, SESSION) != server.sessions.ROTATION_ARMED
 
-    assert response.status_code == 200, response.text
-    assert record.await_args.kwargs["claude_sid"] == "conv-7"
+    current = http.post("/sessions/arm-rotation", json=_PANE_BODY)
+    assert current.status_code == 200, current.text
+    assert http.portal.call(fetchval, armed, SESSION) == server.sessions.ROTATION_ARMED
 
 
-@NAMES
-def test_firing_a_rotation_takes_the_conversation_under_either_name(client, names):
-    http, server = client
-    fire = AsyncMock(return_value={"ok": True})
+def test_a_turn_clears_the_carry_forward_only_of_the_conversation_it_names(client):
+    """A straggling turn from the replaced conversation keeps the new seed."""
+    http, _server = client
+    _seed(http, bind=PANE, carry_forward="the seed", carry_forward_sid=CONVERSATION)
+    stored = "SELECT carry_forward FROM core.sessions WHERE id = $1"
+    turn = {**_PANE_BODY, "role": "user", "content": "hi"}
 
-    with patch.object(server.session_mgr, "fire_rotation", fire), \
-            patch.object(server, "_refuse_foreign_client_ref", AsyncMock(return_value=None)):
-        response = http.post("/sessions/fire-rotation", json={
-            "client_type": "terminal", "client_ref": "terminal-sess-1",
-            "prompt": "go on", names["conversation_id"]: "conv-7",
-        })
+    straggler = http.post("/sessions/record-turn", json={**turn, "conversation_id": "conv-0"})
+    assert straggler.status_code == 200, straggler.text
+    assert http.portal.call(fetchval, stored, SESSION) == "the seed"
 
-    assert response.status_code == 200, response.text
-    assert fire.await_args.kwargs["claude_sid"] == "conv-7"
+    landed = http.post("/sessions/record-turn", json=turn)
+    assert landed.status_code == 200, landed.text
+    assert http.portal.call(fetchval, stored, SESSION) is None
 
 
-@NAMES
-def test_a_command_takes_the_surface_under_either_name(client, names):
-    http, server = client
-    listing = AsyncMock(return_value=[])
+def test_the_carry_forward_is_answered_for_the_conversation_named(client):
+    http, _server = client
+    _seed(http, carry_forward="the seed", carry_forward_sid=CONVERSATION)
 
-    with patch.object(server.session_mgr, "list_selectable_sessions", listing):
-        response = http.post("/command", json={
-            "content": "/sessions", names["surface"]: "telegram:mind-1",
-            names["surface_id"]: "chat-9", "client_ref": "chat-9", "mind_id": "mind-1",
-        })
+    response = http.get(f"/sessions/{SESSION}/carry-forward",
+                        params={"conversation_id": CONVERSATION})
 
     assert response.status_code == 200, response.text
-    assert listing.await_args.kwargs["client_type"] == "telegram:mind-1"
-    assert listing.await_args.kwargs["owner_ref"] == "chat-9"
+    assert response.json()["carry_forward"] == "the seed"
+
+
+def test_listing_sessions_filters_on_the_surface_id(client):
+    http, _server = client
+    _seed(http)
+    _seed(http, "sess-other", surface_id="chat-other", conversation_id="conv-other")
+
+    response = http.get("/sessions", params={"surface_id": CHAT})
+
+    assert response.status_code == 200, response.text
+    assert [s["id"] for s in response.json()] == [SESSION]
+
+
+def test_the_sessions_command_lists_the_surface_ids_own_conversations(client):
+    http, _server = client
+    _seed(http)
+    _seed(http, "sess-other", surface_id="chat-other", conversation_id="conv-other")
+
+    response = http.post("/command", json={
+        "content": "/sessions", "surface": "telegram", "surface_id": CHAT,
+        "client_ref": CHAT, "mind_id": MIND,
+    })
+
+    assert response.status_code == 200, response.text
+    assert [s["id"] for s in response.json()] == [SESSION]

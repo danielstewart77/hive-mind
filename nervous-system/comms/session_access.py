@@ -99,7 +99,7 @@ TABLE.add(
     "GET /sessions/late-turns",
     "POST /sessions/arm-rotation",
     # The rotation summary. Addressed by the *conversation* id the hook
-    # holds — a `claude_sid`, which is not a `sessions.id` and which no
+    # holds — a `conversation_id`, which is not a `sessions.id` and which no
     # lookup here can resolve — so the `OWNER` class refused every mind on
     # the hive the moment it was applied, and the carry-forward each
     # rotation composes was silently dropped. What the write has to be held

@@ -80,8 +80,8 @@ That file is one process's opening context and is deleted as it is read, and
 a system prompt reaches no transcript — so until the rotated conversation's
 first turn lands, nothing on disk remembers what the rotation composed.
 hive-comms therefore stores it on the session row (`carry_forward`, keyed to
-`carry_forward_sid`) at the same moment it writes the new `claude_sid`. A
-mind starting a terminal asks `GET /sessions/{id}/carry-forward?claude_sid=`
+`carry_forward_sid`) at the same moment it writes the new `conversation_id`. A
+mind starting a terminal asks `GET /sessions/{id}/carry-forward?conversation_id=`
 and re-applies whatever it is owed. A completed turn clears the row — it is
 the only evidence the rotation took, and from then on `--resume` carries the
 context by itself — so both turn paths clear it: `record_turn` for the

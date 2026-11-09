@@ -151,7 +151,7 @@ async def _register_mind(mind_id="ada", session_token=None):
 
 
 async def _seed_session_and_mind(
-    server_module, session_id="sess-attach", mind_id="ada", claude_sid="claude-abc",
+    server_module, session_id="sess-attach", mind_id="ada", conversation_id="claude-abc",
     client_ref=None, harness_sid=None,
 ):
     await _register_mind(mind_id)
@@ -161,7 +161,7 @@ async def _seed_session_and_mind(
                                       model, created_at, last_active, status, mind_id,
                                       opening_line)
            VALUES ($1, $2, $3, 'web', 'u1', 'opus', $4, $4, 'running', $5, 'terminal attach')""",
-        session_id, claude_sid, harness_sid, now, mind_id,
+        session_id, conversation_id, harness_sid, now, mind_id,
     )
     if client_ref:
         await execute(
@@ -235,12 +235,8 @@ class TestWsAttach:
         assert "model=opus" in _FakeHttpSession.requested_url
         # The tile takes the conversation, so the pane carries the terminal
         # surface's own key rather than whatever the chat was holding.
-        # Under the schema's names, the raw address in `surface`...
         assert "surface=terminal&" in _FakeHttpSession.requested_url
         assert "surface_id=terminal-sess-attach" in _FakeHttpSession.requested_url
-        # ...and the old ones beside them for a mind that has not moved yet.
-        assert "owner_type=terminal" in _FakeHttpSession.requested_url
-        assert "owner_ref=terminal-sess-attach" in _FakeHttpSession.requested_url
 
     def test_relays_client_ref_so_the_mind_can_arm_rotation(self, app_client, monkeypatch):
         """Without client_ref in the pane env, the mind's Stop hook bails on
@@ -515,7 +511,7 @@ class TestAttachRequiresAConversation:
     def test_session_without_a_conversation_id_is_refused(self, app_client):
         client, server_module = app_client
         _run(_seed_session_and_mind(
-            server_module, session_id="sess-hollow", claude_sid=None
+            server_module, session_id="sess-hollow", conversation_id=None
         ))
 
         with pytest.raises(Exception):
@@ -598,7 +594,7 @@ class TestRotationReachesTheTile:
             client.portal.call(mgr.arm_rotation, "terminal", "terminal-sess-rot")
             client.portal.call(lambda: mgr.fire_rotation(
                 "terminal", "terminal-sess-rot",
-                claude_sid="claude-abc", prompt="why did it go blank?",
+                conversation_id="claude-abc", prompt="why did it go blank?",
             ))
 
             # Read on a deadline. `receive_text` blocks forever on an empty

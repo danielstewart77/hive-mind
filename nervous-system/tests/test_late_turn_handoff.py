@@ -31,12 +31,12 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-async def _seed_session(*, owner_type: str, client_ref: str) -> str:
+async def _seed_session(*, surface: str, client_ref: str) -> str:
     """Insert a running session bound active to a surface. Returns session_id."""
     session_id = "sess-" + client_ref
     await seed_session(
-        session_id, owner_type=owner_type, owner_ref=client_ref,
-        claude_sid="conv-" + client_ref, bind=(owner_type, client_ref),
+        session_id, surface=surface, surface_id=client_ref,
+        conversation_id="conv-" + client_ref, bind=(surface, client_ref),
     )
     return session_id
 
@@ -58,7 +58,7 @@ def test_get_late_turns_returns_only_post_watermark(comms_db) -> None:
     async def scenario() -> None:
         mgr = await make_manager()
         try:
-            sid = await _seed_session(owner_type="telegram", client_ref="123")
+            sid = await _seed_session(surface="telegram", client_ref="123")
             watermark = 1000.0
             # Before watermark — must be excluded.
             await add_turn(sid, "user", "old question", watermark - 5)
@@ -93,7 +93,7 @@ def test_get_late_turns_ignores_closed_session(comms_db) -> None:
     async def scenario() -> None:
         mgr = await make_manager()
         try:
-            sid = await _seed_session(owner_type="telegram", client_ref="123")
+            sid = await _seed_session(surface="telegram", client_ref="123")
             await add_turn(sid, "user", "late", 1010.0)
             # Closed sessions are not active — get_active_session filters them,
             # so a post-clear query must not resurrect the dead session's turns.
@@ -112,8 +112,8 @@ def test_get_late_turns_scoped_to_one_session(comms_db) -> None:
     async def scenario() -> None:
         mgr = await make_manager()
         try:
-            sid_a = await _seed_session(owner_type="telegram", client_ref="aaa")
-            sid_b = await _seed_session(owner_type="telegram", client_ref="bbb")
+            sid_a = await _seed_session(surface="telegram", client_ref="aaa")
+            sid_b = await _seed_session(surface="telegram", client_ref="bbb")
             await add_turn(sid_a, "user", "for-a", 1010.0)
             await add_turn(sid_b, "user", "for-b", 1010.0)
             result = await mgr.get_late_turns("telegram", "aaa", 1000.0)

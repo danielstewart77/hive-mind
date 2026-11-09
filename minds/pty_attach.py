@@ -367,7 +367,7 @@ def seeded_pane_command(
     ]
 
 
-async def fetch_carry_forward(session_id: str, claude_sid: str) -> str:
+async def fetch_carry_forward(session_id: str, conversation_id: str) -> str:
     """The rotation seed comms is still holding for this conversation, if any.
 
     A terminal rotation composes a carry-forward and hands it to the
@@ -387,12 +387,12 @@ async def fetch_carry_forward(session_id: str, claude_sid: str) -> str:
 
     comms_url = os.environ.get("COMMS_URL", "").rstrip("/")
     token = os.environ.get("COMMS_ADMIN_BEARER_TOKEN", "")
-    if not comms_url or not token or not claude_sid:
+    if not comms_url or not token or not conversation_id:
         return ""
     async with aiohttp.ClientSession() as http:
         async with http.get(
             f"{comms_url}/sessions/{session_id}/carry-forward",
-            params={"conversation_id": claude_sid},
+            params={"conversation_id": conversation_id},
             headers={"Authorization": f"Bearer {token}"},
             timeout=aiohttp.ClientTimeout(total=5),
         ) as resp:
@@ -864,7 +864,7 @@ def install_pty_attach(
     """Mount the browser-terminal routes on a mind's app.
 
     ``spawn`` is called as ``spawn(session_id=, model=, conversation_id=,
-    harness_sid=, cols=, rows=, client_ref=, owner_type=, owner_ref=,
+    harness_sid=, cols=, rows=, client_ref=, surface=, surface_id=,
     system_prompt=, effort=)`` and returns ``(Popen, master_fd)`` for a tmux
     client on the session's terminal; raising :class:`PtyUnavailable` refuses
     the attach with the reason instead of opening a terminal on nothing.
@@ -872,8 +872,8 @@ def install_pty_attach(
     handover or a rotation's seed — and the pane opens on it as its first
     user turn.
 
-    ``rotate`` is called as ``rotate(session_id=, new_claude_sid=, model=,
-    system_prompt=, user_prompt=, client_ref=, owner_type=, owner_ref=)`` and
+    ``rotate`` is called as ``rotate(session_id=, new_conversation_id=, model=,
+    system_prompt=, user_prompt=, client_ref=, surface=, surface_id=)`` and
     returns whether a live terminal was rotated in place. ``user_prompt``, when
     given, is the seed the successor opens on as a user turn; ``system_prompt``
     is standing context a fresh terminal takes.
@@ -923,8 +923,8 @@ def install_pty_attach(
         is the normal answer for a conversation nobody has a tile open on.
         """
         body = await request.json()
-        new_claude_sid = (body.get("new_conversation_id") or "").strip()
-        if not new_claude_sid:
+        new_conversation_id = (body.get("new_conversation_id") or "").strip()
+        if not new_conversation_id:
             return JSONResponse({"error": "new_conversation_id required"}, status_code=400)
 
         handle = PTYS.get(session_id)
@@ -958,7 +958,7 @@ def install_pty_attach(
             rotated = await asyncio.to_thread(
                 rotate,
                 session_id=session_id,
-                new_claude_sid=new_claude_sid,
+                new_conversation_id=new_conversation_id,
                 # A rotation turns over the conversation, never the model.
                 # Absent an explicit one, the pane keeps what it started on
                 # rather than falling back to the mind's current default —
@@ -974,8 +974,8 @@ def install_pty_attach(
                 # while this route reports a successful rotation.
                 user_prompt=body.get("user_prompt") or "",
                 client_ref=body.get("client_ref"),
-                owner_type=body.get("surface"),
-                owner_ref=body.get("surface_id"),
+                surface=body.get("surface"),
+                surface_id=body.get("surface_id"),
             )
         except Exception:
             log.exception("Rotation failed for %s session %s", mind_name, session_id)
@@ -986,7 +986,7 @@ def install_pty_attach(
         # The pty, its reader task and the attached queue all belong to a
         # tmux client that survived the swap, so the handle carries over
         # untouched — only the conversation it is pinned to changed.
-        handle.conversation_id = new_claude_sid
+        handle.conversation_id = new_conversation_id
         if switching:
             handle.harness = target
             handle.terminals = adapter.terminals
@@ -996,12 +996,12 @@ def install_pty_attach(
         handle.model = body.get("model") or handle.model
         handle.effort = body.get("effort") or handle.effort
         log.info("Rotated the conversation in session %s's terminal onto %s",
-                 session_id, new_claude_sid)
+                 session_id, new_conversation_id)
         # The respawn took the pane's screen and scrollback with it. What was
         # on that screen is replayed by the gateway, to the browser tile, as
         # a banner beside the terminal — not from here and not into the pane,
         # which the harness owns and repaints.
-        return {"session_id": session_id, "rotated": True, "conversation_id": new_claude_sid}
+        return {"session_id": session_id, "rotated": True, "conversation_id": new_conversation_id}
 
     @app.websocket("/sessions/{session_id}/attach-pty")
     async def attach_pty(
@@ -1133,7 +1133,7 @@ def install_pty_attach(
                 session_id, adapter.spawn, terminals, harness=name, model=model,
                 conversation_id=resume_sid,
                 harness_sid=harness_sid, cols=cols, rows=rows,
-                client_ref=client_ref, owner_type=surface, owner_ref=surface_id,
+                client_ref=client_ref, surface=surface, surface_id=surface_id,
                 system_prompt=carry_forward, effort=effort or None, **spawn_kwargs,
             )
         except PtyUnavailable as exc:

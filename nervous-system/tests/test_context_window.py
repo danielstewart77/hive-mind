@@ -100,7 +100,7 @@ async def _close(mgr: SessionManager) -> None:
 
 async def _seed(
     mgr: SessionManager | None = None, sid: str = "sess-1", *, harness: str = "claude",
-    model: str = "claude-opus-5", claude_sid: str = "conv-1",
+    model: str = "claude-opus-5", conversation_id: str = "conv-1",
     harness_sid: str | None = None, effort: str | None = None,
     client_ref: str = "123",
 ) -> str:
@@ -111,7 +111,7 @@ async def _seed(
         "harness_sid, harness, effort, created_at, last_active, status, mind_id, "
         "opening_line) VALUES ($1, 'telegram', $2, $3, $4, $5, $6, $7, $8, $8, "
         "'running', $9, 'chat')",
-        sid, client_ref, model, claude_sid, harness_sid, harness, effort, now, MIND,
+        sid, client_ref, model, conversation_id, harness_sid, harness, effort, now, MIND,
     )
     await execute(
         "INSERT INTO core.active_sessions (client_type, client_ref, session_id) "
@@ -255,7 +255,7 @@ def test_a_context_report_persists_every_figure_it_carries(comms_db, monkeypatch
 def test_a_report_for_a_replaced_conversation_is_dropped(comms_db):
     async def scenario():
         mgr = await _manager()
-        await _seed(mgr, claude_sid="conv-2")
+        await _seed(mgr, conversation_id="conv-2")
         await _measured(mgr, tokens=5_000)
         answer = await mgr.report_context_for_client(
             "telegram", "123", tokens=190_000, conversation_id="conv-1",
@@ -289,7 +289,7 @@ def test_a_conversation_just_under_the_new_threshold_resumes_under_its_own_id(co
     assert "warning" not in result
     assert mind.sent("POST", "/handover") == []
     assert mind.spawns()[-1]["resume_sid"] == "conv-1"
-    assert row["claude_sid"] == "conv-1"
+    assert row["conversation_id"] == "conv-1"
     assert (row["context_window"], row["context_threshold"]) == (200_000, 200_000 * PERCENT // 100)
 
 
@@ -340,10 +340,10 @@ def test_a_chat_over_the_new_threshold_is_handed_over_under_the_same_row(comms_d
     assert result["id"] == "sess-1"
     assert rows == 1
     assert row["status"] != "closed"
-    assert row["claude_sid"] != "conv-1"
+    assert row["conversation_id"] != "conv-1"
     assert all(s["resume_sid"] != "conv-1" for s in mind.spawns())
-    assert mind.spawns()[-1]["resume_sid"] == row["claude_sid"]
-    assert row["carry_forward"] and row["carry_forward_sid"] == row["claude_sid"]
+    assert mind.spawns()[-1]["resume_sid"] == row["conversation_id"]
+    assert row["carry_forward"] and row["carry_forward_sid"] == row["conversation_id"]
     assert mind.spawns()[-1]["opening_turn"] == row["carry_forward"]
     assert row["model"] == "claude-sonnet-5"
     assert (row["context_window"], row["context_threshold"]) == (200_000, 200_000 * PERCENT // 100)
@@ -378,7 +378,7 @@ def test_an_unmeasured_conversation_that_has_had_turns_is_never_assumed_to_fit(c
         return row, mind
 
     row, mind = _run(scenario())
-    assert row["claude_sid"] != "conv-1"
+    assert row["conversation_id"] != "conv-1"
     assert len(mind.sent("POST", "/handover")) == 1
 
 
@@ -393,7 +393,7 @@ def test_images_on_a_text_only_model_hand_over_even_when_the_size_fits(comms_db)
         await _close(mgr)
         return row
 
-    assert _run(scenario())["claude_sid"] != "conv-1"
+    assert _run(scenario())["conversation_id"] != "conv-1"
 
 
 def test_images_on_a_model_whose_image_support_is_unknown_hand_over(comms_db):
@@ -406,7 +406,7 @@ def test_images_on_a_model_whose_image_support_is_unknown_hand_over(comms_db):
         await _close(mgr)
         return row
 
-    assert _run(scenario())["claude_sid"] != "conv-1"
+    assert _run(scenario())["conversation_id"] != "conv-1"
 
 
 def test_a_conversation_with_no_images_resumes_on_a_text_only_model(comms_db):
@@ -420,7 +420,7 @@ def test_a_conversation_with_no_images_resumes_on_a_text_only_model(comms_db):
         return row
 
     row = _run(scenario())
-    assert row["claude_sid"] == "conv-1"
+    assert row["conversation_id"] == "conv-1"
     assert row["model"] == "text-only"
 
 
@@ -441,12 +441,12 @@ def test_a_terminal_handed_over_keeps_its_row_and_respawns_its_pane_on_the_hando
 
     result, row, mind = _run(scenario())
     assert result["id"] == "sess-1"
-    assert row["claude_sid"] != "conv-1"
+    assert row["conversation_id"] != "conv-1"
     rotated = mind.sent("POST", "/sessions/sess-1/rotate-pty")[0]["json"]
-    assert rotated["new_conversation_id"] == row["claude_sid"]
+    assert rotated["new_conversation_id"] == row["conversation_id"]
     assert rotated["model"] == "claude-sonnet-5"
     assert rotated["user_prompt"] == row["carry_forward"]
-    assert row["carry_forward_sid"] == row["claude_sid"]
+    assert row["carry_forward_sid"] == row["conversation_id"]
     assert row["rotation_armed"] == 0
     assert (row["context_window"], row["context_threshold"]) == (200_000, 100_000)
     # The pane opens on the soul as well — it has a system prompt channel and
@@ -482,8 +482,8 @@ def test_a_terminal_whose_pane_is_gone_gets_a_process_on_the_new_conversation(co
         return row, mind
 
     row, mind = _run(scenario())
-    assert row["claude_sid"] != "conv-1"
-    assert [s["resume_sid"] for s in mind.spawns()] == [row["claude_sid"]]
+    assert row["conversation_id"] != "conv-1"
+    assert [s["resume_sid"] for s in mind.spawns()] == [row["conversation_id"]]
 
 
 def test_a_model_handover_leaves_room_for_the_soul_and_the_harness_under_the_threshold(comms_db):
@@ -603,9 +603,9 @@ def test_an_overflowed_turn_rotates_and_sends_the_same_message_once_on_the_same_
     sent = mind.messages()
     assert [r["path"] for r in sent] == ["/sessions/sess-1/message"] * 2
     assert sent[1]["json"]["content"].endswith("\nship it")
-    assert row["claude_sid"] != "conv-1"
+    assert row["conversation_id"] != "conv-1"
     assert [t["content"] for t in ledger].count("ship it") == 1
-    opening = [s for s in mind.spawns() if s["resume_sid"] == row["claude_sid"]][0]["opening_turn"]
+    opening = [s for s in mind.spawns() if s["resume_sid"] == row["conversation_id"]][0]["opening_turn"]
     assert 'Bash {"command": "make deploy"} (done)' in opening
     assert "/never" not in opening
     # The re-send was on record before it went out, and settled once answered.
@@ -668,7 +668,7 @@ def test_a_harness_that_only_tallies_its_calls_is_not_said_to_have_run_none(comm
         return row, mind
 
     row, mind = _run(scenario())
-    opening = [s for s in mind.spawns() if s["resume_sid"] == row["claude_sid"]][0]["opening_turn"]
+    opening = [s for s in mind.spawns() if s["resume_sid"] == row["conversation_id"]][0]["opening_turn"]
     assert "completed 2 tool call" in opening
     assert "no tool calls" not in opening
 
@@ -836,7 +836,7 @@ def test_a_goal_stopped_for_rotation_is_redispatched_once_with_its_rounds_left(c
 
     events, row, mind = _run(scenario())
     assert len(mind.sent("POST", "/handover")) == 1
-    assert row["claude_sid"] != "conv-1"
+    assert row["conversation_id"] != "conv-1"
     sent = mind.messages()
     assert [r["path"] for r in sent] == ["/sessions/sess-1/message"] * 2
     assert sent[0]["json"]["goal_rounds"] == 5
@@ -1028,10 +1028,10 @@ def test_a_model_change_right_after_a_harness_switch_that_fits_stays_in_place(co
     first, result, row, mind = _run(scenario())
     assert "warning" not in result
     assert row["model"] == "codex-other"
-    assert row["claude_sid"] == first["claude_sid"]
+    assert row["conversation_id"] == first["conversation_id"]
     assert len(mind.sent("POST", "/handover")) == 1
     assert row["carry_forward"] == first["carry_forward"]
-    assert mind.spawns()[-1]["resume_sid"] == first["claude_sid"]
+    assert mind.spawns()[-1]["resume_sid"] == first["conversation_id"]
     assert mind.spawns()[-1]["opening_turn"] == first["carry_forward"]
 
 
@@ -1044,7 +1044,7 @@ def test_a_model_change_right_after_a_harness_switch_that_does_not_fit_hands_ove
         with mind.wired(), _big_soul():
             await mgr.switch_harness("sess-1", "codex", "codex-200k")
             first = await mgr._get_row("sess-1")
-            mind.transcripts[first["claude_sid"]] = "a newer exchange"
+            mind.transcripts[first["conversation_id"]] = "a newer exchange"
             result = await mgr.switch_model("sess-1", "codex-24k")
         row = await mgr._get_row("sess-1")
         await _close(mgr)
@@ -1055,7 +1055,7 @@ def test_a_model_change_right_after_a_harness_switch_that_does_not_fit_hands_ove
     assert result["handed_over"] is True
     assert f"about {first['context_tokens']:,} tokens" in result["warning"]
     assert "hasn't been measured" not in result["warning"]
-    assert row["claude_sid"] not in (first["claude_sid"], "conv-1")
+    assert row["conversation_id"] not in (first["conversation_id"], "conv-1")
     spawned = mind.spawns()[-1]
     assert spawned["opening_turn"] == row["carry_forward"]
     assert row["context_tokens"] == (
@@ -1087,7 +1087,7 @@ def test_a_chat_rotation_leaves_the_row_holding_an_estimate_of_its_opening(comms
 
     successor, mind = _run(scenario())
     spawned = [s for s in mind.spawns() if s["session_id"] == successor["id"]][-1]
-    assert successor["claude_sid"] != "conv-1"
+    assert successor["conversation_id"] != "conv-1"
     assert successor["context_tokens"] == (
         len(spawned["system_prompt_blocks"]) + len(spawned["opening_turn"])
     ) // 4 + OVERHEAD["claude"]
@@ -1107,7 +1107,7 @@ def test_a_report_that_measured_nothing_leaves_the_estimate_in_place(comms_db):
             await mgr.switch_harness("sess-1", "codex", "codex-200k")
         first = await mgr._get_row("sess-1")
         await mgr.report_context("sess-1", tokens=0, kind="none",
-                                 conversation_id=first["claude_sid"])
+                                 conversation_id=first["conversation_id"])
         row = await mgr._get_row("sess-1")
         await _close(mgr)
         return first, row
@@ -1147,7 +1147,7 @@ def test_the_first_real_report_replaces_the_opening_estimate(comms_db):
         first = await mgr._get_row("sess-1")
         await mgr.report_context("sess-1", tokens=first["context_tokens"] + 7_321,
                                  kind="usage", has_images=True, model="codex-200k",
-                                 conversation_id=first["claude_sid"])
+                                 conversation_id=first["conversation_id"])
         row = await mgr._get_row("sess-1")
         await _close(mgr)
         return first, row
@@ -1209,7 +1209,7 @@ def test_an_empty_conversation_switched_onto_a_model_of_unknown_room_changes_mod
 
     first, result, row = _run(scenario())
     assert "warning" not in result
-    assert row["claude_sid"] == first["claude_sid"]
+    assert row["conversation_id"] == first["conversation_id"]
     assert row["model"] == "gpt-5.6-mini"
 
 
@@ -1230,7 +1230,7 @@ def test_the_first_real_report_teaches_the_overhead_the_next_opening_counts(comm
             opening = len(spawned["system_prompt_blocks"] + spawned["opening_turn"]) // 4
             await mgr.report_context("sess-1", tokens=opening + 12_345, kind="usage",
                                      model="codex-200k", surface="telegram",
-                                     conversation_id=first["claude_sid"])
+                                     conversation_id=first["conversation_id"])
             # Back and over again: the next opening counts what was learned.
             await mgr.switch_harness("sess-1", "claude", "claude-opus-5")
             await mgr.switch_harness("sess-1", "codex", "codex-200k")
@@ -1257,7 +1257,7 @@ def test_a_harness_estimate_teaches_no_overhead(comms_db):
             first = await mgr._get_row("sess-1")
             await mgr.report_context("sess-1", tokens=50, kind="estimated",
                                      model="codex-200k",
-                                     conversation_id=first["claude_sid"])
+                                     conversation_id=first["conversation_id"])
             await mgr.switch_harness("sess-1", "claude", "claude-opus-5")
             await mgr.switch_harness("sess-1", "codex", "codex-200k")
         row = await mgr._get_row("sess-1")
@@ -1297,7 +1297,7 @@ async def _teach(mgr, extra: int, *, kind: str = "usage", named: bool = True,
     await mgr.report_context(
         "sess-1", tokens=row["context_opening_tokens"] + extra, kind=kind,
         model=model or row["model"], surface=surface,
-        conversation_id=row["claude_sid"] if named else None,
+        conversation_id=row["conversation_id"] if named else None,
     )
     return row
 
@@ -1356,7 +1356,7 @@ def test_a_harness_estimate_first_leaves_the_opening_for_the_provider_count_afte
             row = await _teach(mgr, 50, kind="estimated")
             await mgr.report_context(
                 "sess-1", tokens=row["context_opening_tokens"] + 11_111, kind="usage",
-                model="codex-200k", surface="telegram", conversation_id=row["claude_sid"],
+                model="codex-200k", surface="telegram", conversation_id=row["conversation_id"],
             )
         learned = await mgr.harness_overhead(MIND, "codex", "codex-200k")
         await _close(mgr)
@@ -1622,7 +1622,7 @@ def test_a_resent_message_is_part_of_the_room_and_of_the_opening(comms_db):
         return row, mind, content
 
     row, mind, content = _run(scenario())
-    spawned = [s for s in mind.spawns() if s["resume_sid"] == row["claude_sid"]][0]
+    spawned = [s for s in mind.spawns() if s["resume_sid"] == row["conversation_id"]][0]
     handover = spawned["opening_turn"]
     note = handover[len("HANDOVER: the old conversation\n\n"):] if handover.startswith(
         "HANDOVER: the old conversation") else handover
@@ -1680,8 +1680,8 @@ def test_a_refused_switch_reaches_a_chat_surface_as_its_reason(comms_db, monkeyp
         mind = FakeMind()
         with mind.wired(), _soul():
             answer = client.post("/command", json={
-                "content": "/harness codex gpt-5.6-nano", "owner_type": "telegram",
-                "client_ref": "123", "owner_ref": "123", "mind_id": MIND,
+                "content": "/harness codex gpt-5.6-nano", "surface": "telegram",
+                "client_ref": "123", "surface_id": "123", "mind_id": MIND,
             })
     assert answer.status_code == 200
     assert "gpt-5.6-nano can't take this conversation" in answer.json()["error"]
@@ -1748,7 +1748,7 @@ def test_a_pane_the_mind_refuses_to_rotate_is_left_running(comms_db):
     before, after, mind = _run(scenario())
     assert mind.kills("sess-1") == []
     assert mind.spawns() == []
-    assert (after["claude_sid"], after["model"]) == (before["claude_sid"], before["model"])
+    assert (after["conversation_id"], after["model"]) == (before["conversation_id"], before["model"])
 
 
 @pytest.mark.parametrize("answer", [(200, []), (200, {}), (200, {"rotated": "false"})])
@@ -1771,7 +1771,7 @@ def test_only_a_mind_saying_it_holds_no_pane_reads_as_no_pane(comms_db, answer):
     after, mind = _run(scenario())
     assert mind.kills("sess-1") == []
     assert mind.spawns() == []
-    assert after["claude_sid"] == "conv-1"
+    assert after["conversation_id"] == "conv-1"
 
 
 def test_an_overflow_whose_debt_cannot_be_recorded_keeps_the_message_in_the_ledger(

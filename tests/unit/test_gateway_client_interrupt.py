@@ -19,7 +19,7 @@ def gateway(monkeypatch):
     return GatewayClient(
         http=mock_http,
         server_url="http://localhost:8420",
-        owner_type="telegram:ada",
+        surface="telegram:ada",
         mind_id="ada",
     )
 

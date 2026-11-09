@@ -399,7 +399,7 @@ def claude_copy(hook, monkeypatch):
         monkeypatch.setattr(check, "REPLY_WAIT_SECONDS", wait, raising=False)
         for var in ("ROTATION_SPAWN",):
             monkeypatch.delenv(var, raising=False)
-        monkeypatch.setenv("HIVEMIND_OWNER_TYPE", "telegram")
+        monkeypatch.setenv("HIVEMIND_SURFACE", "telegram")
         monkeypatch.setenv("HIVEMIND_CLIENT_REF", "chat-1")
         return check, proxy
 

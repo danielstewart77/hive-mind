@@ -204,8 +204,8 @@ def _session(module, sid: str = "row-1", model: str = "qwen35-131k",
         "model": model,
         "proc": None,
         "client_ref": "",
-        "owner_type": "",
-        "owner_ref": "",
+        "surface": "",
+        "surface_id": "",
     }
     return module.SESSIONS[sid]
 
@@ -694,13 +694,13 @@ async def test_the_rotation_hooks_own_metadata_reaches_the_spawn(
     """The Stop hook reads these off the process env to attribute a rotation
     summary to the right row. Unset, rotation silently never arms."""
     state = _session(dsh)
-    state.update({"client_ref": "tg-123", "owner_type": "telegram", "owner_ref": "chat-9"})
+    state.update({"client_ref": "tg-123", "surface": "telegram", "surface_id": "chat-9"})
     spawn = _Spawn([_report()])
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
     await _drain(dsh)
     assert spawn.env["CLIENT_REF"] == "tg-123"
-    assert spawn.env["OWNER_TYPE"] == "telegram"
-    assert spawn.env["OWNER_REF"] == "chat-9"
+    assert spawn.env["SURFACE"] == "telegram"
+    assert spawn.env["SURFACE_ID"] == "chat-9"
 
 
 async def test_a_second_turn_on_a_busy_conversation_is_refused(dsh) -> None:
@@ -931,7 +931,7 @@ def test_rotation_respawns_the_same_pane_on_the_new_conversation(
     terminals = _FakeTerminals(alive=True)
     monkeypatch.setattr(dsh, "TERMINALS", terminals)
     assert dsh._rotate_pty(
-        session_id="row-1", new_claude_sid="conv-2", model="qwen35-131k",
+        session_id="row-1", new_conversation_id="conv-2", model="qwen35-131k",
         system_prompt="carry forward",
     ) is True
     argv = terminals.respawns[0]["argv"]
@@ -951,7 +951,7 @@ def test_a_staged_rotation_asks_dsh_to_answer_its_opening_context(
     terminals = _FakeTerminals(alive=True)
     monkeypatch.setattr(dsh, "TERMINALS", terminals)
     assert dsh._rotate_pty(
-        session_id="row-1", new_claude_sid="conv-3", model="qwen35-131k",
+        session_id="row-1", new_conversation_id="conv-3", model="qwen35-131k",
         system_prompt="the summary",
         user_prompt="the summary\n\nand what I typed",
     ) is True
@@ -970,7 +970,7 @@ def test_a_whitespace_seed_opens_the_pane_unseeded_rather_than_killing_it(
     terminals = _FakeTerminals(alive=True)
     monkeypatch.setattr(dsh, "TERMINALS", terminals)
     assert dsh._rotate_pty(
-        session_id="row-1", new_claude_sid="conv-4", model="qwen35-131k",
+        session_id="row-1", new_conversation_id="conv-4", model="qwen35-131k",
         user_prompt="   \n\t ",
     ) is True
     argv = terminals.respawns[0]["argv"]

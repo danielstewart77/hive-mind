@@ -143,13 +143,13 @@ class GatewayClient:
         self,
         http: aiohttp.ClientSession,
         server_url: str,
-        owner_type: str,
+        surface: str,
         surface_prompt: str | None = None,
         mind_id: str = "ada",
     ):
         self.http = http
         self.server_url = server_url
-        self.owner_type = owner_type
+        self.surface = surface
         self.surface_prompt = surface_prompt
         self.mind_id = mind_id
         # Bearer auth: set when the bot talks to hive-comms (which requires
@@ -168,7 +168,7 @@ class GatewayClient:
         """
         async with self.http.get(
             f"{self.server_url}/sessions",
-            params={"client_type": self.owner_type, "client_ref": str(client_ref)},
+            params={"client_type": self.surface, "client_ref": str(client_ref)},
             headers=self._headers,
         ) as resp:
             data = await resp.json()
@@ -181,7 +181,7 @@ class GatewayClient:
         """Get active session for this client, or create one."""
         async with self.http.get(
             f"{self.server_url}/sessions",
-            params={"client_type": self.owner_type, "client_ref": str(client_ref)},
+            params={"client_type": self.surface, "client_ref": str(client_ref)},
             headers=self._headers,
         ) as resp:
             data = await resp.json()
@@ -190,7 +190,7 @@ class GatewayClient:
                     return s["id"]
 
         payload: dict = {
-            "surface": self.owner_type,
+            "surface": self.surface,
             "surface_id": str(user_id),
             "client_ref": str(client_ref),
             "mind_id": self.mind_id,
@@ -210,7 +210,7 @@ class GatewayClient:
             f"{self.server_url}/command",
             json={
                 "content": content,
-                "surface": self.owner_type,
+                "surface": self.surface,
                 "surface_id": str(user_id),
                 "client_ref": str(client_ref),
                 "mind_id": self.mind_id,

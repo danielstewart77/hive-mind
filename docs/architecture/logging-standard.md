@@ -65,7 +65,7 @@ Names are `noun.verb[.qualifier]`, past tense for completed facts. In use:
 | Voice | `voice.stt.completed`, `voice.tts.completed` |
 
 Attribution fields ride on every event that changes state: `mind_id` (never
-the display name), `session_id`, `conversation_id`, `owner_type`/`owner_ref`,
+the display name), `session_id`, `conversation_id`, `surface`/`surface_id`,
 `user_id`/`client_ref` for surface actions.
 
 ## Privacy and safety rules

@@ -370,7 +370,7 @@ PANE_CONVERSATION_ENV: dict[str, dict[str, str]] = {}
 
 
 def _pane_env(
-    model: str, client_ref: str | None, owner_type: str | None, owner_ref: str | None,
+    model: str, client_ref: str | None, surface: str | None, surface_id: str | None,
     conversation_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Environment the tmux pane needs for this conversation and model."""
@@ -389,17 +389,17 @@ def _pane_env(
     env["MIND_NAME"] = NAME
     if client_ref:
         env["CLIENT_REF"] = client_ref
-    if owner_type:
-        env["OWNER_TYPE"] = owner_type
-    if owner_ref:
-        env["OWNER_REF"] = owner_ref
+    if surface:
+        env["SURFACE"] = surface
+    if surface_id:
+        env["SURFACE_ID"] = surface_id
     return env
 
 
 def _spawn_pty(
     *, session_id: str, model: str, conversation_id: str, cols: int, rows: int,
     harness_sid: str | None = None, client_ref: str | None = None,
-    owner_type: str | None = None, owner_ref: str | None = None,
+    surface: str | None = None, surface_id: str | None = None,
     system_prompt: str = "", effort: str | None = None,
     extra_env: dict[str, str] | None = None,
 ) -> tuple[Any, int]:
@@ -419,7 +419,7 @@ def _spawn_pty(
 
     if extra_env:
         PANE_CONVERSATION_ENV[session_id] = dict(extra_env)
-    pane_env = _pane_env(model, client_ref, owner_type, owner_ref,
+    pane_env = _pane_env(model, client_ref, surface, surface_id,
                          PANE_CONVERSATION_ENV.get(session_id))
     context_file: Path | None = None
     as_turn = False
@@ -461,9 +461,9 @@ def _spawn_pty(
 
 
 def _rotate_pty(
-    *, session_id: str, new_claude_sid: str, model: str = "", system_prompt: str = "",
+    *, session_id: str, new_conversation_id: str, model: str = "", system_prompt: str = "",
     user_prompt: str = "", client_ref: str | None = None,
-    owner_type: str | None = None, owner_ref: str | None = None,
+    surface: str | None = None, surface_id: str | None = None,
     effort: str | None = None,
 ) -> bool:
     """Respawn a live pane onto a fresh gateway-owned DSH conversation."""
@@ -482,23 +482,23 @@ def _rotate_pty(
             # no file, and asking the runner to answer a context that is not
             # there is refused — which would kill the pane this rotation is
             # supposed to keep alive.
-            _terminal_argv(new_claude_sid, context_file,
+            _terminal_argv(new_conversation_id, context_file,
                            context_as_turn=bool(user_prompt) and context_file is not None),
-            env_overrides=_pane_env(model, client_ref, owner_type, owner_ref,
+            env_overrides=_pane_env(model, client_ref, surface, surface_id,
                                     PANE_CONVERSATION_ENV.get(session_id)),
         )
     except Exception:
         if context_file is not None:
             context_file.unlink(missing_ok=True)
         raise
-    log.info("Rotated DSH terminal %s onto %s", session_id, new_claude_sid)
+    log.info("Rotated DSH terminal %s onto %s", session_id, new_conversation_id)
     log_event(log, "session.pty.rotated", mind_id=MIND_ID, mind_name=NAME,
-              session_id=session_id, conversation_id=new_claude_sid)
+              session_id=session_id, conversation_id=new_conversation_id)
     return True
 
 
 def transcript_path(
-    claude_sid: str, harness_sid: str | None = None, session_id: str = "",
+    conversation_id: str, harness_sid: str | None = None, session_id: str = "",
 ) -> Path | None:
     """Where this conversation's session log is, for a handover to read.
 
@@ -506,9 +506,9 @@ def transcript_path(
     whichever dsh wrote. None when it has written neither.
     """
     del harness_sid, session_id
-    if not claude_sid:
+    if not conversation_id:
         return None
-    directory = DSH_HOME / "sessions" / _project_key(_spawn_cwd()) / _encode_segment(claude_sid)
+    directory = DSH_HOME / "sessions" / _project_key(_spawn_cwd()) / _encode_segment(conversation_id)
     for name in ("session.jsonl.zstd", "session.jsonl"):
         if (directory / name).exists():
             return directory / name
@@ -777,8 +777,8 @@ async def start_session(body: dict) -> Any:
     # Spawn-env metadata for the rotation hook, which reads it to attribute the
     # rotation summary to the right (mind_id, client_ref) row.
     client_ref = body.get("client_ref") or ""
-    owner_type = body.get("surface") or ""
-    owner_ref = body.get("surface_id") or ""
+    surface = body.get("surface") or ""
+    surface_id = body.get("surface_id") or ""
     if system_prompt_blocks and surface_prompt:
         full_prompt = f"{system_prompt_blocks}\n\n{surface_prompt}"
     else:
@@ -797,9 +797,9 @@ async def start_session(body: dict) -> Any:
         "conversation_id": conversation_id,
         "model": model,
         "client_ref": client_ref,
-        "owner_type": owner_type,
-        "owner_ref": owner_ref,
-        "surface": chat_surface(body),
+        "surface": surface,
+        "surface_id": surface_id,
+        "surface_label": chat_surface(body),
         "opening_turn": body.get("opening_turn") or "",
         "conversation_env": dict(body.get("conversation_env") or {}),
     })
@@ -1016,8 +1016,8 @@ async def _run_dsh_turn(
     # HIVE_SURFACE is set, or cleared: never one inherited from the
     # container's own env.
     env.pop("HIVE_SURFACE", None)
-    for key, name in (("client_ref", "CLIENT_REF"), ("owner_type", "OWNER_TYPE"),
-                      ("owner_ref", "OWNER_REF"), ("surface", "HIVE_SURFACE")):
+    for key, name in (("client_ref", "CLIENT_REF"), ("surface", "SURFACE"),
+                      ("surface_id", "SURFACE_ID"), ("surface_label", "HIVE_SURFACE")):
         if state.get(key):
             env[name] = state[key]
     env.update(state.get("conversation_env") or {})

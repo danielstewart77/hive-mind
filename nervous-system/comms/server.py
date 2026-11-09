@@ -20,7 +20,7 @@ import hive_data
 from hive_data import broker_ops, core
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from comms.config import config
 import comms.broker as broker
@@ -228,7 +228,7 @@ async def _refuse_foreign_mind_in_body(request: Request, mind_id: str) -> None:
 
     The sibling guards resolve a conversation and compare its mind. This one
     cannot: the rotation hook addresses its write by the *conversation* id it
-    holds, which is a `claude_sid` and not a `sessions.id`, and no lookup here
+    holds, which is a `conversation_id` and not a `sessions.id`, and no lookup here
     resolves one to the other — which is why the mind it is filing under
     travels in the body. So the body is what is checked, against the holder
     that presented the credential.
@@ -316,17 +316,66 @@ async def health() -> dict[str, str]:
 # Request / response models
 # ---------------------------------------------------------------------------
 # The wire speaks the schema's names (`core.sql`): `surface`, `surface_id`,
-# `conversation_id`. The old names are still taken for one deploy, so a
-# consumer still sending them is not refused while the rest move over; the
-# attribute keeps its old name so nothing behind the route changes.
-_SURFACE = AliasChoices("surface", "owner_type")
-_SURFACE_ID = AliasChoices("surface_id", "owner_ref")
-_CONVERSATION_ID = AliasChoices("conversation_id", "claude_sid")
+# `conversation_id`. The routes that once took the old names refuse them,
+# naming the field that replaced each: a model ignores a key it does not
+# declare, so a consumer still on old code would otherwise have its value
+# dropped without a word - a spawn with no surface, an arm for no
+# conversation - and carry on as if heard.
+_RENAMED = {
+    "owner_type": "surface",
+    "owner_ref": "surface_id",
+    "claude_sid": "conversation_id",
+}
+
+
+class RenamedField(Exception):
+    """A request named a field by the name it had before the rename."""
+
+    def __init__(self, renamed: dict[str, str]) -> None:
+        super().__init__(renamed)
+        self.renamed = renamed
+
+
+@app.exception_handler(RenamedField)
+async def _refuse_renamed_field(request: Request, exc: RenamedField) -> JSONResponse:
+    return JSONResponse(
+        {
+            "error": "; ".join(
+                f"{old} was renamed to {new}" for old, new in exc.renamed.items()
+            ),
+            "renamed": exc.renamed,
+        },
+        status_code=422,
+    )
+
+
+def refuse_renamed(*old_names: str):
+    """A route dependency refusing a request that carries any of ``old_names``.
+
+    Read from the query string on a GET and from the JSON body's top-level
+    keys on anything else - the one place each of those routes ever took
+    them. Every other key is left alone: a body carrying something a route
+    does not use is not this check's business.
+    """
+    async def _refuse(request: Request) -> None:
+        if request.method == "GET":
+            carried = set(request.query_params)
+        else:
+            try:
+                body = await request.json()
+            except ValueError:
+                return
+            carried = set(body) if isinstance(body, dict) else set()
+        renamed = {name: _RENAMED[name] for name in old_names if name in carried}
+        if renamed:
+            raise RenamedField(renamed)
+
+    return Depends(_refuse)
 
 
 class CreateSessionRequest(BaseModel):
-    owner_type: str = Field(validation_alias=_SURFACE)
-    owner_ref: str = Field(validation_alias=_SURFACE_ID)
+    surface: str
+    surface_id: str
     client_ref: str
     model: str | None = None
     surface_prompt: str | None = None
@@ -360,8 +409,8 @@ class ActivateRequest(BaseModel):
     # these forwarded, a surface reaching a conversation that lives in a
     # tmux pane spawns a second `--resume` process beside it, both
     # appending to one transcript.
-    owner_type: str | None = Field(default=None, validation_alias=_SURFACE)
-    owner_ref: str | None = Field(default=None, validation_alias=_SURFACE_ID)
+    surface: str | None = None
+    surface_id: str | None = None
 
 
 class RemoteControlResponse(BaseModel):
@@ -508,7 +557,7 @@ class UpdateMindRequest(BaseModel):
 # ---------------------------------------------------------------------------
 # Session endpoints
 # ---------------------------------------------------------------------------
-@app.post("/sessions")
+@app.post("/sessions", dependencies=[refuse_renamed("owner_type", "owner_ref")])
 async def create_session(body: CreateSessionRequest, request: Request):
     # Naming a mind is not the same as being allowed to use it. Without this,
     # any recognised credential could open a conversation on anybody's mind,
@@ -542,8 +591,8 @@ async def create_session(body: CreateSessionRequest, request: Request):
         )
     try:
         session = await session_mgr.create_session(
-            owner_type=body.owner_type,
-            owner_ref=body.owner_ref,
+            surface=body.surface,
+            surface_id=body.surface_id,
             client_ref=body.client_ref,
             model=body.model,
             surface_prompt=body.surface_prompt,
@@ -558,18 +607,16 @@ async def create_session(body: CreateSessionRequest, request: Request):
         )
 
 
-@app.get("/sessions")
+@app.get("/sessions", dependencies=[refuse_renamed("owner_ref")])
 async def list_sessions(
     request: Request,
     surface_id: str | None = None,
-    owner_ref: str | None = None,
     status: str | None = None,
     client_type: str | None = None,
     client_ref: str | None = None,
 ):
-    # `surface_id` is the schema's name; `owner_ref` is taken for one deploy.
     rows = await session_mgr.list_sessions(
-        owner_ref=surface_id or owner_ref,
+        surface_id=surface_id,
         status=status,
         client_type=client_type,
         client_ref=client_ref,
@@ -714,7 +761,7 @@ class ArmRotationRequest(BaseModel):
     client_ref: str
     # The conversation the hook measured. An arm for one a harness switch
     # has since replaced is ignored; absent means a hook predating it.
-    claude_sid: str = Field(default="", validation_alias=_CONVERSATION_ID)
+    conversation_id: str = ""
     # When the hook began, as epoch seconds. Lets an arm that names no
     # conversation be checked against a conversation replaced since.
     started_at: float | None = None
@@ -723,7 +770,7 @@ class ArmRotationRequest(BaseModel):
 class FireRotationRequest(BaseModel):
     client_type: str
     client_ref: str
-    claude_sid: str = Field(default="", validation_alias=_CONVERSATION_ID)
+    conversation_id: str = ""
     prompt: str = ""
 
 
@@ -737,14 +784,14 @@ class RecordTurnRequest(BaseModel):
     # only cleared if it was composed for this same conversation, so a turn
     # still in flight from before a rotation cannot clear the seed the
     # rotation just wrote.
-    claude_sid: str | None = Field(default=None, validation_alias=_CONVERSATION_ID)
+    conversation_id: str | None = None
 
 
 class HarnessStateRequest(BaseModel):
     harness_sid: str
 
 
-@app.post("/sessions/arm-rotation")
+@app.post("/sessions/arm-rotation", dependencies=[refuse_renamed("claude_sid")])
 async def arm_rotation(body: ArmRotationRequest, request: Request):
     """Arm the active session's conversation for replacement on its next turn.
 
@@ -759,11 +806,11 @@ async def arm_rotation(body: ArmRotationRequest, request: Request):
     await _refuse_foreign_client_ref(request, body.client_type, body.client_ref)
     return await session_mgr.arm_rotation(
         body.client_type, body.client_ref,
-        claude_sid=body.claude_sid, started_at=body.started_at,
+        conversation_id=body.conversation_id, started_at=body.started_at,
     )
 
 
-@app.post("/sessions/fire-rotation")
+@app.post("/sessions/fire-rotation", dependencies=[refuse_renamed("claude_sid")])
 async def fire_rotation(body: FireRotationRequest, request: Request):
     """Replace a pane's conversation, carrying the typed message.
 
@@ -777,11 +824,11 @@ async def fire_rotation(body: FireRotationRequest, request: Request):
     await _refuse_foreign_client_ref(request, body.client_type, body.client_ref)
     return await session_mgr.fire_rotation(
         body.client_type, body.client_ref,
-        claude_sid=body.claude_sid, prompt=body.prompt,
+        conversation_id=body.conversation_id, prompt=body.prompt,
     )
 
 
-@app.post("/sessions/record-turn")
+@app.post("/sessions/record-turn", dependencies=[refuse_renamed("claude_sid")])
 async def record_turn(body: RecordTurnRequest, request: Request):
     """Append one turn to the active session's late-turn ledger.
 
@@ -802,7 +849,7 @@ async def record_turn(body: RecordTurnRequest, request: Request):
     await _refuse_foreign_client_ref(request, body.client_type, body.client_ref)
     return await session_mgr.record_turn(
         body.client_type, body.client_ref, body.role, body.content,
-        claude_sid=body.claude_sid,
+        conversation_id=body.conversation_id,
     )
 
 
@@ -923,10 +970,10 @@ async def publish_pty_text(
 
 @app.get(
     "/sessions/{session_id}/carry-forward",
+    dependencies=[refuse_renamed("claude_sid")],
 )
 async def get_carry_forward(
     session_id: str, request: Request, conversation_id: str = "",
-    claude_sid: str = "",
 ):
     """The rotation carry-forward a mind still owes this conversation.
 
@@ -945,10 +992,8 @@ async def get_carry_forward(
     await _require_own_session_mind(request, session_id)
     return {
         "session_id": session_id,
-        # `conversation_id` is the schema's name; `claude_sid` is taken for
-        # one deploy.
         "carry_forward": await session_mgr.get_carry_forward(
-            session_id, conversation_id or claude_sid
+            session_id, conversation_id
         ),
     }
 
@@ -1053,7 +1098,7 @@ async def get_session_history(session_id: str):
 # ---------------------------------------------------------------------------
 # Session management endpoints
 # ---------------------------------------------------------------------------
-@app.post("/sessions/{session_id}/activate")
+@app.post("/sessions/{session_id}/activate", dependencies=[refuse_renamed("owner_type", "owner_ref")])
 async def activate_session(session_id: str, body: ActivateRequest):
     """A conversation with nowhere to go says which kind of nowhere.
 
@@ -1068,7 +1113,7 @@ async def activate_session(session_id: str, body: ActivateRequest):
     try:
         return await session_mgr.activate_session(
             session_id, body.client_type, body.client_ref,
-            owner_type=body.owner_type, owner_ref=body.owner_ref,
+            surface=body.surface, surface_id=body.surface_id,
         )
     except sessions.SessionNotFound as exc:
         return JSONResponse({"error": str(exc)}, status_code=404)
@@ -1279,7 +1324,7 @@ async def ws_attach(ws: WebSocket, session_id: str):
     Resolves the session's mind via the DB (not the in-memory `_procs` cache,
     which is empty after a restart even though the session and its container
     are both still alive) so a fresh hive-comms process can still route an
-    attach. Session-lifecycle knowledge (claude_sid, model) stays here;
+    attach. Session-lifecycle knowledge (conversation_id, model) stays here;
     the mind's attach-pty route stays stateless per-request.
     """
     # The gate in front of this route has already resolved the caller and
@@ -1313,7 +1358,7 @@ async def ws_attach(ws: WebSocket, session_id: str):
     # A session without a conversation id cannot be attached to. Say so
     # instead of proxying through and letting the terminal open on nothing —
     # a blank tile beside a live chat is worse than a visible failure.
-    conversation_id = (session.get("claude_sid") or "").strip()
+    conversation_id = (session.get("conversation_id") or "").strip()
     if not conversation_id:
         log.error("session %s has no conversation id — refusing attach", session_id)
         await ws.close(code=4409, reason="session has no conversation to attach to")
@@ -1364,11 +1409,8 @@ async def ws_attach(ws: WebSocket, session_id: str):
         "cols": ws.query_params.get("cols") or "80",
         "rows": ws.query_params.get("rows") or "24",
         "client_ref": routing["client_ref"],
-        "surface": routing["owner_type"],
-        "surface_id": routing["owner_ref"],
-        # The old names, for a mind that has not moved to the schema's yet.
-        "owner_type": routing["owner_type"],
-        "owner_ref": routing["owner_ref"],
+        "surface": routing["surface"],
+        "surface_id": routing["surface_id"],
     })
     attach_url = f"{mind_ws_url}/sessions/{session_id}/attach-pty?{params}"
 
@@ -1469,13 +1511,13 @@ SERVER_COMMANDS = {"/clear", "/model", "/effort", "/harness", "/kill", "/prune",
 
 class CommandRequest(BaseModel):
     content: str
-    owner_type: str = Field(default="terminal", validation_alias=_SURFACE)
-    owner_ref: str = Field(default="", validation_alias=_SURFACE_ID)
+    surface: str = "terminal"
+    surface_id: str = ""
     client_ref: str = ""
     mind_id: str
 
 
-@app.post("/command")
+@app.post("/command", dependencies=[refuse_renamed("owner_type", "owner_ref")])
 async def route_command(body: CommandRequest, request: Request):
     """Route slash commands — server-handled or passthrough to CLI."""
     content = body.content.strip()
@@ -1515,8 +1557,8 @@ async def _selectable(
     users as well: a position can only ever address the caller's own.
     """
     rows = await session_mgr.list_selectable_sessions(
-        owner_ref=body.owner_ref,
-        client_type=body.owner_type,
+        surface_id=body.surface_id,
+        client_type=body.surface,
         client_ref=body.client_ref,
         mind_id=body.mind_id,
     )
@@ -1575,7 +1617,7 @@ async def _handle_command(
         if not await _names_own_mind(caller, body.mind_id):
             return {"error": "Session not found"}
         active = await session_mgr.get_active_session(
-            body.owner_type, body.client_ref
+            body.surface, body.client_ref
         )
         # A surface reference bound to a conversation on someone else's mind
         # is refused in the same words an absent one gets, so the command
@@ -1603,20 +1645,20 @@ async def _handle_command(
     if cmd in ("/new", "/clear"):
         # Kill active session (if any), run memory pipeline on it, then create a new one.
         # _run_memory_for_owner blocks inside create_session until the pipeline finishes.
-        active = await session_mgr.get_active_session(body.owner_type, body.client_ref)
+        active = await session_mgr.get_active_session(body.surface, body.client_ref)
         if active:
             await session_mgr.kill_session(active["id"])
         allowed_directories = parts[1:] if len(parts) > 1 else None
         return await session_mgr.create_session(
-            owner_type=body.owner_type,
-            owner_ref=body.owner_ref,
+            surface=body.surface,
+            surface_id=body.surface_id,
             client_ref=body.client_ref,
             allowed_directories=allowed_directories,
             mind_id=body.mind_id,
         )
 
     if cmd == "/model":
-        active = await session_mgr.get_active_session(body.owner_type, body.client_ref)
+        active = await session_mgr.get_active_session(body.surface, body.client_ref)
         if len(parts) < 2:
             if not active:
                 return {"error": "No active session. Use /new first."}
@@ -1643,7 +1685,7 @@ async def _handle_command(
             return {"error": str(exc)}
 
     if cmd == "/effort":
-        active = await session_mgr.get_active_session(body.owner_type, body.client_ref)
+        active = await session_mgr.get_active_session(body.surface, body.client_ref)
         if not active:
             return {"error": "No active session. Use /new first."}
         try:
@@ -1658,7 +1700,7 @@ async def _handle_command(
         # Bare: what the mind offers, unavailable ones with their reason, and
         # where this conversation is. With a harness: that harness's models,
         # since the switch lands only once one is picked. With both: switch.
-        active = await session_mgr.get_active_session(body.owner_type, body.client_ref)
+        active = await session_mgr.get_active_session(body.surface, body.client_ref)
         if not active:
             return {"error": "No active session. Use /new first."}
         if len(parts) < 2:
@@ -1684,8 +1726,8 @@ async def _handle_command(
         if error:
             return error
         return await session_mgr.activate_session(
-            target, body.owner_type, body.client_ref,
-            owner_type=body.owner_type, owner_ref=body.owner_ref,
+            target, body.surface, body.client_ref,
+            surface=body.surface, surface_id=body.surface_id,
         )
 
     if cmd == "/kill":
@@ -1697,9 +1739,9 @@ async def _handle_command(
         return await session_mgr.kill_session(target)
 
     if cmd == "/prune":
-        active = await session_mgr.get_active_session(body.owner_type, body.client_ref)
+        active = await session_mgr.get_active_session(body.surface, body.client_ref)
         active_id = active["id"] if active else None
-        rows = await session_mgr.list_sessions(owner_ref=body.owner_ref)
+        rows = await session_mgr.list_sessions(surface_id=body.surface_id)
         keys = await user_access.visible_minds(caller)
         known = await user_access.all_mind_keys()
         sessions = user_access.filter_sessions(rows, caller, keys, known)

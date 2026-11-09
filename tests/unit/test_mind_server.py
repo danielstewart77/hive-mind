@@ -478,7 +478,7 @@ def panes(monkeypatch, homes, proxy):
 
 
 def _attach(client, sid, harness, model, carried, monkeypatch):
-    async def fetch(session_id, claude_sid):
+    async def fetch(session_id, conversation_id):
         return carried
 
     monkeypatch.setattr(pty_attach, "fetch_carry_forward", fetch)
@@ -926,8 +926,8 @@ def test_the_next_attach_on_another_harness_is_cold_on_one_shared_tmux_session(
     monkeypatch.setattr(codex_cli, "_watch_for_new_thread_in_background", lambda *a, **k: None)
     client = TestClient(mind_server.app)
 
-    async def fetch(session_id, claude_sid):
-        fetched.append(claude_sid)
+    async def fetch(session_id, conversation_id):
+        fetched.append(conversation_id)
         return "HANDOVER TEXT"
 
     for harness in ("claude", "codex"):

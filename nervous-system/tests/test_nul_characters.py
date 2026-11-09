@@ -45,9 +45,9 @@ def test_a_terminal_turn_carrying_a_nul_lands_in_the_ledger(comms_db) -> None:
         mgr = await make_manager()
         try:
             await seed_session(
-                "sess-nul", owner_type="web", owner_ref="terminal", model="opus",
-                claude_sid="conv-nul", status="running", mind_id="ada",
-                summary="x")
+                "sess-nul", surface="web", surface_id="terminal", model="opus",
+                conversation_id="conv-nul", status="running", mind_id="ada",
+                opening_line="x")
             await execute(
                 "INSERT INTO core.active_sessions (client_type, client_ref, session_id) "
                 "VALUES ('web', 'tile-1', 'sess-nul')")

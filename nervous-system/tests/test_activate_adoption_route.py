@@ -1,11 +1,14 @@
-"""`POST /sessions/{id}/activate` carries an owner, or it is not an adoption.
+"""`POST /sessions/{id}/activate` carries a surface, or it is not an adoption.
 
 A surface that reaches a conversation living in a tmux pane must release
 that pane before it speaks, or comms spawns a second `--resume` process
 beside the one already holding the transcript. That release is driven by
-the owner fields, and a request model that quietly drops them turns every
+the surface fields, and a request model that quietly drops them turns every
 adoption over HTTP into a plain activation that looks identical in the
 response and breaks the invariant silently.
+
+Checked against the row the real session manager stored. The mind is the
+one thing stubbed: releasing a pane and spawning a process are calls to it.
 """
 
 import importlib
@@ -14,7 +17,9 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from comms_pg_fixture import comms_db, scratch_dsn  # noqa: F401 - fixtures
+from comms_pg_fixture import (  # noqa: F401 - fixtures
+    add_turn, comms_db, fetchrow, scratch_dsn, seed_session,
+)
 
 
 #: These tests are about their own subject, not about authorization, so they
@@ -33,49 +38,48 @@ def client(monkeypatch, comms_db):  # noqa: F811 - the imported fixture
 
     importlib.reload(server_module)
     with TestClient(server_module.app, headers={"Authorization": f"Bearer {GRILL_ADMIN}"}) as http:
-        yield http, server_module
+        async def _seed():
+            await seed_session("sess-1", surface="web", surface_id="terminal",
+                               status="idle", mind_id="ada")
+            # A conversation that took a turn, so waking it is a resume.
+            await add_turn("sess-1", "user", "hello")
+
+        http.portal.call(_seed)
+        mgr = server_module.session_mgr
+        with patch.object(mgr, "release_on_mind", AsyncMock()), \
+                patch.object(mgr, "_spawn", AsyncMock()):
+            yield http
 
 
-@pytest.mark.parametrize(
-    "surface_key, surface_id_key",
-    [("surface", "surface_id"), ("owner_type", "owner_ref")],
-    ids=["schema-names", "old-names"],
-)
-def test_the_owner_reaches_the_session_manager(client, surface_key, surface_id_key):
-    """Under the schema's names, and under the old ones for one deploy."""
-    http, server = client
-    activate = AsyncMock(return_value={"ok": True})
-
-    with patch.object(server.session_mgr, "activate_session", activate):
-        response = http.post(
-            "/sessions/sess-1/activate",
-            # Deliberately different from the client pair. Identical values
-            # cannot tell a route that forwards the owner from one that
-            # forwards the client fields twice.
-            json={
-                "client_type": "browser",
-                "client_ref": "tab-7",
-                surface_key: "design",
-                surface_id_key: "design-1",
-            },
-        )
-
-    assert response.status_code == 200
-    assert activate.await_args.args[1:] == ("browser", "tab-7")
-    assert activate.await_args.kwargs["owner_type"] == "design"
-    assert activate.await_args.kwargs["owner_ref"] == "design-1"
+def _stored(http) -> dict:
+    return http.portal.call(
+        fetchrow, "SELECT surface, surface_id FROM core.sessions WHERE id = 'sess-1'"
+    )
 
 
-def test_a_request_with_no_owner_is_still_a_plain_activation(client):
-    http, server = client
-    activate = AsyncMock(return_value={"ok": True})
+def test_the_surface_named_takes_the_conversation(client):
+    response = client.post(
+        "/sessions/sess-1/activate",
+        # Deliberately different from the client pair. Identical values
+        # cannot tell a route that forwards the surface from one that
+        # forwards the client fields twice.
+        json={
+            "client_type": "browser",
+            "client_ref": "tab-7",
+            "surface": "design",
+            "surface_id": "design-1",
+        },
+    )
 
-    with patch.object(server.session_mgr, "activate_session", activate):
-        response = http.post(
-            "/sessions/sess-1/activate",
-            json={"client_type": "telegram", "client_ref": "chat-1"},
-        )
+    assert response.status_code == 200, response.text
+    assert _stored(client) == {"surface": "design", "surface_id": "design-1"}
 
-    assert response.status_code == 200
-    assert activate.await_args.kwargs["owner_type"] is None
-    assert activate.await_args.kwargs["owner_ref"] is None
+
+def test_a_request_with_no_surface_is_still_a_plain_activation(client):
+    response = client.post(
+        "/sessions/sess-1/activate",
+        json={"client_type": "telegram", "client_ref": "chat-1"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert _stored(client) == {"surface": "web", "surface_id": "terminal"}
