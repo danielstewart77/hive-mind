@@ -85,7 +85,7 @@ def test_list_credentials_marks_manual_only_entries_non_rotatable():
 
 
 def test_rotate_credential_rejects_manual_only_key():
-    with pytest.raises(ValueError, match="sqlite"):
+    with pytest.raises(ValueError, match="api_tokens"):
         credentials_data.rotate_credential("hive_tools_token")
 
 

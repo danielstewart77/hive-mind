@@ -6,7 +6,7 @@ credentials per holder, and `holder_credentials` is the page's path to those.
 What is left here is the two admin tokens — which guard the minting routes
 themselves and are held by more files than this container can see — the
 hive-tools API token, which is issued per consumer from hive-tools' own
-sqlite store with no symmetric env copy, and the GitHub PAT.
+token store in Postgres with no symmetric env copy, and the GitHub PAT.
 
 None of the four is rotatable from the page, each for a reason it states.
 What this module still owns is reading a value out of a `.env` and writing one
@@ -304,8 +304,8 @@ CREDENTIAL_GROUPS: list[dict[str, Any]] = [
         "label": "Hive Tools API token",
         "rotatable": False,
         "manual_reason": (
-            "Issued per-consumer from hive-tools' own token store (sqlite "
-            "api_tokens table, sha256-hashed) — there is no symmetric "
+            "Issued per-consumer from hive-tools' own token store (the "
+            "Postgres tools.api_tokens table, sha256-hashed) — there is no symmetric "
             "env value to fan out. Mint a replacement via hive-tools' "
             "token admin, then update each consumer's HIVE_TOOLS_TOKEN by hand."
         ),
