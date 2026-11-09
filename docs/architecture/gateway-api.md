@@ -94,7 +94,7 @@ Both layers are required. Neither works without the other.
 
 ## Session Model
 
-Each session is a Claude CLI (or Codex CLI) subprocess managed by `nervous-system/comms/sessions.py`. Sessions are stored in SQLite (`nervous-system/data/sessions.db`). The session manager handles:
+Each session is a Claude CLI (or Codex CLI) subprocess managed by `nervous-system/comms/sessions.py`. Sessions are stored in the hive's Postgres, reached through `hive_data`. The session manager handles:
 
 - **Process pool**: one subprocess per active session
 - **Explicit ends only**: a session is suspended or closed when somebody asks

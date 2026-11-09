@@ -52,6 +52,6 @@ class TestDevRequirements:
         dev_packages = extract_packages(dev_content)
 
         # Core production packages that should NOT appear in dev requirements
-        core_prod = {"fastapi", "uvicorn", "aiosqlite", "aiohttp", "neo4j", "py2neo"}
+        core_prod = {"fastapi", "uvicorn", "aiohttp", "neo4j", "py2neo"}
         overlap = dev_packages & core_prod
         assert not overlap, f"Dev requirements should not include production deps: {overlap}"

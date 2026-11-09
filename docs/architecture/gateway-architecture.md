@@ -9,7 +9,7 @@ The gateway (`hive-comms`, built from `nervous-system/comms/server.py`) is the s
 `nervous-system/comms/sessions.py` manages a pool of Claude/Codex CLI subprocesses.
 
 - Each session is a separate subprocess communicating via stdin/stdout NDJSON
-- Sessions are stored in SQLite (`nervous-system/data/sessions.db`)
+- Sessions are stored in the hive's Postgres, reached through `hive_data`
 - Sessions are suspended or closed only on an explicit request; nothing ends
   one for having been quiet
 - `last_active` is updated on every event yielded
@@ -46,7 +46,7 @@ Per-subprocess env isolation — no global env mutation.
 
 **How it works:**
 - A mind POSTs to `POST /broker/messages` with `from`, `to`, `content`, and optional `rolling_summary`
-- The broker writes the message to `nervous-system/data/broker.db` (SQLite, separate from `sessions.db`) and returns immediately: `{ "status": "dispatched", "conversation_id": "...", "message_id": "..." }`
+- The broker writes the message to the hive's Postgres (through `hive_data`) and returns immediately: `{ "status": "dispatched", "conversation_id": "...", "message_id": "..." }`
 - An `asyncio` background task wakes the callee: creates a session via `session_mgr`, sends a wakeup prompt, collects the full SSE response, and writes it back as a new message row
 - The caller's polling agent (`tools/stateless/poll_broker/poll_broker.py`) polls `GET /broker/messages?conversation_id=<id>` every 30 seconds until the callee's response appears
 - Callee minds never know about the broker — they just respond normally through their session
