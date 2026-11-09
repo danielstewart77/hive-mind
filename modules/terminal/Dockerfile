@@ -18,8 +18,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY --from=hive_site . /tmp/hive-site
 RUN pip install --no-cache-dir --no-deps /tmp/hive-site && rm -rf /tmp/hive-site
 
-# The hive's data-access layer, needed by the shared store whenever this
-# site is pointed at Postgres. Same reasoning: private repository, second
+# The hive's data-access layer, which the shared store runs on. Same
+# reasoning: private repository, second
 # build context, dependencies declared beside everything else.
 COPY --from=hive_data . /tmp/hive-data
 RUN pip install --no-cache-dir --no-deps /tmp/hive-data && rm -rf /tmp/hive-data

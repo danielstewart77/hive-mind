@@ -8,12 +8,9 @@ Serving the real app over a real port rather than TestClient: the page has to
 load its own templates, static files and xterm bundle the way a browser does.
 """
 
-import asyncio
 import os
 import socket
 import sys
-import tempfile
-import threading
 import time
 
 import pytest
@@ -31,18 +28,47 @@ import store  # noqa: E402
 from hive_site import testing as accounts  # noqa: E402
 
 
+@pytest.fixture(scope="session")
+def scratch_database():
+    """One scratch database for the run, claimed, with the schemas applied.
+
+    Fails rather than skips without a server: a suite that skipped every
+    test would read as green while testing nothing.
+    """
+    if not accounts.ADMIN_DSN:
+        pytest.fail(accounts.NO_SERVER)
+    with accounts.testclients_on_the_suite_loop():
+        scratch = accounts.run(accounts.ScratchDatabase.create())
+        try:
+            yield scratch
+        finally:
+            accounts.run(scratch.close())
+            accounts.stop_suite_portal()
+
+
 @pytest.fixture(scope="module")
-def live_app():
-    tmp = tempfile.mkdtemp()
-    os.environ["HIVE_DB_PATH"] = os.path.join(tmp, "stb.db")
-    os.environ["HIVE_DATABASE_URL"] = ""
+def live_app(scratch_database):
+    """The real app on a real port, serving for the module.
+
+    Served on the suite's own loop, as a task, rather than on a loop of its
+    own in a thread: the server's lifespan opens the store, and a pool
+    belongs to the loop that opened it, so every other test in the module —
+    the ones driving `TestClient` beside the browser — has to be on the
+    same one. The signed-in user is made first and the store closed again,
+    so the lifespan's open is the one that holds it.
+    """
+    os.environ["HIVE_DATABASE_URL"] = scratch_database.dsn
     os.environ["HIVE_SECRET_KEY"] = "browser-test-secret"
-    asyncio.run(store.open())
+    accounts.run(scratch_database.reset())
+    accounts.run(store.open())
+    try:
+        user = accounts.make_user("browser-test", "browser-pass",
+                                  is_admin=True, replace=True)
+        token = accounts.session_token(user)
+    finally:
+        accounts.run(store.close())
 
     import uvicorn
-
-    user = accounts.make_user("browser-test", "browser-pass", is_admin=True, replace=True)
-    token = accounts.session_token(user)
 
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
@@ -52,8 +78,7 @@ def live_app():
     server = uvicorn.Server(
         uvicorn.Config(main_mod.app, host="127.0.0.1", port=port, log_level="error")
     )
-    serving = threading.Thread(target=server.run, daemon=True)
-    serving.start()
+    serving = accounts.suite_portal().start_task_soon(server.serve)
     for _ in range(100):
         try:
             socket.create_connection(("127.0.0.1", port), 0.2).close()
@@ -66,12 +91,10 @@ def live_app():
     yield f"http://127.0.0.1:{port}", token
     server.should_exit = True
     # Waited for, not fired and forgotten. The app's own lifespan owns the
-    # store now, and its shutdown closes it — on the server's thread. Left
-    # unjoined, that close lands after the next module has opened its own
-    # store and every test in it then fails on a closed one.
-    serving.join(timeout=10)
-    if store.is_open():
-        asyncio.run(store.close())
+    # store, and its shutdown closes it. Left unawaited, that close lands
+    # after the next module has opened its own store and every test in it
+    # then fails on a closed one.
+    serving.result(timeout=10)
 
 
 @pytest.fixture()
@@ -113,18 +136,13 @@ from multiuser_support import (  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
-def _isolated_hive_db(request, tmp_path, monkeypatch):
-    """Every test on a db of its own, on the SQLite half, with it open.
+def _isolated_hive_db(request, scratch_database, monkeypatch):
+    """Every test on an emptied scratch database, with the store open.
 
-    The path first: the default is now a refusal rather than the repo's own
-    data/hive.db, but a test that named nothing would fail on the refusal
-    instead of running.
-
-    The half second. `store.open` picks its backend from
-    `HIVE_DATABASE_URL`, and on the machine that runs the hive that variable
-    is exported, so without this the whole suite would run against the
-    hive's live Postgres. The Postgres half is covered on purpose, in
-    `test_shared_account_store.py` and in the console's own parity suite.
+    `HIVE_DATABASE_URL` is pointed at the scratch database here, whatever
+    the machine exports: on the host that runs the hive that variable names
+    the live database, and a suite that inherited it would edit production
+    and report green.
 
     And the open. Nothing opens the store on demand, so a test reaching a
     route without this gets the refusal that says the lifespan never ran.
@@ -137,18 +155,18 @@ def _isolated_hive_db(request, tmp_path, monkeypatch):
         return
     if store.is_open():
         # A module-scoped live server in this file owns the store, and some
-        # of that module's tests do not ask for the browser. Opening a
-        # second store over the top would point every later statement at a
-        # different file while that server is still serving the first.
+        # of that module's tests do not ask for the browser. Emptying or
+        # reopening it would pull the rows out from under a server that is
+        # still serving them.
         yield
         return
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "hive.db"))
-    monkeypatch.setenv("HIVE_DATABASE_URL", "")
-    asyncio.run(store.open())
+    monkeypatch.setenv("HIVE_DATABASE_URL", scratch_database.dsn)
+    accounts.run(scratch_database.reset())
+    accounts.run(store.open())
     try:
         yield
     finally:
-        asyncio.run(store.close())
+        accounts.run(store.close())
 
 
 @pytest.fixture(scope="session")
@@ -255,13 +273,13 @@ def builtin_terminal(monkeypatch, fake_comms):
 
 
 def pytest_pyfunc_call(pyfuncitem):
-    """Run coroutine tests without pulling in a plugin for it.
+    """Run coroutine tests on the suite's loop, without a plugin for it.
 
     Most of this suite is synchronous and drives the site through its own
     HTTP surface or a real browser. The tests that call the shared store
-    directly are coroutines now that it is one, and one plugin's default
-    event-loop scoping would then apply to every test in the repo. The same
-    hook, for the same reason, is in the console's suite.
+    directly are coroutines, and they run on the loop the store's pool
+    belongs to. The same hook, for the same reason, is in the console's
+    suite.
     """
     import inspect
 
@@ -273,5 +291,5 @@ def pytest_pyfunc_call(pyfuncitem):
         for name in pyfuncitem._fixtureinfo.argnames
         if name in pyfuncitem.funcargs
     }
-    asyncio.run(func(**kwargs))
+    accounts.run(func(**kwargs))
     return True

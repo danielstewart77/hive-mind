@@ -221,7 +221,6 @@ def _assert_error_shown(page):
 
 
 def _authed_client(tmp_path, monkeypatch):
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "stb.db"))
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
     user = accounts.make_user("daniel", "secret-pass", is_admin=True, replace=True)
     client = TestClient(main_mod.app)
@@ -410,7 +409,6 @@ def test_an_empty_transcript_shows_the_error_state_and_types_nothing(page):
 
 # 9. A transcription request carrying no valid login is refused.
 def test_transcription_without_a_login_is_refused(tmp_path, monkeypatch):
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "stb.db"))
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
     client = TestClient(main_mod.app)
 

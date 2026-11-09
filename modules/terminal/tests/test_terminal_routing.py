@@ -29,7 +29,6 @@ import main as main_mod
 
 
 def _authed_client(tmp_path, monkeypatch):
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "stb.db"))
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
     user = accounts.make_user("daniel", "secret-pass", is_admin=True, replace=True)
     client = TestClient(main_mod.app)

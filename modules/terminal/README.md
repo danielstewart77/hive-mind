@@ -30,11 +30,8 @@ change made in the console moved `session_version` in one store while this
 site read the old value out of the other — which from a chair is being
 signed out of the terminal and nowhere else.
 
-Which store answers is this site's own `HIVE_DATABASE_URL`: set means the
-hive's Postgres, unset means the `hive.db` at `HIVE_DB_PATH` (which has no
-default — an unnamed file is refused rather than invented). The two sites
-read it independently, so the terminal can be put back on the file while the
-console stays on Postgres. Either way a session issued by either site
+The accounts live in the hive's Postgres at `HIVE_DATABASE_URL`, which is
+required: unset, the site refuses to start. A session issued by either site
 verifies on both, scoped to the `sparktobloom.com` cookie domain. Accounts are managed on the console;
 the terminal has no user pages of its own beyond changing your password, and
 a user holding a temporary password reaches nothing else until they do.
@@ -63,16 +60,14 @@ docker compose up -d --build
 ```
 
 Runs as container `terminal-site` on :8711, on the `hivemind` docker
-network (to reach `hive-comms` and the voice server). The hive site's
-`data/` directory is mounted directly, not copied, so both containers
-read and write the same `hive.db` when neither is on Postgres. `src/` is
-bind-mounted; the shared `hive_site` package is installed into the image,
+network (to reach `hive-comms`, the voice server and the hive's Postgres).
+`src/` is bind-mounted; the shared `hive_site` package is installed into the image,
 so a change to it reaches this site by a rebuild; route changes need a
 container restart.
 
 `.env` keys: `COMMS_BEARER_TOKEN`; `HIVE_DATA_DIR` and, if the hive checkout
 is not at the default path, `HIVE_SITE_DIR` — the two build contexts;
-`HIVE_DATABASE_URL` when this site is on Postgres; `HIVE_SECRET_KEY` only if
+`HIVE_DATABASE_URL` (required); `HIVE_SECRET_KEY` only if
 the console sets one (left unset on both, the key is generated once and kept
 in the shared store); and, when the console signs in through auth-service,
 the same `AUTH_SERVICE_URL` and `AUTH_SERVICE_ADMIN_TOKEN` (or
@@ -84,5 +79,9 @@ store to share a session.
 ```
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
-.venv/bin/python -m pytest
+HIVE_DATA_TEST_ADMIN_DSN=postgresql://… .venv/bin/python -m pytest
 ```
+
+The suite runs on a scratch Postgres it creates, claims and drops on the
+server `HIVE_DATA_TEST_ADMIN_DSN` names (see `hive_site/testing.py`), never
+on the live database.

@@ -17,23 +17,17 @@ services:
     env_file: .env
     environment:
       - TERMINAL_HOST=0.0.0.0
-      # Which store answers, read by this site independently of the
-      # console's: set means the hive's one Postgres through `hive_data`,
-      # unset means the hive.db mounted below. That unset is the revert —
-      # one value in .env and a restart — and it can be done here while the
-      # console stays on Postgres.
-      - HIVE_DATABASE_URL=${HIVE_DATABASE_URL:-}
-      - HIVE_DB_PATH=/data/hive.db
+      # The hive's one Postgres, through `hive_data`, where the accounts
+      # this site shares with the console live. Required: the site refuses
+      # to start without it.
+      - HIVE_DATABASE_URL=${HIVE_DATABASE_URL:?set HIVE_DATABASE_URL in .env}
       # Parent domain so the session cookie is shared with the hive site,
-      # which owns the same auth db and secret.
+      # which reads the same accounts and secret.
       - HIVE_COOKIE_DOMAIN=sparktobloom.com
       - GATEWAY_API_URL=http://hive-comms:8424
       - VOICE_API_URL=${VOICE_API_URL:-http://hive-mind-voice:8422}
     volumes:
       - ./src:/app/src
-      # Auth db — the hive site's, mounted directly (not a copy) so a
-      # session issued by either site verifies on both.
-      - ${HIVE_DB_HOST_DIR:-/home/daniel/Storage/Dev/hive/data}:/data
     networks:
       - hivemind
 

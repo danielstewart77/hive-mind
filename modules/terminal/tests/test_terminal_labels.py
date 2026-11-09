@@ -88,7 +88,6 @@ class _Gateway:
 
 
 def _authed_client(tmp_path, monkeypatch):
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "stb.db"))
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
     user = accounts.make_user("daniel", "secret-pass", is_admin=True, replace=True)
     client = TestClient(main_mod.app)
@@ -167,7 +166,6 @@ def test_an_unreachable_gateway_is_reported_rather_than_answered_empty(
 
 def test_names_require_auth(tmp_path, monkeypatch):
     """The cookie path is what `mini-boss` reads with; it stays guarded."""
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "stb.db"))
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-secret")
     client = TestClient(main_mod.app)
     assert client.get("/api/terminal/labels").status_code == 401

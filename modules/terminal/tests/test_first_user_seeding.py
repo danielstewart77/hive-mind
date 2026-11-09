@@ -19,7 +19,6 @@ from hive_site import testing as accounts
 @pytest.fixture
 def standalone(tmp_path, monkeypatch):
     """A deployment with nobody else to have made an account."""
-    monkeypatch.setenv("HIVE_DB_PATH", str(tmp_path / "auth.db"))
     monkeypatch.setenv("HIVE_SECRET_KEY", "test-only-signing-key")
     monkeypatch.delenv("HIVE_COOKIE_DOMAIN", raising=False)
     return tmp_path

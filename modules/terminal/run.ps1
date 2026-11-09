@@ -68,11 +68,6 @@ $env:TERMINAL_LABELS_TOKEN = $mind['TERMINAL_LABELS_TOKEN']
 $env:TERMINAL_HOST = if ($env:TERMINAL_HOST) { $env:TERMINAL_HOST } else { '127.0.0.1' }
 $env:TERMINAL_PORT = if ($env:TERMINAL_PORT) { $env:TERMINAL_PORT } else { '8432' }
 
-# Auth state beside the mind's own, in the operator's home rather than in
-# a docker volume that no longer exists.
-$state = Join-Path $env:USERPROFILE '.mini-boss'
-if (-not (Test-Path $state)) { New-Item -ItemType Directory -Force -Path $state | Out-Null }
-$env:HIVE_DB_PATH = Join-Path $state 'auth.db'
 $env:HIVE_SECRET_KEY = $mind['HIVE_SECRET_KEY']
 $env:HIVE_SEED_USERNAME = $mind['HIVE_SEED_USERNAME']
 $env:HIVE_SEED_PASSWORD = $mind['HIVE_SEED_PASSWORD']
