@@ -9,7 +9,6 @@
 SET statement_timeout = 0;
 SET lock_timeout = 0;
 SET idle_in_transaction_session_timeout = 0;
-SET transaction_timeout = 0;
 SET client_encoding = 'UTF8';
 SET standard_conforming_strings = on;
 SELECT pg_catalog.set_config('search_path', '', false);
@@ -24,7 +23,9 @@ SET row_security = off;
 -- This file is the schema's source, edited by hand. It began as
 -- `pg_dump -s --schema=memory --no-owner --no-acl` output; the generator
 -- behind that read the retired SQLite stores and is deleted, so a schema
--- change is an edit here. Applying it on a fresh host is story 1.2.23.
+-- change was an edit here. Applying it to a database is `hive_data.migrate`,
+-- as baseline step 2; a fix after the baseline is a new numbered file in
+-- `steps/`, never an edit here.
 --
 -- The `\restrict` and `\unrestrict` lines pg_dump 17 emits are removed:
 -- they are psql meta-commands, and a driver executing this file hits a
@@ -48,7 +49,7 @@ CREATE EXTENSION IF NOT EXISTS unaccent WITH SCHEMA public;
 -- Name: memory; Type: SCHEMA; Schema: -; Owner: -
 --
 
-CREATE SCHEMA memory;
+CREATE SCHEMA IF NOT EXISTS memory;
 
 
 --

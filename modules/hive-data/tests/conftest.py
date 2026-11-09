@@ -27,6 +27,7 @@ import pytest
 import pytest_asyncio
 
 import hive_data
+from hive_data import migrate
 
 from tests._scratch import claimed_database, sweep_stale
 
@@ -81,14 +82,9 @@ async def scratch_dsn() -> str:
     finally:
         await admin.close()
     async with claimed_database(ADMIN_DSN, "hive_data_test_") as dsn:
-        target = await asyncpg.connect(dsn)
-        try:
-            await target.execute(SCHEMA_SQL.read_text())
-            await target.execute(MEMORY_SCHEMA_SQL.read_text())
-            await target.execute(TOOLS_SCHEMA_SQL.read_text())
-            await target.execute(BOARD_SCHEMA_SQL.read_text())
-        finally:
-            await target.close()
+        # Through the migration, not the four files by hand, so the suite
+        # runs against exactly what an install applies — later steps too.
+        await migrate.apply(dsn)
         yield dsn
 
 

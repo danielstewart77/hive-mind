@@ -1,8 +1,9 @@
 --
 -- The `tools` schema's source, edited by hand. It began as `pg_dump -s`
 -- output, kept below; the generator behind that read the retired SQLite
--- stores and is deleted, so a schema change is an edit here. Applying it on
--- a fresh host is story 1.2.23.
+-- stores and is deleted. Applying it to
+-- a database is `hive_data.migrate`, as baseline step 3; a fix after the
+-- baseline is a new numbered file in `steps/`, never an edit here.
 --
 -- PostgreSQL database dump
 --
@@ -14,7 +15,6 @@
 SET statement_timeout = 0;
 SET lock_timeout = 0;
 SET idle_in_transaction_session_timeout = 0;
-SET transaction_timeout = 0;
 SET client_encoding = 'UTF8';
 SET standard_conforming_strings = on;
 SELECT pg_catalog.set_config('search_path', '', false);
@@ -27,7 +27,7 @@ SET row_security = off;
 -- Name: tools; Type: SCHEMA; Schema: -; Owner: -
 --
 
-CREATE SCHEMA tools;
+CREATE SCHEMA IF NOT EXISTS tools;
 
 
 --

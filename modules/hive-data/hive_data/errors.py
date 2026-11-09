@@ -170,3 +170,32 @@ class TransactionMisuse(HiveDataError):
     the generator, leaving the transaction to unwind whenever the event
     loop's asyncgen finalizer gets to it.
     """
+
+
+class MigrationRefused(HiveDataError):
+    """The database cannot take the schema, and nothing was written.
+
+    Raised before the first statement that writes, with every problem found
+    at once: an operator fixing one missing privilege per run is an install
+    retried once per line of this list.
+    """
+
+    def __init__(self, problems: list[str]) -> None:
+        self.problems = list(problems)
+        super().__init__("; ".join(self.problems))
+
+
+class MigrationFailed(HiveDataError):
+    """A step ran and the database refused it; that step left nothing.
+
+    Every step is one transaction, so the steps before it stay applied and
+    recorded, and this one is neither. Running again starts at this step.
+    """
+
+    def __init__(self, version: int, name: str, error: str,
+                 applied: list[int]) -> None:
+        self.version = version
+        self.name = name
+        self.error = error
+        self.applied = list(applied)
+        super().__init__(f"step {version} ({name}) failed: {error}")

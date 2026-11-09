@@ -432,6 +432,43 @@ scratch database and compared the two implementations row for row: 646
 rows, zero numbers differing. It read the console's retired SQLite file and
 was deleted with it.
 
+## Applying the schema
+
+```
+python -m hive_data.migrate check --dsn D   # writes nothing
+python -m hive_data.migrate apply --dsn D
+```
+
+`--dsn` defaults to `HIVE_DATABASE_URL`, and both are importable as
+`await hive_data.migrate.check(dsn)` and `await hive_data.migrate.apply(dsn)`.
+Each prints one JSON object on stdout and each problem on its own line on
+stderr. `check` exits 0, or 2 with every reason `apply` would refuse: the
+`vector` or `unaccent` extension missing from the server, a role that may not
+add one (`vector` is not trusted, so only a superuser can; `unaccent` needs
+CREATE on the database; both go in `public`, which on Postgres 15 and later a
+non-owner may not create in), no CREATE on the database, a schema holding
+only some of its tables, or a record of a step newer than this package
+knows. `apply` runs the same check first and writes nothing when it fails
+(exit 2); a step the database refuses is exit 1, naming the step.
+
+The schema is a numbered list of steps. Steps 1 to 4 are the four baseline
+files, `core`, `memory`, `tools` and `board`, in that order because `board`
+has foreign keys into `core`. A schema change from here on is a new file
+`hive_data/schema/steps/NNNN_name.sql` with a number above 4, never an edit
+to a baseline file: a hive that already ran the baseline would never see the
+edit. Each step runs in one transaction with the row that records it in
+`hive_meta.migrations`, so a step is applied and recorded or neither, and a
+run that fails starts at that step next time.
+
+A database the hive reached before the record existed — the hive this
+package was written against — is *adopted*: a baseline step whose schema
+holds every table declared in `hive_data.schema` is recorded without running.
+That is the meaning of "present" here, and deliberately not `verify()`'s,
+which lets a database with no `memory` schema open because comms needs only
+`core`. So an empty database gets all four steps, one holding only `core` has
+the other three run, a current hive is a no-op, and a newer step is the only
+thing run on a hive that has the rest.
+
 ## Scope
 
 This package covers the `core`, `memory`, `tools` and `board` schemas.
@@ -454,13 +491,12 @@ python3 -m venv .venv
 
 The suite creates a database of its own per run and drops it afterwards — never
 the live `hive` database, whose rows are the pre-cutover copies the loader
-story still has to verify row for row. It applies
-`hive_data/schema/core.sql`, `memory.sql`, `tools.sql` and `board.sql`,
-the schema's source, one file per schema, kept in the package and edited by
-hand. They began as `pg_dump -s` output of the schemas as first applied; the
-generator that produced that is deleted with the SQLite stores it read, so a
-schema change is an edit to these files. Applying them on a fresh host is
-story 1.2.23. One artifact per schema rather than one for the
+story still has to verify row for row. It applies the
+schema through `hive_data.migrate` (below), exactly as an install does. The
+baseline is `hive_data/schema/core.sql`, `memory.sql`, `tools.sql` and
+`board.sql`, one file per schema, kept in the package. They began as
+`pg_dump -s` output of the schemas as first applied; the generator that
+produced that is deleted with the SQLite stores it read. One artifact per schema rather than one for the
 database, because a deployment can decline to create a context it does not
 run — comms needs `core` and nothing else — and because the memory one needs
 the `vector` extension, which is not a trusted extension and so needs a
