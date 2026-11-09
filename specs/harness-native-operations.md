@@ -112,7 +112,7 @@ Write code **only** when the task requires something the harness fundamentally c
 | "Check if a service is healthy" | `curl GET /health` or `docker ps` |
 | "Parse YAML and extract a field" | `yq '.field' file.yaml` |
 | "Delete old config files" | `rm` via Bash |
-| "Query SQLite for a value" | `sqlite3 data/broker.db "SELECT ..."` |
+| "Query the hive's database for a value" | `psql "$HIVE_DATABASE_URL" -c "SELECT ..."` |
 | "Send a notification" | `notify_owner` skill or `curl` to Telegram API |
 | "Search code for a pattern" | Grep tool |
 | "Run a test suite" | `pytest` via Bash |

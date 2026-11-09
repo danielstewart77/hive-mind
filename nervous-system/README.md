@@ -30,10 +30,10 @@ everything).
   APScheduler in-process cron (`prune-memory` daily at 4am).
 - **`Dockerfile`, `requirements.txt`** — the lucent image.
 - **`tests/`** — the comms test suite.
-- **`scripts/migrations/`** — one-shot DB migrations (archived after
-  run).
-- **`data/`** — runtime databases (gitignored): `lucent.db`,
-  `broker.db`, `sessions.db`, mounted at `/data` in both containers.
+- **`data/`** — mounted at `/data` in both containers (gitignored):
+  `prune.log`, and the retired `lucent.db`, `broker.db` and `sessions.db`,
+  left on disk for recovery by hand and opened by nothing. Both services
+  run on the hive's Postgres through `hive_data`.
 
 ## Quick start
 
