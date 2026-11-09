@@ -6,6 +6,7 @@ Standalone stateless tool. No external dependencies (stdlib only).
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -15,8 +16,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Get current date and time")
     parser.add_argument(
         "--timezone",
-        default="America/Chicago",
-        help="IANA timezone (default: America/Chicago)",
+        # The machine's zone, so an installed hive answers in its own time.
+        default=os.environ.get("TZ", "").strip() or "America/Chicago",
+        help="IANA timezone (default: $TZ, else America/Chicago)",
     )
     args = parser.parse_args()
 

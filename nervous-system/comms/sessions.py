@@ -135,6 +135,29 @@ def _fetch_memories_sync(query: str, mind_id: str) -> str | None:
 
 
 
+#: The zone a message is stamped in when the install names none. This host's
+#: own; an installed hive sets `TZ` from the machine it runs on.
+DEFAULT_TIMEZONE = "America/Chicago"
+
+
+def _local_zone() -> ZoneInfo:
+    """The zone every message is stamped in: `TZ`, else the default.
+
+    A blank `TZ` is unset rather than a zone — compose renders `TZ: ${TZ}`
+    as an empty string on a host that exports none — and an unknown one is
+    logged and passed over, because this runs on every message and a zone
+    that raised would fail them all.
+    """
+    name = os.environ.get("TZ", "").strip()
+    if name:
+        try:
+            return ZoneInfo(name)
+        except (ValueError, KeyError, OSError):
+            log.warning("TZ=%r names no known zone; stamping in %s",
+                        name, DEFAULT_TIMEZONE)
+    return ZoneInfo(DEFAULT_TIMEZONE)
+
+
 _MCP_CONTAINER = PROJECT_DIR / ".mcp.container.json"
 MCP_CONFIG = str(_MCP_CONTAINER if _MCP_CONTAINER.exists() else PROJECT_DIR / ".mcp.json")
 _SPECS_DIR = PROJECT_DIR / "specs"
@@ -2081,8 +2104,7 @@ class SessionManager:
             await _update_session(session_id, status="running")
 
         # Prepend current datetime so Claude always has temporal context
-        tz = ZoneInfo(os.environ.get("TZ", "America/Chicago"))
-        now_str = datetime.now(tz).strftime("%A, %B %-d, %Y at %-I:%M %p %Z")
+        now_str = datetime.now(_local_zone()).strftime("%A, %B %-d, %Y at %-I:%M %p %Z")
         stamped_content = f"[{now_str}]\n{content}"
 
         # Mark this conversation active and running for the duration

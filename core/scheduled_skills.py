@@ -11,16 +11,41 @@ scheduled task is the same operation as adding or removing a skill.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import yaml
 
 log = logging.getLogger(__name__)
 
+#: The zone a schedule is read in when neither it nor the install names one.
+#: This host's own; an installed hive sets `TZ` from the machine it runs on.
 DEFAULT_TIMEZONE = "America/Chicago"
+
+
+def default_timezone() -> str:
+    """The zone a schedule that names none is read in: `TZ`, else the default.
+
+    Read per call rather than at import, so the zone is the process's and not
+    whatever was set when this module was first loaded. A blank `TZ` is unset
+    (compose renders an unset host variable as an empty string), and an
+    unknown one is logged and passed over: a zone the scheduler cannot load
+    would refuse every schedule that leaned on the default.
+    """
+    name = os.environ.get("TZ", "").strip()
+    if name:
+        try:
+            ZoneInfo(name)
+        except (ValueError, KeyError, OSError):
+            log.warning("TZ=%r names no known zone; schedules use %s",
+                        name, DEFAULT_TIMEZONE)
+        else:
+            return name
+    return DEFAULT_TIMEZONE
 
 
 @dataclass(frozen=True)
@@ -169,7 +194,8 @@ def discover_scheduled_skills(minds_root: Path) -> list[ScheduledSkill]:
 
     A skill is considered scheduled if its frontmatter contains a `schedule`
     field with a 5-field cron expression. `schedule_timezone` defaults to
-    America/Chicago. `voice` and `notify` default to True / True.
+    `default_timezone()` — `TZ`, else America/Chicago. `voice` and `notify`
+    default to True / True.
 
     Skills with malformed cron expressions are logged and skipped — one bad
     skill must not take down the scheduler.
@@ -231,7 +257,7 @@ def discover_scheduled_skills(minds_root: Path) -> list[ScheduledSkill]:
             skill_name=skill_name,
             skill_path=str(skill_md),
             cron=cron,
-            timezone=fm.get("schedule_timezone", DEFAULT_TIMEZONE),
+            timezone=fm.get("schedule_timezone") or default_timezone(),
             voice=_coerce_bool(fm.get("voice"), default=True),
             notify=_coerce_bool(fm.get("notify"), default=True),
             discord_channel=_clean_channel(fm.get("discord_channel")),
@@ -295,7 +321,7 @@ def discover_scheduler_tasks(tasks_yaml: Path, minds_root: Path) -> list[Schedul
                 skill_name=name,
                 skill_path=command_tuple[0],
                 cron=cron,
-                timezone=entry.get("timezone") or DEFAULT_TIMEZONE,
+                timezone=entry.get("timezone") or default_timezone(),
                 voice=bool(entry.get("voice", False)),
                 notify=bool(entry.get("notify", False)),
                 command=command_tuple,
@@ -332,7 +358,7 @@ def discover_scheduler_tasks(tasks_yaml: Path, minds_root: Path) -> list[Schedul
             skill_name=name,
             skill_path=str(instructions_path),
             cron=cron,
-            timezone=entry.get("timezone") or DEFAULT_TIMEZONE,
+            timezone=entry.get("timezone") or default_timezone(),
             voice=bool(entry.get("voice", True)),
             notify=bool(entry.get("notify", True)),
             instructions_path=str(instructions_path),

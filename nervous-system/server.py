@@ -17,6 +17,7 @@ import json
 import os
 import time
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import uvicorn
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -109,6 +110,35 @@ async def _run_prune() -> None:
             "against.")
 
 
+#: The zone the prune runs in when the install names none. This host's own;
+#: an installed hive sets `TZ` from the machine it runs on.
+DEFAULT_TIMEZONE = "America/Chicago"
+
+
+def prune_timezone() -> str:
+    """The zone `PRUNE_CRON` is read in: `PRUNE_TIMEZONE`, else `TZ`, else
+    the default.
+
+    `PRUNE_TIMEZONE` stays first so a host that set it keeps its schedule;
+    `TZ` is what an installed hive sets, so the 4 a.m. prune lands at 4 a.m.
+    where the machine is. A blank value is unset — compose renders an unset
+    host variable as an empty string — and an unknown zone is logged and
+    passed over rather than raised, since APScheduler would otherwise refuse
+    the job and the prune would never run.
+    """
+    for var in ("PRUNE_TIMEZONE", "TZ"):
+        name = os.environ.get(var, "").strip()
+        if not name:
+            continue
+        try:
+            ZoneInfo(name)
+        except (ValueError, KeyError, OSError):
+            log.warning("%s=%r names no known zone; ignoring it", var, name)
+            continue
+        return name
+    return DEFAULT_TIMEZONE
+
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -119,7 +149,7 @@ async def main() -> None:
     # Scheduler
     scheduler = AsyncIOScheduler()
     prune_cron = os.environ.get("PRUNE_CRON", "0 4 * * *")
-    prune_tz = os.environ.get("PRUNE_TIMEZONE", "America/Chicago")
+    prune_tz = prune_timezone()
     parts = prune_cron.split()
     if len(parts) != 5:
         log.error("invalid PRUNE_CRON: %r — using default '0 4 * * *'", prune_cron)
