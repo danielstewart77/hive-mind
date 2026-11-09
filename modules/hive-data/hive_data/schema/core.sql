@@ -1,4 +1,9 @@
 --
+-- The `core` schema's source, edited by hand. It began as `pg_dump -s`
+-- output, kept below; the generator behind that read the retired SQLite
+-- stores and is deleted, so a schema change is an edit here. Applying it on
+-- a fresh host is story 1.2.23.
+--
 -- PostgreSQL database dump
 --
 

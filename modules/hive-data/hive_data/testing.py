@@ -41,17 +41,12 @@ import asyncpg
 #: Every name this suite ever creates. Nothing else on the server uses them,
 #: which is what makes sweeping them somebody's business at all.
 #:
-#: `hive_data_parity_` is not a test's. The parity reports under `tools/`
-#: load a real corpus into a database of their own, and the only reason they
-#: are named here is so that a report killed halfway through leaves a
-#: database the next run sweeps rather than one that sits on the server for
-#: ever. A prefix the sweep does not know is exactly that.
 #: `lucent_test_` is the nervous system's. Its suite drives real routes
 #: against a database of its own, for the same reason this one does: the live
 #: `hive` rows are what a cutover is verified against, and writing test
 #: credentials and test Mind nodes into them poisons that comparison.
 PREFIXES = ("hive_data_test_", "hive_data_other_", "hive_data_seq_",
-            "hive_data_parity_", "lucent_test_")
+            "lucent_test_")
 
 _LIKE = [prefix.replace("_", r"\_") + "%" for prefix in PREFIXES]
 

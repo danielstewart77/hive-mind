@@ -10,11 +10,10 @@ failed teardown leaves the live schema dirty.
 The database is *claimed* for the length of the run — see `tests/_scratch.py`
 for why a concurrent run would otherwise drop it out from under this one.
 
-The schema comes from `hive_data/schema/core.sql`, a captured `pg_dump -s` of
-the applied `core` schema, vendored into the package. The generator that
-produced it reads the seven live SQLite stores, so it cannot be run from
-here — and a suite that depended on another checkout and on live stores
-being present would be a suite that fails on any other machine.
+The schema comes from `hive_data/schema/core.sql`, the `core` schema's
+source, kept in the package and edited by hand. It began as a `pg_dump -s`
+of the applied schema; the generator behind that read the retired SQLite
+stores and is deleted, so these files are the schema now.
 """
 
 from __future__ import annotations

@@ -61,8 +61,8 @@ There is no synchronous face and no threadpool bridge to write. Two faces
 would mean every query existing twice forever, and the sync one silently
 blocking somebody's event loop the first time a service forgot the bridge.
 Nothing in the hive needs a sync one: every consumer is already async at the
-top and reaches a sync `sqlite3` module through `run_in_threadpool` precisely
-*because* the database layer is sync. That bridge comes out as each service
+top, and those that once reached a sync `sqlite3` module through
+`run_in_threadpool` did so precisely *because* the database layer was sync. That bridge comes out as each service
 converts. Work that is genuinely CPU-bound — lucent's similarity scan over
 vectors — belongs in `asyncio.to_thread` whatever the database is.
 
@@ -333,14 +333,11 @@ different plan on the second call — so paging without an order repeats some
 rows and skips others, which on a browser built to check a load is the one
 failure that reads as a bad load.
 
-`docs/memory-search-parity.md` is the measured comparison and
-`tools/memory_search_parity.py` regenerates it. It snapshots the live store
-through SQLite's own backup API into a 0700 directory it removes afterwards,
-creates and drops its own Postgres database, and scopes both engines the way
-the live caller scopes them. Run it with hive_mind's interpreter: it imports
-lucent's own recall rather than a reimplementation of it, and the embedding
-is computed once per query and handed to both sides, so a difference in the
-answers is a difference in the search.
+`docs/memory-search-parity.md` is the measured comparison, taken before the
+cutover against a snapshot of the SQLite store, with both engines scoped the
+way the live caller scoped them and one embedding per query handed to both
+sides. The tool that produced it read the retired store and is gone; the
+report stays as the record the scaling constant was set from.
 
 An install that runs none of this is unaffected. A database with no `memory`
 schema opens normally — that is comms, which needs `core` and nothing else —
@@ -430,9 +427,10 @@ were carried over regardless, because every story's number appears in
 conversations, commit messages and the lucent graph, and a port that
 renumbers the board is a port that renames work. An **epic** numbers as a
 root whatever `parent_id` holds, and a **story under a story** does too.
-`tools/board_numbering_parity.py` is the evidence: it copies the console's
-own board into a scratch database and compares the two implementations row
-for row. 646 rows, zero numbers differing.
+The evidence was a parity run that copied the console's own board into a
+scratch database and compared the two implementations row for row: 646
+rows, zero numbers differing. It read the console's retired SQLite file and
+was deleted with it.
 
 ## Scope
 
@@ -458,11 +456,11 @@ The suite creates a database of its own per run and drops it afterwards — neve
 the live `hive` database, whose rows are the pre-cutover copies the loader
 story still has to verify row for row. It applies
 `hive_data/schema/core.sql`, `memory.sql`, `tools.sql` and `board.sql`,
-captured `pg_dump -s` output for the applied schemas and vendored into the
-package:
-the generator that produced them reads the seven live SQLite stores, so it
-cannot run from here, and a suite depending on another checkout would fail on
-every other machine. One artifact per schema rather than one for the
+the schema's source, one file per schema, kept in the package and edited by
+hand. They began as `pg_dump -s` output of the schemas as first applied; the
+generator that produced that is deleted with the SQLite stores it read, so a
+schema change is an edit to these files. Applying them on a fresh host is
+story 1.2.23. One artifact per schema rather than one for the
 database, because a deployment can decline to create a context it does not
 run — comms needs `core` and nothing else — and because the memory one needs
 the `vector` extension, which is not a trusted extension and so needs a

@@ -21,10 +21,10 @@ SET row_security = off;
 --
 -- The `memory` schema, as applied.
 --
--- Captured with `pg_dump -s --schema=memory --no-owner --no-acl` from a
--- database built by `python -m unified_db.build_schema` in the hive_mind
--- checkout, which reads the seven live SQLite stores and so cannot be run
--- from this suite. Vendored for the same reason `core.sql` is.
+-- This file is the schema's source, edited by hand. It began as
+-- `pg_dump -s --schema=memory --no-owner --no-acl` output; the generator
+-- behind that read the retired SQLite stores and is deleted, so a schema
+-- change is an edit here. Applying it on a fresh host is story 1.2.23.
 --
 -- The `\restrict` and `\unrestrict` lines pg_dump 17 emits are removed:
 -- they are psql meta-commands, and a driver executing this file hits a

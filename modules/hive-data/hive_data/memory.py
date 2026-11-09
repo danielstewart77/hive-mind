@@ -59,10 +59,10 @@ KEYWORD_SCAN = KEYWORD_POOL * 4
 #: Postgres has no BM25, and `ts_rank` is not a rescaled BM25 - it is a
 #: different formula with a different shape. `ts_rank` is bounded below 1 and
 #: `bm25()` is not bounded at all, so no single multiplier can map one onto
-#: the other for every query. Measured over the live corpus with the ten real
-#: queries in `tools/memory_search_parity.py`, which reports the ratio per
-#: query so this number can be checked rather than believed: it runs from
-#: roughly 90 to roughly 540, and the median is what is used here.
+#: the other for every query. Measured over the live corpus with ten real
+#: queries, per query, in `docs/memory-search-parity.md`, so this number can
+#: be checked rather than believed: it runs from roughly 90 to roughly 540,
+#: and the median is what is used here.
 #:
 #: An approximation is still worth having, because the alternative is not
 #: "no scaling" - it is a silent change of magnitude in two places. The
