@@ -14,7 +14,7 @@ NO IMPLEMENTATION EXISTS YET. This is a specification to be refuted.
   held by every surface bot and every mind including the kids' Windows
   boxes), `COMMS_ADMIN_BEARER_TOKEN`, `COMMS_RENAME_TOKEN`. None names a
   user. Unset service token = bypass mode.
-- The live `sessions` table has `owner_type`, `owner_ref` (the *surface*
+- The live `sessions` table has `surface`, `surface_id` (the *surface*
   owner: a telegram chat id) and `mind_id`. It has no hive-user column.
 - The live broker `minds` table has an `owner` column, already populated:
   arnold=sloan, zach=aiden, everything else daniel.
@@ -308,9 +308,9 @@ terminal. `/sessions/context` and `late-turns` are addressed the same way.
 **3. `POST /command` is outside the audit band entirely.** It is at
 `server.py:1122`, not under `/sessions`, so test 7's enumeration would never
 see it. It carries `/kill`, `/switch`, `/prune` — which kills everything
-matching a body-supplied `owner_ref` — `/status`, `/model` and `/autopilot`,
+matching a body-supplied `surface_id` — `/status`, `/model` and `/autopilot`,
 and `_resolve_target` accepts a position in a list built from body-supplied
-`mind_id` and `owner_ref`, so it hands back other users' session ids.
+`mind_id` and `surface_id`, so it hands back other users' session ids.
 
 Further unresolved spec gaps from the same review:
 

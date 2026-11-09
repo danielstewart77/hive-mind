@@ -177,7 +177,7 @@ def test_fetch_late_turns_builds_query_and_parses(monkeypatch) -> None:
     monkeypatch.setattr(rc.urllib.request, "urlopen", fake_urlopen)
     cfg = {"COMMS_URL": "http://ns:8426", "COMMS_BEARER": "tok"}
     turns = rc._fetch_late_turns(
-        cfg, owner_type="telegram", client_ref="123", since=1000.0
+        cfg, surface="telegram", client_ref="123", since=1000.0
     )
     assert turns == [{"role": "user", "content": "late"}]
     assert "/sessions/late-turns?" in captured["url"]
@@ -188,7 +188,7 @@ def test_fetch_late_turns_builds_query_and_parses(monkeypatch) -> None:
 
 def test_fetch_late_turns_missing_owner_returns_empty() -> None:
     rc = _load_hook()
-    assert rc._fetch_late_turns({"COMMS_URL": "x", "COMMS_BEARER": ""}, owner_type="", client_ref="c", since=0.0) == []
+    assert rc._fetch_late_turns({"COMMS_URL": "x", "COMMS_BEARER": ""}, surface="", client_ref="c", since=0.0) == []
 
 
 def test_fetch_late_turns_swallows_errors(monkeypatch) -> None:
@@ -199,4 +199,4 @@ def test_fetch_late_turns_swallows_errors(monkeypatch) -> None:
 
     monkeypatch.setattr(rc.urllib.request, "urlopen", boom)
     cfg = {"COMMS_URL": "http://ns:8426", "COMMS_BEARER": ""}
-    assert rc._fetch_late_turns(cfg, owner_type="telegram", client_ref="1", since=0.0) == []
+    assert rc._fetch_late_turns(cfg, surface="telegram", client_ref="1", since=0.0) == []

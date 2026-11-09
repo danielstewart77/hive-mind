@@ -31,12 +31,12 @@ def state_dir(mind_dir: Path) -> Path:
     return Path(explicit) if explicit else mind_dir / "data" / "auto-remember"
 
 
-def drop_markers(mind_dir: Path, claude_sid: str) -> None:
+def drop_markers(mind_dir: Path, conversation_id: str) -> None:
     """Delete one conversation's marker files; absent ones are already gone."""
     root = state_dir(mind_dir)
     for pattern in _MARKER_FILES:
         try:
-            (root / pattern.format(sid=claude_sid)).unlink()
+            (root / pattern.format(sid=conversation_id)).unlink()
         except FileNotFoundError:
             pass
 

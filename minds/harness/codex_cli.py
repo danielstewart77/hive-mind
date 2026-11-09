@@ -241,8 +241,8 @@ async def start_session(body: dict) -> Any:
     # the codex subprocess env to attribute the rotation summary to the
     # right (mind_id, client_ref) row in NS's session_memory table.
     client_ref = body.get("client_ref") or ""
-    owner_type = body.get("surface") or ""
-    owner_ref = body.get("surface_id") or ""
+    surface = body.get("surface") or ""
+    surface_id = body.get("surface_id") or ""
     try:
         if system_prompt_blocks and surface_prompt:
             full_prompt = f"{system_prompt_blocks}\n\n{surface_prompt}"
@@ -256,9 +256,9 @@ async def start_session(body: dict) -> Any:
             "model": model,
             "effort": body.get("effort") or None,
             "client_ref": client_ref,
-            "owner_type": owner_type,
-            "owner_ref": owner_ref,
-            "surface": chat_surface(body),
+            "surface": surface,
+            "surface_id": surface_id,
+            "surface_label": chat_surface(body),
             "opening_turn": body.get("opening_turn") or "",
             "conversation_env": dict(body.get("conversation_env") or {}),
         }
@@ -437,7 +437,7 @@ def _terminal_argv(model: str, thread_id: str | None, effort: str | None = None)
 
 
 def _pane_env(
-    client_ref: str | None, owner_type: str | None, owner_ref: str | None
+    client_ref: str | None, surface: str | None, surface_id: str | None
 ) -> dict[str, str]:
     """Environment the pane needs that the tmux server can't have inherited.
 
@@ -455,10 +455,10 @@ def _pane_env(
     env["HIVE_SURFACE"] = "terminal"
     if client_ref:
         env["CLIENT_REF"] = client_ref
-    if owner_type:
-        env["OWNER_TYPE"] = owner_type
-    if owner_ref:
-        env["OWNER_REF"] = owner_ref
+    if surface:
+        env["SURFACE"] = surface
+    if surface_id:
+        env["SURFACE_ID"] = surface_id
     return env
 
 
@@ -488,7 +488,7 @@ def _resumable_thread(session_id: str, harness_sid: str | None) -> str | None:
 def _spawn_pty(
     *, session_id: str, model: str, conversation_id: str, cols: int, rows: int,
     harness_sid: str | None = None, client_ref: str | None = None,
-    owner_type: str | None = None, owner_ref: str | None = None,
+    surface: str | None = None, surface_id: str | None = None,
     system_prompt: str = "", effort: str | None = None,
     extra_env: dict[str, str] | None = None,
 ) -> tuple[Any, int]:
@@ -507,7 +507,7 @@ def _spawn_pty(
     if not home_declared():
         raise PtyUnavailable("no codex home declared for this mind")
     thread_id = _resumable_thread(session_id, harness_sid)
-    pane_env = {**_pane_env(client_ref, owner_type, owner_ref), **(extra_env or {})}
+    pane_env = {**_pane_env(client_ref, surface, surface_id), **(extra_env or {})}
 
     fresh = not TERMINALS.alive(session_id) and not thread_id
     before = _existing_rollout_paths() if fresh else set()
@@ -545,9 +545,9 @@ def _spawn_pty(
 
 
 def _rotate_pty(
-    *, session_id: str, new_claude_sid: str, model: str = "", system_prompt: str = "",
+    *, session_id: str, new_conversation_id: str, model: str = "", system_prompt: str = "",
     user_prompt: str = "", client_ref: str | None = None,
-    owner_type: str | None = None, owner_ref: str | None = None,
+    surface: str | None = None, surface_id: str | None = None,
     effort: str | None = None,
 ) -> bool:
     """Start a fresh codex thread in a live terminal, in place.
@@ -587,12 +587,12 @@ def _rotate_pty(
     argv = seeded_pane_command(
         _terminal_argv(model, None, effort),
         seed,
-        CODEX_HOME / "rotation-seeds" / f"{session_id}-{new_claude_sid}.txt",
+        CODEX_HOME / "rotation-seeds" / f"{session_id}-{new_conversation_id}.txt",
         as_user_turn=bool(user_prompt),
     )
     TERMINALS.respawn(
         session_id, argv,
-        env_overrides=_pane_env(client_ref, owner_type, owner_ref),
+        env_overrides=_pane_env(client_ref, surface, surface_id),
     )
     _watch_for_new_thread_in_background(session_id, before)
     log.info("Rotated the conversation in terminal %s (seed=%d chars)",
@@ -603,7 +603,7 @@ def _rotate_pty(
 
 
 def transcript_path(
-    claude_sid: str, harness_sid: str | None = None, session_id: str = "",
+    conversation_id: str, harness_sid: str | None = None, session_id: str = "",
 ) -> Path | None:
     """Where this conversation's rollout is, for a handover to read.
 
@@ -613,7 +613,7 @@ def transcript_path(
     it yet. No thread, or none on this volume, is no transcript here — the
     same verdict ``_rollout_exists`` gives a terminal.
     """
-    del claude_sid
+    del conversation_id
     thread_id = harness_sid or THREADS.get(session_id or "")
     if not thread_id:
         return None
@@ -685,14 +685,14 @@ async def _run_codex_turn(sid: str, content: str, images: list[dict] | None) -> 
     # client_ref in env") instead of writing under a fake key.
     if state.get("client_ref"):
         env["CLIENT_REF"] = state["client_ref"]
-    if state.get("owner_type"):
-        env["OWNER_TYPE"] = state["owner_type"]
-    if state.get("owner_ref"):
-        env["OWNER_REF"] = state["owner_ref"]
+    if state.get("surface"):
+        env["SURFACE"] = state["surface"]
+    if state.get("surface_id"):
+        env["SURFACE_ID"] = state["surface_id"]
     # Set, or cleared: never one inherited from the container's own env.
     env.pop("HIVE_SURFACE", None)
-    if state.get("surface"):
-        env["HIVE_SURFACE"] = state["surface"]
+    if state.get("surface_label"):
+        env["HIVE_SURFACE"] = state["surface_label"]
     env.update(state.get("conversation_env") or {})
 
     proc = await asyncio.create_subprocess_exec(

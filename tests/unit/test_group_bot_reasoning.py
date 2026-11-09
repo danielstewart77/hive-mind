@@ -46,7 +46,7 @@ def gateway(monkeypatch):
     client = GatewayClient(
         http=MagicMock(),
         server_url="http://localhost:8420",
-        owner_type="telegram:group",
+        surface="telegram:group",
         mind_id="cypher",
     )
     client.ensure_session = AsyncMock(return_value="sess-1")

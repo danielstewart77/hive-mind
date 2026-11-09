@@ -28,8 +28,8 @@ def test_harness_sid_survives_manager_restart(comms_db) -> None:
     async def scenario() -> None:
         mgr = await _manager()
         await seed_session(
-            "s1", claude_sid="gateway-conversation", owner_type="web",
-            owner_ref="u1", model="gpt", status="idle", mind_id="m1",
+            "s1", conversation_id="gateway-conversation", surface="web",
+            surface_id="u1", model="gpt", status="idle", mind_id="m1",
         )
         await mgr.set_harness_sid("s1", "codex-thread-1")
         await close_manager(mgr)
@@ -37,7 +37,7 @@ def test_harness_sid_survives_manager_restart(comms_db) -> None:
         resumed = await _manager()
         try:
             row = await resumed.get_session("s1")
-            assert row["claude_sid"] == "gateway-conversation"
+            assert row["conversation_id"] == "gateway-conversation"
             assert row["harness_sid"] == "codex-thread-1"
         finally:
             await close_manager(resumed)
@@ -50,8 +50,8 @@ def test_empty_harness_sid_clears_a_failed_codex_thread(comms_db) -> None:
         mgr = await _manager()
         try:
             await seed_session(
-                "failed", claude_sid="gateway", harness_sid="dirty-thread",
-                owner_type="web", owner_ref="u1", model="gpt", status="idle",
+                "failed", conversation_id="gateway", harness_sid="dirty-thread",
+                surface="web", surface_id="u1", model="gpt", status="idle",
                 mind_id="m1",
             )
             row = await mgr.set_harness_sid("failed", "")
@@ -105,8 +105,8 @@ def test_codex_thread_started_event_is_persisted(comms_db) -> None:
         mgr = await _manager()
         try:
             await seed_session(
-                "s2", claude_sid="gateway-conversation", owner_type="web",
-                owner_ref="u1", model="gpt", status="running", mind_id="m1",
+                "s2", conversation_id="gateway-conversation", surface="web",
+                surface_id="u1", model="gpt", status="running", mind_id="m1",
             )
             mgr._procs["s2"] = {"_mind_url": "http://mind.test"}
             mgr._mind_ids["s2"] = "m1"

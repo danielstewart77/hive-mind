@@ -13,7 +13,7 @@ Daniel wants to be able to:
 
 ## User Acceptance Criteria
 
-- [ ] Spike confirms whether `claude --remote-control --resume <claude_sid>` produces a valid session URL
+- [ ] Spike confirms whether `claude --remote-control --resume <conversation_id>` produces a valid session URL
 - [ ] If spike succeeds: sending a `/rc` or remote-control command through the chat interface triggers RC for Ada's current session
 - [ ] A usable session URL is returned in the chat response
 - [ ] Daniel can open that URL on his phone and see the live session (tool calls, messages, responses)
@@ -28,8 +28,8 @@ This is Option A: a "shadow" RC process runs alongside the existing gateway sess
 
 ```
 Gateway session (claude -p --stream-json)  ←— normal operation
-       ↓ same claude_sid
-RC subprocess (claude --remote-control --resume <claude_sid> --name "Ada")
+       ↓ same conversation_id
+RC subprocess (claude --remote-control --resume <conversation_id> --name "Ada")
        ↓ outbound HTTPS to Anthropic relay
 Claude mobile app / claude.ai/code  ←— Daniel observes here
 ```
@@ -38,7 +38,7 @@ Claude mobile app / claude.ai/code  ←— Daniel observes here
 
 Test the flag combination on the host:
 ```bash
-claude --remote-control --resume <claude_sid> --name "Ada"
+claude --remote-control --resume <conversation_id> --name "Ada"
 ```
 
 Capture stdout and look for:
@@ -51,8 +51,8 @@ If the flags compose cleanly, proceed to Phase 2. If not, document the incompati
 ### Phase 2 — Gateway Integration
 
 1. **New endpoint**: `POST /sessions/{id}/remote-control`
-   - Reads `claude_sid` from the session record in SQLite
-   - Spawns `claude --remote-control --resume <claude_sid> --name "<mind_id>"` as a subprocess
+   - Reads `conversation_id` from the session record in SQLite
+   - Spawns `claude --remote-control --resume <conversation_id> --name "<mind_id>"` as a subprocess
    - Parses stdout for the session URL (regex match on `https://claude.ai/code/...`)
    - Returns `{"url": "...", "session_id": "..."}` to caller
 
@@ -78,7 +78,7 @@ Remote Control requires claude.ai OAuth login, not API key. Our sessions already
 
 ## Implementation Order
 
-1. **Spike** — test `claude --remote-control --resume <claude_sid>` on the host machine, confirm flag compatibility and URL output format. **Status: manual verification required** -- run `claude --remote-control --resume <claude_sid>` on the host to confirm the flags compose cleanly and a session URL is output to stdout.
+1. **Spike** — test `claude --remote-control --resume <conversation_id>` on the host machine, confirm flag compatibility and URL output format. **Status: manual verification required** -- run `claude --remote-control --resume <conversation_id>` on the host to confirm the flags compose cleanly and a session URL is output to stdout.
 2. **Endpoint** — `POST /sessions/{id}/remote-control` in `nervous-system/comms/server.py` **[IMPLEMENTED]**
 3. **Delete endpoint** — `DELETE /sessions/{id}/remote-control` in `nervous-system/comms/server.py` **[IMPLEMENTED]**
 4. **Process helper** — `spawn_rc_process()` + `kill_rc_process()` in `nervous-system/comms/sessions.py`, parse URL from stdout **[IMPLEMENTED]**

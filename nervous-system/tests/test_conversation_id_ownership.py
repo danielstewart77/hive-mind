@@ -35,10 +35,10 @@ async def _make_manager() -> SessionManager:
 
 
 async def _seed(mgr: SessionManager, session_id: str = "sess-turn",
-                claude_sid: str = "conv-pinned") -> str:
+                conversation_id: str = "conv-pinned") -> str:
     await seed_session(
-        session_id, owner_type="telegram", owner_ref="123", model="opus",
-        claude_sid=claude_sid, status="running", mind_id="ada", summary="new chat",
+        session_id, surface="telegram", surface_id="123", model="opus",
+        conversation_id=conversation_id, status="running", mind_id="ada", opening_line="new chat",
     )
     mgr._procs[session_id] = {"_mind_url": "http://mind.test:8420"}
     mgr._mind_ids[session_id] = "ada"
@@ -134,7 +134,7 @@ def test_a_session_owns_a_conversation_from_the_moment_it_is_created(comms_db) -
             p_blocks = await _patched_deps(mgr, spawned)
             with p_blocks:
                 session = await mgr.create_session(
-                    owner_type="telegram", owner_ref="123", client_ref="123",
+                    surface="telegram", surface_id="123", client_ref="123",
                     model="opus", mind_id="ada",
                 )
 
@@ -155,9 +155,9 @@ def test_two_sessions_get_two_conversations(comms_db) -> None:
         try:
             p_blocks = await _patched_deps(mgr)
             with p_blocks:
-                a = await mgr.create_session(owner_type="telegram", owner_ref="1",
+                a = await mgr.create_session(surface="telegram", surface_id="1",
                                              client_ref="1", model="opus", mind_id="ada")
-                b = await mgr.create_session(owner_type="telegram", owner_ref="2",
+                b = await mgr.create_session(surface="telegram", surface_id="2",
                                              client_ref="2", model="opus", mind_id="ada")
 
             sid_a = await _stored_sid(mgr, a["id"])
@@ -175,7 +175,7 @@ def test_a_mind_reporting_a_different_conversation_does_not_move_the_session(com
     async def scenario() -> None:
         mgr = await _make_manager()
         try:
-            sid = await _seed(mgr, claude_sid="conv-pinned")
+            sid = await _seed(mgr, conversation_id="conv-pinned")
             response = _SseResponse([
                 {"type": "system", "subtype": "init", "session_id": "conv-invented"},
                 {"type": "assistant", "message": {"content": "hi"}},
@@ -196,7 +196,7 @@ def test_the_id_a_terminal_is_handed_never_changes_mid_turn(comms_db) -> None:
     async def scenario() -> None:
         mgr = await _make_manager()
         try:
-            sid = await _seed(mgr, claude_sid="conv-stable")
+            sid = await _seed(mgr, conversation_id="conv-stable")
             seen: list[str | None] = []
 
             async def after(event):
@@ -239,8 +239,8 @@ def test_legacy_rows_without_a_conversation_id_are_backfilled_on_start(comms_db)
     async def scenario() -> None:
         mgr = await _make_manager()
         await seed_session(
-            "legacy", owner_type="telegram", owner_ref="9", model="opus",
-            claude_sid=None, status="idle", mind_id="ada",
+            "legacy", surface="telegram", surface_id="9", model="opus",
+            conversation_id=None, status="idle", mind_id="ada",
         )
         await close_manager(mgr)
 
@@ -253,13 +253,13 @@ def test_legacy_rows_without_a_conversation_id_are_backfilled_on_start(comms_db)
     asyncio.run(scenario())
 
 
-def test_a_session_goes_out_under_both_the_old_and_the_new_names(comms_db) -> None:
-    """Consumers move to the schema's names one at a time, so for now every
-    session read carries both and they agree."""
+def test_a_session_goes_out_under_the_schema_names(comms_db) -> None:
+    """A single read and the listing both carry the stored values under the
+    schema's names."""
     async def scenario():
         mgr = await _make_manager()
         try:
-            await _seed(mgr, "sess-names", claude_sid="conv-both")
+            await _seed(mgr, "sess-names", conversation_id="conv-both")
             session = await mgr.get_session("sess-names")
             listed = [s for s in await mgr.list_sessions()
                       if s["id"] == "sess-names"]
@@ -271,7 +271,7 @@ def test_a_session_goes_out_under_both_the_old_and_the_new_names(comms_db) -> No
 
     assert len(listed) == 1
     for read in (session, listed[0]):
-        assert read["claude_sid"] == read["conversation_id"] == "conv-both"
-        assert read["owner_type"] == read["surface"] == "telegram"
-        assert read["owner_ref"] == read["surface_id"] == "123"
-        assert read["summary"] == read["opening_line"] == "new chat"
+        assert read["conversation_id"] == "conv-both"
+        assert read["surface"] == "telegram"
+        assert read["surface_id"] == "123"
+        assert read["opening_line"] == "new chat"

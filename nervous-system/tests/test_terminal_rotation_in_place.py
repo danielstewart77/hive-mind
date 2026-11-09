@@ -49,8 +49,8 @@ async def _seed_terminal_session() -> str:
     session_id = "sess-term"
     await register_mind("ada", model="opus", gateway_url="http://mind")
     await seed_session(
-        session_id, owner_type="web", owner_ref="terminal", model="opus",
-        claude_sid="conv-old", terminal_held=True, bind=("web", session_id),
+        session_id, surface="web", surface_id="terminal", model="opus",
+        conversation_id="conv-old", terminal_held=True, bind=("web", session_id),
     )
     return session_id
 
@@ -84,7 +84,7 @@ def _a_mind_with_a_live_pane(rotated_ok: bool = True, raises: bool = False):
 
 async def _row(session_id: str) -> dict:
     return await fetchrow(
-        "SELECT conversation_id AS claude_sid, carry_forward, carry_forward_sid, "
+        "SELECT conversation_id AS conversation_id, carry_forward, carry_forward_sid, "
         "rotation_armed FROM core.sessions WHERE id = $1",
         session_id,
     )
@@ -105,7 +105,7 @@ def test_crossing_the_threshold_prepares_a_rotation_without_replacing_the_pane(c
             assert respawns == [], "the pane was respawned at arming time"
             row = await _row(session_id)
             # Still on the conversation the user can see.
-            assert row["claude_sid"] == "conv-old"
+            assert row["conversation_id"] == "conv-old"
             assert row["rotation_armed"] == ROTATION_ARMED
         finally:
             await close_manager(mgr)
@@ -125,12 +125,12 @@ def test_a_mind_that_refuses_the_respawn_leaves_the_conversation_and_the_arm(com
 
             with _a_mind_with_a_live_pane(raises=True):
                 result = await mgr.fire_rotation(
-                    "web", session_id, claude_sid="conv-old", prompt="carry on",
+                    "web", session_id, conversation_id="conv-old", prompt="carry on",
                 )
 
             assert result["ok"] is False
             row = await _row(session_id)
-            assert row["claude_sid"] == "conv-old"
+            assert row["conversation_id"] == "conv-old"
             assert row["rotation_armed"] == ROTATION_ARMED
         finally:
             await close_manager(mgr)
@@ -152,7 +152,7 @@ def test_the_pane_opens_on_the_handover_and_the_typed_message_as_one_turn(comms_
             with _a_mind_with_a_live_pane() as respawns:
                 result = await mgr.fire_rotation(
                     "web", session_id,
-                    claude_sid="conv-old", prompt="what were we doing?",
+                    conversation_id="conv-old", prompt="what were we doing?",
                 )
 
             assert result["rotated"] is True
@@ -163,8 +163,8 @@ def test_the_pane_opens_on_the_handover_and_the_typed_message_as_one_turn(comms_
             row = await _row(session_id)
             # The row is the same row, on the conversation that was
             # started, holding the opening turn until a turn completes.
-            assert row["claude_sid"] == call["new_claude_sid"]
-            assert row["claude_sid"] != "conv-old"
+            assert row["conversation_id"] == call["new_conversation_id"]
+            assert row["conversation_id"] != "conv-old"
             assert row["carry_forward"] == call["user_prompt"]
             assert row["rotation_armed"] == 0
         finally:
@@ -190,7 +190,7 @@ def test_a_fired_rotation_leaves_the_conversation_with_an_estimate_of_its_openin
             with _a_mind_with_a_live_pane() as respawns:
                 await mgr.fire_rotation(
                     "web", session_id,
-                    claude_sid="conv-old", prompt="what were we doing? " * 50,
+                    conversation_id="conv-old", prompt="what were we doing? " * 50,
                 )
             row = await fetchrow(
                 "SELECT context_tokens, context_kind, context_model, "
@@ -245,7 +245,7 @@ def test_a_chat_turn_never_replaces_the_conversation_a_pane_holds(pane_held_by, 
 
             assert respawns == [], "a chat turn respawned the pane"
             row = await _row(session_id)
-            assert row["claude_sid"] == "conv-old"
+            assert row["conversation_id"] == "conv-old"
             assert row["rotation_armed"] == ROTATION_ARMED
         finally:
             await close_manager(mgr)

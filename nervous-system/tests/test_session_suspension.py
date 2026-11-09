@@ -32,8 +32,8 @@ async def _manager():
 async def _seed(mgr, session_id: str, status: str) -> None:
     now = time.time()
     await seed_session(
-        session_id, owner_type="web", owner_ref="terminal", model="opus",
-        claude_sid="conversation-1", created_at=now - 60, last_active=now,
+        session_id, surface="web", surface_id="terminal", model="opus",
+        conversation_id="conversation-1", created_at=now - 60, last_active=now,
         status=status, mind_id="skippy", bind=("web", "terminal-old"),
     )
 
