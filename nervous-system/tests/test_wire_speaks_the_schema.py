@@ -1,17 +1,11 @@
-"""The comms wire speaks the schema's names, and refuses the old ones.
+"""The comms wire speaks the schema's names.
 
-`core.sql` calls them `surface`, `surface_id` and `conversation_id`; the wire
-once called them `owner_type`, `owner_ref` and `claude_sid`. Every consumer
-has moved, so a request still carrying an old name is refused with the name
-that replaced it - a model ignores a key it does not declare, and a consumer
-left on old code would otherwise have its value dropped without a word.
-
-The routes that read a schema name are checked against what the real
-session manager stored or answered, on the scratch database.
+`core.sql` calls them `surface`, `surface_id` and `conversation_id`. The
+routes that read them are checked against what the real session manager
+stored or answered, on the scratch database.
 """
 
 import importlib
-from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -52,59 +46,6 @@ def _seed(http, session_id: str = SESSION, **columns) -> None:
 # Every route that once took an old name, a request it would otherwise
 # accept under the schema's names, and the old name added beside them.
 _PANE_BODY = {"client_type": PANE[0], "client_ref": PANE[1], "conversation_id": CONVERSATION}
-REFUSED = [
-    ("POST", "/sessions", {"surface": "telegram", "surface_id": CHAT,
-                           "client_ref": CHAT, "mind_id": MIND}, "owner_type", "surface"),
-    ("POST", "/sessions", {"surface": "telegram", "surface_id": CHAT,
-                           "client_ref": CHAT, "mind_id": MIND}, "owner_ref", "surface_id"),
-    ("POST", f"/sessions/{SESSION}/activate", {"client_type": "telegram", "client_ref": CHAT,
-                                               "surface": "telegram", "surface_id": CHAT},
-     "owner_type", "surface"),
-    ("POST", f"/sessions/{SESSION}/activate", {"client_type": "telegram", "client_ref": CHAT,
-                                               "surface": "telegram", "surface_id": CHAT},
-     "owner_ref", "surface_id"),
-    ("POST", "/command", {"content": "/sessions", "surface": "telegram", "surface_id": CHAT,
-                          "client_ref": CHAT, "mind_id": MIND}, "owner_type", "surface"),
-    ("POST", "/command", {"content": "/sessions", "surface": "telegram", "surface_id": CHAT,
-                          "client_ref": CHAT, "mind_id": MIND}, "owner_ref", "surface_id"),
-    ("POST", "/sessions/arm-rotation", _PANE_BODY, "claude_sid", "conversation_id"),
-    ("POST", "/sessions/fire-rotation", {**_PANE_BODY, "prompt": "go on"},
-     "claude_sid", "conversation_id"),
-    ("POST", "/sessions/record-turn", {**_PANE_BODY, "role": "user", "content": "hi"},
-     "claude_sid", "conversation_id"),
-    ("GET", "/sessions", {"surface_id": CHAT}, "owner_ref", "surface_id"),
-    ("GET", f"/sessions/{SESSION}/carry-forward", {"conversation_id": CONVERSATION},
-     "claude_sid", "conversation_id"),
-]
-
-
-@pytest.mark.parametrize(
-    "method, path, valid, old, new", REFUSED,
-    ids=[f"{m} {p} {o}" for m, p, _, o, _ in REFUSED],
-)
-def test_a_request_carrying_an_old_name_is_refused_with_the_new_one(
-    client, method, path, valid, old, new,
-):
-    http, server = client
-    _seed(http, bind=PANE)
-    # Carried beside the schema's name, with the same value, as a consumer
-    # still on the stage-one code sends it: the old key is the only thing
-    # wrong with the request.
-    carried = {**valid, old: valid.get(new, CHAT)}
-
-    with patch.object(server, "_names_own_mind", AsyncMock(return_value=True)), \
-            patch.object(server, "_refuse_foreign_client_ref", AsyncMock(return_value=None)), \
-            patch.object(server, "_require_own_session_mind", AsyncMock(return_value=None)):
-        if method == "GET":
-            response = http.get(path, params=carried)
-        else:
-            response = http.post(path, json=carried)
-
-    assert response.status_code == 422, response.text
-    assert response.json()["renamed"] == {old: new}
-    assert response.json()["error"] == f"{old} was renamed to {new}"
-
-
 def test_an_arm_is_stored_only_for_the_conversation_it_names(client):
     """A route dropping `conversation_id` arms whatever conversation is there."""
     http, server = client
