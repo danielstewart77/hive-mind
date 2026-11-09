@@ -144,8 +144,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 # Main loop
 # ---------------------------------------------------------------------------
 def _is_daytime() -> bool:
-    """Check if current time is between 6am and 10pm local."""
-    now = datetime.now(ZoneInfo("America/Chicago"))
+    """Check if current time is between 6am and 10pm local.
+
+    Local is `TZ`, else America/Chicago; an unknown `TZ` falls back too.
+    """
+    try:
+        zone = ZoneInfo(os.environ.get("TZ", "").strip() or "America/Chicago")
+    except (ValueError, KeyError, OSError):
+        zone = ZoneInfo("America/Chicago")
+    now = datetime.now(zone)
     return 6 <= now.hour < 22
 
 

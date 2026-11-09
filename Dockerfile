@@ -33,10 +33,17 @@ RUN mkdir -p /etc/apt/keyrings \
     && rm -rf /var/lib/apt/lists/*
 
 
-# Non-root user — UID 1000 matches typical host user for bind-mount perms
-# Ubuntu 24.04 ships with uid 1000 as 'ubuntu', so rename it
+# Non-root user, at the host operator's uid/gid so bind-mounted files stay
+# theirs. Ubuntu 24.04 ships uid/gid 1000 as 'ubuntu', so rename it, then move
+# it when the host's ids differ. `-o` because the host's id may already be
+# taken inside the image (gid 100 is `users`): the name is what the image
+# uses, the number only has to match the host.
+ARG UID=1000
+ARG GID=1000
 RUN usermod -l hivemind -d /home/hivemind -m ubuntu \
     && groupmod -n hivemind ubuntu \
+    && if [ "$GID" != "1000" ]; then groupmod -o -g "$GID" hivemind; fi \
+    && if [ "$UID" != "1000" ]; then usermod -o -u "$UID" -g "$GID" hivemind; fi \
     && mkdir -p /home/hivemind/.cache \
     && chown -R hivemind:hivemind /home/hivemind
 

@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from core.scheduled_skills import (
-    DEFAULT_TIMEZONE,
     ScheduledSkill,
     discover_scheduled_skills,
 )
@@ -67,11 +66,34 @@ def test_discovers_basic_cron(tmp_path: Path):
     ]
 
 
-def test_defaults_timezone_when_omitted(tmp_path: Path):
+def test_schedule_naming_no_zone_runs_in_chicago_without_tz(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.delenv("TZ", raising=False)
     _write_skill(tmp_path, "ada", "fire", "name: fire\nschedule: \"*/5 * * * *\"")
     found = discover_scheduled_skills(tmp_path)
     assert len(found) == 1
-    assert found[0].timezone == DEFAULT_TIMEZONE
+    assert found[0].timezone == "America/Chicago"
+
+
+def test_schedule_naming_no_zone_runs_in_the_zone_tz_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("TZ", "Europe/Berlin")
+    _write_skill(tmp_path, "ada", "fire", "name: fire\nschedule: \"*/5 * * * *\"")
+    found = discover_scheduled_skills(tmp_path)
+    assert found[0].timezone == "Europe/Berlin"
+
+
+def test_an_unknown_tz_leaves_schedules_in_chicago(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    """A zone the scheduler cannot load would refuse every schedule leaning
+    on the default."""
+    monkeypatch.setenv("TZ", "Nowhere/Atlantis")
+    _write_skill(tmp_path, "ada", "fire", "name: fire\nschedule: \"*/5 * * * *\"")
+    found = discover_scheduled_skills(tmp_path)
+    assert found[0].timezone == "America/Chicago"
 
 
 def test_voice_and_notify_flags_parsed(tmp_path: Path):
