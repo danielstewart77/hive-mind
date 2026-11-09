@@ -1,6 +1,7 @@
 """Unit tests for the stateless current_time tool."""
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path as _Path
@@ -13,15 +14,26 @@ SCRIPT_PATH = str(_PROJECT_ROOT / "tools/stateless/current_time/current_time.py"
 
 class TestStatelessCurrentTime:
     def test_current_time_default_timezone(self):
-        """Asserts script outputs valid datetime string for America/Chicago."""
+        """With no TZ in its environment, the script answers in America/Chicago."""
+        env = {k: v for k, v in os.environ.items() if k != "TZ"}
         result = subprocess.run(
             [sys.executable, SCRIPT_PATH],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=10, env=env,
         )
         data = json.loads(result.stdout)
         assert data["timezone"] == "America/Chicago"
         assert "time" in data
         assert len(data["time"]) > 0
+
+    def test_current_time_answers_in_the_machines_tz(self):
+        """With no --timezone, the script answers in the zone TZ names."""
+        env = {**os.environ, "TZ": "Europe/Berlin"}
+        result = subprocess.run(
+            [sys.executable, SCRIPT_PATH],
+            capture_output=True, text=True, timeout=10, env=env,
+        )
+        data = json.loads(result.stdout)
+        assert data["timezone"] == "Europe/Berlin"
 
     def test_current_time_custom_timezone(self):
         """Asserts script handles --timezone UTC argument."""

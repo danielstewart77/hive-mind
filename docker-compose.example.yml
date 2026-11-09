@@ -72,7 +72,9 @@ services:
       HIVE_TOOLS_URL: "http://hive-tools:9421"
       PRUNE_LOG_PATH: "/data/prune.log"
       PRUNE_CRON: "0 4 * * *"
-      PRUNE_TIMEZONE: "America/Chicago"
+      # The prune reads PRUNE_CRON in PRUNE_TIMEZONE, else TZ, else
+      # America/Chicago. Set TZ to the machine's zone rather than this.
+      TZ: "${TZ:-America/Chicago}"
       # PRUNE_PROJECT_ROOT: /mnt/project — mount a source tree and set this
       # to let the pruner verify codebase_ref anchors; unset, refs are
       # unverifiable and the entries are kept.

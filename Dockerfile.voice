@@ -7,8 +7,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc libpq-dev ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Match host UID 1000 so bind-mount file permissions work
-RUN useradd -m -u 1000 -s /bin/bash hivemind \
+# The host operator's uid/gid, so bind-mounted files stay theirs. `-o`
+# because the host's id may already be taken inside the image.
+ARG UID=1000
+ARG GID=1000
+RUN groupadd -o -g "$GID" hivemind \
+    && useradd -o -m -u "$UID" -g "$GID" -s /bin/bash hivemind \
     && mkdir -p /home/hivemind/.cache /home/hivemind/.local/share \
     && chown -R hivemind:hivemind /home/hivemind
 
