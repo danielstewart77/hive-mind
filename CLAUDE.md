@@ -229,6 +229,18 @@ codex minds already run under — the boundary is the container and the
 directories mounted into it. A mind that wants confinement anyway names
 `permission_mode` in its own `runtime.yaml`.
 
+**A profile of its own.** Every spawn is `dsh --profile hive` under the
+mind's `DSH_HOME`, so `$DSH_HOME/profiles/hive` must exist before the first
+turn. `python3 -m minds.harness.dsh_profile --mind <name> --out <minds dir>`
+writes it (stdlib only, keeps an existing patch layer). It links two packages
+into the profile's own `node_modules` because the launcher's self-healed
+`profiles/node_modules` holds only its app's dependency closure, and neither
+is in it: the hive bundle, and the Claude Code hook bridge the bundle mounts
+whenever `DSH_HOOKS_CONFIG` is set — without that link a mind with hooks dies
+at boot with `ERR_MODULE_NOT_FOUND`. The tree itself is built by the harness
+repo's `Dockerfile` on this image's base, because its native modules must
+match the container's glibc.
+
 A mind's settings are a form on the console, not a file to open.
 `minds/runtime_settings.py` declares the vocabulary — one entry per control,
 with its label, kind, range and the comment written above a line it creates —
