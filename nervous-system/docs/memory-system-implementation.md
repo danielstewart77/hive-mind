@@ -64,9 +64,8 @@ What it provides. Adopters consume; they don't rebuild.
 ├── comms/                     # gateway — sessions, broker, bootstrap, HITL
 ├── server.py                  # lucent container entry — starts uvicorn + APScheduler
 ├── Dockerfile                 # lucent image (comms has comms/Dockerfile)
-├── data/                      # (volume) broker.db, sessions.db, prune.log
-│                              #   lucent.db is retired — present, unread
-├── scripts/migrations/        # one-shot DB migrations (archived)
+├── data/                      # (volume) prune.log; the retired lucent.db,
+│                              #   broker.db, sessions.db — present, unread
 └── .env                       # LUCENT_BEARER_TOKEN, COMMS_BEARER_TOKEN
 ```
 

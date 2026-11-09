@@ -32,7 +32,6 @@ zstandard
 # Gateway server
 fastapi
 uvicorn[standard]
-aiosqlite
 aiohttp
 
 # Vector operations (Lucent)

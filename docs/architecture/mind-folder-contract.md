@@ -61,7 +61,6 @@ HIVE_TOOLS_URL=http://hive-tools:9421
 HIVE_TOOLS_TOKEN=${HIVE_TOOLS_TOKEN}
 COMMS_URL=http://hive-comms:8424         # NS gateway — composes prompts, dispatches sessions, receives rotation memory
 COMMS_BEARER_TOKEN=${COMMS_BEARER_TOKEN}
-SESSIONS_DB_PATH=/usr/src/app/data/sessions.db
 SPECS_DIR=/usr/src/app/specs/data-classes
 AUTO_REMEMBER_LOG_DIR=/usr/src/app/minds/${MIND_NAME}/data/auto-remember
 ```

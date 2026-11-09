@@ -298,7 +298,7 @@ hive-mind/
 │   ├── lucent_api/               # Vector store + KG (hive-lucent container)
 │   ├── comms/                    # Gateway: sessions, broker, bootstrap, HITL (hive-comms container)
 │   ├── tests/                    # Comms test suite (lucent's is lucent_api/tests/)
-│   └── data/                     # lucent.db, broker.db, sessions.db (gitignored)
+│   └── data/                     # prune.log; retired lucent/broker/sessions .db, unread (gitignored)
 ├── config.py                      # Centralized config (loads config.yaml)
 ├── config.yaml                    # Non-secret settings (providers, models, server)
 │

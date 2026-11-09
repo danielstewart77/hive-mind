@@ -13,9 +13,9 @@ Complete reference for all Hive Mind Docker services. Load this spec when buildi
 | Port | `0.0.0.0:8425:8424` |
 | Restart | `unless-stopped` |
 
-**Volumes:** `./nervous-system/data:/data` (SQLite store), `./nervous-system/lucent_api:/app/lucent_api` (bind-mounted source, no rebuild needed for hot fixes).
+**Volumes:** `./nervous-system/data:/data` (`prune.log`; the retired `lucent.db` sits here unread), `./nervous-system/lucent_api:/app/lucent_api` (bind-mounted source, no rebuild needed for hot fixes).
 
-**Environment:** `LUCENT_API_PORT`, `LUCENT_URL_SELF`, `LUCENT_DB_PATH`, `OLLAMA_BASE_URL`, `HIVE_TOOLS_URL`, `PRUNE_LOG_PATH`/`PRUNE_CRON`/`PRUNE_TIMEZONE` plus `./nervous-system/.env` (`LUCENT_BEARER_TOKEN`, `LUCENT_ADMIN_BEARER_TOKEN`).
+**Environment:** `LUCENT_API_PORT`, `LUCENT_URL_SELF`, `HIVE_DATABASE_URL`, `OLLAMA_BASE_URL`, `HIVE_TOOLS_URL`, `PRUNE_LOG_PATH`/`PRUNE_CRON`/`PRUNE_TIMEZONE` plus `./nervous-system/.env` (`LUCENT_BEARER_TOKEN`, `LUCENT_ADMIN_BEARER_TOKEN`).
 
 **Security:** none of the base hardening below is applied to this service.
 
@@ -28,9 +28,9 @@ Complete reference for all Hive Mind Docker services. Load this spec when buildi
 | Port | `0.0.0.0:8426:8424` |
 | Restart | `unless-stopped` |
 
-**Volumes:** `./nervous-system/data:/data` (broker + sessions DB), `./nervous-system/comms:/app/comms` (bind-mounted source).
+**Volumes:** `./nervous-system/data:/data` (the retired `broker.db` and `sessions.db` sit here unread), `./nervous-system/comms:/app/comms` (bind-mounted source).
 
-**Environment:** `COMMS_PORT`, `COMMS_PROJECT_DIR`, `BROKER_DB_PATH`, `SESSIONS_DB_PATH` plus `./nervous-system/.env` (`COMMS_BEARER_TOKEN`, `COMMS_ADMIN_BEARER_TOKEN`).
+**Environment:** `COMMS_PORT`, `COMMS_PROJECT_DIR`, `HIVE_DATABASE_URL` plus `./nervous-system/.env` (`COMMS_BEARER_TOKEN`, `COMMS_ADMIN_BEARER_TOKEN`).
 
 **Security:** none of the base hardening below is applied to this service.
 
