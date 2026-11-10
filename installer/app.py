@@ -60,9 +60,13 @@ class Installer:
         except ValueError as exc:
             return {"error": str(exc)}
         return {
-            "pieces": [{"name": p.name, "label": p.label, "required": p.required,
+            # The local models are never ticked: shown, locked, only when
+            # something installed needs them.
+            "pieces": [{"name": p.name, "label": p.label,
+                        "required": p.required or p.name == "embeddings",
                         "modes": list(p.modes), "needs": list(p.needs),
-                        "selected": p.name in pieces} for p in plan.PIECES.values()],
+                        "selected": p.name in pieces} for p in plan.PIECES.values()
+                       if p.name != "embeddings" or p.name in pieces],
             "selected": pieces,
             "modes": {p: plan.mode(answers, p) for p in plan.PIECES if plan.PIECES[p].modes},
             "questions": [{"key": q.key, "label": q.label, "kind": q.kind,

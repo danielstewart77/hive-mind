@@ -40,11 +40,12 @@ PIECES: dict[str, Piece] = {p.name: p for p in (
           modes=(HERE, EXISTING)),
     Piece("comms", "Comms (gateway, broker, sessions)", required=True,
           needs=("postgres",), repos=("hive-mind", "hive-data")),
-    # Lucent embeds through the proxy; the embedding service is the proxy's
-    # local model backend.
+    # Lucent embeds through the proxy. The local models (Ollama) are only the
+    # backend of a proxy installed here, or of the tools service: never
+    # ticked, installed exactly when one of those needs them (`installed`).
     Piece("lucent", "Lucent (memory and knowledge graph)", required=True,
           needs=("postgres", "proxy"), repos=("hive-mind", "hive-data")),
-    Piece("embeddings", "Embedding service (Ollama)", required=True,
+    Piece("embeddings", "Local models for the proxy installed here (Ollama)",
           modes=(HERE, EXISTING)),
     Piece("proxy", "Inference proxy", required=True, needs=("postgres",),
           repos=("inference-proxy",), modes=(HERE, EXISTING)),
@@ -53,9 +54,9 @@ PIECES: dict[str, Piece] = {p.name: p for p in (
           needs=("dsh", "comms", "lucent", "proxy"), repos=("hive-mind",)),
     # The terminal is built from the console's shared site code (hive_site),
     # which lives in the console's repository — not from the console service.
-    Piece("terminal", "Web terminal", default=True, needs=("comms",),
+    Piece("terminal", "Browser terminal (chat with your mind)", default=True, needs=("comms",),
           repos=("terminal", "hive", "hive-data")),
-    Piece("console", "Console", needs=("comms", "lucent"),
+    Piece("console", "Hive site (settings and admin)", needs=("comms", "lucent"),
           repos=("hive", "hive-data")),
     Piece("voice", "Voice server", needs=("comms",), repos=("hive-mind",),
           modes=(NONE, HERE, EXISTING)),
@@ -134,6 +135,10 @@ def installed(answers: dict) -> set[str]:
     existing is installed, set to none it is not, whatever its tick says.
     """
     pieces = closure(answers.get("pieces") or ())
+    # The local models follow what uses them, whatever was ticked or saved.
+    pieces.discard("embeddings")
+    if ("proxy" in pieces and mode(answers, "proxy") == HERE) or "tools" in pieces:
+        pieces |= closure(["embeddings"])
     for p in PIECES.values():
         if NONE in p.modes:
             if mode(answers, p.name) == NONE:
@@ -145,6 +150,11 @@ def installed(answers: dict) -> set[str]:
 
 def runs_here(answers: dict, piece: str) -> bool:
     return piece in installed(answers) and mode(answers, piece) == HERE
+
+
+def runs_elsewhere(answers: dict, piece: str) -> bool:
+    """Installed, at an address the operator gave."""
+    return piece in installed(answers) and mode(answers, piece) == EXISTING
 
 
 def repos(answers: dict) -> list[str]:
@@ -207,8 +217,8 @@ def questions(answers: dict) -> list[Question]:
             Question("provider_model_window", "That model's context window, in tokens",
                      "int", default="200000"),
         ]
-    if mode(answers, "embeddings") == EXISTING:
-        qs.append(Question("embeddings_url", "Embedding service address (Ollama)"))
+    if runs_elsewhere(answers, "embeddings"):
+        qs.append(Question("embeddings_url", "Ollama address (for the proxy's local models)"))
     if mode(answers, "voice") == EXISTING:
         qs.append(Question("voice_url", "Voice server address"))
     pieces = installed(answers)

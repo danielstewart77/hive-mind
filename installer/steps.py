@@ -276,7 +276,7 @@ def check_existing(ctx: Ctx):
     targets = []
     if not plan.runs_here(a, "proxy"):
         targets.append(("proxy", compose.proxy_url(a) + "/health"))
-    if not plan.runs_here(a, "embeddings"):
+    if plan.runs_elsewhere(a, "embeddings"):
         targets.append(("embedding service", compose.embeddings_url(a) + "/api/tags"))
     if plan.mode(a, "voice") == plan.EXISTING:
         targets.append(("voice server", compose.voice_url(a) + "/health"))
@@ -513,7 +513,7 @@ def embeddings(ctx: Ctx):
     through the proxy, with the key the hive uses."""
     a = ctx.answers
     if not plan.runs_here(a, "embeddings"):
-        return "existing embedding service"
+        return "no local models to pull"
     notes = []
     if 0 < _mem_gb() < 10:
         notes.append(f"only {_mem_gb():.0f} GB of memory: embedding will be slow")
@@ -594,8 +594,9 @@ def _endpoints(ctx: Ctx) -> list[tuple[str, str]]:
     a = ctx.answers
     pieces = plan.installed(a)
     out = [("comms", compose.COMMS_URL + "/health"), ("lucent", compose.LUCENT_URL + "/health"),
-           ("proxy", compose.proxy_url(a) + "/health"),
-           ("embedding service", compose.embeddings_url(a) + "/api/tags")]
+           ("proxy", compose.proxy_url(a) + "/health")]
+    if "embeddings" in pieces:
+        out.append(("embedding service", compose.embeddings_url(a) + "/api/tags"))
     if "console" in pieces:
         out.append(("console", f"http://{compose.CONSOLE}:{compose.CONSOLE_PORT}/"))
     if "terminal" in pieces:
