@@ -546,8 +546,8 @@ def _chosen(ctx: Ctx, key: str, offered: list[str]) -> str:
     where = f"the proxy at {compose.proxy_url(ctx.answers)}"
     chosen = str(ctx.answers.get(key) or ctx.env().get(env_name) or "").strip()
     if not offered:
-        raise StepFailed(f"{where} offers no {purpose} model; register one "
-                         f"(add-model --purpose {purpose}) and run again")
+        raise StepFailed(f"{where} lists no models this hive's key may use; "
+                         "add one to the proxy and run again")
     if not chosen:
         raise NeedInput(key, label, sorted(offered, key=lambda m: m != default))
     if chosen not in offered:
@@ -556,31 +556,47 @@ def _chosen(ctx: Ctx, key: str, offered: list[str]) -> str:
     return chosen
 
 
+def _forget(ctx: Ctx, key: str, env_name: str) -> None:
+    """A model pick that failed its real call: forgotten, so the next run
+    asks for it again instead of failing on it for good."""
+    ctx.answers.pop(key, None)
+    ctx.installer.save()
+    ctx.set_env(**{env_name: ""})
+
+
 def resolve_models(ctx: Ctx):
     """The embedding and classifier models, each offered by the proxy and
     each answering one real call made with the hive's key, before lucent is
     pointed at them."""
     a, key = ctx.answers, ctx.env().get("MIND_PROXY_KEY", "")
     url, web, own = compose.proxy_url(a), ctx.web_env(), plan.runs_here(a, "proxy")
-    chat = proxy_adapter.list_models(ctx.sh, url, key, harness="dsh", proxy_env=web)
+    chat = proxy_adapter.list_models(ctx.sh, url, key, purpose="chat", proxy_env=web)
     embedders = proxy_adapter.list_models(ctx.sh, url, key, purpose="embedding", proxy_env=web)
     embedder = _chosen(ctx, "embedding_model", embedders)
     classifier = _chosen(ctx, "classifier_model", chat)
-    if own:
-        dims = proxy_adapter.check_model(ctx.sh, ctx.compose, model=embedder,
-                                         harness=None).get("dimensions")
-    else:
-        dims = proxy_adapter.embedding_dimensions(ctx.sh, url, key, embedder, proxy_env=web)
-    # Narrower vectors are zero-padded by lucent; wider ones do not fit.
-    if not dims or dims > compose.EMBEDDING_DIMENSIONS:
-        raise StepFailed(f"{embedder!r} answered {dims} dimensions; lucent stores at most "
-                         f"{compose.EMBEDDING_DIMENSIONS} (memory.memories.embedding is "
-                         f"vector({compose.EMBEDDING_DIMENSIONS})). Choose another embedding "
-                         "model and run again")
-    if own:
-        proxy_adapter.check_model(ctx.sh, ctx.compose, model=classifier)
-    else:
-        proxy_adapter.classify_check(ctx.sh, url, key, classifier, proxy_env=web)
+    try:
+        if own:
+            dims = proxy_adapter.check_model(ctx.sh, ctx.compose, model=embedder,
+                                             harness=None).get("dimensions")
+        else:
+            dims = proxy_adapter.embedding_dimensions(ctx.sh, url, key, embedder, proxy_env=web)
+        # Narrower vectors are zero-padded by lucent; wider ones do not fit.
+        if not dims or dims > compose.EMBEDDING_DIMENSIONS:
+            raise StepFailed(f"{embedder!r} answered {dims} dimensions; lucent stores at most "
+                             f"{compose.EMBEDDING_DIMENSIONS} (memory.memories.embedding is "
+                             f"vector({compose.EMBEDDING_DIMENSIONS})). Choose another "
+                             "embedding model")
+    except StepFailed:
+        _forget(ctx, "embedding_model", compose.EMBEDDING_MODEL_VAR)
+        raise
+    try:
+        if own:
+            proxy_adapter.check_model(ctx.sh, ctx.compose, model=classifier)
+        else:
+            proxy_adapter.classify_check(ctx.sh, url, key, classifier, proxy_env=web)
+    except StepFailed:
+        _forget(ctx, "classifier_model", compose.CLASSIFIER_MODEL_VAR)
+        raise
     a["embedding_model"], a["classifier_model"] = embedder, classifier
     ctx.set_env(**{compose.EMBEDDING_MODEL_VAR: embedder, compose.CLASSIFIER_MODEL_VAR: classifier})
     # Lucent and the console started before the key and the models were

@@ -153,9 +153,9 @@ def list_models(sh: Shell, proxy_url: str, key: str, harness: str | None = "dsh"
                 retries: int = 4, pause: float = 3.0, proxy_env: dict | None = None,
                 purpose: str | None = None) -> list[str]:
     """The model names the proxy offers this harness, or (`purpose`) the
-    models of that purpose. A listing filtered by purpose keeps only the
-    entries that say so: a proxy that predates purposes ignores the filter
-    and would otherwise offer its chat models as embedding models."""
+    models of that purpose. A proxy whose listing marks no model with a
+    purpose (an older one, or not this proxy at all) offers every model it
+    lists: the operator picks, and one real call proves the pick."""
     root = _root(proxy_url)
     query = f"purpose={purpose}" if purpose else f"harness={harness}"
     for attempt in range(retries + 1):
@@ -173,8 +173,10 @@ def list_models(sh: Shell, proxy_url: str, key: str, harness: str | None = "dsh"
         rows = json.loads(out["body"]).get("data") or []
     except ValueError as exc:
         raise StepFailed("the proxy's model listing is not JSON") from exc
-    return [str(r["id"]) for r in rows
-            if r.get("id") and (not purpose or r.get("purpose") == purpose)]
+    named = [r for r in rows if r.get("id")]
+    if purpose and any("purpose" in r for r in named):
+        named = [r for r in named if r.get("purpose") == purpose]
+    return [str(r["id"]) for r in named]
 
 
 def embedding_dimensions(sh: Shell, proxy_url: str, key: str, model: str,
