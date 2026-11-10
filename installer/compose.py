@@ -167,7 +167,7 @@ def given_hosts(answers: dict) -> list[str]:
     """The host names of every address the operator gave: what the hive
     reaches directly, so each must be in NO_PROXY."""
     urls = []
-    if not plan.runs_here(answers, "embeddings"):
+    if plan.runs_elsewhere(answers, "embeddings"):
         urls.append(answers.get("embeddings_url"))
     if not plan.runs_here(answers, "proxy"):
         urls.append(answers.get("proxy_url"))

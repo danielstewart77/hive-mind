@@ -56,3 +56,18 @@ def test_a_mind_may_not_take_a_name_the_hive_uses_for_a_service():
 
 def test_a_context_window_of_zero_is_refused():
     assert any("above zero" in p for p in plan.validate(answers(provider_model_window="0")))
+
+
+def test_an_existing_proxy_needs_no_embedding_address():
+    # Lucent embeds through the proxy; with the operator's own proxy the
+    # hive runs no local models, so the answers are complete without one.
+    given = answers(modes={"proxy": "existing", "embeddings": "existing"},
+                    pieces=["embeddings"], proxy_url="https://proxy.corp.example",
+                    proxy_key="k")
+
+    assert plan.validate(given) == []
+    assert "embeddings" not in plan.installed(given)
+
+
+def test_a_proxy_installed_here_brings_its_local_models():
+    assert plan.runs_here(answers(), "embeddings")
