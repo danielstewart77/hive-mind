@@ -10,7 +10,7 @@ from tests.unit.installer_helpers import a_host, answers
 
 def test_no_proxy_covers_every_hive_service_and_every_address_given():
     host = a_host(web_proxy={"HTTPS_PROXY": "http://corp-proxy:3128", "NO_PROXY": ".corp"})
-    given = answers(modes={"embeddings": "existing", "proxy": "existing",
+    given = answers(pieces=["tools"], modes={"embeddings": "existing", "proxy": "existing",
                            "postgres": "existing", "voice": "existing"},
                     embeddings_url="http://gpu.corp.example:11434",
                     proxy_url="http://10.1.2.3:8888", voice_url="http://voice-box:8422",
