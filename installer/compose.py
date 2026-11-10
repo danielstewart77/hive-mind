@@ -18,7 +18,9 @@ Rules the rendered file keeps, each one a bug when it was not kept:
   waits (`depends_on`) on one that is not rendered;
 - nothing asks for a GPU;
 - every bind mount's source lies under the install folder and is created
-  before the first `up` (`prepare_mounts`), or Docker creates it root-owned;
+  before the first `up` (`prepare_mounts`), or Docker creates it root-owned —
+  the one exception the Docker socket, which the tools service needs to
+  restart a mind, and which is mounted, never created;
 - the host's web proxy reaches every build and container, with NO_PROXY
   covering every hive service so their own traffic never goes through it.
 """
@@ -246,6 +248,12 @@ class Rendered:
     mounts: list[Path] = field(default_factory=list)
     #: Empty folders inside a read-only mount, for a nested mount to land on.
     mountpoints: list[Path] = field(default_factory=list)
+    #: Single files bind-mounted (the .env the console's credentials tab
+    #: rewrites): written by the config step itself, never created as folders.
+    files: list[Path] = field(default_factory=list)
+    #: Host paths outside the install folder, mounted and never created: the
+    #: Docker socket.
+    host_paths: list[Path] = field(default_factory=list)
 
     def text(self) -> str:
         return json.dumps(self.compose, indent=2, sort_keys=False) + "\n"
@@ -268,8 +276,11 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
     pg_here = plan.runs_here(answers, "postgres")
     voice = voice_url(answers)
 
-    def bind(source: Path, target: str, mode: str = "rw") -> dict:
-        mounts.append(source)
+    files: list[Path] = []
+    host_paths: list[Path] = []
+
+    def bind(source: Path, target: str, mode: str = "rw", kind: list | None = None) -> dict:
+        (mounts if kind is None else kind).append(source)
         return {"type": "bind", "source": str(source), "target": target,
                 "read_only": mode == "ro"}
 
@@ -382,7 +393,7 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
                # Where the hive's compose project is, for the console's
                # restart and mount controls; unset it names Daniel's checkout.
                "HIVE_MIND_PROJECT_PATH": str(home.root),
-               **site_links}
+               **site_links, **site.env_files_settings()}
         if voice:
             env["KOKORO_VOICE_URL"] = voice
         if "tools" in pieces:
@@ -391,7 +402,8 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
             "context": str(repo("hive")), "additional_contexts": {"hive_data": hive_data}}, env=env)
         svc["ports"] = [f"0.0.0.0:{CONSOLE_PORT}:{CONSOLE_PORT}"]
         svc["volumes"] = [bind(home.data / "console", "/data"),
-                          bind(home.minds, "/minds_hive_mind", "ro")]
+                          bind(home.minds, "/minds_hive_mind", "ro"),
+                          bind(home.env_file, site.ENV_FILE_MOUNT, kind=files)]
 
     if "terminal" in pieces:
         env = {"TERMINAL_HOST": "0.0.0.0", "HIVE_DATABASE_URL": dsn,
@@ -430,7 +442,12 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
             "COMMS_BEARER_TOKEN": env_ref(token_var("COMMS", tools.SERVICE)),
             "LUCENT_URL": LUCENT_URL,
             "LUCENT_ADMIN_BEARER_TOKEN": env_ref("LUCENT_ADMIN_BEARER_TOKEN")})
-        svc["volumes"] = [bind(home.data / "tools", "/app/data")]
+        # The console restarts a mind through the tools service, which runs
+        # `docker compose` against this install: the socket, and the install
+        # folder at the same path it has on the host so the file's paths hold.
+        svc["volumes"] = [bind(home.data / "tools", "/app/data"),
+                          bind(Path(tools.DOCKER_SOCKET), tools.DOCKER_SOCKET, kind=host_paths),
+                          bind(home.root, str(home.root))]
 
     mind_dir = home.mind(mind)
     app_mind = f"{APP}/minds/{mind}"
@@ -494,7 +511,7 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
            "networks": {NETWORK: {"external": True, "name": NETWORK}}}
     if volumes:
         doc["volumes"] = volumes
-    return Rendered(doc, mounts, mountpoints)
+    return Rendered(doc, mounts, mountpoints, files, host_paths)
 
 
 def console_image_build(home: Home, host: Host) -> list[str]:
