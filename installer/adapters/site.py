@@ -49,13 +49,14 @@ def links(console_url: str, terminal_url: str) -> dict[str, str]:
     return {CONSOLE_URL: console_url, TERMINAL_URL: terminal_url}
 
 
-# ---- pending: the console's env-file list (another builder) -------------
-#: The console's credentials tab rewrites a fixed list of host .env files
-#: (hive src/credentials_data.py) that this install does not mount. The list
-#: is being made configurable; until its interface lands the installer mounts
-#: nothing for it, and the tab shows nothing to rotate. Wire it here.
-def env_files_settings(home) -> tuple[dict[str, str], list[tuple[str, str]]]:
-    """(env settings, (host path, container path) mounts) for the console's
-    credentials tab. Empty until the interface lands."""
-    del home
-    return {}, []
+# ---- the console's credentials tab (hive PR #82) --------------------------
+#: The credentials tab rewrites the .env files `HIVE_ENV_FILES` names, by
+#: role, at the container paths given. The installer has one: its own .env,
+#: bind-mounted read-write as a single file.
+ENV_FILES = "HIVE_ENV_FILES"
+ENV_FILE_MOUNT = "/env_hive/.env"
+
+
+def env_files_settings() -> dict[str, str]:
+    import json
+    return {ENV_FILES: json.dumps({"nervous_system": ENV_FILE_MOUNT})}

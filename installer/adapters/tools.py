@@ -18,6 +18,7 @@ SERVICE = "hive-tools"
 URL = f"http://{SERVICE}:{PORT}"
 #: A route behind the token check: 401 for a token the store does not hold,
 #: anything else (404 for this id) for one it does.
+DOCKER_SOCKET = "/var/run/docker.sock"
 TOKEN_CHECK = "/hitl/installer-token-check"  # secret-guard: allow — a route path
 SECRETS = ("HT_SECRET_KEY", "HT_ADMIN_PASSWORD")
 

@@ -385,33 +385,19 @@ def _digest(*parts) -> str:
     return hashlib.sha256("\x00".join(str(p) for p in parts).encode()).hexdigest()
 
 
-def _settled(ctx: Ctx, key: str, now: str, what: str) -> None:
-    """Refuse a change the proxy cannot take yet, once; accept it on the run
-    after the operator has made it on the proxy's admin page.
+def _put_row(ctx: Ctx, key: str, fingerprint: str, add) -> bool:
+    """Add a proxy row; when it existed and what this install gave for it has
+    changed since it was last confirmed, rewrite it with `--update`.
 
-    The proxy's add commands keep an existing row untouched, so a changed
-    key passed to them is silently dropped and the mind runs on the old one.
-    Until the proxy's update path lands (adapter: `proxy.update_provider`),
-    the change is refused with where to make it; the next run, still asked
-    for the same new value, takes it as made.
-    """
-    recorded = ctx.output(key) or {}
-    if not recorded.get("value"):
-        ctx.output(key, {"value": now})
-        return
-    if recorded["value"] == now:
-        return
-    if recorded.get("pending") == now:
-        ctx.output(key, {"value": now})
-        return
-    ctx.output(key, {**recorded, "pending": now})
-    try:
-        proxy_adapter.update_provider(ctx.sh, ctx.compose)
-    except proxy_adapter.Pending:
-        raise StepFailed(
-            f"the {what} changed since the proxy was set up, and the proxy keeps the old one. "
-            f"Change it on {_proxy_admin(ctx)}, then run again; the next run takes it as "
-            "changed") from None
+    The add commands keep an existing row untouched, so without this a key
+    or a context window changed on a rerun would be silently dropped. True
+    when the row was rewritten."""
+    out = add(update=False)
+    existed = out.get("created") is False
+    if existed and (ctx.output(key) or {}).get("value") != fingerprint:
+        add(update=True)
+        return True
+    return False
 
 
 def proxy_setup(ctx: Ctx):
@@ -430,25 +416,30 @@ def proxy_setup(ctx: Ctx):
     base_url = str(a.get("provider_base_url") or "")
     api_key = ctx.secret("provider_api_key")
     window = int(a.get("provider_model_window") or 200000)
-    _settled(ctx, f"provider:{provider}", _digest(base_url, api_key),
-             f"{provider} provider's key or address")
-    _settled(ctx, f"model:{a['provider_model']}", str(window),
-             f"context window of {a['provider_model']}")
-    proxy_adapter.add_provider(ctx.sh, ctx.compose, name=provider, kind=provider,
-                               base_url=base_url, api_key=api_key)
-    proxy_adapter.add_model(ctx.sh, ctx.compose, provider=provider, model=a["provider_model"],
-                            context_window=window)
+    model = a["provider_model"]
+    fingerprints = {f"provider:{provider}": _digest(provider, base_url, api_key),
+                    f"model:{model}": _digest(provider, window)}
+    rewrote = _put_row(ctx, f"provider:{provider}", fingerprints[f"provider:{provider}"],
+                       lambda update: proxy_adapter.add_provider(
+                           ctx.sh, ctx.compose, name=provider, kind=provider,
+                           base_url=base_url, api_key=api_key, update=update))
+    rewrote |= _put_row(ctx, f"model:{model}", fingerprints[f"model:{model}"],
+                        lambda update: proxy_adapter.add_model(
+                            ctx.sh, ctx.compose, provider=provider, model=model,
+                            context_window=window, update=update))
     key = proxy_adapter.mint_key(ctx.sh, ctx.compose, client=a["mind_name"])
     if key:
         ctx.set_env(MIND_PROXY_KEY=key)
     elif not ctx.env().get("MIND_PROXY_KEY"):
         raise StepFailed(f"the proxy already has a key for {a['mind_name']!r} that this install "
                          f"did not record; revoke it on {_proxy_admin(ctx)} and run again")
-    try:
-        proxy_adapter.check_model(ctx.sh, ctx.compose, model=a["provider_model"])
-        checked = "; a test completion answered"
-    except proxy_adapter.Pending:
-        checked = "; no test completion yet (the proxy's check-model is pending)"
+    # Done only once a real completion has come back through the proxy: a
+    # wrong upstream key is found here, with the provider's own words, not
+    # at the mind's first turn.
+    proxy_adapter.check_model(ctx.sh, ctx.compose, model=model)
+    for name, value in fingerprints.items():
+        ctx.output(name, {"value": value})
+    checked = "; a test completion answered" + ("; rows updated" if rewrote else "")
     return ("provider, model and the mind's key" if key else
             "provider, model; the mind's key kept") + checked
 
@@ -759,7 +750,7 @@ STEPS = [
     Step("schema_apply", "Create or update the tables", schema_apply, 900),
     Step("admin", "Make the admin account", seed_admin, 180),
     Step("services", "Start the services", start_services, 900),
-    Step("proxy", "Set up the proxy", proxy_setup, 900),
+    Step("proxy", "Set up the proxy", proxy_setup, 1200),
     Step("embeddings", "Pull and test the embedding model", embeddings, 4200),
     Step("reachability", "Reach every service from inside the hive", reachability, 600),
     Step("credentials", "Mint the services' credentials", mint_credentials, 300),
