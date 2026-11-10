@@ -29,9 +29,11 @@ Behavior per class:
     3. ``kg_entity`` set → re-query the entity, drop entries that
        contradict newer facts on the same entity (TODO).
     4. No anchor → decay_only(half_life_days=180, delete_below=0.02).
-- ``future-state`` — POST entry + recent ``current-state`` entries to
-  ``/ollama/structured`` with schema ``{shipped: bool, reason: string}``;
-  delete on ``shipped: true``. Then apply decay_only(90, 0.02) to the
+- ``future-state`` — the entry + recent ``current-state`` entries are
+  classified through the inference proxy's ``/v1/chat/completions``
+  (``response_format`` json_schema ``{shipped: bool, reason: string}``,
+  model ``LUCENT_CLASSIFIER_MODEL``, the one proxy key); delete on
+  ``shipped: true``. Then apply decay_only(90, 0.02) to the
   remainder.
 - ``feedback`` — decay_only(half_life_days=90, delete_below=0.02).
   Standing-tier entries are exempt and never reach the pruner.
@@ -41,6 +43,7 @@ Behavior per class:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import os
@@ -57,10 +60,9 @@ from hive_data import graph
 from hive_data import memory as store
 from hive_data.schema import qualified
 
-log = logging.getLogger(__name__)
+from lucent_api import model_proxy
 
-HIVE_TOOLS_URL = os.environ.get("HIVE_TOOLS_URL", "http://127.0.0.1:9421")
-HIVE_TOOLS_TOKEN = os.environ.get("HIVE_TOOLS_TOKEN", "")
+log = logging.getLogger(__name__)
 
 # Per-class decay parameters (per the design).
 CURRENT_STATE_HALF_LIFE_DAYS = 180
@@ -145,7 +147,7 @@ async def _codebase_ref_exists(codebase_ref: str) -> bool:
     on missing evidence.
 
     Async, and the `grep` goes behind a thread, for the same reason
-    `_ollama_structured` does: the pruner is awaited on the scheduler's
+    `_classify` does: the pruner is awaited on the scheduler's
     event loop now, so a ten-second subprocess inline is ten seconds —
     per unresolved token, per entry — with `/health`, every memory read and
     the pool's own protocol handling stopped dead.
@@ -197,32 +199,43 @@ def _parse_iso(ts: str) -> float | None:
         return None
 
 
-async def _ollama_structured(prompt: str, schema: dict) -> dict | None:
-    """POST to /ollama/structured. Returns parsed JSON, or None on error.
+async def _classify(prompt: str, schema: dict) -> dict | None:
+    """One structured verdict through the proxy's chat route, or None.
 
-    In a thread. The call is `requests` with a two-minute timeout and the
-    pruner is awaited on the scheduler's event loop now, so inline it would
-    hold that loop — and the loop is the one serving `/health` and every
-    memory route — for up to two minutes per future-state entry.
+    The proxy, its key and the model are `INFERENCE_PROXY_URL`,
+    `INFERENCE_PROXY_KEY` and `LUCENT_CLASSIFIER_MODEL`; with any unset the
+    call is not made and the entry falls through to decay, as a failed call
+    does. In a thread: the call is `requests` with a two-minute timeout and
+    the pruner is awaited on the scheduler's event loop, which also serves
+    `/health` and every memory route.
     """
-    if not HIVE_TOOLS_TOKEN:
-        log.warning("HIVE_TOOLS_TOKEN not set; skipping Ollama call")
+    try:
+        root, key, model = model_proxy.settings("LUCENT_CLASSIFIER_MODEL")
+    except RuntimeError as exc:
+        log.warning("%s; skipping the classifier call", exc)
         return None
 
     def _ask() -> dict:
         resp = requests.post(
-            f"{HIVE_TOOLS_URL}/ollama/structured",
-            json={"prompt": prompt, "schema": schema},
-            headers={"Authorization": f"Bearer {HIVE_TOOLS_TOKEN}"},
+            f"{root}/v1/chat/completions",
+            json={"model": model,
+                  "messages": [{"role": "user", "content": prompt}],
+                  "response_format": {"type": "json_schema", "json_schema": {
+                      "name": "verdict", "strict": True, "schema": schema}}},
+            headers={"Authorization": f"Bearer {key}"},
             timeout=120,
         )
         resp.raise_for_status()
-        return resp.json()
+        content = resp.json()["choices"][0]["message"]["content"]
+        verdict = json.loads(content)
+        if not isinstance(verdict, dict):
+            raise ValueError(f"the classifier answered {type(verdict).__name__}")
+        return verdict
 
     try:
         return await asyncio.to_thread(_ask)
     except Exception:
-        log.exception("ollama/structured call failed")
+        log.exception("classifier call through the proxy failed")
         return None
 
 
@@ -297,7 +310,7 @@ async def prune_current_state(*, now: float | None = None) -> dict:
 
 
 async def prune_future_state(*, now: float | None = None) -> dict:
-    """For each entry: ask Ollama if it has shipped. If yes, delete; otherwise decay."""
+    """For each entry: ask the classifier if it has shipped. If yes, delete; otherwise decay."""
     now = now if now is not None else time.time()
     entries = await _read_class_entries("future-state")
     if not entries:
@@ -306,7 +319,7 @@ async def prune_future_state(*, now: float | None = None) -> dict:
 
     # Pull recent current-state entries (top 30 by created_at) as context for the
     # shipped check. Caller does not need full content; a representative subset
-    # is enough for Ollama to decide if the planned thing is now reality.
+    # is enough for the classifier to decide if the planned thing is now reality.
     current_state_pool = sorted(
         await _read_class_entries("current-state"),
         key=lambda r: r.get("created_at") or 0,
@@ -343,9 +356,9 @@ async def prune_future_state(*, now: float | None = None) -> dict:
             "according to the current-state entries? Default to false unless "
             "there is clear evidence the plan has been realized."
         )
-        verdict = await _ollama_structured(prompt, schema)
+        verdict = await _classify(prompt, schema)
         if verdict is None:
-            errors.append(f"ollama call failed: id={eid}")
+            errors.append(f"classifier call failed: id={eid}")
             not_shipped.append(e)
             continue
         if verdict.get("shipped") is True:

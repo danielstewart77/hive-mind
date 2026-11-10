@@ -33,7 +33,10 @@ happened reported as a turn that was remembered. They propagate, and
 `lucent_api.routers.memory` turns each into a status code that names the
 rule that refused it.
 
-Model: qwen3-embedding:8b via Ollama (4096-dim).
+Embeddings come through the hive's inference proxy (`POST /v1/embeddings`,
+OpenAI shape) with the one proxy key, from the model named by
+`LUCENT_EMBEDDING_MODEL`. It must answer 4096 dimensions: the column is
+`vector(4096)`. Nothing here calls Ollama directly.
 """
 
 from __future__ import annotations
@@ -53,20 +56,18 @@ import hive_data
 from hive_data import memory as store
 from hive_data.schema import qualified
 
+from lucent_api import model_proxy
 from lucent_api.memory_schema import (
     build_metadata,
     validate_source,
     validate_tier,
 )
-from lucent_api.secrets import get_credential
 
 logger = logging.getLogger(__name__)
 
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://localhost:8420")
 HITL_TTL = 180
 
-OLLAMA_BASE_URL = get_credential("OLLAMA_BASE_URL") or "http://127.0.0.1:11434"
-EMBEDDING_MODEL = "qwen3-embedding:8b"
 EMBEDDING_DIM = 4096
 
 DEDUP_THRESHOLD = 0.92  # cosine similarity at or above which a write is deduped
@@ -80,19 +81,21 @@ _MEMORIES = qualified("memories")
 
 
 def _embed(text: str) -> list[float]:
-    """The embedding for a text, from Ollama. Synchronous on purpose.
+    """The embedding for a text, through the proxy. Synchronous on purpose.
 
     Kept as the one synchronous call in the module because it is the point
     where the process stops being ours — and it is therefore the one thing a
     test stubs. Nothing on a route calls it directly; `_embedding_for` does.
     """
+    root, key, model = model_proxy.settings("LUCENT_EMBEDDING_MODEL")
     resp = requests.post(
-        f"{OLLAMA_BASE_URL}/api/embed",
-        json={"model": EMBEDDING_MODEL, "input": text},
+        f"{root}/v1/embeddings",
+        json={"model": model, "input": text},
+        headers={"Authorization": f"Bearer {key}"},
         timeout=30,
     )
     resp.raise_for_status()
-    return resp.json()["embeddings"][0]
+    return resp.json()["data"][0]["embedding"]
 
 
 async def _embedding_for(text: str) -> list[float]:

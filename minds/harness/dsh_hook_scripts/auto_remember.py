@@ -2,8 +2,10 @@
 """Stop hook: capture what this turn taught into the hive's memory.
 
 The last thing the user said and the last thing the mind answered are
-classified in one structured call through hive-tools (``/ollama/structured``)
-against four independent branches, and each branch that applies is written
+classified in one structured call through the hive's inference proxy
+(``/v1/chat/completions`` with a json_schema ``response_format``, the mind's
+proxy key, the model ``HIVE_CLASSIFIER_MODEL``) against four independent
+branches, and each branch that applies is written
 to lucent (``/memory/store``, ``tier: contextual``, ``source: session``,
 ``mind_id`` this mind's UUID):
 
@@ -18,8 +20,9 @@ A chunk the classifier says would be a typed graph node or edge is dropped:
 structured facts are written by explicit skills, not by a sweep. A delegate's
 turn is skipped, since every hook fires for it under the mind's identity.
 
-The classifier is the hive's tools service; a hive installed without it, or
-a mind without its token, captures nothing and logs why. Every run is one
+The tools service is not involved: a hive installed without it captures
+the same. A mind without a proxy address, key or classifier model captures
+nothing and logs why. Every run is one
 line in ``<state dir>/runs.jsonl``. The work runs detached, so the turn is
 never held.
 """
@@ -165,6 +168,21 @@ def chunks(verdict: dict, person_resolves) -> list[tuple[str, str, str]]:
     return out
 
 
+def classify(proxy_url: str, key: str, model: str, prompt: str) -> dict:
+    """The classifier's verdict, from the proxy's chat route under SCHEMA."""
+    reply = hive.request("POST", f"{proxy_url}/v1/chat/completions", key, {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "response_format": {"type": "json_schema", "json_schema": {
+            "name": "turn_classification", "strict": True, "schema": SCHEMA}},
+    }, timeout=120)
+    content = ((reply.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+    verdict = json.loads(content)
+    if not isinstance(verdict, dict):
+        raise ValueError(f"the classifier answered {type(verdict).__name__}")
+    return verdict
+
+
 def _record(**fields: object) -> None:
     try:
         directory = hive.state_dir()
@@ -199,10 +217,10 @@ def capture(event: dict) -> list[str]:
         _record(session_id=sid, status="skip", reason="no-content")
         return []
     mind_id = os.environ.get("MIND_ID", "")
-    tools_url = os.environ.get("HIVE_TOOLS_URL", "").rstrip("/")
-    tools_token = os.environ.get("HIVE_TOOLS_TOKEN", "")
+    proxy_url, proxy_key = hive.proxy()
+    model = os.environ.get("HIVE_CLASSIFIER_MODEL", "").strip()
     lucent_url, bearer = hive.lucent()
-    if not (mind_id and tools_url and tools_token and lucent_url):
+    if not (mind_id and proxy_url and proxy_key and model and lucent_url):
         _record(session_id=sid, status="skip", reason="no-classifier-or-memory")
         return []
     try:
@@ -212,8 +230,7 @@ def capture(event: dict) -> list[str]:
     prompt = PROMPT.format(turn=f"## User\n{user}\n\n## Assistant\n{assistant}\n",
                            spec=spec, schema=_schema_block(lucent_url, bearer))
     try:
-        verdict = hive.request("POST", f"{tools_url}/ollama/structured", tools_token,
-                               {"prompt": prompt, "schema": SCHEMA}, timeout=120)
+        verdict = classify(proxy_url, proxy_key, model, prompt)
     except Exception as exc:  # noqa: BLE001
         _record(session_id=sid, status="fail", reason="classifier", error=str(exc))
         return []

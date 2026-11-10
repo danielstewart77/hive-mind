@@ -8,12 +8,20 @@ ok, 2 refused {"error"}, 1 the database unreachable or not migrated:
                  [--api-key-env NAME] [--update]
         the key read from the env name, passed with `exec -T -e NAME`, so it
         is never in an argv; --update rewrites address and key ("updated")
-    add-model --provider N --model M --context-window W [--update]
+    add-model --provider N --model M --context-window W [--purpose chat|embedding] [--update]
     mint-key --client NAME [--kind mind] -> {"client","created","minted","key"};
         an existing live key -> minted false, key null
     check-model --model M [--harness dsh] -> exit 0 {"ok": true, "status": 200,
-        "reply"}; exit 2 {"error", "status": 401|404|502}; up to ~45s
-    list-models [--harness dsh]
+        "reply"}, or for an embedding model {"model", "ok", "status", "dimensions"};
+        exit 2 {"error", "status": 401|404|502}; up to ~45s
+    list-models [--harness dsh] [--purpose embedding]
+
+Over HTTP with a client key (inference-proxy PR #21): POST /v1/embeddings
+(OpenAI shape) for an embedding model, POST /v1/chat/completions for a chat
+one; each refuses the other kind with a 400. `GET /v1/models?purpose=embedding`
+lists the embedding models, which no `?harness=` listing includes; every
+entry carries its "purpose". An ollama provider gets the embeddings path on
+its own.
 
 A newly minted key is accepted within KEY_CACHE_REFRESH_SECONDS (5s), so the
 listing is retried briefly. The container migrates its own schema on start
@@ -103,19 +111,23 @@ def add_provider(sh, compose, *, name, kind, base_url="", api_key="", update=Fal
     return _ok(*_cli(sh, compose, args, env=env), f"the provider {name!r}")
 
 
-def add_model(sh, compose, *, provider, model, context_window, update=False) -> dict:
+def add_model(sh, compose, *, provider, model, context_window, purpose=None,
+              update=False) -> dict:
     args = ["add-model", "--provider", provider, "--model", model,
             "--context-window", str(context_window)]
+    if purpose:
+        args += ["--purpose", purpose]
     if update:
         args.append("--update")
     return _ok(*_cli(sh, compose, args), f"the model {model!r}")
 
 
-def check_model(sh, compose, *, model: str, harness: str = "dsh") -> dict:
-    """One real completion through the proxy. Its own upstream retries take
-    up to about 45 seconds."""
-    code, out = _cli(sh, compose, ["check-model", "--model", model, "--harness", harness],
-                     timeout=CHECK_TIMEOUT)
+def check_model(sh, compose, *, model: str, harness: str | None = "dsh") -> dict:
+    """One real call through the proxy: a completion, or for an embedding
+    model an embedding whose length is "dimensions". Its own upstream
+    retries take up to about 45 seconds."""
+    args = ["check-model", "--model", model] + (["--harness", harness] if harness else [])
+    code, out = _cli(sh, compose, args, timeout=CHECK_TIMEOUT)
     if code == 0 and out.get("ok"):
         return out
     status = out.get("status")
@@ -132,13 +144,22 @@ def mint_key(sh, compose, *, client) -> str | None:
     return str(out["key"]) if out.get("minted") and out.get("key") else None
 
 
-def list_models(sh: Shell, proxy_url: str, key: str, harness: str = "dsh",
-                retries: int = 4, pause: float = 3.0, proxy_env: dict | None = None) -> list[str]:
-    """The model names the proxy offers this harness."""
+def _root(proxy_url: str) -> str:
     root = proxy_url.rstrip("/")
-    root = root[: -len("/v1")] if root.endswith("/v1") else root
+    return root[: -len("/v1")] if root.endswith("/v1") else root
+
+
+def list_models(sh: Shell, proxy_url: str, key: str, harness: str | None = "dsh",
+                retries: int = 4, pause: float = 3.0, proxy_env: dict | None = None,
+                purpose: str | None = None) -> list[str]:
+    """The model names the proxy offers this harness, or (`purpose`) the
+    models of that purpose. A listing filtered by purpose keeps only the
+    entries that say so: a proxy that predates purposes ignores the filter
+    and would otherwise offer its chat models as embedding models."""
+    root = _root(proxy_url)
+    query = f"purpose={purpose}" if purpose else f"harness={harness}"
     for attempt in range(retries + 1):
-        out = http_in_network(sh, "GET", f"{root}{LISTING}?harness={harness}",
+        out = http_in_network(sh, "GET", f"{root}{LISTING}?{query}",
                               headers={"Authorization": f"Bearer {key}"}, proxy_env=proxy_env)
         # A key minted a moment ago is refused until the proxy's key cache
         # refreshes.
@@ -152,4 +173,53 @@ def list_models(sh: Shell, proxy_url: str, key: str, harness: str = "dsh",
         rows = json.loads(out["body"]).get("data") or []
     except ValueError as exc:
         raise StepFailed("the proxy's model listing is not JSON") from exc
-    return [str(r["id"]) for r in rows if r.get("id")]
+    return [str(r["id"]) for r in rows
+            if r.get("id") and (not purpose or r.get("purpose") == purpose)]
+
+
+def embedding_dimensions(sh: Shell, proxy_url: str, key: str, model: str,
+                         proxy_env: dict | None = None) -> int:
+    """The length of one real embedding from `model`, made with `key`."""
+    out = http_in_network(sh, "POST", f"{_root(proxy_url)}/v1/embeddings",
+                          headers={"Authorization": f"Bearer {key}"},
+                          body={"model": model, "input": "hive install check"},
+                          timeout=180, proxy_env=proxy_env)
+    if out.get("status") != 200:
+        raise StepFailed(f"a test embedding from {model!r} through the proxy failed "
+                         f"({out.get('status')}): {out.get('error') or out.get('body', '')[:200]}")
+    try:
+        data = json.loads(out["body"]).get("data") or [{}]
+        return len(data[0].get("embedding") or [])
+    except (ValueError, AttributeError) as exc:
+        raise StepFailed(f"the proxy's embedding from {model!r} is not the OpenAI shape") from exc
+
+
+#: What the test classification is asked to fill: the same json_schema
+#: response_format lucent's pruner and the capture hook send.
+_CHECK_SCHEMA = {"type": "object", "properties": {"ok": {"type": "boolean"}},
+                 "required": ["ok"], "additionalProperties": False}
+
+
+def classify_check(sh: Shell, proxy_url: str, key: str, model: str,
+                   proxy_env: dict | None = None) -> dict:
+    """One real structured completion from `model`, made with `key`."""
+    out = http_in_network(sh, "POST", f"{_root(proxy_url)}/v1/chat/completions",
+                          headers={"Authorization": f"Bearer {key}"},
+                          body={"model": model,
+                                "messages": [{"role": "user",
+                                              "content": 'Answer {"ok": true}.'}],
+                                "response_format": {"type": "json_schema", "json_schema": {
+                                    "name": "check", "strict": True,
+                                    "schema": _CHECK_SCHEMA}}},
+                          timeout=180, proxy_env=proxy_env)
+    if out.get("status") != 200:
+        raise StepFailed(f"a test classification by {model!r} through the proxy failed "
+                         f"({out.get('status')}): {out.get('error') or out.get('body', '')[:200]}")
+    try:
+        content = json.loads(out["body"])["choices"][0]["message"]["content"]
+        verdict = json.loads(content)
+    except (ValueError, KeyError, IndexError, TypeError) as exc:
+        raise StepFailed(f"the classifier {model!r} did not answer JSON") from exc
+    if not isinstance(verdict, dict):
+        raise StepFailed(f"the classifier {model!r} did not answer a JSON object")
+    return verdict

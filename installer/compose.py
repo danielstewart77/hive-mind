@@ -64,8 +64,17 @@ POSTGRES_IMAGE = "pgvector/pgvector:pg17"
 PG_VOLUME = "hive_postgres"
 CONSOLE_IMAGE = "hive/console:local"
 OLLAMA_IMAGE = "ollama/ollama:latest"
+#: The models an installer-run proxy serves from the hive's Ollama, pulled
+#: and registered before anything needs them. Every model call in the hive
+#: goes through the proxy with the one key; nothing calls Ollama for one.
 EMBEDDING_MODEL = "qwen3-embedding:8b"
+CLASSIFIER_MODEL = "gpt-oss:20b-32k"
+#: lucent's `memory.memories.embedding` is `vector(4096)`.
 EMBEDDING_DIMENSIONS = 4096
+#: The .env names of the two models chosen at install: lucent embeds with
+#: the first; lucent's pruner and the capture hook classify with the second.
+EMBEDDING_MODEL_VAR = "LUCENT_EMBEDDING_MODEL"
+CLASSIFIER_MODEL_VAR = "HIVE_CLASSIFIER_MODEL"
 
 APP = "/usr/src/app"
 
@@ -237,6 +246,8 @@ def env_values(home: Home, answers: dict, generated: dict[str, str], current: di
     values.update({k: v for k, v in (extra or {}).items() if v is not None})
     values["HIVE_DATABASE_URL"] = database_url(answers, values)
     values.setdefault("MIND_PROXY_KEY", "")
+    values.setdefault(EMBEDDING_MODEL_VAR, "")
+    values.setdefault(CLASSIFIER_MODEL_VAR, "")
     values.setdefault("HIVE_TOOLS_TOKEN", "")
     values["TERMINAL_LABELS_TOKEN"] = values["COMMS_RENAME_TOKEN"]
     return values
@@ -339,24 +350,27 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
     svc["ports"] = [f"127.0.0.1:{COMMS_HOST_PORT}:8424"]
     svc["volumes"] = [bind(home.data / "comms", "/data")]
 
+    # The one proxy key: lucent embeds (and its pruner classifies) through
+    # the proxy, with the key the mind, the hooks and the console carry.
     lucent_env = {
         "LUCENT_API_PORT": "8424", "LUCENT_URL_SELF": "http://127.0.0.1:8424",
-        "HIVE_DATABASE_URL": dsn, "OLLAMA_BASE_URL": embeddings_url(answers),
+        "HIVE_DATABASE_URL": dsn, "INFERENCE_PROXY_URL": proxy_url(answers),
+        "INFERENCE_PROXY_KEY": env_ref("MIND_PROXY_KEY"),
+        "LUCENT_EMBEDDING_MODEL": env_ref(EMBEDDING_MODEL_VAR),
+        "LUCENT_CLASSIFIER_MODEL": env_ref(CLASSIFIER_MODEL_VAR),
         "LUCENT_ADMIN_BEARER_TOKEN": env_ref("LUCENT_ADMIN_BEARER_TOKEN"),
         "LUCENT_SOUL_BEARER_TOKEN": env_ref("LUCENT_SOUL_BEARER_TOKEN"),
         "LUCENT_PRIMARY_USER": env_ref("HIVE_SEED_USERNAME"),
         "PRUNE_LOG_PATH": "/data/prune.log", "PRUNE_TIMEZONE": host.tz,
     }
-    if "tools" in pieces:
-        lucent_env.update({"HIVE_TOOLS_URL": tools.URL, "HIVE_TOOLS_TOKEN": env_ref("HIVE_TOOLS_TOKEN")})
     svc = base(LUCENT, image="hive/lucent:local", waits_on_db=True, build={
         "context": ns, "additional_contexts": {"hive_data": hive_data}}, env=lucent_env)
     svc["ports"] = [f"127.0.0.1:{LUCENT_HOST_PORT}:8424"]
     svc["volumes"] = [bind(home.data / "lucent", "/data")]
 
     if plan.runs_here(answers, "embeddings"):
-        # Held in memory for good: lucent's embed call has a 30-second
-        # deadline, and reloading an 8B model on a CPU after Ollama's idle
+        # Held in memory for good: lucent's embed call (through the proxy)
+        # has a 30-second deadline, and reloading an 8B model on a CPU after Ollama's idle
         # unload takes longer than that.
         svc = base(OLLAMA, image=OLLAMA_IMAGE, env={"OLLAMA_KEEP_ALIVE": "-1"})
         svc["volumes"] = [{"type": "volume", "source": "hive_ollama", "target": "/root/.ollama"}]
@@ -386,9 +400,12 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
                "LUCENT_API_URL": LUCENT_URL,
                "LUCENT_BEARER_TOKEN": env_ref(token_var("LUCENT", CONSOLE)),
                "LUCENT_SOUL_BEARER_TOKEN": env_ref("LUCENT_SOUL_BEARER_TOKEN"),
+               # The console's model address is the proxy too, with the one
+               # key: OLLAMA_BASE_URL / OLLAMA_URL are where it points a mind
+               # it scaffolds for local models.
                "INFERENCE_PROXY_URL": proxy_url(answers),
                "INFERENCE_PROXY_KEY": env_ref("MIND_PROXY_KEY"),
-               "OLLAMA_BASE_URL": embeddings_url(answers),
+               "OLLAMA_BASE_URL": proxy_url(answers), "OLLAMA_URL": proxy_url(answers),
                "HOST_UID": str(host.uid), "HOST_GID": str(host.gid),
                # Where the hive's compose project is, for the console's
                # restart and mount controls; unset it names Daniel's checkout.
@@ -465,6 +482,8 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
         "LUCENT_BEARER_TOKEN": env_ref(token_var("LUCENT", mind)),
         "SPECS_DIR": f"{APP}/specs/data-classes",
         "AUTO_REMEMBER_LOG_DIR": f"{app_mind}/data/auto-remember",
+        # The capture hook classifies through the proxy with the mind's key.
+        CLASSIFIER_MODEL_VAR: env_ref(CLASSIFIER_MODEL_VAR),
         **dsh.mind_environment(app_mind_dir=app_mind, proxy_url=proxy_url(answers),
                                key_ref=env_ref("MIND_PROXY_KEY")),
     }

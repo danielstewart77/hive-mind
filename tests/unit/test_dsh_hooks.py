@@ -62,10 +62,14 @@ def service(monkeypatch):
     url = f"http://127.0.0.1:{server.server_address[1]}"
     for name, value in (("COMMS_URL", url), ("COMMS_BEARER_TOKEN", "comms-key"),
                         ("LUCENT_URL_SELF", url), ("LUCENT_BEARER_TOKEN", "lucent-key"),
-                        ("HIVE_TOOLS_URL", url), ("HIVE_TOOLS_TOKEN", "tools-key"),
+                        ("INFERENCE_PROXY_URL", url), ("MIND_PROXY_KEY", "proxy-key"),
+                        ("HIVE_CLASSIFIER_MODEL", "classifier-of-record"),
                         ("MIND_ID", "mind-uuid"), ("SURFACE", "telegram"),
                         ("CLIENT_REF", "chat-1")):
         monkeypatch.setenv(name, value)
+    # A hive without the tools service: the capture must not need it.
+    for name in ("HIVE_TOOLS_URL", "HIVE_TOOLS_TOKEN", "DSH_PROXY_BASE_URL", "DSH_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
     yield seen, replies
     server.shutdown()
 
@@ -214,14 +218,17 @@ def test_a_prompt_the_harness_submitted_does_not_fire(mind):
 # --- auto_remember ---------------------------------------------------------
 
 
-def test_a_classified_turn_is_stored_as_this_minds_memory(mind, service, tmp_path):
+def test_a_turn_is_classified_by_the_proxy_with_the_one_key_and_stored_as_this_minds_memory(
+        mind, service, tmp_path):
     seen, replies = service
-    replies["/ollama/structured"] = {
+    verdict = {
         "feedback": {"present": True, "content": "Answer tersely.", "reason": ""},
         "person": {"present": False}, "tech": {"present": True, "data_class": "future-state",
                                                "prose": "The hive moves to v2.",
                                                "fits_schema": False},
         "self": {"present": True}}
+    replies["/v1/chat/completions"] = {
+        "choices": [{"message": {"role": "assistant", "content": json.dumps(verdict)}}]}
     replies["/memory/store"] = {"id": "mem-1"}
     auto_remember = importlib.import_module("auto_remember")
     transcript = _transcript(tmp_path / "t.jsonl", [
@@ -230,6 +237,12 @@ def test_a_classified_turn_is_stored_as_this_minds_memory(mind, service, tmp_pat
 
     stored = auto_remember.capture({"session_id": "conv-1", "transcript_path": str(transcript)})
 
+    asked = [r for r in seen if r["path"] == "/v1/chat/completions"]
+    assert len(asked) == 1
+    assert asked[0]["auth"] == "Bearer proxy-key"
+    assert asked[0]["body"]["model"] == "classifier-of-record"
+    assert asked[0]["body"]["response_format"]["type"] == "json_schema"
+    assert not [r for r in seen if r["path"].startswith("/ollama")]
     writes = [r["body"] for r in seen if r["path"] == "/memory/store"]
     assert stored == ["mem-1", "mem-1"]
     assert [(w["data_class"], w["content"]) for w in writes] == [
