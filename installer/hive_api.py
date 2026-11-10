@@ -65,11 +65,13 @@ class Api:
 
 
 def mint(api: Api, holders: dict[str, str], username: str, role: str = SERVICE,
-         mind_id: str | None = None) -> dict[str, str]:
+         mind_id: str | None = None, on_minted=None) -> dict[str, str]:
     """Give every holder its credential unless it has one; never replace.
 
     `holders` maps holder -> the value this install holds for it. Returns
-    holder -> "minted" | "kept".
+    holder -> "minted" | "kept". `on_minted(holder)` is called the moment a
+    holder's PUT succeeds, so a run that fails at the next holder has
+    already recorded this one as its own.
     """
     existing = api.credentials()
     out: dict[str, str] = {}
@@ -90,6 +92,8 @@ def mint(api: Api, holders: dict[str, str], username: str, role: str = SERVICE,
         if status != 200:
             raise StepFailed(f"{api.kind} refused to mint {key!r}: {answer}")
         out[key] = "minted"
+        if on_minted is not None:
+            on_minted(key)
     return out
 
 
