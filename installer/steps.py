@@ -7,7 +7,9 @@ holds a hive — free of the names this install would take).
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import secrets as _random
 import shutil
 import time
@@ -15,7 +17,7 @@ import uuid
 from pathlib import Path
 
 from installer import collisions, compose, hive_api, plan, probe, secrets_store
-from installer.adapters import dsh, migrate, proxy as proxy_adapter, tools
+from installer.adapters import dsh, migrate, proxy as proxy_adapter, site, tools
 from installer.paths import REPO_BASE, write_private
 from installer.runner import NeedInput, Step
 from installer.shell import NETWORK, Shell, StepFailed, http_in_network
@@ -38,6 +40,12 @@ class Ctx:
         return self.installer.answers
 
     @property
+    def typed(self) -> dict:
+        """The secrets typed on the page this run; never written to disk
+        except as the .env values they become."""
+        return getattr(self.installer, "typed", {}) or {}
+
+    @property
     def host(self):
         return self.installer.host
 
@@ -47,6 +55,11 @@ class Ctx:
 
     def env(self) -> dict[str, str]:
         return secrets_store.parse_env(self.home.env_file)
+
+    def secret(self, answer_key: str) -> str:
+        """A secret answer: typed this run, else the live .env's value."""
+        typed = str(self.typed.get(answer_key) or "").strip()
+        return typed or self.env().get(compose.SECRET_ANSWERS[answer_key], "")
 
     def set_env(self, **values: str) -> None:
         """Change values in the live .env, keeping everything else in it."""
@@ -60,6 +73,16 @@ class Ctx:
             return (self.installer.runner.state.get("outputs") or {}).get(key)
         self.installer.runner.record_output(key, value)
         return value
+
+    def web_env(self) -> dict[str, str]:
+        """The web proxy settings the services run with."""
+        names = [*plan.SERVICE_NAMES, self.answers.get("mind_name") or "mind",
+                 *compose.given_hosts(self.answers)]
+        return self.host.proxy_env(names)
+
+    def http(self, method: str, url: str, **kw) -> dict:
+        """A request from inside the hive network, under the services' proxy."""
+        return http_in_network(self.sh, method, url, proxy_env=self.web_env(), **kw)
 
     def comms(self) -> hive_api.Api:
         return hive_api.Api("comms", f"http://127.0.0.1:{compose.COMMS_HOST_PORT}",
@@ -102,61 +125,119 @@ def _wait(ctx: Ctx, what: str, probe_fn, timeout: float, pause: float = 3) -> No
 
 
 def _healthy_in_network(ctx: Ctx, url: str) -> tuple[bool, str]:
-    out = http_in_network(ctx.sh, "GET", url, timeout=8)
+    out = ctx.http("GET", url, timeout=8)
     return out.get("status") == 200, str(out.get("error") or out.get("status"))
 
 
+def _facts(ctx: Ctx) -> dict:
+    dsn = ctx.env()["HIVE_DATABASE_URL"]
+    facts = ctx.sh.in_network(probe.gather_script(), {"dsn": dsn}, timeout=60, redact=(dsn,))
+    if facts.get("error"):
+        raise StepFailed(f"the database could not be read: {facts['error']}")
+    return facts
+
+
+def _proxy_admin(ctx: Ctx) -> str:
+    """Where a proxy fix is made, said in a way the operator can act on."""
+    env = ctx.env()
+    return (f"the proxy's admin page, http://{ctx.host.address}:{proxy_adapter.HOST_PORT}/admin "
+            f"(user {env.get('HIVE_SEED_USERNAME', '')!r}, password PROXY_ADMIN_PASSWORD in "
+            f"{ctx.home.env_file})")
+
+
 # ---- 1. clone ---------------------------------------------------------------
+def _valid_repo(ctx: Ctx, path: Path) -> bool:
+    return (path / ".git").is_dir() and ctx.sh.run(
+        ["git", "-C", str(path), "rev-parse", "--verify", "HEAD"], check=False).returncode == 0
+
+
 def clone_repos(ctx: Ctx):
     done = []
     for name in plan.repos(ctx.answers):
         path = ctx.home.repo(name)
-        if (path / ".git").is_dir():
+        if path.exists() and not _valid_repo(ctx, path):
+            # A clone a deadline killed half way: ours, unusable, redone.
+            shutil.rmtree(path)
+        if path.exists():
             ctx.sh.run(["git", "-C", str(path), "pull", "--ff-only", "--quiet"], timeout=300)
         else:
-            ctx.sh.run(["git", "clone", "--quiet", f"{REPO_BASE}/{name}.git", str(path)],
+            # Into a temporary name, renamed only once whole, so an
+            # interrupted clone is never mistaken for a repository.
+            partial = path.with_name(f".{name}.partial")
+            if partial.exists():
+                shutil.rmtree(partial)
+            ctx.sh.run(["git", "clone", "--quiet", f"{REPO_BASE}/{name}.git", str(partial)],
                        timeout=900)
+            if not _valid_repo(ctx, partial):
+                raise StepFailed(f"the clone of {name} has no HEAD")
+            partial.rename(path)
         head = ctx.sh.run(["git", "-C", str(path), "rev-parse", "--short", "HEAD"]).stdout.strip()
         done.append(f"{name}@{head}")
     return ", ".join(done)
 
 
 # ---- 2. dsh tree ------------------------------------------------------------
+def _dsh_fresh(ctx: Ctx) -> Path:
+    return ctx.home.root / "dsh.new"
+
+
 def build_dsh_tree(ctx: Ctx):
+    """Built beside the live tree. A running mind has the live one mounted,
+    so the new tree is swapped in by `start_mind`, which recreates the mind
+    in the same breath; only a first install swaps it in here."""
     repo = ctx.home.repo("hive-harness-dsh")
     head = ctx.sh.run(["git", "-C", str(repo), "rev-parse", "HEAD"]).stdout.strip()
+    fresh = _dsh_fresh(ctx)
     if dsh.tree_built(ctx.home.dsh) and ctx.output("dsh_head") == head:
         return f"tree at {head[:8]} already built"
-    fresh = ctx.home.root / "dsh.new"
+    if dsh.tree_built(fresh) and ctx.output("dsh_fresh_head") == head:
+        return f"tree at {head[:8]} built, waiting to be swapped in"
     if fresh.exists():
         shutil.rmtree(fresh)
-    ctx.sh.run(dsh.build_tree(repo, fresh, ctx.host.proxy_env([])),
+    ctx.sh.run(dsh.build_tree(repo, fresh, ctx.host.proxy_env(plan.SERVICE_NAMES)),
                timeout=3600, env={"DOCKER_BUILDKIT": "1"})
     if not dsh.tree_built(fresh):
         raise StepFailed(f"the dsh build produced no launcher at {dsh.LAUNCHER}")
-    old = ctx.home.root / "dsh.old"
+    ctx.output("dsh_fresh_head", head)
+    if not dsh.tree_built(ctx.home.dsh):
+        _swap_dsh(ctx)
+        return f"tree built at {head[:8]}"
+    return f"tree built at {head[:8]}; swapped in when the mind restarts"
+
+
+def _swap_dsh(ctx: Ctx) -> None:
+    fresh, old = _dsh_fresh(ctx), ctx.home.root / "dsh.old"
     if old.exists():
         shutil.rmtree(old)
     if ctx.home.dsh.exists():
         ctx.home.dsh.rename(old)
     fresh.rename(ctx.home.dsh)
-    if old.exists():
-        shutil.rmtree(old, ignore_errors=True)
-    ctx.output("dsh_head", head)
-    ctx.output("dsh_rebuilt", True)
-    return f"tree built at {head[:8]}"
+    shutil.rmtree(old, ignore_errors=True)
+    ctx.output("dsh_head", ctx.output("dsh_fresh_head"))
 
 
 # ---- 3. config --------------------------------------------------------------
 def render_config(ctx: Ctx):
     home, answers = ctx.home, ctx.answers
+    current = secrets_store.current(home)
+    if plan.runs_here(answers, "postgres") and not current.get("HIVE_PG_PASSWORD") and \
+            ctx.sh.run(["docker", "volume", "inspect", compose.PG_VOLUME],
+                       check=False).returncode == 0:
+        # A new password over an old volume is a database that refuses every
+        # service, reported as each of them being unhealthy.
+        raise StepFailed(
+            f"a Docker volume named {compose.PG_VOLUME} already holds a database, and this "
+            f"install folder has no password for it. Put the earlier install's .env back in "
+            f"{home.root}, or remove the volume (docker volume rm {compose.PG_VOLUME}) if its "
+            "data is not wanted, then run again")
     generated = secrets_store.resolve(home, compose.secret_names(answers))
-    values = compose.env_values(home, answers, generated, secrets_store.current(home))
+    values = compose.env_values(home, answers, generated, current, typed=ctx.typed)
     rendered = compose.render(home, answers, ctx.host)
     compose.prepare_mounts(rendered)
     write_private(home.env_file, secrets_store.format_env(values, ENV_HEADER))
     secrets_store.remember(home, values)
-    home.compose_file.write_text(rendered.text())
+    # 0600 as well: a web proxy's credential is written into it literally.
+    write_private(home.compose_file, rendered.text())
     ctx.sh.run([*ctx.compose, "config", "--quiet"], timeout=60)
     return f"{len(rendered.compose['services'])} services"
 
@@ -173,6 +254,11 @@ def create_network(ctx: Ctx):
 def build_images(ctx: Ctx):
     ctx.sh.run([*ctx.compose, "build"], timeout=5400)
     ctx.sh.run([*ctx.compose, "pull", "--ignore-buildable", "--quiet"], timeout=1800)
+    doc = json.loads(ctx.home.compose_file.read_text())
+    if compose.CONSOLE not in doc["services"]:
+        # The first admin is seeded with the console's own code, so its image
+        # is built even when the console is not installed.
+        ctx.sh.run(compose.console_image_build(ctx.home, ctx.host), timeout=3600)
     return "built"
 
 
@@ -181,8 +267,8 @@ def check_existing(ctx: Ctx):
     a = ctx.answers
     checked = []
     if not plan.runs_here(a, "postgres"):
-        facts = ctx.sh.in_network(probe.gather_script(), {"dsn": ctx.env()["HIVE_DATABASE_URL"]},
-                                  timeout=60, redact=(ctx.env()["HIVE_DATABASE_URL"],))
+        dsn = ctx.env()["HIVE_DATABASE_URL"]
+        facts = ctx.sh.in_network(probe.gather_script(), {"dsn": dsn}, timeout=60, redact=(dsn,))
         if facts.get("error"):
             raise StepFailed(f"the database at {a['postgres_host']}:{a.get('postgres_port')} "
                              f"cannot be reached from inside the hive: {facts['error']}")
@@ -195,7 +281,7 @@ def check_existing(ctx: Ctx):
     if plan.mode(a, "voice") == plan.EXISTING:
         targets.append(("voice server", compose.voice_url(a) + "/health"))
     for label, url in targets:
-        out = http_in_network(ctx.sh, "GET", url, timeout=10)
+        out = ctx.http("GET", url, timeout=10)
         if not out.get("status"):
             raise StepFailed(f"the {label} at {url.rsplit('/', 1)[0]} cannot be reached from "
                              f"inside the hive: {out.get('error')}")
@@ -219,12 +305,8 @@ def start_database(ctx: Ctx):
 
 # ---- 8. schema check --------------------------------------------------------
 def schema_check(ctx: Ctx):
-    dsn = ctx.env()["HIVE_DATABASE_URL"]
-    report = migrate.check(ctx.sh, dsn)
-    facts = ctx.sh.in_network(probe.gather_script(), {"dsn": dsn}, timeout=60, redact=(dsn,))
-    if facts.get("error"):
-        raise StepFailed(f"the database could not be read: {facts['error']}")
-    ctx.output("facts", facts)
+    report = migrate.check(ctx.sh, ctx.env()["HIVE_DATABASE_URL"])
+    ctx.output("facts", _facts(ctx))
     pending = report.get("pending") or []
     return f"{len(pending)} schema step(s) to apply" if pending else "schema current"
 
@@ -250,7 +332,32 @@ def schema_apply(ctx: Ctx):
     return f"schema at {report.get('version')}"
 
 
-# ---- 11. services -----------------------------------------------------------
+# ---- 11. the first admin ----------------------------------------------------
+def seed_admin(ctx: Ctx):
+    """The admin account, made with the console's own seed code.
+
+    hive_site's `seed_first_user` in the console image (which carries it),
+    whatever pieces are ticked: without an account nothing can own the mind
+    or sign in. It writes only into an empty account store, so against an
+    existing hive it does nothing and the account is the one the collision
+    check already found.
+    """
+    env = ctx.env()
+    admin = collisions.username(ctx.answers["admin_username"])
+    out = ctx.sh.in_network(site.SEED_SCRIPT, {
+        "dsn": env["HIVE_DATABASE_URL"], "username": admin,
+        "password": env.get("HIVE_SEED_PASSWORD", "")},
+        timeout=120, image=compose.CONSOLE_IMAGE,
+        redact=(env["HIVE_DATABASE_URL"], env.get("HIVE_SEED_PASSWORD", "")))
+    if out.get("error"):
+        raise StepFailed(f"the admin account could not be made: {out['error']}")
+    if not out.get("exists"):
+        raise StepFailed(f"the admin {admin!r} has no account and none was made: the account "
+                         "store already holds other accounts")
+    return "admin made" if out.get("created") else "admin exists"
+
+
+# ---- 12. services -----------------------------------------------------------
 def _infra(ctx: Ctx) -> list[str]:
     mind = ctx.answers["mind_name"]
     skip = {mind, compose.TELEGRAM, compose.DISCORD}
@@ -273,7 +380,40 @@ def start_services(ctx: Ctx):
     return ", ".join(services)
 
 
-# ---- 12. proxy --------------------------------------------------------------
+# ---- 13. proxy --------------------------------------------------------------
+def _digest(*parts) -> str:
+    return hashlib.sha256("\x00".join(str(p) for p in parts).encode()).hexdigest()
+
+
+def _settled(ctx: Ctx, key: str, now: str, what: str) -> None:
+    """Refuse a change the proxy cannot take yet, once; accept it on the run
+    after the operator has made it on the proxy's admin page.
+
+    The proxy's add commands keep an existing row untouched, so a changed
+    key passed to them is silently dropped and the mind runs on the old one.
+    Until the proxy's update path lands (adapter: `proxy.update_provider`),
+    the change is refused with where to make it; the next run, still asked
+    for the same new value, takes it as made.
+    """
+    recorded = ctx.output(key) or {}
+    if not recorded.get("value"):
+        ctx.output(key, {"value": now})
+        return
+    if recorded["value"] == now:
+        return
+    if recorded.get("pending") == now:
+        ctx.output(key, {"value": now})
+        return
+    ctx.output(key, {**recorded, "pending": now})
+    try:
+        proxy_adapter.update_provider(ctx.sh, ctx.compose)
+    except proxy_adapter.Pending:
+        raise StepFailed(
+            f"the {what} changed since the proxy was set up, and the proxy keeps the old one. "
+            f"Change it on {_proxy_admin(ctx)}, then run again; the next run takes it as "
+            "changed") from None
+
+
 def proxy_setup(ctx: Ctx):
     a = ctx.answers
     if not plan.runs_here(a, "proxy"):
@@ -287,22 +427,33 @@ def proxy_setup(ctx: Ctx):
     ctx.sh.run([*ctx.compose, "up", "-d", proxy_adapter.SERVICE], timeout=300)
     _wait(ctx, "the proxy", lambda: _healthy_in_network(ctx, proxy_adapter.URL + "/health"), 240)
     provider = a["provider_kind"]
-    proxy_adapter.add_provider(ctx.sh, ctx.compose, name=provider, kind=a["provider_kind"],
-                               base_url=str(a.get("provider_base_url") or ""),
-                               api_key=str(a.get("provider_api_key") or ""))
+    base_url = str(a.get("provider_base_url") or "")
+    api_key = ctx.secret("provider_api_key")
+    window = int(a.get("provider_model_window") or 200000)
+    _settled(ctx, f"provider:{provider}", _digest(base_url, api_key),
+             f"{provider} provider's key or address")
+    _settled(ctx, f"model:{a['provider_model']}", str(window),
+             f"context window of {a['provider_model']}")
+    proxy_adapter.add_provider(ctx.sh, ctx.compose, name=provider, kind=provider,
+                               base_url=base_url, api_key=api_key)
     proxy_adapter.add_model(ctx.sh, ctx.compose, provider=provider, model=a["provider_model"],
-                            context_window=int(a.get("provider_model_window") or 200000))
+                            context_window=window)
     key = proxy_adapter.mint_key(ctx.sh, ctx.compose, client=a["mind_name"])
     if key:
         ctx.set_env(MIND_PROXY_KEY=key)
-        return "provider, model and the mind's key"
-    if not ctx.env().get("MIND_PROXY_KEY"):
+    elif not ctx.env().get("MIND_PROXY_KEY"):
         raise StepFailed(f"the proxy already has a key for {a['mind_name']!r} that this install "
-                         "did not record; revoke it in the proxy's admin pages and run again")
-    return "provider, model; the mind's key kept"
+                         f"did not record; revoke it on {_proxy_admin(ctx)} and run again")
+    try:
+        proxy_adapter.check_model(ctx.sh, ctx.compose, model=a["provider_model"])
+        checked = "; a test completion answered"
+    except proxy_adapter.Pending:
+        checked = "; no test completion yet (the proxy's check-model is pending)"
+    return ("provider, model and the mind's key" if key else
+            "provider, model; the mind's key kept") + checked
 
 
-# ---- 13. embeddings ---------------------------------------------------------
+# ---- 14. embeddings ---------------------------------------------------------
 def _mem_gb() -> float:
     try:
         for line in Path("/proc/meminfo").read_text().splitlines():
@@ -326,9 +477,9 @@ def embeddings(ctx: Ctx):
         for model in models:
             ctx.sh.run([*ctx.compose, "exec", "-T", compose.OLLAMA, "ollama", "pull", model],
                        timeout=3600)
-    out = http_in_network(ctx.sh, "POST", f"{url}/api/embed",
-                          body={"model": compose.EMBEDDING_MODEL, "input": "hive install check"},
-                          timeout=180)
+    out = ctx.http("POST", f"{url}/api/embed",
+                   body={"model": compose.EMBEDDING_MODEL, "input": "hive install check"},
+                   timeout=180)
     if out.get("status") != 200:
         raise StepFailed(f"a test embedding at {url} failed ({out.get('status')}): "
                          f"{out.get('error') or out.get('body', '')[:200]}")
@@ -339,7 +490,7 @@ def embeddings(ctx: Ctx):
     return "; ".join([f"{len(vector)}-dimension test embedding", *notes])
 
 
-# ---- 14. reachability -------------------------------------------------------
+# ---- 15. reachability -------------------------------------------------------
 def _endpoints(ctx: Ctx) -> list[tuple[str, str]]:
     a = ctx.answers
     pieces = plan.installed(a)
@@ -362,7 +513,7 @@ def reachability(ctx: Ctx):
     for label, url in _endpoints(ctx):
         last = {}
         for _ in range(20):
-            last = http_in_network(ctx.sh, "GET", url, timeout=8)
+            last = ctx.http("GET", url, timeout=8)
             if last.get("status"):
                 break
             time.sleep(3)
@@ -373,40 +524,72 @@ def reachability(ctx: Ctx):
     return "every service answers"
 
 
-# ---- 15. service credentials ------------------------------------------------
+# ---- 16. service credentials ------------------------------------------------
+def _tools_token_ok(ctx: Ctx, token: str) -> bool:
+    out = ctx.http("GET", tools.URL + tools.TOKEN_CHECK,
+                   headers={"Authorization": f"Bearer {token}"}, timeout=10)
+    return out.get("status") not in (0, 401, 403)
+
+
 def mint_credentials(ctx: Ctx):
     a, env = ctx.answers, ctx.env()
     holders = compose.service_holders(a)
-    admin = a["admin_username"]
+    admin = collisions.username(a["admin_username"])
     done = {}
     for store, api in (("comms", ctx.comms()), ("lucent", ctx.lucent())):
         wanted = {h: env[compose.token_var(store.upper(), h)] for h in holders[store]}
-        result = hive_api.mint(api, wanted, admin, role=hive_api.SERVICE)
-        _record_minted(ctx, store, [h for h, how in result.items() if how == "minted"])
-        done[store] = result
-    if "tools" in plan.installed(a) and not env.get("HIVE_TOOLS_TOKEN"):
-        token = tools.mint_token(ctx.sh, ctx.compose)
-        ctx.set_env(HIVE_TOOLS_TOKEN=token)
-        ctx.sh.run([*ctx.compose, "up", "-d", compose.LUCENT,
-                    *([compose.CONSOLE] if "console" in plan.installed(a) else [])], timeout=300)
-        done["tools"] = "token minted"
+        done[store] = hive_api.mint(api, wanted, admin, role=hive_api.SERVICE,
+                                    on_minted=lambda h, s=store: _record_minted(ctx, s, [h]))
+    if "tools" in plan.installed(a):
+        token = env.get("HIVE_TOOLS_TOKEN")
+        # Checked, not trusted: a tools database rebuilt since has none of
+        # the tokens this install recorded.
+        if not token or not _tools_token_ok(ctx, token):
+            token = tools.mint_token(ctx.sh, ctx.compose)
+            ctx.set_env(HIVE_TOOLS_TOKEN=token)
+            ctx.sh.run([*ctx.compose, "up", "-d", compose.LUCENT,
+                        *([compose.CONSOLE] if "console" in plan.installed(a) else [])],
+                       timeout=300)
+            done["tools"] = "token minted"
+        else:
+            done["tools"] = "token kept"
     return done
 
 
-# ---- 16. model --------------------------------------------------------------
+# ---- 17. model --------------------------------------------------------------
+def _runtime(ctx: Ctx) -> Path:
+    return ctx.home.mind(ctx.answers["mind_name"]) / "runtime.yaml"
+
+
+def _file_model(path: Path) -> str:
+    try:
+        found = re.search(r"^default_model:\s*(\S+)\s*$", path.read_text(), re.M)
+    except OSError:
+        return ""
+    return found.group(1).strip("'\"") if found else ""
+
+
 def choose_model(ctx: Ctx):
     models = proxy_adapter.list_models(ctx.sh, compose.proxy_url(ctx.answers),
-                                       ctx.env()["MIND_PROXY_KEY"], harness="dsh")
+                                       ctx.env()["MIND_PROXY_KEY"], harness="dsh",
+                                       proxy_env=ctx.web_env())
     if not models:
-        raise StepFailed("the proxy offers no model for dsh; add one in the proxy and run again")
+        raise StepFailed("the proxy offers no model for dsh; add one on "
+                         f"{_proxy_admin(ctx)} and run again")
     ctx.output("models", models)
+    # The mind's own file is the truth once it exists: a model changed on
+    # the console since is the one kept.
+    current = _file_model(_runtime(ctx))
+    if current in models:
+        ctx.answers["model"] = current
+        return current
     chosen = ctx.answers.get("model")
     if chosen in models:
         return chosen
     raise NeedInput("model", "The model the mind runs on", models)
 
 
-# ---- 17. the mind -----------------------------------------------------------
+# ---- 18. the mind -----------------------------------------------------------
 RUNTIME = """\
 # Written by the hive installer. The mind's own configuration from here on:
 # edit it on the console. Identity and soul live in the knowledge graph.
@@ -450,101 +633,116 @@ def create_mind(ctx: Ctx):
     if not token.exists() or not token.read_text().strip():
         write_private(token, _random.token_urlsafe(32) + "\n")
     runtime = folder / "runtime.yaml"
-    wrote = False
     if not runtime.exists():
         app_mind = f"{compose.APP}/minds/{name}"
         runtime.write_text(RUNTIME.format(name=name, mind_id=a["mind_id"],
-                                          owner=a["admin_username"].lower(), model=a["model"],
-                                          **dsh.runtime_keys(app_mind)))
-        wrote = True
+                                          owner=collisions.username(a["admin_username"]),
+                                          model=a["model"], **dsh.runtime_keys(app_mind)))
+        note = "runtime.yaml written"
+    elif _file_model(runtime) != a["model"]:
+        # The file's model is no longer offered and another was chosen.
+        text = re.sub(r"^default_model:.*$", f"default_model: {a['model']}",
+                      runtime.read_text(), count=1, flags=re.M)
+        runtime.write_text(text)
+        note = f"runtime.yaml moved to {a['model']}"
+    else:
+        note = "runtime.yaml kept"
     proc = ctx.sh.run(dsh.profile_command(name, ctx.home.minds), cwd=ctx.home.repo("hive-mind"),
                       timeout=120, check=False)
     if proc.returncode != 0:
         why = proc.stdout.strip().splitlines()[-1:] or [proc.stderr.strip()[-300:]]
         raise StepFailed(f"the dsh profile could not be written: {why[0]}")
-    return ("runtime.yaml written" if wrote else "runtime.yaml kept") + \
-        f"; profile at {dsh.profile_path(folder)}"
+    return f"{note}; profile at {dsh.profile_path(folder)}"
 
 
-# ---- 17b. the mind's dsh hooks ----------------------------------------------
+# ---- 19. the mind's dsh hooks -----------------------------------------------
 def dsh_hooks(ctx: Ctx):
-    """The mind's hooks.json, from the generator E's follow-up delivers.
-
-    Until that generator is in the clone, dsh runs but reports itself
-    unavailable on `GET /harnesses`; that is recorded, not failed.
-    """
-    name = ctx.answers["mind_name"]
-    hive_mind = ctx.home.repo("hive-mind")
-    if not dsh.hooks_available(hive_mind):
-        return "pending: no hooks generator yet, so dsh will report itself unavailable"
-    ctx.sh.run(dsh.hooks_command(name, ctx.home.minds), cwd=hive_mind, timeout=120)
+    """The mind's hooks.json and hook scripts: dsh is offered only with them."""
+    proc = ctx.sh.run(dsh.hooks_command(ctx.answers["mind_name"], ctx.home.minds),
+                      cwd=ctx.home.repo("hive-mind"), timeout=120, check=False)
+    if proc.returncode != 0:
+        why = proc.stdout.strip().splitlines()[-1:] or [proc.stderr.strip()[-300:]]
+        raise StepFailed(f"the dsh hooks could not be written: {why[0]}")
     return "hooks written"
 
 
-# ---- 18. register -----------------------------------------------------------
+# ---- 20. register -----------------------------------------------------------
 def register_mind(ctx: Ctx):
     a, env = ctx.answers, ctx.env()
-    name, mind_id, admin = a["mind_name"], a["mind_id"], a["admin_username"].lower()
+    name, mind_id = a["mind_name"], a["mind_id"]
+    admin = collisions.username(a["admin_username"])
     # Comms takes any owner string. An owner with no account is a mind
     # nobody can sign in to reach, so the account is checked here.
-    dsn = env["HIVE_DATABASE_URL"]
-    facts = ctx.sh.in_network(probe.gather_script(), {"dsn": dsn}, timeout=60, redact=(dsn,))
-    if collisions.fold(admin) not in {collisions.fold(u) for u in facts.get("users") or []}:
-        raise StepFailed(f"the owner {admin!r} has no account yet: the console or terminal "
-                         "seeds it on its first start; check that it started, then run again")
+    users = {collisions.username(u) for u in _facts(ctx).get("users") or []}
+    if admin not in users:
+        raise StepFailed(f"the owner {admin!r} has no account; the admin step makes it — "
+                         "run again")
     hive_api.register_mind(ctx.comms(), mind_id=mind_id, name=name,
                            gateway_url=f"http://{name}:8420", model=a["model"], owner=admin)
     for store, api in (("comms", ctx.comms()), ("lucent", ctx.lucent())):
-        result = hive_api.mint(api, {name: env[compose.token_var(store.upper(), name)]}, admin,
-                               role=hive_api.MIND, mind_id=mind_id)
-        _record_minted(ctx, store, [h for h, how in result.items() if how == "minted"])
+        hive_api.mint(api, {name: env[compose.token_var(store.upper(), name)]}, admin,
+                      role=hive_api.MIND, mind_id=mind_id,
+                      on_minted=lambda h, s=store: _record_minted(ctx, s, [h]))
     return f"{name} on dsh, owned by {admin}, model {a['model']}"
 
 
-# ---- 19. start the mind -----------------------------------------------------
+# ---- 21. start the mind -----------------------------------------------------
 def start_mind(ctx: Ctx):
     name = ctx.answers["mind_name"]
     doc = json.loads(ctx.home.compose_file.read_text())
     services = [s for s in (name, compose.TELEGRAM, compose.DISCORD) if s in doc["services"]]
     argv = [*ctx.compose, "up", "-d"]
-    if ctx.output("dsh_rebuilt"):
+    if dsh.tree_built(_dsh_fresh(ctx)):
+        # The mind is stopped before its tree is replaced under it, and
+        # recreated on the new one at once.
+        ctx.sh.run([*ctx.compose, "stop", name], timeout=120)
+        _swap_dsh(ctx)
         argv.append("--force-recreate")
     ctx.sh.run([*argv, *services], timeout=600)
-    ctx.output("dsh_rebuilt", False)
     _wait(ctx, f"the mind {name}", lambda: _healthy_in_network(ctx, f"http://{name}:8420/health"),
           240)
     return ", ".join(services)
 
 
-# ---- 20. health -------------------------------------------------------------
+# ---- 22. health -------------------------------------------------------------
+def dsh_state(report) -> str:
+    """dsh's line in a mind's `GET /harnesses` answer:
+    {"harnesses": [{"name", "available", "reason"}], "default"}."""
+    rows = report.get("harnesses") if isinstance(report, dict) else None
+    for row in rows or []:
+        if isinstance(row, dict) and row.get("name") == "dsh":
+            return "available" if row.get("available") else f"not available: {row.get('reason')}"
+    return "not reported"
+
+
 def health(ctx: Ctx):
     name = ctx.answers["mind_name"]
     failing = []
     for label, url in _endpoints(ctx):
-        out = http_in_network(ctx.sh, "GET", url, timeout=8)
+        out = ctx.http("GET", url, timeout=8)
         if not out.get("status") or out["status"] >= 500:
             failing.append(f"{label}: {out.get('error') or out.get('status')}")
     if failing:
         raise StepFailed("unhealthy: " + "; ".join(failing))
-    out = http_in_network(ctx.sh, "GET", f"http://{name}:8420/harnesses",
-                          headers={"Authorization": f"Bearer {ctx.env()['COMMS_ADMIN_BEARER_TOKEN']}"})
-    dsh_state = "unknown"
+    out = ctx.http("GET", f"http://{name}:8420/harnesses",
+                   headers={"Authorization": f"Bearer {ctx.env()['COMMS_ADMIN_BEARER_TOKEN']}"})
     try:
-        report = json.loads(out.get("body") or "{}")
-        entry = report.get("dsh") if isinstance(report, dict) else None
-        if isinstance(entry, dict):
-            dsh_state = "available" if entry.get("available") or entry.get("offered") \
-                else f"not available: {entry.get('reason')}"
+        state = dsh_state(json.loads(out.get("body") or "{}"))
     except ValueError:
-        pass
-    ctx.output("dsh", dsh_state)
-    return f"every service healthy; dsh {dsh_state}"
+        state = f"not reported ({out.get('status')})"
+    ctx.output("dsh", state)
+    return f"every service healthy; dsh {state}"
 
 
-# ---- 21. finish -------------------------------------------------------------
+# ---- 23. finish -------------------------------------------------------------
 def finish(ctx: Ctx):
     links = compose.links(ctx.answers, ctx.host)
     ctx.output("links", links)
+    if plan.runs_here(ctx.answers, "proxy"):
+        env = ctx.env()
+        ctx.output("proxy_admin", {"url": links.get("proxy admin"),
+                                   "username": env.get("HIVE_SEED_USERNAME"),
+                                   "password": env.get("PROXY_ADMIN_PASSWORD")})
     return links
 
 
@@ -559,6 +757,7 @@ STEPS = [
     Step("schema_check", "Check the database", schema_check, 300),
     Step("collisions", "Check names against an existing hive", refuse_collisions, 30),
     Step("schema_apply", "Create or update the tables", schema_apply, 900),
+    Step("admin", "Make the admin account", seed_admin, 180),
     Step("services", "Start the services", start_services, 900),
     Step("proxy", "Set up the proxy", proxy_setup, 900),
     Step("embeddings", "Pull and test the embedding model", embeddings, 4200),
@@ -572,6 +771,10 @@ STEPS = [
     Step("health", "Health checks", health, 300),
     Step("finish", "Done", finish, 30),
 ]
+
+#: The steps that write to the database or a service. Each must come after
+#: `collisions`.
+WRITING_STEPS = ("schema_apply", "admin", "services", "proxy", "credentials", "register")
 
 
 def new_mind_id() -> str:

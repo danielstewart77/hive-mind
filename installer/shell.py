@@ -45,7 +45,10 @@ class Shell:
 
     def run(self, argv: list[str], *, timeout: float = 60, input: str | None = None,
             cwd: str | os.PathLike | None = None, env: dict | None = None,
-            check: bool = True, redact: tuple[str, ...] = ()) -> subprocess.CompletedProcess:
+            check: bool = True, redact: tuple[str, ...] = (),
+            quiet: bool = False) -> subprocess.CompletedProcess:
+        """`quiet` keeps the command's output out of the log: for a command
+        that prints a secret it has just made (a proxy key, a tools token)."""
         shown = " ".join(argv)
         for secret in redact:
             if secret:
@@ -71,7 +74,7 @@ class Shell:
         for secret in redact:
             if secret:
                 out = out.replace(secret, "***")
-        if out.strip():
+        if out.strip() and not quiet:
             self.log(out.rstrip()[-4000:])
         if check and proc.returncode != 0:
             tail = out.strip().splitlines()[-6:]
@@ -80,7 +83,7 @@ class Shell:
         return proc
 
     def in_network(self, script: str, payload: dict, *, timeout: float = 30,
-                   redact: tuple[str, ...] = ()) -> dict:
+                   redact: tuple[str, ...] = (), image: str = PROBE_IMAGE) -> dict:
         """Run a python script on the hive's network and read its JSON answer.
 
         What a container can reach is not what the host can: `localhost`
@@ -95,8 +98,8 @@ class Shell:
         source = f"import json\nPAYLOAD = json.loads({json.dumps(json.dumps(payload))})\n{script}"
         proc = self.run(
             ["docker", "run", "--rm", "-i", "--network", NETWORK,
-             "--entrypoint", "python", PROBE_IMAGE, "-"],
-            timeout=timeout, input=source, check=False, redact=redact,
+             "--entrypoint", "python", image, "-"],
+            timeout=timeout, input=source, check=False, redact=redact, quiet=True,
         )
         lines = [l for l in (proc.stdout or "").splitlines() if l.strip()]
         try:
@@ -111,10 +114,14 @@ class Shell:
 #: An HTTP request made from inside the network.
 HTTP_SCRIPT = r'''
 import urllib.request, urllib.error
+import os
 method, url, headers, body, timeout = (PAYLOAD[k] for k in ("method", "url", "headers", "body", "timeout"))
+# The web proxy the services themselves run with, NO_PROXY included: a check
+# that bypassed it would pass for a service whose own traffic is sent to it.
+os.environ.update(PAYLOAD.get("proxy_env") or {})
 data = json.dumps(body).encode() if body is not None else None
 req = urllib.request.Request(url, data=data, method=method, headers=headers)
-opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+opener = urllib.request.build_opener()
 try:
     with opener.open(req, timeout=timeout) as r:
         print(json.dumps({"status": r.status, "body": r.read().decode("utf-8", "replace")}))
@@ -126,7 +133,8 @@ except Exception as e:
 
 
 def http_in_network(sh: Shell, method: str, url: str, *, headers: dict | None = None,
-                    body: dict | None = None, timeout: float = 15) -> dict:
+                    body: dict | None = None, timeout: float = 15,
+                    proxy_env: dict | None = None) -> dict:
     """{status, body|error} for one request made from inside the network."""
     hdrs = dict(headers or {})
     if body is not None:
@@ -134,6 +142,7 @@ def http_in_network(sh: Shell, method: str, url: str, *, headers: dict | None = 
     redact = tuple(v.split(" ", 1)[-1] for k, v in hdrs.items() if k.lower() == "authorization")
     return sh.in_network(
         HTTP_SCRIPT,
-        {"method": method, "url": url, "headers": hdrs, "body": body, "timeout": timeout},
+        {"method": method, "url": url, "headers": hdrs, "body": body, "timeout": timeout,
+         "proxy_env": proxy_env or {}},
         timeout=timeout + 30, redact=redact,
     )

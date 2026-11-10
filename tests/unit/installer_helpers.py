@@ -40,8 +40,16 @@ def installer_at(tmp_path, answer_set: dict, host: Host | None = None, step_list
     home = Home.at(tmp_path / "hive")
     home.ensure()
     inst = app.Installer(home, host or a_host(), step_list=list(step_list))
-    inst.answers = answer_set
+    # As the page hands them over: secrets typed this run are held apart and
+    # never saved with the answers.
+    inst.typed = {k: v for k, v in answer_set.items() if k in compose.SECRET_ANSWERS}
+    inst.answers = {k: v for k, v in answer_set.items() if k not in compose.SECRET_ANSWERS}
     return inst
+
+
+def render_raw(inst) -> dict:
+    """The installer's step only: what it wrote, before compose reads it."""
+    return steps.render_config(steps.Ctx(inst, Shell(inst.home.log)))
 
 
 def render(inst) -> dict:
