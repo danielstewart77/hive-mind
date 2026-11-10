@@ -16,11 +16,16 @@ As built:
    runtime.yaml: harness dsh, default_model from the dsh listing,
    runtime_config_dir the DSH_HOME, owner the admin.
 
-Pending (E follow-up): a generator for the mind's `$DSH_HOME/hooks.json`.
-`GET /harnesses` reports dsh available only once that file names Stop hooks
-`auto_remember` and `rotation_check` and a UserPromptSubmit hook. The command
-it is expected to be is `HOOKS_MODULE` below; until it exists in the clone the
-step records that dsh will report itself unavailable, and does not fail.
+4. The hooks, from the hive-mind clone's root, stdlib only:
+       python3 -m minds.harness.dsh_hooks --mind N --out "$HIVE_HOME/minds"
+   writes <out>/<N>/.dsh/hooks/ (rewritten every run) and <out>/<N>/.dsh/hooks.json
+   (only when absent) and prints one JSON line
+   {"mind","hooks_dir","hooks_config","hooks_config_written","scripts",
+   "hooks_dir_in_container"}; exit 2 {"error"}. The hooks read MIND_ID,
+   COMMS_URL/COMMS_BEARER_TOKEN, LUCENT_URL_SELF/LUCENT_BEARER_TOKEN and, when
+   tools is installed, HIVE_TOOLS_URL/HIVE_TOOLS_TOKEN; without tools a turn
+   is not captured to memory, and dsh is still offered. A clone predating the
+   generator leaves dsh reported unavailable, which the step records.
 """
 
 from __future__ import annotations
