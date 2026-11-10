@@ -15,6 +15,7 @@ import subprocess
 import pytest
 
 from installer import compose, steps
+from installer.runner import NeedInput
 from installer.shell import Shell, StepFailed
 
 from tests.unit.installer_helpers import answers, installer_at
@@ -27,8 +28,10 @@ class _Hive:
     """`subprocess.run` for an install: the proxy's command and its routes."""
 
     def __init__(self, *, chat=("claude-sonnet-5", "gpt-oss:20b-32k"),
-                 embedders=("qwen3-embedding:8b",), dimensions=4096):
+                 embedders=("qwen3-embedding:8b",), dimensions=4096, purposes=True):
         self.chat, self.embedders, self.dimensions = list(chat), list(embedders), dimensions
+        # An older proxy marks no model with a purpose and ignores the filter.
+        self.purposes = purposes
         self.commands: list[list[str]] = []
         self.requests: list[dict] = []
 
@@ -48,6 +51,9 @@ class _Hive:
         url = payload["url"]
         if url.endswith("/health"):
             return {"status": 200, "body": "{}"}
+        if "/v1/models" in url and not self.purposes:
+            return {"status": 200, "body": json.dumps(
+                {"data": [{"id": n} for n in [*self.chat, *self.embedders]]})}
         if "/v1/models" in url:
             embedding = "purpose=embedding" in url
             names = self.embedders if embedding else self.chat
@@ -194,3 +200,32 @@ def test_the_hives_ollama_is_given_both_models_including_a_context_sized_tag(
     assert len(created) == 1
     assert f"PARAMETER num_ctx {32 * 1024}" in created[0][2]
     assert "ollama create gpt-oss:20b-32k" in created[0][2]
+
+
+def test_a_proxy_that_marks_no_purposes_offers_all_its_models_and_the_pick_is_proved(
+        tmp_path, monkeypatch):
+    hive = _Hive(chat=["gpt-oss-120b"], embedders=["text-embedding-3-large"],
+                 dimensions=3072, purposes=False)
+    ctx = _existing(tmp_path, monkeypatch, hive)
+
+    with pytest.raises(NeedInput) as asked:
+        steps.resolve_models(ctx)
+    assert set(asked.value.choices) == {"gpt-oss-120b", "text-embedding-3-large"}
+
+    ctx.answers.update(embedding_model="text-embedding-3-large", classifier_model="gpt-oss-120b")
+    steps.resolve_models(ctx)
+    assert ctx.env()[compose.EMBEDDING_MODEL_VAR] == "text-embedding-3-large"
+    assert ctx.env()[compose.CLASSIFIER_MODEL_VAR] == "gpt-oss-120b"
+
+
+def test_an_embedding_pick_that_fails_its_call_is_asked_for_again(tmp_path, monkeypatch):
+    hive = _Hive(chat=["gpt-oss-120b"], embedders=["text-embedding-3-large"],
+                 dimensions=8192, purposes=False)
+    ctx = _existing(tmp_path, monkeypatch, hive,
+                    embedding_model="text-embedding-3-large", classifier_model="gpt-oss-120b")
+
+    with pytest.raises(StepFailed):
+        steps.resolve_models(ctx)
+    with pytest.raises(NeedInput) as asked:
+        steps.resolve_models(ctx)
+    assert asked.value.key == "embedding_model"
