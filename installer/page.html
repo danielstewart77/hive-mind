@@ -20,6 +20,7 @@
 </head>
 <body>
 <h1>Install the hive</h1>
+<p class="err" id="lost" hidden>Connection to the installer lost; retrying…</p>
 <div id="setup">
   <h2>Pieces</h2>
   <div id="pieces"></div>
@@ -36,11 +37,24 @@
 </div>
 <script>
 const code = new URLSearchParams(location.search).get("code") || "";
-const api = (path, body) => fetch(path, {
-  method: body ? "POST" : "GET",
-  headers: {"X-Setup-Code": code, "Content-Type": "application/json"},
-  body: body ? JSON.stringify(body) : undefined,
-}).then(r => r.json().then(j => ({status: r.status, body: j})));
+// A dropped connection (the page restarting, the network) is said, and the
+// call retried, rather than leaving the page frozen.
+async function api(path, body) {
+  for (;;) {
+    try {
+      const r = await fetch(path, {
+        method: body ? "POST" : "GET",
+        headers: {"X-Setup-Code": code, "Content-Type": "application/json"},
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      $("lost").hidden = true;
+      return {status: r.status, body: await r.json()};
+    } catch (e) {
+      $("lost").hidden = false;
+      await new Promise(ok => setTimeout(ok, 3000));
+    }
+  }
+}
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 let view = null;
@@ -56,9 +70,10 @@ function selection() {
 
 function drawPlan(v) {
   view = v;
+  // A piece offered "none" (voice) is chosen by its dropdown alone.
   $("pieces").innerHTML = v.pieces.map(p => `
-    <label><input type="checkbox" data-piece="${p.name}" ${p.selected ? "checked" : ""}
-      ${p.required ? "disabled" : ""}> ${esc(p.label)}
+    <label>${p.modes.includes("none") ? "" : `<input type="checkbox" data-piece="${p.name}"
+      ${p.selected ? "checked" : ""} ${p.required ? "disabled" : ""}>`} ${esc(p.label)}
       ${p.required ? '<span class="req">(always)</span>' : ""}
       ${p.modes.length ? `<select data-mode="${p.name}">${p.modes.map(m =>
         `<option ${v.modes[p.name] === m ? "selected" : ""}>${m}</option>`).join("")}</select>` : ""}
@@ -88,8 +103,13 @@ async function replan() {
 }
 
 $("go").onclick = async () => {
+  $("go").disabled = true;
   const r = await api("/api/start", selection());
-  if (r.status !== 200) { $("problems").textContent = (r.body.problems || [r.body.error]).join("\n"); return; }
+  if (r.status !== 200) {
+    $("problems").textContent = (r.body.problems || [r.body.error]).join("\n");
+    $("go").disabled = false;
+    return;
+  }
   showProgress();
 };
 
@@ -112,16 +132,20 @@ async function poll() {
       $("ask").innerHTML = ""; delete $("ask").dataset.key;
     };
   }
+  if (s.error) $("final").innerHTML = `<p class="err">${esc(s.error)}</p>`;
   if (s.finished) {
     const links = (s.outputs || {}).links || {};
+    const pa = (s.outputs || {}).proxy_admin;
     $("final").innerHTML = `<h2>Done</h2><ul>${Object.entries(links).map(([k, u]) =>
       `<li>${esc(k)}: <a href="${esc(u)}">${esc(u)}</a></li>`).join("")}</ul>
       <p>dsh: ${esc((s.outputs || {}).dsh || "unknown")}. Sign in with the admin account you gave.
-      A Telegram or Discord bot is claimed from the console. This page closes shortly.</p>`;
+      A Telegram or Discord bot is claimed from the console. This page closes shortly.</p>
+      ${pa ? `<p>Proxy admin: <a href="${esc(pa.url)}">${esc(pa.url)}</a> — user <code>${esc(pa.username)}</code>,
+      password <code>${esc(pa.password)}</code>. Keep it; it is also in the install folder's .env.</p>` : ""}`;
     return;
   }
-  if (s.failed_step && !s.running) {
-    $("final").innerHTML = `<p class="err">Stopped at “${esc(s.failed_step)}”. Fix what it says and run
+  if ((s.failed_step || s.error) && !s.running) {
+    $("final").innerHTML += `<p class="err">Stopped${s.failed_step ? ` at “${esc(s.failed_step)}”` : ""}. Fix what it says and run
       the install command again; every step is safe to repeat.</p>`;
     return;
   }
@@ -131,7 +155,9 @@ async function poll() {
 (async () => {
   const st = await api("/api/state");
   if (st.status === 403) { document.body.innerHTML = "<p>This page needs the link the installer printed.</p>"; return; }
-  if (st.body.running || st.body.finished) { showProgress(); return; }
+  if (st.body.running || st.body.finished || st.body.failed_step || st.body.error) {
+    showProgress(); return;
+  }
   const r = await api("/api/plan");
   drawPlan(r.body);
 })();

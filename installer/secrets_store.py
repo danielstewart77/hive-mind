@@ -32,8 +32,13 @@ def parse_env(path: Path) -> dict[str, str]:
             line = line[len("export "):]
         key, _, value = line.partition("=")
         value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
-            value = value[1:-1]
+        if value[:1] in ("'", '"') and value[0] in value[1:]:
+            # Quoted: the value is what the quotes hold, and anything after
+            # the closing quote (a comment) is not part of it.
+            value = value[1:value.index(value[0], 1)]
+        else:
+            # Unquoted: ` #` starts a comment, as compose reads it.
+            value = value.split(" #", 1)[0].split("\t#", 1)[0].strip()
         out[key.strip()] = value
     return out
 

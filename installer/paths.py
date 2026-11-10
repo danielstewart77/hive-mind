@@ -61,6 +61,16 @@ class Home:
         return self.state / "minted.json"
 
     @property
+    def page_lock(self) -> Path:
+        """Held by the installer process for its whole life."""
+        return self.state / "page.lock"
+
+    @property
+    def page_link(self) -> Path:
+        """The live page's link, 0600, for a second start to reprint."""
+        return self.state / "page.link"
+
+    @property
     def log(self) -> Path:
         return self.state / "installer.log"
 

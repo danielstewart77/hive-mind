@@ -25,7 +25,7 @@ As built:
    COMMS_URL/COMMS_BEARER_TOKEN, LUCENT_URL_SELF/LUCENT_BEARER_TOKEN and, when
    tools is installed, HIVE_TOOLS_URL/HIVE_TOOLS_TOKEN; without tools a turn
    is not captured to memory, and dsh is still offered. A clone predating the
-   generator leaves dsh reported unavailable, which the step records.
+   generator fails the hooks step, naming why.
 """
 
 from __future__ import annotations
@@ -41,6 +41,8 @@ PROFILE_MODULE = "minds.harness.dsh_profile"
 #: The hooks generator the follow-up is delivering (assumed name and flags:
 #: the same shape as the profile generator).
 HOOKS_MODULE = "minds.harness.dsh_hooks"
+#: Where the mind's container sees the minds folder.
+CONTAINER_MINDS = "/usr/src/app/minds"
 
 
 def build_tree(repo: Path, dest: Path, proxy_args: dict[str, str]) -> list[str]:
@@ -61,13 +63,10 @@ def profile_command(mind: str, minds_dir: Path) -> list[str]:
             "--dsh-root", MOUNT]
 
 
-def hooks_available(hive_mind: Path) -> bool:
-    return (hive_mind / (HOOKS_MODULE.replace(".", "/") + ".py")).is_file()
-
-
 def hooks_command(mind: str, minds_dir: Path) -> list[str]:
     """Run with cwd = the hive-mind clone."""
-    return ["python3", "-m", HOOKS_MODULE, "--mind", mind, "--out", str(minds_dir)]
+    return ["python3", "-m", HOOKS_MODULE, "--mind", mind, "--out", str(minds_dir),
+            "--container-minds-dir", CONTAINER_MINDS]
 
 
 def profile_path(mind_dir: Path) -> Path:

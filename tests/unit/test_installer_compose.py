@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 from installer import compose
@@ -48,7 +47,7 @@ def test_no_voice_starts_no_voice_server_and_no_bot_waits_on_one(tmp_path):
 
 def test_existing_services_and_bot_tokens_land_in_each_service_that_uses_them(tmp_path):
     inst = installer_at(tmp_path, answers(
-        pieces=["telegram", "voice"],
+        pieces=["telegram", "console", "terminal", "tools"],
         modes={"proxy": "existing", "embeddings": "existing", "voice": "existing"},
         proxy_url="http://proxy.corp.example:8888", proxy_key="client-key-1",
         embeddings_url="http://gpu.corp.example:11434", voice_url="http://voice.corp.example:8422",
@@ -66,6 +65,15 @@ def test_existing_services_and_bot_tokens_land_in_each_service_that_uses_them(tm
     bot = services[compose.TELEGRAM]["environment"]
     assert bot["VOICE_SERVER_URL"] == "http://voice.corp.example:8422"
     assert bot["TELEGRAM_BOT_TOKEN"] == "123:bot"
+    console = services[compose.CONSOLE]["environment"]
+    assert console["KOKORO_VOICE_URL"] == "http://voice.corp.example:8422"
+    assert console["INFERENCE_PROXY_URL"] == "http://proxy.corp.example:8888"
+    assert console["INFERENCE_PROXY_KEY"] == "client-key-1"
+    assert console["OLLAMA_BASE_URL"] == "http://gpu.corp.example:11434"
+    assert services[compose.TERMINAL]["environment"]["VOICE_API_URL"] == \
+        "http://voice.corp.example:8422"
+    assert services["hive-tools"]["environment"]["OLLAMA_BASE_URL"] == \
+        "http://gpu.corp.example:11434"
 
 
 def test_nothing_waits_on_a_service_that_is_not_rendered(tmp_path):
@@ -88,6 +96,8 @@ def test_no_service_asks_for_an_nvidia_device_or_runtime(tmp_path):
     for name, svc in config["services"].items():
         assert "nvidia" not in str(svc.get("runtime", "")).lower(), name
         assert "nvidia" not in json.dumps(svc.get("deploy", {})).lower(), name
+        assert "gpus" not in svc, name
+        assert "nvidia" not in json.dumps(svc.get("devices", [])).lower(), name
         assert not any(k.startswith("NVIDIA_") for k in svc.get("environment", {})), name
 
 
@@ -95,9 +105,10 @@ def test_every_mount_lies_inside_the_install_folder_and_exists_and_the_user_is_t
         tmp_path):
     inst = installer_at(tmp_path, answers(pieces=all_pieces(), modes={"voice": "here"},
                                           telegram_token="t", discord_token="d"),
-                        host=a_host(docker_gid=4242))
+                        host=a_host(uid=4321, gid=4322, docker_gid=4242))
     config = render(inst)
     root = inst.home.root
+    rendered = compose.render(inst.home, inst.answers, inst.host)
 
     binds = [(name, Path(v["source"])) for name, svc in config["services"].items()
              for v in svc.get("volumes", []) if v.get("type") == "bind"]
@@ -105,7 +116,24 @@ def test_every_mount_lies_inside_the_install_folder_and_exists_and_the_user_is_t
     for name, source in binds:
         assert source.resolve().is_relative_to(root), (name, source)
         assert source.exists(), (name, source)
+    assert rendered.mountpoints
+    for path in rendered.mountpoints:
+        assert path.is_dir() and path.resolve().is_relative_to(root), path
     for name in ("wren", compose.VOICE, "hive-tools"):
         args = config["services"][name]["build"]["args"]
-        assert (args["UID"], args["GID"]) == (str(os.getuid()), str(os.getgid())), name
+        assert (args["UID"], args["GID"]) == ("4321", "4322"), name
     assert config["services"]["hive-tools"]["build"]["args"]["DOCKER_GID"] == "4242"
+    console = config["services"][compose.CONSOLE]["environment"]
+    assert (console["HOST_UID"], console["HOST_GID"]) == ("4321", "4322")
+
+
+def test_the_host_time_zone_lands_in_every_service_and_nothing_names_sparktobloom(tmp_path):
+    inst = installer_at(tmp_path, answers(pieces=all_pieces(), modes={"voice": "here"},
+                                          telegram_token="t", discord_token="d"),
+                        host=a_host(tz="Pacific/Auckland"))
+    config = render(inst)
+
+    for name, svc in config["services"].items():
+        assert svc["environment"]["TZ"] == "Pacific/Auckland", name
+    assert "sparktobloom" not in json.dumps(config)
+    assert "/home/daniel" not in json.dumps(config)

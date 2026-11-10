@@ -31,12 +31,30 @@ from installer.shell import Shell, StepFailed, http_in_network
 
 SERVICE = "inference-proxy"
 PORT = 8888
+HOST_PORT = 8888
 URL = f"http://{SERVICE}:{PORT}"
 CLI = ["python", "-m", "app.cli"]
 LISTING = "/v1/models"
 #: The proxy creates its own tables on a first start only when told to.
 ALLOW_CREATE = "PROXY_ALLOW_SCHEMA_CREATE"
 SCHEMA = "proxy"
+
+
+class Pending(Exception):
+    """A proxy command another builder is still delivering."""
+
+
+def update_provider(sh, compose, **_) -> dict:
+    """Pending: the update path for a provider's key and address and a
+    model's context window, with the key on stdin or env rather than argv.
+    Until it lands, a change is refused by the proxy step with where to make
+    it by hand."""
+    raise Pending("the proxy CLI's update path")
+
+
+def check_model(sh, compose, *, model: str) -> dict:
+    """Pending: `check-model`, one real completion through the proxy."""
+    raise Pending("the proxy CLI's check-model")
 
 
 def environment(env_ref, *, dsn_ref: str) -> dict[str, str]:
@@ -52,9 +70,11 @@ def environment(env_ref, *, dsn_ref: str) -> dict[str, str]:
     }
 
 
-def _cli(sh: Shell, compose: list[str], args: list[str], redact=()) -> dict:
+def _cli(sh: Shell, compose: list[str], args: list[str], redact=(), quiet=False) -> dict:
+    # NOTE: add-provider's --api-key is still on argv here; the stdin/env form
+    # is pending in the proxy CLI and is wired in when it lands.
     proc = sh.run([*compose, "exec", "-T", SERVICE, *CLI, *args], timeout=60, redact=redact,
-                  check=False)
+                  check=False, quiet=quiet)
     lines = [l for l in (proc.stdout or "").splitlines() if l.strip()]
     try:
         out = json.loads(lines[-1])
@@ -87,18 +107,18 @@ def add_model(sh, compose, *, provider, model, context_window) -> dict:
 
 def mint_key(sh, compose, *, client) -> str | None:
     """The new key, or None when the client already had one (minted nothing)."""
-    out = _cli(sh, compose, ["mint-key", "--client", client, "--kind", "mind"])
+    out = _cli(sh, compose, ["mint-key", "--client", client, "--kind", "mind"], quiet=True)
     return str(out["key"]) if out.get("minted") and out.get("key") else None
 
 
 def list_models(sh: Shell, proxy_url: str, key: str, harness: str = "dsh",
-                retries: int = 4, pause: float = 3.0) -> list[str]:
+                retries: int = 4, pause: float = 3.0, proxy_env: dict | None = None) -> list[str]:
     """The model names the proxy offers this harness."""
     root = proxy_url.rstrip("/")
     root = root[: -len("/v1")] if root.endswith("/v1") else root
     for attempt in range(retries + 1):
         out = http_in_network(sh, "GET", f"{root}{LISTING}?harness={harness}",
-                              headers={"Authorization": f"Bearer {key}"})
+                              headers={"Authorization": f"Bearer {key}"}, proxy_env=proxy_env)
         # A key minted a moment ago is refused until the proxy's key cache
         # refreshes.
         if out.get("status") != 401 or attempt == retries:

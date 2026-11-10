@@ -27,10 +27,13 @@ def test_a_failed_step_is_recorded_and_the_next_run_repeats_the_earlier_ones_unc
     assert first["config"]["status"] == runner.DONE
     assert first["flaky"]["status"] == runner.FAILED
     assert "the registry was unreachable" in first["flaky"]["error"]
+    assert runner.read_state(inst.home)["failed_step"] == "flaky"
     produced = (inst.home.compose_file.read_bytes(), inst.home.env_file.read_bytes())
 
     broken["yes"] = False
     assert inst.runner.run() is True
     second = {s["name"]: s for s in runner.read_state(inst.home)["steps"]}
     assert [second[n]["status"] for n in ("config", "flaky")] == [runner.DONE, runner.DONE]
+    # The earlier step was run again, not skipped as already done.
+    assert second["config"]["started"] > first["config"]["ended"]
     assert (inst.home.compose_file.read_bytes(), inst.home.env_file.read_bytes()) == produced

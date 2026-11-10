@@ -72,20 +72,32 @@ PROVIDER_KINDS = ("anthropic", "openai", "ollama")
 
 MIND_NAME = re.compile(r"^[a-z][a-z0-9-]{1,30}$")
 
-#: Names a mind may not take: the hive's own service and container names.
-RESERVED_NAMES = {
+#: The hive's own service and container names. A mind is a service named
+#: after itself in a container named `hive-mind-<name>`, so a mind may take
+#: none of these, nor the part after `hive-mind-` or `hive-` of any of them
+#: (a mind named `voice` would be a second `hive-mind-voice`).
+SERVICE_NAMES = (
     "hive-postgres", "hive-comms", "hive-lucent", "hive-ollama", "inference-proxy",
     "hive-site", "terminal-site", "hive-mind-voice", "hive-tools", "hive-telegram",
-    "hive-discord", "comms", "lucent", "postgres", "proxy", "shared",
-}
+    "hive-discord",
+)
+
+
+def reserved_names() -> set[str]:
+    out = {"shared", "mind", "example", *PIECES}
+    for name in SERVICE_NAMES:
+        out.add(name)
+        for prefix in ("hive-mind-", "hive-"):
+            if name.startswith(prefix):
+                out.add(name[len(prefix):])
+    return out
 
 
 def defaults() -> dict:
     """The selection a first run starts from."""
     return {
         "pieces": sorted(p.name for p in PIECES.values() if p.required or p.default),
-        "modes": {p.name: (p.modes[1] if p.name == "voice" else p.modes[0])
-                  for p in PIECES.values() if p.modes},
+        "modes": {p.name: p.modes[0] for p in PIECES.values() if p.modes},
     }
 
 
@@ -104,22 +116,28 @@ def closure(selected) -> set[str]:
 
 
 def mode(answers: dict, piece: str) -> str:
-    """Where a piece runs: here, existing, or (voice) none."""
+    """Where a piece runs: here, existing, or (voice) none — the choice saved,
+    else the piece's first."""
     p = PIECES[piece]
-    chosen = (answers.get("modes") or {}).get(piece)
     if not p.modes:
         return HERE
-    if piece == "voice" and "voice" not in set(answers.get("pieces") or ()):
-        return NONE
+    chosen = (answers.get("modes") or {}).get(piece)
     return chosen if chosen in p.modes else p.modes[0]
 
 
 def installed(answers: dict) -> set[str]:
-    """The pieces this answer set installs, after closure; voice set to none
-    is not a piece."""
+    """The pieces this answer set installs, after closure.
+
+    A piece offered "none" is chosen by its mode alone: voice set to here or
+    existing is installed, set to none it is not, whatever its tick says.
+    """
     pieces = closure(answers.get("pieces") or ())
-    if mode(answers, "voice") == NONE:
-        pieces.discard("voice")
+    for p in PIECES.values():
+        if NONE in p.modes:
+            if mode(answers, p.name) == NONE:
+                pieces.discard(p.name)
+            else:
+                pieces |= closure([p.name])
     return pieces
 
 
@@ -129,7 +147,9 @@ def runs_here(answers: dict, piece: str) -> bool:
 
 def repos(answers: dict) -> list[str]:
     """The repositories this install clones."""
-    names: set[str] = {"hive-mind"}
+    # hive-data and the console's repo always: the installer seeds the first
+    # admin with the console's own site code (hive_site), whatever is ticked.
+    names: set[str] = {"hive-mind", "hive-data", "hive"}
     for piece in installed(answers):
         if PIECES[piece].modes and mode(answers, piece) != HERE:
             continue
@@ -215,14 +235,14 @@ def validate(answers: dict, kept: set[str] = frozenset()) -> list[str]:
                 continue
             problems.append(f"{q.label}: required")
             continue
-        if q.kind == "int" and not value.isdigit():
-            problems.append(f"{q.label}: a number")
+        if q.kind == "int" and not (value.isdigit() and int(value) > 0):
+            problems.append(f"{q.label}: a whole number above zero")
         if q.kind == "choice" and value not in q.choices:
             problems.append(f"{q.label}: one of {', '.join(q.choices)}")
         if "'" in value or "\n" in value:
             problems.append(f"{q.label}: may not contain a single quote or a newline")
     name = str(answers.get("mind_name") or "")
-    if name in RESERVED_NAMES:
+    if name in reserved_names():
         problems.append(f"The mind's name: {name!r} is a name the hive uses itself")
     elif name and not MIND_NAME.match(name):
         problems.append("The mind's name: lowercase letters, digits and dashes, "

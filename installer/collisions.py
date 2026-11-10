@@ -7,8 +7,9 @@ never exist — and a mind or service name already in use is refused, because
 both stores' credential routes replace a holder outright and a mind
 registration under a taken name rewrites that mind's row.
 
-Names are compared folded: the console treats `my-mind` and `my_mind` as one
-holder.
+Holder names are compared folded: the console treats `my-mind` and
+`my_mind` as one holder. Account names are compared the way comms and the
+console compare them — stripped and lower-cased, nothing more.
 """
 
 from __future__ import annotations
@@ -17,7 +18,13 @@ import re
 
 
 def fold(name: object) -> str:
+    """A holder name as the console folds it."""
     return re.sub(r"[-_\s]+", "-", str(name or "").strip().lower())
+
+
+def username(name: object) -> str:
+    """An account name as comms and the console normalise it."""
+    return str(name or "").strip().lower()
 
 
 def hive_present(facts: dict) -> bool:
@@ -34,8 +41,8 @@ def refusals(facts: dict, *, admin: str, mind_name: str, mind_id: str,
     if not hive_present(facts):
         return []
     out: list[str] = []
-    users = {fold(u) for u in facts.get("users") or []}
-    if fold(admin) not in users:
+    users = {username(u) for u in facts.get("users") or []}
+    if username(admin) not in users:
         out.append(f"the admin {admin!r} has no account on this hive; name an existing "
                    "account as the admin")
     for row in facts.get("minds") or []:

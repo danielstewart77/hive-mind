@@ -79,6 +79,9 @@ class SetupServer:
                                         daemon=True)
         self._thread.start()
 
+    def alive(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
     def stop(self) -> None:
         self.httpd.shutdown()
         self.httpd.server_close()

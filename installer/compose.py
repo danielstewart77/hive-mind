@@ -59,6 +59,8 @@ OLLAMA_URL = f"http://{OLLAMA}:11434"
 VOICE_URL = f"http://{VOICE}:8422"
 
 POSTGRES_IMAGE = "pgvector/pgvector:pg17"
+PG_VOLUME = "hive_postgres"
+CONSOLE_IMAGE = "hive/console:local"
 OLLAMA_IMAGE = "ollama/ollama:latest"
 EMBEDDING_MODEL = "qwen3-embedding:8b"
 EMBEDDING_DIMENSIONS = 4096
@@ -150,6 +152,24 @@ def voice_url(answers: dict) -> str | None:
     return None
 
 
+def given_hosts(answers: dict) -> list[str]:
+    """The host names of every address the operator gave: what the hive
+    reaches directly, so each must be in NO_PROXY."""
+    urls = []
+    if not plan.runs_here(answers, "embeddings"):
+        urls.append(answers.get("embeddings_url"))
+    if not plan.runs_here(answers, "proxy"):
+        urls.append(answers.get("proxy_url"))
+    elif answers.get("provider_kind") == "ollama":
+        urls.append(answers.get("provider_base_url"))
+    if plan.mode(answers, "voice") == plan.EXISTING:
+        urls.append(answers.get("voice_url"))
+    out = [urllib.parse.urlsplit(str(u)).hostname for u in urls if u]
+    if not plan.runs_here(answers, "postgres") and answers.get("postgres_host"):
+        out.append(str(answers["postgres_host"]).strip())
+    return [h for h in out if h]
+
+
 def links(answers: dict, host: Host) -> dict[str, str]:
     out = {}
     pieces = plan.installed(answers)
@@ -157,31 +177,56 @@ def links(answers: dict, host: Host) -> dict[str, str]:
         out["console"] = f"http://{host.address}:{CONSOLE_PORT}"
     if "terminal" in pieces:
         out["terminal"] = f"http://{host.address}:{TERMINAL_PORT}"
+    if plan.runs_here(answers, "proxy"):
+        out["proxy admin"] = f"http://{host.address}:{proxy_adapter.HOST_PORT}/admin"
     return out
 
 
+#: Each secret the operator types, and the .env name it lives under. A
+#: secret answer is never written to answers.json: the live .env holds it,
+#: so a value rotated there since (on the console, or by hand) is the one a
+#: rerun keeps unless the operator types a new one this run.
+SECRET_ANSWERS = {
+    "admin_password": "HIVE_SEED_PASSWORD",
+    "postgres_password": "POSTGRES_PASSWORD",
+    "proxy_key": "MIND_PROXY_KEY",
+    "provider_api_key": "PROVIDER_API_KEY",
+    "telegram_token": "TELEGRAM_BOT_TOKEN",
+    "discord_token": "DISCORD_BOT_TOKEN",
+}
+
+
 def env_values(home: Home, answers: dict, generated: dict[str, str], current: dict[str, str],
+               typed: dict[str, str] | None = None,
                extra: dict[str, str] | None = None) -> dict[str, str]:
     """Everything `.env` holds: generated secrets, what the operator gave,
-    and values made by a later step (a proxy key, a tools token)."""
-    values = {**current, **generated}
+    and values made by a later step (a proxy key, a tools token).
 
-    def given(answer_key: str, env_name: str) -> None:
-        value = str(answers.get(answer_key) or "").strip() or current.get(env_name, "")
+    `typed` is the secrets typed on the page this run; a blank one keeps the
+    live value."""
+    values = {**current, **generated}
+    typed = typed or {}
+
+    def given(answer_key: str) -> None:
+        env_name = SECRET_ANSWERS[answer_key]
+        value = str(typed.get(answer_key) or "").strip() or current.get(env_name, "")
         if value:
             values[env_name] = value
 
-    given("admin_username", "HIVE_SEED_USERNAME")
-    given("admin_password", "HIVE_SEED_PASSWORD")
+    if answers.get("admin_username"):
+        values["HIVE_SEED_USERNAME"] = str(answers["admin_username"]).strip().lower()
+    given("admin_password")
     if not plan.runs_here(answers, "postgres"):
-        given("postgres_password", "POSTGRES_PASSWORD")
+        given("postgres_password")
     if not plan.runs_here(answers, "proxy"):
-        given("proxy_key", "MIND_PROXY_KEY")
+        given("proxy_key")
+    else:
+        given("provider_api_key")
     pieces = plan.installed(answers)
     if "telegram" in pieces:
-        given("telegram_token", "TELEGRAM_BOT_TOKEN")
+        given("telegram_token")
     if "discord" in pieces:
-        given("discord_token", "DISCORD_BOT_TOKEN")
+        given("discord_token")
     for name in ("MIND_PROXY_KEY", "HIVE_TOOLS_TOKEN"):
         if current.get(name) and name not in values:
             values[name] = current[name]
@@ -218,7 +263,7 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
              tools.SERVICE, TELEGRAM, DISCORD]
     mind = answers.get("mind_name") or "mind"
     names.append(mind)
-    web = host.proxy_env(names)
+    web = host.proxy_env([*names, *given_hosts(answers)])
     tz = mind_image.tz(host)
     pg_here = plan.runs_here(answers, "postgres")
     voice = voice_url(answers)
@@ -260,7 +305,7 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
             "POSTGRES_INITDB_ARGS": "--data-checksums",
         })
         svc.pop("init")
-        svc["volumes"] = [{"type": "volume", "source": "hive_postgres",
+        svc["volumes"] = [{"type": "volume", "source": PG_VOLUME,
                            "target": "/var/lib/postgresql/data"}]
         svc["healthcheck"] = {
             "test": ["CMD-SHELL", "PGPASSWORD=\"$$POSTGRES_PASSWORD\" psql -h \"$$(hostname -i)\" "
@@ -299,7 +344,10 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
     svc["volumes"] = [bind(home.data / "lucent", "/data")]
 
     if plan.runs_here(answers, "embeddings"):
-        svc = base(OLLAMA, image=OLLAMA_IMAGE)
+        # Held in memory for good: lucent's embed call has a 30-second
+        # deadline, and reloading an 8B model on a CPU after Ollama's idle
+        # unload takes longer than that.
+        svc = base(OLLAMA, image=OLLAMA_IMAGE, env={"OLLAMA_KEEP_ALIVE": "-1"})
         svc["volumes"] = [{"type": "volume", "source": "hive_ollama", "target": "/root/.ollama"}]
 
     if plan.runs_here(answers, "proxy"):
@@ -310,6 +358,10 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
             "test": ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen("
                      f"'http://127.0.0.1:{proxy_adapter.PORT}/health', timeout=3)"],
             "interval": "15s", "timeout": "5s", "retries": 8, "start_period": "20s"}
+        # Published so the proxy's own admin pages are reachable: the place a
+        # provider key or a model is changed, and the page the final links
+        # name.
+        svc["ports"] = [f"0.0.0.0:{proxy_adapter.HOST_PORT}:{proxy_adapter.PORT}"]
 
     link = links(answers, host)
     site_links = site.links(link.get("console", ""), link.get("terminal", ""))
@@ -327,12 +379,15 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
                "INFERENCE_PROXY_KEY": env_ref("MIND_PROXY_KEY"),
                "OLLAMA_BASE_URL": embeddings_url(answers),
                "HOST_UID": str(host.uid), "HOST_GID": str(host.gid),
-               **site_links, **site.seed(env_ref)}
+               # Where the hive's compose project is, for the console's
+               # restart and mount controls; unset it names Daniel's checkout.
+               "HIVE_MIND_PROJECT_PATH": str(home.root),
+               **site_links}
         if voice:
             env["KOKORO_VOICE_URL"] = voice
         if "tools" in pieces:
             env.update({"HIVE_TOOLS_URL": tools.URL, "HIVE_TOOLS_TOKEN": env_ref("HIVE_TOOLS_TOKEN")})
-        svc = base(CONSOLE, image="hive/console:local", waits_on_db=True, needs=(COMMS,), build={
+        svc = base(CONSOLE, image=CONSOLE_IMAGE, waits_on_db=True, needs=(COMMS,), build={
             "context": str(repo("hive")), "additional_contexts": {"hive_data": hive_data}}, env=env)
         svc["ports"] = [f"0.0.0.0:{CONSOLE_PORT}:{CONSOLE_PORT}"]
         svc["volumes"] = [bind(home.data / "console", "/data"),
@@ -346,8 +401,6 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
                "TERMINAL_LABELS_TOKEN": env_ref("TERMINAL_LABELS_TOKEN"), **site_links}
         if voice:
             env["VOICE_API_URL"] = voice
-        if "console" not in pieces:
-            env.update(site.seed(env_ref))
         svc = base(TERMINAL, image="hive/terminal:local", waits_on_db=True, needs=(COMMS,), build={
             "context": str(repo("terminal")),
             "additional_contexts": {"hive_site": str(repo("hive") / "hive_site"),
@@ -442,6 +495,16 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
     if volumes:
         doc["volumes"] = volumes
     return Rendered(doc, mounts, mountpoints)
+
+
+def console_image_build(home: Home, host: Host) -> list[str]:
+    """The console image on its own, for when the console is not installed:
+    the first admin is seeded with its code."""
+    argv = ["docker", "build", "-q", "-t", CONSOLE_IMAGE,
+            "--build-context", f"hive_data={home.repo('hive-data')}"]
+    for key, value in host.proxy_env(plan.SERVICE_NAMES).items():
+        argv += ["--build-arg", f"{key}={value}"]
+    return [*argv, str(home.repo("hive"))]
 
 
 def prepare_mounts(rendered: Rendered) -> None:

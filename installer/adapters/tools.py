@@ -16,6 +16,9 @@ from installer.shell import Shell, StepFailed
 PORT = 9421
 SERVICE = "hive-tools"
 URL = f"http://{SERVICE}:{PORT}"
+#: A route behind the token check: 401 for a token the store does not hold,
+#: anything else (404 for this id) for one it does.
+TOKEN_CHECK = "/hitl/installer-token-check"  # secret-guard: allow — a route path
 SECRETS = ("HT_SECRET_KEY", "HT_ADMIN_PASSWORD")
 
 _MINT = """import asyncio,store,auth_api
@@ -44,7 +47,7 @@ def mint_token(sh: Shell, compose: list[str], name: str = "lucent") -> str:
     """A new tools API token. Each call adds one, so call it only when the
     install holds none."""
     proc = sh.run([*compose, "exec", "-T", SERVICE, "python", "-c", _MINT.format(name=name)],
-                  timeout=60)
+                  timeout=60, quiet=True)
     token = (proc.stdout or "").strip().splitlines()[-1:] or [""]
     if not token[0]:
         raise StepFailed("the tools service minted no token")
