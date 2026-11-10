@@ -109,16 +109,25 @@ def test_an_existing_proxy_without_the_chosen_classifier_is_refused(tmp_path, mo
     assert ctx.env().get(compose.CLASSIFIER_MODEL_VAR, "") == ""
 
 
-def test_an_embedding_model_that_is_not_4096_wide_is_refused(tmp_path, monkeypatch):
-    hive = _Hive(dimensions=1024)
+def test_an_embedding_model_wider_than_4096_is_refused(tmp_path, monkeypatch):
+    hive = _Hive(dimensions=8192)
     ctx = _existing(tmp_path, monkeypatch, hive,
                     embedding_model="qwen3-embedding:8b", classifier_model="gpt-oss:20b-32k")
 
-    with pytest.raises(StepFailed, match=r"answered 1024 dimensions"):
+    with pytest.raises(StepFailed, match=r"answered 8192 dimensions"):
         steps.resolve_models(ctx)
     embeds = [r for r in hive.requests if r["url"] == f"{EXISTING}/v1/embeddings"]
     assert [r["headers"]["Authorization"] for r in embeds] == [f"Bearer {OPERATOR_KEY}"]
     assert ctx.env().get(compose.EMBEDDING_MODEL_VAR, "") == ""
+
+
+def test_a_narrower_embedding_model_is_accepted_and_given_to_lucent(tmp_path, monkeypatch):
+    ctx = _existing(tmp_path, monkeypatch, _Hive(embedders=["text-embedding-3-large"],
+                                                 dimensions=3072),
+                    embedding_model="text-embedding-3-large", classifier_model="gpt-oss:20b-32k")
+
+    steps.resolve_models(ctx)
+    assert ctx.env()[compose.EMBEDDING_MODEL_VAR] == "text-embedding-3-large"
 
 
 def test_models_an_existing_proxy_offers_and_answers_for_are_what_lucent_is_given(

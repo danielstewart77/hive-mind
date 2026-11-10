@@ -571,8 +571,9 @@ def resolve_models(ctx: Ctx):
                                          harness=None).get("dimensions")
     else:
         dims = proxy_adapter.embedding_dimensions(ctx.sh, url, key, embedder, proxy_env=web)
-    if dims != compose.EMBEDDING_DIMENSIONS:
-        raise StepFailed(f"{embedder!r} answered {dims} dimensions; lucent stores "
+    # Narrower vectors are zero-padded by lucent; wider ones do not fit.
+    if not dims or dims > compose.EMBEDDING_DIMENSIONS:
+        raise StepFailed(f"{embedder!r} answered {dims} dimensions; lucent stores at most "
                          f"{compose.EMBEDDING_DIMENSIONS} (memory.memories.embedding is "
                          f"vector({compose.EMBEDDING_DIMENSIONS})). Choose another embedding "
                          "model and run again")
