@@ -476,3 +476,66 @@ def test_a_token_that_cannot_be_sent_as_a_header_is_refused_clearly(tmp_path, mo
 
     assert "doesn't look like a token" in str(raised.value)
     assert reached["verify"] is False, "nothing should be sent to GitHub"
+
+
+def _env_files_in_a_fresh_console(env_value):
+    """ENV_FILES as a console process started with this HIVE_ENV_FILES has it."""
+    import json as _json
+    import subprocess
+
+    env = {k: v for k, v in os.environ.items() if k != "HIVE_ENV_FILES"}
+    if env_value is not None:
+        env["HIVE_ENV_FILES"] = env_value
+    src = os.path.join(os.path.dirname(__file__), "..", "src")
+    done = subprocess.run(
+        [sys.executable, "-c",
+         "import json, credentials_data; "
+         "print(json.dumps({k: str(v) for k, v in credentials_data.ENV_FILES.items()}))"],
+        cwd=src, env=env, capture_output=True, text=True, timeout=60,
+    )
+    assert done.returncode == 0, done.stderr
+    return _json.loads(done.stdout)
+
+
+def test_hive_env_files_names_the_files_the_console_reads():
+    files = _env_files_in_a_fresh_console('{"nervous_system": "/env_hive/.env"}')
+
+    assert files == {"nervous_system": "/env_hive/.env"}
+
+
+def test_unset_hive_env_files_keeps_the_workstation_files():
+    files = _env_files_in_a_fresh_console(None)
+
+    assert files == {k: str(v) for k, v in credentials_data.DEFAULT_ENV_FILES.items()}
+
+
+def test_malformed_hive_env_files_is_refused_not_read_as_unset():
+    with pytest.raises(ValueError, match="HIVE_ENV_FILES"):
+        credentials_data.env_files_from('{"nervous_system": "relative/.env"}')
+
+
+def test_credentials_tab_lists_only_the_files_it_was_given(tmp_path, monkeypatch):
+    hive_env = tmp_path / "hive.env"
+    _write_env(hive_env, COMMS_ADMIN_BEARER_TOKEN="c", LUCENT_ADMIN_BEARER_TOKEN="l")
+    monkeypatch.setattr(credentials_data, "ENV_FILES", {"nervous_system": hive_env})
+
+    groups = {g["key"]: g for g in credentials_data.list_credentials()}
+
+    for key in ("comms_admin_bearer_token", "lucent_admin_bearer_token"):
+        assert [loc["file"] for loc in groups[key]["locations"]] == ["nervous_system"]
+        assert groups[key]["locations"][0]["present"] is True
+    assert groups["hive_tools_token"]["locations"] == []
+
+
+def test_holder_whose_own_file_is_not_configured_is_found_in_the_shared_file(
+    tmp_path, monkeypatch
+):
+    hive_env = tmp_path / "hive.env"
+    _write_env(hive_env, LUCENT_TOKEN_SKIPPY="v")
+    env_files = {"nervous_system": hive_env}
+    monkeypatch.setattr(credentials_data, "ENV_FILES", env_files)
+    monkeypatch.setattr(holder_credentials, "ENV_FILES", env_files)
+
+    location = holder_credentials.locate(holder_credentials.SERVICES["lucent"], "skippy")
+
+    assert (location.file, location.env_key) == ("nervous_system", "LUCENT_TOKEN_SKIPPY")

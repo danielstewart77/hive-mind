@@ -52,13 +52,47 @@ BACKUP_DIR = Path(os.environ.get("ENV_BACKUP_DIR", "/data/env-backups"))
 # the far cheaper double-clicked-button case; this one mutates the secrets.
 _WRITE_LOCK = threading.RLock()
 
-ENV_FILES: dict[str, Path] = {
+#: The `.env` files this console reads and writes, by label, as this
+#: container sees them. This is the hive on Daniel's workstation, where each
+#: service keeps its own file; it is what `HIVE_ENV_FILES` falls back to.
+DEFAULT_ENV_FILES: dict[str, Path] = {
     "nervous_system": Path("/env_nervous_system/.env"),
     "hive_mind": Path("/env_hive_mind/.env"),
     "skippy": Path("/env_edge/skippy/.env"),
     "mordecai": Path("/env_edge/mordecai/.env"),
     "hive_tools": Path("/env_hive_tools/.env"),
 }
+
+
+def env_files_from(raw: str | None) -> dict[str, Path]:
+    """The env-file map `HIVE_ENV_FILES` describes, or the default when unset.
+
+    A JSON object of label to absolute path inside this container, e.g.
+    `{"nervous_system": "/env_hive/.env"}` for an installed hive whose
+    services share one `.env`. It replaces the default whole: a label left out
+    is a file this console does not have, and every location naming it is
+    skipped. Malformed is refused rather than read as unset — falling back
+    would point a console at another hive's files.
+    """
+    if raw is None or not raw.strip():
+        return dict(DEFAULT_ENV_FILES)
+    try:
+        parsed = json.loads(raw)
+    except ValueError as exc:
+        raise ValueError(f"HIVE_ENV_FILES is not valid JSON: {exc}") from exc
+    if not isinstance(parsed, dict) or not parsed:
+        raise ValueError("HIVE_ENV_FILES must be a JSON object of label to path")
+    files: dict[str, Path] = {}
+    for label, path in parsed.items():
+        if not str(label).strip() or not isinstance(path, str) or not path.startswith("/"):
+            raise ValueError(
+                f"HIVE_ENV_FILES: {label!r} must map to an absolute path, got {path!r}"
+            )
+        files[str(label).strip()] = Path(path)
+    return files
+
+
+ENV_FILES: dict[str, Path] = env_files_from(os.environ.get("HIVE_ENV_FILES"))
 
 # The GitHub PAT's two live homes, bind-mounted as single files like the
 # .env files above (same EBUSY constraint — rewrite in place only).
@@ -559,7 +593,10 @@ def _group_status(group: dict[str, Any]) -> dict[str, Any]:
         blank_seen = False
         unreadable_seen = False
         for file_label, env_key in group["locations"]:
-            path = ENV_FILES[file_label]
+            path = ENV_FILES.get(file_label)
+            if path is None:
+                # Not a file this console was given (`HIVE_ENV_FILES`).
+                continue
             try:
                 value = _read_env_value(path, env_key)
             except Unreadable:

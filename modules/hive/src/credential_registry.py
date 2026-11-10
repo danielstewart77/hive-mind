@@ -471,12 +471,11 @@ def _shared_value(credential: str, holder: str) -> str | None:
     if group is None:
         return None
     for file_label, env_key in group["locations"]:
-        if file_label != holder:
+        path = credentials_data.ENV_FILES.get(file_label)
+        if file_label != holder or path is None:
             continue
         try:
-            raw = credentials_data._read_env_value(
-                credentials_data.ENV_FILES[file_label], env_key
-            )
+            raw = credentials_data._read_env_value(path, env_key)
         except credentials_data.Unreadable as exc:
             raise Unreadable(str(exc)) from exc
         if raw is None:

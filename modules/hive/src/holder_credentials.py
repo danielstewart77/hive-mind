@@ -232,7 +232,7 @@ def locate(service: Service, holder: str) -> Location | None:
             raise Unreadable(str(exc)) from exc
     # A holder with a file of its own is read from that file, whatever else
     # mentions its name.
-    if own is not None:
+    if own is not None and own in ENV_FILES:
         own_key = f"{service.prefix}_BEARER_TOKEN"
         if credentials_data._read_env_value(ENV_FILES[own], own_key) is not None:
             return Location(own, own_key)
@@ -614,6 +614,8 @@ async def provision_mind(
     for service in SERVICES.values():
         try:
             key = variable_name(service, name)
+            if "hive_mind" not in ENV_FILES:
+                raise MintRefused("no hive_mind env file is configured (HIVE_ENV_FILES)")
             _ensure_key(ENV_FILES["hive_mind"], key)
             minted.append(
                 await mint(
