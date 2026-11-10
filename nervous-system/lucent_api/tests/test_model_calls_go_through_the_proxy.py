@@ -39,9 +39,10 @@ class _Reply:
 class _Transport:
     """`requests.post`, answering each proxy route the way the proxy does."""
 
-    def __init__(self, verdict: dict | None = None):
+    def __init__(self, verdict: dict | None = None, dims: int = DIMS):
         self.sent: list[dict] = []
         self.verdict = verdict or {}
+        self.dims = dims
 
     def __call__(self, url, **kw):
         body = kw.get("json") or {}
@@ -50,7 +51,7 @@ class _Transport:
             # A direction of its own, so save-time dedup against other
             # tests' rows in the shared scratch database never fires.
             rng = random.Random(body.get("input"))
-            vector = [rng.gauss(0.0, 1.0) for _ in range(DIMS)]
+            vector = [rng.gauss(0.0, 1.0) for _ in range(self.dims)]
             return _Reply({"data": [{"embedding": vector, "index": 0}],
                            "model": body["model"]})
         content = json.dumps(self.verdict)
@@ -106,3 +107,24 @@ async def test_the_prune_classifies_through_the_proxy_chat_route_and_acts_on_the
     gone = await inspector.fetchrow(
         'SELECT "id" FROM memory.memories WHERE "id" = $1', planned)
     assert gone is None
+
+
+@pytest.mark.asyncio
+async def test_a_narrower_embedding_is_stored_zero_padded_to_the_column(
+        store, proxy, inspector):
+    proxy.dims = 3072  # OpenAI's text-embedding-3-large
+    answer = json.loads(await lucent_memory.memory_store_direct(
+        content=f"a memory from a narrower model {unique('n')}", data_class="current-state",
+        source="session", mind_id="proxy-pad-test"))
+
+    assert answer.get("stored") is True, answer
+    row = await inspector.fetchrow(
+        'SELECT "embedding"::text AS "v" FROM memory.memories WHERE "id" = $1',
+        int(answer["id"]))
+    stored = [float(x) for x in row["v"].strip("[]").split(",")]
+    sent = [r for r in proxy.sent if r["url"] == f"{PROXY}/v1/embeddings"][-1]
+    rng = random.Random(sent["body"]["input"])
+    expected = [rng.gauss(0.0, 1.0) for _ in range(3072)]
+    assert len(stored) == DIMS
+    assert stored[:3072] == pytest.approx(expected, rel=1e-5)
+    assert stored[3072:] == [0.0] * (DIMS - 3072)

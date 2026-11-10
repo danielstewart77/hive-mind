@@ -35,8 +35,11 @@ rule that refused it.
 
 Embeddings come through the hive's inference proxy (`POST /v1/embeddings`,
 OpenAI shape) with the one proxy key, from the model named by
-`LUCENT_EMBEDDING_MODEL`. It must answer 4096 dimensions: the column is
-`vector(4096)`. Nothing here calls Ollama directly.
+`LUCENT_EMBEDDING_MODEL`. It may answer at most 4096 dimensions, the width
+of the `vector(4096)` column; a narrower one (OpenAI's text-embedding-3-large
+answers 3072) is padded with zeros, which leaves every cosine similarity
+unchanged. A hive keeps one embedding model for good: vectors from two models
+are not comparable, padded or not. Nothing here calls Ollama directly.
 """
 
 from __future__ import annotations
@@ -107,7 +110,17 @@ async def _embedding_for(text: str) -> list[float]:
     pool's own protocol handling, and `/health` with it — so the one
     blocking call left goes to a thread.
     """
-    return await asyncio.to_thread(_embed, text)
+    return _to_column(await asyncio.to_thread(_embed, text))
+
+
+def _to_column(vector: list[float]) -> list[float]:
+    """The model's vector at the column's width: zero-padded when narrower
+    (dot products and norms, so cosine similarity, are unchanged), refused
+    when wider."""
+    if len(vector) > EMBEDDING_DIM:
+        raise ValueError(f"the embedding model answered {len(vector)} dimensions; "
+                         f"the memory column holds {EMBEDDING_DIM}")
+    return [*vector, *([0.0] * (EMBEDDING_DIM - len(vector)))]
 
 
 async def _hitl_gate(content: str) -> bool:
