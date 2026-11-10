@@ -113,7 +113,10 @@ def test_every_mount_lies_inside_the_install_folder_and_exists_and_the_user_is_t
     binds = [(name, Path(v["source"])) for name, svc in config["services"].items()
              for v in svc.get("volumes", []) if v.get("type") == "bind"]
     assert binds
+    assert rendered.host_paths == [Path("/var/run/docker.sock")]
     for name, source in binds:
+        if source in rendered.host_paths:
+            continue
         assert source.resolve().is_relative_to(root), (name, source)
         assert source.exists(), (name, source)
     assert rendered.mountpoints
@@ -137,3 +140,22 @@ def test_the_host_time_zone_lands_in_every_service_and_nothing_names_sparktobloo
         assert svc["environment"]["TZ"] == "Pacific/Auckland", name
     assert "sparktobloom" not in json.dumps(config)
     assert "/home/daniel" not in json.dumps(config)
+
+
+def test_the_console_rewrites_the_installs_own_env_and_tools_can_run_compose_on_it(tmp_path):
+    inst = installer_at(tmp_path, answers(pieces=["console", "tools"]))
+    config = render(inst)
+    root = str(inst.home.root)
+
+    console = config["services"][compose.CONSOLE]
+    assert json.loads(console["environment"]["HIVE_ENV_FILES"]) == \
+        {"nervous_system": "/env_hive/.env"}
+    assert console["environment"]["HIVE_MIND_PROJECT_PATH"] == root
+    env_mount = [v for v in console["volumes"] if v["target"] == "/env_hive/.env"]
+    assert env_mount and env_mount[0]["source"] == str(inst.home.env_file)
+    assert not env_mount[0].get("read_only")
+    assert inst.home.env_file.is_file()
+
+    tools_mounts = {v["target"]: v["source"] for v in config["services"]["hive-tools"]["volumes"]}
+    assert tools_mounts["/var/run/docker.sock"] == "/var/run/docker.sock"
+    assert tools_mounts[root] == root
