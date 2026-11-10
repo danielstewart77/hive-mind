@@ -75,6 +75,20 @@ def lucent() -> tuple[str, str]:
     return url.rstrip("/"), os.environ.get("LUCENT_BEARER_TOKEN", "")
 
 
+def proxy() -> tuple[str, str]:
+    """The inference proxy's root and this mind's key for it: the one key.
+
+    ``INFERENCE_PROXY_URL`` / ``MIND_PROXY_KEY`` as the installer sets them,
+    else the dsh variables naming the same proxy and key.
+    """
+    url = os.environ.get("INFERENCE_PROXY_URL") or os.environ.get("DSH_PROXY_BASE_URL") or ""
+    url = url.strip().rstrip("/")
+    if url.endswith("/v1"):
+        url = url[: -len("/v1")]
+    key = os.environ.get("MIND_PROXY_KEY") or os.environ.get("DSH_API_KEY") or ""
+    return url, key.strip()
+
+
 def request(method: str, url: str, bearer: str, body: dict | None = None,
             timeout: float = 10) -> dict:
     """One JSON request; the decoded reply. Raises on transport or status."""

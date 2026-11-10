@@ -22,6 +22,7 @@ connections belong to the loop that opened them.
 from __future__ import annotations
 
 import hashlib
+import random
 import json
 from dataclasses import dataclass
 
@@ -44,19 +45,20 @@ DIMS = 4096
 
 
 def _fake_embed(text: str) -> list[float]:
-    """A unit vector per text, orthogonal to every other text's.
+    """A random direction per text, seeded by the text.
 
     Distinct texts must embed distinctly or the store's own 0.92-cosine
     dedup — which compares against every mind's rows in the same data
-    class — swallows every write after the first, and these tests would
-    read as a scoping failure. Identical text embeds identically, which is
+    class — swallows the write, and these tests would read as a scoping
+    failure. A basis vector picked by hashing into 4096 slots collided with
+    some earlier row in the shared scratch database often enough to fail a
+    full run now and then; two seeded Gaussian vectors in 4096 dimensions
+    have a cosine near zero. Identical text embeds identically, which is
     what lets a retrieval query rank its own memory first.
     """
-    slot = int.from_bytes(hashlib.sha256(text.encode("utf-8")).digest()[:4],
-                          "big") % DIMS
-    values = [0.0] * DIMS
-    values[slot] = 1.0
-    return values
+    seed = int.from_bytes(hashlib.sha256(text.encode("utf-8")).digest()[:8], "big")
+    rng = random.Random(seed)
+    return [rng.gauss(0.0, 1.0) for _ in range(DIMS)]
 
 
 # ---- the hive these tests are run against ---------------------------------

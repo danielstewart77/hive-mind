@@ -8,7 +8,8 @@ grows until it overflows. This writes that set, from the scripts in
 ``minds/harness/dsh_hook_scripts/``:
 
 * Stop: ``auto_remember.py`` (memory capture to lucent, classified through
-  hive-tools) and ``rotation_check.py`` (size report and rotation arm to
+  the inference proxy's chat route with the mind's key and
+  ``HIVE_CLASSIFIER_MODEL``) and ``rotation_check.py`` (size report and rotation arm to
   comms).
 * UserPromptSubmit: ``contextual_retrieval.py`` (standing rules, relevant
   memory and known persons from lucent) and ``rotation_fire.py`` (a terminal

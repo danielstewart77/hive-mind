@@ -19,9 +19,10 @@ deleted by the pruner. Entries are not reclassified in place.
 ## Pruning
 Three checks, run on cadence:
 
-1. **Shipped check** — for each entry, POST to
-   `${HIVE_TOOLS_URL}/ollama/structured` with the entry plus recent
-   `current-state` entries on the same topic. Schema:
+1. **Shipped check** — for each entry, lucent's pruner asks the
+   inference proxy's `/v1/chat/completions` (json_schema
+   `response_format`, model `LUCENT_CLASSIFIER_MODEL`, the one proxy key)
+   with the entry plus recent `current-state` entries on the same topic. Schema:
    `{shipped: bool, reason: string}`. If `shipped: true`, delete.
 2. **Decay-on-age** — `half_life_days: 90`, `delete_below_score: 0.02`.
 3. **Contradiction-on-capture** — when a new chunk supersedes an

@@ -46,8 +46,8 @@ services:
       # the container is up long before the server accepts a query.
       hive-postgres:
         condition: service_healthy
-    # Embeddings come from Ollama on the host, not from inside this
-    # container — resolve the host gateway so OLLAMA_BASE_URL below has
+    # Every model call goes through the inference proxy, which runs on the
+    # host — resolve the host gateway so INFERENCE_PROXY_URL below has
     # something to point at.
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -63,13 +63,15 @@ services:
       # saying no database was named, rather than serving happily out of a
       # store nothing else writes.
       HIVE_DATABASE_URL: ${HIVE_DATABASE_URL:-}
-      # Every /memory/retrieve and /memory/store embeds through Ollama.
-      # The code default is loopback, which inside a container is the
-      # container itself — set it explicitly or retrieval fails closed
-      # with connection refused. Override in .env for a remote Ollama.
-      OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:-http://host.docker.internal:11434}"
-      # The nightly pruner classifies through hive-tools; same reasoning.
-      HIVE_TOOLS_URL: "http://hive-tools:9421"
+      # Every /memory/retrieve and /memory/store embeds through the
+      # inference proxy (POST /v1/embeddings), and the nightly pruner
+      # classifies through its chat route, both with the one proxy key.
+      # No default: unset, a memory write fails naming the missing variable.
+      # The embedding model must answer 4096 dimensions (vector(4096)).
+      INFERENCE_PROXY_URL: "${INFERENCE_PROXY_URL:-http://host.docker.internal:8899}"
+      INFERENCE_PROXY_KEY: "${INFERENCE_PROXY_KEY:-}"
+      LUCENT_EMBEDDING_MODEL: "${LUCENT_EMBEDDING_MODEL:-}"
+      LUCENT_CLASSIFIER_MODEL: "${LUCENT_CLASSIFIER_MODEL:-}"
       PRUNE_LOG_PATH: "/data/prune.log"
       PRUNE_CRON: "0 4 * * *"
       # The prune reads PRUNE_CRON in PRUNE_TIMEZONE, else TZ, else

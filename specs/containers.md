@@ -15,7 +15,7 @@ Complete reference for all Hive Mind Docker services. Load this spec when buildi
 
 **Volumes:** `./nervous-system/data:/data` (`prune.log`; the retired `lucent.db` sits here unread), `./nervous-system/lucent_api:/app/lucent_api` (bind-mounted source, no rebuild needed for hot fixes).
 
-**Environment:** `LUCENT_API_PORT`, `LUCENT_URL_SELF`, `HIVE_DATABASE_URL`, `OLLAMA_BASE_URL`, `HIVE_TOOLS_URL`, `PRUNE_LOG_PATH`/`PRUNE_CRON`/`PRUNE_TIMEZONE` plus `./nervous-system/.env` (`LUCENT_BEARER_TOKEN`, `LUCENT_ADMIN_BEARER_TOKEN`).
+**Environment:** `LUCENT_API_PORT`, `LUCENT_URL_SELF`, `HIVE_DATABASE_URL`, `INFERENCE_PROXY_URL`, `INFERENCE_PROXY_KEY`, `LUCENT_EMBEDDING_MODEL`, `LUCENT_CLASSIFIER_MODEL` (every model call goes through the proxy; no default model, no Ollama fallback), `PRUNE_LOG_PATH`/`PRUNE_CRON`/`PRUNE_TIMEZONE` plus `./nervous-system/.env` (`LUCENT_BEARER_TOKEN`, `LUCENT_ADMIN_BEARER_TOKEN`).
 
 **Security:** none of the base hardening below is applied to this service.
 

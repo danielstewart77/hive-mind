@@ -22,9 +22,9 @@ As built:
    (only when absent) and prints one JSON line
    {"mind","hooks_dir","hooks_config","hooks_config_written","scripts",
    "hooks_dir_in_container"}; exit 2 {"error"}. The hooks read MIND_ID,
-   COMMS_URL/COMMS_BEARER_TOKEN, LUCENT_URL_SELF/LUCENT_BEARER_TOKEN and, when
-   tools is installed, HIVE_TOOLS_URL/HIVE_TOOLS_TOKEN; without tools a turn
-   is not captured to memory, and dsh is still offered. A clone predating the
+   COMMS_URL/COMMS_BEARER_TOKEN, LUCENT_URL_SELF/LUCENT_BEARER_TOKEN, and for
+   the capture's classifier INFERENCE_PROXY_URL/MIND_PROXY_KEY (the one proxy
+   key) and HIVE_CLASSIFIER_MODEL; the tools service is not needed. A clone predating the
    generator fails the hooks step, naming why.
 """
 

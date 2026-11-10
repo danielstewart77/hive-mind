@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 from installer import compose
@@ -57,19 +58,11 @@ def test_existing_services_and_bot_tokens_land_in_each_service_that_uses_them(tm
 
     assert "inference-proxy" not in services and compose.OLLAMA not in services
     assert compose.VOICE not in services
-    mind = services["wren"]["environment"]
-    assert mind["DSH_PROXY_BASE_URL"] == "http://proxy.corp.example:8888/v1"
-    assert mind["DSH_API_KEY"] == "client-key-1"
-    assert services[compose.LUCENT]["environment"]["OLLAMA_BASE_URL"] == \
-        "http://gpu.corp.example:11434"
     bot = services[compose.TELEGRAM]["environment"]
     assert bot["VOICE_SERVER_URL"] == "http://voice.corp.example:8422"
     assert bot["TELEGRAM_BOT_TOKEN"] == "123:bot"
     console = services[compose.CONSOLE]["environment"]
     assert console["KOKORO_VOICE_URL"] == "http://voice.corp.example:8422"
-    assert console["INFERENCE_PROXY_URL"] == "http://proxy.corp.example:8888"
-    assert console["INFERENCE_PROXY_KEY"] == "client-key-1"
-    assert console["OLLAMA_BASE_URL"] == "http://gpu.corp.example:11434"
     assert services[compose.TERMINAL]["environment"]["VOICE_API_URL"] == \
         "http://voice.corp.example:8422"
     assert services["hive-tools"]["environment"]["OLLAMA_BASE_URL"] == \
@@ -159,3 +152,38 @@ def test_the_console_rewrites_the_installs_own_env_and_tools_can_run_compose_on_
     tools_mounts = {v["target"]: v["source"] for v in config["services"]["hive-tools"]["volumes"]}
     assert tools_mounts["/var/run/docker.sock"] == "/var/run/docker.sock"
     assert tools_mounts[root] == root
+
+
+def test_mind_lucent_hooks_and_console_carry_the_one_proxy_key_and_the_proxy_address(
+        tmp_path, monkeypatch):
+    """R5: the operator's key for an existing proxy is the hive's only one."""
+    inst = installer_at(tmp_path, answers(
+        pieces=["console"], modes={"proxy": "existing"},
+        proxy_url="http://proxy.corp.example:8888", proxy_key="the-operator-key"))
+    services = render(inst)["services"]
+    proxy, key = "http://proxy.corp.example:8888", "the-operator-key"
+
+    mind = services["wren"]["environment"]
+    lucent = services[compose.LUCENT]["environment"]
+    console = services[compose.CONSOLE]["environment"]
+    assert (mind["DSH_API_KEY"], mind["MIND_PROXY_KEY"]) == (key, key)
+    assert mind["DSH_PROXY_BASE_URL"] == f"{proxy}/v1"
+    assert (lucent["INFERENCE_PROXY_URL"], lucent["INFERENCE_PROXY_KEY"]) == (proxy, key)
+    assert (console["INFERENCE_PROXY_URL"], console["INFERENCE_PROXY_KEY"]) == (proxy, key)
+    assert console["OLLAMA_BASE_URL"] == proxy
+
+    # The capture hook resolves its proxy and key from the mind's own
+    # environment, as the generated copy does in the container.
+    for name in ("INFERENCE_PROXY_URL", "MIND_PROXY_KEY", "DSH_PROXY_BASE_URL", "DSH_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in mind.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2]
+                                    / "minds" / "harness" / "dsh_hook_scripts"))
+    sys.modules.pop("hive_mind_env", None)
+    try:
+        import hive_mind_env
+
+        assert hive_mind_env.proxy() == (proxy, key)
+    finally:
+        sys.modules.pop("hive_mind_env", None)

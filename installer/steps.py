@@ -412,14 +412,17 @@ def proxy_setup(ctx: Ctx):
     ctx.set_env(**{proxy_adapter.ALLOW_CREATE: "false"})
     ctx.sh.run([*ctx.compose, "up", "-d", proxy_adapter.SERVICE], timeout=300)
     _wait(ctx, "the proxy", lambda: _healthy_in_network(ctx, proxy_adapter.URL + "/health"), 240)
+    # The hive's own models first: lucent embeds and classifies with them,
+    # and the capture hook classifies with the second.
+    fingerprints, rewrote = _register_local_models(ctx)
     provider = a["provider_kind"]
     base_url = str(a.get("provider_base_url") or "")
     api_key = ctx.secret("provider_api_key")
     window = int(a.get("provider_model_window") or 200000)
     model = a["provider_model"]
-    fingerprints = {f"provider:{provider}": _digest(provider, base_url, api_key),
-                    f"model:{model}": _digest(provider, window)}
-    rewrote = _put_row(ctx, f"provider:{provider}", fingerprints[f"provider:{provider}"],
+    fingerprints.update({f"provider:{provider}": _digest(provider, base_url, api_key),
+                         f"model:{model}": _digest(provider, window)})
+    rewrote |= _put_row(ctx, f"provider:{provider}", fingerprints[f"provider:{provider}"],
                        lambda update: proxy_adapter.add_provider(
                            ctx.sh, ctx.compose, name=provider, kind=provider,
                            base_url=base_url, api_key=api_key, update=update))
@@ -440,8 +443,57 @@ def proxy_setup(ctx: Ctx):
     for name, value in fingerprints.items():
         ctx.output(name, {"value": value})
     checked = "; a test completion answered" + ("; rows updated" if rewrote else "")
-    return ("provider, model and the mind's key" if key else
-            "provider, model; the mind's key kept") + checked
+    return (f"{compose.EMBEDDING_MODEL} and {compose.CLASSIFIER_MODEL} on {LOCAL_PROVIDER}; "
+            + ("provider, model and the hive's key" if key else
+               "provider, model; the hive's key kept") + checked)
+
+
+#: The proxy's provider for the hive's own Ollama. Named apart from the
+#: operator's provider, which may be another Ollama.
+LOCAL_PROVIDER = "hive-ollama"
+#: The context window an Ollama model is registered with when its tag does
+#: not say one.
+LOCAL_WINDOW = 32768
+_DERIVED_TAG = re.compile(r"^(?P<base>[^:\s]+:[^:\s]+?)-(?P<k>\d+)k$")
+
+
+def local_window(tag: str) -> int:
+    found = _DERIVED_TAG.match(tag)
+    return int(found.group("k")) * 1024 if found else LOCAL_WINDOW
+
+
+def ollama_commands(tag: str) -> list[list[str]]:
+    """What makes `tag` present in an Ollama: a pull, or for a tag that is a
+    library model with a context size of its own (`gpt-oss:20b-32k`, which
+    no registry serves) a pull of the base and a create with that `num_ctx`."""
+    found = _DERIVED_TAG.match(tag)
+    if not found:
+        return [["ollama", "pull", tag]]
+    base, ctx_len = found.group("base"), int(found.group("k")) * 1024
+    modelfile = f"/tmp/{tag.replace(':', '_').replace('/', '_')}.Modelfile"
+    return [["ollama", "pull", base],
+            ["sh", "-c", f"printf 'FROM {base}\\nPARAMETER num_ctx {ctx_len}\\n' > {modelfile} "
+                         f"&& ollama create {tag} -f {modelfile}"]]
+
+
+def _register_local_models(ctx: Ctx) -> tuple[dict, bool]:
+    """The hive's Ollama as a proxy provider, its embedding model
+    (purpose embedding) and its classifier (purpose chat) on it."""
+    url = compose.embeddings_url(ctx.answers)
+    rows = {f"provider:{LOCAL_PROVIDER}": (_digest("ollama", url), lambda update: (
+        proxy_adapter.add_provider(ctx.sh, ctx.compose, name=LOCAL_PROVIDER, kind="ollama",
+                                   base_url=url, update=update)))}
+    for model, purpose in ((compose.EMBEDDING_MODEL, "embedding"),
+                           (compose.CLASSIFIER_MODEL, "chat")):
+        window = local_window(model)
+        rows[f"model:{model}"] = (_digest(LOCAL_PROVIDER, window, purpose), (
+            lambda update, model=model, window=window, purpose=purpose:
+            proxy_adapter.add_model(ctx.sh, ctx.compose, provider=LOCAL_PROVIDER, model=model,
+                                    context_window=window, purpose=purpose, update=update)))
+    rewrote = False
+    for key, (fingerprint, add) in rows.items():
+        rewrote |= _put_row(ctx, key, fingerprint, add)
+    return {key: fingerprint for key, (fingerprint, _) in rows.items()}, rewrote
 
 
 # ---- 14. embeddings ---------------------------------------------------------
@@ -456,29 +508,85 @@ def _mem_gb() -> float:
 
 
 def embeddings(ctx: Ctx):
+    """The models the hive's Ollama serves, pulled before the proxy that
+    serves them is set up. Nothing is tested here: every model is checked
+    through the proxy, with the key the hive uses."""
     a = ctx.answers
-    url = compose.embeddings_url(a)
+    if not plan.runs_here(a, "embeddings"):
+        return "existing embedding service"
     notes = []
-    if plan.runs_here(a, "embeddings"):
-        if 0 < _mem_gb() < 10:
-            notes.append(f"only {_mem_gb():.0f} GB of memory: embedding will be slow")
-        models = [compose.EMBEDDING_MODEL]
-        if "tools" in plan.installed(a):
-            models.append(str(a.get("tools_ollama_model") or "qwen3:4b"))
-        for model in models:
-            ctx.sh.run([*ctx.compose, "exec", "-T", compose.OLLAMA, "ollama", "pull", model],
-                       timeout=3600)
-    out = ctx.http("POST", f"{url}/api/embed",
-                   body={"model": compose.EMBEDDING_MODEL, "input": "hive install check"},
-                   timeout=180)
-    if out.get("status") != 200:
-        raise StepFailed(f"a test embedding at {url} failed ({out.get('status')}): "
-                         f"{out.get('error') or out.get('body', '')[:200]}")
-    vector = (json.loads(out["body"]).get("embeddings") or [[]])[0]
-    if len(vector) != compose.EMBEDDING_DIMENSIONS:
-        raise StepFailed(f"{compose.EMBEDDING_MODEL} answered {len(vector)} dimensions; lucent "
-                         f"stores {compose.EMBEDDING_DIMENSIONS}")
-    return "; ".join([f"{len(vector)}-dimension test embedding", *notes])
+    if 0 < _mem_gb() < 10:
+        notes.append(f"only {_mem_gb():.0f} GB of memory: embedding will be slow")
+    models = []
+    if plan.runs_here(a, "proxy"):
+        models += [compose.EMBEDDING_MODEL, compose.CLASSIFIER_MODEL]
+    if "tools" in plan.installed(a):
+        models.append(str(a.get("tools_ollama_model") or "qwen3:4b"))
+    for model in models:
+        for argv in ollama_commands(model):
+            ctx.sh.run([*ctx.compose, "exec", "-T", compose.OLLAMA, *argv], timeout=3600)
+    return "; ".join([("pulled " + ", ".join(models)) if models else "nothing to pull", *notes])
+
+
+# ---- 14b. the hive's models -------------------------------------------------
+MODEL_CHOICES = {
+    # answer key: (.env name, purpose, the label asked, the default)
+    "embedding_model": (compose.EMBEDDING_MODEL_VAR, "embedding",
+                        "The embedding model lucent stores memory with", compose.EMBEDDING_MODEL),
+    "classifier_model": (compose.CLASSIFIER_MODEL_VAR, "chat",
+                         "The model lucent and the mind's memory capture classify with",
+                         compose.CLASSIFIER_MODEL),
+}
+
+
+def _chosen(ctx: Ctx, key: str, offered: list[str]) -> str:
+    """The model chosen for `key`: answered on the page, else the one this
+    hive already uses; asked from the proxy's own listing when neither."""
+    env_name, purpose, label, default = MODEL_CHOICES[key]
+    where = f"the proxy at {compose.proxy_url(ctx.answers)}"
+    chosen = str(ctx.answers.get(key) or ctx.env().get(env_name) or "").strip()
+    if not offered:
+        raise StepFailed(f"{where} offers no {purpose} model; register one "
+                         f"(add-model --purpose {purpose}) and run again")
+    if not chosen:
+        raise NeedInput(key, label, sorted(offered, key=lambda m: m != default))
+    if chosen not in offered:
+        raise StepFailed(f"{where} does not offer the {purpose} model {chosen!r} chosen for "
+                         f"this hive (it offers: {', '.join(offered)})")
+    return chosen
+
+
+def resolve_models(ctx: Ctx):
+    """The embedding and classifier models, each offered by the proxy and
+    each answering one real call made with the hive's key, before lucent is
+    pointed at them."""
+    a, key = ctx.answers, ctx.env().get("MIND_PROXY_KEY", "")
+    url, web, own = compose.proxy_url(a), ctx.web_env(), plan.runs_here(a, "proxy")
+    chat = proxy_adapter.list_models(ctx.sh, url, key, harness="dsh", proxy_env=web)
+    embedders = proxy_adapter.list_models(ctx.sh, url, key, purpose="embedding", proxy_env=web)
+    embedder = _chosen(ctx, "embedding_model", embedders)
+    classifier = _chosen(ctx, "classifier_model", chat)
+    if own:
+        dims = proxy_adapter.check_model(ctx.sh, ctx.compose, model=embedder,
+                                         harness=None).get("dimensions")
+    else:
+        dims = proxy_adapter.embedding_dimensions(ctx.sh, url, key, embedder, proxy_env=web)
+    if dims != compose.EMBEDDING_DIMENSIONS:
+        raise StepFailed(f"{embedder!r} answered {dims} dimensions; lucent stores "
+                         f"{compose.EMBEDDING_DIMENSIONS} (memory.memories.embedding is "
+                         f"vector({compose.EMBEDDING_DIMENSIONS})). Choose another embedding "
+                         "model and run again")
+    if own:
+        proxy_adapter.check_model(ctx.sh, ctx.compose, model=classifier)
+    else:
+        proxy_adapter.classify_check(ctx.sh, url, key, classifier, proxy_env=web)
+    a["embedding_model"], a["classifier_model"] = embedder, classifier
+    ctx.set_env(**{compose.EMBEDDING_MODEL_VAR: embedder, compose.CLASSIFIER_MODEL_VAR: classifier})
+    # Lucent and the console started before the key and the models were
+    # known; `up -d` recreates whichever the .env change reaches.
+    ctx.sh.run([*ctx.compose, "up", "-d", compose.LUCENT,
+                *([compose.CONSOLE] if "console" in plan.installed(a) else [])], timeout=300)
+    return f"embedding {embedder} ({dims} dimensions), classifier {classifier}"
 
 
 # ---- 15. reachability -------------------------------------------------------
@@ -538,9 +646,8 @@ def mint_credentials(ctx: Ctx):
         if not token or not _tools_token_ok(ctx, token):
             token = tools.mint_token(ctx.sh, ctx.compose)
             ctx.set_env(HIVE_TOOLS_TOKEN=token)
-            ctx.sh.run([*ctx.compose, "up", "-d", compose.LUCENT,
-                        *([compose.CONSOLE] if "console" in plan.installed(a) else [])],
-                       timeout=300)
+            if "console" in plan.installed(a):
+                ctx.sh.run([*ctx.compose, "up", "-d", compose.CONSOLE], timeout=300)
             done["tools"] = "token minted"
         else:
             done["tools"] = "token kept"
@@ -750,8 +857,9 @@ STEPS = [
     Step("schema_apply", "Create or update the tables", schema_apply, 900),
     Step("admin", "Make the admin account", seed_admin, 180),
     Step("services", "Start the services", start_services, 900),
+    Step("embeddings", "Pull the hive's models into Ollama", embeddings, 7200),
     Step("proxy", "Set up the proxy", proxy_setup, 1200),
-    Step("embeddings", "Pull and test the embedding model", embeddings, 4200),
+    Step("models", "Check the embedding and classifier models", resolve_models, 600),
     Step("reachability", "Reach every service from inside the hive", reachability, 600),
     Step("credentials", "Mint the services' credentials", mint_credentials, 300),
     Step("model", "Choose the mind's model", choose_model, 120),

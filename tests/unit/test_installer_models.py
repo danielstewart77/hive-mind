@@ -1,0 +1,187 @@
+"""The hive's embedding and classifier models: registered on a proxy the
+installer runs, and checked on any proxy before lucent is pointed at them.
+
+The one stub is `subprocess.run`, where the process stops being ours: every
+`docker compose exec ... app.cli` and every request made from inside the hive
+network (a `docker run` of the HTTP probe) goes through it. It answers the
+way the proxy does.
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+
+import pytest
+
+from installer import compose, steps
+from installer.shell import Shell, StepFailed
+
+from tests.unit.installer_helpers import answers, installer_at
+
+EXISTING = "http://proxy.corp.example:8888"
+OPERATOR_KEY = "the-operator-key"  # invented
+
+
+class _Hive:
+    """`subprocess.run` for an install: the proxy's command and its routes."""
+
+    def __init__(self, *, chat=("claude-sonnet-5", "gpt-oss:20b-32k"),
+                 embedders=("qwen3-embedding:8b",), dimensions=4096):
+        self.chat, self.embedders, self.dimensions = list(chat), list(embedders), dimensions
+        self.commands: list[list[str]] = []
+        self.requests: list[dict] = []
+
+    def _cli(self, args: list[str]) -> dict:
+        command = args[0]
+        if command == "mint-key":
+            return {"client": "wren", "created": True, "minted": True, "key": "minted-key"}
+        if command == "check-model":
+            model = args[args.index("--model") + 1]
+            if model in self.embedders:
+                return {"model": model, "ok": True, "status": 200, "dimensions": self.dimensions}
+            return {"ok": True, "status": 200, "reply": "ok"}
+        return {"created": True, "updated": False}
+
+    def _http(self, payload: dict) -> dict:
+        self.requests.append(payload)
+        url = payload["url"]
+        if url.endswith("/health"):
+            return {"status": 200, "body": "{}"}
+        if "/v1/models" in url:
+            embedding = "purpose=embedding" in url
+            names = self.embedders if embedding else self.chat
+            purpose = "embedding" if embedding else "chat"
+            return {"status": 200, "body": json.dumps(
+                {"data": [{"id": n, "purpose": purpose} for n in names]})}
+        if url.endswith("/v1/embeddings"):
+            return {"status": 200, "body": json.dumps(
+                {"data": [{"embedding": [0.0] * self.dimensions, "index": 0}]})}
+        if url.endswith("/v1/chat/completions"):
+            return {"status": 200, "body": json.dumps(
+                {"choices": [{"message": {"content": '{"ok": true}'}}]})}
+        return {"status": 404, "body": ""}
+
+    def __call__(self, argv, **kw):
+        self.commands.append(list(argv))
+        out = {}
+        if "app.cli" in argv:
+            out = self._cli(argv[argv.index("app.cli") + 1:])
+        elif argv[:2] == ["docker", "run"]:
+            source = kw.get("input") or ""
+            literal = source.splitlines()[1][len("PAYLOAD = json.loads("):-1]
+            out = self._http(json.loads(json.loads(literal)))
+        return subprocess.CompletedProcess(argv, 0, json.dumps(out) if out else "", "")
+
+
+def _ctx(tmp_path, monkeypatch, hive: _Hive, **given):
+    monkeypatch.setattr(subprocess, "run", hive)
+    inst = installer_at(tmp_path, answers(**given))
+    ctx = steps.Ctx(inst, Shell(inst.home.log))
+    return ctx
+
+
+def _existing(tmp_path, monkeypatch, hive, **given):
+    ctx = _ctx(tmp_path, monkeypatch, hive, modes={"proxy": "existing"}, proxy_url=EXISTING,
+               **given)
+    ctx.set_env(MIND_PROXY_KEY=OPERATOR_KEY)
+    return ctx
+
+
+# --- T5: an existing proxy is refused what it cannot serve ------------------
+
+
+def test_an_existing_proxy_without_the_chosen_embedding_model_is_refused(tmp_path, monkeypatch):
+    ctx = _existing(tmp_path, monkeypatch, _Hive(embedders=["nomic-embed-text"]),
+                    embedding_model="qwen3-embedding:8b", classifier_model="gpt-oss:20b-32k")
+
+    with pytest.raises(StepFailed, match=r"does not offer the embedding model 'qwen3-embedding:8b'"):
+        steps.resolve_models(ctx)
+    assert ctx.env().get(compose.EMBEDDING_MODEL_VAR, "") == ""
+
+
+def test_an_existing_proxy_without_the_chosen_classifier_is_refused(tmp_path, monkeypatch):
+    ctx = _existing(tmp_path, monkeypatch, _Hive(chat=["claude-sonnet-5"]),
+                    embedding_model="qwen3-embedding:8b", classifier_model="gpt-oss:20b-32k")
+
+    with pytest.raises(StepFailed, match=r"does not offer the chat model 'gpt-oss:20b-32k'"):
+        steps.resolve_models(ctx)
+    assert ctx.env().get(compose.CLASSIFIER_MODEL_VAR, "") == ""
+
+
+def test_an_embedding_model_that_is_not_4096_wide_is_refused(tmp_path, monkeypatch):
+    hive = _Hive(dimensions=1024)
+    ctx = _existing(tmp_path, monkeypatch, hive,
+                    embedding_model="qwen3-embedding:8b", classifier_model="gpt-oss:20b-32k")
+
+    with pytest.raises(StepFailed, match=r"answered 1024 dimensions"):
+        steps.resolve_models(ctx)
+    embeds = [r for r in hive.requests if r["url"] == f"{EXISTING}/v1/embeddings"]
+    assert [r["headers"]["Authorization"] for r in embeds] == [f"Bearer {OPERATOR_KEY}"]
+    assert ctx.env().get(compose.EMBEDDING_MODEL_VAR, "") == ""
+
+
+def test_models_an_existing_proxy_offers_and_answers_for_are_what_lucent_is_given(
+        tmp_path, monkeypatch):
+    hive = _Hive()
+    ctx = _existing(tmp_path, monkeypatch, hive,
+                    embedding_model="qwen3-embedding:8b", classifier_model="gpt-oss:20b-32k")
+
+    steps.resolve_models(ctx)
+
+    env = ctx.env()
+    assert env[compose.EMBEDDING_MODEL_VAR] == "qwen3-embedding:8b"
+    assert env[compose.CLASSIFIER_MODEL_VAR] == "gpt-oss:20b-32k"
+    called = {r["url"]: r["headers"]["Authorization"] for r in hive.requests
+              if r["method"] == "POST"}
+    assert called == {f"{EXISTING}/v1/embeddings": f"Bearer {OPERATOR_KEY}",
+                      f"{EXISTING}/v1/chat/completions": f"Bearer {OPERATOR_KEY}"}
+
+
+# --- T7: a proxy the installer runs serves both models ----------------------
+
+
+def _add_models(commands: list[list[str]]) -> list[list[str]]:
+    return [c[c.index("app.cli") + 1:] for c in commands
+            if "app.cli" in c and c[c.index("app.cli") + 1] == "add-model"]
+
+
+def _flag(args: list[str], name: str) -> str | None:
+    return args[args.index(name) + 1] if name in args else None
+
+
+def test_a_proxy_the_installer_runs_registers_the_embedding_model_and_the_classifier_first(
+        tmp_path, monkeypatch):
+    hive = _Hive()
+    ctx = _ctx(tmp_path, monkeypatch, hive)
+
+    steps.proxy_setup(ctx)
+
+    added = [(_flag(a, "--provider"), _flag(a, "--model"), _flag(a, "--purpose"))
+             for a in _add_models(hive.commands)]
+    assert added[:2] == [(steps.LOCAL_PROVIDER, "qwen3-embedding:8b", "embedding"),
+                         (steps.LOCAL_PROVIDER, "gpt-oss:20b-32k", "chat")]
+    assert added[2][1] == "claude-sonnet-5"
+    providers = [c[c.index("app.cli") + 1:] for c in hive.commands
+                 if "app.cli" in c and c[c.index("app.cli") + 1] == "add-provider"]
+    local = [p for p in providers if _flag(p, "--name") == steps.LOCAL_PROVIDER]
+    assert [(_flag(p, "--kind"), _flag(p, "--base-url")) for p in local] == [
+        ("ollama", compose.OLLAMA_URL)]
+    assert ctx.env()["MIND_PROXY_KEY"] == "minted-key"
+
+
+def test_the_hives_ollama_is_given_both_models_including_a_context_sized_tag(
+        tmp_path, monkeypatch):
+    hive = _Hive()
+    ctx = _ctx(tmp_path, monkeypatch, hive)
+
+    steps.embeddings(ctx)
+
+    in_ollama = [c[c.index(compose.OLLAMA) + 1:] for c in hive.commands
+                 if compose.OLLAMA in c]
+    assert ["ollama", "pull", "qwen3-embedding:8b"] in in_ollama
+    assert ["ollama", "pull", "gpt-oss:20b"] in in_ollama
+    created = [c for c in in_ollama if c[:2] == ["sh", "-c"]]
+    assert len(created) == 1
+    assert f"PARAMETER num_ctx {32 * 1024}" in created[0][2]
+    assert "ollama create gpt-oss:20b-32k" in created[0][2]

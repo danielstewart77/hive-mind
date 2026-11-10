@@ -40,8 +40,10 @@ PIECES: dict[str, Piece] = {p.name: p for p in (
           modes=(HERE, EXISTING)),
     Piece("comms", "Comms (gateway, broker, sessions)", required=True,
           needs=("postgres",), repos=("hive-mind", "hive-data")),
+    # Lucent embeds through the proxy; the embedding service is the proxy's
+    # local model backend.
     Piece("lucent", "Lucent (memory and knowledge graph)", required=True,
-          needs=("postgres", "embeddings"), repos=("hive-mind", "hive-data")),
+          needs=("postgres", "proxy"), repos=("hive-mind", "hive-data")),
     Piece("embeddings", "Embedding service (Ollama)", required=True,
           modes=(HERE, EXISTING)),
     Piece("proxy", "Inference proxy", required=True, needs=("postgres",),
