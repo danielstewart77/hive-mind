@@ -237,7 +237,18 @@ into the profile's own `node_modules` because the launcher's self-healed
 `profiles/node_modules` holds only its app's dependency closure, and neither
 is in it: the hive bundle, and the Claude Code hook bridge the bundle mounts
 whenever `DSH_HOOKS_CONFIG` is set — without that link a mind with hooks dies
-at boot with `ERR_MODULE_NOT_FOUND`. The tree itself is built by the harness
+at boot with `ERR_MODULE_NOT_FOUND`.
+
+**Hooks of its own.** dsh is offered only when the mind's hook file has
+`auto_remember` and `rotation_check` on Stop and a UserPromptSubmit hook.
+`python3 -m minds.harness.dsh_hooks --mind <name> --out <minds dir>` copies
+the stdlib scripts in `minds/harness/dsh_hook_scripts/` into
+`$DSH_HOME/hooks/` (rewritten every run, so a fix here reaches the mind on the
+next install) and writes `$DSH_HOME/hooks.json` if there is none. The scripts
+resolve paths from where they sit and reach comms, lucent and hive-tools only
+through the spawn's environment. The hook file names them by container path,
+because `minds/failed_turn.py` execs the rotation check without a shell. The
+tree itself is built by the harness
 repo's `Dockerfile` on this image's base, because its native modules must
 match the container's glibc.
 
