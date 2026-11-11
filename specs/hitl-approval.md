@@ -17,9 +17,19 @@ A mind calls a HITL-gated hive-tools endpoint
   → Daniel taps a button
   → Telegram delivers the callback to this repo's bot
   → hive_surfaces.telegram_bot::handle_hitl_callback POSTs
-    {hive_tools_url}/hitl/{token}/respond
+    {hive_tools_url}/hitl/{token}/respond under HIVE_TOOLS_APPROVER_TOKEN
   → hive-tools resolves the request and the original tool call proceeds or is cancelled
 ```
+
+## Who can decide
+
+Only the operator: signed in on hive-tools' approval page (`/hitl-ui`), or
+through the bot that receives hive-tools' buttons, which sends hive-tools'
+approver credential (holder `hitl-approver`) as `HIVE_TOOLS_APPROVER_TOKEN`.
+A mind's token — any mind's — is refused with 403 and the request stays
+pending, so a mind polls and waits; it never answers its own gate. In this
+stack only `telegram-bot` holds the credential, read from an `env_file`
+outside the repo, because every mind container mounts the repo.
 
 ## Polling
 
