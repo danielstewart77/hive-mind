@@ -446,7 +446,9 @@ stderr. `check` exits 0, or 2 with every reason `apply` would refuse: the
 `vector` or `unaccent` extension missing from the server, a role that may not
 add one (`vector` is not trusted, so only a superuser can; `unaccent` needs
 CREATE on the database; both go in `public`, which on Postgres 15 and later a
-non-owner may not create in), no CREATE on the database, a schema holding
+non-owner may not create in), no CREATE on the database (for a baseline
+schema or a later step's `CREATE SCHEMA`), a later step's foreign key into an
+existing table the role holds no REFERENCES on, a schema holding
 only some of its tables, or a record of a step newer than this package
 knows. `apply` runs the same check first and writes nothing when it fails
 (exit 2); a step the database refuses is exit 1, naming the step.
@@ -471,7 +473,12 @@ thing run on a hive that has the rest.
 
 ## Scope
 
-This package covers the `core`, `memory`, `tools` and `board` schemas.
+This package covers the `core`, `memory`, `tools`, `board` and `staff`
+schemas. `staff` (step 6) is the chief of staff's ledger: `staff.tasks`, a
+`staff.statuses` lookup its status is a foreign key into, and
+`staff.task_sessions` pairing a task with the `core.sessions` ids working it
+(not a foreign key: the pair outlives comms deleting an ended session).
+`hive_data.staff` is the only way the chief of staff and its tick reach it.
 
 Two things are deliberately outside it. **hive-health** is not part of the one
 database at all. The **inference proxy** keeps SQLAlchemy and its own store:

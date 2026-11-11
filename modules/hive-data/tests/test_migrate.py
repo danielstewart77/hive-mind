@@ -49,7 +49,7 @@ async def test_an_empty_database_gets_every_declared_table_and_a_second_apply_ke
         first = await migrate.apply(dsn)
         assert await _missing_tables(dsn) == []
         assert {schema_of(t) for t in COLUMNS} == {
-            "core", "memory", "tools", "board"}
+            "core", "memory", "tools", "board", "staff"}
         assert first["applied"] == [s.version for s in migrate.steps()]
 
         connection = await asyncpg.connect(dsn)
@@ -178,6 +178,46 @@ async def test_a_role_that_may_not_add_vector_is_refused_before_anything_is_writ
                     f"REVOKE ALL ON SCHEMA public FROM {role}")
             finally:
                 await admin.close()
+    finally:
+        try:
+            await server.execute(f"DROP ROLE IF EXISTS {role}")
+        finally:
+            await server.close()
+
+
+async def test_a_later_step_needing_create_or_references_is_refused_up_front():
+    """A step after the baseline that makes a schema needs CREATE on the
+    database, and one with a key into an existing table needs REFERENCES on
+    it. Both are reported by `check` rather than failing halfway through."""
+    role = f"hive_data_test_role_{uuid.uuid4().hex[:8]}"
+    password = uuid.uuid4().hex
+    newer = migrate.Step(
+        99, "keyed",
+        "CREATE SCHEMA keyed; CREATE TABLE keyed.t "
+        "(s text REFERENCES core.sessions(id));")
+    server = await asyncpg.connect(ADMIN_DSN)
+    await server.execute(f"CREATE ROLE {role} LOGIN PASSWORD '{password}'")
+    try:
+        async with claimed_database(ADMIN_DSN, "hive_data_other_") as dsn:
+            await migrate.apply(dsn)
+            admin = await asyncpg.connect(dsn)
+            try:
+                # Enough to read the record, and nothing else.
+                await admin.execute(
+                    f"GRANT USAGE ON SCHEMA {migrate.RECORD_SCHEMA} TO {role}; "
+                    f"GRANT SELECT ON {migrate.RECORD} TO {role}")
+            finally:
+                await admin.close()
+            as_role = _as(dsn, role, password)
+
+            report = await migrate.check(as_role,
+                                         chosen=migrate.steps() + [newer])
+
+            assert not report["ok"]
+            assert any("no CREATE on database" in p
+                       for p in report["problems"])
+            assert any("REFERENCES on core.sessions" in p
+                       for p in report["problems"])
     finally:
         try:
             await server.execute(f"DROP ROLE IF EXISTS {role}")

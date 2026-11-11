@@ -105,6 +105,12 @@ COLUMNS: dict[str, tuple[str, ...]] = {
         "id", "kind", "parent_id", "title", "status", "position",
         "description", "requirements", "acceptance_criteria", "qa_tests",
         "subtype"),
+    #: The chief of staff's ledger (step 6). Dotted like every schema
+    #: after `core`.
+    "staff.statuses": ("name",),
+    "staff.tasks": (
+        "id", "name", "description", "status", "created_at", "updated_at"),
+    "staff.task_sessions": ("session_id", "task_id", "attached_at"),
     #: Lucent's half. Qualified keys, not bare ones, and that is the point:
     #: `credentials` exists in both `core` and `memory`, the 12 holders that
     #: appear in both share no `token_sha`, and a bare name could only ever

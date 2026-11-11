@@ -53,6 +53,7 @@ from .errors import (
 )
 from . import graph
 from . import memory
+from . import staff
 from . import tools
 from .pool import close_pool, live_pool, open_pool, run, settings_in_use
 from .rows import UNSET
@@ -69,7 +70,7 @@ __all__ = [
     "WriteRejected", "board", "close", "connect", "conversation_lock",
     "core",
     "from_environment", "graph",
-    "live_pool", "memory", "run", "settings_in_use", "tools",
+    "live_pool", "memory", "run", "settings_in_use", "staff", "tools",
     "transaction",
     "verify_schema",
 ]

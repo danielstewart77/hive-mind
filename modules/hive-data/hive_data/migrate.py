@@ -177,7 +177,8 @@ async def _plan(connection, chosen: list[Step]) -> dict[str, Any]:
     creates_schema = bool(adopt or run) and not await connection.fetchval(
         "SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1)",
         RECORD_SCHEMA)
-    creates_schema = creates_schema or any(s.schema for s in run)
+    creates_schema = creates_schema or any(
+        s.schema or _CREATES_SCHEMA.search(_code(s.sql)) for s in run)
     if creates_schema and not privileges["db_create"]:
         problems.append(
             f"role {privileges['role']} has no CREATE on database "
@@ -185,11 +186,70 @@ async def _plan(connection, chosen: list[Step]) -> dict[str, Any]:
             f"schemas. Run: GRANT CREATE ON DATABASE \"{privileges['db']}\" "
             f"TO \"{privileges['role']}\"")
 
+    problems.extend(await _reference_problems(connection, run, privileges))
+
     if any(s.version == _MEMORY_VERSION for s in run):
         problems.extend(await _extension_problems(connection, privileges))
 
     return {"problems": problems, "recorded": sorted(recorded),
             "adopt": adopt, "run": run}
+
+
+#: A later step that makes a schema of its own (step 6 makes `staff`) needs
+#: CREATE on the database just as a baseline step does. Only the baseline
+#: steps declare the schema they make, so the later ones are read for it.
+_CREATES_SCHEMA = re.compile(r"\bCREATE\s+SCHEMA\b", re.IGNORECASE)
+
+#: A foreign key into a table that already exists needs the REFERENCES
+#: privilege on it, which a role that owns its own schema does not get on
+#: someone else's (`core.sessions` is the usual target).
+_REFERENCES = re.compile(
+    r"\bREFERENCES\s+([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)",
+    re.IGNORECASE)
+
+
+def _code(sql: str) -> str:
+    """A step's SQL without its `--` comments, which name things freely."""
+    return re.sub(r"--[^\n]*", "", sql)
+
+
+async def _reference_problems(connection, run: list[Step],
+                              privileges) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for step in run:
+        for schema, table in _REFERENCES.findall(_code(step.sql)):
+            target = f"{schema}.{table}".lower()
+            if target in seen:
+                continue
+            seen.add(target)
+            # A table not there yet is one these steps create, as this role.
+            # Looked up in `pg_catalog` by name rather than `to_regclass`,
+            # which raises for a role with no USAGE on the schema.
+            row = await connection.fetchrow(
+                "SELECT c.oid, has_table_privilege(c.oid, 'REFERENCES') "
+                "AS refs, has_schema_privilege(n.oid, 'USAGE') AS usage "
+                "FROM pg_class c JOIN pg_namespace n "
+                "ON n.oid = c.relnamespace "
+                "WHERE lower(n.nspname) = $1 AND lower(c.relname) = $2",
+                schema.lower(), table.lower())
+            if row is None:
+                continue
+            role = privileges["role"]
+            lacks, grants = [], []
+            if not row["usage"]:
+                lacks.append(f"USAGE on schema {schema.lower()}")
+                grants.append(f'GRANT USAGE ON SCHEMA {schema.lower()} '
+                              f'TO "{role}"')
+            if not row["refs"]:
+                lacks.append(f"REFERENCES on {target}")
+                grants.append(f'GRANT REFERENCES ON {target} TO "{role}"')
+            if lacks:
+                out.append(
+                    f"step {step.version} ({step.name}) has a foreign key "
+                    f"into {target}, and role {role} lacks "
+                    + " and ".join(lacks) + ". Run: " + "; ".join(grants))
+    return out
 
 
 async def _extension_problems(connection, privileges) -> list[str]:
