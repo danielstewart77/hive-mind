@@ -43,13 +43,23 @@ def tools_url() -> str:
     return os.environ.get("HIVE_TOOLS_URL", DEFAULT_TOOLS_URL).rstrip("/")
 
 
-def _tools_token() -> str:
-    return os.environ.get("HIVE_TOOLS_TOKEN", "")
+def _approver_token() -> str:
+    """The credential hive-tools accepts a decision from.
+
+    Its own variable, never `HIVE_TOOLS_TOKEN`. That one is a mind's token -
+    the mind's tool calls go out under it - and hive-tools refuses a decision
+    made with a mind's token, because a tap reported under it is
+    indistinguishable from the mind approving its own request. With no
+    approver credential configured nothing is sent, and hive-tools answers
+    401, which the message then shows.
+    """
+    return os.environ.get("HIVE_TOOLS_APPROVER_TOKEN", "")
 
 
 def respond_request(token: str, action: str) -> tuple[str, dict, dict]:
     """The URL, JSON body and headers for reporting one decision."""
-    headers = {"Authorization": f"Bearer {_tools_token()}"} if _tools_token() else {}
+    approver = _approver_token()
+    headers = {"Authorization": f"Bearer {approver}"} if approver else {}
     return f"{tools_url()}/hitl/{token}/respond", {"action": action}, headers
 
 

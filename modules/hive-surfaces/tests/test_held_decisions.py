@@ -44,17 +44,30 @@ class TestTheTwoHandlersDoNotTakeEachOthersTaps:
 class TestWhatIsSentToTheDecisionHolder:
     def test_the_token_addresses_the_held_decision(self, monkeypatch) -> None:
         monkeypatch.setenv("HIVE_TOOLS_URL", "http://tools.example:9421/")
-        monkeypatch.setenv("HIVE_TOOLS_TOKEN", "t0ken")
+        monkeypatch.setenv("HIVE_TOOLS_APPROVER_TOKEN", "appr0ver")
 
         url, payload, headers = hitl.respond_request("abc123", "approve")
 
         assert url == "http://tools.example:9421/hitl/abc123/respond"
         assert payload == {"action": "approve"}
-        assert headers == {"Authorization": "Bearer t0ken"}
 
-    def test_no_configured_token_sends_no_authorization_header(self, monkeypatch) -> None:
+    def test_a_decision_is_sent_under_the_approver_credential_not_the_minds_token(
+            self, monkeypatch) -> None:
+        """hive-tools refuses a decision under a mind's token: a tap reported
+        with it reads as the mind approving its own request."""
+        monkeypatch.setenv("HIVE_TOOLS_TOKEN", "minds-t0ken")
+        monkeypatch.setenv("HIVE_TOOLS_APPROVER_TOKEN", "appr0ver")
+
+        for action in ("approve", "deny"):
+            _url, payload, headers = hitl.respond_request("abc123", action)
+            assert payload == {"action": action}
+            assert headers == {"Authorization": "Bearer appr0ver"}
+
+    def test_without_an_approver_credential_the_minds_token_is_never_sent(
+            self, monkeypatch) -> None:
         """An empty bearer reads as a credential to the far end; absent does not."""
-        monkeypatch.delenv("HIVE_TOOLS_TOKEN", raising=False)
+        monkeypatch.setenv("HIVE_TOOLS_TOKEN", "minds-t0ken")
+        monkeypatch.delenv("HIVE_TOOLS_APPROVER_TOKEN", raising=False)
 
         _url, _payload, headers = hitl.respond_request("abc123", "deny")
 

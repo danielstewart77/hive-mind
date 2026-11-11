@@ -115,7 +115,8 @@ token where nothing consults it.
 | `DISCORD_BOT_TOKEN` | Discord surface; unset disables it |
 | `MIND_ID` | The mind this surface is a surface of |
 | `HIVE_TOOLS_URL` | Where held decisions are reported; defaults to localhost |
-| `HIVE_TOOLS_TOKEN` | Bearer for that report; absent sends no header |
+| `HIVE_TOOLS_APPROVER_TOKEN` | Bearer for that report: hive-tools' approver credential (holder `hitl-approver`), never a mind's token; absent sends no header |
+| `HIVE_TOOLS_TOKEN` | A mind's hive-tools token, for `/models`; never sent with a decision |
 
 ## Unsolicited turns
 
@@ -131,7 +132,10 @@ poller puts what it finds on the same queue. Empty means in-process only.
 ## Held decisions
 
 Some tools wait for a person. hive-tools mints a token, posts the question
-with two buttons, and this reports which one was tapped. It decides nothing —
+with two buttons, and this reports which one was tapped, under
+`HIVE_TOOLS_APPROVER_TOKEN` — hive-tools refuses a decision made with a mind's
+token, so only the bot that receives hive-tools' buttons needs it, and a host
+whose mind shares the bot's process should not be given it. It decides nothing —
 the message ends up saying what hive-tools said, status and all, because the
 question after a failed approval is always whether the thing actually
 happened.
