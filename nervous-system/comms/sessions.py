@@ -3687,9 +3687,15 @@ class SessionManager:
         at the same moment either lands before the delete and goes with it,
         or arrives after and is refused for want of a session — which every
         writer of a turn reports as an ended conversation, not a fault.
-        Nothing refuses the delete itself: the one other reference into
+        Nothing refuses the delete itself: the one other foreign key into
         ``sessions``, a design session's conversation, is ON DELETE SET NULL.
         Either the conversation is entirely gone or it is entirely there.
+
+        One thing names the session and stays: the chief of staff's ledger,
+        ``staff.task_sessions``, holds the session id as plain text with no
+        foreign key, so the record that this session worked a task outlives
+        the row. Its tick reads a paired id with no session as one that has
+        ended.
         """
         session = await self._get_row(session_id)
         if not session:
