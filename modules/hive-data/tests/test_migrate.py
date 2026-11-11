@@ -19,6 +19,10 @@ from hive_data.errors import MigrationFailed, MigrationRefused
 from hive_data.schema import COLUMNS, bare, schema_of
 
 from tests._scratch import claimed_database
+
+#: Every step after the four baseline files. A hive the baseline reached
+#: before the record existed is adopted for those four and still runs these.
+LATER = [s.version for s in migrate.steps() if s.version > 4]
 from tests.conftest import (
     ADMIN_DSN, BOARD_SCHEMA_SQL, MEMORY_SCHEMA_SQL, NO_SERVER, SCHEMA_SQL,
     TOOLS_SCHEMA_SQL)
@@ -73,7 +77,7 @@ async def test_a_hive_applied_before_the_record_is_adopted_without_running_a_ste
                 "INSERT INTO core.conversations (id, created_at) "
                 "VALUES ('kept', 1)")
             out = await migrate.apply(dsn)
-            assert out["applied"] == []
+            assert out["applied"] == LATER
             assert out["adopted"] == [1, 2, 3, 4]
             assert await connection.fetchval(
                 "SELECT count(*) FROM core.conversations") == 1
@@ -90,7 +94,7 @@ async def test_a_database_holding_only_core_is_completed():
             await connection.close()
         out = await migrate.apply(dsn)
         assert out["adopted"] == [1]
-        assert out["applied"] == [2, 3, 4]
+        assert out["applied"] == [2, 3, 4, *LATER]
         assert await _missing_tables(dsn) == []
 
 
@@ -119,7 +123,7 @@ async def test_a_failing_step_leaves_nothing_of_itself_and_the_earlier_steps_rec
         with pytest.raises(MigrationFailed) as failed:
             await migrate.apply(dsn, chosen=migrate.steps() + [broken])
         assert failed.value.version == 99
-        assert failed.value.applied == [1, 2, 3, 4]
+        assert failed.value.applied == [1, 2, 3, 4, *LATER]
         connection = await asyncpg.connect(dsn)
         try:
             assert not await connection.fetchval(
@@ -127,7 +131,7 @@ async def test_a_failing_step_leaves_nothing_of_itself_and_the_earlier_steps_rec
         finally:
             await connection.close()
         report = await migrate.check(dsn, chosen=migrate.steps() + [broken])
-        assert report["recorded"] == [1, 2, 3, 4]
+        assert report["recorded"] == [1, 2, 3, 4, *LATER]
         assert report["pending"] == [{"version": 99, "name": "broken"}]
 
 

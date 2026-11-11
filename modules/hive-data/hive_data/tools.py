@@ -169,6 +169,47 @@ async def decide_request(request_id: str, status: str, decided_at: int,
     return await _execute_returning(unit, sql, *args, *extra_args, now)
 
 
+#: The one status an outcome can be recorded against. A denied request ran
+#: nothing and an expired one was never decided, so neither has an outcome.
+APPROVED = "approved"
+
+
+async def record_outcome(request_id: str, ok: bool, status: int | None,
+                         body: str, at: int, *,
+                         unit: Unit | None = None) -> Row:
+    """Record what an approved request's replay did, once.
+
+    Guarded in the statement on the request being approved and having no
+    outcome yet, so a second replay of one approval - there should never be
+    one - cannot overwrite the first answer, and a denial can never be given
+    a result it did not produce. Reports how many rows it changed.
+    """
+    values = {"outcome_ok": bool(ok), "outcome_status": status,
+              "outcome_body": body, "outcome_at": at}
+    clause, extra_args = _sql.where(
+        REQUESTS, {"status": APPROVED, "outcome_at": None},
+        start=len(values) + 2)
+    sql, args = _sql.update(REQUESTS, values, {"id": request_id},
+                            extra_where=clause)
+    return await _execute(unit, sql, *args, *extra_args)
+
+
+async def request_outcome(request_id: str, *,
+                          unit: Unit | None = None) -> Row | None:
+    """A request's replay outcome, body included, or None for no request.
+
+    The one read naming `outcome_body`, which is private so the approvals
+    listing never carries it. The other three outcome columns are on
+    `request` as well; NULL `outcome_at` means none has landed.
+    """
+    columns = ("id", "outcome_ok", "outcome_status", "outcome_body",
+               "outcome_at")
+    return await _fetch_one(
+        unit,
+        f"SELECT {select_list(REQUESTS, columns)} "
+        f"FROM {qualified(REQUESTS)} WHERE id = $1", request_id)
+
+
 async def extend_request(request_id: str, expires_at: int, *,
                          unit: Unit | None = None) -> Row:
     """Give a request still waiting on a person longer to wait.

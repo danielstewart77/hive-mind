@@ -79,7 +79,8 @@ COLUMNS: dict[str, tuple[str, ...]] = {
     "tools.hitl_requests": (
         "id", "tool_name", "caller_mind", "params_json", "status",
         "created_at", "expires_at", "decided_at", "tool_method", "tool_path",
-        "tool_body"),
+        "tool_body", "outcome_ok", "outcome_status", "outcome_body",
+        "outcome_at"),
     "tools.sudo_grants": (
         "id", "tool_name", "caller_mind", "granted_at", "expires_at"),
     "tools.tool_hitl_settings": ("tool_name", "mode", "sudo_timeout_minutes"),
@@ -188,7 +189,12 @@ PRIVATE: dict[str, frozenset[str]] = {
     #: rows carry three megabytes of it, some of it holding credentials. The
     #: page this listing is modelled on selects neither. The replay path,
     #: which genuinely needs the body, names it.
-    "tools.hitl_requests": frozenset({"params_json", "tool_body"}),
+    #:
+    #: `outcome_body` for the same reason: it is whatever the replayed tool
+    #: answered, which for a browser or a mail read can be a page of text,
+    #: and the queue shows none of it. `request_outcome` names it.
+    "tools.hitl_requests": frozenset({"params_json", "tool_body",
+                                      "outcome_body"}),
     #: The 4096 floats. Private because no caller reading memories wants
     #: them: lucent has never returned an embedding, and a listing that
     #: included one hands back 4096 numbers per row, as a 50,000-character
