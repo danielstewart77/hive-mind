@@ -92,7 +92,8 @@ def create_app() -> FastAPI:
     # asking is the answer they need. /health stays open.
     app.include_router(graph_router)
     app.include_router(memory_router)
-    # No auth_dep: the soul router carries its own, stricter credential.
+    # No auth_dep: the soul router carries its own gate — the console's soul
+    # key, or a mind's own key scoped to that mind's own soul.
     from lucent_api.routers.soul import router as soul_router
     app.include_router(soul_router)
 
