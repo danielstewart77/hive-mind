@@ -448,7 +448,8 @@ add one (`vector` is not trusted, so only a superuser can; `unaccent` needs
 CREATE on the database; both go in `public`, which on Postgres 15 and later a
 non-owner may not create in), no CREATE on the database (for a baseline
 schema or a later step's `CREATE SCHEMA`), a later step's foreign key into an
-existing table the role holds no REFERENCES on, a schema holding
+existing table the role holds no REFERENCES on, a step creating a role
+the migrating role may not create (no CREATEROLE), a schema holding
 only some of its tables, or a record of a step newer than this package
 knows. `apply` runs the same check first and writes nothing when it fails
 (exit 2); a step the database refuses is exit 1, naming the step.
@@ -470,6 +471,30 @@ which lets a database with no `memory` schema open because comms needs only
 `core`. So an empty database gets all four steps, one holding only `core` has
 the other three run, a current hive is a no-op, and a newer step is the only
 thing run on a hive that has the rest.
+
+## The chief of staff's role
+
+Step 7 makes `hive_staff`, a NOLOGIN role that may connect, use the `staff`
+schema and read and write its tables, and read or write no other schema's
+tables. It keeps what every role has from PUBLIC (CONNECT and TEMP, unless
+the server revoked them). The database's CONNECT grant needs a migrator that
+owns the database; for one that does not, Postgres reduces it to a warning
+and PUBLIC's CONNECT is what lets the login in. The chief of
+staff holds the hive's widest reach over conversations, so its database
+credential is the narrowest one there is. The login carrying a password is
+not in a step — a role is cluster-wide and a password is not a tracked
+value — and is made once per hive, as a superuser, by piping this to `psql`
+on stdin so the password stays off every command line:
+
+```
+CREATE ROLE stash LOGIN PASSWORD '<generated>' IN ROLE hive_staff;
+```
+
+Its URL is that mind's `HIVE_DATABASE_URL`; for the hive's `stash`
+container, `STASH_DATABASE_URL` in hive_mind's `.env`, which its compose
+fragment passes in. That role sees only `staff`, so
+`hive_data.connect()`'s schema check, which reads every schema, is passed
+`verify=False` by a process connecting as it.
 
 ## Scope
 

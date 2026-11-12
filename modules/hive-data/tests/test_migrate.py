@@ -223,3 +223,48 @@ async def test_a_later_step_needing_create_or_references_is_refused_up_front():
             await server.execute(f"DROP ROLE IF EXISTS {role}")
         finally:
             await server.close()
+
+
+async def test_a_step_creating_a_role_is_refused_up_front_without_createrole():
+    """A step that makes a role needs CREATEROLE unless the role is there."""
+    role = f"hive_data_test_role_{uuid.uuid4().hex[:8]}"
+    password = uuid.uuid4().hex
+    absent = f"hive_data_test_absent_{uuid.uuid4().hex[:8]}"
+    present = migrate.Step(98, "has_role", "CREATE ROLE hive_staff NOLOGIN;")
+    newer = migrate.Step(99, "makes_role", f"CREATE ROLE {absent} NOLOGIN;")
+    creator = f"hive_data_test_creator_{uuid.uuid4().hex[:8]}"
+    server = await asyncpg.connect(ADMIN_DSN)
+    await server.execute(f"CREATE ROLE {role} LOGIN PASSWORD '{password}'")
+    await server.execute(
+        f"CREATE ROLE {creator} LOGIN CREATEROLE PASSWORD '{password}'")
+    try:
+        async with claimed_database(ADMIN_DSN, "hive_data_other_") as dsn:
+            await migrate.apply(dsn)
+            admin = await asyncpg.connect(dsn)
+            try:
+                await admin.execute(
+                    f"GRANT USAGE ON SCHEMA {migrate.RECORD_SCHEMA} "
+                    f"TO {role}, {creator}; "
+                    f"GRANT SELECT ON {migrate.RECORD} TO {role}, {creator}")
+            finally:
+                await admin.close()
+            chosen = migrate.steps() + [present, newer]
+
+            report = await migrate.check(_as(dsn, role, password),
+                                         chosen=chosen)
+            allowed = await migrate.check(_as(dsn, creator, password),
+                                          chosen=chosen)
+
+            assert not report["ok"]
+            assert any(f"creates role {absent}" in p
+                       for p in report["problems"])
+            assert not any("creates role hive_staff" in p
+                           for p in report["problems"])
+            assert not any("creates role" in p
+                           for p in allowed["problems"])
+    finally:
+        try:
+            await server.execute(f"DROP ROLE IF EXISTS {role}")
+            await server.execute(f"DROP ROLE IF EXISTS {creator}")
+        finally:
+            await server.close()

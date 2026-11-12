@@ -170,7 +170,7 @@ async def _plan(connection, chosen: list[Step]) -> dict[str, Any]:
         run.append(step)
 
     privileges = await connection.fetchrow(
-        "SELECT r.rolsuper AS superuser, "
+        "SELECT r.rolsuper AS superuser, r.rolcreaterole AS createrole, "
         "has_database_privilege(current_database(), 'CREATE') AS db_create, "
         "current_user AS role, current_database() AS db "
         "FROM pg_roles r WHERE r.rolname = current_user")
@@ -187,6 +187,7 @@ async def _plan(connection, chosen: list[Step]) -> dict[str, Any]:
             f"TO \"{privileges['role']}\"")
 
     problems.extend(await _reference_problems(connection, run, privileges))
+    problems.extend(await _role_problems(connection, run, privileges))
 
     if any(s.version == _MEMORY_VERSION for s in run):
         problems.extend(await _extension_problems(connection, privileges))
@@ -206,6 +207,31 @@ _CREATES_SCHEMA = re.compile(r"\bCREATE\s+SCHEMA\b", re.IGNORECASE)
 _REFERENCES = re.compile(
     r"\bREFERENCES\s+([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)",
     re.IGNORECASE)
+
+
+#: A step that makes a role (step 7 makes `hive_staff`) needs CREATEROLE,
+#: unless the role is already there and the step only grants to it.
+_CREATES_ROLE = re.compile(
+    r"\bCREATE\s+ROLE\s+([A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE)
+
+
+async def _role_problems(connection, run: list[Step],
+                         privileges) -> list[str]:
+    if privileges["superuser"] or privileges["createrole"]:
+        return []
+    out: list[str] = []
+    for step in run:
+        for name in _CREATES_ROLE.findall(_code(step.sql)):
+            if await connection.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM pg_roles "
+                    "WHERE rolname = $1)", name.lower()):
+                continue
+            out.append(
+                f"step {step.version} ({step.name}) creates role "
+                f"{name.lower()}, and role {privileges['role']} may not "
+                f"create roles. Run as a superuser: CREATE ROLE "
+                f"{name.lower()} NOLOGIN")
+    return out
 
 
 def _code(sql: str) -> str:

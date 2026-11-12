@@ -186,6 +186,18 @@ async def update_task(task_id: str, *, name: Any = UNSET,
             ).get("row")
 
 
+async def delete_task(task_id: str, *, unit: Unit | None = None) -> Row:
+    """Remove a task and its session pairs. Reports rows changed; 0 if none.
+
+    For a task opened in error. A task that was worked is closed by moving
+    it to `done`, which keeps its record; deleting it loses which sessions
+    worked it.
+    """
+    clause, args = _sql.where(TASKS, {"id": task_id})
+    return await _execute(
+        unit, f"DELETE FROM {qualified(TASKS)} WHERE {clause}", *args)
+
+
 # ----------------------------------------------------------------- sessions
 
 async def attach_session(task_id: str, session_id: str, *,

@@ -45,8 +45,10 @@ import asyncpg
 #: against a database of its own, for the same reason this one does: the live
 #: `hive` rows are what a cutover is verified against, and writing test
 #: credentials and test Mind nodes into them poisons that comparison.
+#: `staff_ledger_test_` is hive_mind's ledger tool, whose tasks would
+#: otherwise land on the chief of staff's real ledger.
 PREFIXES = ("hive_data_test_", "hive_data_other_", "hive_data_seq_",
-            "lucent_test_")
+            "lucent_test_", "staff_ledger_test_")
 
 _LIKE = [prefix.replace("_", r"\_") + "%" for prefix in PREFIXES]
 
