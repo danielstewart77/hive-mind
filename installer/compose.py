@@ -344,7 +344,6 @@ def render(home: Home, answers: dict, host: Host) -> Rendered:
         "SMS_INBOUND_HMAC_SECRET": env_ref("SMS_INBOUND_HMAC_SECRET"),
         "LUCENT_URL": LUCENT_URL, "LUCENT_URL_HIVE": LUCENT_URL,
         "LUCENT_BEARER_TOKEN": env_ref(token_var("LUCENT", COMMS)),
-        "LUCENT_SOUL_BEARER_TOKEN": env_ref("LUCENT_SOUL_BEARER_TOKEN"),
         "COMMS_PRIMARY_USER": env_ref("HIVE_SEED_USERNAME"),
     })
     svc["ports"] = [f"127.0.0.1:{COMMS_HOST_PORT}:8424"]

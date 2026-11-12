@@ -54,7 +54,7 @@ from .conftest import unique
 # held; it is now this mind's alone, and the holder is the mind.
 SERVICE_TOKEN = "skippys-own-credential"  # secret-guard: allow
 ADMIN_TOKEN = "admin-token-hive-tools-holds"  # secret-guard: allow
-SOUL_TOKEN = "soul-token-only-the-skill-holds"  # secret-guard: allow
+SOUL_TOKEN = "soul-token-only-the-console-holds"  # secret-guard: allow
 
 ORIGINAL_SOUL = [
     "I am Skippy the Magnificent.",
@@ -293,6 +293,68 @@ async def test_an_unconfigured_soul_token_locks_the_route_rather_than_opening_it
 
     assert response.status_code == 503, response.text
     assert await a_soul.soul() == ORIGINAL_SOUL
+
+
+# ---- A mind's own key reaches its own soul and nobody else's ----------
+
+
+async def _a_mind_with_its_own_key(a_soul: Mind) -> str:
+    """Mint `a_soul`'s mind a lucent credential the way the hive does.
+
+    The holder is the mind's short name and the credential carries the uuid
+    its Mind node is keyed by — the shape every live mind's row has.
+    """
+    from lucent_api import holder_access
+
+    token = unique("own-key")
+    await holder_access.put_credential(
+        holder=a_soul.name, username=OWNER, token=token,
+        role=holder_access.MIND, mind_id=a_soul.mind_id)
+    return token
+
+
+@pytest.mark.asyncio
+async def test_a_minds_own_key_writes_its_own_soul(client, a_soul):
+    """The key a mind already holds for the graph is the key to its soul."""
+    token = await _a_mind_with_its_own_key(a_soul)
+    wanted = ORIGINAL_SOUL + ["I keep my own ledger, and I sign it."]
+
+    written = await client.post(
+        "/graph/soul", headers={"Authorization": f"Bearer {token}"},
+        json={"name": a_soul.name, "soul_values": wanted, "actor": "mind",
+              "reason": "Reviewed and accepted, in my own voice."})
+
+    assert written.status_code == 200, written.text
+    read = await client.get(
+        "/graph/soul", headers={"Authorization": f"Bearer {token}"},
+        params={"name": a_soul.name})
+    assert read.status_code == 200, read.text
+    assert read.json()["soul_values"] == wanted
+    assert await a_soul.soul() == wanted
+    assert [r["actor"] for r in await a_soul.recorded()] == ["mind"]
+
+
+@pytest.mark.asyncio
+async def test_a_minds_own_key_cannot_write_another_minds_soul(
+        client, a_soul, store, registered_types, inspector):
+    """Daniel's rule: a mind may never write another mind's soul."""
+    token = await _a_mind_with_its_own_key(a_soul)
+    other_name = unique("Stash")
+    other = await graph.node_write(
+        owner=OWNER, type="Mind", name=other_name, mind_id=str(uuid.uuid4()),
+        properties={"name": other_name, "type": "Mind",
+                    "soul_values": list(ORIGINAL_SOUL)})
+    theirs = Mind(other_name, other["id"], "", inspector)
+
+    refused = await client.post(
+        "/graph/soul", headers={"Authorization": f"Bearer {token}"},
+        json={"name": other_name, "soul_values": [THE_LINE],
+              "actor": "mind", "reason": "not mine to write",
+              "allow_shrink": True})
+
+    assert refused.status_code == 403, refused.text
+    assert await theirs.soul() == ORIGINAL_SOUL
+    assert await theirs.recorded() == []
 
 
 # ---- Requirement 3: provenance the writing host does not control ------
