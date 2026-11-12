@@ -59,6 +59,8 @@ def test_every_route_answers_a_request_carrying_this_runs_code(pages):
     bodies = {"/api/start": answers(), "/api/plan": {"pieces": ["terminal"]}}
     routes = sorted(SetupServer.ROUTES, key=lambda r: r[1] == "/api/close")
     for method, path in routes:
+        if path == "/api/close" and server.installer._thread:
+            server.installer._thread.join(10)  # the empty run has ended
         status = _call(server, method, path, server.code, bodies.get(path))
         if path == "/api/answer":
             assert status == 400, (method, path)  # no step is waiting: a refusal, not a 403

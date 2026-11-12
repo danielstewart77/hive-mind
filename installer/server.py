@@ -160,7 +160,7 @@ class SetupServer:
             (200, {"restarted": True}, "application/json")
 
     def post_close(self, _):
-        if self.installer.running():
+        if not self.installer.close():
             return 409, {"error": "the install is still running"}, "application/json"
         threading.Thread(target=self.stop, daemon=True).start()
         return 200, {"closing": True}, "application/json"

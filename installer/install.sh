@@ -71,35 +71,53 @@ PY
     local link answer
     link="$(cat "$HIVE_HOME/state/page.link" 2>/dev/null || true)"
     answer="$(python3 - "$link" <<'PY' || true
-import sys, urllib.error, urllib.request
+import json, sys, urllib.error, urllib.request
 from urllib.parse import parse_qs, urlparse
 link = urlparse(sys.argv[1])
 code = (parse_qs(link.query).get("code") or [""])[0]
-req = urllib.request.Request(f"http://127.0.0.1:{link.port}/api/restart", data=b"{}",
-                             method="POST", headers={"X-Setup-Code": code,
-                                                     "Content-Type": "application/json"})
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-try:
-    with opener.open(req, timeout=15) as resp:
-        print("restarted" if resp.status == 200 else "unanswered")
-except urllib.error.HTTPError as exc:
-    print("busy" if exc.code == 409 else "unanswered")
-except Exception:
-    print("unanswered")
+
+def call(method, path):
+    req = urllib.request.Request(f"http://127.0.0.1:{link.port}{path}",
+                                 data=b"{}" if method == "POST" else None, method=method,
+                                 headers={"X-Setup-Code": code,
+                                          "Content-Type": "application/json"})
+    try:
+        with opener.open(req, timeout=15) as resp:
+            return resp.status, json.loads(resp.read() or b"{}")
+    except urllib.error.HTTPError as exc:
+        return exc.code, {}
+    except Exception:
+        return 0, {}
+
+status, _ = call("POST", "/api/restart")
+if status == 200:
+    print("restarted")
+elif status == 409:
+    print("busy")
+else:
+    # A page from before /api/restart existed: what its run is doing
+    # decides whether it is left alone or has to be stopped once.
+    status, state = call("GET", "/api/state")
+    failed = status == 200 and not state.get("running") and \
+        bool(state.get("failed_step") or state.get("error"))
+    print("busy" if status == 200 and not failed else "unanswered")
 PY
 )"
     case "$answer" in
       restarted)
         echo "The hive installer's last run here failed; it is running again on its page:"
         echo "  $link"
+        echo "(It runs the installer code it started with. For a newer installer, stop it:"
+        echo "  pkill -f 'python3 -m installer --home $HIVE_HOME'   then run this command again.)"
         exit 0 ;;
       busy)
-        echo "The hive installer is already running here. Its page:"
+        echo "The hive installer is already open here. Its page:"
         echo "  $link"
         exit 0 ;;
     esac
-    echo "hive install: an installer is already open here but did not start its run again" >&2
-    echo "  (it runs older code, or is not answering). Its page: ${link:-(none recorded)}" >&2
+    echo "hive install: an installer is already open here but cannot start its failed run" >&2
+    echo "  again (it runs older code, or is not answering). Its page: ${link:-(none recorded)}" >&2
     echo "  fix: stop it, then run this command again:" >&2
     echo "    pkill -f 'python3 -m installer --home $HIVE_HOME'" >&2
     exit 1

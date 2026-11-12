@@ -32,6 +32,7 @@ class Installer:
         self._starting = threading.Lock()
         self.error: str | None = None
         self.on_finished = None
+        self.closing = False
 
     # ---- answers ----------------------------------------------------------
     def _load(self) -> dict:
@@ -92,6 +93,8 @@ class Installer:
         try:
             if self.running():
                 return ["the install is already running"]
+            if self.closing:
+                return ["this page is closing"]
             answers = {**self.answers}
             typed = {}
             for key, value in submitted.items():
@@ -125,6 +128,8 @@ class Installer:
         try:
             if self.running():
                 return ["the install is already running"]
+            if self.closing:
+                return ["this page is closing"]
             state = self.runner.snapshot()
             if self._thread is None or not (state.get("failed_step") or self.error):
                 return ["no failed run on this page to start again"]
@@ -133,6 +138,14 @@ class Installer:
             return []
         finally:
             self._starting.release()
+
+    def close(self) -> bool:
+        """True, and no run is started from now on, when none is going."""
+        with self._starting:
+            if self.running():
+                return False
+            self.closing = True
+            return True
 
     def _launch(self) -> None:
         self._thread = threading.Thread(target=self._run, name="install-run", daemon=True)

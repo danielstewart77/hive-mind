@@ -83,7 +83,7 @@ def main(argv: list[str] | None = None) -> int:
                 idle_since = None
             elif idle_since is None:
                 idle_since = time.monotonic()
-            elif time.monotonic() - idle_since > FINAL_GRACE_SECONDS:
+            elif time.monotonic() - idle_since > FINAL_GRACE_SECONDS and installer.close():
                 break
             time.sleep(1)
     finally:
