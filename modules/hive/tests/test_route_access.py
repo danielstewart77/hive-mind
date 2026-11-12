@@ -386,7 +386,7 @@ def test_the_cutover_bearer_is_attached_to_those_three_routes_and_no_others():
     carrying = {
         f"{method} {path}"
         for (method, path), rule in console_access.TABLE.rules.items()
-        if rule.bearer == console_access.CUTOVER
+        if console_access.CUTOVER in rule.bearers
     }
 
     assert carrying == {
@@ -396,11 +396,171 @@ def test_the_cutover_bearer_is_attached_to_those_three_routes_and_no_others():
     }
 
 
+def test_the_board_bearer_is_attached_to_the_board_and_no_others():
+    """Read off the table itself, for the reason the cutover test gives: a
+    bearer in the wrong rule is a sessionless way into whatever that rule
+    covers, and the rule next door carries every per-mind write on the hive.
+
+    The delete is the other half of this. It is the one board operation that
+    destroys a row and everything under it, finished work is never deleted
+    anyway, and a credential living in an `.env` is not what should be able
+    to reach it — so it stays off this set deliberately, and a change that
+    quietly added it fails here.
+    """
+    carrying = {
+        f"{method} {path}"
+        for (method, path), rule in console_access.TABLE.rules.items()
+        if console_access.BOARD in rule.bearers
+    }
+
+    assert carrying == {
+        "GET /api/kanban/data",
+        "GET /api/kanban/numbers",
+        "GET /api/kanban/relations/{record_id}",
+        "GET /api/kanban/{kind}/{record_id}/descendants",
+        "POST /api/kanban/epics",
+        "POST /api/kanban/features",
+        "POST /api/kanban/stories",
+        "PATCH /api/kanban/{kind}/{record_id}",
+    }
+
+
 def test_every_bearer_the_table_declares_is_used_by_some_rule():
     """A bearer nobody names is a credential the table reads as configured
     and no route ever admits — which looks like a working guard and is a
     dead one."""
-    named = {rule.bearer for rule in console_access.TABLE.rules.values()
-             if rule.bearer}
+    named = {name for rule in console_access.TABLE.rules.values()
+             for name in rule.bearers}
 
     assert named == set(console_access.TABLE.bearers)
+
+
+def test_a_mind_reads_and_writes_the_board_with_the_board_bearer_and_no_session(
+        builtin_console, monkeypatch):
+    """The reach this whole credential exists to grant, exercised end to end
+    rather than read off the table.
+
+    A mind working the backlog runs outside a browser and has no session to
+    present. Without a door of its own the things it reaches for instead are
+    raw SQL against `work_items` — which skips the ordering, the numbering
+    and the write lock the board module holds — or `docker exec` into this
+    container. So this asserts the four operations it was given the token
+    for: list the board, create under it, update a row, and read a row's
+    relations. A wrong value is refused on each, so the token is the guard
+    and not merely the thing that happened to be in the header.
+    """
+    monkeypatch.setenv("BOARD_PUSH_TOKEN", "a-board-token")
+    mind = builtin_console.client()
+    good = {"Authorization": "Bearer a-board-token"}
+    wrong = {"Authorization": "Bearer not-the-token"}
+
+    listing = mind.get("/api/kanban/data", headers=good)
+    assert listing.status_code == 200, listing.text
+    assert REFUSED not in listing.headers
+
+    created = mind.post("/api/kanban/epics",
+                        json={"title": "An epic the chief of staff opened"},
+                        headers=good)
+    assert created.status_code == 200, created.text
+    epic_id = created.json()["id"]
+
+    renamed = mind.patch(f"/api/kanban/epics/{epic_id}",
+                         json={"title": "Renamed by the same bearer"},
+                         headers=good)
+    assert renamed.status_code == 200, renamed.text
+
+    # Stored, not merely reported: the point of the write is that the board
+    # the operator opens in a browser now says this.
+    after = mind.get("/api/kanban/data", headers=good).json()
+    titles = [row["title"] for row in after["epics"]]
+    assert "Renamed by the same bearer" in titles, after
+
+    relations = mind.get(f"/api/kanban/relations/{epic_id}", headers=good)
+    assert relations.status_code == 200, relations.text
+
+    for method, path, body in (
+        ("get", "/api/kanban/data", None),
+        ("get", "/api/kanban/numbers", None),
+        ("get", f"/api/kanban/relations/{epic_id}", None),
+        ("post", "/api/kanban/epics", {"title": "refused"}),
+        ("patch", f"/api/kanban/epics/{epic_id}", {"title": "refused"}),
+    ):
+        call = getattr(mind, method)
+        refused = call(path, headers=wrong, **({"json": body} if body else {}))
+        assert refused.status_code == 401, (path, refused.text)
+
+
+def test_the_board_bearer_does_not_delete_and_is_not_a_way_into_the_console(
+        builtin_console, monkeypatch):
+    """The two edges of the grant.
+
+    Delete is the one board operation that destroys a row and everything
+    under it, and finished work is never deleted — it goes to `done` and
+    stays. It is therefore not on the board bearer's set, and a mind holding
+    the token is refused it exactly as an anonymous caller is. Nor is the
+    token a session: it admits the board and nothing else on the console,
+    so it cannot be used to read the memory store or edit another Mind.
+    """
+    monkeypatch.setenv("BOARD_PUSH_TOKEN", "a-board-token")
+    mind = builtin_console.client()
+    good = {"Authorization": "Bearer a-board-token"}
+
+    epic_id = mind.post("/api/kanban/epics", json={"title": "Not deletable"},
+                        headers=good).json()["id"]
+
+    refused = mind.delete(f"/api/kanban/epics/{epic_id}", headers=good,
+                          follow_redirects=False)
+    assert refused.status_code in (303, 401, 403), refused.text
+    # Still on the board: the refusal was a refusal, not a slow success.
+    after = mind.get("/api/kanban/data", headers=good).json()
+    assert epic_id in {row["id"] for row in after["epics"]}, after
+
+    for path in ("/api/memory/tables", "/api/admin/users",
+                 "/api/minds/arnold/settings"):
+        elsewhere = mind.get(path, headers=good, follow_redirects=False)
+        assert elsewhere.status_code in (303, 401, 403), (path, elsewhere.text)
+
+
+def test_an_install_that_issued_no_board_token_admits_no_bearer_to_the_board(
+        builtin_console, monkeypatch):
+    """Where an install with no mind on the backlog sits: an unset token is
+    not an open door, and the board answers to a session and nothing else."""
+    monkeypatch.delenv("BOARD_PUSH_TOKEN", raising=False)
+    monkeypatch.delenv("HIVE_SITE_ADMIN_TOKEN", raising=False)
+    anonymous = builtin_console.client()
+
+    for path in ("/api/kanban/data", "/api/kanban/numbers"):
+        refused = anonymous.get(path, headers={"Authorization": "Bearer anything"})
+        assert refused.status_code == 401, (path, refused.text)
+
+
+def test_the_board_and_the_cutover_bearer_each_admit_the_one_route_they_share(
+        builtin_console, monkeypatch):
+    """`GET /api/kanban/data` is named by two unrelated credentials, which is
+    the only reason a rule may name more than one.
+
+    Each has to be admitted on its own, and neither may be admitted by the
+    other's value — a route that accepted any configured bearer would make
+    every token on the table a key to every route that names one.
+    """
+    monkeypatch.setenv("BOARD_PUSH_TOKEN", "a-board-token")
+    monkeypatch.setenv("HIVE_SITE_ADMIN_TOKEN", "a-cutover-token")
+    anonymous = builtin_console.client()
+
+    for token in ("a-board-token", "a-cutover-token"):
+        admitted = anonymous.get("/api/kanban/data",
+                                 headers={"Authorization": f"Bearer {token}"})
+        assert admitted.status_code == 200, (token, admitted.text)
+
+    # The board token reaches the board; it does not become the cutover
+    # check's credential by sharing one route with it.
+    memory = anonymous.get("/api/memory/tables",
+                           headers={"Authorization": "Bearer a-board-token"},
+                           follow_redirects=False)
+    assert memory.status_code in (303, 401, 403), memory.text
+
+    # And the cutover token does not become a board writer by the same share.
+    write = anonymous.post("/api/kanban/epics", json={"title": "no"},
+                           headers={"Authorization": "Bearer a-cutover-token"},
+                           follow_redirects=False)
+    assert write.status_code in (303, 401, 403), write.text

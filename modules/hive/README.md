@@ -238,6 +238,19 @@ design routes refuse with 503 rather than opening. Daniel's own browser
 login is accepted on the same routes, reads included — a design session
 carries source text pulled off his disks.
 
+`BOARD_PUSH_TOKEN` is the credential a Mind reads and writes the Kanban
+board with. It exists because the backlog is where the hive's work is
+decided and the only way in was a signed-in admin browser, so a mind whose
+job *is* the backlog had no door — and what it reaches for without one is
+raw SQL against `work_items`, which skips the ordering, the numbering and
+the write lock `kanban_data` holds above that table. It has no fallback to
+the house tokens, for the reason `DESIGN_PUSH_TOKEN` gives, and it is not
+`HIVE_SITE_ADMIN_TOKEN`, which also opens the memory store. It admits the
+board's reads, creates and updates. It does not admit
+`DELETE /api/kanban/{kind}/{record_id}`: finished work goes to `done` and
+stays on the board, so a mind working the backlog never needs the one
+operation that destroys a row and everything under it.
+
 ## Test
 
 ```

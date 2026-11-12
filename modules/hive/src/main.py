@@ -777,8 +777,34 @@ async def kanban_backlog_page(request: Request):
     return await _console_page(request, "kanban.html", view="backlog")
 
 
+#: What each bearer the board routes admit is called in the handler's user.
+_BEARER_USERS = {
+    console_access.CUTOVER: "cutover-check",
+    console_access.BOARD: "board-bearer",
+}
+
+
+async def require_admin_or_route_bearer(request: Request) -> dict:
+    """A signed-in admin, or one of the bearers the route's rule admits.
+
+    These routes are guarded by a session like every other admin route, and
+    a caller outside a browser — the one-database check, a Mind working the
+    backlog — has no session to present. The bearer is verified by the route
+    table before the route runs; this only reads *which* one it was, so the
+    credential is never compared here. A bearer the table did not verify for
+    this route never reaches this function, so an unrecognised name falls
+    through to the session rather than being treated as anyone.
+    """
+    via = route_access.bearer_of(request)
+    if via in _BEARER_USERS:
+        return {"username": _BEARER_USERS[via], "via": "bearer"}
+    return await require_auth(request)
+
+
 @app.get("/api/kanban/relations/{record_id}")
-async def api_kanban_relations(record_id: str, user: dict = Depends(require_auth)):
+async def api_kanban_relations(
+        record_id: str,
+        user: dict = Depends(require_admin_or_route_bearer)):
     del user
     return await _kanban_call(kanban_data.item_relations, record_id)
 
@@ -861,29 +887,16 @@ async def _kanban_call(function, *args, **kwargs):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-async def require_admin_or_cutover_check(request: Request) -> dict:
-    """A signed-in admin, or the one-database check's own bearer.
-
-    The three reads the check makes are guarded by a session like every other
-    admin route, and a check running outside a browser has no session to
-    present. The bearer is verified by the route table before the route runs
-    (`console_access.CUTOVER`); this only reads which of the two it was, so
-    the credential is never compared here.
-    """
-    if route_access.bearer_of(request) == console_access.CUTOVER:
-        return {"username": "cutover-check", "via": "bearer"}
-    return await require_auth(request)
-
-
 @app.get("/api/kanban/data")
 async def api_kanban_data(
-        user: dict = Depends(require_admin_or_cutover_check)):
+        user: dict = Depends(require_admin_or_route_bearer)):
     del user
     return await _kanban_call(kanban_data.get_data)
 
 
 @app.get("/api/kanban/numbers")
-async def api_kanban_numbers(user: dict = Depends(require_auth)):
+async def api_kanban_numbers(
+        user: dict = Depends(require_admin_or_route_bearer)):
     del user
     return await _kanban_call(kanban_data.backlog_numbers)
 
@@ -894,7 +907,9 @@ _SINGULAR = {"epics": "epic", "features": "feature", "stories": "story"}
 
 
 @app.get("/api/kanban/{kind}/{record_id}/descendants")
-async def api_kanban_descendants(kind: str, record_id: str, user: dict = Depends(require_auth)):
+async def api_kanban_descendants(
+        kind: str, record_id: str,
+        user: dict = Depends(require_admin_or_route_bearer)):
     """What a delete of this row would take with it, counted now.
 
     The page asks immediately before it puts the number in front of Daniel.
@@ -910,7 +925,9 @@ async def api_kanban_descendants(kind: str, record_id: str, user: dict = Depends
 @app.post("/api/kanban/epics")
 @app.post("/api/kanban/features")
 @app.post("/api/kanban/stories")
-async def api_kanban_create(request: Request, user: dict = Depends(require_auth)):
+async def api_kanban_create(
+        request: Request,
+        user: dict = Depends(require_admin_or_route_bearer)):
     del user
     kind = request.url.path.rsplit("/", 1)[-1]
     fields = _KANBAN_CREATE_FIELDS[kind]
@@ -923,7 +940,9 @@ async def api_kanban_create(request: Request, user: dict = Depends(require_auth)
 
 
 @app.patch("/api/kanban/{kind}/{record_id}")
-async def api_kanban_update(kind: str, record_id: str, request: Request, user: dict = Depends(require_auth)):
+async def api_kanban_update(
+        kind: str, record_id: str, request: Request,
+        user: dict = Depends(require_admin_or_route_bearer)):
     del user
     if kind not in _KANBAN_UPDATE_FIELDS:
         raise HTTPException(status_code=404, detail="Kanban resource not found")
@@ -2163,7 +2182,7 @@ async def memory_page(request: Request):
 
 @app.get("/api/memory/tables")
 async def api_memory_tables(
-        user: dict = Depends(require_admin_or_cutover_check)):
+        user: dict = Depends(require_admin_or_route_bearer)):
     """The memory store's tables — the `memory` schema of the hive's
     database — with a row count each."""
     del user
@@ -2175,7 +2194,7 @@ async def api_memory_rows(
     table: str,
     limit: int = _MEMORY_ROW_LIMIT_DEFAULT,
     offset: int = 0,
-    user: dict = Depends(require_admin_or_cutover_check),
+    user: dict = Depends(require_admin_or_route_bearer),
 ):
     del user
     page = await store.memory_rows(table, limit=limit, offset=offset)

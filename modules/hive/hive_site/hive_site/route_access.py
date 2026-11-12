@@ -17,12 +17,15 @@ Every route is classified in a single table. The classes are:
 - `bearer` — reached only with the bearer the rule names (a mind
   publishing); no session admits it.
 
-Any rule may also name a bearer (`Rule(..., bearer="design")`): a request
-presenting one is admitted by that bearer and nothing else. The middleware
-verifies it against the table's token before the route runs — scheme
-compared without regard to case, value in constant time — and a wrong one
-is refused, never answered from the cookie beside it. A route reads what was
-verified with `bearer_of(request)`; it never reads the header itself. A
+Any rule may also name a bearer (`Rule(..., bearer="design")`), or several
+(`Rule(..., bearer=("cutover", "board"))` — one route two callers reach with
+two unrelated credentials): a request presenting one is admitted by that
+bearer and nothing else. The middleware verifies it against the table's
+token before the route runs — scheme compared without regard to case, value
+in constant time — and a wrong one is refused, never answered from the
+cookie beside it. A route reads *which* bearer was verified with
+`bearer_of(request)`; it never reads the header itself, and with two named
+it must not assume it was the one it cares about. A
 request carrying more than one Authorization header is refused outright,
 since two readers of one request could otherwise each believe a different
 one.
@@ -94,19 +97,33 @@ class Rule:
     kind: str
     # For `owner`: the path parameter naming the mind, operation or session.
     param: str | None = None
-    # The bearer (a name in the table's `bearers`) that also admits this
-    # route; the middleware verifies it before the route runs.
-    bearer: str | None = None
+    # The bearer, or bearers, (names in the table's `bearers`) that also
+    # admit this route; the middleware verifies one before the route runs.
+    # A tuple is for a route two different callers reach with two different
+    # credentials — not a way to widen one caller's reach, since each name
+    # still has to be attached to this route deliberately.
+    bearer: str | tuple[str, ...] | None = None
     # A `user` rule only for these parameter values; any other is `admin`.
     only_when: tuple[tuple[str, frozenset[str]], ...] = ()
+
+    @property
+    def bearers(self) -> tuple[str, ...]:
+        """Every bearer this rule admits, however it was written."""
+        if self.bearer is None:
+            return ()
+        if isinstance(self.bearer, str):
+            return (self.bearer,)
+        return tuple(self.bearer)
 
     def __post_init__(self):
         if self.kind not in _KINDS:
             raise ValueError(f"unknown route class {self.kind!r}")
         if self.kind == OWNER and not self.param:
             raise ValueError("an owner rule names the parameter it resolves")
-        if self.kind == BEARER and not self.bearer:
+        if self.kind == BEARER and not self.bearers:
             raise ValueError("a bearer rule names the bearer it takes")
+        if len(set(self.bearers)) != len(self.bearers):
+            raise ValueError("a rule names a bearer twice")
 
 
 DEFAULT_RULE = Rule(ADMIN)
@@ -146,8 +163,9 @@ class RouteTable:
                 raise ValueError(f"{spec} is classified twice")
             if rule.kind == OWNER and rule.param not in self.resolvers:
                 raise ValueError(f"no resolver for {rule.param!r}")
-            if rule.bearer and rule.bearer not in self.bearers:
-                raise ValueError(f"no token for bearer {rule.bearer!r}")
+            for name in rule.bearers:
+                if name not in self.bearers:
+                    raise ValueError(f"no token for bearer {name!r}")
             self.rules[key] = rule
 
     def rule_for(self, method: str, path: str) -> Rule:
@@ -379,12 +397,12 @@ class AccessMiddleware:
             await self._refuse(scope, receive, send, refusal, is_socket)
             return
         presented = _presented_bearer(authorization[0]) if authorization else None
-        if rule.bearer and presented is not None:
-            refusal = self._verify_bearer(rule.bearer, presented)
+        if rule.bearers and presented is not None:
+            admitted, refusal = self._verify_bearer(rule.bearers, presented)
             if refusal is not None:
                 await self._refuse(scope, receive, send, refusal, is_socket)
                 return
-            scope.setdefault("state", {})[_BEARER_STATE_KEY] = rule.bearer
+            scope.setdefault("state", {})[_BEARER_STATE_KEY] = admitted
             await self.app(scope, receive, send)
             return
         if rule.kind == BEARER:
@@ -401,14 +419,43 @@ class AccessMiddleware:
             return
         await self._run_watched(scope, receive, send, rule, params, is_socket)
 
-    def _verify_bearer(self, name: str, presented: bytes) -> Response | None:
-        bearer = self.table.bearers[name]
-        expected = bearer.token() or ""
-        if not expected:
-            return JSONResponse({"detail": bearer.unset_message}, bearer.unset_status)
-        if not hmac.compare_digest(presented, expected.encode("utf-8", "surrogatepass")):
-            return JSONResponse({"detail": "Authentication required"}, 401)
-        return None
+    def _verify_bearer(
+        self, names: tuple[str, ...], presented: bytes
+    ) -> tuple[str | None, Response | None]:
+        """Which of the rule's bearers this value is, or why it is refused.
+
+        Every name is compared, in constant time and to the end, so the
+        answer cannot be read off how long the refusal took. A rule naming
+        two bearers is two separate credentials reaching one route, so a
+        value matching either is admitted as that one and `bearer_of` tells
+        the route which — never merely that some bearer passed.
+
+        `unset_message` is reported only when *no* named bearer is
+        configured: where one is, the install has issued a credential for
+        this route and a wrong value is a refusal, not a misconfiguration.
+        """
+        admitted: str | None = None
+        unset: BearerToken | None = None
+        for name in names:
+            bearer = self.table.bearers[name]
+            expected = bearer.token() or ""
+            if not expected:
+                if unset is None:
+                    unset = bearer
+                continue
+            if hmac.compare_digest(
+                presented, expected.encode("utf-8", "surrogatepass")
+            ) and admitted is None:
+                admitted = name
+        if admitted is not None:
+            return admitted, None
+        if unset is not None and all(
+            not (self.table.bearers[name].token() or "") for name in names
+        ):
+            return None, JSONResponse(
+                {"detail": unset.unset_message}, unset.unset_status
+            )
+        return None, JSONResponse({"detail": "Authentication required"}, 401)
 
     async def _refuse(self, scope, receive, send, refusal: Response, is_socket: bool) -> None:
         if is_socket:

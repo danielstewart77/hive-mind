@@ -100,9 +100,34 @@ def cutover_check_token() -> str:
     return os.getenv("HIVE_SITE_ADMIN_TOKEN", "")
 
 
+def board_token() -> str:
+    """The credential a Mind reads and writes the Kanban board with.
+
+    The backlog is where the hive's work is decided, and until now the only
+    way in was a signed-in admin browser. A mind whose whole job is the
+    backlog — the chief of staff — therefore had no door at all, and the
+    alternatives it reaches for when it has none are worse than this token:
+    raw SQL against `work_items`, which skips the ordering, the hierarchy
+    numbering and the write lock the board module holds, or `docker exec`
+    into this container, which is host access granted to get at a table.
+
+    Deliberately its own, with no fallback to the house tokens, for the
+    reason `design_push_token` gives: every Mind in the hive already holds
+    `COMMS_BEARER_TOKEN` and `COMMS_ADMIN_BEARER_TOKEN`, so either as a
+    fallback would hand the backlog to every mind on it, a kid's Windows box
+    included. Not `HIVE_SITE_ADMIN_TOKEN` either: that one also opens the
+    whole memory store, which is far more than the board.
+
+    Unset means the board routes admit no bearer and only a session reaches
+    them, which is where an install with no mind on the backlog sits.
+    """
+    return os.getenv("BOARD_PUSH_TOKEN", "")
+
+
 CANVAS = "canvas"
 DESIGN = "design"
 CUTOVER = "cutover"
+BOARD = "board"
 
 # ── the table ──────────────────────────────────────────────────────────
 
@@ -123,6 +148,10 @@ TABLE = RouteTable(
         ),
         CUTOVER: BearerToken(
             cutover_check_token, unset_status=401,
+            unset_message="Authentication required",
+        ),
+        BOARD: BearerToken(
+            board_token, unset_status=401,
             unset_message="Authentication required",
         ),
     },
@@ -230,9 +259,33 @@ TABLE.add(
 # working.
 TABLE.add(
     Rule(ADMIN, bearer=CUTOVER),
-    "GET /api/kanban/data",
     "GET /api/memory/tables",
     "GET /api/memory/rows",
+)
+
+# The board, reached by a signed-in admin in a browser and by a Mind with
+# the board bearer. The whole board is one read (`/api/kanban/data`), which
+# the one-database check also makes, so that route names both credentials;
+# the rest are the board's alone.
+#
+# `DELETE /api/kanban/{kind}/{record_id}` is deliberately *not* here and
+# stays admin-only. Finished work goes to `done` and stays on the board, so
+# a mind working the backlog never needs a delete — and the one operation
+# that destroys a row and everything under it is not the one to open to a
+# credential sitting in an `.env`.
+TABLE.add(
+    Rule(ADMIN, bearer=(CUTOVER, BOARD)),
+    "GET /api/kanban/data",
+)
+TABLE.add(
+    Rule(ADMIN, bearer=BOARD),
+    "GET /api/kanban/numbers",
+    "GET /api/kanban/relations/{record_id}",
+    "GET /api/kanban/{kind}/{record_id}/descendants",
+    "POST /api/kanban/epics",
+    "POST /api/kanban/features",
+    "POST /api/kanban/stories",
+    "PATCH /api/kanban/{kind}/{record_id}",
 )
 
 # House-wide: named so the table is complete, and so nobody mistakes a
@@ -280,18 +333,12 @@ TABLE.add(
     "GET /api/dashboard/text",
     "GET /harness-runs",
     "GET /api/harness-runs",
-    # kanban
+    # kanban — the pages, and the one write no bearer reaches. The board's
+    # API routes are classified above, with the bearer that also admits them.
     "GET /kanban",
     "GET /kanban/board",
     "GET /kanban/backlog",
     "GET /kanban/item/{record_id}",
-    "GET /api/kanban/relations/{record_id}",
-    "GET /api/kanban/numbers",
-    "GET /api/kanban/{kind}/{record_id}/descendants",
-    "POST /api/kanban/epics",
-    "POST /api/kanban/features",
-    "POST /api/kanban/stories",
-    "PATCH /api/kanban/{kind}/{record_id}",
     "DELETE /api/kanban/{kind}/{record_id}",
     # design pages
     "GET /design",
