@@ -35,9 +35,9 @@ PENDING, RUNNING, DONE, FAILED, WAITING = "pending", "running", "done", "failed"
 class NeedInput(Exception):
     """A step that needs the operator: it pauses the run with a question."""
 
-    def __init__(self, key: str, label: str, choices: list[str]):
+    def __init__(self, key: str, label: str, choices: list[str], reason: str = ""):
         super().__init__(label)
-        self.key, self.label, self.choices = key, label, choices
+        self.key, self.label, self.choices, self.reason = key, label, choices, reason
 
 
 @dataclass(frozen=True)
@@ -173,7 +173,8 @@ class Runner:
             if isinstance(exc, NeedInput):
                 self.answered.clear()
                 self._set(step, status=WAITING, question={
-                    "key": exc.key, "label": exc.label, "choices": exc.choices})
+                    "key": exc.key, "label": exc.label, "choices": exc.choices,
+                    "reason": exc.reason})
                 self.answered.wait()
                 continue
             if exc is not None:

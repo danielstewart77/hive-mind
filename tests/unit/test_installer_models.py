@@ -28,8 +28,11 @@ class _Hive:
     """`subprocess.run` for an install: the proxy's command and its routes."""
 
     def __init__(self, *, chat=("claude-sonnet-5", "gpt-oss:20b-32k"),
-                 embedders=("qwen3-embedding:8b",), dimensions=4096, purposes=True):
+                 embedders=("qwen3-embedding:8b",), dimensions=4096, purposes=True,
+                 call_status=200):
         self.chat, self.embedders, self.dimensions = list(chat), list(embedders), dimensions
+        # What a test embedding or classification answers.
+        self.call_status = call_status
         # An older proxy marks no model with a purpose and ignores the filter.
         self.purposes = purposes
         self.commands: list[list[str]] = []
@@ -60,6 +63,8 @@ class _Hive:
             purpose = "embedding" if embedding else "chat"
             return {"status": 200, "body": json.dumps(
                 {"data": [{"id": n, "purpose": purpose} for n in names]})}
+        if url.endswith(("/v1/embeddings", "/v1/chat/completions")) and self.call_status != 200:
+            return {"status": self.call_status, "body": "upstream unavailable"}
         if url.endswith("/v1/embeddings"):
             return {"status": 200, "body": json.dumps(
                 {"data": [{"embedding": [0.0] * self.dimensions, "index": 0}]})}
@@ -97,25 +102,20 @@ def _existing(tmp_path, monkeypatch, hive, **given):
 # --- T5: an existing proxy is refused what it cannot serve ------------------
 
 
-def test_an_existing_proxy_without_the_chosen_embedding_model_is_refused(tmp_path, monkeypatch):
-    ctx = _existing(tmp_path, monkeypatch, _Hive(embedders=["nomic-embed-text"]),
-                    embedding_model="qwen3-embedding:8b", classifier_model="gpt-oss:20b-32k")
-
-    with pytest.raises(StepFailed, match=r"does not offer the embedding model 'qwen3-embedding:8b'"):
-        steps.resolve_models(ctx)
-    assert ctx.env().get(compose.EMBEDDING_MODEL_VAR, "") == ""
-
-
-def test_an_existing_proxy_without_the_chosen_classifier_is_refused(tmp_path, monkeypatch):
+def test_a_classifier_the_proxy_does_not_list_is_forgotten_and_asked_again(tmp_path, monkeypatch):
     ctx = _existing(tmp_path, monkeypatch, _Hive(chat=["claude-sonnet-5"]),
                     embedding_model="qwen3-embedding:8b", classifier_model="gpt-oss:20b-32k")
 
-    with pytest.raises(StepFailed, match=r"does not offer the chat model 'gpt-oss:20b-32k'"):
+    with pytest.raises(NeedInput) as asked:
         steps.resolve_models(ctx)
+    assert asked.value.key == "classifier_model"
+    assert asked.value.choices == ["claude-sonnet-5"]
+    assert "does not offer the chat model 'gpt-oss:20b-32k'" in asked.value.reason
+    assert "classifier_model" not in ctx.answers
     assert ctx.env().get(compose.CLASSIFIER_MODEL_VAR, "") == ""
 
 
-def test_an_embedding_model_wider_than_4096_is_refused(tmp_path, monkeypatch):
+def test_the_only_embedding_model_wider_than_4096_fails_the_step(tmp_path, monkeypatch):
     hive = _Hive(dimensions=8192)
     ctx = _existing(tmp_path, monkeypatch, hive,
                     embedding_model="qwen3-embedding:8b", classifier_model="gpt-oss:20b-32k")
@@ -224,8 +224,90 @@ def test_an_embedding_pick_that_fails_its_call_is_asked_for_again(tmp_path, monk
     ctx = _existing(tmp_path, monkeypatch, hive,
                     embedding_model="text-embedding-3-large", classifier_model="gpt-oss-120b")
 
-    with pytest.raises(StepFailed):
-        steps.resolve_models(ctx)
     with pytest.raises(NeedInput) as asked:
         steps.resolve_models(ctx)
     assert asked.value.key == "embedding_model"
+    assert "8192 dimensions" in asked.value.reason
+    assert asked.value.choices == ["gpt-oss-120b"]
+    assert ctx.env()[compose.EMBEDDING_MODEL_VAR] == ""
+
+
+# --- a bad pick is asked for again in the same run --------------------------
+
+
+def test_a_pick_the_proxy_does_not_list_is_forgotten_and_asked_again_in_the_same_run(
+        tmp_path, monkeypatch):
+    import time
+
+    from installer import runner, secrets_store
+    from installer.runner import Step
+
+    hive = _Hive(embedders=["text-embedding-3-large"], dimensions=3072)
+    monkeypatch.setattr(subprocess, "run", hive)
+    inst = installer_at(tmp_path, answers(modes={"proxy": "existing"}, proxy_url=EXISTING),
+                        step_list=[Step("models", "The hive's models", steps.resolve_models, 60)])
+    ctx = steps.Ctx(inst, Shell(inst.home.log))
+    # Saved by an earlier run: a pick this proxy does not list.
+    ctx.set_env(MIND_PROXY_KEY=OPERATOR_KEY,
+                **{compose.EMBEDDING_MODEL_VAR: "qwen3-embedding:8b"})
+    inst.answers.update(embedding_model="qwen3-embedding:8b", classifier_model="gpt-oss:20b-32k")
+    inst.save()
+
+    run = __import__("threading").Thread(target=inst.runner.run, daemon=True)
+    run.start()
+    question = None
+    for _ in range(200):
+        step = (inst.runner.snapshot()["steps"] or [{"status": runner.PENDING}])[0]
+        if step["status"] == runner.WAITING:
+            question = step["question"]
+            break
+        assert step["status"] != runner.FAILED, step.get("error")
+        time.sleep(0.05)
+
+    assert question["key"] == "embedding_model"
+    assert question["choices"] == ["text-embedding-3-large"]
+    assert "does not offer" in question["reason"] and "qwen3-embedding:8b" in question["reason"]
+    assert "embedding_model" not in json.loads(inst.home.answers.read_text())
+    assert ctx.env()[compose.EMBEDDING_MODEL_VAR] == ""
+    assert compose.EMBEDDING_MODEL_VAR not in secrets_store.parse_env(inst.home.secrets)
+
+    assert inst.answer("embedding_model", "text-embedding-3-large") == []
+    run.join(30)
+    assert inst.runner.snapshot()["steps"][0]["status"] == runner.DONE
+    assert ctx.env()[compose.EMBEDDING_MODEL_VAR] == "text-embedding-3-large"
+
+
+def test_an_embedding_pick_whose_call_fails_is_asked_again_and_stays_a_choice(
+        tmp_path, monkeypatch):
+    ctx = _existing(tmp_path, monkeypatch,
+                    _Hive(embedders=["qwen3-embedding:8b", "nomic-embed-text"], call_status=502),
+                    embedding_model="qwen3-embedding:8b", classifier_model="gpt-oss:20b-32k")
+
+    with pytest.raises(NeedInput) as asked:
+        steps.resolve_models(ctx)
+    assert asked.value.key == "embedding_model"
+    assert "(502)" in asked.value.reason
+    # One bad answer from the proxy does not take the hive's model off the list.
+    assert asked.value.choices == ["qwen3-embedding:8b", "nomic-embed-text"]
+
+
+def test_a_classifier_whose_call_fails_is_forgotten_and_asked_again_from_the_chat_models(
+        tmp_path, monkeypatch):
+    hive = _Hive()
+    ctx = _existing(tmp_path, monkeypatch, hive,
+                    embedding_model="qwen3-embedding:8b", classifier_model="gpt-oss:20b-32k")
+    ctx.set_env(**{compose.CLASSIFIER_MODEL_VAR: "gpt-oss:20b-32k"})
+
+    def failing_chat(payload, http=hive._http):
+        if payload["url"].endswith("/v1/chat/completions"):
+            return {"status": 500, "body": "the model crashed"}
+        return http(payload)
+    hive._http = failing_chat
+
+    with pytest.raises(NeedInput) as asked:
+        steps.resolve_models(ctx)
+    assert asked.value.key == "classifier_model"
+    assert "(500)" in asked.value.reason
+    assert asked.value.choices == ["gpt-oss:20b-32k", "claude-sonnet-5"]
+    assert "classifier_model" not in ctx.answers
+    assert ctx.env()[compose.CLASSIFIER_MODEL_VAR] == ""

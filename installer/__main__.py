@@ -4,7 +4,8 @@ Prints the address, port and link (with this run's code) and writes them to
 `state/installer.log`, where install.sh reads them, and to `state/page.link`
 (0600). One installer per install folder: a second start while one is alive
 reprints the live page's link and exits. The page stops a while after the
-run ends, finished or failed.
+last run ends, finished or failed; a run started again on it (install.sh run
+again after a failure) keeps it up.
 """
 
 from __future__ import annotations
@@ -76,11 +77,15 @@ def main(argv: list[str] | None = None) -> int:
           f"  ssh -L {server.port}:127.0.0.1:{server.port} <this host>  then open "
           f"http://127.0.0.1:{server.port}/?code={server.code}", flush=True)
     try:
-        while not ended.is_set() and server.alive():
+        idle_since = None
+        while server.alive():
+            if not ended.is_set() or installer.running():
+                idle_since = None
+            elif idle_since is None:
+                idle_since = time.monotonic()
+            elif time.monotonic() - idle_since > FINAL_GRACE_SECONDS and installer.close():
+                break
             time.sleep(1)
-        deadline = time.monotonic() + FINAL_GRACE_SECONDS
-        while time.monotonic() < deadline and server.alive():
-            time.sleep(2)
     finally:
         try:
             server.stop()

@@ -551,17 +551,36 @@ def _chosen(ctx: Ctx, key: str, offered: list[str]) -> str:
     if not chosen:
         raise NeedInput(key, label, sorted(offered, key=lambda m: m != default))
     if chosen not in offered:
-        raise StepFailed(f"{where} does not offer the {purpose} model {chosen!r} chosen for "
-                         f"this hive (it offers: {', '.join(offered)})")
+        _ask_again(ctx, key, offered,
+                   f"{where} does not offer the {purpose} model {chosen!r} chosen for this hive "
+                   f"(it offers: {', '.join(offered)})")
     return chosen
 
 
 def _forget(ctx: Ctx, key: str, env_name: str) -> None:
-    """A model pick that failed its real call: forgotten, so the next run
-    asks for it again instead of failing on it for good."""
+    """A bad model pick: forgotten from the answers, the live .env and the
+    installer's own copy, so nothing brings it back."""
     ctx.answers.pop(key, None)
     ctx.installer.save()
     ctx.set_env(**{env_name: ""})
+    secrets_store.forget(ctx.home, [env_name])
+
+
+def _ask_again(ctx: Ctx, key: str, offered: list[str], reason: str):
+    """A bad pick is forgotten and asked for again in this run, with why and
+    the proxy's models. A pick whose test call failed stays a choice: the
+    failure may have been the proxy's, not the model's, and a hive's working
+    embedding model is not swapped for another over one bad answer. Only a
+    model proven too wide is left out; when that leaves none, no pick can
+    fix it and the step fails."""
+    env_name, _, label, default = MODEL_CHOICES[key]
+    _forget(ctx, key, env_name)
+    too_wide = set(ctx.output("too_wide") or []) if key == "embedding_model" else set()
+    choices = [m for m in sorted(offered, key=lambda m: m != default) if m not in too_wide]
+    if not choices:
+        raise StepFailed(f"{reason}. The proxy offers no other model to choose; add one to "
+                         "the proxy and run again")
+    raise NeedInput(key, label, choices, reason=reason)
 
 
 def resolve_models(ctx: Ctx):
@@ -582,21 +601,20 @@ def resolve_models(ctx: Ctx):
             dims = proxy_adapter.embedding_dimensions(ctx.sh, url, key, embedder, proxy_env=web)
         # Narrower vectors are zero-padded by lucent; wider ones do not fit.
         if not dims or dims > compose.EMBEDDING_DIMENSIONS:
+            ctx.output("too_wide", sorted({*(ctx.output("too_wide") or []), embedder}))
             raise StepFailed(f"{embedder!r} answered {dims} dimensions; lucent stores at most "
                              f"{compose.EMBEDDING_DIMENSIONS} (memory.memories.embedding is "
                              f"vector({compose.EMBEDDING_DIMENSIONS})). Choose another "
                              "embedding model")
-    except StepFailed:
-        _forget(ctx, "embedding_model", compose.EMBEDDING_MODEL_VAR)
-        raise
+    except StepFailed as exc:
+        _ask_again(ctx, "embedding_model", embedders, str(exc))
     try:
         if own:
             proxy_adapter.check_model(ctx.sh, ctx.compose, model=classifier)
         else:
             proxy_adapter.classify_check(ctx.sh, url, key, classifier, proxy_env=web)
-    except StepFailed:
-        _forget(ctx, "classifier_model", compose.CLASSIFIER_MODEL_VAR)
-        raise
+    except StepFailed as exc:
+        _ask_again(ctx, "classifier_model", chat, str(exc))
     a["embedding_model"], a["classifier_model"] = embedder, classifier
     ctx.set_env(**{compose.EMBEDDING_MODEL_VAR: embedder, compose.CLASSIFIER_MODEL_VAR: classifier})
     # Lucent and the console started before the key and the models were
