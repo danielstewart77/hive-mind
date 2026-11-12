@@ -15,7 +15,8 @@ reaches every soul. A mind's own lucent credential — the per-holder value its
 it — reaches that mind's own soul and no other: read, write and history
 alike. Every mind can therefore reach this door, and none can reach another
 mind's soul through it. The rule is the identity guard's on the graph routes
-(a Mind node changes only for the mind its `mind_id` names), judged here on
+(a Mind node changes only for the mind its `mind_id` names), held here a
+little tighter — the node must also be named as the holder — and judged on
 the same row the route then reads or writes. A mind's key that names another
 mind, or a name with no Mind node, is a 403 before anything is written.
 
@@ -135,7 +136,7 @@ async def soul_get(
     from lucent_api.soul import soul_read
 
     try:
-        return _decode(await soul_read(name=name, own=who.own_names))
+        return _decode(await soul_read(name=name, own=who.own))
     except hive_data.HiveDataError as refused:
         log.warning("soul.read.store_refused: %s: %s",
                     type(refused).__name__, refused)
@@ -174,7 +175,7 @@ async def soul_post(
                 as_of=body.as_of,
                 expected_change_count=body.expected_change_count,
                 allow_shrink=body.allow_shrink,
-                own=who.own_names,
+                own=who.own,
             )
         )
     except hive_data.HiveDataError as refused:
@@ -193,7 +194,7 @@ async def soul_history_get(
 
     try:
         return _decode(await soul_history(
-            name=name, limit=limit, own=who.own_names))
+            name=name, limit=limit, own=who.own))
     except hive_data.HiveDataError as refused:
         log.warning("soul.history.store_refused: %s: %s",
                     type(refused).__name__, refused)

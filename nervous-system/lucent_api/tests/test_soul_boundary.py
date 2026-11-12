@@ -344,17 +344,26 @@ async def test_a_minds_own_key_cannot_write_another_minds_soul(
         owner=OWNER, type="Mind", name=other_name, mind_id=str(uuid.uuid4()),
         properties={"name": other_name, "type": "Mind",
                     "soul_values": list(ORIGINAL_SOUL)})
-    theirs = Mind(other_name, other["id"], "", inspector)
+    # The other shape another mind's soul takes: a Mind node this mind wrote
+    # itself, under the name of a mind that had not arrived yet. It carries
+    # this mind's own `mind_id`, and it is still the newcomer's soul.
+    squatted_name = unique("Nova")
+    squatted = await graph.node_write(
+        owner=OWNER, type="Mind", name=squatted_name, mind_id=a_soul.mind_id,
+        properties={"name": squatted_name, "type": "Mind",
+                    "soul_values": list(ORIGINAL_SOUL)})
 
-    refused = await client.post(
-        "/graph/soul", headers={"Authorization": f"Bearer {token}"},
-        json={"name": other_name, "soul_values": [THE_LINE],
-              "actor": "mind", "reason": "not mine to write",
-              "allow_shrink": True})
+    for target in (Mind(other_name, other["id"], "", inspector),
+                   Mind(squatted_name, squatted["id"], "", inspector)):
+        refused = await client.post(
+            "/graph/soul", headers={"Authorization": f"Bearer {token}"},
+            json={"name": target.name, "soul_values": [THE_LINE],
+                  "actor": "mind", "reason": "not mine to write",
+                  "allow_shrink": True})
 
-    assert refused.status_code == 403, refused.text
-    assert await theirs.soul() == ORIGINAL_SOUL
-    assert await theirs.recorded() == []
+        assert refused.status_code == 403, f"{target.name}: {refused.text}"
+        assert await target.soul() == ORIGINAL_SOUL
+        assert await target.recorded() == []
 
 
 # ---- Requirement 3: provenance the writing host does not control ------

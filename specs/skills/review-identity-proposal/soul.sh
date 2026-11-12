@@ -10,12 +10,15 @@
 # the mind meets them cold, once, on the turn that matters.
 #
 #   soul.sh read
-#   soul.sh write   --line "..." [--line "..."] --reason "..." [--allow-shrink]
+#   soul.sh write   --line "..." [--line "..."] --reason "..." \
+#                   [--expect <change_count>] [--allow-shrink]
 #   soul.sh decide  <proposal-id> --decision accepted|reworded|rejected \
 #                                 --reason "..." [--final "..."]
 #
 # `write` takes the complete list, because rewrite and removal cannot be
-# expressed as an append. Read first, edit, send the whole thing.
+# expressed as an append. Read first, edit, send the whole thing — and pass
+# the `change_count` that read returned as --expect, so an edit made while
+# you were deciding refuses this write instead of being overwritten by it.
 #
 # The key is the mind's own lucent credential, LUCENT_BEARER_TOKEN — the same
 # value its memory hooks present. Lucent answers it for this mind's soul and
@@ -30,12 +33,14 @@ NAME="$(printf '%s' "${NAME^}")"
 
 die() { printf '{"ok":false,"error":"%s"}\n' "$1" >&2; exit 1; }
 
-[ -n "$LUCENT" ] || die "LUCENT_URL_SELF is not set"
-[ -n "$NAME" ]   || die "MIND_NAME is not set"
-[ -n "$TOKEN" ]  || die "LUCENT_BEARER_TOKEN is not set; it is this mind's own lucent key"
-
 api() {  # method path [body]
     local method="$1" path="$2" body="${3:-}"
+    # Checked here rather than at the top: `decide` only moves local files,
+    # and a host whose lucent is unreachable must still be able to clear a
+    # proposal it has already decided.
+    [ -n "$LUCENT" ] || die "LUCENT_URL_SELF is not set"
+    [ -n "$NAME" ]   || die "MIND_NAME is not set"
+    [ -n "$TOKEN" ]  || die "LUCENT_BEARER_TOKEN is not set; it is this mind's own lucent key"
     if [ -n "$body" ]; then
         curl -sS -m 30 -X "$method" "$LUCENT$path" \
             -H "Authorization: Bearer $TOKEN" \
@@ -64,23 +69,30 @@ read)
 
 write)
     shift
-    LINES='[]'; REASON=''; SHRINK=false
+    LINES='[]'; REASON=''; SHRINK=false; EXPECT=''
     while [ $# -gt 0 ]; do
         case "$1" in
             --line)  LINES="$(printf '%s' "$LINES" | jq -c --arg v "$2" '. + [$v]')"; shift 2 ;;
             --reason) REASON="$2"; shift 2 ;;
+            --expect) EXPECT="$2"; shift 2 ;;
             --allow-shrink) SHRINK=true; shift ;;
             *) die "unknown argument: $1" ;;
         esac
     done
     [ -n "$REASON" ] || die "--reason is required; it is stored with the change"
+    case "$EXPECT" in
+        ''|*[!0-9]*) [ -z "$EXPECT" ] || die "--expect takes the change_count your read returned" ;;
+    esac
 
+    # The read is still made, because a write built on a failed read must
+    # never leave the machine. Its count is used only when --expect was not
+    # given; with it, the count is the one the list was built from.
     CURRENT="$(read_soul)" || exit 1
-    SEEN="$(printf '%s' "$CURRENT" | jq -r '.change_count')"
+    SEEN="${EXPECT:-$(printf '%s' "$CURRENT" | jq -r '.change_count')}"
 
     # expected_change_count is the compare-and-set. Another pane, or the
-    # console, may have written between the read above and this line; without
-    # it the loser's edit vanishes and both writers report success.
+    # console, may have written since the list was built; without it the
+    # loser's edit vanishes and both writers report success.
     RESP="$(api POST /graph/soul "$(jq -nc \
         --arg name "$NAME" --argjson soul "$LINES" --arg reason "$REASON" \
         --argjson seen "$SEEN" --argjson shrink "$SHRINK" \

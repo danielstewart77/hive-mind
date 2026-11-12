@@ -34,9 +34,11 @@ import logging
 import os
 from dataclasses import dataclass
 
+import hive_data
 from fastapi import Header, HTTPException
 
 from lucent_api.holder_access import MIND, Caller, _bearer, resolve_caller
+from lucent_api.soul import OwnSoul
 
 log = logging.getLogger(__name__)
 
@@ -71,8 +73,8 @@ class SoulCaller:
     """Who is at the soul door: the console, or one mind about itself.
 
     ``mind`` is None for the console's key, which reaches every soul. For a
-    mind it is the holder its own value resolved to, and ``own_names`` is
-    the set a Mind node's ``mind_id`` must be in for that mind to touch it.
+    mind it is the holder its own value resolved to, and ``own`` is the one
+    soul that value reaches (``soul.OwnSoul``).
     """
 
     mind: Caller | None = None
@@ -82,11 +84,13 @@ class SoulCaller:
         return self.mind is None
 
     @property
-    def own_names(self) -> frozenset[str] | None:
-        """None for the console (every soul); otherwise this mind's names."""
+    def own(self) -> OwnSoul | None:
+        """None for the console (every soul); otherwise this mind's own."""
         if self.mind is None:
             return None
-        return frozenset(n.lower() for n in self.mind.own_names)
+        return OwnSoul(
+            name=self.mind.holder.lower(),
+            mind_ids=frozenset(n.lower() for n in self.mind.own_names))
 
 
 async def require_soul_caller(authorization: str = Header(default="")) -> SoulCaller:
@@ -117,7 +121,16 @@ async def require_soul_caller(authorization: str = Header(default="")) -> SoulCa
         token.encode("utf-8"), expected.encode("utf-8")
     ):
         return SoulCaller()
-    caller = await resolve_caller(token)
+    try:
+        caller = await resolve_caller(token)
+    except hive_data.HiveDataError as refused:
+        # The store did not answer, which says nothing about the caller. A
+        # 503 the review skill reports as "ask again", not a bare 500.
+        log.warning("soul.auth.store_refused: %s: %s",
+                    type(refused).__name__, refused)
+        raise HTTPException(
+            503, "the credential store did not answer; try again shortly"
+        ) from refused
     if caller.role == MIND and caller.holder and not caller.is_admin:
         return SoulCaller(mind=caller)
     if not expected:

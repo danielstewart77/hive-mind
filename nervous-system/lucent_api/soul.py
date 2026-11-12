@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import hive_data
@@ -149,7 +150,7 @@ async def preserve_soul(
 #: planner felt like — which means a soul read and the soul write that
 #: follows it can land on different nodes.
 _MIND_LOOKUP = (
-    f'SELECT "id", "mind_id", "properties" FROM {qualified("memory.nodes")} '
+    f'SELECT "id", "name", "mind_id", "properties" FROM {qualified("memory.nodes")} '
     'WHERE LOWER("name") = LOWER($1) AND "type" = \'Mind\' '
     'ORDER BY "id" LIMIT 1'
 )
@@ -183,19 +184,39 @@ def _props_of(row) -> dict:
 NOT_YOUR_SOUL = "not_your_soul"
 
 
-def _refuse_unless_own(row, name: str, own: frozenset[str] | None) -> str | None:
+@dataclass(frozen=True)
+class OwnSoul:
+    """The one soul a mind's own key reaches.
+
+    ``name`` is the holder the key resolved to, lowered; ``mind_ids`` is
+    every spelling of that mind's provenance, lowered. A Mind node is this
+    mind's only when both agree: named as the holder *and* keyed by it.
+    Either alone is not enough. The name alone would hand a mind any node
+    called after one of its spellings whoever it belongs to; the key alone
+    would hand a mind any Mind node it created under a name nobody held yet
+    — a soul every name-based lookup, the console's included, then treats
+    as the mind that later arrives under that name.
+    """
+
+    name: str
+    mind_ids: frozenset[str]
+
+
+def _refuse_unless_own(row, name: str, own: OwnSoul | None) -> str | None:
     """The refusal when a mind's key names a soul that is not its own.
 
-    ``own`` is None for the console, which reaches every soul. For a mind it
-    is every spelling of itself, lowered, and the Mind node's ``mind_id`` has
-    to be one of them. Judged on the row the caller is about to read or
-    write — not a lookup of its own — so the check and the write cannot land
-    on two different nodes. A name with no Mind node is refused the same way:
-    to a mind there is no difference between another's soul and nobody's.
+    ``own`` is None for the console, which reaches every soul. Judged on the
+    row the caller is about to read or write — not a lookup of its own — so
+    the check and the write cannot land on two different nodes. A name with
+    no Mind node is refused the same way: to a mind there is no difference
+    between another's soul and nobody's.
     """
     if own is None:
         return None
-    if row is not None and str(row["mind_id"] or "").strip().lower() in own:
+    if row is not None and (
+        str(row["name"] or "").strip().lower() == own.name
+        and str(row["mind_id"] or "").strip().lower() in own.mind_ids
+    ):
         return None
     return json.dumps({
         "ok": False, "code": NOT_YOUR_SOUL,
@@ -205,7 +226,7 @@ def _refuse_unless_own(row, name: str, own: frozenset[str] | None) -> str | None
     })
 
 
-async def soul_read(*, name: str, own: frozenset[str] | None) -> str:
+async def soul_read(*, name: str, own: OwnSoul | None) -> str:
     """Return a mind's soul as it stands, with its provenance count.
 
     No ``except`` around the change count. The SQLite version answered zero
@@ -248,7 +269,7 @@ async def soul_write(
     as_of: str | None = None,
     expected_change_count: int | None = None,
     allow_shrink: bool = False,
-    own: frozenset[str] | None,
+    own: OwnSoul | None,
 ) -> str:
     """Replace a mind's soul, recording what it was and who changed it.
 
@@ -390,7 +411,7 @@ async def soul_write(
 
 
 async def soul_history(
-    *, name: str, own: frozenset[str] | None, limit: int = 50
+    *, name: str, own: OwnSoul | None, limit: int = 50
 ) -> str:
     """Return the recorded changes to a mind's soul, newest first.
 

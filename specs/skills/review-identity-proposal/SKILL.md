@@ -42,7 +42,7 @@ using skill: review-identity-proposal
 
 ```bash
 SOUL="<skills directory>/review-identity-proposal/soul.sh"
-PROPOSAL_DIR="${SOUL_PROPOSAL_DIR:-${AUTO_REMEMBER_LOG_DIR:-$HIVE_PROJECT_DIR/data/auto-remember}/soul-proposals}"
+PROPOSAL_DIR="${SOUL_PROPOSAL_DIR:-${AUTO_REMEMBER_LOG_DIR:-${HIVE_PROJECT_DIR:-$HOME}/data/auto-remember}/soul-proposals}"
 ls -1 "$PROPOSAL_DIR"/*.json 2>/dev/null   # pending; decided/ is a subdirectory
 bash "$SOUL" read
 ```
@@ -54,7 +54,8 @@ anyone else's. There is no other soul key on a mind; the operator's lives
 with the hive site.
 
 Read every pending proposal, and read your soul as it actually stands — not
-as you remember it. What you remember is the copy composed into this
+as you remember it. Note the `change_count` the read returns; the write in
+Step 3 carries it. What you remember is the copy composed into this
 session's prompt, which may predate an edit made from the console.
 
 `soul.sh read` exits non-zero and prints nothing usable if the read failed.
@@ -103,14 +104,18 @@ expressed as an append, so there is no append.
 
 ```bash
 bash "$SOUL" write \
+  --expect <the change_count from your Step 1 read> \
   --line "<the first line you are keeping>" \
   --line "<the line you are adding, in your own voice>" \
   --reason "Accepted the flagged moment, reworded in my own voice."
 ```
 
-It re-reads the soul, sends your list with the change count it saw, and
-fails loudly rather than quietly if another pane or the console wrote in
-between. `--reason` is required and is stored with the change.
+`--expect` is the count your list was built from, and lucent refuses the
+write if anything — another pane, the console — changed the soul since. Then
+read again, re-apply your edit, and write with the new count. Without
+`--expect` the script uses a count it reads just before writing, which does
+not cover the time you spent deciding. `--reason` is required and is stored
+with the change.
 
 A write that would drop most of your soul is refused. That is deliberate:
 it is what an unchecked failed read looks like. If you genuinely mean it,
