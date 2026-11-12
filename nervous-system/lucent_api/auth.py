@@ -10,10 +10,14 @@ store, and it is the only way the credential-minting route is reachable on a
 first boot, when the credentials table is necessarily empty. There is no
 bypass — unset, admin routes answer 503 rather than opening.
 
-`LUCENT_SOUL_BEARER_TOKEN` is already narrower than everything else by
-design: it is held by one holder, the soul-review flow, and the admin token is
-deliberately *not* accepted for it. Making it per-holder would buy no
-isolation it does not already have.
+`LUCENT_SOUL_BEARER_TOKEN` is the operator's key to every soul, and it is
+held by the hive site alone — the console's soul editor, actor `console`. No
+mind holds it. A mind reaches its own soul with its own per-holder value, the
+one its `LUCENT_BEARER_TOKEN` carries, and `require_soul_caller` scopes that
+value to the one Mind node it represents. One shared value that could write
+any mind's soul, held by a mind, was a mind holding every other mind's
+identity; a second per-mind key would have been a second value to mint,
+rotate and lose for no isolation the first does not already give.
 
 The store no longer holds a `LUCENT_BEARER_TOKEN` of its own. One value held
 by every mind, every hook and every background process on every host made its
@@ -25,10 +29,16 @@ here.
 """
 from __future__ import annotations
 
+import hmac
 import logging
 import os
+from dataclasses import dataclass
 
+import hive_data
 from fastapi import Header, HTTPException
+
+from lucent_api.holder_access import MIND, Caller, _bearer, resolve_caller
+from lucent_api.soul import OwnSoul
 
 log = logging.getLogger(__name__)
 
@@ -58,30 +68,80 @@ if not os.environ.get("LUCENT_ADMIN_BEARER_TOKEN"):
     )
 
 
-def require_soul_bearer(authorization: str = Header(default="")) -> None:
-    """Bearer gate for the one route that can change a mind's soul.
+@dataclass(frozen=True)
+class SoulCaller:
+    """Who is at the soul door: the console, or one mind about itself.
 
-    Checks ``LUCENT_SOUL_BEARER_TOKEN`` and nothing else. The service token
-    is deliberately not accepted, and neither is the admin token: the point
-    of this credential is that the ones every hook, cron job and background
-    process on a mind's host already hold cannot reach a soul. Accepting a
-    more privileged token "for convenience" would hand it straight back to
-    hive-tools, which is the path the small model's verdict travelled.
-
-    Unset means locked (503), not open. A soul that is writable because
-    nobody configured a token is the failure mode this exists to close.
+    ``mind`` is None for the console's key, which reaches every soul. For a
+    mind it is the holder its own value resolved to, and ``own`` is the one
+    soul that value reaches (``soul.OwnSoul``).
     """
-    expected = os.environ.get("LUCENT_SOUL_BEARER_TOKEN", "")
-    if not expected:
-        raise HTTPException(503, "Soul endpoints disabled: LUCENT_SOUL_BEARER_TOKEN unset")
-    if not authorization.startswith("Bearer "):
+
+    mind: Caller | None = None
+
+    @property
+    def is_console(self) -> bool:
+        return self.mind is None
+
+    @property
+    def own(self) -> OwnSoul | None:
+        """None for the console (every soul); otherwise this mind's own."""
+        if self.mind is None:
+            return None
+        return OwnSoul(
+            name=self.mind.holder.lower(),
+            mind_ids=frozenset(n.lower() for n in self.mind.own_names))
+
+
+async def require_soul_caller(authorization: str = Header(default="")) -> SoulCaller:
+    """Bearer gate for the routes that read and change a mind's soul.
+
+    Two values open it and nothing else does. ``LUCENT_SOUL_BEARER_TOKEN``
+    is the console's, and reaches every soul. A mind's own per-holder value —
+    the same one the graph routes resolve through ``require_holder`` — reaches
+    that mind's soul and no other; the route compares the Mind node it found
+    against the holder, on the same row it then writes.
+
+    The admin value is deliberately not accepted, and neither is a service's
+    or a person's: the point of this door is that the credentials every hook,
+    cron job and background service already hold cannot reach a soul.
+    Accepting a more privileged token "for convenience" would hand it
+    straight back to hive-tools, which is the path the small model's verdict
+    travelled.
+
+    An unset console key disables the console's door, not the minds'. A
+    value that is neither a mind's nor a configured console key answers 503
+    when the console key is unset, as it always did — locked, never open.
+    """
+    token = _bearer(authorization)
+    if not token:
         raise HTTPException(401, "Missing or invalid Authorization header")
-    if authorization[7:] != expected:
-        raise HTTPException(401, "Invalid soul token")
+    expected = os.environ.get("LUCENT_SOUL_BEARER_TOKEN", "")
+    if expected and hmac.compare_digest(
+        token.encode("utf-8"), expected.encode("utf-8")
+    ):
+        return SoulCaller()
+    try:
+        caller = await resolve_caller(token)
+    except hive_data.HiveDataError as refused:
+        # The store did not answer, which says nothing about the caller. A
+        # 503 the review skill reports as "ask again", not a bare 500.
+        log.warning("soul.auth.store_refused: %s: %s",
+                    type(refused).__name__, refused)
+        raise HTTPException(
+            503, "the credential store did not answer; try again shortly"
+        ) from refused
+    if caller.role == MIND and caller.holder and not caller.is_admin:
+        return SoulCaller(mind=caller)
+    if not expected:
+        raise HTTPException(
+            503, "Soul endpoints disabled: LUCENT_SOUL_BEARER_TOKEN unset "
+            "and this is not a mind's own credential")
+    raise HTTPException(401, "Invalid soul token")
 
 
 if not os.environ.get("LUCENT_SOUL_BEARER_TOKEN"):
     log.warning(
-        "LUCENT_SOUL_BEARER_TOKEN is unset — soul endpoints will return 503 "
-        "until it is set. Souls are unwritable, not unprotected."
+        "LUCENT_SOUL_BEARER_TOKEN is unset — the console cannot edit souls "
+        "until it is set. Each mind still reaches its own with its own key."
     )

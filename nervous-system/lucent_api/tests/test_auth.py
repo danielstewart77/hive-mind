@@ -8,8 +8,8 @@ the refusal to serve unconfigured are covered in `test_holder_access.py`.
 
 What is left here is the admin credential, which stays a single shared value
 because it is how the console reaches the store and the only way the minting
-route is reachable on a first boot, and the soul credential, which was already
-held by exactly one holder by design.
+route is reachable on a first boot. The soul door's gate is driven through the
+real routes in `test_soul_boundary.py`.
 """
 
 from __future__ import annotations
