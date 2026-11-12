@@ -33,6 +33,7 @@ import argparse
 import asyncio
 import json
 import sys
+import uuid
 from typing import Any
 
 import hive_data
@@ -44,6 +45,20 @@ OPENED = "in progress"
 
 class Refused(Exception):
     """An operation that ran and changed nothing the caller asked for."""
+
+
+def _session_id(value: str) -> str:
+    """A hive-comms session id, which comms mints as a UUID.
+
+    Checked here because a failed `POST /sessions` piped through `jq -r .id`
+    is the string `null`, and the ledger would otherwise watch it.
+    """
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"{value!r} is not a hive-comms session id (a UUID)") from None
+    return value
 
 
 class _Parser(argparse.ArgumentParser):
@@ -62,7 +77,7 @@ def _parser() -> argparse.ArgumentParser:
 
     opened = sub.add_parser("open", help="create a task with its session")
     opened.add_argument("--name", required=True)
-    opened.add_argument("--session", required=True,
+    opened.add_argument("--session", required=True, type=_session_id,
                         help="the hive-comms session id working it")
     opened.add_argument("--description", default="")
     opened.add_argument("--status", default=OPENED)
@@ -86,10 +101,10 @@ def _parser() -> argparse.ArgumentParser:
     for name in ("attach", "detach"):
         pair = sub.add_parser(name, help=f"{name} a session")
         pair.add_argument("task")
-        pair.add_argument("session")
+        pair.add_argument("session", type=_session_id)
 
     sub.add_parser("find", help="the task a session works").add_argument(
-        "session")
+        "session", type=_session_id)
     sub.add_parser("statuses", help="every status a task may have")
     sub.add_parser("delete", help="remove a task opened in error"
                    ).add_argument("task")
@@ -109,6 +124,10 @@ async def _changed(task_id: str, row: dict[str, Any] | None,
         return {"task": row}
     if await staff.task(task_id) is None:
         raise Refused(f"no task {task_id!r}")
+    if expect is not None and expect not in await staff.statuses():
+        # Otherwise a misspelt --expect reads as the task having moved.
+        raise Refused(f"{expect!r} is not a status; task {task_id!r} "
+                      "unchanged")
     raise Refused(f"task {task_id!r} is no longer {expect!r}; unchanged")
 
 

@@ -44,7 +44,7 @@ def _tool():
 
 async def test_opening_a_task_creates_the_row_with_its_session_and_prints_its_id(
         monkeypatch, capsys):
-    session_id = f"sess-{uuid.uuid4().hex}"
+    session_id = str(uuid.uuid4())
     async with claimed_database(ADMIN_DSN, "staff_ledger_test_") as dsn:
         await migrate.apply(dsn)
         monkeypatch.setenv("HIVE_DATABASE_URL", dsn)
