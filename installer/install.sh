@@ -56,7 +56,9 @@ main() {
               "free some space, or run with HIVE_HOME=/a/larger/disk/hive"
   done
 
-  # An installer already running for this folder: reprint its page.
+  # An installer already running for this folder: its page is asked to start
+  # its run again, which it does only when that run failed; a run going or
+  # waiting on a question is left alone. Either way its link is reprinted.
   if [ -f "$HIVE_HOME/state/page.lock" ] && ! python3 - "$HIVE_HOME/state/page.lock" <<'PY'
 import fcntl, sys
 with open(sys.argv[1], "a") as fh:
@@ -66,9 +68,41 @@ with open(sys.argv[1], "a") as fh:
         sys.exit(1)
 PY
   then
-    echo "The hive installer is already running here. Its page:"
-    echo "  $(cat "$HIVE_HOME/state/page.link" 2>/dev/null || echo '(see the earlier output)')"
-    exit 0
+    local link answer
+    link="$(cat "$HIVE_HOME/state/page.link" 2>/dev/null || true)"
+    answer="$(python3 - "$link" <<'PY' || true
+import sys, urllib.error, urllib.request
+from urllib.parse import parse_qs, urlparse
+link = urlparse(sys.argv[1])
+code = (parse_qs(link.query).get("code") or [""])[0]
+req = urllib.request.Request(f"http://127.0.0.1:{link.port}/api/restart", data=b"{}",
+                             method="POST", headers={"X-Setup-Code": code,
+                                                     "Content-Type": "application/json"})
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+try:
+    with opener.open(req, timeout=15) as resp:
+        print("restarted" if resp.status == 200 else "unanswered")
+except urllib.error.HTTPError as exc:
+    print("busy" if exc.code == 409 else "unanswered")
+except Exception:
+    print("unanswered")
+PY
+)"
+    case "$answer" in
+      restarted)
+        echo "The hive installer's last run here failed; it is running again on its page:"
+        echo "  $link"
+        exit 0 ;;
+      busy)
+        echo "The hive installer is already running here. Its page:"
+        echo "  $link"
+        exit 0 ;;
+    esac
+    echo "hive install: an installer is already open here but did not start its run again" >&2
+    echo "  (it runs older code, or is not answering). Its page: ${link:-(none recorded)}" >&2
+    echo "  fix: stop it, then run this command again:" >&2
+    echo "    pkill -f 'python3 -m installer --home $HIVE_HOME'" >&2
+    exit 1
   fi
 
   mkdir -p "$HIVE_HOME/repos" "$HIVE_HOME/state"

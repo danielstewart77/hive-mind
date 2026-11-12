@@ -39,6 +39,7 @@ class SetupServer:
         ("GET", "/api/state"): "get_state",
         ("POST", "/api/start"): "post_start",
         ("POST", "/api/answer"): "post_answer",
+        ("POST", "/api/restart"): "post_restart",
         ("POST", "/api/close"): "post_close",
     }
 
@@ -152,6 +153,11 @@ class SetupServer:
         problems = self.installer.answer(str(body.get("key") or ""), str(body.get("value") or ""))
         return (400, {"problems": problems}, "application/json") if problems else \
             (200, {"ok": True}, "application/json")
+
+    def post_restart(self, _):
+        problems = self.installer.restart()
+        return (409, {"problems": problems}, "application/json") if problems else \
+            (200, {"restarted": True}, "application/json")
 
     def post_close(self, _):
         if self.installer.running():

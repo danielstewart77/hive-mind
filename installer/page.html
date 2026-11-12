@@ -125,14 +125,14 @@ async function poll() {
   if (waiting && waiting.question && !$("ask").dataset.key) {
     const q = waiting.question;
     $("ask").dataset.key = q.key;
-    $("ask").innerHTML = `<label>${esc(q.label)}<select id="answer">${q.choices.map(c =>
+    $("ask").innerHTML = `${q.reason ? `<p class="err">${esc(q.reason)}</p>` : ""}<label>${esc(q.label)}<select id="answer">${q.choices.map(c =>
       `<option>${esc(c)}</option>`).join("")}</select></label><button id="send">Continue</button>`;
     $("send").onclick = async () => {
       await api("/api/answer", {key: q.key, value: $("answer").value});
       $("ask").innerHTML = ""; delete $("ask").dataset.key;
     };
   }
-  if (s.error) $("final").innerHTML = `<p class="err">${esc(s.error)}</p>`;
+  $("final").innerHTML = s.error ? `<p class="err">${esc(s.error)}</p>` : "";
   if (s.finished) {
     const links = (s.outputs || {}).links || {};
     const pa = (s.outputs || {}).proxy_admin;
@@ -145,8 +145,11 @@ async function poll() {
     return;
   }
   if ((s.failed_step || s.error) && !s.running) {
+    // Still polled, slowly: running the install command again starts the
+    // run again on this page, and the page follows it.
     $("final").innerHTML += `<p class="err">Stopped${s.failed_step ? ` at “${esc(s.failed_step)}”` : ""}. Fix what it says and run
       the install command again; every step is safe to repeat.</p>`;
+    setTimeout(poll, 5000);
     return;
   }
   setTimeout(poll, 2000);

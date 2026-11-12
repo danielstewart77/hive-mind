@@ -62,5 +62,7 @@ def test_every_route_answers_a_request_carrying_this_runs_code(pages):
         status = _call(server, method, path, server.code, bodies.get(path))
         if path == "/api/answer":
             assert status == 400, (method, path)  # no step is waiting: a refusal, not a 403
+        elif path == "/api/restart":
+            assert status == 409, (method, path)  # no failed run: a refusal, not a 403
         else:
             assert 200 <= status < 300, (method, path, status)

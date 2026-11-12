@@ -111,11 +111,32 @@ class Installer:
                         "the installer"]
             self.answers, self.typed, self.error = answers, typed, None
             self.save()
-            self._thread = threading.Thread(target=self._run, name="install-run", daemon=True)
-            self._thread.start()
+            self._launch()
             return []
         finally:
             self._starting.release()
+
+    def restart(self) -> list[str]:
+        """The run again, with the answers it had, when this page's last run
+        failed; install.sh asks for it when it is run again. A run going or
+        waiting on a question, or none yet, is left alone."""
+        if not self._starting.acquire(blocking=False):
+            return ["the install is already starting"]
+        try:
+            if self.running():
+                return ["the install is already running"]
+            state = self.runner.snapshot()
+            if self._thread is None or not (state.get("failed_step") or self.error):
+                return ["no failed run on this page to start again"]
+            self.error = None
+            self._launch()
+            return []
+        finally:
+            self._starting.release()
+
+    def _launch(self) -> None:
+        self._thread = threading.Thread(target=self._run, name="install-run", daemon=True)
+        self._thread.start()
 
     def _run(self) -> None:
         try:
