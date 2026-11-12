@@ -1,4 +1,4 @@
-FROM ubuntu:24.04
+FROM ubuntu:24.04 AS mind
 
 WORKDIR /usr/src/app
 
@@ -105,3 +105,21 @@ USER hivemind
 
 EXPOSE 8420
 CMD ["/opt/venv/bin/python3", "server.py"]
+
+# The chief of staff's image: the mind image plus `hive_data`, which its
+# ledger tool (tools/stateless/staff_ledger) reaches its own Postgres schema
+# through. A target of its own, so no other mind carries a database driver it
+# has no use for, and so their builds never ask for the `hive_data` context.
+# From a build context rather than git because the repository is private;
+# asyncpg is its one dependency. Built with `target: mind-ledger` and
+# `additional_contexts: hive_data:` in that mind's compose fragment.
+FROM mind AS mind-ledger
+USER root
+COPY --from=hive_data . /tmp/hive-data
+RUN /opt/venv/bin/pip install --no-cache-dir "asyncpg>=0.29" /tmp/hive-data \
+    && rm -rf /tmp/hive-data
+USER hivemind
+
+# The default target, so every other mind's build is the mind image as it
+# always was.
+FROM mind
