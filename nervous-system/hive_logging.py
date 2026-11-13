@@ -10,7 +10,9 @@ import re
 import sys
 import time
 import uuid
+from collections import deque
 from datetime import datetime, timezone
+from threading import Lock
 from typing import Any
 
 _context: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar("hive_log_context", default=None)
@@ -33,6 +35,29 @@ def _safe(value: Any, key: str = "", depth: int = 0) -> Any:
     return str(value)
 
 
+# An in-process feed: bounded independently of how often the UI is opened.
+_ERRORS = deque(maxlen=100)
+_ERROR_LOCK = Lock()
+_STARTED_AT = datetime.now(timezone.utc).isoformat()
+
+
+def _diagnostic_text(value: str) -> str:
+    value = re.sub(r"(?i)(bearer\s+)[^\s\"']+", r"\1[REDACTED]", value)
+    value = re.sub(r"(?i)((?:token|password|secret|api[_-]?key)\s*[=:]\s*)[^\s,;]+", r"\1[REDACTED]", value)
+    value = re.sub(r"([a-zA-Z][a-zA-Z0-9+.-]*://[^/\s:@]+:)[^@\s]+@", r"\1[REDACTED]@", value)
+    for key, secret in os.environ.items():
+        if (_SENSITIVE.search(key) or key.upper().endswith("_API_KEY")) and len(secret) >= 8:
+            value = value.replace(secret, "[REDACTED]")
+    return value[:4096]
+
+
+def recent_errors() -> dict:
+    with _ERROR_LOCK:
+        cutoff = time.time() - 3600
+        return {"started_at": _STARTED_AT,
+                "errors": [dict(item) for stamp, item in reversed(_ERRORS) if stamp >= cutoff]}
+
+
 class HiveJsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         data = {
@@ -53,6 +78,14 @@ class HiveJsonFormatter(logging.Formatter):
                 "message": _safe(str(record.exc_info[1])),
                 "stacktrace": self.formatException(record.exc_info),
             }
+        if record.levelno >= logging.ERROR:
+            item = {
+                "timestamp": data["timestamp"], "level": record.levelname,
+                "message": _diagnostic_text(record.getMessage()),
+                "detail": _diagnostic_text(str(record.exc_info[1])) if record.exc_info else "",
+            }
+            with _ERROR_LOCK:
+                _ERRORS.append((record.created, item))
         return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
 

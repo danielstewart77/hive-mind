@@ -171,3 +171,5 @@ TABLE.add(
     "DELETE /credentials/{holder}",
     "GET /credentials",
 )
+
+TABLE.add(Rule(ADMIN), "GET /diagnostics/errors")

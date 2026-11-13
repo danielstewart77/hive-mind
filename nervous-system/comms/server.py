@@ -33,7 +33,7 @@ import comms.session_access as session_access
 import comms.user_access as user_access
 import comms.sessions as sessions
 from comms.sessions import SessionManager, normalise_harness
-from hive_logging import configure_logging, install_fastapi_logging, log_event
+from hive_logging import configure_logging, install_fastapi_logging, log_event, recent_errors
 
 log = configure_logging("hive-mind.server")
 
@@ -302,6 +302,11 @@ async def _owned_mind_keys(
 
 
 install_fastapi_logging(app, log, "hive-comms")
+
+
+@app.get("/diagnostics/errors", dependencies=[Depends(require_admin_bearer)])
+async def diagnostic_errors():
+    return recent_errors()
 
 
 @app.get("/health")
